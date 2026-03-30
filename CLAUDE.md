@@ -169,7 +169,7 @@ WallHaven/
 │   └── DataSourceProfile.json  # 内置媒体配置
 ├── Rules/              # 规则示例
 │   └── gimy-example.json     # 规则示例
-├── Docs/               # 文档
+├── Docs/               # GitHub Pages 静态网站
 ├── Design/             # 设计资源
 └── project.yml         # XcodeGen 配置
 ```
