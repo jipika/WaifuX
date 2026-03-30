@@ -51,6 +51,9 @@ jobs:
       - name: Check XcodeGen
         run: which xcodegen || brew install xcodegen
 
+      - name: Install create-dmg
+        run: brew install create-dmg || true
+
       - name: Generate Xcode Project
         run: xcodegen generate
 
