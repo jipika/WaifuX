@@ -34,7 +34,7 @@ actor AnimeParser {
 
     /// 使用指定规则搜索
     private func searchWithRule(query: String, rule: AnimeRule) async throws -> [AnimeSearchResult] {
-        print("\n[AnimeParser] ========== 开始搜索 ========"=")
+        print("\n[AnimeParser] ========== 开始搜索 ==========")
         print("[AnimeParser] 规则: \(rule.name) (id: \(rule.id), api: \(rule.api))")
         print("[AnimeParser] 关键词: \(query)")
         
@@ -277,31 +277,31 @@ actor AnimeParser {
         
         for element in elements {
             // 提取标题
-            let title = try? HTMLParser.shared.extractText(element: element, xpath: searchXPath.title)
+            let title = try? HTMLParser.shared.simpleExtractText(element: element, selector: searchXPath.title)
                 ?? element.text()
             
             // 提取封面
-            let cover = HTMLParser.shared.extractAttr(
+            let cover = HTMLParser.shared.simpleExtractAttr(
                 element: element,
-                xpath: searchXPath.cover,
+                selector: searchXPath.cover,
                 attr: "src"
-            ) ?? HTMLParser.shared.extractAttr(
+            ) ?? HTMLParser.shared.simpleExtractAttr(
                 element: element,
-                xpath: searchXPath.cover,
+                selector: searchXPath.cover,
                 attr: "data-src"
             )
             
             // 提取详情链接
-            let detail = HTMLParser.shared.extractAttr(
+            let detail = HTMLParser.shared.simpleExtractAttr(
                 element: element,
-                xpath: searchXPath.detail,
+                selector: searchXPath.detail,
                 attr: "href"
             )
             
             guard let detailURL = detail, !detailURL.isEmpty else { continue }
             
             let id = searchXPath.id.flatMap { 
-                HTMLParser.shared.extractAttr(element: element, xpath: $0, attr: "href") 
+                HTMLParser.shared.simpleExtractAttr(element: element, selector: $0, attr: "href") 
             } ?? detailURL
             
             let fullDetailURL = HTMLParser.shared.makeAbsoluteURL(detailURL, baseURL: rule.baseURL) ?? detailURL
