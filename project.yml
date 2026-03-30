@@ -2,8 +2,8 @@ name: WallHaven
 options:
   bundleIdPrefix: com.wallhaven
   deploymentTarget:
-    macOS: "14.0"
-  xcodeVersion: "15.0"
+    macOS: "26.0"
+  xcodeVersion: "16.0"
 
 packages:
   SwiftSoup:
@@ -12,8 +12,8 @@ packages:
 
 settings:
   base:
-    SWIFT_VERSION: "5.9"
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: YES
