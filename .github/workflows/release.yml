@@ -14,9 +14,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26
+      - name: Select Xcode 26.4
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
           xcodebuild -version
 
       - name: Check XcodeGen
