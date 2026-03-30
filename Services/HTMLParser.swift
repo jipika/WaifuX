@@ -570,33 +570,35 @@ actor HTMLParser {
         )
     }
 
-    // MARK: - 辅助提取方法
+    // MARK: - 辅助提取方法 (简化版, 用于 AnimeParser)
 
     /// 从文档中提取文本 (简化版,用于 AnimeParser)
-    nonisolated func extractText(document: Document, xpath: String) throws -> String? {
-        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+    nonisolated func simpleExtractText(document: Document, selector: String) throws -> String? {
+        let cssSelector = convertXPathToCSS(selector) ?? selector
         return try? document.select(cssSelector).first()?.text()
     }
     
     /// 从元素中提取文本 (简化版,用于 AnimeParser)
-    nonisolated func extractText(element: Element, xpath: String) throws -> String? {
-        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+    nonisolated func simpleExtractText(element: Element, selector: String) throws -> String? {
+        let cssSelector = convertXPathToCSS(selector) ?? selector
         return try? element.select(cssSelector).first()?.text()
     }
     
     /// 从文档中提取属性 (简化版,用于 AnimeParser)
-    nonisolated func extractAttr(document: Document, xpath: String, attr: String) -> String? {
-        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+    nonisolated func simpleExtractAttr(document: Document, selector: String, attr: String) -> String? {
+        let cssSelector = convertXPathToCSS(selector) ?? selector
         guard let element = try? document.select(cssSelector).first() else { return nil }
         return (try? element.attr(attr)) ?? ""
     }
     
     /// 从元素中提取属性 (简化版,用于 AnimeParser)
-    nonisolated func extractAttr(element: Element, xpath: String, attr: String) -> String? {
-        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+    nonisolated func simpleExtractAttr(element: Element, selector: String, attr: String) -> String? {
+        let cssSelector = convertXPathToCSS(selector) ?? selector
         guard let el = try? element.select(cssSelector).first() else { return nil }
         return (try? el.attr(attr)) ?? ""
     }
+
+    // MARK: - 元素上下文提取方法 (完整版, 用于 HTMLParser 内部)
 
     /// 从元素上下文中提取文本 (使用 XPath 模式)
     private func extractText(element: Element, xpath: String) throws -> String? {
