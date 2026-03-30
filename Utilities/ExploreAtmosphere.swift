@@ -239,6 +239,36 @@ final class ExploreAtmosphereController: ObservableObject {
             }
         }
     }
+
+    func updateFirstAnime(coverURL: String) {
+        guard !coverURL.isEmpty else {
+            resetToFallback()
+            return
+        }
+
+        let key = "a:\(coverURL)"
+        if key == activeFirstItemKey, referenceImage != nil {
+            return
+        }
+        activeFirstItemKey = key
+        loadTask?.cancel()
+        loadTask = nil
+        referenceImage = nil
+
+        // 动漫使用媒体回退色调
+        tint = .mediaFallback
+
+        guard let url = URL(string: coverURL) else { return }
+
+        loadTask = Task { @MainActor in
+            let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
+            guard !Task.isCancelled, let image else { return }
+            referenceImage = image
+            if let (c1, c2, c3) = ExploreImageColorSampler.triplet(from: image) {
+                tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+            }
+        }
+    }
 }
 
 // MARK: - 胶片噪点平铺（Arc 类质感，生成一次复用）

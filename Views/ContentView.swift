@@ -34,7 +34,7 @@ struct ContentView: View {
                 case .wallpaperExplore:
                     WallpaperExploreContentView(viewModel: viewModel, selectedWallpaper: $selectedWallpaper)
                 case .animeExplore:
-                    AnimeContentView(selectedAnime: $selectedAnime)
+                    AnimeExploreView()
                 case .mediaExplore:
                     MediaExploreContentView(viewModel: mediaViewModel, selectedMedia: $selectedMedia)
                 case .myMedia:
