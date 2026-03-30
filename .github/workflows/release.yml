@@ -8,38 +8,11 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
 
-# 仅当代码相关文件变化时触发构建
-  paths:
-    - '**.swift'
-    - 'project.yml'
-    - '**.yml'
-    - 'App/**'
-    - 'Views/**'
-    - 'ViewModels/**'
-    - 'Models/**'
-    - 'Services/**'
-    - 'Components/**'
-    - 'Utilities/**'
-    - 'DesignSystem/**'
-    - 'Resources/**'
-    - 'Scripts/**'
-    - 'scripts/**'
-    # 排除文档和配置文件
-    - '!**.md'
-    - '!CLAUDE.md'
-    - '!README.md'
-    - '!LICENSE'
-    - '!CHANGELOG.md'
-    - '!CONTRIBUTING.md'
-    - '!.github/**'
-    - '!Design/**'
-    - '!Docs/**'
-    - '!Tools/**'
-    - '!Rules/**'
-
 jobs:
   build:
     runs-on: macos-latest
+    # 仅在标签发布时创建 Draft Release
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout
@@ -80,14 +53,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 构建成功后通知（仅标签发布时）
-  notify:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+  # 仅测试构建（任何代码变更都会触发）
+  test-build:
+    runs-on: macos-latest
+    # 排除标签推送，避免重复运行
+    if: "!startsWith(github.ref, 'refs/tags/v')"
 
     steps:
-      - name: Create Release Notification
-        run: |
-          echo "✅ Release 构建成功！"
-          echo "📦 下载地址: https://github.com/${{ github.repository }}/releases/latest"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Check XcodeGen
+        run: which xcodegen || brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Cache SPM Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build
+        run: xcodebuild -project WallHaven.xcodeproj -scheme WallHaven build CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO
