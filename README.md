@@ -73,8 +73,9 @@ If you find this app helpful, you can buy me a coffee ☕️
 
 このプロジェクトが役に立った場合は咖啡をおごってください ☕️
 
-> 请上传赞赏码图片到 `reward.jpg` 后取消注释下方代码：
-> <!-- <p align="center"><img src="reward.jpg" width="280" /></p> -->
+<p align="center">
+  <img src="reward.jpg" width="280" />
+</p>
 
 ---
 
