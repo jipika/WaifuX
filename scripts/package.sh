@@ -20,14 +20,16 @@ mkdir -p "$BUILD_DIR"
 
 # Archive
 echo "🔨 正在 Archive..."
+set -o pipefail
 xcodebuild -scheme WallHaven -configuration Release clean archive \
   CODE_SIGN_IDENTITY="-" \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGNING_ALLOWED=NO \
-  -archivePath "$BUILD_DIR/$ARCHIVE_NAME" 2>&1 | tail -5
+  -archivePath "$BUILD_DIR/$ARCHIVE_NAME" 2>&1 | tee "$BUILD_DIR/archive.log"
 
 if [ $? -ne 0 ]; then
     echo "❌ Archive 失败"
+    cat "$BUILD_DIR/archive.log" | tail -50
     exit 1
 fi
 
@@ -52,10 +54,11 @@ xcodebuild -exportArchive \
   -exportPath "$BUILD_DIR" \
   -exportOptionsPlist "$BUILD_DIR/exportOptions.plist" \
   CODE_SIGN_IDENTITY="-" \
-  CODE_SIGNING_ALLOWED=NO 2>&1 | tail -3
+  CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$BUILD_DIR/export.log"
 
 if [ $? -ne 0 ]; then
     echo "❌ 导出失败"
+    cat "$BUILD_DIR/export.log" | tail -50
     exit 1
 fi
 
@@ -70,7 +73,7 @@ if command -v create-dmg &> /dev/null; then
       --volname "WallHaven" \
       --window-size 540 400 \
       --app-drop-link 400 185 \
-      --hide-extension \
+      --hide-extension "WallHaven.app" \
       --no-internet-enable \
       "$BUILD_DIR/$DMG_NAME" \
       "$BUILD_DIR/$APP_NAME"
