@@ -11,8 +11,20 @@ actor AnimeRuleStore {
     private let rulesDirectory: URL
     private let fileManager = FileManager.default
 
+    // 规则源选择
     // 用户规则仓库索引 URL
-    private let defaultIndexURL = "https://raw.githubusercontent.com/jipika/WallHaven-Profiles/main/anime/index.json"
+    private let userIndexURL = "https://raw.githubusercontent.com/jipika/WallHaven-Profiles/main/anime/index.json"
+    // Kazumi 规则仓库索引 URL
+    private let kazumiIndexURL = "https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json"
+    
+    // 规则来源类型
+    enum RuleSource: String, CaseIterable {
+        case user = "用户规则"
+        case kazumi = "Kazumi 规则"
+    }
+    
+    // 当前使用的规则源
+    private var currentSource: RuleSource = .kazumi  // 默认使用 Kazumi 规则
 
     init() {
         let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -67,7 +79,55 @@ actor AnimeRuleStore {
     }
 
     // MARK: - 加载规则
-
+    
+    /// 切换规则源
+    func switchRuleSource(to source: RuleSource) {
+        currentSource = source
+        print("[AnimeRuleStore] 切换规则源: \(source.rawValue)")
+    }
+    
+    /// 从远程加载规则 (支持两种源)
+    func loadRulesFromRemote() async throws -> [AnimeRule] {
+        switch currentSource {
+        case .user:
+            return try await loadRulesFromUserRepo()
+        case .kazumi:
+            return try await KazumiRuleLoader.shared.loadAllRules()
+        }
+    }
+    
+    /// 从用户规则仓库加载
+    private func loadRulesFromUserRepo() async throws -> [AnimeRule] {
+        guard let url = URL(string: userIndexURL) else {
+            throw URLError(.badURL)
+        }
+        
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let index = try JSONDecoder().decode([AnimeRuleIndex].self, from: data)
+        
+        var loadedRules: [AnimeRule] = []
+        for item in index {
+            if let rule = try? await loadRuleFromUserRepo(id: item.id) {
+                rules[rule.id] = rule
+                loadedRules.append(rule)
+            }
+        }
+        
+        return loadedRules
+    }
+    
+    /// 从用户仓库加载单个规则
+    private func loadRuleFromUserRepo(id: String) async throws -> AnimeRule {
+        let ruleURL = "https://raw.githubusercontent.com/jipika/WallHaven-Profiles/main/anime/\(id).json"
+        guard let url = URL(string: ruleURL) else {
+            throw URLError(.badURL)
+        }
+        
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let rule = try JSONDecoder().decode(AnimeRule.self, from: data)
+        return rule
+    }
+    
     /// 加载所有本地规则
     func loadAllRules() async -> [AnimeRule] {
         guard let files = try? fileManager.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil)
