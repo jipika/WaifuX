@@ -1,6 +1,12 @@
 import Foundation
 import SwiftUI
 
+// MARK: - 通知名称
+
+extension Notification.Name {
+    static let animeRuleSourceChanged = Notification.Name("animeRuleSourceChanged")
+}
+
 // MARK: - 动漫 ViewModel
 
 @MainActor
@@ -18,6 +24,24 @@ class AnimeViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var searchText = ""
     @Published var selectedCategory: AnimeCategory = .all
+    
+    // MARK: - 初始化
+    
+    init() {
+        // 监听规则源切换通知
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleRuleSourceChanged),
+            name: .animeRuleSourceChanged,
+            object: nil
+        )
+    }
+    
+    @objc private func handleRuleSourceChanged() {
+        Task {
+            await reloadRules()
+        }
+    }
 
     // MARK: - 初始化
 
@@ -26,11 +50,11 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
-            // 加载所有可用规则
-            let rules = await AnimeRuleStore.shared.loadAllRules()
+            // 从远程加载所有可用规则
+            let rules = try await AnimeRuleStore.shared.loadRulesFromRemote()
             self.availableRules = rules.filter { !$0.deprecated }
 
-            print("[AnimeViewModel] Loaded \(self.availableRules.count) rules")
+            print("[AnimeViewModel] Loaded \(self.availableRules.count) rules from remote")
 
             // 如果有规则，执行搜索获取数据
             if !self.availableRules.isEmpty {
@@ -42,6 +66,11 @@ class AnimeViewModel: ObservableObject {
             print("[AnimeViewModel] Failed to load rules: \(error)")
             errorMessage = error.localizedDescription
         }
+    }
+    
+    /// 重新加载规则(切换规则源后调用)
+    func reloadRules() async {
+        await loadInitialData()
     }
 
     // MARK: - 搜索
