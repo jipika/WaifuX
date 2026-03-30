@@ -110,9 +110,3 @@ This app is solely a wallpaper aggregation tool. All wallpaper copyrights belong
 - [MotionBGs](https://motionbgs.com) のコンテンツはユーザーが設定
 - 各ウェブサイトの利用規約を遵守してください
 - 個人利用のみ，商業利用は禁止
-
----
-
-<p align="center">
-  Made with ❤️
-</p>
