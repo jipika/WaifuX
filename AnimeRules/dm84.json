@@ -1,0 +1,33 @@
+{
+  "id": "dm84",
+  "api": "1",
+  "type": "anime",
+  "name": "DM84 动漫",
+  "version": "1.0.0",
+  "deprecated": false,
+  "baseURL": "https://dmbus.cc",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+  },
+  "timeout": 30,
+  "searchURL": "https://dmbus.cc/s----------.html?wd={keyword}",
+  "searchList": ".mov-list, .video-item, ul.search-list li",
+  "searchName": "a.title, .mov-title a, .video-title",
+  "searchCover": "img[data-original], img[src]",
+  "searchDetail": "a.title[href], .mov-title a[href]",
+  "searchId": "a[href]",
+  "detailTitle": "h1.title, .vod-title, h2.title",
+  "detailCover": ".vodbox-img img, .cover img, .detail-img img",
+  "detailDesc": ".content, .desc, .vod-content",
+  "detailStatus": ".type span",
+  "detailRating": ".score, .rating",
+  "episodeList": ".play-list a, .episode-list a, .playlist li a",
+  "episodeName": "span, .episode-title",
+  "episodeLink": "a[href]",
+  "episodeThumb": "img",
+  "videoSelector": "iframe[src*='player'], iframe[src*='embed'], #player iframe",
+  "videoSourceAttr": "src",
+  "useWebview": false,
+  "multiSources": true
+}

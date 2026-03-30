@@ -1,0 +1,33 @@
+{
+  "id": "age",
+  "api": "1",
+  "type": "anime",
+  "name": "AGE 动漫",
+  "version": "1.0.0",
+  "deprecated": false,
+  "baseURL": "https://www.agedm.io",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+  },
+  "timeout": 30,
+  "searchURL": "https://www.agedm.io/search?query={keyword}",
+  "searchList": ".col-lg-4, .video-item, div[class*='col-']",
+  "searchName": "h5 a, .video-title, a[title]",
+  "searchCover": "img[data-src], img[src]",
+  "searchDetail": "h5 a[href], a[href*='/detail/']",
+  "searchId": "a[href]",
+  "detailTitle": "h1.page-title, .anime-title, h2.title",
+  "detailCover": "img.cover, .cover-img img, img[data-original]",
+  "detailDesc": ".desc, .description, .anime-desc",
+  "detailStatus": ".status, .anime-status",
+  "detailRating": ".rating, .score",
+  "episodeList": "ul.episode-list li a, .episode-list a, div.episode a, .play-list a",
+  "episodeName": "span, .episode-title",
+  "episodeLink": "a[href]",
+  "episodeThumb": "img[data-src]",
+  "videoSelector": "iframe[src*='player'], iframe[src*='embed'], iframe[src*='video']",
+  "videoSourceAttr": "src",
+  "useWebview": false,
+  "multiSources": true
+}

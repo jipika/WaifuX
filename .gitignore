@@ -1,0 +1,30 @@
+# Xcode
+*.xcuserstate
+*.xcworkspace
+xcuserdata/
+build/
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
+
+# macOS
+.DS_Store
+*.log
+
+# Swift Package Manager
+Packages/
+.swiftpm/
+
+# CocoaPods
+Pods/
+
+# App
+*.app
+*.dSYM
+
+# Derived data
+.derivedData/
+.1code/
+.claude/
+
+# Local config
+LocalConfig.json

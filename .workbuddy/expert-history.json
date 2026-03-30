@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "sessions": {
+    "128091d6e2af4e1c853e733a10902b55": [
+      {
+        "expertId": "MacOsSpatialMetalEngineer",
+        "name": "Vale",
+        "profession": "macOS空间Metal工程师",
+        "avatarUrl": "https://acc-1258344699.cos.accelerate.myqcloud.com/workbuddy/experts/avatars/10-SpatialComputing/MacOsSpatialMetalEngineer/MacOsSpatialMetalEngineer.png",
+        "promptUrl": "https://acc-1258344699.cos.accelerate.myqcloud.com/workbuddy/experts/experts/10-SpatialComputing/MacOsSpatialMetalEngineer/MacOsSpatialMetalEngineer_zh.md",
+        "usedAt": 1774785859745,
+        "industryId": "all"
+      }
+    ]
+  },
+  "lastUpdated": 1774794046020
+}

@@ -1,0 +1,45 @@
+{
+  "id": "gimy-example",
+  "name": "Gimy (示例)",
+  "version": "1.0.0",
+  "api": "2",
+  "contentType": "anime",
+  "sourceType": "gimy",
+  "deprecated": false,
+  "useWebview": false,
+  "multiSources": true,
+  "baseURL": "https://gimy.ai",
+  "headers": {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+  },
+  "timeout": 30,
+  "xpath": {
+    "search": {
+      "url": "https://gimy.ai/search?q={keyword}&page={page}",
+      "list": "//div[contains(@class, 'video-item') or contains(@class, 'anime-item')]",
+      "title": ".//h3/a/text() | .//h2/a/text() | .//a/@title",
+      "cover": ".//img/@data-src | .//img/@src",
+      "detail": ".//h3/a/@href | .//h2/a/@href | .//a/@href",
+      "id": ".//a/@href"
+    },
+    "detail": {
+      "title": "//h1[@class='title']/text() | //h1/text()",
+      "cover": "//div[@class='poster']/img/@src | //img[contains(@class, 'poster')]/@src | //div[contains(@class, 'cover')]/img/@src",
+      "description": "//div[@class='summary']/text() | //div[contains(@class, 'description')]/text() | //p[contains(@class, 'summary')]/text()",
+      "episodes": "//a[contains(@class, 'episode-link')] | //div[contains(@class, 'episode')]//a | //li[contains(@class, 'episode')]//a",
+      "episodeName": ".//text() | .//span/text()",
+      "episodeLink": ".//@href",
+      "episodeThumb": ".//img/@src"
+    },
+    "list": {
+      "url": "https://gimy.ai/list?page={page}",
+      "list": "//div[contains(@class, 'video-item')] | //div[contains(@class, 'anime-item')]",
+      "title": ".//h3/a/text() | .//h2/a/text()",
+      "cover": ".//img/@data-src | .//img/@src",
+      "detail": ".//h3/a/@href | .//h2/a/@href",
+      "nextPage": "//a[@class='next']/@href | //a[contains(text(),'下一页')]/@href"
+    }
+  }
+}

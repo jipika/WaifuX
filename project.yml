@@ -1,0 +1,63 @@
+name: WallHaven
+options:
+  bundleIdPrefix: com.wallhaven
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15.0"
+
+packages:
+  SwiftSoup:
+    url: https://github.com/scinfu/SwiftSoup.git
+    from: "2.7.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    COMBINE_HIDPI_IMAGES: YES
+
+targets:
+  WallHaven:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Views
+      - path: ViewModels
+      - path: Models
+      - path: Services
+      - path: Utilities
+      - path: Components
+      - path: DesignSystem
+      - path: Assets.xcassets
+      - path: Resources
+        type: folder
+        buildPhase: resources
+      - path: AnimeRules
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: WallHaven
+        PRODUCT_BUNDLE_IDENTIFIER: com.wallhaven.app
+        MARKETING_VERSION: 1.0.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+        INFOPLIST_FILE: App/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
+    dependencies:
+      - package: SwiftSoup
+    entitlements:
+      path: WallHaven.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.files.downloads.read-write: true

@@ -1,0 +1,847 @@
+import SwiftUI
+import AVKit
+import AVFoundation
+import AppKit
+
+struct MediaDetailSheet: View {
+    let item: MediaItem
+    @ObservedObject var viewModel: MediaExploreViewModel
+    let onClose: () -> Void
+
+    @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
+    @State private var resolvedItem: MediaItem
+    @State private var isDownloading = false
+    @State private var isSettingWallpaper = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    @State private var isMuted = true
+    @State private var isVisible = false
+    @State private var isMediaLoaded = false
+    @State private var scrollOffset: CGFloat = 0
+    @State private var showInfoBubble = false
+    @State private var isHeroContentHidden = false
+
+    // 挤压动画配置
+    private let squeezeThreshold: CGFloat = 80
+    private let maxSqueezeOffset: CGFloat = 120
+
+    init(item: MediaItem, viewModel: MediaExploreViewModel, onClose: @escaping () -> Void) {
+        self.item = item
+        self.viewModel = viewModel
+        self.onClose = onClose
+        _resolvedItem = State(initialValue: item)
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let horizontalPadding = max(28, min(72, geometry.size.width * 0.05))
+            let topBarTopInset = max(geometry.safeAreaInsets.top, 18)
+            let bottomSafeInset = max(geometry.safeAreaInsets.bottom, 28)
+
+            let viewW = geometry.size.width
+            let viewH = geometry.size.height
+
+            ZStack(alignment: .topLeading) {
+                Color(hex: "0A0A0C")
+                    .ignoresSafeArea()
+                    .coordinateSpace(name: "scroll")
+
+                if isVisible {
+                    fixedMediaBackground(width: viewW, height: viewH)
+                }
+                
+                // 媒体加载动画
+                if !isMediaLoaded {
+                    LoadingOverlayView()
+                        .frame(width: viewW, height: viewH)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.3)))
+                }
+
+                ZStack {
+                    VStack {
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.52), Color.black.opacity(0.18), Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 180)
+                        Spacer()
+                    }
+                    VStack {
+                        Spacer()
+                        LinearGradient(
+                            colors: [Color.clear, Color.black.opacity(0.26), Color.black.opacity(0.56)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: min(viewH * 0.36, 440))
+                    }
+                }
+                .allowsHitTesting(false)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        Color.clear
+                            .frame(height: detailScrollTopInset(viewportHeight: viewH, heroHidden: isHeroContentHidden))
+
+                        Color.clear
+                            .frame(height: 1)
+                            .padding(.horizontal, horizontalPadding)
+                            .padding(.bottom, bottomSafeInset + 88)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(key: ScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("scroll")).minY)
+                        }
+                    )
+                }
+                .scrollClipDisabled()
+                .safeAreaPadding(.bottom, bottomSafeInset)
+                .background(Color.clear)
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+                    scrollOffset = value
+                }
+                .overlay(alignment: .top) {
+                    fixedHeroChrome(
+                        viewportWidth: viewW,
+                        topBarTopInset: topBarTopInset
+                    )
+                }
+
+                if showInfoBubble {
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                showInfoBubble = false
+                            }
+                        }
+                }
+
+                floatingBackButton
+                    .padding(.top, topBarTopInset + 18)
+                    .padding(.leading, 28)
+
+                floatingInfoOverlay(
+                    viewportWidth: viewW,
+                    topBarTopInset: topBarTopInset
+                )
+            }
+        }
+        .ignoresSafeArea()
+        .alert(t("mediaError"), isPresented: $showError) {
+            Button(t("ok"), role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
+        .navigationBarBackButtonHidden(true)
+        .task {
+            isVisible = true
+            await loadDetailIfNeeded()
+        }
+    }
+
+    private var heroImageURL: URL? {
+        resolvedItem.posterURL ?? resolvedItem.thumbnailURL
+    }
+
+    private var previewVideoURL: URL? {
+        resolvedItem.previewVideoURL
+    }
+
+    private func detailScrollTopInset(viewportHeight: CGFloat, heroHidden: Bool) -> CGFloat {
+        if heroHidden {
+            return max(min(viewportHeight * 0.42, 380), 300)
+        }
+        return max(min(viewportHeight * 0.58, 520), 420)
+    }
+
+    @ViewBuilder
+    private func fixedMediaBackground(width: CGFloat, height viewH: CGFloat) -> some View {
+        ZStack {
+            if let previewVideoURL {
+                LoopingVideoBackgroundView(
+                    url: previewVideoURL,
+                    isMuted: isMuted,
+                    onReady: {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isMediaLoaded = true
+                        }
+                    }
+                )
+            } else {
+                OptimizedAsyncImage(url: heroImageURL, priority: .high, onLoad: {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isMediaLoaded = true
+                    }
+                }) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Color.clear
+                }
+            }
+
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.22),
+                    Color.black.opacity(0.10),
+                    Color.black.opacity(0.34)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Rectangle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.clear,
+                            Color.black.opacity(0.12),
+                            Color.black.opacity(0.34)
+                        ],
+                        center: .center,
+                        startRadius: 120,
+                        endRadius: max(width, viewH)
+                    )
+                )
+        }
+        .frame(width: width, height: viewH)
+        .clipped()
+        .ignoresSafeArea()
+    }
+
+    private func fixedHeroChrome(viewportWidth: CGFloat, topBarTopInset: CGFloat) -> some View {
+        // 计算挤压进度：0 表示未滚动，1 表示达到最大挤压
+        let squeezeProgress = min(max(-scrollOffset / squeezeThreshold, 0), 1)
+        let scaleY = 1 - (squeezeProgress * 0.15) // 最大挤压到 85%
+        let offsetY = -squeezeProgress * maxSqueezeOffset * 0.3
+        let opacity = 1 - (squeezeProgress * 0.3)
+
+        return VStack(spacing: 0) {
+            Spacer()
+                .frame(height: max(topBarTopInset + 44, 68))
+
+            VStack(spacing: 18) {
+                if !isHeroContentHidden {
+                    detailCategoryBadge
+
+                    Text(mediaTitle)
+                        .font(.system(size: 52, weight: .bold, design: .serif))
+                        .tracking(-1.3)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .frame(maxWidth: 980)
+                        .detailGlassTitleChrome()
+
+                    HStack(spacing: 0) {
+                        metadataCapsules
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                    buttonRowWithDividers
+                }
+
+                Text(statusText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .multilineTextAlignment(.center)
+                    .opacity(statusText.isEmpty ? 0 : 1)
+            }
+            .frame(maxWidth: 920)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(width: viewportWidth)
+        .scaleEffect(x: 1, y: scaleY, anchor: .center)
+        .offset(y: offsetY)
+        .opacity(opacity)
+        .animation(.easeOut(duration: 0.15), value: scrollOffset)
+    }
+
+    private var floatingBackButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.95))
+                .frame(width: 38, height: 38)
+                .detailGlassCircleChrome()
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func floatingInfoOverlay(viewportWidth: CGFloat, topBarTopInset: CGFloat) -> some View {
+        let bubbleWidth = min(360, max(260, viewportWidth - 84))
+
+        return VStack(alignment: .trailing, spacing: 14) {
+            HStack(spacing: 10) {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                        showInfoBubble.toggle()
+                    }
+                } label: {
+                    Image(systemName: showInfoBubble ? "info.circle.fill" : "info.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.95))
+                        .frame(width: 40, height: 40)
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                        isHeroContentHidden.toggle()
+                    }
+                } label: {
+                    Image(systemName: isHeroContentHidden ? "eye.slash" : "eye")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.95))
+                        .frame(width: 40, height: 40)
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+            }
+
+            if showInfoBubble {
+                detailInfoBubble(width: bubbleWidth)
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.92, anchor: .topTrailing).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
+            }
+        }
+        .padding(.top, topBarTopInset + 18)
+        .padding(.trailing, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .zIndex(2)
+    }
+
+    private var detailCategoryBadge: some View {
+        Text("\(resolvedItem.subtitle) · \(resolvedItem.resolutionLabel)")
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(.white.opacity(0.85))
+            .tracking(2)
+            .padding(.horizontal, 16)
+            .frame(height: 34)
+            .detailGlassCapsuleChrome(level: .prominent)
+    }
+
+    private var metadataItems: [(label: String, value: String)] {
+        var items: [(String, String)] = [
+            (t("source"), resolvedItem.sourceName)
+        ]
+
+        if let exactResolution = resolvedItem.exactResolution, !exactResolution.isEmpty {
+            items.append((t("specs2"), exactResolution))
+        } else {
+            items.append((t("specs2"), resolvedItem.resolutionLabel))
+        }
+
+        if let duration = resolvedItem.durationLabel {
+            items.append((t("duration"), duration))
+        }
+
+        if !resolvedItem.downloadOptions.isEmpty {
+            items.append((t("download2"), "\(resolvedItem.downloadOptions.count) \(t("items"))"))
+        }
+
+        return items
+    }
+
+    private func detailMetaCapsule(label: String, value: String, isLast: Bool = false) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        .detailGlassCapsuleChrome(level: .prominent)
+        .padding(.trailing, isLast ? 0 : 8)
+    }
+
+    private var metadataCapsules: some View {
+        ForEach(Array(metadataItems.enumerated()), id: \.offset) { index, item in
+            detailMetaCapsule(
+                label: item.label,
+                value: item.value,
+                isLast: index == metadataItems.count - 1
+            )
+        }
+    }
+
+    private var buttonRowWithDividers: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 16) {
+                dividerLine
+                    .frame(width: 70)
+
+                Button {
+                    viewModel.toggleFavorite(resolvedItem)
+                } label: {
+                    Image(systemName: viewModel.isFavorite(resolvedItem) ? "heart.fill" : "heart")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(viewModel.isFavorite(resolvedItem) ? Color(hex: "FF5A7D") : .white)
+                        .frame(width: 42, height: 42)
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                setAsDesktopWallpaper()
+            } label: {
+                HStack(spacing: 10) {
+                    if isSettingWallpaper {
+                        CustomProgressView(tint: .white)
+                            .scaleEffect(0.8)
+                    } else {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 13, weight: .medium))
+                        Text(t("setWallpaper"))
+                            .font(.system(size: 15, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 28)
+                .frame(height: 46)
+                .detailPrimaryGlassButtonChrome()
+            }
+            .buttonStyle(.plain)
+            .disabled(isSettingWallpaper)
+
+            HStack(spacing: 16) {
+                Button {
+                    let newMuted = !isMuted
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isMuted = newMuted
+                    }
+                    wallpaperManager.setMuted(newMuted)
+                } label: {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    downloadMedia()
+                } label: {
+                    Image(systemName: viewModel.isDownloaded(resolvedItem) ? "checkmark" : "arrow.down")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+                .disabled(isDownloading)
+
+                dividerLine
+                    .frame(width: 70)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 12)
+        .glassContainer(spacing: 16)
+    }
+
+    private var dividerLine: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.0),
+                        Color.white.opacity(0.25),
+                        Color.white.opacity(0.0)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .frame(height: 1)
+    }
+
+    private func detailInfoBubble(width: CGFloat) -> some View {
+        DetailGlassPopoverCard(width: width, maxHeight: 460, variant: .dark) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(mediaTitle)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.96))
+                    .lineLimit(2)
+
+                Text("\(resolvedItem.subtitle) · \(resolvedItem.resolutionLabel)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .tracking(0.6)
+            }
+
+            if !resolvedItem.tags.isEmpty {
+                FlowLayout(spacing: 8) {
+                    ForEach(resolvedItem.tags.prefix(8), id: \.self) { tag in
+                        Text(tag)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                            .detailGlassCapsuleChrome(level: .prominent)
+                    }
+                }
+                .glassContainer(spacing: 10)
+            }
+
+            infoSection(title: t("info")) {
+                compactFact(label: t("title"), value: mediaTitle)
+                compactFact(label: t("source"), value: resolvedItem.sourceName)
+                compactFact(label: t("category"), value: resolvedItem.subtitle)
+                compactFact(label: t("page"), value: resolvedItem.slug)
+            }
+
+            dividerLine.opacity(0.7)
+
+            infoSection(title: t("specs2")) {
+                compactFact(label: t("resolution2"), value: resolvedItem.exactResolution ?? resolvedItem.resolutionLabel)
+                compactFact(label: t("duration"), value: resolvedItem.durationLabel ?? t("unknown"))
+                compactFact(
+                    label: t("format2"),
+                    value: previewVideoURL?.pathExtension.uppercased().isEmpty == false ? previewVideoURL!.pathExtension.uppercased() : "MP4"
+                )
+                compactFact(label: t("audio2"), value: isMuted ? t("muted") : t("audioOn"))
+                compactFact(
+                    label: t("download2"),
+                    value: resolvedItem.downloadOptions.isEmpty ? t("noDownloadOptions") : "\(resolvedItem.downloadOptions.count) \(t("versions"))"
+                )
+            }
+
+            if !resolvedItem.downloadOptions.isEmpty {
+                dividerLine.opacity(0.7)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle(t("downloadSources"))
+
+                    ForEach(resolvedItem.downloadOptions.prefix(3)) { option in
+                        HStack(spacing: 10) {
+                            Text(option.label)
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.92))
+                                .frame(width: 44, alignment: .leading)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.resolutionText)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+
+                                Text(option.fileSizeLabel)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.46))
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.42))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 46)
+                        .detailGlassRoundedRectChrome(cornerRadius: 14, level: .prominent)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func infoSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle(title)
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+            }
+        }
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.56))
+            .tracking(2)
+    }
+
+    private func compactFact(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.45))
+                .frame(width: 72, alignment: .leading)
+
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var mediaTitle: String {
+        resolvedItem.title
+    }
+
+    private var statusText: String {
+        if isSettingWallpaper {
+            return t("applyingWallpaper")
+        }
+        if isDownloading {
+            return t("downloadingMedia")
+        }
+        if viewModel.isDownloaded(resolvedItem) {
+            return t("savedToDownloads")
+        }
+        if previewVideoURL != nil {
+            return isMuted ? t("videoMutedPlaying") : t("videoPlaying")
+        }
+        return ""
+    }
+
+    private func loadDetailIfNeeded() async {
+        let detail = await viewModel.ensureDetail(for: item)
+        resolvedItem = detail
+        viewModel.recordViewed(detail)
+    }
+
+    private func downloadMedia() {
+        isDownloading = true
+        errorMessage = ""
+        Task {
+            do {
+                let targetOption = resolvedItem.downloadOptions.first ?? resolvedItem.downloadOptions.first
+                if let targetOption {
+                    _ = try await viewModel.downloadMedia(resolvedItem, option: targetOption)
+                } else {
+                    throw NetworkError.invalidResponse
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+            isDownloading = false
+        }
+    }
+
+    private func setAsDesktopWallpaper() {
+        isSettingWallpaper = true
+        errorMessage = ""
+        Task {
+            do {
+                try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+            isSettingWallpaper = false
+        }
+    }
+}
+
+private struct LoopingVideoBackgroundView: NSViewRepresentable {
+    let url: URL
+    let isMuted: Bool
+    let onReady: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onReady: onReady)
+    }
+
+    func makeNSView(context: Context) -> PlayerContainerView {
+        let view = PlayerContainerView()
+        context.coordinator.attach(to: view)
+        context.coordinator.update(url: url, isMuted: isMuted, in: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: PlayerContainerView, context: Context) {
+        context.coordinator.update(url: url, isMuted: isMuted, in: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: PlayerContainerView, coordinator: Coordinator) {
+        coordinator.teardown()
+    }
+
+    final class Coordinator {
+        private weak var containerView: PlayerContainerView?
+        private var currentURL: URL?
+        private var player: AVQueuePlayer?
+        private var looper: AVPlayerLooper?
+        private var onReady: (() -> Void)?
+        private var readyObserver: NSObjectProtocol?
+
+        init(onReady: (() -> Void)?) {
+            self.onReady = onReady
+        }
+
+        func attach(to view: PlayerContainerView) {
+            containerView = view
+        }
+
+        func update(url: URL, isMuted: Bool, in view: PlayerContainerView) {
+            attach(to: view)
+
+            if currentURL != url {
+                configurePlayer(with: url, in: view)
+            }
+
+            player?.isMuted = isMuted
+            player?.volume = isMuted ? 0 : 1
+            player?.play()
+        }
+
+        func teardown() {
+            if let observer = readyObserver {
+                NotificationCenter.default.removeObserver(observer)
+                readyObserver = nil
+            }
+            looper?.disableLooping()
+            looper = nil
+            player?.pause()
+            player = nil
+            currentURL = nil
+            containerView?.playerLayer.player = nil
+        }
+
+        private func configurePlayer(with url: URL, in view: PlayerContainerView) {
+            teardown()
+
+            let item = AVPlayerItem(url: url)
+            let queuePlayer = AVQueuePlayer()
+            queuePlayer.actionAtItemEnd = .none
+            queuePlayer.automaticallyWaitsToMinimizeStalling = true
+
+            let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
+            view.playerLayer.player = queuePlayer
+            
+            // 监听视频准备好播放的状态
+            readyObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemNewAccessLogEntry,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onReady?()
+            }
+            
+            // 备选：使用短暂延迟确保视频已经开始加载
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.onReady?()
+            }
+            
+            queuePlayer.play()
+
+            self.player = queuePlayer
+            self.looper = looper
+            self.currentURL = url
+        }
+    }
+}
+
+private final class PlayerContainerView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer = AVPlayerLayer()
+        playerLayer.videoGravity = .resizeAspectFill
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    var playerLayer: AVPlayerLayer {
+        guard let layer = layer as? AVPlayerLayer else {
+            let newLayer = AVPlayerLayer()
+            newLayer.videoGravity = .resizeAspectFill
+            self.layer = newLayer
+            return newLayer
+        }
+        return layer
+    }
+
+    override func layout() {
+        super.layout()
+        playerLayer.frame = bounds
+    }
+}
+
+// MARK: - 详情页加载动画
+private struct LoadingOverlayView: View {
+    @State private var isAnimating = false
+    @State private var rotationAngle: Double = 0
+    
+    var body: some View {
+        ZStack {
+            Color(hex: "0A0A0C")
+                .ignoresSafeArea()
+            
+            VStack(spacing: 24) {
+                // 加载指示器
+                ZStack {
+                    // 外圈
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.1),
+                                    Color.white.opacity(0.3),
+                                    Color.white.opacity(0.1)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 3
+                        )
+                        .frame(width: 48, height: 48)
+                    
+                    // 旋转的弧线
+                    Circle()
+                        .trim(from: 0, to: 0.7)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.8),
+                                    Color.white.opacity(0.4),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                        )
+                        .frame(width: 48, height: 48)
+                        .rotationEffect(.degrees(rotationAngle))
+                }
+                .onAppear {
+                    withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                        rotationAngle = 360
+                    }
+                }
+                
+                // 加载文本
+                Text(t("loading"))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
