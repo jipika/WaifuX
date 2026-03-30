@@ -44,3 +44,4 @@ LocalConfig.json
 
 # Temp
 *.tmp
+.gstack/
