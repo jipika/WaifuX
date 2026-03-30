@@ -113,23 +113,43 @@ actor KazumiRuleLoader {
     /// 将 Kazumi 规则转换为我们的 AnimeRule 格式
     private func convertKazumiRuleToAnimeRule(_ kazumiRule: KazumiRule) -> AnimeRule {
         // 构建搜索 XPath 配置
-        let xpathSearch = AnimeRule.XPathConfig.SearchConfig(
+        let xpathSearch = AnimeSearchXPath(
             url: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
             list: kazumiRule.searchList ?? "",
-            name: kazumiRule.searchName ?? "",
-            result: kazumiRule.searchResult
+            title: kazumiRule.searchName ?? "",
+            cover: "",  // Kazumi 规则中没有单独的封面选择器
+            detail: kazumiRule.searchResult ?? "",
+            id: nil
         )
         
-        // 构建剧集 XPath 配置
-        let xpathChapter = AnimeRule.XPathConfig.ChapterConfig(
-            roads: kazumiRule.chapterRoads,
-            result: kazumiRule.chapterResult,
-            name: kazumiRule.chapterName
+        // 构建详情 XPath 配置
+        let xpathDetail = AnimeDetailXPath(
+            title: nil,
+            cover: nil,
+            description: nil,
+            episodes: kazumiRule.chapterRoads,
+            episodeName: kazumiRule.chapterName,
+            episodeLink: nil,
+            episodeThumb: nil,
+            fullImage: nil,
+            resolution: nil,
+            fileSize: nil
         )
         
-        let xpath = AnimeRule.XPathConfig(
+        // 构建列表 XPath 配置
+        let xpathList = AnimeListXPath(
+            url: "",
+            list: kazumiRule.chapterResult ?? "",
+            title: "",
+            cover: "",
+            detail: "",
+            nextPage: nil
+        )
+        
+        let xpath = AnimeXPathRules(
             search: xpathSearch,
-            chapter: xpathChapter
+            detail: xpathDetail,
+            list: xpathList
         )
         
         // 构建 AnimeRule
@@ -138,7 +158,7 @@ actor KazumiRuleLoader {
             api: "\(kazumiRule.api ?? 2)",  // Kazumi 使用 api 版本,转为字符串
             type: kazumiRule.type ?? "anime",
             name: kazumiRule.name,
-            version: kazumiRule.version != nil ? "\(kazumiRule.version!)" : nil,
+            version: kazumiRule.version != nil ? "\(kazumiRule.version!)" : "1.0.0",
             deprecated: false,
             baseURL: kazumiRule.baseURL ?? "",
             headers: kazumiRule.headers,
@@ -151,15 +171,14 @@ actor KazumiRuleLoader {
             searchId: nil,
             detailTitle: nil,
             detailCover: nil,
-            detailDescription: nil,
+            detailDesc: nil,
             episodeList: nil,
             episodeName: nil,
             episodeLink: nil,
             episodeThumb: nil,
             useWebview: kazumiRule.useWebview ?? false,
-            multiSource: kazumiRule.multiSource ?? false,
-            xpath: xpath,
-            searchable: true
+            multiSources: kazumiRule.multiSource ?? false,
+            xpath: xpath
         )
     }
 }

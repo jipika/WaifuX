@@ -103,10 +103,10 @@ actor AnimeRuleStore {
         }
         
         let (data, _) = try await URLSession.shared.data(from: url)
-        let index = try JSONDecoder().decode([AnimeRuleIndex].self, from: data)
+        let index = try JSONDecoder().decode(AnimeRuleIndex.self, from: data)
         
         var loadedRules: [AnimeRule] = []
-        for item in index {
+        for item in index.animeRules {
             if let rule = try? await loadRuleFromUserRepo(id: item.id) {
                 rules[rule.id] = rule
                 loadedRules.append(rule)
@@ -209,7 +209,9 @@ actor AnimeRuleStore {
     }
 
     private func fetchIndexData() async throws -> Data {
-        guard let url = URL(string: defaultIndexURL) else {
+        // 根据当前规则源选择索引 URL
+        let indexURL = currentSource == .kazumi ? kazumiIndexURL : userIndexURL
+        guard let url = URL(string: indexURL) else {
             throw AnimeRuleStoreError.invalidURL
         }
 
