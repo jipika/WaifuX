@@ -8,6 +8,35 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
 
+# 仅当代码相关文件变化时触发构建
+  paths:
+    - '**.swift'
+    - 'project.yml'
+    - '**.yml'
+    - 'App/**'
+    - 'Views/**'
+    - 'ViewModels/**'
+    - 'Models/**'
+    - 'Services/**'
+    - 'Components/**'
+    - 'Utilities/**'
+    - 'DesignSystem/**'
+    - 'Resources/**'
+    - 'Scripts/**'
+    - 'scripts/**'
+    # 排除文档和配置文件
+    - '!**.md'
+    - '!CLAUDE.md'
+    - '!README.md'
+    - '!LICENSE'
+    - '!CHANGELOG.md'
+    - '!CONTRIBUTING.md'
+    - '!.github/**'
+    - '!Design/**'
+    - '!Docs/**'
+    - '!Tools/**'
+    - '!Rules/**'
+
 jobs:
   build:
     runs-on: macos-latest
@@ -48,7 +77,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 构建成功后通知（可选）
+  # 构建成功后通知（仅标签发布时）
   notify:
     needs: build
     runs-on: ubuntu-latest
