@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.0.1] - 2026-03-30
+
+### 🔧 CI/CD
+- 更新 GitHub Actions runner 到 macos-26-arm64
+- 添加 Xcode 路径验证和 Swift 版本输出
+
+---
+
 ## [1.0.0] - 2026-03-25
 
 ### ✨ Features / 功能
