@@ -68,6 +68,9 @@ class SettingsViewModel: ObservableObject {
         animeRuleSource = source
         UserDefaults.standard.set(source.rawValue, forKey: "anime_rule_source")
         await AnimeRuleStore.shared.switchRuleSource(to: source)
+        
+        // 发送通知,让 AnimeViewModel 重新加载
+        NotificationCenter.default.post(name: .animeRuleSourceChanged, object: nil)
     }
 
     func saveRuleRepository() async {
