@@ -572,6 +572,32 @@ actor HTMLParser {
 
     // MARK: - 辅助提取方法
 
+    /// 从文档中提取文本 (简化版,用于 AnimeParser)
+    nonisolated func extractText(document: Document, xpath: String) throws -> String? {
+        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+        return try? document.select(cssSelector).first()?.text()
+    }
+    
+    /// 从元素中提取文本 (简化版,用于 AnimeParser)
+    nonisolated func extractText(element: Element, xpath: String) throws -> String? {
+        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+        return try? element.select(cssSelector).first()?.text()
+    }
+    
+    /// 从文档中提取属性 (简化版,用于 AnimeParser)
+    nonisolated func extractAttr(document: Document, xpath: String, attr: String) -> String? {
+        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+        guard let element = try? document.select(cssSelector).first() else { return nil }
+        return (try? element.attr(attr)) ?? ""
+    }
+    
+    /// 从元素中提取属性 (简化版,用于 AnimeParser)
+    nonisolated func extractAttr(element: Element, xpath: String, attr: String) -> String? {
+        let cssSelector = convertXPathToCSS(xpath) ?? xpath
+        guard let el = try? element.select(cssSelector).first() else { return nil }
+        return (try? el.attr(attr)) ?? ""
+    }
+
     /// 从元素上下文中提取文本 (使用 XPath 模式)
     private func extractText(element: Element, xpath: String) throws -> String? {
         let trimmed = xpath.trimmingCharacters(in: .whitespacesAndNewlines)

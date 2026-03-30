@@ -34,12 +34,32 @@ actor AnimeParser {
 
     /// 使用指定规则搜索
     private func searchWithRule(query: String, rule: AnimeRule) async throws -> [AnimeSearchResult] {
-        let url = rule.searchURL
+        print("\n[AnimeParser] ========== 开始搜索 ========"=")
+        print("[AnimeParser] 规则: \(rule.name) (id: \(rule.id), api: \(rule.api))")
+        print("[AnimeParser] 关键词: \(query)")
+        
+        var url = rule.searchURL
+        
+        // 处理 XPath 格式 (API v2)
+        if rule.api == "2", let xpath = rule.xpath, let search = xpath.search {
+            url = search.url
+            print("[AnimeParser] 使用 XPath 格式 URL: \(url)")
+        }
+        
+        url = url
             .replacingOccurrences(of: "{keyword}", with: query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)
             .replacingOccurrences(of: "{page}", with: "1")
+        
+        print("[AnimeParser] 最终 URL: \(url)")
 
         let html = try await fetchHTML(url: url, rule: rule)
-        return try parseSearchResults(html: html, rule: rule)
+        print("[AnimeParser] HTML 长度: \(html.count) 字符")
+        
+        let results = try parseSearchResults(html: html, rule: rule)
+        print("[AnimeParser] 解析结果: \(results.count) 条")
+        print("[AnimeParser] ========== 搜索结束 ==========\n")
+        
+        return results
     }
 
     // MARK: - 获取详情
@@ -48,8 +68,21 @@ actor AnimeParser {
         detailURL: String,
         rule: AnimeRule
     ) async throws -> AnimeDetail {
+        print("\n[AnimeParser] ========== 获取详情 ==========")
+        print("[AnimeParser] 规则: \(rule.name)")
+        print("[AnimeParser] URL: \(detailURL)")
+        
         let html = try await fetchHTML(url: detailURL, rule: rule)
-        return try parseDetail(html: html, detailURL: detailURL, rule: rule)
+        print("[AnimeParser] HTML 长度: \(html.count) 字符")
+        
+        let detail = try parseDetail(html: html, detailURL: detailURL, rule: rule)
+        
+        print("[AnimeParser] 详情解析成功:")
+        print("  标题: \(detail.title)")
+        print("  剧集数: \(detail.episodes.count)")
+        print("[AnimeParser] ========== 详情结束 ==========\n")
+        
+        return detail
     }
 
     // MARK: - 获取视频链接
@@ -148,36 +181,77 @@ actor AnimeParser {
 
     private func parseSearchResults(html: String, rule: AnimeRule) throws -> [AnimeSearchResult] {
         let document = try SwiftSoup.parse(html)
-        let listSelector = rule.searchList
+        
+        // 根据规则 API 版本选择解析方式
+        if rule.api == "2" {
+            return try parseSearchResultsV2(html: html, rule: rule, document: document)
+        } else {
+            return try parseSearchResultsV1(html: html, rule: rule, document: document)
+        }
+    }
+    
+    /// API v1: 简化 CSS Selector 解析
+    private func parseSearchResultsV1(html: String, rule: AnimeRule, document: Document) throws -> [AnimeSearchResult] {
+        let listSelector = rule.searchList ?? "a"
+        print("[AnimeParser] V1 解析 - 列表选择器: \(listSelector)")
+        
         let elements = try document.select(listSelector)
+        print("[AnimeParser] 找到 \(elements.count) 个元素")
 
         var results: [AnimeSearchResult] = []
 
         for element in elements {
-            // 提取标题 (使用 CSS 选择器提取文本)
-            let title = try? element.select(rule.searchName).first()?.text()
-                ?? (try? element.text())
-                ?? "Untitled"
+            // 提取标题
+            var title: String? = nil
+            if let nameSelector = rule.searchName, !nameSelector.isEmpty {
+                title = try? element.select(nameSelector).first()?.text()
+            }
+            if title == nil {
+                title = try? element.text()
+            }
+            let finalTitle = (title ?? "Untitled").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
             // 提取封面
-            let cover = extractAttr(element: element, selector: rule.searchCover, attr: "src")
-                ?? extractAttr(element: element, selector: rule.searchCover, attr: "data-src")
+            var cover: String? = nil
+            if let coverSelector = rule.searchCover, !coverSelector.isEmpty {
+                cover = extractAttr(element: element, selector: coverSelector, attr: "src")
+                    ?? extractAttr(element: element, selector: coverSelector, attr: "data-src")
+            }
+            if cover == nil {
+                // 默认从 img 标签提取
+                cover = try? element.select("img").first()?.attr("src")
+                    ?? element.select("img").first()?.attr("data-src")
+            }
 
             // 提取详情链接
-            let detail = extractAttr(element: element, selector: rule.searchDetail, attr: "href")
-
-            guard let detailURL = detail else { continue }
+            var detail: String? = nil
+            if let detailSelector = rule.searchDetail, !detailSelector.isEmpty {
+                detail = extractAttr(element: element, selector: detailSelector, attr: "href")
+            }
+            if detail == nil {
+                // 默认从 a 标签提取
+                detail = try? element.select("a").first()?.attr("href")
+            }
+            
+            guard let detailURL = detail, !detailURL.isEmpty else { 
+                print("[AnimeParser] ⚠️ 跳过元素: 无详情链接")
+                continue 
+            }
 
             // 提取 ID
-            let id = extractAttr(element: element, selector: rule.searchId ?? rule.searchDetail, attr: "href")
+            let id = rule.searchId.flatMap { extractAttr(element: element, selector: $0, attr: "href") }
                 ?? detailURL
 
             let fullDetailURL = HTMLParser.shared.makeAbsoluteURL(detailURL, baseURL: rule.baseURL) ?? detailURL
             let fullCoverURL = HTMLParser.shared.makeAbsoluteURL(cover, baseURL: rule.baseURL)
+            
+            print("[AnimeParser] ✓ 解析成功: \(finalTitle)")
+            print("         详情: \(fullDetailURL)")
+            print("         封面: \(fullCoverURL ?? "无")")
 
             results.append(AnimeSearchResult(
                 id: id,
-                title: (title ?? "Untitled").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines),
+                title: finalTitle,
                 coverURL: fullCoverURL,
                 detailURL: fullDetailURL,
                 sourceId: rule.id,
@@ -188,32 +262,131 @@ actor AnimeParser {
 
         return results
     }
+    
+    /// API v2: XPath 解析 (兼容 Kazumi)
+    private func parseSearchResultsV2(html: String, rule: AnimeRule, document: Document) throws -> [AnimeSearchResult] {
+        guard let xpath = rule.xpath, let searchXPath = xpath.search else {
+            throw AnimeParserError.parseError("Missing xpath.search configuration")
+        }
+        
+        // 使用 HTMLParser 的 XPath 转 CSS 功能
+        let listSelector = HTMLParser.shared.convertXPathToCSS(searchXPath.list) ?? searchXPath.list
+        let elements = try document.select(listSelector)
+        
+        var results: [AnimeSearchResult] = []
+        
+        for element in elements {
+            // 提取标题
+            let title = try? HTMLParser.shared.extractText(element: element, xpath: searchXPath.title)
+                ?? element.text()
+            
+            // 提取封面
+            let cover = HTMLParser.shared.extractAttr(
+                element: element,
+                xpath: searchXPath.cover,
+                attr: "src"
+            ) ?? HTMLParser.shared.extractAttr(
+                element: element,
+                xpath: searchXPath.cover,
+                attr: "data-src"
+            )
+            
+            // 提取详情链接
+            let detail = HTMLParser.shared.extractAttr(
+                element: element,
+                xpath: searchXPath.detail,
+                attr: "href"
+            )
+            
+            guard let detailURL = detail, !detailURL.isEmpty else { continue }
+            
+            let id = searchXPath.id.flatMap { 
+                HTMLParser.shared.extractAttr(element: element, xpath: $0, attr: "href") 
+            } ?? detailURL
+            
+            let fullDetailURL = HTMLParser.shared.makeAbsoluteURL(detailURL, baseURL: rule.baseURL) ?? detailURL
+            let fullCoverURL = HTMLParser.shared.makeAbsoluteURL(cover, baseURL: rule.baseURL)
+            
+            results.append(AnimeSearchResult(
+                id: id,
+                title: (title ?? "Untitled").trimmingCharacters(in: .whitespacesAndNewlines),
+                coverURL: fullCoverURL,
+                detailURL: fullDetailURL,
+                sourceId: rule.id,
+                sourceName: rule.name,
+                latestEpisode: nil
+            ))
+        }
+        
+        return results
+    }
 
     // MARK: - 详情解析
 
     private func parseDetail(html: String, detailURL: String, rule: AnimeRule) throws -> AnimeDetail {
         let document = try SwiftSoup.parse(html)
-
-        let title = try (document.select(rule.detailTitle ?? "h1").first()?.text())
-            ?? "Unknown"
-
-        let cover = extractAttr(element: document, selector: rule.detailCover ?? "img", attr: "src")
-            ?? extractAttr(element: document, selector: rule.detailCover ?? "img", attr: "data-src")
-
-        let description = try? document.select(rule.detailDesc ?? "p").first()?.text()
-        let status = try? document.select(rule.detailStatus ?? "span").first()?.text()
-        let rating = try? document.select(rule.detailRating ?? "span").first()?.text()
+        
+        // 根据规则 API 版本选择解析方式
+        if rule.api == "2" {
+            return try parseDetailV2(html: html, detailURL: detailURL, rule: rule, document: document)
+        } else {
+            return try parseDetailV1(html: html, detailURL: detailURL, rule: rule, document: document)
+        }
+    }
+    
+    /// API v1: 简化 CSS Selector 解析
+    private func parseDetailV1(html: String, detailURL: String, rule: AnimeRule, document: Document) throws -> AnimeDetail {
+        // 提取标题
+        var title: String? = nil
+        if let titleSelector = rule.detailTitle, !titleSelector.isEmpty {
+            title = try? document.select(titleSelector).first()?.text()
+        }
+        let finalTitle = title ?? "Unknown"
+        
+        // 提取封面
+        var cover: String? = nil
+        if let coverSelector = rule.detailCover, !coverSelector.isEmpty {
+            cover = extractAttr(element: document, selector: coverSelector, attr: "src")
+                ?? extractAttr(element: document, selector: coverSelector, attr: "data-src")
+        }
+        
+        // 提取描述、状态、评分
+        let description = rule.detailDesc.flatMap { try? document.select($0).first()?.text() }
+        let status = rule.detailStatus.flatMap { try? document.select($0).first()?.text() }
+        let rating = rule.detailRating.flatMap { try? document.select($0).first()?.text() }
 
         // 解析剧集列表
         var episodes: [AnimeDetail.AnimeEpisodeItem] = []
-        if let listSelector = rule.episodeList {
+        if let listSelector = rule.episodeList, !listSelector.isEmpty {
             let episodeElements = try document.select(listSelector)
             for (index, element) in episodeElements.array().enumerated() {
-                let episodeLink = extractAttr(element: element, selector: rule.episodeLink ?? "a", attr: "href")
+                // 提取剧集链接
+                var episodeLink: String? = nil
+                if let linkSelector = rule.episodeLink, !linkSelector.isEmpty {
+                    episodeLink = extractAttr(element: element, selector: linkSelector, attr: "href")
+                }
+                if episodeLink == nil {
+                    // 默认从 a 标签提取
+                    episodeLink = try? element.select("a").first()?.attr("href")
+                }
+                
                 guard let link = episodeLink, !link.isEmpty else { continue }
 
-                let name = try? element.text()
-                let thumb = extractAttr(element: element, selector: rule.episodeThumb ?? "img", attr: "src")
+                // 提取剧集名称
+                var name: String? = nil
+                if let nameSelector = rule.episodeName, !nameSelector.isEmpty {
+                    name = try? element.select(nameSelector).first()?.text()
+                }
+                if name == nil {
+                    name = try? element.text()
+                }
+                
+                // 提取剧集缩略图
+                var thumb: String? = nil
+                if let thumbSelector = rule.episodeThumb, !thumbSelector.isEmpty {
+                    thumb = extractAttr(element: element, selector: thumbSelector, attr: "src")
+                        ?? extractAttr(element: element, selector: thumbSelector, attr: "data-src")
+                }
 
                 let fullLink = HTMLParser.shared.makeAbsoluteURL(link, baseURL: rule.baseURL) ?? link
                 let fullThumb = HTMLParser.shared.makeAbsoluteURL(thumb, baseURL: rule.baseURL)
@@ -232,11 +405,85 @@ actor AnimeParser {
 
         return AnimeDetail(
             id: detailURL,
-            title: title,
+            title: finalTitle,
             coverURL: fullCoverURL,
             description: description,
             status: status,
             rating: rating,
+            episodes: episodes,
+            sourceId: rule.id
+        )
+    }
+    
+    /// API v2: XPath 解析 (兼容 Kazumi)
+    private func parseDetailV2(html: String, detailURL: String, rule: AnimeRule, document: Document) throws -> AnimeDetail {
+        guard let xpath = rule.xpath, let detailXPath = xpath.detail else {
+            throw AnimeParserError.parseError("Missing xpath.detail configuration")
+        }
+        
+        // 提取标题
+        let title = detailXPath.title.flatMap { selector in
+            try? document.select(selector).first()?.text()
+        } ?? "Unknown"
+        
+        // 提取封面
+        let cover = detailXPath.cover.flatMap { selector in
+            extractAttr(element: document, selector: selector, attr: "src")
+                ?? extractAttr(element: document, selector: selector, attr: "data-src")
+        }
+        
+        // 提取描述
+        let description = detailXPath.description.flatMap { selector in
+            try? document.select(selector).first()?.text()
+        }
+        
+        // 解析剧集列表
+        var episodes: [AnimeDetail.AnimeEpisodeItem] = []
+        if let episodesSelector = detailXPath.episodes {
+            let cssSelector = HTMLParser.shared.convertXPathToCSS(episodesSelector) ?? episodesSelector
+            let episodeElements = try document.select(cssSelector)
+            
+            for (index, element) in episodeElements.array().enumerated() {
+                // 提取剧集链接
+                let link = detailXPath.episodeLink.flatMap { linkPattern in
+                    extractAttr(element: element, selector: linkPattern, attr: "href")
+                }
+                
+                guard let episodeLink = link, !episodeLink.isEmpty else { continue }
+                
+                // 提取剧集名称
+                let name = detailXPath.episodeName.flatMap { namePattern in
+                    try? element.select(namePattern).first()?.text()
+                }
+                
+                // 提取剧集缩略图
+                let thumb = detailXPath.episodeThumb.flatMap { thumbPattern in
+                    extractAttr(element: element, selector: thumbPattern, attr: "src")
+                        ?? extractAttr(element: element, selector: thumbPattern, attr: "data-src")
+                }
+                
+                let fullLink = HTMLParser.shared.makeAbsoluteURL(episodeLink, baseURL: rule.baseURL) ?? episodeLink
+                let fullThumb = HTMLParser.shared.makeAbsoluteURL(thumb, baseURL: rule.baseURL)
+                
+                episodes.append(AnimeDetail.AnimeEpisodeItem(
+                    id: fullLink,
+                    name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    episodeNumber: index + 1,
+                    url: fullLink,
+                    thumbnailURL: fullThumb
+                ))
+            }
+        }
+        
+        let fullCoverURL = HTMLParser.shared.makeAbsoluteURL(cover, baseURL: rule.baseURL)
+        
+        return AnimeDetail(
+            id: detailURL,
+            title: title,
+            coverURL: fullCoverURL,
+            description: description,
+            status: nil,
+            rating: nil,
             episodes: episodes,
             sourceId: rule.id
         )
