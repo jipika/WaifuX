@@ -7,7 +7,7 @@ import Foundation
 
 struct AnimeRule: Identifiable, Codable, Hashable {
     let id: String
-    let api: String      // "1" = 基础版
+    let api: String      // "1" = 简化版(CSS), "2" = XPath版
     let type: String      // "anime"
     let name: String
     let version: String
@@ -18,34 +18,32 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     let headers: [String: String]?
     let timeout: Int?
 
-    // 搜索解析
+    // API v1: 简化 CSS Selector 格式
     let searchURL: String
-    let searchList: String      // CSS Selector: 搜索结果列表容器
-    let searchName: String      // CSS Selector: 标题
-    let searchCover: String      // CSS Selector: 封面图
-    let searchDetail: String     // CSS Selector: 详情链接
-    let searchId: String?        // CSS Selector: ID (可选)
+    let searchList: String?
+    let searchName: String?
+    let searchCover: String?
+    let searchDetail: String?
+    let searchId: String?
 
-    // 详情解析
-    let detailTitle: String?     // CSS Selector: 详情页标题
-    let detailCover: String?    // CSS Selector: 详情页封面
-    let detailDesc: String?     // CSS Selector: 描述
-    let detailStatus: String?   // CSS Selector: 状态
-    let detailRating: String?   // CSS Selector: 评分
+    let detailTitle: String?
+    let detailCover: String?
+    let detailDesc: String?
+    let detailStatus: String?
+    let detailRating: String?
 
-    // 剧集列表
-    let episodeList: String?    // CSS Selector: 剧集列表容器
-    let episodeName: String?    // CSS Selector: 剧集名称
-    let episodeLink: String?    // CSS Selector: 剧集链接
-    let episodeThumb: String?   // CSS Selector: 剧集缩略图
+    let episodeList: String?
+    let episodeName: String?
+    let episodeLink: String?
+    let episodeThumb: String?
 
-    // 视频解析
-    let videoSelector: String?  // CSS Selector: 视频 iframe 或 video 标签
-    let videoSourceAttr: String? // 属性名: "src" 或 "data-src"
-    let useWebview: Bool        // 是否需要 WebView 加载
+    let videoSelector: String?
+    let videoSourceAttr: String?
+    let useWebview: Bool?
+    let multiSources: Bool?
 
-    // 多源支持
-    let multiSources: Bool
+    // API v2: XPath 格式 (兼容 Kazumi)
+    let xpath: AnimeXPathRules?
 
     enum CodingKeys: String, CodingKey {
         case id, api, type, name, version, deprecated
@@ -53,11 +51,11 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         case searchURL, searchList, searchName, searchCover, searchDetail, searchId
         case detailTitle, detailCover, detailDesc, detailStatus, detailRating
         case episodeList, episodeName, episodeLink, episodeThumb
-        case videoSelector, videoSourceAttr, useWebview
-        case multiSources
+        case videoSelector, videoSourceAttr, useWebview, multiSources
+        case xpath
     }
 
-    // 方便创建默认值的初始化器
+    // 初始化器支持两种格式
     init(
         id: String,
         api: String = "1",
@@ -68,11 +66,12 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         baseURL: String,
         headers: [String: String]? = nil,
         timeout: Int? = 30,
+        // API v1 字段
         searchURL: String,
-        searchList: String,
-        searchName: String,
-        searchCover: String,
-        searchDetail: String,
+        searchList: String? = nil,
+        searchName: String? = nil,
+        searchCover: String? = nil,
+        searchDetail: String? = nil,
         searchId: String? = nil,
         detailTitle: String? = nil,
         detailCover: String? = nil,
@@ -85,8 +84,10 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         episodeThumb: String? = nil,
         videoSelector: String? = nil,
         videoSourceAttr: String? = "src",
-        useWebview: Bool = false,
-        multiSources: Bool = false
+        useWebview: Bool? = false,
+        multiSources: Bool? = false,
+        // API v2 字段
+        xpath: AnimeXPathRules? = nil
     ) {
         self.id = id
         self.api = api
@@ -97,28 +98,62 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         self.baseURL = baseURL
         self.headers = headers
         self.timeout = timeout
+        
         self.searchURL = searchURL
         self.searchList = searchList
         self.searchName = searchName
         self.searchCover = searchCover
         self.searchDetail = searchDetail
         self.searchId = searchId
+        
         self.detailTitle = detailTitle
         self.detailCover = detailCover
         self.detailDesc = detailDesc
         self.detailStatus = detailStatus
         self.detailRating = detailRating
+        
         self.episodeList = episodeList
         self.episodeName = episodeName
         self.episodeLink = episodeLink
         self.episodeThumb = episodeThumb
+        
         self.videoSelector = videoSelector
         self.videoSourceAttr = videoSourceAttr
         self.useWebview = useWebview
         self.multiSources = multiSources
+        
+        self.xpath = xpath
     }
 
-    // Hashable conformance
+    // 辅助计算属性: 获取实际的搜索列表选择器
+    func getSearchListSelector() -> String {
+        if api == "2", let xpath = xpath, let search = xpath.search {
+            return search.list
+        }
+        return searchList ?? "a"
+    }
+    
+    func getSearchNameSelector() -> String {
+        if api == "2", let xpath = xpath, let search = xpath.search {
+            return search.title
+        }
+        return searchName ?? ""
+    }
+    
+    func getSearchCoverSelector() -> String {
+        if api == "2", let xpath = xpath, let search = xpath.search {
+            return search.cover
+        }
+        return searchCover ?? "img"
+    }
+    
+    func getSearchDetailSelector() -> String {
+        if api == "2", let xpath = xpath, let search = xpath.search {
+            return search.detail
+        }
+        return searchDetail ?? "a[href]"
+    }
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
@@ -126,6 +161,45 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     static func == (lhs: AnimeRule, rhs: AnimeRule) -> Bool {
         lhs.id == rhs.id
     }
+}
+
+// MARK: - XPath 规则结构 (API v2)
+
+struct AnimeXPathRules: Codable {
+    let search: AnimeSearchXPath?
+    let detail: AnimeDetailXPath?
+    let list: AnimeListXPath?
+}
+
+struct AnimeSearchXPath: Codable {
+    let url: String
+    let list: String
+    let title: String
+    let cover: String
+    let detail: String
+    let id: String?
+}
+
+struct AnimeDetailXPath: Codable {
+    let title: String?
+    let cover: String?
+    let description: String?
+    let episodes: String?
+    let episodeName: String?
+    let episodeLink: String?
+    let episodeThumb: String?
+    let fullImage: String?
+    let resolution: String?
+    let fileSize: String?
+}
+
+struct AnimeListXPath: Codable {
+    let url: String
+    let list: String
+    let title: String
+    let cover: String
+    let detail: String
+    let nextPage: String?
 }
 
 // MARK: - 动漫规则索引 (用于规则市场)
