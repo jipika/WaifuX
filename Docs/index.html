@@ -286,27 +286,16 @@
                         <span data-i18n="githubBtn">查看源码</span>
                     </a>
                 </div>
-                <div class="relative max-w-5xl mx-auto">
+                <div class="relative max-w-5xl mx-auto -mx-4 md:-mx-12">
                     <!-- 背景光晕 -->
-                    <div class="absolute inset-0 bg-gradient-to-r from-primary-500/30 via-transparent to-accent-cyan/30 rounded-3xl blur-3xl"></div>
-                    <div class="absolute inset-4 bg-gradient-to-br from-primary-500/10 to-transparent rounded-3xl"></div>
+                    <div class="absolute inset-0 bg-gradient-to-r from-primary-500/30 via-transparent to-accent-cyan/30 rounded-2xl blur-3xl"></div>
 
-                    <!-- 主预览卡片 - 全面屏设计 -->
-                    <div class="relative rounded-2xl overflow-hidden shadow-2xl shadow-primary-500/20">
-                        <!-- 图片区域 -->
-                        <div class="aspect-[16/9] bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 relative overflow-hidden">
-                            <img src="./app-screenshot-real.png" alt="WallHaven App Screenshot" class="w-full h-full object-cover object-top" onerror="this.src='./app-preview.png'">
-
-                            <!-- 底部渐变遮罩 -->
-                            <div class="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-black/40 to-transparent"></div>
+                    <!-- 主预览卡片 - 真正的全面屏沉浸设计 -->
+                    <div class="relative rounded-2xl overflow-hidden shadow-2xl shadow-primary-500/20 border border-white/5">
+                        <div class="w-full h-[60vh] min-h-[400px] max-h-[700px] bg-gray-900 relative overflow-hidden">
+                            <img src="./app-screenshot-real.png" alt="WallHaven App Screenshot" class="w-full h-full object-cover" onerror="this.src='./app-preview.png'">
                         </div>
-
-                        <!-- 底部导航栏 -->
-                        <div class="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-black/80 to-transparent z-10"></div>
                     </div>
-
-                    <!-- 装饰性边框 -->
-                    <div class="absolute inset-0 rounded-2xl gradient-border -z-10 transform scale-[1.02]"></div>
                 </div>
             </div>
         </div>
