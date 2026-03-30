@@ -2,22 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'project.yml'
-      - 'App/**'
-      - 'Views/**'
-      - 'ViewModels/**'
-      - 'Models/**'
-      - 'Services/**'
-      - 'Components/**'
-      - 'Utilities/**'
-      - 'DesignSystem/**'
-      - 'Resources/**'
-      - 'Scripts/**'
-      - 'scripts/**'
-      - 'Assets.xcassets/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
