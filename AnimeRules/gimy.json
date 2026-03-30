@@ -1,0 +1,33 @@
+{
+  "id": "gimy",
+  "api": "1",
+  "type": "anime",
+  "name": "Gimy 动漫",
+  "version": "1.0.0",
+  "deprecated": false,
+  "baseURL": "https://gimy.ai",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
+  },
+  "timeout": 30,
+  "searchURL": "https://gimy.ai/search?q={keyword}",
+  "searchList": "div.video-item, .anime-item, li.video-item",
+  "searchName": "h3 a, h2 a, a.title, .video-title",
+  "searchCover": "img[data-src], img[src]",
+  "searchDetail": "h3 a[href], h2 a[href], a.title[href]",
+  "searchId": "a[href]",
+  "detailTitle": "h1.title, h1, .anime-title",
+  "detailCover": "img.poster, .cover img, .anime-cover img",
+  "detailDesc": "div.summary, .description, .anime-desc",
+  "detailStatus": "span.status, .status",
+  "detailRating": "span.rating, .rating",
+  "episodeList": "a.episode-link, div.episode a, li.episode a, .episode-list a",
+  "episodeName": "span, .episode-name, .episode-title",
+  "episodeLink": "a[href]",
+  "episodeThumb": "img[data-src]",
+  "videoSelector": "iframe[src*='player'], iframe[src*='embed'], div.player iframe",
+  "videoSourceAttr": "src",
+  "useWebview": false,
+  "multiSources": true
+}

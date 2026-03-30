@@ -1,0 +1,52 @@
+{
+  "profiles" : [
+    {
+      "description" : "Built-in default profile for the current app.",
+      "id" : "wallhaven-motionbgs-default",
+      "media" : {
+        "baseURL" : "https://motionbgs.com",
+        "displayName" : "MotionBGs",
+        "headers" : {
+          "Accept-Language" : "en-US,en;q=0.9",
+          "User-Agent" : "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        },
+        "provider" : "motionbgs_html",
+        "routes" : {
+          "detail" : "/{slug}",
+          "home" : "/",
+          "mobile" : "/mobile/",
+          "search" : "/search?q={query}",
+          "tag" : "/tag:{slug}/"
+        },
+        "parsing" : {
+          "durationPattern" : ""duration":\\s*"([^"]+)"",
+          "downloadPattern" : "<a href=([^ >]+) rel=nofollow target=_blank>.*?<span class=font-bold>([^<]+)</span>\\s*Wallpaper\\s*\\(([^)]+)\\)</div><div class=text-xs>([^<]+)</div>",
+          "listItemPatterns" : [
+            "<a title=\"([^\"]+)\" href=([^ >]+)>.*?<img[^>]+src=([^ >]+)[^>]*>.*?<span class=[\"']?ttl[\"']?>(.*?)</span>\\s*<span class=[\"']?frm[\"']?>\\s*(.*?)\\s*</span>",
+            "<a[^>]*title=[\"']?([^\"'>]+)[\"']?[^>]*href=[\"']?([^\"'\\s>]+)[\"']?[^>]*>.*?<img[^>]+src=[\"']?([^\"'\\s>]+)[\"']?[^>]*>.*?<span[^>]*>([^<]*)</span>\\s*<span[^>]*>\\s*</span>\\s*<span[^>]*>([^<]*)</span>"
+          ],
+          "nextPagePatterns" : [
+            "href\\s*=\\s*\"?([^\">\\s]+)\"?\\s*(?=rel=\"?next\"?)",
+            "<section[^>]*class=[\"']?pag[\"']?[^>]*>.*?<a[^>]*href=[\"']?([^\"'\\s]+)[\"']?[^>]*>\\s*Next",
+            "<section class=pag>.*?<a href=([^ >\\s]+)>\\s*Next",
+            "hx-get=[\"']?([^\"'\\s]+)[\"']?",
+            "<a[^>]*href=[\"']?([^\"'\\s]+)[\"']?[^>]*>\\s*Next\\s*</a>",
+            "<div class=larrow><a class=link--arrowed href=([^ >\\s]+)>\\s*View More Wallpapers"
+          ],
+          "tagPattern" : "<a href=/tag:([^/]+)/>\\s*(?:<picture>.*?</picture>\\s*)?(?:<span>)?([^<]+?)(?:</span>)?</a>"
+        }
+      },
+      "name" : "WallHaven + MotionBGs",
+      "wallpaper" : {
+        "apiBaseURL" : "https://wallhaven.cc/api/v1",
+        "authHeaderName" : "X-API-Key",
+        "displayName" : "WallHaven",
+        "imageURLTemplate" : "https://w.wallhaven.cc/full/{prefix}/wallhaven-{id}.{ext}",
+        "provider" : "wallhaven_api",
+        "searchPath" : "/search",
+        "wallpaperPath" : "/w/{id}"
+      }
+    }
+  ],
+  "schemaVersion" : "1.0.0"
+}

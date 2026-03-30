@@ -1,0 +1,166 @@
+{
+  "schemaVersion": "2.0.0",
+  "profiles": [
+    {
+      "id": "anime-age",
+      "name": "AGE 动漫",
+      "description": "AGE 动漫源 (参考 Kazumi 插件格式)",
+      "wallpaper": {
+        "provider": "wallhaven_api",
+        "displayName": "WallHaven",
+        "apiBaseURL": "https://wallhaven.cc/api/v1",
+        "searchPath": "/search",
+        "wallpaperPath": "/w/{id}",
+        "imageURLTemplate": "https://w.wallhaven.cc/full/{prefix}/wallhaven-{id}.{ext}",
+        "authHeaderName": "X-API-Key"
+      },
+      "media": {
+        "provider": "motionbgs_html",
+        "displayName": "MotionBGs",
+        "baseURL": "https://motionbgs.com",
+        "headers": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        "routes": {
+          "home": "/",
+          "mobile": "/mobile/",
+          "tag": "/tag:{slug}/",
+          "search": "/search?q={query}",
+          "detail": "/{slug}"
+        },
+        "parsing": {
+          "searchList": "//div[contains(@class, 'flex flex-col')]/a",
+          "searchName": ".//img/@alt",
+          "searchResult": "@href",
+          "searchCover": ".//img/@src"
+        }
+      },
+      "anime": {
+        "enabled": true,
+        "provider": "age_html",
+        "displayName": "AGE",
+        "baseURL": "https://www.agedm.io",
+        "userAgent": "",
+        "searchURL": "https://www.agedm.io/search?query=@keyword",
+        "parsing": {
+          "searchList": "//div[2]/div/section/div/div/div/div",
+          "searchName": "//div/div[2]/h5/a",
+          "searchResult": "//div/div[2]/h5/a",
+          "searchCover": "//img/@src",
+          "chapterRoads": "//div[2]/div/section/div/div[2]/div[2]/div[2]/div",
+          "chapterResult": "//ul/li/a",
+          "chapterName": "//text()",
+          "detailCover": "//div[@class='cover']/img/@src",
+          "detailDescription": "//div[@class='desc']/text()"
+        }
+      }
+    },
+    {
+      "id": "anime-7sefun",
+      "name": "7sefun 动漫",
+      "description": "7sefun 动漫源",
+      "wallpaper": {
+        "provider": "wallhaven_api",
+        "displayName": "WallHaven",
+        "apiBaseURL": "https://wallhaven.cc/api/v1",
+        "searchPath": "/search",
+        "wallpaperPath": "/w/{id}",
+        "imageURLTemplate": "https://w.wallhaven.cc/full/{prefix}/wallhaven-{id}.{ext}",
+        "authHeaderName": "X-API-Key"
+      },
+      "media": {
+        "provider": "motionbgs_html",
+        "displayName": "MotionBGs",
+        "baseURL": "https://motionbgs.com",
+        "headers": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        "routes": {
+          "home": "/",
+          "mobile": "/mobile/",
+          "tag": "/tag:{slug}/",
+          "search": "/search?q={query}",
+          "detail": "/{slug}"
+        },
+        "parsing": {
+          "searchList": "//div[contains(@class, 'flex flex-col')]/a",
+          "searchName": ".//img/@alt",
+          "searchResult": "@href",
+          "searchCover": ".//img/@src"
+        }
+      },
+      "anime": {
+        "enabled": true,
+        "provider": "7sefun_html",
+        "displayName": "7sefun",
+        "baseURL": "https://www.7sefun.top",
+        "userAgent": "",
+        "searchURL": "https://www.7sefun.top/vodsearch/-------------.html?wd=@keyword",
+        "parsing": {
+          "searchList": "//div[2]/div[2]/div[2]/div[2]/div",
+          "searchName": "//div[2]/text()",
+          "searchResult": "//a",
+          "searchCover": "//img/@src",
+          "chapterRoads": "//div[2]/div[2]/div[2]/div/div[2]/div[1]/div[2]",
+          "chapterResult": "//a",
+          "chapterName": "//text()"
+        }
+      }
+    },
+    {
+      "id": "anime-dm84",
+      "name": "DM84 动漫",
+      "description": "DM84 动漫源",
+      "wallpaper": {
+        "provider": "wallhaven_api",
+        "displayName": "WallHaven",
+        "apiBaseURL": "https://wallhaven.cc/api/v1",
+        "searchPath": "/search",
+        "wallpaperPath": "/w/{id}",
+        "imageURLTemplate": "https://w.wallhaven.cc/full/{prefix}/wallhaven-{id}.{ext}",
+        "authHeaderName": "X-API-Key"
+      },
+      "media": {
+        "provider": "motionbgs_html",
+        "displayName": "MotionBGs",
+        "baseURL": "https://motionbgs.com",
+        "headers": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        "routes": {
+          "home": "/",
+          "mobile": "/mobile/",
+          "tag": "/tag:{slug}/",
+          "search": "/search?q={query}",
+          "detail": "/{slug}"
+        },
+        "parsing": {
+          "searchList": "//div[contains(@class, 'flex flex-col')]/a",
+          "searchName": ".//img/@alt",
+          "searchResult": "@href",
+          "searchCover": ".//img/@src"
+        }
+      },
+      "anime": {
+        "enabled": true,
+        "provider": "dm84_html",
+        "displayName": "DM84",
+        "baseURL": "https://dmbus.cc",
+        "userAgent": "",
+        "searchURL": "https://dmbus.cc/s----------.html?wd=@keyword",
+        "parsing": {
+          "searchList": "//div/div[3]/ul/li",
+          "searchName": "//div/a[2]",
+          "searchResult": "//div/a[2]",
+          "searchCover": "//img/@src",
+          "chapterRoads": "//div/div[4]/div/ul",
+          "chapterResult": "//li/a",
+          "chapterName": "//text()"
+        }
+      }
+    }
+  ]
+}

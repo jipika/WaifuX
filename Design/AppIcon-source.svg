@@ -1,0 +1,90 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="84" x2="902" y2="948" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0A0C14"/>
+      <stop offset="0.45" stop-color="#14182A"/>
+      <stop offset="1" stop-color="#090A12"/>
+    </linearGradient>
+    <radialGradient id="violetGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(302 214) rotate(54.8) scale(326 302)">
+      <stop stop-color="#8B5CF6" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyanGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(766 334) rotate(132.7) scale(272 250)">
+      <stop stop-color="#00D4FF" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#00D4FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pinkGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(710 780) rotate(145.1) scale(290 250)">
+      <stop stop-color="#FF3366" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FF3366" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panelFill" x1="244" y1="176" x2="780" y2="848" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#171B2B" stop-opacity="0.88"/>
+      <stop offset="1" stop-color="#0D101A" stop-opacity="0.96"/>
+    </linearGradient>
+    <linearGradient id="panelStroke" x1="222" y1="170" x2="814" y2="850" gradientUnits="userSpaceOnUse">
+      <stop stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.45" stop-color="rgba(255,255,255,0.14)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0.10)"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="512" y1="170" x2="512" y2="858" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#24163A"/>
+      <stop offset="0.38" stop-color="#18395A"/>
+      <stop offset="0.68" stop-color="#127D8A"/>
+      <stop offset="1" stop-color="#F3A35A"/>
+    </linearGradient>
+    <radialGradient id="sunGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 540) rotate(90) scale(158 302)">
+      <stop stop-color="#FDBE7D" stop-opacity="0.92"/>
+      <stop offset="0.55" stop-color="#FDBE7D" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#FDBE7D" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wStroke" x1="512" y1="298" x2="512" y2="704" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#C4EEFF"/>
+    </linearGradient>
+    <filter id="blur40" x="-120" y="-120" width="1264" height="1264" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <filter id="glow" x="174" y="216" width="676" height="602" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+    <clipPath id="baseClip">
+      <rect x="52" y="52" width="920" height="920" rx="224"/>
+    </clipPath>
+    <clipPath id="panelClip">
+      <rect x="188" y="168" width="648" height="688" rx="146"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#baseClip)">
+    <rect x="52" y="52" width="920" height="920" rx="224" fill="url(#bg)"/>
+    <circle cx="284" cy="236" r="236" fill="url(#violetGlow)" filter="url(#blur40)"/>
+    <circle cx="760" cy="322" r="214" fill="url(#cyanGlow)" filter="url(#blur40)"/>
+    <circle cx="710" cy="782" r="206" fill="url(#pinkGlow)" filter="url(#blur40)"/>
+
+    <rect x="188" y="168" width="648" height="688" rx="146" fill="url(#panelFill)"/>
+    <rect x="188.5" y="168.5" width="647" height="687" rx="145.5" stroke="url(#panelStroke)" stroke-width="1"/>
+    <rect x="206" y="186" width="612" height="652" rx="128" fill="rgba(255,255,255,0.04)"/>
+
+    <g clip-path="url(#panelClip)">
+      <rect x="188" y="168" width="648" height="688" fill="url(#sky)"/>
+      <ellipse cx="512" cy="550" rx="244" ry="110" fill="url(#sunGlow)"/>
+
+      <path d="M188 588C252 538 311 516 373 528C416 536 456 564 512 558C559 554 617 516 674 514C734 512 787 542 836 582V856H188V588Z" fill="#172336" fill-opacity="0.78"/>
+      <path d="M188 648C246 612 301 604 358 622C412 639 454 680 515 676C575 672 612 626 668 616C729 606 785 632 836 670V856H188V648Z" fill="#101A2B" fill-opacity="0.92"/>
+      <path d="M188 740C274 688 350 702 426 746C472 773 557 779 612 742C689 690 766 688 836 730V856H188V740Z" fill="#0A0F1B"/>
+
+      <g filter="url(#glow)" opacity="0.66">
+        <path d="M304 318L400 692L512 436L624 692L720 318" stroke="#8DE7FF" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <path d="M304 318L400 692L512 436L624 692L720 318" stroke="url(#wStroke)" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M304 318L400 692L512 436L624 692L720 318" stroke="white" stroke-opacity="0.18" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+
+      <path d="M188 774C250 748 310 742 364 758C414 772 462 806 512 802C569 797 611 758 667 750C726 742 781 756 836 786V856H188V774Z" fill="#070B14"/>
+
+      <path d="M232 220C354 206 491 210 614 212C683 213 746 214 800 212" stroke="white" stroke-opacity="0.18" stroke-width="8" stroke-linecap="round"/>
+      <path d="M256 248C464 226 611 234 766 244" stroke="white" stroke-opacity="0.08" stroke-width="4" stroke-linecap="round"/>
+    </g>
+
+    <rect x="188.5" y="168.5" width="647" height="687" rx="145.5" stroke="white" stroke-opacity="0.06" stroke-width="1"/>
+  </g>
+</svg>

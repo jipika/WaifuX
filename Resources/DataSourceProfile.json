@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "2.0.0",
+  "profiles": [
+    {
+      "id": "wallhaven-motionbgs-default",
+      "name": "WallHaven + MotionBGs",
+      "description": "内置默认配置：WallHaven 壁纸源 + MotionBGs 动态壁纸源",
+      "version": "1.0.0",
+      "wallpaper": {
+        "provider": "wallhaven_api",
+        "displayName": "WallHaven",
+        "apiBaseURL": "https://wallhaven.cc/api/v1",
+        "searchPath": "/search",
+        "wallpaperPath": "/w/{id}",
+        "imageURLTemplate": "https://w.wallhaven.cc/full/{prefix}/wallhaven-{id}.{ext}",
+        "authHeaderName": "X-API-Key"
+      },
+      "media": {
+        "provider": "motionbgs_html",
+        "displayName": "MotionBGs",
+        "baseURL": "https://motionbgs.com",
+        "headers": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        "routes": {
+          "home": "/",
+          "mobile": "/mobile/",
+          "tag": "/tag:{slug}/",
+          "search": "/search?q={query}",
+          "detail": "/{slug}"
+        },
+        "parsing": {
+          "searchList": "a[title*='live wallpaper']",
+          "searchName": "span.ttl",
+          "searchResult": "href",
+          "searchCover": "img",
+          "nextPage": "a[rel='next']",
+          "detailList": "a.btn-dl",
+          "detailName": "span",
+          "detailLink": "href",
+          "tagList": "a[href^='/tag:']",
+          "tagName": ""
+        }
+      },
+      "anime": null
+    }
+  ]
+}

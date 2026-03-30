@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>WallHaven</string>
+    <key>CFBundleDisplayName</key>
+    <string>WallHaven</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2024 WallHaven. All rights reserved.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>WallHaven需要访问下载文件夹来保存壁纸图片。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>WallHaven需要访问文档文件夹来保存壁纸图片。</string>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>
