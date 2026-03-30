@@ -2,9 +2,11 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*.*.*'  # 推送 v开头的标签时触发，如 v1.0.0
-  workflow_dispatch:  # 允许手动触发
+      - 'v*.*.*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,16 +19,43 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
+      - name: Check XcodeGen
+        run: which xcodegen || brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Cache SPM Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
       - name: Build & Package
         run: |
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
 
       - name: Upload Release Asset
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
           files: build/WallHaven.dmg
           draft: true
+          prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 构建成功后通知（可选）
+  notify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Create Release Notification
+        run: |
+          echo "✅ Release 构建成功！"
+          echo "📦 下载地址: https://github.com/${{ github.repository }}/releases/latest"
