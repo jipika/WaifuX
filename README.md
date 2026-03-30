@@ -59,6 +59,25 @@ Download the latest version from the [Releases](https://github.com/jipika/WallHa
 
 ---
 
+## 规则配置 / Rule Profiles / ルール設定
+
+壁纸和动漫解析规则托管在独立的 GitHub 仓库中：
+
+Wallpaper and anime parsing rules are hosted in a separate GitHub repository:
+
+壁纸とアニメのパースルールは、別の GitHub リポジトリで管理されています：
+
+- **仓库 / Repository / リポジトリ：** [WallHaven-Profiles](https://github.com/jipika/WallHaven-Profiles)
+- **说明 / Description / 説明：** 包含 WallHaven 壁纸规则、MotionBGs 媒体配置和动漫解析规则
+
+应用会自动从该仓库同步最新规则，你也可以手动导入自定义规则。
+
+The app automatically syncs rules from this repository, or you can manually import custom rules.
+
+アプリはこのリポジトリから自動的にルールを同期します。また、手動でカスタムルールをインポートすることもできます。
+
+---
+
 ## 支持作者 / Support / 作者を支援
 
 如果这个项目对你有帮助，可以请作者喝杯咖啡 ☕️
