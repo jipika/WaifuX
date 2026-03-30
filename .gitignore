@@ -9,6 +9,8 @@ build/
 # macOS
 .DS_Store
 *.log
+.AppleDouble
+.LSOverride
 
 # Swift Package Manager
 Packages/
@@ -21,10 +23,24 @@ Pods/
 *.app
 *.dSYM
 
-# Derived data
+# Cache directories
 .derivedData/
+.WallHavenCache/
+.WallHavenImageCache/
+
+# Editor
 .1code/
 .claude/
+.vscode/
+*.swp
+*~
 
-# Local config
+# Config (local only)
 LocalConfig.json
+*.local.json
+
+# Images
+reward.jpg
+
+# Temp
+*.tmp
