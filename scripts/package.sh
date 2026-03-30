@@ -61,23 +61,33 @@ fi
 
 echo "✅ 导出成功"
 
-# 创建 DMG (使用 create-dmg)
+# 创建 DMG
 echo "💿 正在创建 DMG..."
-create-dmg \
-  --volname "WallHaven" \
-  --window-size 540 400 \
-  --app-drop-link 400 185 \
-  --hide-extension \
-  --no-internet-enable \
-  "$BUILD_DIR/$DMG_NAME" \
-  "$BUILD_DIR/$APP_NAME" 2>&1
 
-if [ $? -ne 0 ]; then
-    echo "⚠️ create-dmg 失败，尝试使用 hdiutil..."
-    hdiutil create -volname "$APP_NAME" \
+# 尝试使用 create-dmg（如果可用）
+if command -v create-dmg &> /dev/null; then
+    create-dmg \
+      --volname "WallHaven" \
+      --window-size 540 400 \
+      --app-drop-link 400 185 \
+      --hide-extension \
+      --no-internet-enable \
+      "$BUILD_DIR/$DMG_NAME" \
+      "$BUILD_DIR/$APP_NAME"
+else
+    # 使用 hdiutil 作为备选方案
+    echo "⚠️ create-dmg 未安装，使用 hdiutil..."
+    hdiutil create -volname "WallHaven" \
       -srcfolder "$BUILD_DIR/$APP_NAME" \
       -ov -format UDZO \
-      "$BUILD_DIR/$DMG_NAME" 2>&1
+      -imagekey zlib-level=9 \
+      "$BUILD_DIR/$DMG_NAME"
+fi
+
+# 验证 DMG 是否创建成功
+if [ ! -f "$BUILD_DIR/$DMG_NAME" ]; then
+    echo "❌ DMG 创建失败"
+    exit 1
 fi
 
 # 完成
