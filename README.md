@@ -59,12 +59,6 @@ Download the latest version from the [Releases](https://github.com/jipika/WallHa
 
 ---
 
-## 截图 / Screenshots / スクリーンショット
-
-> 应用截图占位符 / App screenshots placeholder / アプリスクリーンショットのプレースホルダー
-
----
-
 ## 支持作者 / Support / 作者を支援
 
 如果这个项目对你有帮助，可以请作者喝杯咖啡 ☕️
