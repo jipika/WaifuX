@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="WallHaven - macOS 壁纸应用，支持 WallHaven 壁纸、MotionBGs 动态背景和动漫视频解析">
+  <meta name="keywords" content="WallHaven, macOS, wallpaper, dynamic background, anime, 壁纸, 动态背景">
+  <meta name="author" content="jipika">
+  <meta property="og:title" content="WallHaven">
+  <meta property="og:description" content="macOS 壁纸应用，支持 WallHaven 壁纸、MotionBGs 动态背景和动漫视频解析">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://jipika.github.io/WallHaven">
+  <meta property="og:image" content="./og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#6366f1">
+  <title>WallHaven - macOS 壁纸应用</title>
+  <link rel="icon" type="image/png" href="./logo.png">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --bg-primary: #0f172a;
+      --bg-secondary: #1e293b;
+      --bg-card: #1e293b;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --border-color: #334155;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+    header { padding: 80px 0 60px; text-align: center; }
+    .logo { width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 25px 50px -12px rgba(99, 102, 241, 0.25); margin-bottom: 24px; }
+    h1 { font-size: 3rem; font-weight: 700; background: linear-gradient(135deg, #fff 0%, #94a3b8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 16px; }
+    .tagline { font-size: 1.25rem; color: var(--text-secondary); max-width: 500px; margin: 0 auto 32px; }
+    .badges { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 20px; font-size: 0.875rem; color: var(--text-secondary); }
+    .badge svg { width: 16px; height: 16px; }
+    .features, .install, .rule-profiles { padding: 60px 0; }
+    .section-title { text-align: center; font-size: 2rem; font-weight: 600; margin-bottom: 48px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; }
+    .feature-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 32px; transition: transform 0.2s, box-shadow 0.2s; }
+    .feature-card:hover { transform: translateY(-4px); box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.4); }
+    .feature-icon { width: 48px; height: 48px; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); border-radius: 12px; display: flex; align-items: center; justify-content: center; margin-bottom: 20px; font-size: 24px; }
+    .feature-card h3 { font-size: 1.25rem; font-weight: 600; margin-bottom: 12px; }
+    .feature-card p { color: var(--text-secondary); font-size: 0.95rem; }
+    .download-btn { display: inline-flex; align-items: center; gap: 10px; padding: 16px 32px; background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); color: white; font-size: 1.125rem; font-weight: 600; border-radius: 12px; text-decoration: none; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 10px 30px -8px rgba(99, 102, 241, 0.5); }
+    .download-btn:hover { transform: translateY(-2px); box-shadow: 0 15px 40px -8px rgba(99, 102, 241, 0.6); }
+    .download-btn svg { width: 20px; height: 20px; }
+    .system-req { margin-top: 16px; color: var(--text-secondary); font-size: 0.875rem; }
+    .rule-info { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 32px; max-width: 600px; margin: 0 auto; text-align: center; }
+    .rule-info h3 { font-size: 1.25rem; margin-bottom: 12px; }
+    .rule-info p { color: var(--text-secondary); margin-bottom: 16px; }
+    .rule-link { display: inline-flex; align-items: center; gap: 8px; color: var(--primary); text-decoration: none; font-weight: 500; }
+    .rule-link:hover { text-decoration: underline; }
+    footer { padding: 60px 0; border-top: 1px solid var(--border-color); text-align: center; }
+    .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 32px; flex-wrap: wrap; }
+    .footer-links a { color: var(--text-secondary); text-decoration: none; font-size: 0.95rem; transition: color 0.2s; }
+    .footer-links a:hover { color: var(--text-primary); }
+    .support-section { margin-bottom: 32px; }
+    .support-section h4 { font-size: 1rem; margin-bottom: 16px; color: var(--text-secondary); }
+    .reward-img { max-width: 200px; border-radius: 12px; box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.4); }
+    .disclaimer { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--border-color); color: var(--text-secondary); font-size: 0.8rem; }
+    .copyright { margin-top: 12px; color: var(--text-secondary); font-size: 0.8rem; }
+    .lang-switcher { position: fixed; top: 20px; right: 20px; display: flex; gap: 8px; background: var(--bg-secondary); padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); z-index: 100; }
+    .lang-btn { padding: 6px 12px; background: transparent; border: none; color: var(--text-secondary); font-size: 0.8rem; cursor: pointer; border-radius: 4px; transition: all 0.2s; }
+    .lang-btn:hover, .lang-btn.active { background: var(--primary); color: white; }
+    @media (max-width: 640px) { header { padding: 60px 0 40px; } h1 { font-size: 2rem; } .tagline { font-size: 1rem; } .section-title { font-size: 1.5rem; } .feature-card { padding: 24px; } .lang-switcher { top: 12px; right: 12px; } }
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    .animate { animation: fadeInUp 0.6s ease-out forwards; opacity: 0; }
+    .delay-1 { animation-delay: 0.1s; } .delay-2 { animation-delay: 0.2s; } .delay-3 { animation-delay: 0.3s; }
+  </style>
+</head>
+<body>
+  <div class="lang-switcher">
+    <button class="lang-btn active" data-lang="zh">中文</button>
+    <button class="lang-btn" data-lang="en">EN</button>
+    <button class="lang-btn" data-lang="ja">日本語</button>
+  </div>
+
+  <header>
+    <div class="container">
+      <img src="./logo.png" alt="WallHaven Logo" class="logo">
+      <h1>WallHaven</h1>
+      <p class="tagline" data-i18n="tagline">macOS 壁纸应用，支持 WallHaven 壁纸、MotionBGs 动态背景和动漫视频解析</p>
+      <div class="badges">
+        <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> macOS 10.15+</span>
+        <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> <span data-i18n="openSource">开源免费</span></span>
+        <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> GitHub</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="features">
+    <div class="container">
+      <h2 class="section-title" data-i18n="features">主要功能</h2>
+      <div class="feature-grid">
+        <div class="feature-card animate delay-1"><div class="feature-icon">🖼️</div><h3 data-i18n="wallpaper">WallHaven 壁纸</h3><p data-i18n="wallpaperDesc">浏览和下载 WallHaven 上数百万张高质量壁纸，支持分类筛选、收藏和自动更换</p></div>
+        <div class="feature-card animate delay-2"><div class="feature-icon">🎬</div><h3 data-i18n="dynamicBg">动态背景</h3><p data-i18n="dynamicBgDesc">支持 MotionBGs 动态背景，为桌面添加生动有趣的动态元素</p></div>
+        <div class="feature-card animate delay-3"><div class="feature-icon">📺</div><h3 data-i18n="anime">动漫解析</h3><p data-i18n="animeDesc">集成多个动漫源，支持搜索、播放和下载动漫视频内容</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="install">
+    <div class="container">
+      <a href="https://github.com/jipika/WallHaven/releases/latest" class="download-btn" target="_blank"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> <span data-i18n="download">下载最新版</span></a>
+      <p class="system-req" data-i18n="systemReq">支持 macOS 10.15 (Catalina) 及以上版本</p>
+    </div>
+  </section>
+
+  <section class="rule-profiles">
+    <div class="container">
+      <h2 class="section-title" data-i18n="ruleProfiles">规则配置</h2>
+      <div class="rule-info">
+        <h3 data-i18n="ruleInfoTitle">独立的规则仓库</h3>
+        <p data-i18n="ruleInfoDesc">壁纸和动漫解析规则托管在独立的 GitHub 仓库中，支持社区共享和自动同步</p>
+        <a href="https://github.com/jipika/WallHaven-Profiles" class="rule-link" target="_blank"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg> <span data-i18n="viewRepo">查看规则仓库</span></a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/jipika/WallHaven" target="_blank" data-i18n="github">GitHub</a>
+        <a href="https://github.com/jipika/WallHaven/releases" target="_blank" data-i18n="releases">Releases</a>
+        <a href="https://github.com/jipika/WallHaven-Profiles" target="_blank" data-i18n="ruleProfilesLink">规则仓库</a>
+      </div>
+      <div class="support-section"><h4 data-i18n="supportTitle">支持作者</h4><img src="./reward.jpg" alt="Support" class="reward-img"></div>
+      <p class="disclaimer" data-i18n="disclaimer">本应用仅供个人学习研究使用，WallHaven 相关内容版权归其权利人所有</p>
+      <p class="copyright">&copy; 2024 WallHaven. <span data-i18n="rights">保留所有权利。</span></p>
+    </div>
+  </footer>
+
+  <script>
+    const translations = {
+      zh: { tagline: 'macOS 壁纸应用，支持 WallHaven 壁纸、MotionBGs 动态背景和动漫视频解析', openSource: '开源免费', features: '主要功能', wallpaper: 'WallHaven 壁纸', wallpaperDesc: '浏览和下载 WallHaven 上数百万张高质量壁纸，支持分类筛选、收藏和自动更换', dynamicBg: '动态背景', dynamicBgDesc: '支持 MotionBGs 动态背景，为桌面添加生动有趣的动态元素', anime: '动漫解析', animeDesc: '集成多个动漫源，支持搜索、播放和下载动漫视频内容', download: '下载最新版', systemReq: '支持 macOS 10.15 (Catalina) 及以上版本', ruleProfiles: '规则配置', ruleInfoTitle: '独立的规则仓库', ruleInfoDesc: '壁纸和动漫解析规则托管在独立的 GitHub 仓库中，支持社区共享和自动同步', viewRepo: '查看规则仓库', github: 'GitHub', releases: 'Releases', ruleProfilesLink: '规则仓库', supportTitle: '支持作者', disclaimer: '本应用仅供个人学习研究使用，WallHaven 相关内容版权归其权利人所有', rights: '保留所有权利。' },
+      en: { tagline: 'A macOS wallpaper app supporting WallHaven wallpapers, MotionBGs dynamic backgrounds, and anime video parsing', openSource: 'Open Source', features: 'Features', wallpaper: 'WallHaven Wallpapers', wallpaperDesc: 'Browse and download millions of high-quality wallpapers from WallHaven with category filtering, favorites, and auto-change support', dynamicBg: 'Dynamic Backgrounds', dynamicBgDesc: 'Support MotionBGs dynamic backgrounds, adding lively dynamic elements to your desktop', anime: 'Anime Parsing', animeDesc: 'Integrated with multiple anime sources, supporting search, playback and download of anime content', download: 'Download Latest', systemReq: 'Requires macOS 10.15 (Catalina) or later', ruleProfiles: 'Rule Profiles', ruleInfoTitle: 'Independent Rule Repository', ruleInfoDesc: 'Wallpaper and anime parsing rules are hosted in a separate GitHub repository with community sharing and auto-sync support', viewRepo: 'View Rule Repository', github: 'GitHub', releases: 'Releases', ruleProfilesLink: 'Rule Profiles', supportTitle: 'Support Author', disclaimer: 'This app is for personal learning and research only. WallHaven content is copyrighted by its respective owners', rights: 'All rights reserved.' },
+      ja: { tagline: 'WallHaven 壁紙、MotionBGs 動的背景、动漫動画解析をサポートする macOS の壁紙アプリ', openSource: 'オープンソース', features: '主な機能', wallpaper: 'WallHaven 壁紙', wallpaperDesc: 'WallHaven の数百万枚の高品質、壁紙を閲覧・ダウンロード、カテゴリフィルタリング、お気に入り、自動変更をサポート', dynamicBg: '動的背景', dynamicBgDesc: 'MotionBGs 動的背景をサポート、デスクトップに生き生きとした動的要素を追加', anime: 'アニメ解析', animeDesc: '複数のアニメソースと統合され、アニメコンテンツの検索、再生、ダウンロードをサポート', download: '最新版をダウンロード', systemReq: 'macOS 10.15 (Catalina) 以降が必要', ruleProfiles: 'ルール設定', ruleInfoTitle: '独立したルールリポジトリ', ruleInfoDesc: '壁紙とアニメ解析ルールは別の GitHub リポジトリで管理され、コミュニティ共有と自動同期をサポート', viewRepo: 'ルールリポジトリを見る', github: 'GitHub', releases: 'Releases', ruleProfilesLink: 'ルール設定', supportTitle: '作者を支援', disclaimer: 'このアプリは個人的な学習と研究のみを目的としています。WallHaven コンテンツはそれぞれの所有者の著作権に帰属します', rights: '全著作権所有。' }
+    };
+    function setLanguage(lang) {
+      document.querySelectorAll('[data-i18n]').forEach(el => { const key = el.getAttribute('data-i18n'); if (translations[lang][key]) el.textContent = translations[lang][key]; });
+      document.querySelectorAll('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === lang));
+      document.documentElement.lang = lang;
+    }
+    document.querySelectorAll('.lang-btn').forEach(btn => btn.addEventListener('click', () => setLanguage(btn.dataset.lang)));
+  </script>
+</body>
+</html>
