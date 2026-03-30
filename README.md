@@ -79,11 +79,11 @@ This app is solely a wallpaper aggregation tool. All wallpaper copyrights belong
 
 ## 下载 / Download / ダウンロード
 
-从 [Releases](https://github.com/yourusername/WallHaven/releases) 页面下载最新版本。
+从 [Releases](https://github.com/jipika/WallHaven/releases) 页面下载最新版本。
 
-Download the latest version from the [Releases](https://github.com/yourusername/WallHaven/releases) page.
+Download the latest version from the [Releases](https://github.com/jipika/WallHaven/releases) page.
 
-最新バージョンは [Releases](https://github.com/yourusername/WallHaven/releases) ページからダウンロードできます。
+最新バージョンは [Releases](https://github.com/jipika/WallHaven/releases) ページからダウンロードできます。
 
 ---
 
