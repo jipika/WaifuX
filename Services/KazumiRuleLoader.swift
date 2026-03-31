@@ -41,8 +41,8 @@ actor KazumiRuleLoader {
             return cached
         }
         
-        // 从远程加载
-        let ruleURL = "\(ruleRepositoryURL)\(name.uppercased()).json"
+        // 直接使用 index 中的 name，不做大小写转换（GitHub raw 文件名大小写敏感）
+        let ruleURL = "\(ruleRepositoryURL)\(name).json"
         guard let url = URL(string: ruleURL) else {
             throw URLError(.badURL)
         }
@@ -84,7 +84,7 @@ actor KazumiRuleLoader {
     struct KazumiRule: Codable {
         let name: String
         let type: String?
-        let version: Double?
+        let version: String?
         let api: Int?
         let baseURL: String?
         let searchURL: String?
@@ -158,7 +158,7 @@ actor KazumiRuleLoader {
             api: "\(kazumiRule.api ?? 2)",  // Kazumi 使用 api 版本,转为字符串
             type: kazumiRule.type ?? "anime",
             name: kazumiRule.name,
-            version: kazumiRule.version != nil ? "\(kazumiRule.version!)" : "1.0.0",
+            version: kazumiRule.version ?? "1.0.0",
             deprecated: false,
             baseURL: kazumiRule.baseURL ?? "",
             headers: kazumiRule.headers,

@@ -184,36 +184,38 @@ struct AnimeExploreView: View {
             }
             .frame(maxWidth: 520)
 
-            // 热门标签
-            HStack(alignment: .center, spacing: 10) {
-                Text("标签:")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.4))
+            // 热门标签（15个标签需要横向滚动）
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 10) {
+                    Text("标签:")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.4))
 
-                ForEach(AnimeHotTag.allCases) { tag in
-                    AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
-                        withAnimation(AppFluidMotion.interactiveSpring) {
-                            selectedHotTag = selectedHotTag == tag ? nil : tag
-                            searchText = selectedHotTag == nil ? "" : tag.displayName
-                            Task {
-                                await viewModel.fetchPopular(keyword: selectedHotTag)
+                    ForEach(AnimeHotTag.allCases) { tag in
+                        AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
+                            withAnimation(AppFluidMotion.interactiveSpring) {
+                                selectedHotTag = selectedHotTag == tag ? nil : tag
+                                searchText = selectedHotTag == nil ? "" : tag.displayName
+                                Task {
+                                    await viewModel.fetchPopular(keyword: selectedHotTag)
+                                }
                             }
                         }
                     }
-                }
 
-                // 源选择器（放在热门标签后，与壁纸页比例一致）
-                if !viewModel.availableRules.isEmpty {
-                    Divider()
-                        .background(Color.white.opacity(0.2))
-                        .frame(height: 20)
+                    // 源选择器（放在热门标签后，与壁纸页比例一致）
+                    if !viewModel.availableRules.isEmpty {
+                        Divider()
+                            .background(Color.white.opacity(0.2))
+                            .frame(height: 20)
 
-                    AnimeSourcePicker(
-                        selectedRule: $viewModel.selectedRule,
-                        rules: viewModel.availableRules
-                    ) {
-                        Task {
-                            await viewModel.search()
+                        AnimeSourcePicker(
+                            selectedRule: $viewModel.selectedRule,
+                            rules: viewModel.availableRules
+                        ) {
+                            Task {
+                                await viewModel.search()
+                            }
                         }
                     }
                 }
