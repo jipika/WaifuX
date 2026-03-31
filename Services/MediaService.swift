@@ -364,7 +364,7 @@ actor MediaService {
         }
 
         // 🔍 诊断日志：输出所有可能的分页链接
-        print("[MediaService] parseNextPagePath: 🔍 开始诊断分页元素")
+        print("[MediaService] parseNextPagePath: 🔍 开始诊断分页元素 (source=\(source))")
         do {
             let document = try SwiftSoup.parse(html)
             
@@ -372,7 +372,7 @@ actor MediaService {
             let allLinks = try document.select("a")
             print("[MediaService] parseNextPagePath: 页面共找到 \(allLinks.count) 个 <a> 标签")
             
-            // 查找包含 "next" 关键词的链接
+            // 查找包含 "next"、"more"、或数字路径的链接
             var candidateLinks: [(href: String, rel: String, text: String, className: String)] = []
             
             for link in allLinks.array() {
@@ -384,9 +384,17 @@ actor MediaService {
                 // 收集可能的分页链接
                 let lowerText = text.lowercased()
                 let lowerHref = href.lowercased()
-                if lowerText.contains("next") || lowerText.contains("›") || lowerText.contains(">") ||
-                   lowerHref.contains("page") || lowerHref.contains("next") ||
-                   rel.contains("next") || className.contains("next") || className.contains("pagination") {
+                
+                // 扩展匹配条件：包含分页关键词，或 href 以 /数字/ 结尾
+                let isPaginationKeyword = lowerText.contains("next") || lowerText.contains("more") || 
+                                          lowerText.contains("›") || lowerText.contains(">") ||
+                                          lowerHref.contains("page") || lowerHref.contains("next") ||
+                                          rel.contains("next") || className.contains("next") || 
+                                          className.contains("pagination") || className.contains("arrowed")
+                
+                let isNumericPath = href.matches(regex: #"^/(\d+/|tag:[^/]+/\d+/)$"#)
+                
+                if isPaginationKeyword || isNumericPath {
                     candidateLinks.append((href: href, rel: rel, text: text, className: className))
                 }
             }
@@ -674,5 +682,14 @@ private extension String {
         ]
 
         return (try? NSAttributedString(data: data, options: options, documentAttributes: nil).string) ?? self
+    }
+    
+    /// 检查字符串是否匹配正则表达式
+    func matches(regex pattern: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return false
+        }
+        let range = NSRange(self.startIndex..., in: self)
+        return regex.firstMatch(in: self, options: [], range: range) != nil
     }
 }
