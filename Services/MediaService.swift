@@ -24,6 +24,15 @@ actor MediaService {
     func clearCache() async {
         listCache.removeAll()
         detailCache.removeAll()
+        print("[MediaService] 🗑️ 缓存已清除")
+    }
+    
+    /// 清除特定 URL 的缓存
+    func clearCache(for url: URL) async {
+        let cacheKey = url.absoluteString
+        if listCache.removeValue(forKey: cacheKey) != nil {
+            print("[MediaService] 🗑️ 已清除缓存: \(cacheKey)")
+        }
     }
 
     func fetchPage(source: MediaRouteSource, pagePath: String? = nil) async throws -> MediaListPage {
