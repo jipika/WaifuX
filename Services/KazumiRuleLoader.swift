@@ -17,8 +17,8 @@ actor KazumiRuleLoader {
     struct KazumiRuleIndex: Codable {
         let name: String
         let version: String
-        let useNativePlayer: Bool
-        let useAntiCrawler: Bool
+        let useNativePlayer: Bool?
+        let antiCrawlerEnabled: Bool?
         let lastUpdate: Int64 // Unix 时间戳 (毫秒)
     }
     
@@ -85,7 +85,7 @@ actor KazumiRuleLoader {
         let name: String
         let type: String?
         let version: String?
-        let api: Int?
+        let api: String?  // JSON 中是字符串，如 "1", "2"
         let baseURL: String?
         let searchURL: String?
         let searchList: String?
@@ -97,16 +97,22 @@ actor KazumiRuleLoader {
         let useWebview: Bool?
         let useNativePlayer: Bool?
         let multiSource: Bool?
+        let muliSources: Bool?  // 处理拼写错误：有些规则写的是 muliSources
         let userAgent: String?
         let headers: [String: String]?
         let antiCrawler: Bool?
-        
+
         enum CodingKeys: String, CodingKey {
             case name, type, version, api, baseURL, searchURL
             case searchList, searchName, searchResult
             case chapterRoads, chapterResult, chapterName
-            case useWebview, useNativePlayer, multiSource
+            case useWebview, useNativePlayer, multiSource, muliSources
             case userAgent, headers, antiCrawler
+        }
+
+        /// 获取多源标志（兼容 muliSources 拼写错误）
+        var hasMultiSources: Bool {
+            multiSource ?? muliSources ?? false
         }
     }
     
@@ -155,7 +161,7 @@ actor KazumiRuleLoader {
         // 构建 AnimeRule
         return AnimeRule(
             id: kazumiRule.name.lowercased(),
-            api: "\(kazumiRule.api ?? 2)",  // Kazumi 使用 api 版本,转为字符串
+            api: kazumiRule.api ?? "2",
             type: kazumiRule.type ?? "anime",
             name: kazumiRule.name,
             version: kazumiRule.version ?? "1.0.0",
@@ -177,7 +183,7 @@ actor KazumiRuleLoader {
             episodeLink: nil,
             episodeThumb: nil,
             useWebview: kazumiRule.useWebview ?? false,
-            multiSources: kazumiRule.multiSource ?? false,
+            multiSources: kazumiRule.hasMultiSources,
             xpath: xpath
         )
     }

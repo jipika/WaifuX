@@ -181,16 +181,28 @@ struct AnimeExploreView: View {
                         )
                 }
                 .buttonStyle(.plain)
+
+                // 源选择器
+                if !viewModel.availableRules.isEmpty {
+                    AnimeSourcePicker(
+                        selectedRule: $viewModel.selectedRule,
+                        rules: viewModel.availableRules
+                    ) {
+                        Task {
+                            await viewModel.search()
+                        }
+                    }
+                }
             }
             .frame(maxWidth: 520)
 
-            // 热门标签（15个标签需要横向滚动）
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: 10) {
-                    Text("标签:")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4))
+            // 热门标签（流式布局铺满宽度）
+            VStack(alignment: .leading, spacing: 12) {
+                Text("标签:")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.4))
 
+                FlowLayout(spacing: 10) {
                     ForEach(AnimeHotTag.allCases) { tag in
                         AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
                             withAnimation(AppFluidMotion.interactiveSpring) {
@@ -199,22 +211,6 @@ struct AnimeExploreView: View {
                                 Task {
                                     await viewModel.fetchPopular(keyword: selectedHotTag)
                                 }
-                            }
-                        }
-                    }
-
-                    // 源选择器（放在热门标签后，与壁纸页比例一致）
-                    if !viewModel.availableRules.isEmpty {
-                        Divider()
-                            .background(Color.white.opacity(0.2))
-                            .frame(height: 20)
-
-                        AnimeSourcePicker(
-                            selectedRule: $viewModel.selectedRule,
-                            rules: viewModel.availableRules
-                        ) {
-                            Task {
-                                await viewModel.search()
                             }
                         }
                     }
