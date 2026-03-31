@@ -405,50 +405,6 @@ struct SettingsView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
                         .padding(.bottom, 16)
-                        
-                        // 动漫规则源切换
-                        SettingsRowDivider()
-                            .padding(.horizontal, 20)
-                        
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("动漫规则源")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(LiquidGlassColors.textSecondary)
-                            
-                            Text("选择动漫内容的来源规则")
-                                .font(.system(size: 12))
-                                .foregroundStyle(LiquidGlassColors.textTertiary)
-                            
-                            Picker("动漫规则源", selection: $viewModel.animeRuleSource) {
-                                ForEach(AnimeRuleStore.RuleSource.allCases, id: \.self) { source in
-                                    HStack(spacing: 6) {
-                                        Text(source.rawValue)
-                                    }
-                                    .tag(source)
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.segmented)
-                            .onChange(of: viewModel.animeRuleSource) { oldValue, newValue in
-                                Task {
-                                    await viewModel.switchAnimeRuleSource(to: newValue)
-                                }
-                            }
-                            
-                            HStack(spacing: 6) {
-                                Image(systemName: "info.circle")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(LiquidGlassColors.textTertiary)
-                                
-                                Text(viewModel.animeRuleSource == .kazumi 
-                                     ? "使用 Kazumi 社区维护的规则(16+ 个源)"
-                                     : "使用你自己仓库的规则")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(LiquidGlassColors.textTertiary)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 16)
                     }
                 }
             }

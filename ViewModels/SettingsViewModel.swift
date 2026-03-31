@@ -20,9 +20,6 @@ class SettingsViewModel: ObservableObject {
     @Published var isRuleRepositoryConfigured: Bool = false
     @Published var currentRuleRepository: String = ""
     
-    // MARK: - 动漫规则源切换
-    @Published var animeRuleSource: AnimeRuleStore.RuleSource = .kazumi  // 默认使用 Kazumi
-    
     private let ruleRepository = RuleRepository.shared
 
     // MARK: - 调度器相关
@@ -56,21 +53,6 @@ class SettingsViewModel: ObservableObject {
             isRuleRepositoryConfigured = true
         }
         
-        // 加载动漫规则源设置
-        if let savedSource = UserDefaults.standard.string(forKey: "anime_rule_source"),
-           let source = AnimeRuleStore.RuleSource(rawValue: savedSource) {
-            animeRuleSource = source
-        }
-    }
-    
-    /// 切换动漫规则源
-    func switchAnimeRuleSource(to source: AnimeRuleStore.RuleSource) async {
-        animeRuleSource = source
-        UserDefaults.standard.set(source.rawValue, forKey: "anime_rule_source")
-        await AnimeRuleStore.shared.switchRuleSource(to: source)
-        
-        // 发送通知,让 AnimeViewModel 重新加载
-        NotificationCenter.default.post(name: .animeRuleSourceChanged, object: nil)
     }
 
     func saveRuleRepository() async {
