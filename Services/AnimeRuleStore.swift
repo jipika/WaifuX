@@ -101,18 +101,43 @@ actor AnimeRuleStore {
         guard let url = URL(string: userIndexURL) else {
             throw URLError(.badURL)
         }
-        
+
         let (data, _) = try await URLSession.shared.data(from: url)
-        let index = try JSONDecoder().decode(AnimeRuleIndex.self, from: data)
-        
-        var loadedRules: [AnimeRule] = []
-        for item in index.animeRules {
-            if let rule = try? await loadRuleFromUserRepo(id: item.id) {
-                rules[rule.id] = rule
-                loadedRules.append(rule)
+
+        // 解析用户仓库的嵌套格式
+        struct UserRepoIndex: Codable {
+            let schemaVersion: String?
+            let lastUpdated: String?
+            let anime: AnimeSection?
+
+            struct AnimeSection: Codable {
+                let description: String?
+                let items: [RuleItem]
+            }
+
+            struct RuleItem: Codable {
+                let name: String
+                let type: String
+                let version: String?
+                let url: String
+                let description: String?
             }
         }
-        
+
+        let index = try JSONDecoder().decode(UserRepoIndex.self, from: data)
+
+        var loadedRules: [AnimeRule] = []
+        if let items = index.anime?.items {
+            for item in items {
+                // 从 URL 中提取规则 ID
+                let ruleId = item.name
+                if let rule = try? await loadRuleFromUserRepo(id: ruleId) {
+                    rules[rule.id] = rule
+                    loadedRules.append(rule)
+                }
+            }
+        }
+
         return loadedRules
     }
     
