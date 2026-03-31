@@ -24,6 +24,7 @@ class AnimeViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var searchText = ""
     @Published var selectedCategory: AnimeCategory = .all
+    @Published var selectedHotTag: AnimeHotTag?
     
     // MARK: - 初始化
     
@@ -103,18 +104,53 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 获取热门
 
-    func fetchPopular() async {
+    func fetchPopular(keyword: AnimeHotTag? = nil) async {
         isLoading = true
         defer { isLoading = false }
 
-        // 使用固定关键词搜索热门动漫
-        let popularKeywords = ["热门", "新番", "推荐", "完结"]
+        // 使用默认关键词或指定标签搜索
+        let baseKeywords: [String]
+        switch keyword {
+        case .none:
+            baseKeywords = ["热门", "新番", "推荐", "完结"]
+        case .daily:
+            baseKeywords = ["日常"]
+        case .original:
+            baseKeywords = ["原创"]
+        case .school:
+            baseKeywords = ["校园"]
+        case .comedy:
+            baseKeywords = ["搞笑"]
+        case .fantasy:
+            baseKeywords = ["奇幻"]
+        case .yuri:
+            baseKeywords = ["百合"]
+        case .romance:
+            baseKeywords = ["恋爱"]
+        case .mystery:
+            baseKeywords = ["悬疑"]
+        case .action:
+            baseKeywords = ["热血"]
+        case .harem:
+            baseKeywords = ["后宫"]
+        case .mecha:
+            baseKeywords = ["机战"]
+        case .lightNovel:
+            baseKeywords = ["轻改"]
+        case .idol:
+            baseKeywords = ["偶像"]
+        case .healing:
+            baseKeywords = ["治愈"]
+        case .otherWorld:
+            baseKeywords = ["异世界"]
+        }
+
         var allResults: [AnimeSearchResult] = []
 
-        for keyword in popularKeywords {
+        for baseKeyword in baseKeywords {
             do {
                 let rules = selectedRule.map { [$0] } ?? availableRules
-                let results = try await AnimeParser.shared.search(query: keyword, rules: rules)
+                let results = try await AnimeParser.shared.search(query: baseKeyword, rules: rules)
                 allResults.append(contentsOf: results)
 
                 if allResults.count >= 30 { break }
@@ -154,60 +190,66 @@ class AnimeViewModel: ObservableObject {
 
 enum AnimeCategory: String, CaseIterable, Identifiable {
     case all = "all"
-    case japan = "japan"
-    case china = "china"
-    case western = "western"
-    case korea = "korea"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .all: return "全部"
-        case .japan: return "日本"
-        case .china: return "国产"
-        case .western: return "欧美"
-        case .korea: return "韩国"
         }
     }
 
     var icon: String {
         switch self {
         case .all: return "sparkles"
-        case .japan: return "person.crop.rectangle.stack.fill"
-        case .china: return "building.columns.fill"
-        case .western: return "film.fill"
-        case .korea: return "heart.fill"
         }
     }
 
     var accentColors: [String] {
         switch self {
         case .all: return ["5A7CFF", "20C1FF"]
-        case .japan: return ["FF88C7", "7747FF"]
-        case .china: return ["FF6B6B", "FF8E53"]
-        case .western: return ["62D4FF", "4E66FF"]
-        case .korea: return ["FFD66E", "FF8B3D"]
         }
     }
 }
 
-// MARK: - 热门标签
+// MARK: - 动漫标签（参考 Kazumi）
 
 enum AnimeHotTag: String, CaseIterable, Identifiable {
-    case popular = "popular"
-    case new = "new"
-    case classic = "classic"
-    case movie = "movie"
+    case daily = "daily"
+    case original = "original"
+    case school = "school"
+    case comedy = "comedy"
+    case fantasy = "fantasy"
+    case yuri = "yuri"
+    case romance = "romance"
+    case mystery = "mystery"
+    case action = "action"
+    case harem = "harem"
+    case mecha = "mecha"
+    case lightNovel = "lightNovel"
+    case idol = "idol"
+    case healing = "healing"
+    case otherWorld = "otherWorld"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .popular: return "热播"
-        case .new: return "新番"
-        case .classic: return "经典"
-        case .movie: return "电影"
+        case .daily: return "日常"
+        case .original: return "原创"
+        case .school: return "校园"
+        case .comedy: return "搞笑"
+        case .fantasy: return "奇幻"
+        case .yuri: return "百合"
+        case .romance: return "恋爱"
+        case .mystery: return "悬疑"
+        case .action: return "热血"
+        case .harem: return "后宫"
+        case .mecha: return "机战"
+        case .lightNovel: return "轻改"
+        case .idol: return "偶像"
+        case .healing: return "治愈"
+        case .otherWorld: return "异世界"
         }
     }
 }

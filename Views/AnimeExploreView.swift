@@ -27,7 +27,6 @@ struct AnimeExploreView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
                     heroSection
-                    sourceAndCategorySection
                     animeSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
@@ -187,7 +186,7 @@ struct AnimeExploreView: View {
 
             // 热门标签
             HStack(alignment: .center, spacing: 10) {
-                Text("热门:")
+                Text("标签:")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.4))
 
@@ -195,16 +194,9 @@ struct AnimeExploreView: View {
                     AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
                         withAnimation(AppFluidMotion.interactiveSpring) {
                             selectedHotTag = selectedHotTag == tag ? nil : tag
-                            if selectedHotTag != nil {
-                                searchText = tag.displayName
-                                Task {
-                                    await viewModel.search()
-                                }
-                            } else {
-                                searchText = ""
-                                Task {
-                                    await viewModel.fetchPopular()
-                                }
+                            searchText = selectedHotTag == nil ? "" : tag.displayName
+                            Task {
+                                await viewModel.fetchPopular(keyword: selectedHotTag)
                             }
                         }
                     }
@@ -228,29 +220,6 @@ struct AnimeExploreView: View {
             }
         }
         .frame(maxWidth: 700, alignment: .leading)
-    }
-
-    // MARK: - 源和分类区域
-
-    private var sourceAndCategorySection: some View {
-        FlowLayout(spacing: 12) {
-            ForEach(AnimeCategory.allCases) { category in
-                AnimeCategoryChip(
-                    category: category,
-                    isSelected: selectedCategory == category
-                ) {
-                    withAnimation(AppFluidMotion.interactiveSpring) {
-                        selectedCategory = category
-                        selectedHotTag = nil
-                        searchText = ""
-                    }
-
-                    Task {
-                        await viewModel.fetchPopular()
-                    }
-                }
-            }
-        }
     }
 
     // MARK: - 动漫网格区域
