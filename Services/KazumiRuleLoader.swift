@@ -117,7 +117,7 @@ actor KazumiRuleLoader {
             url: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
             list: kazumiRule.searchList ?? "",
             title: kazumiRule.searchName ?? "",
-            cover: "",  // Kazumi 规则中没有单独的封面选择器
+            cover: nil,  // Kazumi 规则中没有单独的封面选择器
             detail: kazumiRule.searchResult ?? "",
             id: nil
         )

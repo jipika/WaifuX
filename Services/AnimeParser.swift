@@ -281,15 +281,20 @@ actor AnimeParser {
                 ?? element.text()
             
             // 提取封面
-            let cover = HTMLParser.shared.simpleExtractAttr(
-                element: element,
-                selector: searchXPath.cover,
-                attr: "src"
-            ) ?? HTMLParser.shared.simpleExtractAttr(
-                element: element,
-                selector: searchXPath.cover,
-                attr: "data-src"
-            )
+            let cover: String?
+            if let coverSelector = searchXPath.cover, !coverSelector.isEmpty {
+                cover = HTMLParser.shared.simpleExtractAttr(
+                    element: element,
+                    selector: coverSelector,
+                    attr: "src"
+                ) ?? HTMLParser.shared.simpleExtractAttr(
+                    element: element,
+                    selector: coverSelector,
+                    attr: "data-src"
+                )
+            } else {
+                cover = nil
+            }
             
             // 提取详情链接
             let detail = HTMLParser.shared.simpleExtractAttr(

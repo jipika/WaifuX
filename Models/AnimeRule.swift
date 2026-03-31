@@ -141,8 +141,8 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     }
     
     func getSearchCoverSelector() -> String {
-        if api == "2", let xpath = xpath, let search = xpath.search {
-            return search.cover
+        if api == "2", let xpath = xpath, let search = xpath.search, let cover = search.cover {
+            return cover
         }
         return searchCover ?? "img"
     }
@@ -175,7 +175,7 @@ struct AnimeSearchXPath: Codable {
     let url: String
     let list: String
     let title: String
-    let cover: String
+    let cover: String?
     let detail: String
     let id: String?
 }

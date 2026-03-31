@@ -114,6 +114,9 @@ class SettingsViewModel: ObservableObject {
     func clearCache() async {
         // 清除 CacheService 缓存
         try? await CacheService.shared.clearCache()
+        
+        // 清除 MediaService 缓存（包含分页数据）
+        await MediaService.shared.clearCache()
 
         // 清除 URLCache 缓存
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
