@@ -372,84 +372,52 @@ actor MediaService {
             return path
         }
 
-        // 🔍 诊断日志：输出所有可能的分页链接
-        print("[MediaService] parseNextPagePath: 🔍 开始诊断分页元素 (source=\(source))")
         do {
             let document = try SwiftSoup.parse(html)
-            
-            // 检查所有 a 标签
-            let allLinks = try document.select("a")
-            print("[MediaService] parseNextPagePath: 页面共找到 \(allLinks.count) 个 <a> 标签")
-            
-            // 查找包含 "next"、"more"、或数字路径的链接
-            var candidateLinks: [(href: String, rel: String, text: String, className: String)] = []
-            
-            for link in allLinks.array() {
-                let href = (try? link.attr("href")) ?? ""
-                let rel = (try? link.attr("rel")) ?? ""
-                let text = (try? link.text()) ?? ""
-                let className = (try? link.attr("class")) ?? ""
-                
-                // 收集可能的分页链接
-                let lowerText = text.lowercased()
-                let lowerHref = href.lowercased()
-                
-                // 扩展匹配条件：包含分页关键词，或 href 以 /数字/ 结尾
-                let isPaginationKeyword = lowerText.contains("next") || lowerText.contains("more") || 
-                                          lowerText.contains("›") || lowerText.contains(">") ||
-                                          lowerHref.contains("page") || lowerHref.contains("next") ||
-                                          rel.contains("next") || className.contains("next") || 
-                                          className.contains("pagination") || className.contains("arrowed")
-                
-                let isNumericPath = href.matches(regex: #"^/(\d+/|tag:[^/]+/\d+/)$"#)
-                
-                if isPaginationKeyword || isNumericPath {
-                    candidateLinks.append((href: href, rel: rel, text: text, className: className))
-                }
-            }
-            
-            print("[MediaService] parseNextPagePath: 找到 \(candidateLinks.count) 个候选分页链接:")
-            for (index, candidate) in candidateLinks.enumerated() {
-                print("  [\(index + 1)] href='\(candidate.href)' rel='\(candidate.rel)' class='\(candidate.className)' text='\(candidate.text.prefix(30))'")
-            }
-            
-            // 检查配置的选择器
-            if let nextPageXPath = config.parsing.nextPage {
-                print("[MediaService] parseNextPagePath: 配置的选择器: '\(nextPageXPath)'")
-                let cssSelector = htmlParser.convertXPathToCSS(nextPageXPath) ?? nextPageXPath
-                print("[MediaService] parseNextPagePath: 转换后的 CSS 选择器: '\(cssSelector)'")
-                
-                let matchingElements = try document.select(cssSelector)
-                print("[MediaService] parseNextPagePath: 匹配到 \(matchingElements.count) 个元素")
-                
-                for (index, element) in matchingElements.array().enumerated() {
-                    let href = (try? element.attr("href")) ?? ""
-                    let text = (try? element.text()) ?? ""
-                    print("  [\(index + 1)] href='\(href)' text='\(text.prefix(30))'")
-                }
-            } else {
-                print("[MediaService] parseNextPagePath: ⚠️ 未配置 nextPage 选择器")
-            }
-            
-        } catch {
-            print("[MediaService] parseNextPagePath: 解析 HTML 失败: \(error)")
-        }
 
-        // 原有的解析逻辑
-        if let nextPageXPath = config.parsing.nextPage {
-            do {
-                let document = try SwiftSoup.parse(html)
+            // 策略 1：使用配置的选择器
+            if let nextPageXPath = config.parsing.nextPage {
                 let cssSelector = htmlParser.convertXPathToCSS(nextPageXPath) ?? nextPageXPath
                 if let nextLink = try? document.select(cssSelector).first()?.attr("href"),
                    !nextLink.isEmpty {
-                    print("[MediaService] parseNextPagePath: ✅ 成功提取分页链接: '\(nextLink)'")
+                    print("[MediaService] parseNextPagePath: ✅ 配置选择器匹配成功: '\(nextLink)'")
                     return pathPreservingQuery(from: nextLink)
-                } else {
-                    print("[MediaService] parseNextPagePath: ❌ 未能提取到分页链接")
                 }
-            } catch {
-                print("[MediaService] parseNextPagePath: error: \(error)")
             }
+
+            // 策略 2：后备匹配 - 查找 "Next" 文本链接
+            let allLinks = try document.select("a")
+            for link in allLinks.array() {
+                let text = (try? link.text().trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                let href = (try? link.attr("href")) ?? ""
+
+                // 匹配 text 为 "Next" 且 href 包含数字路径的链接
+                if text.lowercased() == "next" && href.matches(regex: #"/\d+/?$"#) {
+                    print("[MediaService] parseNextPagePath: ✅ 后备匹配成功 (text='Next'): '\(href)'")
+                    return pathPreservingQuery(from: href)
+                }
+            }
+
+            // 策略 3：匹配 href 格式为 /tag:xxx/N/ 或 /N/
+            for link in allLinks.array() {
+                let href = (try? link.attr("href")) ?? ""
+                let text = (try? link.text()) ?? ""
+
+                // 匹配 MotionBGs 分页格式: /tag:anime/2/ 或 /2/
+                if href.matches(regex: #"^/(tag:[^/]+/)?\d+/?$"#) {
+                    // 排除导航链接（Guides, About 等）
+                    let isNav = text.lowercased().matches(regex: #"^(guides?|about|privacy|dmca|contact)$"#)
+                    if !isNav {
+                        print("[MediaService] parseNextPagePath: ✅ 后备匹配成功 (href pattern): '\(href)'")
+                        return pathPreservingQuery(from: href)
+                    }
+                }
+            }
+
+            print("[MediaService] parseNextPagePath: ❌ 未找到分页链接")
+
+        } catch {
+            print("[MediaService] parseNextPagePath: 解析失败: \(error)")
         }
 
         return nil

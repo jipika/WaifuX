@@ -75,22 +75,6 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 搜索
 
-    /// 根据分类构建搜索关键词
-    private func searchKeyword(for category: AnimeCategory, baseKeyword: String) -> String {
-        switch category {
-        case .all:
-            return baseKeyword
-        case .japan:
-            return baseKeyword.isEmpty ? "" : "\(baseKeyword) 日本"
-        case .china:
-            return baseKeyword.isEmpty ? "" : "\(baseKeyword) 国产"
-        case .western:
-            return baseKeyword.isEmpty ? "" : "\(baseKeyword) 欧美"
-        case .korea:
-            return baseKeyword.isEmpty ? "" : "\(baseKeyword) 韩国"
-        }
-    }
-
     func search() async {
         guard !searchText.isEmpty else {
             // 如果搜索为空，获取热门内容
@@ -102,17 +86,15 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
-            // 根据分类构建搜索关键词
-            let searchKeyword = searchKeyword(for: selectedCategory, baseKeyword: searchText)
             let rules = selectedRule.map { [$0] } ?? availableRules
-            let results = try await AnimeParser.shared.search(query: searchKeyword, rules: rules)
+            let results = try await AnimeParser.shared.search(query: searchText, rules: rules)
 
             await MainActor.run {
                 self.animeItems = results
                 self.featuredItem = results.first
             }
 
-            print("[AnimeViewModel] Found \(results.count) results for '\(searchKeyword)' (category: \(selectedCategory.displayName))")
+            print("[AnimeViewModel] Found \(results.count) results for '\(searchText)'")
         } catch {
             print("[AnimeViewModel] Search failed: \(error)")
             errorMessage = error.localizedDescription
@@ -125,27 +107,11 @@ class AnimeViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // 根据分类使用不同的关键词
-        let baseKeywords: [String]
-        switch selectedCategory {
-        case .all:
-            baseKeywords = ["热门", "新番", "推荐"]
-        case .japan:
-            baseKeywords = ["日本动漫"]
-        case .china:
-            baseKeywords = ["国产动漫"]
-        case .western:
-            baseKeywords = ["欧美动漫"]
-        case .korea:
-            baseKeywords = ["韩国动漫"]
-        }
-
+        // 使用固定关键词搜索热门动漫
+        let popularKeywords = ["热门", "新番", "推荐", "完结"]
         var allResults: [AnimeSearchResult] = []
 
-        for baseKeyword in baseKeywords {
-            let keyword = searchKeyword(for: selectedCategory, baseKeyword: baseKeyword)
-            guard !keyword.isEmpty else { continue }
-
+        for keyword in popularKeywords {
             do {
                 let rules = selectedRule.map { [$0] } ?? availableRules
                 let results = try await AnimeParser.shared.search(query: keyword, rules: rules)
