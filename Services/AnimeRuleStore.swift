@@ -60,7 +60,7 @@ actor AnimeRuleStore {
             defaults.set(true, forKey: copiedKey)
             print("[AnimeRuleStore] Default anime rules copied successfully")
 
-            await loadAllRules()
+            _ = await loadAllRules()
         } catch {
             print("[AnimeRuleStore] Failed to copy default rules: \(error)")
         }
@@ -243,7 +243,7 @@ actor AnimeRuleStore {
 
     /// 更新单个规则
     func updateRule(id: String) async throws -> AnimeRule? {
-        guard let rule = rules[id] else {
+        guard rules[id] != nil else {
             return nil
         }
 

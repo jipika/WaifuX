@@ -415,14 +415,6 @@ class RuleMarketViewModel: ObservableObject {
                 let index = try await ruleRepository.fetchIndex()
                 parseRulesFromIndex(index)
 
-                // 也获取动漫索引
-                do {
-                    let animeIndex = try await ruleRepository.fetchAnimeIndex()
-                    parseAnimeRules(animeIndex)
-                } catch {
-                    print("[RuleMarket] No anime index found: \(error)")
-                }
-
                 await loadInstalledRules()
                 isLoading = false
             } catch {
@@ -435,7 +427,6 @@ class RuleMarketViewModel: ObservableObject {
     private func parseRulesFromIndex(_ index: RepositoryIndex) {
         var newRules: [RemoteRuleInfo] = []
 
-        // 解析壁纸规则
         if let wallpaperItems = index.categories?.wallpaper?.items {
             for item in wallpaperItems {
                 newRules.append(RemoteRuleInfo(
@@ -450,41 +441,7 @@ class RuleMarketViewModel: ObservableObject {
             }
         }
 
-        // 解析动漫规则
-        if let animeItems = index.categories?.anime?.items {
-            for item in animeItems {
-                newRules.append(RemoteRuleInfo(
-                    id: item.name,
-                    name: item.name,
-                    type: item.type ?? "anime",
-                    version: item.version ?? "1.0.0",
-                    deprecated: item.deprecated ?? false,
-                    url: item.url,
-                    description: item.description
-                ))
-            }
-        }
-
         self.rules = newRules
-    }
-
-    private func parseAnimeRules(_ index: AnimeRuleIndexData) {
-        guard let items = index.anime?.items else { return }
-
-        for item in items {
-            // 检查是否已存在
-            if !rules.contains(where: { $0.id == item.name }) {
-                rules.append(RemoteRuleInfo(
-                    id: item.name,
-                    name: item.name,
-                    type: item.type ?? "anime",
-                    version: item.version ?? "1.0.0",
-                    deprecated: item.deprecated ?? false,
-                    url: item.url,
-                    description: item.description
-                ))
-            }
-        }
     }
 
     private func loadInstalledRules() async {
