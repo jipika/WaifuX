@@ -8,7 +8,6 @@ actor RuleRepository {
     static let shared = RuleRepository()
 
     private let ruleLoader = RuleLoader.shared
-    private let animeRuleStore = AnimeRuleStore.shared
 
     // 当前配置的仓库
     private var currentRepoURL: String?
@@ -118,38 +117,10 @@ actor RuleRepository {
         return index
     }
 
-    /// 获取动漫规则索引
-    func fetchAnimeIndex() async throws -> AnimeRuleIndexData {
-        guard let owner = currentOwner, let repo = currentRepo else {
-            throw RuleRepositoryError.notConfigured
-        }
-
-        let animeIndexURL = "https://raw.githubusercontent.com/\(owner)/\(repo)/main/anime/index.json"
-
-        do {
-            let data = try await fetchData(from: animeIndexURL)
-            return try JSONDecoder().decode(AnimeRuleIndexData.self, from: data)
-        } catch {
-            // 如果 anime/index.json 不存在，尝试从主 index.json 获取
-            let mainIndex = try await fetchIndex()
-            if let animeCategory = mainIndex.categories?.anime {
-                let items = animeCategory.items ?? []
-                return AnimeRuleIndexData(
-                    schemaVersion: mainIndex.schemaVersion ?? "1.0.0",
-                    lastUpdated: mainIndex.lastUpdated ?? "",
-                    anime: AnimeRuleIndexData.AnimeRuleIndexItems(
-                        description: animeCategory.description,
-                        items: items
-                    )
-                )
-            }
-            throw RuleRepositoryError.indexNotFound
-        }
-    }
-
     // MARK: - 同步规则
 
-    /// 同步所有规则
+    /// 同步所有规则（壁纸 + 媒体，不包括动漫）
+    /// 动漫规则完全由 AnimeRuleStore/KazumiRuleLoader 独立管理
     func syncAllRules() async throws {
         print("[RuleRepository] Syncing all rules...")
 
@@ -159,8 +130,8 @@ actor RuleRepository {
         // 同步壁纸规则
         try await syncWallpaperRules()
 
-        // 同步动漫规则
-        try await syncAnimeRules()
+        // 注意：动漫规则不由 RuleRepository 管理
+        // 动漫规则由 AnimeRuleStore 独立从 Kazumi 仓库加载
 
         print("[RuleRepository] Sync completed")
     }
@@ -256,33 +227,6 @@ actor RuleRepository {
         }
     }
 
-    /// 同步动漫规则
-    func syncAnimeRules() async throws {
-        guard let owner = currentOwner, let repo = currentRepo else {
-            throw RuleRepositoryError.notConfigured
-        }
-
-        print("[RuleRepository] Syncing anime rules...")
-
-        let animeIndex = try await fetchAnimeIndex()
-        let animeItems = animeIndex.anime?.items ?? []
-
-        for item in animeItems {
-            do {
-                _ = try await animeRuleStore.installRule(from: item.url)
-                print("[RuleRepository] Installed anime rule: \(item.name)")
-            } catch {
-                // 尝试从相对路径安装
-                do {
-                    let ruleURL = "https://raw.githubusercontent.com/\(owner)/\(repo)/main/anime/\(item.name).json"
-                    _ = try await animeRuleStore.installRule(from: ruleURL)
-                } catch {
-                    print("[RuleRepository] Failed to install anime rule \(item.name): \(error)")
-                }
-            }
-        }
-    }
-
     // MARK: - 辅助方法
 
     private func fetchData(from urlString: String) async throws -> Data {
@@ -321,7 +265,8 @@ struct RepositoryIndex: Codable {
     struct RuleCategories: Codable {
         let wallpaper: WallpaperCategory?
         let media: MediaCategory?
-        let anime: AnimeCategory?
+        // 注意：anime 类别不由 RuleRepository 管理
+        // 动漫规则由 AnimeRuleStore/KazumiRuleLoader 独立管理
     }
 
     struct WallpaperCategory: Codable {
@@ -334,36 +279,11 @@ struct RepositoryIndex: Codable {
         let items: [WallpaperRuleInfo]?
     }
 
-    struct AnimeCategory: Codable {
-        let description: String?
-        let items: [AnimeRuleInfoItem]?
-    }
-
     struct WallpaperRuleInfo: Codable {
         let name: String
         let version: String?
         let deprecated: Bool?
         let url: String?
-    }
-
-    struct AnimeRuleInfoItem: Codable {
-        let name: String
-        let type: String?
-        let version: String?
-        let deprecated: Bool?
-        let url: String
-        let description: String?
-    }
-}
-
-struct AnimeRuleIndexData: Codable {
-    let schemaVersion: String?
-    let lastUpdated: String?
-    let anime: AnimeRuleIndexItems?
-
-    struct AnimeRuleIndexItems: Codable {
-        let description: String?
-        let items: [RepositoryIndex.AnimeRuleInfoItem]
     }
 }
 

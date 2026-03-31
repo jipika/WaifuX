@@ -182,8 +182,12 @@ actor AnimeParser {
     private func parseSearchResults(html: String, rule: AnimeRule) throws -> [AnimeSearchResult] {
         let document = try SwiftSoup.parse(html)
         
-        // 根据规则 API 版本选择解析方式
-        if rule.api == "2" {
+        // 自动检测使用 XPath 还是 CSS 选择器
+        // 如果 searchList 以 // 开头，或者 api == "2"，使用 V2 (XPath)
+        let searchList = rule.searchList ?? ""
+        let useXPath = rule.api == "2" || searchList.hasPrefix("//")
+        
+        if useXPath {
             return try parseSearchResultsV2(html: html, rule: rule, document: document)
         } else {
             return try parseSearchResultsV1(html: html, rule: rule, document: document)
