@@ -1,21 +1,15 @@
 import Foundation
 import SwiftUI
 
-// MARK: - 通知名称
-
-extension Notification.Name {
-    static let animeRuleSourceChanged = Notification.Name("animeRuleSourceChanged")
-}
-
 // MARK: - 动漫 ViewModel
 
 @MainActor
 class AnimeViewModel: ObservableObject {
-    // MARK: - 数据源
+    // MARK: - 数据源 (详情页使用)
     @Published var availableRules: [AnimeRule] = []
     @Published var selectedRule: AnimeRule?
 
-    // MARK: - 内容
+    // MARK: - 内容 (列表页使用 Bangumi)
     @Published var animeItems: [AnimeSearchResult] = []
     @Published var featuredItem: AnimeSearchResult?
 
@@ -30,26 +24,11 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 私有状态
     private var currentPage = 1
-    private var currentSearchKeyword: String = ""
+    private let pageSize = 24
     private var loadMoreTask: Task<Void, Never>?
-
-    // MARK: - 初始化
-
-    init() {
-        // 监听规则源切换通知
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleRuleSourceChanged),
-            name: .animeRuleSourceChanged,
-            object: nil
-        )
-    }
-
-    @objc private func handleRuleSourceChanged() {
-        Task {
-            await reloadRules()
-        }
-    }
+    
+    // Bangumi 服务
+    private let bangumiService = BangumiService.shared
 
     // MARK: - 初始化
 
@@ -59,38 +38,25 @@ class AnimeViewModel: ObservableObject {
 
         // 重置分页状态
         currentPage = 1
-        hasMorePages = false
-        currentSearchKeyword = ""
-
+        hasMorePages = true
+        
+        // 加载详情页需要的规则
         do {
-            // 从远程加载所有可用规则
             let rules = try await AnimeRuleStore.shared.loadRulesFromRemote()
             self.availableRules = rules.filter { !$0.deprecated }
-
-            print("[AnimeViewModel] Loaded \(self.availableRules.count) rules from remote")
-
-            // 如果有规则，执行搜索获取数据
-            if !self.availableRules.isEmpty {
-                await search()
-            } else {
-                errorMessage = "没有可用的动漫源，请添加规则"
-            }
+            print("[AnimeViewModel] Loaded \(self.availableRules.count) rules for detail page")
         } catch {
             print("[AnimeViewModel] Failed to load rules: \(error)")
-            errorMessage = error.localizedDescription
         }
+
+        // 加载列表页数据 (使用 Bangumi)
+        await fetchPopular()
     }
 
-    /// 重新加载规则(切换规则源后调用)
-    func reloadRules() async {
-        await loadInitialData()
-    }
-
-    // MARK: - 搜索
+    // MARK: - 搜索 (使用 Bangumi)
 
     func search() async {
         guard !searchText.isEmpty else {
-            // 如果搜索为空，获取热门内容
             await fetchPopular()
             return
         }
@@ -98,129 +64,57 @@ class AnimeViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // 重置分页状态
         currentPage = 1
-        hasMorePages = false
-        currentSearchKeyword = searchText
-
+        
         do {
-            let rules = selectedRule.map { [$0] } ?? availableRules
-            let results = try await AnimeParser.shared.search(query: searchText, rules: rules, page: currentPage)
-
+            let (items, total) = try await bangumiService.searchByTag(
+                tag: searchText,
+                limit: pageSize,
+                offset: 0
+            )
+            
             await MainActor.run {
-                self.animeItems = results
-                self.featuredItem = results.first
-                // 搜索结果暂时不支持分页，根据结果数量判断
-                self.hasMorePages = results.count >= 20
+                self.animeItems = items.map { $0.toAnimeSearchResult() }
+                self.featuredItem = self.animeItems.first
+                self.hasMorePages = items.count < (total ?? 0)
             }
 
-            print("[AnimeViewModel] Found \(results.count) results for '\(searchText)'")
+            print("[AnimeViewModel] Bangumi search found \(items.count) results for '\(searchText)'")
         } catch {
-            print("[AnimeViewModel] Search failed: \(error)")
+            print("[AnimeViewModel] Bangumi search failed: \(error)")
             errorMessage = error.localizedDescription
         }
     }
 
-    // MARK: - 获取热门
+    // MARK: - 获取热门 (使用 Bangumi)
 
     func fetchPopular(keyword: AnimeHotTag? = nil) async {
         isLoading = true
         defer { isLoading = false }
 
-        // 重置分页状态
         currentPage = 1
         hasMorePages = true
 
-        // 使用默认关键词或指定标签搜索
-        let baseKeywords: [String]
-        let searchKeyword: String
-        switch keyword {
-        case .none:
-            baseKeywords = ["热门", "新番", "推荐", "完结"]
-            searchKeyword = "热门"
-        case .daily:
-            baseKeywords = ["日常"]
-            searchKeyword = "日常"
-        case .original:
-            baseKeywords = ["原创"]
-            searchKeyword = "原创"
-        case .school:
-            baseKeywords = ["校园"]
-            searchKeyword = "校园"
-        case .comedy:
-            baseKeywords = ["搞笑"]
-            searchKeyword = "搞笑"
-        case .fantasy:
-            baseKeywords = ["奇幻"]
-            searchKeyword = "奇幻"
-        case .yuri:
-            baseKeywords = ["百合"]
-            searchKeyword = "百合"
-        case .romance:
-            baseKeywords = ["恋爱"]
-            searchKeyword = "恋爱"
-        case .mystery:
-            baseKeywords = ["悬疑"]
-            searchKeyword = "悬疑"
-        case .action:
-            baseKeywords = ["热血"]
-            searchKeyword = "热血"
-        case .harem:
-            baseKeywords = ["后宫"]
-            searchKeyword = "后宫"
-        case .mecha:
-            baseKeywords = ["机战"]
-            searchKeyword = "机战"
-        case .lightNovel:
-            baseKeywords = ["轻改"]
-            searchKeyword = "轻改"
-        case .idol:
-            baseKeywords = ["偶像"]
-            searchKeyword = "偶像"
-        case .healing:
-            baseKeywords = ["治愈"]
-            searchKeyword = "治愈"
-        case .otherWorld:
-            baseKeywords = ["异世界"]
-            searchKeyword = "异世界"
-        }
-
-        // 设置当前搜索关键词用于分页
-        self.currentSearchKeyword = searchKeyword
-
-        var allResults: [AnimeSearchResult] = []
-
-        for baseKeyword in baseKeywords {
-            do {
-                let rules = selectedRule.map { [$0] } ?? availableRules
-                let results = try await AnimeParser.shared.search(query: baseKeyword, rules: rules, page: currentPage)
-                allResults.append(contentsOf: results)
-
-                if allResults.count >= 30 { break }
-            } catch {
-                continue
+        do {
+            let (items, total) = try await bangumiService.getTrendingList(
+                limit: pageSize,
+                offset: 0
+            )
+            
+            await MainActor.run {
+                self.animeItems = items.map { $0.toAnimeSearchResult() }
+                self.featuredItem = self.animeItems.first
+                self.hasMorePages = items.count < (total ?? 0)
             }
-        }
-
-        // 去重
-        var seenIDs = Set<String>()
-        let uniqueResults = allResults.filter { result in
-            if seenIDs.contains(result.id) {
-                return false
-            }
-            seenIDs.insert(result.id)
-            return true
-        }
-
-        await MainActor.run {
-            self.animeItems = uniqueResults
-            self.featuredItem = uniqueResults.first
-            // 如果获取到了较多结果，认为还有下一页
-            self.hasMorePages = uniqueResults.count >= 20
+            
+            print("[AnimeViewModel] Bangumi trending loaded \(items.count) items")
+        } catch {
+            print("[AnimeViewModel] Bangumi trending failed: \(error)")
+            errorMessage = error.localizedDescription
         }
     }
 
-    // MARK: - 加载更多（分页）
+    // MARK: - 加载更多 (分页)
 
     func loadMore() async {
         loadMoreTask?.cancel()
@@ -231,46 +125,32 @@ class AnimeViewModel: ObservableObject {
             isLoadingMore = true
             defer { isLoadingMore = false }
 
-            currentPage += 1
-            print("[AnimeViewModel] 加载第 \(currentPage) 页...")
-
-            // 使用当前搜索关键词或默认关键词
-            let keyword = currentSearchKeyword.isEmpty ? "热门" : currentSearchKeyword
-
+            let offset = currentPage * pageSize
+            
             do {
-                let rules = selectedRule.map { [$0] } ?? availableRules
-                let results = try await AnimeParser.shared.search(query: keyword, rules: rules, page: currentPage)
-
-                // 检查任务是否被取消
+                let (items, total) = try await bangumiService.getTrendingList(
+                    limit: pageSize,
+                    offset: offset
+                )
+                
                 guard !Task.isCancelled else { return }
 
-                // 过滤已存在的结果
-                let existingIDs = Set(self.animeItems.map { $0.id })
-                let newResults = results.filter { !existingIDs.contains($0.id) }
-
                 await MainActor.run {
-                    if !newResults.isEmpty {
-                        self.animeItems.append(contentsOf: newResults)
-                        print("[AnimeViewModel] 新增 \(newResults.count) 条数据，总计 \(self.animeItems.count)")
-                    }
-
-                    // 如果没有新数据或结果太少，认为没有更多页面了
-                    self.hasMorePages = !results.isEmpty && results.count >= 10
-
-                    if !self.hasMorePages {
-                        print("[AnimeViewModel] 没有更多数据了")
-                    }
+                    let newResults = items.map { $0.toAnimeSearchResult() }
+                    self.animeItems.append(contentsOf: newResults)
+                    currentPage += 1
+                    self.hasMorePages = self.animeItems.count < (total ?? 0)
+                    print("[AnimeViewModel] Loaded more, total: \(self.animeItems.count)")
                 }
             } catch {
-                print("[AnimeViewModel] 加载更多失败: \(error)")
-                currentPage -= 1 // 回退页码
+                print("[AnimeViewModel] Load more failed: \(error)")
             }
         }
 
         await loadMoreTask?.value
     }
 
-    // MARK: - 获取详情
+    // MARK: - 获取详情 (使用规则源)
 
     func fetchDetail(for item: AnimeSearchResult) async throws -> AnimeDetail {
         guard let rule = availableRules.first(where: { $0.id == item.sourceId }) else {
@@ -279,13 +159,16 @@ class AnimeViewModel: ObservableObject {
 
         return try await AnimeParser.shared.fetchDetail(detailURL: item.detailURL, rule: rule)
     }
-
-    // MARK: - 取消加载
-
-    func cancelLoadMore() {
-        loadMoreTask?.cancel()
-        loadMoreTask = nil
-        isLoadingMore = false
+    
+    // MARK: - 重新加载规则
+    
+    func reloadRules() async {
+        do {
+            let rules = try await AnimeRuleStore.shared.loadRulesFromRemote()
+            self.availableRules = rules.filter { !$0.deprecated }
+        } catch {
+            print("[AnimeViewModel] Failed to reload rules: \(error)")
+        }
     }
 }
 
@@ -315,7 +198,7 @@ enum AnimeCategory: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - 动漫标签（参考 Kazumi）
+// MARK: - 动漫标签
 
 enum AnimeHotTag: String, CaseIterable, Identifiable {
     case daily = "daily"
