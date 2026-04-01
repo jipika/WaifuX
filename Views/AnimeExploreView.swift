@@ -225,9 +225,17 @@ struct AnimeExploreView: View {
     private func animeSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack(alignment: .center) {
-                Text("\(viewModel.animeItems.count) 部动漫")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.64))
+                HStack(spacing: 8) {
+                    Text("\(viewModel.animeItems.count) 部动漫")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.64))
+
+                    if viewModel.isLoadingMore {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .tint(.white.opacity(0.6))
+                    }
+                }
 
                 Spacer()
 
@@ -274,14 +282,40 @@ struct AnimeExploreView: View {
                     columns: calculateGridColumns(width: gridContentWidth),
                     spacing: 20
                 ) {
-                    ForEach(viewModel.animeItems) { anime in
+                    ForEach(Array(viewModel.animeItems.enumerated()), id: \.element.id) { index, anime in
                         AnimePortraitCard(anime: anime) {
                             selectedAnime = anime
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 showDetail = true
                             }
                         }
+                        .onAppear {
+                            // 检测接近列表底部时加载更多
+                            guard index >= viewModel.animeItems.count - 6,
+                                  viewModel.hasMorePages,
+                                  !viewModel.isLoading,
+                                  !viewModel.isLoadingMore else { return }
+                            Task {
+                                await viewModel.loadMore()
+                            }
+                        }
                     }
+                }
+
+                // 加载更多指示器
+                if viewModel.isLoadingMore {
+                    PaginationLoadingView()
+                        .frame(height: 60)
+                        .padding(.top, 20)
+                }
+
+                // 没有更多数据提示
+                if !viewModel.hasMorePages && viewModel.animeItems.count > 20 {
+                    Text("已经到底啦")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .frame(height: 50)
+                        .padding(.top, 10)
                 }
             }
         }
