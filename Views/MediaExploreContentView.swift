@@ -293,11 +293,20 @@ struct MediaExploreContentView: View {
                     }
                 }
 
-                // 加载指示器
-                if viewModel.isLoading && !displayedMediaItems.isEmpty {
+                // 加载更多指示器
+                if isLoadingMore {
                     PaginationLoadingView()
                         .frame(height: 60)
                         .padding(.top, 20)
+                }
+
+                // 没有更多数据提示
+                if !viewModel.hasMorePages && displayedMediaItems.count > 20 {
+                    Text("已经到底啦")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .frame(height: 50)
+                        .padding(.top, 10)
                 }
             }
         }

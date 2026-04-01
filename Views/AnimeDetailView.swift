@@ -25,18 +25,18 @@ struct AnimeDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: 0) {
                         // Hero 区域
-                        heroSection(width: geometry.size.width)
+                        heroSection(width: geometry.size.width, height: geometry.size.height)
 
-                        // 剧集列表
-                        if let detail = detail, !detail.episodes.isEmpty {
-                            episodesSection
-                        }
+                        // 内容区域
+                        contentSection
 
-                        // 相关推荐占位
-                        relatedSection
-
-                        Spacer(minLength: 40)
+                        Spacer(minLength: 60)
                     }
+                    .offsetReader()
+                }
+                .coordinateSpace(name: "scroll")
+                .onPreferenceChange(ViewOffsetKey.self) { offset in
+                    scrollOffset = offset
                 }
 
                 // 顶部导航栏
@@ -70,13 +70,14 @@ struct AnimeDetailView: View {
                     Color.black.opacity(0.9)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .blur(radius: 60)
+                .blur(radius: 40)
                 .overlay(
                     LinearGradient(
                         colors: [
-                            Color.black.opacity(0.3),
-                            Color.black.opacity(0.7),
-                            Color.black.opacity(0.95)
+                            Color.black.opacity(0.2),
+                            Color.black.opacity(0.5),
+                            Color.black.opacity(0.85),
+                            Color.black.opacity(0.98)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
@@ -91,203 +92,237 @@ struct AnimeDetailView: View {
 
     // MARK: - Hero Section
 
-    private func heroSection(width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Spacer()
-                .frame(height: 100)
-
-            HStack(alignment: .bottom, spacing: 24) {
-                // 海报
-                posterImage
-
-                // 信息
-                infoPanel
-            }
-            .padding(.horizontal, 28)
-        }
-        .frame(width: width)
-        .padding(.bottom, 40)
-    }
-
-    // MARK: - 海报
-
-    private var posterImage: some View {
-        OptimizedAsyncImage(
-            url: anime.coverURL.flatMap { URL(string: $0) },
-            priority: .medium
-        ) { image in
-            image
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-        } placeholder: {
-            Rectangle()
-                .fill(Color.white.opacity(0.1))
+    private func heroSection(width: CGFloat, height: CGFloat) -> some View {
+        ZStack(alignment: .bottom) {
+            // 背景大图
+            if let coverURL = anime.coverURL {
+                OptimizedAsyncImage(
+                    url: URL(string: coverURL),
+                    priority: .high
+                ) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.2))
+                }
+                .frame(width: width, height: height * 0.65)
+                .clipped()
                 .overlay(
-                    Image(systemName: "tv")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.white.opacity(0.3))
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.1),
+                            Color.black.opacity(0.3),
+                            Color.black.opacity(0.7),
+                            Color.black.opacity(0.95)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
                 )
-        }
-        .frame(width: 180, height: 270)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-        .liquidGlassSurface(.prominent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: - 信息面板
-
-    private var infoPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // 标题
-            Text(anime.title)
-                .font(.system(size: 36, weight: .bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-
-            // 元信息
-            HStack(spacing: 12) {
-                if let rating = detail?.rating {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.yellow)
-                        Text(rating)
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                }
-
-                if let status = detail?.status {
-                    Text(status)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(Color.white.opacity(0.1))
-                        )
-                }
-
-                Text(anime.sourceName)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
             }
 
-            // 描述
-            if let desc = detail?.description, !desc.isEmpty {
-                Text(desc)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .lineLimit(4)
-                    .multilineTextAlignment(.leading)
-            } else if isLoading {
-                Text("正在加载详情...")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
+            // 内容叠加层
+            VStack(alignment: .leading, spacing: 20) {
+                Spacer()
 
-            // 操作按钮
-            actionButtons
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - 操作按钮
-
-    private var actionButtons: some View {
-        HStack(spacing: 12) {
-            // 播放按钮
-            Button {
-                if let firstEpisode = detail?.episodes.first {
-                    selectedEpisode = firstEpisode
-                    showPlayer = true
-                }
-            } label: {
+                // 源标签
                 HStack(spacing: 8) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                    Text("立即播放")
-                        .font(.system(size: 15, weight: .semibold))
+                    Text(anime.sourceName)
+                        .font(.system(size: 12, weight: .bold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.red)
+                        )
+
+                    if let rating = detail?.rating, !rating.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.yellow)
+                            Text(rating)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.white.opacity(0.15))
+                        )
+                    }
+
+                    if let status = detail?.status, !status.isEmpty {
+                        Text(status)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.white.opacity(0.15))
+                            )
+                    }
                 }
-                .foregroundStyle(.black)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color.white)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(detail?.episodes.isEmpty ?? true)
-            .opacity(detail?.episodes.isEmpty ?? true ? 0.5 : 1)
 
-            // 收藏按钮
-            Button {
-                // TODO: 收藏功能
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .semibold))
+                // 标题
+                Text(anime.title)
+                    .font(.system(size: 42, weight: .bold))
                     .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.15))
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
+                    .lineLimit(2)
+                    .shadow(color: Color.black.opacity(0.5), radius: 4, x: 0, y: 2)
 
-            // 分享按钮
-            Button {
-                // TODO: 分享功能
-            } label: {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.15))
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
-                    )
+                // 操作按钮
+                HStack(spacing: 16) {
+                    // 播放按钮
+                    Button {
+                        if let firstEpisode = detail?.episodes.first {
+                            selectedEpisode = firstEpisode
+                            showPlayer = true
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                            Text(detail?.episodes.isEmpty ?? true ? "暂无剧集" : "立即播放")
+                                .font(.system(size: 16, weight: .bold))
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 14)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(detail?.episodes.isEmpty ?? true)
+                    .opacity(detail?.episodes.isEmpty ?? true ? 0.5 : 1)
+
+                    // 收藏按钮
+                    Button {
+                        // TODO: 收藏功能
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 16, weight: .semibold))
+                            Text("收藏")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.2))
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.white.opacity(0.4), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    // 分享按钮
+                    Button {
+                        // TODO: 分享功能
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 48, height: 48)
+                            .background(
+                                Circle()
+                                    .fill(Color.white.opacity(0.15))
+                            )
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // 描述
+                if let desc = detail?.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: 600, alignment: .leading)
+                } else if isLoading {
+                    Text("正在加载详情...")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 40)
+            .padding(.bottom, 40)
+            .frame(width: width, alignment: .leading)
         }
-        .padding(.top, 8)
+        .frame(height: height * 0.75)
+    }
+
+    // MARK: - 内容区域
+
+    private var contentSection: some View {
+        VStack(alignment: .leading, spacing: 32) {
+            // 剧集列表
+            if let detail = detail, !detail.episodes.isEmpty {
+                episodesSection
+            }
+
+            // 相关推荐
+            relatedSection
+        }
+        .padding(.top, 20)
     }
 
     // MARK: - 剧集列表
 
     private var episodesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("剧集")
-                .font(.system(size: 20, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 28)
+            HStack {
+                Text("剧集")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(detail?.episodes ?? []) { episode in
-                        EpisodeCard(
-                            episode: episode,
-                            isPlaying: selectedEpisode?.id == episode.id
-                        ) {
-                            selectedEpisode = episode
-                            showPlayer = true
-                        }
+                Spacer()
+
+                // 剧集数量
+                Text("\(detail?.episodes.count ?? 0) 集")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .padding(.horizontal, 40)
+
+            // 剧集网格
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 12),
+                    GridItem(.flexible(), spacing: 12),
+                    GridItem(.flexible(), spacing: 12)
+                ],
+                spacing: 12
+            ) {
+                ForEach(detail?.episodes ?? []) { episode in
+                    EpisodeRow(
+                        episode: episode,
+                        isPlaying: selectedEpisode?.id == episode.id
+                    ) {
+                        selectedEpisode = episode
+                        showPlayer = true
                     }
                 }
-                .padding(.horizontal, 28)
             }
+            .padding(.horizontal, 40)
         }
-        .padding(.vertical, 24)
     }
 
     // MARK: - 相关推荐
@@ -295,18 +330,32 @@ struct AnimeDetailView: View {
     private var relatedSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("相关推荐")
-                .font(.system(size: 20, weight: .bold))
+                .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 40)
 
             // 可以在这里添加相关动漫
-            // 目前显示提示
-            Text("更多精彩内容即将推出")
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.5))
-                .padding(.horizontal, 28)
+            HStack(spacing: 16) {
+                ForEach(0..<4) { index in
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white.opacity(0.1))
+                            .frame(width: 200, height: 112)
+                            .overlay(
+                                Image(systemName: "tv")
+                                    .font(.system(size: 32))
+                                    .foregroundStyle(.white.opacity(0.3))
+                            )
+
+                        Text("推荐动漫 \(index + 1)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+            }
+            .padding(.horizontal, 40)
+            .opacity(0.5)
         }
-        .padding(.vertical, 24)
     }
 
     // MARK: - 顶部导航栏
@@ -325,7 +374,7 @@ struct AnimeDetailView: View {
                         .frame(width: 40, height: 40)
                         .background(
                             Circle()
-                                .fill(Color.black.opacity(0.3))
+                                .fill(Color.black.opacity(scrollOffset > 100 ? 0.5 : 0.3))
                                 .background(.ultraThinMaterial)
                         )
                 }
@@ -334,10 +383,11 @@ struct AnimeDetailView: View {
                 Spacer()
 
                 // 标题（滚动时显示）
-                if scrollOffset < -200 {
+                if scrollOffset < -300 {
                     Text(anime.title)
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
                         .transition(.opacity)
                 }
 
@@ -347,11 +397,17 @@ struct AnimeDetailView: View {
                 Color.clear
                     .frame(width: 40, height: 40)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 24)
             .padding(.top, 20)
 
             Spacer()
         }
+        .background(
+            scrollOffset < -300 ?
+            Color.black.opacity(min(0.9, abs(scrollOffset + 300) / 200))
+            : Color.clear
+        )
+        .animation(.easeInOut(duration: 0.2), value: scrollOffset)
     }
 
     // MARK: - 加载详情
@@ -373,9 +429,32 @@ struct AnimeDetailView: View {
     }
 }
 
-// MARK: - 剧集卡片
+// MARK: - 滚动偏移检测
 
-struct EpisodeCard: View {
+struct ViewOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+extension View {
+    func offsetReader() -> some View {
+        self.background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(
+                        key: ViewOffsetKey.self,
+                        value: proxy.frame(in: .named("scroll")).minY
+                    )
+            }
+        )
+    }
+}
+
+// MARK: - 剧集行
+
+struct EpisodeRow: View {
     let episode: AnimeDetail.AnimeEpisodeItem
     let isPlaying: Bool
     let onTap: () -> Void
@@ -384,13 +463,13 @@ struct EpisodeCard: View {
 
     var body: some View {
         Button(action: onTap) {
-            VStack(spacing: 8) {
-                // 缩略图或占位
+            HStack(spacing: 12) {
+                // 缩略图
                 ZStack {
                     if let thumb = episode.thumbnailURL {
                         OptimizedAsyncImage(
                             url: URL(string: thumb),
-                            priority: .medium
+                            priority: .low
                         ) { image in
                             image
                                 .resizable()
@@ -398,53 +477,69 @@ struct EpisodeCard: View {
                         } placeholder: {
                             Rectangle()
                                 .fill(Color.white.opacity(0.1))
-                                .overlay(
-                                    Image(systemName: "play.circle")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(.white.opacity(0.5))
-                                )
                         }
                     } else {
                         Rectangle()
                             .fill(Color.white.opacity(0.1))
-                            .overlay(
-                                Image(systemName: "play.circle")
-                                    .font(.system(size: 32))
-                                    .foregroundStyle(.white.opacity(0.5))
-                            )
                     }
 
-                    // 播放中指示器
-                    if isPlaying {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 40, height: 40)
-                            .overlay(
-                                Image(systemName: "pause.fill")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(.black)
-                            )
-                    }
+                    // 播放图标
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.6))
+                        )
+                        .opacity(isHovered || isPlaying ? 1 : 0)
                 }
-                .frame(width: 160, height: 90)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .frame(width: 120, height: 68)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 // 剧集信息
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(episode.name ?? "第 \(episode.episodeNumber) 集")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
                     Text("第 \(episode.episodeNumber) 集")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.5))
                 }
-                .frame(width: 160, alignment: .leading)
+
+                Spacer()
+
+                // 播放中指示器
+                if isPlaying {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 10))
+                        Text("播放中")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.red.opacity(0.15))
+                    )
+                }
             }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isHovered || isPlaying ? Color.white.opacity(0.1) : Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isPlaying ? Color.red.opacity(0.5) : Color.clear, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.05 : 1.0)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
         .onHover { hovering in
             isHovered = hovering
