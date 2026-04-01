@@ -15,11 +15,12 @@ actor AnimeParser {
     /// 搜索动漫
     func search(
         query: String,
-        rules: [AnimeRule]
+        rules: [AnimeRule],
+        page: Int = 1
     ) async throws -> [AnimeSearchResult] {
         for rule in rules where !rule.deprecated {
             do {
-                let results = try await searchWithRule(query: query, rule: rule)
+                let results = try await searchWithRule(query: query, rule: rule, page: page)
                 if !results.isEmpty {
                     print("[AnimeParser] Found \(results.count) results using rule: \(rule.name)")
                     return results
@@ -33,22 +34,22 @@ actor AnimeParser {
     }
 
     /// 使用指定规则搜索
-    private func searchWithRule(query: String, rule: AnimeRule) async throws -> [AnimeSearchResult] {
+    private func searchWithRule(query: String, rule: AnimeRule, page: Int = 1) async throws -> [AnimeSearchResult] {
         print("\n[AnimeParser] ========== 开始搜索 ==========")
         print("[AnimeParser] 规则: \(rule.name) (id: \(rule.id), api: \(rule.api))")
-        print("[AnimeParser] 关键词: \(query)")
-        
+        print("[AnimeParser] 关键词: \(query), 页码: \(page)")
+
         var url = rule.searchURL
-        
+
         // 处理 XPath 格式 (API v2)
         if rule.api == "2", let xpath = rule.xpath, let search = xpath.search {
             url = search.url
             print("[AnimeParser] 使用 XPath 格式 URL: \(url)")
         }
-        
+
         url = url
             .replacingOccurrences(of: "{keyword}", with: query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)
-            .replacingOccurrences(of: "{page}", with: "1")
+            .replacingOccurrences(of: "{page}", with: "\(page)")
         
         print("[AnimeParser] 最终 URL: \(url)")
 
