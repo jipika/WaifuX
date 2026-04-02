@@ -507,6 +507,18 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "versions": "VERSIONS",
         // Settings additional
         "clearCacheConfirm": "Are you sure you want to clear all cache? This will delete downloaded thumbnails and temp files.",
+        // Settings - Update Check
+        "apiKey": "API KEY",
+        "ruleRepository": "RULE REPOSITORY",
+        "ruleRepositoryDesc": "Configure GitHub repository URL to auto-sync wallpaper, media, and anime rules.",
+        "configured": "Configured",
+        "checkForUpdates": "CHECK FOR UPDATES",
+        "downloadUpdate": "DOWNLOAD UPDATE",
+        "newVersionAvailable": "New version available",
+        "goToDownload": "GO TO DOWNLOAD",
+        "alreadyLatestVersion": "You are using the latest version.",
+        "newVersionFound": "New version found:",
+        "goToDownloadQuestion": "Would you like to go to download?",
         "networkProxy": "NETWORK PROXY",
         "networkProxyDesc": "Chinese users can access WallHaven via self-hosted Cloudflare Worker.",
         "customWorkerUrl": "CUSTOM WORKER URL",
@@ -1098,7 +1110,19 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "network.offline": "离线",
         "weak.network.message": "网络连接较弱，部分内容可能加载缓慢",
         "offline.title": "您已离线",
-        "offline.message": "请检查网络连接后重试。缓存内容仍可查看。"
+        "offline.message": "请检查网络连接后重试。缓存内容仍可查看。",
+        // Settings - Update Check
+        "apiKey": "API Key",
+        "ruleRepository": "规则仓库",
+        "ruleRepositoryDesc": "配置 GitHub 仓库地址，自动同步壁纸、媒体、动漫规则。",
+        "configured": "已配置",
+        "checkForUpdates": "检查更新",
+        "downloadUpdate": "下载更新",
+        "newVersionAvailable": "新版本可用",
+        "goToDownload": "前往下载",
+        "alreadyLatestVersion": "当前已是最新版本",
+        "newVersionFound": "发现新版本",
+        "goToDownloadQuestion": "是否前往下载？"
     ],
     .japanese: [
         // Launch at Login
@@ -1607,7 +1631,19 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "network.offline": "オフライン",
         "weak.network.message": "ネットワーク接続が弱いです。コンテンツの読み込みが遅くなる場合があります。",
         "offline.title": "オフライン中",
-        "offline.message": "接続を確認して再試行してください。キャッシュされたコンテンツは引き続き利用可能です。"
+        "offline.message": "接続を確認して再試行してください。キャッシュされたコンテンツは引き続き利用可能です。",
+        // Settings - Update Check
+        "apiKey": "API Key",
+        "ruleRepository": "ルールリポジトリ",
+        "ruleRepositoryDesc": "GitHubリポジトリURLを設定して、壁紙・メディア・アニメルールを自動同期。",
+        "configured": "設定済み",
+        "checkForUpdates": "アップデートを確認",
+        "downloadUpdate": "アップデートをダウンロード",
+        "newVersionAvailable": "新しいバージョンが利用可能",
+        "goToDownload": "ダウンロードへ進む",
+        "alreadyLatestVersion": "最新バージョンを使用中です",
+        "newVersionFound": "新しいバージョンが見つかりました:",
+        "goToDownloadQuestion": "ダウンロードページに移動しますか？"
     ]
 ]
 

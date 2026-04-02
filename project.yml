@@ -9,6 +9,9 @@ packages:
   SwiftSoup:
     url: https://github.com/scinfu/SwiftSoup.git
     from: "2.7.0"
+  Kanna:
+    url: https://github.com/tid-kijyun/Kanna.git
+    from: "5.2.0"
 
 settings:
   base:
@@ -51,6 +54,7 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
     dependencies:
       - package: SwiftSoup
+      - package: Kanna
     entitlements:
       path: WallHaven.entitlements
       properties:

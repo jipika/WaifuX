@@ -86,6 +86,35 @@ class AnimeViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 按标签搜索
+
+    func searchByTag(_ tag: AnimeHotTag) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        currentPage = 1
+
+        do {
+            // 将标签的 displayName 用作搜索关键词
+            let (items, total) = try await bangumiService.searchByTag(
+                tag: tag.rawValue,
+                limit: pageSize,
+                offset: 0
+            )
+
+            await MainActor.run {
+                self.animeItems = items.map { $0.toAnimeSearchResult() }
+                self.featuredItem = self.animeItems.first
+                self.hasMorePages = items.count < (total ?? 0)
+            }
+
+            print("[AnimeViewModel] Bangumi tag search found \(items.count) results for tag '\(tag.displayName)'")
+        } catch {
+            print("[AnimeViewModel] Bangumi tag search failed: \(error)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
     // MARK: - 获取热门 (使用 Bangumi)
 
     func fetchPopular(keyword: AnimeHotTag? = nil) async {

@@ -15,8 +15,10 @@ struct MediaExploreContentView: View {
     @State private var displayedMediaItems: [MediaItem] = []
     @State private var isLoadingMore = false
     @State private var loadMoreSentinelID: String? = nil
-    @State private var lastExploreScrollOffset: CGFloat = 0
-    @State private var isExploreFastScrolling = false
+
+    // Task 管理
+    @State private var searchTask: Task<Void, Never>?
+    @State private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
         GeometryReader { geometry in
@@ -32,39 +34,12 @@ struct MediaExploreContentView: View {
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                .environment(\.isHighSpeedScrolling, isExploreFastScrolling)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: ScrollOffsetPreferenceKey.self,
-                            value: proxy.frame(in: .named("mediaExploreScroll")).minY
-                        )
-                    }
-                )
-            }
-            .coordinateSpace(name: "mediaExploreScroll")
-            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                let delta = offset - lastExploreScrollOffset
-                let speed = abs(delta) * 60
-                
-                // 使用滞后机制避免频繁切换状态
-                let newFastScrolling = speed > 1200
-                if newFastScrolling != isExploreFastScrolling {
-                    isExploreFastScrolling = newFastScrolling
-                    
-                    if newFastScrolling {
-                        ImageLoader.shared.cancelAllLoads()
-                    }
-                }
-                
-                lastExploreScrollOffset = offset
             }
             .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: isExploreFastScrolling
+                    referenceImage: exploreAtmosphere.referenceImage
                 )
             )
         }
@@ -76,10 +51,19 @@ struct MediaExploreContentView: View {
             rebuildVisibleMediaItems()
             syncExploreMediaAtmosphere()
         }
-        .onChange(of: selectedHotTag) { _, _ in rebuildVisibleMediaItems() }
-        .onChange(of: selectedSort) { _, _ in rebuildVisibleMediaItems() }
-        .onChange(of: sortAscending) { _, _ in rebuildVisibleMediaItems() }
-        .onChange(of: searchText) { _, _ in rebuildVisibleMediaItems() }
+        // 合并 onChange 监听，减少重复调用
+        .onChange(of: selectedHotTag) { _, _ in
+            handleFilterChange()
+        }
+        .onChange(of: selectedSort) { _, _ in
+            handleFilterChange()
+        }
+        .onChange(of: sortAscending) { _, _ in
+            handleFilterChange()
+        }
+        .onChange(of: searchText) { _, _ in
+            handleFilterChange()
+        }
         .onChange(of: viewModel.items) { _, _ in
             // 当媒体数据变化时，重新构建显示的列表
             rebuildVisibleMediaItems()
@@ -378,6 +362,13 @@ struct MediaExploreContentView: View {
         }
     }
 
+    // MARK: - 合并的过滤处理
+
+    private func handleFilterChange() {
+        // 一次性处理所有过滤条件的变化
+        rebuildVisibleMediaItems()
+    }
+
     private func rebuildVisibleMediaItems() {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
@@ -502,7 +493,6 @@ private struct SimpleMediaCard: View {
     let isFavorite: Bool
     let onTap: () -> Void
 
-    @Environment(\.isHighSpeedScrolling) private var isHighSpeedScrolling
     @State private var isHovered = false
 
     private var thumbShape: UnevenRoundedRectangle {
@@ -532,7 +522,7 @@ private struct SimpleMediaCard: View {
                 ZStack {
                     OptimizedAsyncImage(
                         url: item.posterURLValue ?? item.thumbnailURLValue,
-                        priority: isHighSpeedScrolling ? .low : .medium
+                        priority: .medium
                     ) { image in
                         image
                             .resizable()

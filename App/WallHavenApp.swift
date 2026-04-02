@@ -139,6 +139,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        // 启动时预加载动漫规则（后台异步）
+        Task {
+            print("[AppDelegate] 启动时预加载动漫规则...")
+            await AnimeRuleStore.shared.ensureDefaultRulesCopied()
+            let rules = await AnimeRuleStore.shared.loadAllRules()
+            print("[AppDelegate] 预加载完成，共 \(rules.count) 个规则")
+            for rule in rules {
+                print("[AppDelegate]   - \(rule.name) (\(rule.id))")
+            }
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             VideoWallpaperManager.shared.restoreIfNeeded()
         }

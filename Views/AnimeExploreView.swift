@@ -11,8 +11,6 @@ struct AnimeExploreView: View {
     @State private var selectedCategory: AnimeCategory = .all
     @State private var selectedHotTag: AnimeHotTag?
     @State private var searchText = ""
-    @State private var isExploreFastScrolling = false
-    @State private var lastExploreScrollOffset: CGFloat = 0
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var sortAscending = false
 
@@ -34,45 +32,18 @@ struct AnimeExploreView: View {
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                .environment(\.isHighSpeedScrolling, isExploreFastScrolling)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: ScrollOffsetPreferenceKey.self,
-                            value: proxy.frame(in: .named("animeExploreScroll")).minY
-                        )
-                    }
-                )
-            }
-            .coordinateSpace(name: "animeExploreScroll")
-            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                let delta = offset - lastExploreScrollOffset
-                let speed = abs(delta) * 60
-
-                let newFastScrolling = speed > 1200
-                if newFastScrolling != isExploreFastScrolling {
-                    isExploreFastScrolling = newFastScrolling
-
-                    if newFastScrolling {
-                        ImageLoader.shared.cancelAllLoads()
-                    }
-                }
-
-                lastExploreScrollOffset = offset
             }
             .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: isExploreFastScrolling
+                    referenceImage: exploreAtmosphere.referenceImage
                 )
             )
             .overlay {
                 if showDetail, let anime = selectedAnime {
                     AnimeDetailView(
                         anime: anime,
-                        viewModel: viewModel,
                         isPresented: $showDetail
                     )
                     .transition(.move(edge: .trailing))
@@ -96,35 +67,16 @@ struct AnimeExploreView: View {
     private var heroSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "play.tv")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.56))
-
-                    Text("ANIME")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .padding(.horizontal, 8)
-                        .frame(height: 20)
-                        .liquidGlassSurface(
-                            .regular,
-                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
-                            in: Capsule(style: .continuous)
-                        )
-                }
-
                 Text("探索动漫")
                     .font(.system(size: 32, weight: .bold, design: .serif))
                     .tracking(-0.5)
                     .foregroundStyle(.white.opacity(0.98))
                     .lineLimit(1)
 
-                if !viewModel.availableRules.isEmpty {
-                    Text("\(viewModel.animeItems.count) 部动漫 · 已加载 \(viewModel.availableRules.count) 个动漫源")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                }
+                Text("发现热门动漫，追踪最新剧集")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
             }
 
             HStack(spacing: 12) {
@@ -148,7 +100,7 @@ struct AnimeExploreView: View {
                             searchText = ""
                             selectedHotTag = nil
                             Task {
-                                await viewModel.fetchPopular()
+                                await viewModel.search()
                             }
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -181,35 +133,30 @@ struct AnimeExploreView: View {
                         )
                 }
                 .buttonStyle(.plain)
-
-                // 源选择器
-                if !viewModel.availableRules.isEmpty {
-                    AnimeSourcePicker(
-                        selectedRule: $viewModel.selectedRule,
-                        rules: viewModel.availableRules
-                    ) {
-                        Task {
-                            await viewModel.search()
-                        }
-                    }
-                }
             }
-            .frame(maxWidth: 520)
+            .frame(maxWidth: 460, alignment: .leading)
 
-            // 热门标签（流式布局铺满宽度）
+            // 热门标签（横向滚动布局，与 WallpaperExploreContentView 一致）
             VStack(alignment: .leading, spacing: 12) {
-                Text("标签:")
+                Text("热门标签")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.4))
 
-                FlowLayout(spacing: 10) {
-                    ForEach(AnimeHotTag.allCases) { tag in
-                        AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
-                            withAnimation(AppFluidMotion.interactiveSpring) {
-                                selectedHotTag = selectedHotTag == tag ? nil : tag
-                                searchText = selectedHotTag == nil ? "" : tag.displayName
-                                Task {
-                                    await viewModel.fetchPopular(keyword: selectedHotTag)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(AnimeHotTag.allCases) { tag in
+                            AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
+                                withAnimation(AppFluidMotion.interactiveSpring) {
+                                    let newTag = selectedHotTag == tag ? nil : tag
+                                    selectedHotTag = newTag
+                                    // 标签搜索不填充搜索栏
+                                    Task {
+                                        if let tagToSearch = newTag {
+                                            await viewModel.searchByTag(tagToSearch)
+                                        } else {
+                                            await viewModel.fetchPopular()
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -223,12 +170,12 @@ struct AnimeExploreView: View {
     // MARK: - 动漫网格区域
 
     private func animeSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .center) {
                 HStack(spacing: 8) {
                     Text("\(viewModel.animeItems.count) 部动漫")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.64))
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.66))
 
                     if viewModel.isLoadingMore {
                         ProgressView()
@@ -239,9 +186,8 @@ struct AnimeExploreView: View {
 
                 Spacer()
 
-                HStack(spacing: 12) {
-                    // 排序选项菜单
-                    Menu {
+                // 排序选项菜单
+                Menu {
                         ForEach(AnimeSortOption.allCases) { option in
                             Button(option.menuTitle) {
                                 selectedSort = option
@@ -265,44 +211,46 @@ struct AnimeExploreView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                }
             }
 
             if viewModel.isLoading && viewModel.animeItems.isEmpty {
                 // 骨架屏加载状态
                 AnimeGridSkeleton(contentWidth: gridContentWidth)
                     .padding(.top, 20)
-                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
+                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if viewModel.animeItems.isEmpty {
                 // 空状态/错误状态
                 emptyState
-                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
+                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
                 LazyVGrid(
                     columns: calculateGridColumns(width: gridContentWidth),
-                    spacing: 20
+                    spacing: 24
                 ) {
-                    ForEach(Array(viewModel.animeItems.enumerated()), id: \.element.id) { index, anime in
+                    ForEach(viewModel.animeItems) { anime in
                         AnimePortraitCard(anime: anime) {
                             selectedAnime = anime
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 showDetail = true
                             }
                         }
-                        .onAppear {
-                            // 检测接近列表底部时加载更多
-                            guard index >= viewModel.animeItems.count - 6,
-                                  viewModel.hasMorePages,
-                                  !viewModel.isLoading,
-                                  !viewModel.isLoadingMore else { return }
-                            Task {
-                                await viewModel.loadMore()
+                    }
+
+                    // 加载更多指示器（同时作为触发器）
+                    if viewModel.hasMorePages && !viewModel.isLoading {
+                        PaginationLoadingView()
+                            .frame(height: 60)
+                            .padding(.top, 20)
+                            .onAppear {
+                                guard !viewModel.isLoadingMore else { return }
+                                Task {
+                                    await viewModel.loadMore()
+                                }
                             }
-                        }
                     }
                 }
 
-                // 加载更多指示器
+                // 加载更多指示器（非网格内）
                 if viewModel.isLoadingMore {
                     PaginationLoadingView()
                         .frame(height: 60)
@@ -353,13 +301,23 @@ struct AnimeExploreView: View {
     }
 
     private func calculateGridColumns(width: CGFloat) -> [GridItem] {
-        let minItemWidth: CGFloat = 160
-        let spacing: CGFloat = 20
+        let spacing: CGFloat = 24
+        // 竖图 2:3 比例，支持 2-6 列
+        let tiers: [(cols: Int, minCell: CGFloat)] = [
+            (6, 140),  // 6列需要每列至少 140pt
+            (5, 145),  // 5列需要每列至少 145pt
+            (4, 150),  // 4列需要每列至少 150pt
+            (3, 160),  // 3列需要每列至少 160pt
+            (2, 180)   // 2列需要每列至少 180pt
+        ]
 
-        let availableWidth = width + spacing
-        let columnCount = max(2, Int(availableWidth / (minItemWidth + spacing)))
-
-        return Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        for tier in tiers {
+            let cellWidth = (width - CGFloat(tier.cols - 1) * spacing) / CGFloat(tier.cols)
+            if cellWidth >= tier.minCell {
+                return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: tier.cols)
+            }
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: 2)
     }
 
     private func syncExploreAtmosphere() {
@@ -407,10 +365,9 @@ private struct AnimeHotTagChip: View {
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(AppFluidMotion.hoverEase) {
-                isHovered = hovering
-            }
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -458,10 +415,9 @@ private struct AnimeCategoryChip: View {
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered && !isSelected ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(AppFluidMotion.hoverEase) {
-                isHovered = hovering
-            }
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -498,16 +454,23 @@ private struct AnimeGridSkeleton: View {
     var contentWidth: CGFloat = 800
 
     private var columns: [GridItem] {
-        let minItemWidth: CGFloat = 160
-        let spacing: CGFloat = 20
-        let availableWidth = contentWidth + spacing
-        let columnCount = max(2, Int(availableWidth / (minItemWidth + spacing)))
-        return Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        let spacing: CGFloat = 24
+        let tiers: [(cols: Int, minCell: CGFloat)] = [
+            (6, 140), (5, 145), (4, 150), (3, 160), (2, 180)
+        ]
+
+        for tier in tiers {
+            let cellWidth = (contentWidth - CGFloat(tier.cols - 1) * spacing) / CGFloat(tier.cols)
+            if cellWidth >= tier.minCell {
+                return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: tier.cols)
+            }
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: 2)
     }
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 20) {
-            ForEach(0..<8, id: \.self) { _ in
+        LazyVGrid(columns: columns, spacing: 24) {
+            ForEach(0..<6, id: \.self) { _ in
                 AnimePortraitCardSkeleton()
             }
         }
@@ -519,44 +482,31 @@ private struct AnimeGridSkeleton: View {
 private struct AnimePortraitCardSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 竖版图片区域骨架 - 2:3比例
+            // 竖版图片区域骨架
             LinearGradient(
                 colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .frame(height: 240) // 竖版高度
-            .clipShape(
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 14,
-                    bottomLeadingRadius: 0,
-                    bottomTrailingRadius: 0,
-                    topTrailingRadius: 14,
-                    style: .continuous
-                )
-            )
-            .shimmer()
+            .frame(height: 300)
 
-            // 底部信息栏骨架
-            HStack {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.06))
-                    .frame(width: 80, height: 12)
+            // 信息栏骨架 - 深色半透明背景
+            VStack(alignment: .leading, spacing: 4) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 100, height: 13)
 
-                Spacer()
-
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.06))
-                    .frame(width: 40, height: 12)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(width: 50, height: 10)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.black.opacity(0.46))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shimmer()
     }
 }
