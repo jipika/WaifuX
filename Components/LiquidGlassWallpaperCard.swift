@@ -19,7 +19,7 @@ struct LiquidGlassWallpaperCard: View {
                     OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .medium) { image in
                         image
                             .resizable()
-                            .aspectRatio(contentMode: .fill)
+                            .scaledToFill()
                     } placeholder: {
                         ZStack {
                             Rectangle()
@@ -28,7 +28,7 @@ struct LiquidGlassWallpaperCard: View {
                         }
                     }
                     .id(imageRetryId)
-                    .frame(height: 160)
+                    .frame(maxWidth: .infinity, minHeight: 160, idealHeight: 160, maxHeight: 160)
                     .clipped()
                 }
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -76,8 +76,9 @@ struct LiquidGlassWallpaperCard: View {
             .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovered = hovering }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
         .help(wallpaper.resolution)
     }
@@ -119,7 +120,7 @@ struct LiquidGlassCarouselCard: View {
                 OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
                     image
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .scaledToFill()
                 } placeholder: {
                     Rectangle()
                         .fill(LiquidGlassColors.glassWhiteSubtle)
@@ -166,10 +167,9 @@ struct LiquidGlassCarouselCard: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                isHovered = hovering
-            }
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -190,7 +190,7 @@ struct LiquidGlassFeaturedCard: View {
                 OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
                     image
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .scaledToFill()
                 } placeholder: {
                     Rectangle()
                         .fill(LiquidGlassColors.glassWhiteSubtle)
@@ -238,8 +238,9 @@ struct LiquidGlassFeaturedCard: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovered = hovering }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -259,12 +260,12 @@ struct LiquidGlassCompactWallpaperCard: View {
                 OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .low) { image in
                     image
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .scaledToFill()
                 } placeholder: {
                     Rectangle()
                         .fill(LiquidGlassColors.glassWhiteSubtle)
                 }
-                .frame(height: 120)
+                .frame(maxWidth: .infinity, minHeight: 120, idealHeight: 120, maxHeight: 120)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
 
@@ -302,8 +303,9 @@ struct LiquidGlassCompactWallpaperCard: View {
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) { isHovered = hovering }
+        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }

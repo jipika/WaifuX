@@ -201,12 +201,22 @@ final class ExploreAtmosphereController: ObservableObject {
 
         guard let url = wallpaper.thumbURL ?? wallpaper.smallThumbURL else { return }
 
-        loadTask = Task { @MainActor in
+        loadTask = Task {
             let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
             guard !Task.isCancelled, let image else { return }
-            referenceImage = image
-            if let (c1, c2, c3) = ExploreImageColorSampler.triplet(from: image) {
-                tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+
+            // 在后台线程进行颜色采样（耗时操作）
+            let sampledColors = await Task.detached(priority: .userInitiated) {
+                ExploreImageColorSampler.triplet(from: image)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                referenceImage = image
+                if let (c1, c2, c3) = sampledColors {
+                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                }
             }
         }
     }
@@ -230,12 +240,22 @@ final class ExploreAtmosphereController: ObservableObject {
         tint = .mediaFallback
         let url = item.posterURLValue ?? item.thumbnailURLValue
 
-        loadTask = Task { @MainActor in
+        loadTask = Task {
             let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
             guard !Task.isCancelled, let image else { return }
-            referenceImage = image
-            if let (c1, c2, c3) = ExploreImageColorSampler.triplet(from: image) {
-                tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+
+            // 在后台线程进行颜色采样
+            let sampledColors = await Task.detached(priority: .userInitiated) {
+                ExploreImageColorSampler.triplet(from: image)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                referenceImage = image
+                if let (c1, c2, c3) = sampledColors {
+                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                }
             }
         }
     }
@@ -260,12 +280,22 @@ final class ExploreAtmosphereController: ObservableObject {
 
         guard let url = URL(string: coverURL) else { return }
 
-        loadTask = Task { @MainActor in
+        loadTask = Task {
             let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
             guard !Task.isCancelled, let image else { return }
-            referenceImage = image
-            if let (c1, c2, c3) = ExploreImageColorSampler.triplet(from: image) {
-                tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+
+            // 在后台线程进行颜色采样
+            let sampledColors = await Task.detached(priority: .userInitiated) {
+                ExploreImageColorSampler.triplet(from: image)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                referenceImage = image
+                if let (c1, c2, c3) = sampledColors {
+                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                }
             }
         }
     }
@@ -365,64 +395,49 @@ struct ExploreDynamicAtmosphereBackground: View {
                 baseBottom: tint.baseBottom
             )
 
+            // 简化背景效果 - 固定不变，不随滚动切换
             if let referenceImage {
                 Image(nsImage: referenceImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(minWidth: 900, minHeight: 900)
-                    .blur(radius: lightweightBackdrop ? 96 : 132)
-                    .opacity(lightweightBackdrop ? 0.36 : 0.5)
-                    .saturation(lightweightBackdrop ? 1.05 : 1.18)
+                    .frame(minWidth: 600, minHeight: 600)
+                    .blur(radius: 60)
+                    .opacity(0.35)
+                    .saturation(1.1)
                     .allowsHitTesting(false)
             }
 
-            // 叠一层更散的径向色晕，接近 mesh / 弥散渐变
             RadialGradient(
-                colors: [tint.primary.opacity(lightweightBackdrop ? 0.12 : 0.2), Color.clear],
+                colors: [tint.primary.opacity(0.12), Color.clear],
                 center: .topLeading,
                 startRadius: 20,
-                endRadius: lightweightBackdrop ? 360 : 460
+                endRadius: 350
             )
             .allowsHitTesting(false)
 
             RadialGradient(
-                colors: [tint.secondary.opacity(lightweightBackdrop ? 0.1 : 0.16), Color.clear],
+                colors: [tint.secondary.opacity(0.1), Color.clear],
                 center: .bottomTrailing,
                 startRadius: 40,
-                endRadius: lightweightBackdrop ? 400 : 520
+                endRadius: 400
             )
             .allowsHitTesting(false)
-
-            if !lightweightBackdrop {
-                RadialGradient(
-                    colors: [tint.tertiary.opacity(0.12), Color.clear],
-                    center: UnitPoint(x: 0.78, y: 0.22),
-                    startRadius: 30,
-                    endRadius: 400
-                )
-                .allowsHitTesting(false)
-            }
 
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .opacity(referenceImage == nil ? (lightweightBackdrop ? 0.16 : 0.2) : (lightweightBackdrop ? 0.26 : 0.32))
+                .opacity(0.2)
                 .allowsHitTesting(false)
 
             LinearGradient(
                 colors: [
-                    tint.baseTop.opacity(lightweightBackdrop ? 0.26 : 0.32),
-                    tint.primary.opacity(lightweightBackdrop ? 0.04 : 0.06),
+                    tint.baseTop.opacity(0.28),
                     Color.clear,
-                    tint.secondary.opacity(lightweightBackdrop ? 0.03 : 0.05),
-                    tint.baseBottom.opacity(lightweightBackdrop ? 0.45 : 0.52)
+                    tint.baseBottom.opacity(0.45)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .allowsHitTesting(false)
-
-            // Arc 感胶片颗粒：使用全局颗粒材质组件
-            GrainTextureOverlay(lightweight: lightweightBackdrop)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()

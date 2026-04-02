@@ -117,11 +117,10 @@ public struct MediaVideoCard: View {
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
+        .animation(.easeOut(duration: 0.16), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    isHovered = hovering
-                }
+                isHovered = hovering
             }
         }
     }
@@ -234,11 +233,10 @@ public struct WallpaperEditCard: View {
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
+        .animation(.easeOut(duration: 0.16), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    isHovered = hovering
-                }
+                isHovered = hovering
             }
         }
     }

@@ -4,7 +4,7 @@ import AVFoundation
 import AppKit
 
 struct MediaDetailSheet: View {
-    let item: MediaItem
+    let initialItem: MediaItem
     @ObservedObject var viewModel: MediaExploreViewModel
     let onClose: () -> Void
 
@@ -25,8 +25,15 @@ struct MediaDetailSheet: View {
     private let squeezeThreshold: CGFloat = 80
     private let maxSqueezeOffset: CGFloat = 120
 
+    // MARK: - 下一张弹窗相关
+    @StateObject private var nextItemDataSource = NextItemDataSource()
+    @State private var currentItemIndex: Int = 0
+
+    // 计算属性：当前媒体项
+    var item: MediaItem { resolvedItem }
+
     init(item: MediaItem, viewModel: MediaExploreViewModel, onClose: @escaping () -> Void) {
-        self.item = item
+        self.initialItem = item
         self.viewModel = viewModel
         self.onClose = onClose
         _resolvedItem = State(initialValue: item)
@@ -129,6 +136,22 @@ struct MediaDetailSheet: View {
                     viewportWidth: viewW,
                     topBarTopInset: topBarTopInset
                 )
+
+                // 下一张弹窗
+                LiquidGlassNextItemToast(
+                    nextItem: nextItemDataSource.nextItem,
+                    onTap: {
+                        navigateToNextMedia()
+                    },
+                    onScrollUp: {
+                        navigateToNextMedia()
+                    },
+                    onScrollDown: {
+                        navigateToPreviousMedia()
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(nextItemDataSource.nextItem != nil)
             }
         }
         .ignoresSafeArea()
@@ -140,6 +163,7 @@ struct MediaDetailSheet: View {
         .navigationBarBackButtonHidden(true)
         .task {
             isVisible = true
+            setupNextItemDataSource()
             await loadDetailIfNeeded()
         }
     }
@@ -617,6 +641,76 @@ struct MediaDetailSheet: View {
     }
 
     private func loadDetailIfNeeded() async {
+        let detail = await viewModel.ensureDetail(for: initialItem)
+        resolvedItem = detail
+        viewModel.recordViewed(detail)
+    }
+
+    // MARK: - 下一张弹窗相关方法
+
+    private func setupNextItemDataSource() {
+        // 找到当前媒体项在列表中的索引
+        let allItems = viewModel.items
+        if let index = allItems.firstIndex(where: { $0.id == initialItem.id }) {
+            currentItemIndex = index
+        }
+
+        // 设置数据源
+        nextItemDataSource.setItems(allItems, currentIndex: currentItemIndex)
+    }
+
+    private func navigateToNextMedia() {
+        guard nextItemDataSource.hasNext else { return }
+
+        // 获取下一个媒体项
+        let nextIndex = currentItemIndex + 1
+        let allItems = viewModel.items
+        guard nextIndex < allItems.count else { return }
+
+        let nextItem = allItems[nextIndex]
+
+        // 更新索引和数据源
+        currentItemIndex = nextIndex
+        nextItemDataSource.moveToNext()
+
+        // 重新加载媒体
+        reloadMedia(nextItem)
+    }
+
+    private func navigateToPreviousMedia() {
+        guard nextItemDataSource.hasPrevious else { return }
+
+        // 获取上一个媒体项
+        let prevIndex = currentItemIndex - 1
+        guard prevIndex >= 0 else { return }
+
+        let prevItem = viewModel.items[prevIndex]
+
+        // 更新索引和数据源
+        currentItemIndex = prevIndex
+        nextItemDataSource.moveToPrevious()
+
+        // 重新加载媒体
+        reloadMedia(prevItem)
+    }
+
+    private func reloadMedia(_ newItem: MediaItem) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            // 更新当前媒体项
+            resolvedItem = newItem
+
+            // 重置状态
+            isMediaLoaded = false
+            showInfoBubble = false
+        }
+
+        // 异步加载详情
+        Task {
+            await loadDetailIfNeededFor(newItem)
+        }
+    }
+
+    private func loadDetailIfNeededFor(_ item: MediaItem) async {
         let detail = await viewModel.ensureDetail(for: item)
         resolvedItem = detail
         viewModel.recordViewed(detail)

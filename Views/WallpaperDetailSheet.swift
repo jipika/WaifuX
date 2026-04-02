@@ -20,6 +20,10 @@ struct WallpaperDetailSheet: View {
     private let squeezeThreshold: CGFloat = 80
     private let maxSqueezeOffset: CGFloat = 120
 
+    // MARK: - 下一张弹窗相关
+    @StateObject private var nextItemDataSource = NextItemDataSource()
+    @State private var currentWallpaperIndex: Int = 0
+
     var body: some View {
         GeometryReader { geometry in
             let horizontalPadding = max(28, min(72, geometry.size.width * 0.05))
@@ -121,6 +125,22 @@ struct WallpaperDetailSheet: View {
                     viewportWidth: viewW,
                     topBarTopInset: topBarTopInset
                 )
+
+                // 下一张弹窗
+                LiquidGlassNextItemToast(
+                    nextItem: nextItemDataSource.nextItem,
+                    onTap: {
+                        navigateToNextWallpaper()
+                    },
+                    onScrollUp: {
+                        navigateToNextWallpaper()
+                    },
+                    onScrollDown: {
+                        navigateToPreviousWallpaper()
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(nextItemDataSource.nextItem != nil)
             }
         }
         .ignoresSafeArea()
@@ -134,6 +154,7 @@ struct WallpaperDetailSheet: View {
             withAnimation(.easeOut(duration: 0.15).delay(0.05)) {
                 isVisible = true
             }
+            setupNextItemDataSource()
         }
     }
 
@@ -859,6 +880,68 @@ struct WallpaperDetailSheet: View {
 
     private func shareWallpaper() {
         viewModel.shareWallpaper(wallpaper)
+    }
+
+    // MARK: - 下一张弹窗相关方法
+
+    private func setupNextItemDataSource() {
+        // 找到当前壁纸在列表中的索引
+        if let index = viewModel.wallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
+            currentWallpaperIndex = index
+        }
+
+        // 设置数据源
+        nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
+    }
+
+    private func navigateToNextWallpaper() {
+        guard nextItemDataSource.hasNext else { return }
+
+        // 获取下一张壁纸
+        let nextIndex = currentWallpaperIndex + 1
+        guard nextIndex < viewModel.wallpapers.count else { return }
+
+        let nextWallpaper = viewModel.wallpapers[nextIndex]
+
+        // 更新索引和数据源
+        currentWallpaperIndex = nextIndex
+        nextItemDataSource.moveToNext()
+
+        // 重新加载视图
+        reloadWallpaper(nextWallpaper)
+    }
+
+    private func navigateToPreviousWallpaper() {
+        guard nextItemDataSource.hasPrevious else { return }
+
+        // 获取上一张壁纸
+        let prevIndex = currentWallpaperIndex - 1
+        guard prevIndex >= 0 else { return }
+
+        let prevWallpaper = viewModel.wallpapers[prevIndex]
+
+        // 更新索引和数据源
+        currentWallpaperIndex = prevIndex
+        nextItemDataSource.moveToPrevious()
+
+        // 重新加载视图
+        reloadWallpaper(prevWallpaper)
+    }
+
+    private func reloadWallpaper(_ newWallpaper: Wallpaper) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            // 重置状态来触发重新加载
+            isImageLoaded = false
+            showInfoBubble = false
+
+            // 更新当前壁纸 - 由于 wallpaper 是 let，我们需要通过重新创建视图来切换
+            // 这里使用通知或代理模式来通知父视图切换壁纸
+            NotificationCenter.default.post(
+                name: .init("SwitchWallpaper"),
+                object: nil,
+                userInfo: ["wallpaper": newWallpaper]
+            )
+        }
     }
 }
 

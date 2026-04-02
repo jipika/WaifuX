@@ -11,8 +11,10 @@ struct WallpaperExploreContentView: View {
     @State private var displayedWallpapers: [Wallpaper] = []
     @State private var isLoadingMore = false
     @State private var showProtectedPurityAlert = false
-    @State private var lastExploreScrollOffset: CGFloat = 0
-    @State private var isExploreFastScrolling = false
+
+    // Task 管理
+    @State private var searchTask: Task<Void, Never>?
+    @State private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
         GeometryReader { geometry in
@@ -30,41 +32,12 @@ struct WallpaperExploreContentView: View {
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                .environment(\.isHighSpeedScrolling, isExploreFastScrolling)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: ScrollOffsetPreferenceKey.self,
-                            value: proxy.frame(in: .named("wallpaperExploreScroll")).minY
-                        )
-                    }
-                )
-            }
-            .coordinateSpace(name: "wallpaperExploreScroll")
-            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                let delta = offset - lastExploreScrollOffset
-                let speed = abs(delta) * 60
-                
-                // 使用滞后机制避免频繁切换状态
-                let newFastScrolling = speed > 1200
-                if newFastScrolling != isExploreFastScrolling {
-                    // 只有状态真正改变时才更新
-                    isExploreFastScrolling = newFastScrolling
-                    
-                    if newFastScrolling {
-                        // 高速滚动时取消所有加载
-                        ImageLoader.shared.cancelAllLoads()
-                    }
-                }
-                
-                lastExploreScrollOffset = offset
             }
             .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: isExploreFastScrolling
+                    referenceImage: exploreAtmosphere.referenceImage
                 )
             )
         }
@@ -203,7 +176,7 @@ struct WallpaperExploreContentView: View {
                 Menu {
                     Button(t("allRatios")) {
                         viewModel.selectedRatios = []
-                        Task { await viewModel.search() }
+                        cancelAndSearch()
                     }
                     Divider()
                     ForEach(["16x9", "16x10", "21x9", "4x3", "3x2", "1x1", "9x16", "10x16"], id: \.self) { ratio in
@@ -214,7 +187,7 @@ struct WallpaperExploreContentView: View {
                             } else {
                                 viewModel.selectedRatios = [ratio]
                             }
-                            Task { await viewModel.search() }
+                            cancelAndSearch()
                         } label: {
                             HStack {
                                 Text(ratio.replacingOccurrences(of: "x", with: ":"))
@@ -338,7 +311,7 @@ struct WallpaperExploreContentView: View {
                     ForEach(SortingOption.allCases, id: \.self) { option in
                         Button(sortingOptionDisplayName(option)) {
                             viewModel.sortingOption = option
-                            Task { await viewModel.search() }
+                            cancelAndSearch()
                         }
                     }
                 } label: {
@@ -406,9 +379,7 @@ struct WallpaperExploreContentView: View {
                 ErrorStateView(
                     type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
                     message: errorMessage,
-                    retryAction: {
-                        Task { await viewModel.search() }
-                    }
+                    retryAction: cancelAndSearch
                 )
             } else {
                 // 空数据状态
@@ -416,9 +387,7 @@ struct WallpaperExploreContentView: View {
                     type: .empty,
                     title: t("no.wallpapers"),
                     message: t("tryDifferentFilter"),
-                    retryAction: {
-                        Task { await viewModel.search() }
-                    }
+                    retryAction: cancelAndSearch
                 )
             }
         }
@@ -445,7 +414,7 @@ struct WallpaperExploreContentView: View {
     private func submitSearch(with query: String) {
         selectedHotTag = nil
         viewModel.searchQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { await viewModel.search() }
+        cancelAndSearch()
     }
     private var activePurityLabels: [String] {
         var labels: [String] = []
@@ -523,7 +492,7 @@ struct WallpaperExploreContentView: View {
         case .nsfw:
             viewModel.purityNSFW.toggle()
         }
-        Task { await viewModel.search() }
+        cancelAndSearch()
     }
     private func toggleColor(_ preset: WallhavenAPI.ColorPreset) {
         if selectedColorPreset?.hex.lowercased() == preset.hex.lowercased() {
@@ -531,7 +500,7 @@ struct WallpaperExploreContentView: View {
         } else {
             viewModel.selectedColors = [preset.hex]
         }
-        Task { await viewModel.search() }
+        cancelAndSearch()
     }
     private func resetServerFilters() {
         viewModel.puritySFW = true
@@ -540,7 +509,7 @@ struct WallpaperExploreContentView: View {
         viewModel.selectedColors = []
         viewModel.selectedRatios = []
         viewModel.selectedResolutions = []
-        Task { await viewModel.search() }
+        cancelAndSearch()
     }
     private func removeFilter(_ chip: ExploreFilterChipData) {
         switch chip.kind {
@@ -563,7 +532,7 @@ struct WallpaperExploreContentView: View {
         case .ratio(let ratio):
             viewModel.selectedRatios.removeAll { $0 == ratio }
         }
-        Task { await viewModel.search() }
+        cancelAndSearch()
     }
     private func filterSummaryPill(title: String, value: String, accent: Color) -> some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -736,6 +705,28 @@ struct WallpaperExploreContentView: View {
         }
         isLoadingMore = false
     }
+
+    // MARK: - Task 管理
+
+    /// 取消并执行新的搜索
+    private func cancelAndSearch() {
+        searchTask?.cancel()
+        searchTask = Task {
+            await viewModel.search()
+            await MainActor.run {
+                rebuildVisibleWallpapers()
+                syncExploreAtmosphere()
+            }
+        }
+    }
+
+    /// 取消所有任务（视图消失时调用）
+    private func cancelAllTasks() {
+        searchTask?.cancel()
+        loadMoreTask?.cancel()
+        searchTask = nil
+        loadMoreTask = nil
+    }
 }
 
 // MARK: - 探索网格壁纸卡片（布局对齐 ContentView.WallpaperEditCard / 已下载壁纸）
@@ -746,7 +737,6 @@ private struct SimpleWallpaperCard: View {
     let isFavorite: Bool
     let onTap: () -> Void
     @State private var isHovered = false
-    @Environment(\.isHighSpeedScrolling) private var isHighSpeedScrolling
 
     private var purityBorderColor: Color? {
         switch wallpaper.purity.lowercased() {
@@ -788,7 +778,7 @@ private struct SimpleWallpaperCard: View {
                 ZStack {
                     OptimizedAsyncImage(
                         url: wallpaper.thumbURL ?? wallpaper.smallThumbURL,
-                        priority: isHighSpeedScrolling ? .low : .medium
+                        priority: .medium
                     ) { image in
                         image
                             .resizable()
