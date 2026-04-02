@@ -4,6 +4,7 @@ struct SourceRulesSettingsView: View {
     @StateObject private var viewModel = SourceRulesViewModel()
     @State private var showAddRuleSheet = false
     @State private var showGitHubImportSheet = false
+    @State private var showAnimeRulesMarket = false
 
     var body: some View {
         settingsPage {
@@ -54,6 +55,22 @@ struct SourceRulesSettingsView: View {
                 }
             }
 
+            // 动漫规则市场
+            SettingsSection(
+                title: "动漫规则",
+                subtitle: "从 Kazumi 规则市场安装动漫源",
+                accentColor: .pink
+            ) {
+                AddRuleButton(
+                    icon: "play.tv",
+                    title: "规则市场",
+                    subtitle: "浏览并安装 Kazumi 官方规则",
+                    color: .pink
+                ) {
+                    showAnimeRulesMarket = true
+                }
+            }
+
             // 添加按钮
             SettingsSection(
                 title: "添加规则",
@@ -86,6 +103,10 @@ struct SourceRulesSettingsView: View {
         }
         .sheet(isPresented: $showGitHubImportSheet) {
             GitHubImportSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showAnimeRulesMarket) {
+            AnimeRulesMarketView()
+                .frame(minWidth: 700, minHeight: 500)
         }
         .task {
             await viewModel.loadRules()

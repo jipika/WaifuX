@@ -13,17 +13,3 @@ enum AppFluidMotion {
     /// 页面级淡入淡出（Tab、Sheet 可配合 transition）
     static let contentCrossfade = Animation.easeInOut(duration: 0.22)
 }
-
-// MARK: - 高速滚动（与 Home 一致：降载图片与重背景）
-
-private struct IsHighSpeedScrollingKey: EnvironmentKey {
-    static let defaultValue = false
-}
-
-extension EnvironmentValues {
-    /// 由滚动容器在 preference 更新时写入；子视图可据此跳过缩略图解码等。
-    var isHighSpeedScrolling: Bool {
-        get { self[IsHighSpeedScrollingKey.self] }
-        set { self[IsHighSpeedScrollingKey.self] = newValue }
-    }
-}

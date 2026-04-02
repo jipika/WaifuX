@@ -101,13 +101,14 @@ actor KazumiRuleLoader {
         let userAgent: String?
         let headers: [String: String]?
         let antiCrawler: Bool?
+        let adBlocker: Bool?
 
         enum CodingKeys: String, CodingKey {
             case name, type, version, api, baseURL, searchURL
             case searchList, searchName, searchResult
             case chapterRoads, chapterResult, chapterName
             case useWebview, useNativePlayer, multiSource, muliSources
-            case userAgent, headers, antiCrawler
+            case userAgent, headers, antiCrawler, adBlocker
         }
 
         /// 获取多源标志（兼容 muliSources 拼写错误）
@@ -158,6 +159,13 @@ actor KazumiRuleLoader {
             list: xpathList
         )
         
+        // 构建反爬虫配置
+        let antiCrawlerConfig = AntiCrawlerConfig(
+            enabled: kazumiRule.antiCrawler ?? false,
+            captchaImage: "",
+            captchaButton: ""
+        )
+
         // 构建 AnimeRule
         return AnimeRule(
             id: kazumiRule.name.lowercased(),
@@ -168,6 +176,7 @@ actor KazumiRuleLoader {
             deprecated: false,
             baseURL: kazumiRule.baseURL ?? "",
             headers: kazumiRule.headers,
+            userAgent: kazumiRule.userAgent,
             timeout: 30,
             searchURL: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
             searchList: nil,  // 使用 XPath 格式
@@ -184,7 +193,8 @@ actor KazumiRuleLoader {
             episodeThumb: nil,
             useWebview: kazumiRule.useWebview ?? false,
             multiSources: kazumiRule.hasMultiSources,
-            xpath: xpath
+            xpath: xpath,
+            antiCrawlerConfig: antiCrawlerConfig
         )
     }
 }

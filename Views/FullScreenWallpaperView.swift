@@ -2,9 +2,12 @@ import SwiftUI
 
 // MARK: - 全屏壁纸预览视图 - macOS 26 Liquid Glass 风格
 struct FullScreenWallpaperView: View {
-    let wallpaper: Wallpaper
+    let initialWallpaper: Wallpaper
     @ObservedObject var viewModel: WallpaperViewModel
     @Environment(\.dismiss) private var dismiss
+
+    // 使用 @State 管理当前壁纸，支持内部切换
+    @State private var currentWallpaper: Wallpaper
     @State private var isFullScreen = false
     @State private var isLoading = true
     @State private var loadError: Error?
@@ -15,6 +18,20 @@ struct FullScreenWallpaperView: View {
 
     // 图片内存缓存
     @State private var cachedImage: NSImage?
+
+    // MARK: - 下一张弹窗相关
+    @StateObject private var nextItemDataSource = NextItemDataSource()
+    @State private var currentWallpaperIndex: Int = 0
+    @State private var viewAppearTime: Date = Date()
+
+    // 计算属性：当前壁纸
+    var wallpaper: Wallpaper { currentWallpaper }
+
+    init(wallpaper: Wallpaper, viewModel: WallpaperViewModel) {
+        self.initialWallpaper = wallpaper
+        self.viewModel = viewModel
+        _currentWallpaper = State(initialValue: wallpaper)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -92,12 +109,29 @@ struct FullScreenWallpaperView: View {
                     bottomInfoBar
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+
+                // 下一张弹窗
+                LiquidGlassNextItemToast(
+                    nextItem: nextItemDataSource.nextItem,
+                    onTap: {
+                        navigateToNextWallpaper()
+                    },
+                    onScrollUp: {
+                        navigateToNextWallpaper()
+                    },
+                    onScrollDown: {
+                        navigateToPreviousWallpaper()
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(nextItemDataSource.nextItem != nil)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .onAppear {
             setupWindow()
             startControlsTimer()
+            setupNextItemDataSource()
         }
         .onDisappear {
             cleanup()
@@ -339,6 +373,65 @@ struct FullScreenWallpaperView: View {
         DispatchQueue.global(qos: .utility).async {
             // 实际的缓存逻辑在 AsyncImage 内部处理
             // 这里可以添加额外的缓存层
+        }
+    }
+
+    // MARK: - 下一张弹窗相关方法
+
+    private func setupNextItemDataSource() {
+        // 找到当前壁纸在列表中的索引
+        if let index = viewModel.wallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
+            currentWallpaperIndex = index
+        }
+
+        // 设置数据源
+        nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
+    }
+
+    private func navigateToNextWallpaper() {
+        guard nextItemDataSource.hasNext else { return }
+
+        // 获取下一张壁纸
+        let nextIndex = currentWallpaperIndex + 1
+        guard nextIndex < viewModel.wallpapers.count else { return }
+
+        let nextWallpaper = viewModel.wallpapers[nextIndex]
+
+        // 更新索引和数据源
+        currentWallpaperIndex = nextIndex
+        nextItemDataSource.moveToNext()
+
+        // 重新加载视图
+        reloadWallpaper(nextWallpaper)
+    }
+
+    private func navigateToPreviousWallpaper() {
+        guard nextItemDataSource.hasPrevious else { return }
+
+        // 获取上一张壁纸
+        let prevIndex = currentWallpaperIndex - 1
+        guard prevIndex >= 0 else { return }
+
+        let prevWallpaper = viewModel.wallpapers[prevIndex]
+
+        // 更新索引和数据源
+        currentWallpaperIndex = prevIndex
+        nextItemDataSource.moveToPrevious()
+
+        // 重新加载视图
+        reloadWallpaper(prevWallpaper)
+    }
+
+    private func reloadWallpaper(_ newWallpaper: Wallpaper) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            // 更新当前壁纸
+            currentWallpaper = newWallpaper
+
+            // 重置状态
+            isLoading = true
+            loadError = nil
+            cachedImage = nil
+            imageScale = 1.0
         }
     }
 

@@ -19,7 +19,13 @@ class SettingsViewModel: ObservableObject {
     @Published var ruleRepositoryURL: String = ""
     @Published var isRuleRepositoryConfigured: Bool = false
     @Published var currentRuleRepository: String = ""
-    
+
+    // MARK: - 更新检测相关
+    @Published var updateChecker = UpdateChecker.shared
+    @Published var updateCheckResult: UpdateCheckResult?
+    @Published var isCheckingUpdate = false
+    @Published var updateCheckError: String?
+
     private let ruleRepository = RuleRepository.shared
 
     // MARK: - 调度器相关
@@ -42,6 +48,44 @@ class SettingsViewModel: ObservableObject {
         Task { await updateCacheSize() }
         refreshDataSourceProfiles()
         Task { await loadRuleRepository() }
+    }
+
+    // MARK: - 更新检测
+
+    func checkForUpdates() async {
+        isCheckingUpdate = true
+        updateCheckError = nil
+
+        let result = await updateChecker.checkForUpdates()
+        updateCheckResult = result
+
+        if case .error(let message) = result {
+            updateCheckError = message
+        }
+
+        isCheckingUpdate = false
+    }
+
+    func openDownloadPage() {
+        if case .updateAvailable(_, let release) = updateCheckResult {
+            updateChecker.openDownloadPage(for: release)
+        } else {
+            updateChecker.openDownloadPage()
+        }
+    }
+
+    var hasUpdate: Bool {
+        if case .updateAvailable = updateCheckResult {
+            return true
+        }
+        return false
+    }
+
+    var latestVersion: String? {
+        if case .updateAvailable(_, let release) = updateCheckResult {
+            return release.version
+        }
+        return updateChecker.currentRelease?.version
     }
 
     // MARK: - 规则仓库

@@ -15,10 +15,6 @@ struct HomeContentView: View {
     @State private var isCarouselInteracting = false
     @State private var isCarouselAnimating = false
     @State private var carouselDragOffset: CGFloat = 0
-    
-    // 滚动性能监测
-    @State private var isHighSpeedScrolling = false
-    @State private var lastScrollOffset: CGFloat = 0
 
     private let heroHeight: CGFloat = 620
     private let carouselAutoPlayInterval: TimeInterval = 6.0
@@ -81,19 +77,11 @@ struct HomeContentView: View {
             stopCarouselAutoPlay()
             startCarouselAutoPlay()
         }
-        .environment(\.isHighSpeedScrolling, isHighSpeedScrolling)
     }
-    
+
     // MARK: - 滚动处理
     private func handleScroll(offset: CGFloat) {
-        let delta = offset - lastScrollOffset
-        let speed = abs(delta) * 60
-        isHighSpeedScrolling = speed > 1200
-        lastScrollOffset = offset
-        
-        if isHighSpeedScrolling {
-            ImageLoader.shared.cancelAllLoads()
-        }
+        // 滚动速度检测已移除（状态切换本身会导致卡顿）
     }
 
     private var heroSection: some View {
@@ -1094,27 +1082,18 @@ struct HomeShelfCard: View {
     let onTap: () -> Void
 
     @State private var isHovered = false
-    @Environment(\.isHighSpeedScrolling) private var isHighSpeedScrolling
 
     private let cardSize = CGSize(width: 278, height: 158)
 
     var body: some View {
         Button(action: onTap) {
             ZStack(alignment: .topLeading) {
-                Group {
-                    if isHighSpeedScrolling {
-                        // 高速滚动时只显示占位色块
-                        placeholderCard
-                    } else {
-                        // 正常加载图片
-                        OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
-                        }
-                    }
+                OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
                 }
                 .frame(width: cardSize.width, height: cardSize.height)
 
@@ -1182,22 +1161,6 @@ struct HomeShelfCard: View {
                 isHovered = hovering
             }
         }
-    }
-
-    private var placeholderCard: some View {
-        LinearGradient(
-            colors: placeholderColors,
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    private var placeholderColors: [Color] {
-        let hexColors = wallpaper.colors.prefix(3).map(Color.init(hex:))
-        if !hexColors.isEmpty {
-            return Array(hexColors)
-        }
-        return [Color(hex: "536878"), Color(hex: "1D2733")]
     }
 
     private func tagChip(text: String) -> some View {

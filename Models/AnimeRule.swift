@@ -16,6 +16,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     // 站点配置
     let baseURL: String
     let headers: [String: String]?
+    let userAgent: String?
     let timeout: Int?
 
     // API v1: 简化 CSS Selector 格式
@@ -45,14 +46,18 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     // API v2: XPath 格式 (兼容 Kazumi)
     let xpath: AnimeXPathRules?
 
+    // 反爬虫配置 (参考 Kazumi antiCrawlerConfig)
+    let antiCrawlerConfig: AntiCrawlerConfig?
+
     enum CodingKeys: String, CodingKey {
         case id, api, type, name, version, deprecated
-        case baseURL, headers, timeout
+        case baseURL, headers, userAgent, timeout
         case searchURL, searchList, searchName, searchCover, searchDetail, searchId
         case detailTitle, detailCover, detailDesc, detailStatus, detailRating
         case episodeList, episodeName, episodeLink, episodeThumb
         case videoSelector, videoSourceAttr, useWebview, multiSources
         case xpath
+        case antiCrawlerConfig
     }
 
     // 初始化器支持两种格式
@@ -65,6 +70,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         deprecated: Bool = false,
         baseURL: String,
         headers: [String: String]? = nil,
+        userAgent: String? = nil,
         timeout: Int? = 30,
         // API v1 字段
         searchURL: String,
@@ -87,7 +93,8 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         useWebview: Bool? = false,
         multiSources: Bool? = false,
         // API v2 字段
-        xpath: AnimeXPathRules? = nil
+        xpath: AnimeXPathRules? = nil,
+        antiCrawlerConfig: AntiCrawlerConfig? = nil
     ) {
         self.id = id
         self.api = api
@@ -97,6 +104,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         self.deprecated = deprecated
         self.baseURL = baseURL
         self.headers = headers
+        self.userAgent = userAgent
         self.timeout = timeout
         
         self.searchURL = searchURL
@@ -121,8 +129,9 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         self.videoSourceAttr = videoSourceAttr
         self.useWebview = useWebview
         self.multiSources = multiSources
-        
+
         self.xpath = xpath
+        self.antiCrawlerConfig = antiCrawlerConfig
     }
 
     // 辅助计算属性: 获取实际的搜索列表选择器
@@ -202,6 +211,24 @@ struct AnimeListXPath: Codable {
     let nextPage: String?
 }
 
+// MARK: - 反爬虫配置 (参考 Kazumi AntiCrawlerConfig)
+
+struct AntiCrawlerConfig: Codable {
+    let enabled: Bool
+    let captchaImage: String
+    let captchaButton: String
+
+    init(enabled: Bool = false, captchaImage: String = "", captchaButton: String = "") {
+        self.enabled = enabled
+        self.captchaImage = captchaImage
+        self.captchaButton = captchaButton
+    }
+
+    static func empty() -> AntiCrawlerConfig {
+        AntiCrawlerConfig(enabled: false, captchaImage: "", captchaButton: "")
+    }
+}
+
 // MARK: - 动漫规则索引 (用于规则市场)
 
 struct AnimeRuleIndex: Codable {
@@ -231,6 +258,7 @@ struct AnimeSearchResult: Identifiable, Codable {
     let sourceId: String
     let sourceName: String
     let latestEpisode: String?
+    let rating: String?
 }
 
 struct AnimeDetail: Identifiable, Codable {

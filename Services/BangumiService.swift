@@ -306,7 +306,34 @@ actor BangumiService {
         return (searchResponse.data, searchResponse.total)
     }
     
-    // MARK: - 获取番剧详情
+    // MARK: - 获取番剧详情 (兼容 AnimeDetailViewModel)
+
+    func getDetail(id: Int) async throws -> BangumiDetail {
+        let urlString = "\(BangumiAPI.baseURL)\(BangumiAPI.subjectDetail(id: String(id)))"
+
+        guard let url = URL(string: urlString) else {
+            throw BangumiError.invalidURL
+        }
+
+        print("[BangumiService] Fetching detail: \(id)")
+
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw BangumiError.invalidResponse
+        }
+
+        let detail = try decoder.decode(BangumiDetail.self, from: data)
+        print("[BangumiService] Detail loaded: \(detail.name)")
+        return detail
+    }
+
+    // MARK: - 获取番剧详情 (旧版)
 
     func getSubjectDetail(id: Int) async throws -> BangumiSubjectDetail {
         let urlString = "\(BangumiAPI.baseURL)\(BangumiAPI.subjectDetail(id: String(id)))"
@@ -361,6 +388,33 @@ actor BangumiService {
     }
 }
 
+// MARK: - Bangumi 详情模型 (简化版，用于 AnimeDetailView)
+
+struct BangumiDetail: Codable {
+    let id: Int
+    let name: String
+    let nameCN: String?
+    let summary: String?
+    let rating: BangumiDetailRating?
+    let images: BangumiImages?
+    let totalEpisodes: Int?
+    let airDate: String?
+    let airWeekday: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, summary, rating, images
+        case nameCN = "name_cn"
+        case totalEpisodes = "total_episodes"
+        case airDate = "air_date"
+        case airWeekday = "air_weekday"
+    }
+}
+
+struct BangumiDetailRating: Codable {
+    let score: Double
+    let total: Int
+}
+
 enum BangumiError: Error {
     case invalidURL
     case invalidResponse
@@ -375,6 +429,8 @@ extension BangumiSubject {
     func toAnimeSearchResult() -> AnimeSearchResult {
         // 使用大尺寸图片以提高清晰度
         let largeCoverURL = images?.large ?? images?.grid ?? images?.common ?? images?.medium
+        // 格式化评分
+        let ratingString = rating.map { String(format: "%.1f", $0.score) }
         return AnimeSearchResult(
             id: String(id),
             title: displayTitle,
@@ -382,7 +438,8 @@ extension BangumiSubject {
             detailURL: "https://bgm.tv/subject/\(id)",
             sourceId: "bangumi",
             sourceName: "Bangumi",
-            latestEpisode: nil
+            latestEpisode: nil,
+            rating: ratingString
         )
     }
 }

@@ -97,3 +97,33 @@ struct SettingsPage<Content: View>: View {
 func settingsPage<Content: View>(@ViewBuilder content: () -> Content) -> some View {
     SettingsPage(content: content)
 }
+
+// MARK: - 设置状态标签
+
+struct SettingsStatusBadge: View {
+    let title: String
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(color)
+
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(LiquidGlassColors.textPrimary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(color.opacity(0.15))
+        )
+        .overlay(
+            Capsule()
+                .stroke(color.opacity(0.3), lineWidth: 1)
+        )
+    }
+}

@@ -22,48 +22,67 @@ actor AnimeRuleStore {
 
         // 创建目录
         try? fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+    }
 
-        // 首次启动：从 Bundle 复制默认规则
-        Task {
-            await copyDefaultRulesFromBundle()
+    /// 确保默认规则已复制完成
+    /// 用户要求直接加载所有可用规则，因此自动安装全部 Kazumi 规则
+    func ensureDefaultRulesCopied() async {
+        do {
+            let index = try await KazumiRuleLoader.shared.fetchRuleIndex()
+            for item in index {
+                if !isRuleInstalled(item.name.lowercased()) {
+                    _ = await installRuleByName(item.name)
+                }
+            }
+            print("[AnimeRuleStore] 自动安装规则完成，共 \(allRules().count) 个")
+        } catch {
+            print("[AnimeRuleStore] 自动安装规则失败: \(error)")
         }
     }
 
     // MARK: - 初始化
 
-    /// 从 Bundle 复制默认动漫规则
-    private func copyDefaultRulesFromBundle() async {
-        let copiedKey = "anime_rules_copied_v1"
-        let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: copiedKey) else { return }
-
-        // 尝试从 Bundle 加载动漫规则目录
-        guard let bundleRulesURL = Bundle.main.url(forResource: "AnimeRules", withExtension: nil) else {
-            print("[AnimeRuleStore] AnimeRules directory not found in bundle")
-            // 即使没有 Bundle 规则，也标记为已处理
-            defaults.set(true, forKey: copiedKey)
-            return
-        }
-
+    /// 获取远程可用规则列表（不自动安装）
+    /// 与 Kazumi 对齐：显示全部可用规则，让用户手动选择安装
+    func fetchAvailableRules() async -> [AnimeRuleInfo] {
         do {
-            let files = try fileManager.contentsOfDirectory(at: bundleRulesURL, includingPropertiesForKeys: nil)
-                .filter { $0.pathExtension == "json" }
-
-            for file in files {
-                let destination = rulesDirectory.appendingPathComponent(file.lastPathComponent)
-                if !fileManager.fileExists(atPath: destination.path) {
-                    try fileManager.copyItem(at: file, to: destination)
-                    print("[AnimeRuleStore] Copied default anime rule: \(file.lastPathComponent)")
-                }
+            let indexData = try await fetchIndexData()
+            guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
+                return []
             }
-
-            defaults.set(true, forKey: copiedKey)
-            print("[AnimeRuleStore] Default anime rules copied successfully")
-
-            _ = await loadAllRules()
+            return index.map { $0.asRuleInfo }
         } catch {
-            print("[AnimeRuleStore] Failed to copy default rules: \(error)")
+            print("[AnimeRuleStore] 获取可用规则列表失败: \(error)")
+            return []
         }
+    }
+
+    /// 安装指定规则
+    func installRuleByName(_ name: String) async -> AnimeRule? {
+        do {
+            let rule = try await KazumiRuleLoader.shared.loadRule(name: name)
+            try saveRule(rule)
+            print("[AnimeRuleStore] 安装规则成功: \(name)")
+            return rule
+        } catch {
+            print("[AnimeRuleStore] 安装规则失败 \(name): \(error)")
+            return nil
+        }
+    }
+
+    /// 卸载指定规则
+    func uninstallRule(_ ruleId: String) throws {
+        rules.removeValue(forKey: ruleId)
+        let filePath = rulesDirectory.appendingPathComponent("\(ruleId).json")
+        if fileManager.fileExists(atPath: filePath.path) {
+            try fileManager.removeItem(at: filePath)
+            print("[AnimeRuleStore] 卸载规则: \(ruleId)")
+        }
+    }
+
+    /// 检查规则是否已安装
+    func isRuleInstalled(_ ruleId: String) -> Bool {
+        return rules[ruleId] != nil || fileManager.fileExists(atPath: rulesDirectory.appendingPathComponent("\(ruleId).json").path)
     }
 
     // MARK: - 加载规则
@@ -142,9 +161,9 @@ actor AnimeRuleStore {
 
         var installedRules: [AnimeRule] = []
 
-        for item in index.items where item.type == "anime" {
+        for item in index {
             do {
-                let rule = try await installRule(from: item.url)
+                let rule = try await installRule(from: item.ruleURL)
                 installedRules.append(rule)
             } catch {
                 print("[AnimeRuleStore] Failed to install \(item.name): \(error)")
@@ -225,12 +244,12 @@ actor AnimeRuleStore {
 
         var updatedRules: [String] = []
 
-        for item in index.items where item.type == "anime" {
-            if let localRule = rules[item.name],
+        for item in index {
+            if let localRule = rules[item.name.lowercased()],
                let remoteVersion = item.version,
                remoteVersion != localRule.version {
                 do {
-                    _ = try await installRule(from: item.url)
+                    _ = try await installRule(from: item.ruleURL)
                     updatedRules.append(item.name)
                 } catch {
                     print("[AnimeRuleStore] Failed to update \(item.name): \(error)")
@@ -283,19 +302,44 @@ actor AnimeRuleStore {
 
 // MARK: - 规则索引 (Kazumi 格式)
 
-private struct KazumiAnimeIndex: Codable {
-    let api: String?
-    let version: String?
-    let lastUpdated: String?
-    let items: [KazumiRuleItem]
-}
+/// KazumiRules index.json 格式（直接是数组）
+private typealias KazumiAnimeIndex = [KazumiRuleItem]
 
 private struct KazumiRuleItem: Codable {
     let name: String
-    let type: String
     let version: String?
-    let url: String
+    let useNativePlayer: Bool?
+    let antiCrawlerEnabled: Bool?
+    let author: String?
+    let lastUpdate: Int64?
+}
+
+// MARK: - 公开规则信息类型
+
+struct AnimeRuleInfo: Identifiable {
+    let id: String
+    let name: String
+    let version: String
     let description: String?
+    let antiCrawlerEnabled: Bool
+}
+
+// 扩展 KazumiRuleItem 转换为 AnimeRuleInfo
+extension KazumiRuleItem {
+    var asRuleInfo: AnimeRuleInfo {
+        AnimeRuleInfo(
+            id: name,
+            name: name,
+            version: version ?? "1.0",
+            description: nil,
+            antiCrawlerEnabled: antiCrawlerEnabled ?? false
+        )
+    }
+
+    /// 构造规则文件的 URL
+    var ruleURL: String {
+        "https://raw.githubusercontent.com/Predidit/KazumiRules/main/\(name).json"
+    }
 }
 
 // MARK: - 错误类型

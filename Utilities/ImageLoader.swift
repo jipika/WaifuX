@@ -24,10 +24,23 @@ final class ImageLoader {
     private var diskCacheKeys: [String] = []
     private let maxDiskCacheSize: Int = 500 * 1024 * 1024 // 500MB
     private let maxMemoryCacheSize: Int = 150 * 1024 * 1024 // 150MB
+    private var pendingSaveIndex = false
+    private var saveIndexTask: Task<Void, Never>?
 
     // MARK: - 并发控制（使用 AsyncChannel 避免 QoS 优先级反转）
     private let maxConcurrentLoads = 4
     private var activeTasks: [String: Task<Data?, Error>] = [:]
+
+    // MARK: - URLSession
+    private lazy var urlSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 300
+        config.requestCachePolicy = .returnCacheDataElseLoad
+        config.urlCache = URLCache(memoryCapacity: 50 * 1024 * 1024,
+                                   diskCapacity: 100 * 1024 * 1024)
+        return URLSession(configuration: config)
+    }()
     
     // MARK: - 重试配置
     private let imageRetryConfig = RetryConfiguration(
@@ -100,42 +113,50 @@ final class ImageLoader {
     func loadImage(
         from url: URL,
         priority: TaskPriority = .medium,
-        retryConfig: RetryConfiguration? = nil
+        retryConfig: RetryConfiguration? = nil,
+        targetSize: CGSize? = nil
     ) async -> NSImage? {
         let key = url.absoluteString
         let config = retryConfig ?? imageRetryConfig
-        
+
         // 检查是否已有正在进行的任务
         if let existingTask = activeTasks[key] {
             return try? await existingTask.value.flatMap { NSImage(data: $0) }
         }
-        
+
         // 检查内存缓存
         if let cached = getFromMemoryCache(key: key) {
+            // 如果有目标尺寸，检查是否需要降采样
+            if let targetSize = targetSize {
+                return downsampleImage(image: cached, to: targetSize)
+            }
             return cached
         }
-        
+
         // 检查磁盘缓存
         if let diskCached = getFromDiskCache(key: key) {
             setToMemoryCache(diskCached, key: key)
+            if let targetSize = targetSize {
+                return downsampleImage(image: diskCached, to: targetSize)
+            }
             return diskCached
         }
-        
+
         // 检查是否之前已经失败太多次
         if failedURLs.contains(key) {
             print("[ImageLoader] ⚠️ URL previously failed, skipping: \(url.lastPathComponent)")
             return nil
         }
-        
+
         // 创建新的加载任务
         let task = Task<Data?, Error>(priority: priority) { [weak self] in
             guard let self = self else { return nil }
-            
+
             return try await self.loadImageWithRetry(from: url, key: key, config: config)
         }
-        
+
         activeTasks[key] = task
-        
+
         // 等待任务完成
         do {
             let data = try await task.value
@@ -143,7 +164,34 @@ final class ImageLoader {
             // 成功加载后清除失败记录
             failedURLs.remove(key)
             urlRetryCounts.removeValue(forKey: key)
-            return data.flatMap { NSImage(data: $0) }
+
+            // 如果 data 为 nil，表示应该从缓存读取
+            if data == nil {
+                if let cached = getFromMemoryCache(key: key) {
+                    if let targetSize = targetSize {
+                        return downsampleImage(image: cached, to: targetSize)
+                    }
+                    return cached
+                }
+                if let diskCached = getFromDiskCache(key: key) {
+                    setToMemoryCache(diskCached, key: key)
+                    if let targetSize = targetSize {
+                        return downsampleImage(image: diskCached, to: targetSize)
+                    }
+                    return diskCached
+                }
+                return nil
+            }
+
+            guard let image = data.flatMap({ NSImage(data: $0) }) else {
+                return nil
+            }
+
+            // 应用降采样
+            if let targetSize = targetSize {
+                return downsampleImage(image: image, to: targetSize)
+            }
+            return image
         } catch {
             activeTasks.removeValue(forKey: key)
             // 记录失败
@@ -200,17 +248,18 @@ final class ImageLoader {
         // 使用 Swift 并发友好的方式控制并发
         await self.loadLimiter.acquire()
         defer { Task { await self.loadLimiter.release() } }
-        
+
         // 再次检查缓存（可能其他任务已加载）
-        if let cached = self.getFromMemoryCache(key: key) {
-            return cached.tiffRepresentation
+        // 注意：不转换为 tiffRepresentation，直接返回 nil 让上层从缓存获取
+        if self.getFromMemoryCache(key: key) != nil {
+            return nil // 标记为需要从内存缓存读取
         }
-        if let diskCached = self.getFromDiskCache(key: key) {
-            return diskCached.tiffRepresentation
+        if self.getFromDiskCache(key: key) != nil {
+            return nil // 标记为需要从磁盘缓存读取
         }
-        
+
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await urlSession.data(from: url)
             
             // 检查任务是否被取消
             try Task.checkCancellation()
@@ -383,8 +432,9 @@ final class ImageLoader {
         do {
             try data.write(to: fileURL)
             diskCacheKeys.append(key)
-            saveDiskCacheIndex()
-            
+            // 延迟保存索引，避免频繁写入
+            scheduleSaveDiskCacheIndex()
+
             // 检查是否需要清理
             await cleanupDiskCacheIfNeeded()
         } catch {
@@ -433,10 +483,107 @@ final class ImageLoader {
     
     private func saveDiskCacheIndex() {
         let indexFile = cacheDirectory.appendingPathComponent("cache_index.json")
-        
+
         if let data = try? JSONEncoder().encode(diskCacheKeys) {
             try? data.write(to: indexFile)
         }
+        pendingSaveIndex = false
+    }
+
+    /// 延迟保存磁盘缓存索引，避免频繁写入
+    private func scheduleSaveDiskCacheIndex() {
+        guard !pendingSaveIndex else { return }
+        pendingSaveIndex = true
+
+        saveIndexTask?.cancel()
+        saveIndexTask = Task {
+            // 延迟 5 秒保存，合并多次写入
+            try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if self.pendingSaveIndex {
+                    self.saveDiskCacheIndex()
+                }
+            }
+        }
+    }
+
+    // MARK: - 图片降采样
+
+    /// 创建降采样后的图片（从文件 URL）
+    func downsampleImage(from url: URL, to size: CGSize) async -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+
+        let maxDimension = max(size.width, size.height) * 2 // 2x 用于 Retina
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    /// 对已有图片进行降采样
+    func downsampleImage(image: NSImage, to size: CGSize) -> NSImage {
+        // 如果图片已经比目标尺寸小，直接返回
+        if image.size.width <= size.width && image.size.height <= size.height {
+            return image
+        }
+
+        let targetSize: NSSize
+        let aspectRatio = image.size.width / image.size.height
+        let targetAspectRatio = size.width / size.height
+
+        if aspectRatio > targetAspectRatio {
+            // 图片更宽，以宽度为基准
+            targetSize = NSSize(width: size.width, height: size.width / aspectRatio)
+        } else {
+            // 图片更高，以高度为基准
+            targetSize = NSSize(width: size.height * aspectRatio, height: size.height)
+        }
+
+        // 使用 2x Retina 缩放
+        let retinaSize = NSSize(width: targetSize.width * 2, height: targetSize.height * 2)
+
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return image
+        }
+
+        let bitmapRep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                          pixelsWide: Int(retinaSize.width),
+                                          pixelsHigh: Int(retinaSize.height),
+                                          bitsPerSample: 8,
+                                          samplesPerPixel: 4,
+                                          hasAlpha: true,
+                                          isPlanar: false,
+                                          colorSpaceName: .deviceRGB,
+                                          bytesPerRow: 0,
+                                          bitsPerPixel: 0)
+
+        guard let bitmap = bitmapRep else { return image }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        NSGraphicsContext.current?.imageInterpolation = .high
+
+        NSRect(origin: .zero, size: retinaSize).fill()
+        image.draw(in: NSRect(origin: .zero, size: retinaSize),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy,
+                   fraction: 1.0)
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        let result = NSImage(size: targetSize)
+        result.addRepresentation(bitmap)
+        return result
     }
 }
 
@@ -452,6 +599,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     private let loader = ImageLoader.shared
     @State private var image: NSImage?
     @State private var isVisible = false
+    @State private var loadTask: Task<Void, Never>?
     
     public init(
         url: URL?,
@@ -476,45 +624,47 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
             }
         }
         .onAppear {
-            // 延迟加载，避免快速滚动时立即触发
             isVisible = true
-            Task {
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms 延迟
-                if isVisible {
-                    loadImage()
-                }
+            // 延迟加载，避免快速滚动时立即触发
+            loadTask?.cancel()
+            loadTask = Task {
+                try? await Task.sleep(nanoseconds: 30_000_000) // 30ms 延迟
+                guard !Task.isCancelled else { return }
+                await loadImage()
             }
         }
         .onDisappear {
             isVisible = false
-            // 不立即取消，让图片有机会缓存
+            // 立即取消加载任务
+            loadTask?.cancel()
+            loadTask = nil
+            cancelLoad()
         }
         .onChange(of: url) { _, newURL in
             image = nil
+            loadTask?.cancel()
             if isVisible, let newURL {
-                Task {
-                    try? await Task.sleep(nanoseconds: 50_000_000)
-                    if isVisible {
-                        loadImage()
-                    }
+                loadTask = Task {
+                    try? await Task.sleep(nanoseconds: 30_000_000)
+                    guard !Task.isCancelled else { return }
+                    await loadImage()
                 }
             }
         }
     }
     
-    private func loadImage() {
+    private func loadImage() async {
         guard let url = url, isVisible else { return }
-        
-        Task {
-            if let loadedImage = await loader.loadImage(from: url, priority: priority) {
-                await MainActor.run {
-                    self.image = loadedImage
-                    self.onLoad?()
-                }
+
+        if let loadedImage = await loader.loadImage(from: url, priority: priority) {
+            guard isVisible else { return } // 再次检查可见性
+            await MainActor.run {
+                self.image = loadedImage
+                self.onLoad?()
             }
         }
     }
-    
+
     private func cancelLoad() {
         guard let url = url else { return }
         loader.cancelLoad(for: url)
@@ -533,7 +683,8 @@ struct ProgressiveImageView<Content: View>: View {
     @State private var thumbImage: NSImage?
     @State private var fullImage: NSImage?
     @State private var isVisible = false
-    
+    @State private var loadTask: Task<Void, Never>?
+
     init(
         thumbURL: URL?,
         fullURL: URL?,
@@ -545,7 +696,7 @@ struct ProgressiveImageView<Content: View>: View {
         self.priority = priority
         self.content = content
     }
-    
+
     var body: some View {
         Group {
             if let full = fullImage {
@@ -558,30 +709,33 @@ struct ProgressiveImageView<Content: View>: View {
         }
         .onAppear {
             isVisible = true
-            loadImages()
+            loadTask?.cancel()
+            loadTask = Task { await loadImages() }
         }
         .onDisappear {
             isVisible = false
+            loadTask?.cancel()
+            loadTask = nil
             cancelLoads()
         }
     }
-    
-    private func loadImages() {
+
+    private func loadImages() async {
         guard isVisible else { return }
-        
-        Task {
-            // 先加载缩略图
-            if let thumbURL = thumbURL {
-                thumbImage = await loader.loadImage(from: thumbURL, priority: priority)
-            }
-            
-            // 再加载高清图（低优先级）
-            if let fullURL = fullURL, fullURL != thumbURL {
-                fullImage = await loader.loadImage(from: fullURL, priority: .low)
-            }
+
+        // 先加载缩略图
+        if let thumbURL = thumbURL {
+            guard !Task.isCancelled else { return }
+            thumbImage = await loader.loadImage(from: thumbURL, priority: priority)
+        }
+
+        // 再加载高清图（低优先级）
+        if let fullURL = fullURL, fullURL != thumbURL {
+            guard !Task.isCancelled else { return }
+            fullImage = await loader.loadImage(from: fullURL, priority: .low)
         }
     }
-    
+
     private func cancelLoads() {
         if let thumbURL = thumbURL {
             loader.cancelLoad(for: thumbURL)
