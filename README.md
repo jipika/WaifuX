@@ -1,128 +1,148 @@
 # WallHaven
 
 <p align="center">
-  <img src="Design/Logo/AppIcon_Glass.png" width="100" height="100" />
+  <img src="Design/Logo/AppIcon_Glass.png" width="120" height="120" />
 </p>
 
 <p align="center">
-  <b>macOS 壁纸 & 动态背景</b><br>
-  <b>Wallpaper & Motion Backgrounds for macOS</b><br>
-  <b>macOS の壁纸 & ダイナミック背景</b>
+  <samp>
+    <b>✨ 让你的 macOS 桌面不再单调</b><br>
+    <b>🎨 静态壁纸 + 动态背景 + 动漫视频</b><br>
+    <b>🚀 一键切换，自动同步</b>
+  </samp>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jipika/WallHaven/releases">
+    <img src="https://img.shields.io/github/v/release/jipika/WallHaven?color=6366f1&style=flat-square" alt="Release">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-06b6d4?style=flat-square" alt="License">
+  </a>
+  <a href="https://jipika.github.io/WallHaven">
+    <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
+  </a>
 </p>
 
 ---
 
-## 简介 / Introduction / 紹介
+## 🎯 这是什么？
 
-**🇨🇳 中文：**
+**WallHaven** 是一款为 macOS 打造的壁纸应用——但不是那种普普通通的壁纸工具。
 
-WallHaven 是一款 macOS 壁纸应用，汇集了海量精美壁纸和动态背景。无论你是喜欢动漫，自然风景，游戏还是抽象艺术，这里都能找到适合你的桌面壁纸。
+想象一下：早上打开电脑，桌面是 Wallhaven 的 4K 风景大片；下午摸鱼时切到 MotionBGs 的动态流水；晚上追番前再换成二次元壁纸... 是的，我们全都要！
 
-**🇺🇸 English:**
-
-WallHaven is a macOS wallpaper app featuring a vast collection of beautiful wallpapers and dynamic backgrounds. Whether you love anime, nature, games, or abstract art, you'll find the perfect desktop wallpaper here.
-
-**🇯🇵 日本語：**
-
-WallHavenは、高品質な壁纸とダイナミック背景を豊富に取り揃えたmacOS용壁纸アプリケーションです。アニメ，自然風景、ゲーム、抽象芸術など、どのようなデスクトップ壁纸でも、きっと见つかるでしょう。
+> "你的桌面，值得更好看的衣服 👔"
 
 ---
 
-## 功能 / Features / 機能
+## ✨ 功能亮点
 
-| 中文 | English | 日本語 |
-|------|---------|--------|
-| 📚 双库支持：Wallhaven + MotionBGs | Dual library: Wallhaven + MotionBGs | ダブルライブラリ：Wallhaven + MotionBGs |
-| 🔍 智能搜索和分类浏览 | Smart search & category browsing | インテリジェント検索とカテゴリーブラウジング |
-| 🎬 动态背景支持 | Dynamic backgrounds support | ダイナミック背景のサポート |
-| ⭐ 收藏喜欢的壁纸 | Save favorites | お気に入り保存 |
-| ⚡️ 一键设置桌面壁纸 | One-click set wallpaper | ワンクリックで壁纸を設定 |
-| 🖼 4K / 超宽屏 / HD | 4K / Ultrawide / HD | 4K / ウルトラワイド / HD |
-| 🌙 深色模式界面 | Dark mode UI | ダークモードUI |
-
----
-
-## 系统要求 / Requirements / システム要件
-
-- macOS 14.0 (Sonoma) 或更高版本 / or later / 以上
-- Apple Silicon 或 Intel Mac
+| 功能 | 说明 |
+|------|------|
+| 📚 **双库支持** | Wallhaven（静态）+ MotionBGs（动态），一个应用两种体验 |
+| 🎬 **动漫解析** | 内置多源动漫视频解析，追番党的桌面也要二次元 |
+| 🔍 **智能搜索** | 关键词、标签、分类，快速找到心仪壁纸 |
+| ⭐ **收藏管理** | 喜欢的壁纸一键收藏，打造你的专属图库 |
+| ⚡️ **一键设置** | 看到喜欢的？点一下，桌面就换了 |
+| 🔄 **自动同步** | GitHub 规则自动更新，源站变了我们自动适配 |
+| 🖼 **全分辨率** | 4K、8K、超宽屏？统统拿下 |
+| 🌙 **深色界面** | 护眼模式，深夜换壁纸也不刺眼 |
 
 ---
 
-## 下载 / Download / ダウンロード
+## 📥 下载安装
 
-- 🌐 **官网 / Website / ウェブサイト：** [https://jipika.github.io/WallHaven](https://jipika.github.io/WallHaven)
-- 📦 **Releases：** [https://github.com/jipika/WallHaven/releases](https://github.com/jipika/WallHaven/releases)
+### 方式一：官网下载（推荐）
+👉 **[https://jipika.github.io/WallHaven](https://jipika.github.io/WallHaven)**
 
-从 Releases 页面下载最新版本。
+### 方式二：GitHub Releases
+👉 **[https://github.com/jipika/WallHaven/releases](https://github.com/jipika/WallHaven/releases)**
 
-Download the latest version from the Releases page.
-
-最新バージョンは Releases ページからダウンロードできます。
-
----
-
-## 规则配置 / Rule Profiles / ルール設定
-
-壁纸和动漫解析规则托管在独立的 GitHub 仓库中：
-
-Wallpaper and anime parsing rules are hosted in a separate GitHub repository:
-
-壁纸とアニメのパースルールは、別の GitHub リポジトリで管理されています：
-
-- **仓库 / Repository / リポジトリ：** [WallHaven-Profiles](https://github.com/jipika/WallHaven-Profiles)
-- **说明 / Description / 説明：** 包含 WallHaven 壁纸规则、MotionBGs 媒体配置和动漫解析规则
-
-应用会自动从该仓库同步最新规则，你也可以手动导入自定义规则。
-
-The app automatically syncs rules from this repository, or you can manually import custom rules.
-
-アプリはこのリポジトリから自動的にルールを同期します。また、手動でカスタムルールをインポートすることもできます。
+> ⚠️ **注意**：首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行
 
 ---
 
-## 支持作者 / Support / 作者を支援
+## 🛠 系统要求
 
-如果这个项目对你有帮助，可以请作者喝杯咖啡 ☕️
+- **macOS 14.0+** (Sonoma 或更高版本)
+- **Apple Silicon** 或 **Intel** Mac 均可
 
-If you find this app helpful, you can buy me a coffee ☕️
+---
 
-このプロジェクトが役に立った場合は咖啡をおごってください ☕️
+## 🔧 规则配置
+
+WallHaven 的规则是**动态加载**的——这意味着即使源站改版，我们也能快速适配。
+
+规则托管在独立仓库：**[WallHaven-Profiles](https://github.com/jipika/WallHaven-Profiles)**
+
+- 应用启动时自动同步最新规则
+- 支持手动导入自定义规则
+- 规则格式简单，自己也能写
+
+```
+用户输入 GitHub URL → 自动同步规则 → 开始使用
+         ↑___________________________________|
+              （规则更新，自动获取）
+```
+
+---
+
+## 🎨 使用截图
+
+<p align="center">
+  <img src="Docs/og.png" width="600" />
+</p>
+
+---
+
+## 🌍 多语言支持
+
+| 语言 | 状态 |
+|------|------|
+| 🇨🇳 简体中文 | ✅ 完整支持 |
+| 🇺🇸 English | ✅ Full Support |
+| 🇯🇵 日本語 | ✅ 完全対応 |
+
+---
+
+## ☕️ 支持作者
+
+如果 WallHaven 让你的桌面变得更好看了，可以请作者喝杯咖啡：
 
 <p align="center">
   <img src="reward.jpg" width="280" />
 </p>
 
----
-
-## 开源协议 / License / オープンソースライセンス
-
-MIT License - 详见 [LICENSE](LICENSE) 文件 / See [LICENSE](LICENSE) file / [LICENSE](LICENSE) ファイルを参照
+或者，**点个 Star ⭐️** 也是很大的支持！
 
 ---
 
-## 免责声明 / Disclaimer / 免责事項
+## 📄 开源协议
 
-**🇨🇳 中文：**
+[MIT License](LICENSE) - 自由使用，欢迎贡献代码！
 
-本应用仅作为壁纸聚合工具，所有壁纸版权归原网站及原作者所有。应用本身不存储、托管或分发任何壁纸内容。
-- [Wallhaven](https://wallhaven.cc) 壁纸通过其官方 API 获取
-- [MotionBGs](https://motionbgs.com) 内容由用户自行配置访问
-- 请遵守各网站的服务条款，仅限个人使用，不得用于商业目的
-- 如有侵权，请联系相关网站移除内容
+---
 
-**🇺🇸 English:**
+## ⚠️ 免责声明
 
-This app is solely a wallpaper aggregation tool. All wallpaper copyrights belong to their respective owners. The app does not store, host, or distribute any wallpaper content.
-- [Wallhaven](https://wallhaven.cc) wallpapers are fetched via official API
-- [MotionBGs](https://motionbgs.com) content is user-configured
-- Please comply with each website's Terms of Service
-- For personal use only, not for commercial purposes
+WallHaven 只是一个**壁纸聚合工具**，本身不存储任何壁纸内容：
 
-**🇯🇵 日本語：**
+- [Wallhaven](https://wallhaven.cc) 壁纸通过官方 API 获取
+- [MotionBGs](https://motionbgs.com) 内容由用户自行配置
+- 所有壁纸版权归原网站及原作者所有
+- 请遵守各网站服务条款，仅限个人使用
 
-このアプリは壁纸の集約ツールです。すべての壁纸の著作権は各所有者に帰属します。
-- [Wallhaven](https://wallhaven.cc) の壁纸は公式 API 経由で取得
-- [MotionBGs](https://motionbgs.com) のコンテンツはユーザーが設定
-- 各ウェブサイトの利用規約を遵守してください
-- 個人利用のみ，商業利用は禁止
+---
+
+<p align="center">
+  <samp>
+    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+  </samp>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jipika/WallHaven/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WallHaven?style=social" alt="Stars">
+  </a>
+</p>

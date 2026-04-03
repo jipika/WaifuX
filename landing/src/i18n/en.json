@@ -1,0 +1,84 @@
+{
+  "nav": {
+    "features": "Features",
+    "sources": "Sources",
+    "download": "Download"
+  },
+  "hero": {
+    "badge": "NEW",
+    "title": "Stunning Wallpapers\nfor Your Desktop",
+    "downloadBtn": "Free Download",
+    "sourceBtn": "View Source"
+  },
+  "features": {
+    "sectionTitle": "FEATURES",
+    "sectionNumber": "01",
+    "mainTitle": "Powerful\nWallpaper Manager",
+    "subtitle": "Multiple wallpaper sources, one-click switching, auto-sync rules",
+    "cards": {
+      "search": {
+        "title": "Smart Search",
+        "desc": "Search by keywords, tags, categories - find your perfect wallpaper fast"
+      },
+      "dynamic": {
+        "title": "Live Wallpapers",
+        "desc": "MotionBGs video wallpaper support - bring your desktop to life"
+      },
+      "anime": {
+        "title": "Anime Parser",
+        "desc": "Built-in anime video parsing - because your desktop deserves to be weeby too"
+      },
+      "sync": {
+        "title": "Auto Sync",
+        "desc": "GitHub rules auto-sync - we adapt when sources change"
+      },
+      "download": {
+        "title": "One-Click Download",
+        "desc": "Save HD wallpapers instantly - 4K, 8K, we got 'em all"
+      },
+      "custom": {
+        "title": "Custom Rules",
+        "desc": "Define your own parsing rules - your wallpapers, your way"
+      }
+    }
+  },
+  "sources": {
+    "sectionTitle": "SOURCES",
+    "mainTitle": "Rich Content Sources",
+    "subtitle": "Multiple wallpaper sources with continuous updates",
+    "wallhaven": {
+      "name": "WALLHAVEN",
+      "desc": "Massive HD static wallpaper library from landscapes to abstract art",
+      "tags": ["4K", "Rich Categories"]
+    },
+    "motionbgs": {
+      "name": "MOTIONBGS",
+      "desc": "Curated live video wallpapers - never a dull desktop moment",
+      "tags": ["Live", "Video"]
+    },
+    "anime": {
+      "name": "Anime Videos",
+      "desc": "Multiple anime source parsing - weeb wallpapers on demand",
+      "tags": ["Anime", "Multi-Source"]
+    }
+  },
+  "cta": {
+    "title": "Start Exploring",
+    "subtitle": "Download WallHaven for free and give your macOS desktop a fresh new look",
+    "downloadBtn": "Download Latest",
+    "githubBtn": "STAR ON GITHUB"
+  },
+  "footer": {
+    "description": "macOS Wallpaper App\nSupports WallHaven, MotionBGs & Anime",
+    "links": "LINKS",
+    "github": "GitHub",
+    "rules": "Rules Repo",
+    "info": "INFO",
+    "copyright": "© 2026 WallHaven\nOpen Source under MIT"
+  },
+  "language": {
+    "zh": "中文",
+    "en": "English",
+    "ja": "日本語"
+  }
+}

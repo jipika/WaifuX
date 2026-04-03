@@ -1,0 +1,70 @@
+.language-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.language-icon {
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+.language-buttons {
+  display: flex;
+  gap: 2px;
+}
+
+.language-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 12px;
+  transition: all 0.2s ease;
+}
+
+.language-btn:hover {
+  color: white;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.language-btn.active {
+  color: white;
+  background: rgba(99, 102, 241, 0.5);
+}
+
+.language-flag {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.language-label {
+  font-size: 11px;
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+  .language-switcher {
+    padding: 3px 6px;
+  }
+
+  .language-btn {
+    padding: 3px 6px;
+  }
+
+  .language-label {
+    display: none;
+  }
+}

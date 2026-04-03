@@ -1,5 +1,8 @@
 import Beams from './components/Beams/Beams';
-import { Download, Search, Sparkles, Film, RefreshCw, Settings, Mountain, Play, Tv, Ghost } from 'lucide-react';
+import { Download, Search, Sparkles, Film, RefreshCw, Settings, Mountain, Play, Tv, Heart } from 'lucide-react';
+import { useLanguage } from './contexts/LanguageContext';
+import { LanguageSwitcher } from './components/LanguageSwitcher';
+import './App.css';
 
 const GithubIcon = ({ className }: { className?: string }) => (
   <svg className={className} viewBox="0 0 24 24" fill="currentColor">
@@ -7,12 +10,12 @@ const GithubIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
-import './App.css';
-
 function App() {
+  const { t } = useLanguage();
+
   return (
     <div className="app">
-      <Beams 
+      <Beams
         beamWidth={2}
         beamHeight={20}
         beamNumber={15}
@@ -24,102 +27,149 @@ function App() {
 
       <div className="relative w-full h-full overflow-hidden pointer-events-none">
         <div className="pointer-events-none">
-          {/* Navbar - following the demo structure */}
-          <div className="top-[2em] left-0 z-10 absolute flex justify-between items-center glass-nav mx-auto my-0 px-6 py-4 border border-white/20 rounded-[50px] w-[90%] md:w-[60%]">
-            <img src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%236366f1' width='100' height='100' rx='20'/><text y='.9em' font-size='60' x='50%' text-anchor='middle' fill='white' font-family='system-ui' font-weight='bold'>W</text></svg>" alt="WallHaven" className="h-[24px]" />
-            <div className="hidden md:flex items-center gap-6 font-semibold">
-              <a href="#features" className="text-[14px] text-white hover:text-gray-200 transition">功能特性</a>
-              <a href="#sources" className="text-[14px] text-white hover:text-gray-200 transition">壁纸来源</a>
+          {/* Navbar */}
+          <nav className="top-[2em] left-0 z-10 absolute flex justify-between items-center glass-nav mx-auto my-0 px-6 py-4 border border-white/20 rounded-[50px] w-[90%] md:w-[70%] max-w-4xl">
+            <div className="flex items-center gap-3">
+              <img src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%236366f1' width='100' height='100' rx='20'/><text y='.9em' font-size='60' x='50%' text-anchor='middle' fill='white' font-family='system-ui' font-weight='bold'>W</text></svg>" alt="WallHaven" className="h-[24px]" />
             </div>
-            <a href="#download" className="text-[14px] text-white hover:text-gray-200 transition">下载</a>
-          </div>
 
-          {/* Center Content - matching demo structure */}
-          <div className="top-0 left-0 z-10 absolute flex flex-col justify-center items-center w-full h-full pointer-events-none">
-            <div className="flex justify-center items-center glass-tag px-4 border border-white/20 rounded-full w-auto h-[34px] font-medium text-white text-[12px] md:text-[14px]">
-              <Sparkles className="w-3 h-3 mr-1" />
-              <span>NEW</span>
-            </div>
-            
-            <h1 className="mt-8 max-w-[18ch] font-bold text-white text-center leading-[1.2] tracking-[-2px] text-shadow" style="font-size: clamp(2rem, 4vw, 2.6rem); text-shadow: 0 0 16px rgba(0,0,0,0.5);">
-              精美壁纸，<br />为你的桌面而生
-            </h1>
-            
-            <div className="flex items-center gap-4 mt-8">
-              <a href="https://github.com/jipika/WallHaven/releases/latest" target="_blank" className="demo-btn-primary">
-                免费下载
+            <div className="hidden md:flex items-center gap-8 font-semibold">
+              <a href="#features" className="nav-link text-[14px] text-white/80 hover:text-white transition">
+                {t.nav.features}
               </a>
-              <a href="https://github.com/jipika/WallHaven" target="_blank" className="demo-btn-secondary">
-                查看源码
+              <a href="#sources" className="nav-link text-[14px] text-white/80 hover:text-white transition">
+                {t.nav.sources}
+              </a>
+              <a href="#download" className="nav-link text-[14px] text-white/80 hover:text-white transition">
+                {t.nav.download}
               </a>
             </div>
-          </div>
+
+            <div className="flex items-center gap-4">
+              <LanguageSwitcher />
+              <a
+                href="https://github.com/jipika/WallHaven"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hidden sm:flex items-center justify-center w-9 h-9 rounded-full bg-white/5 hover:bg-white/10 transition"
+              >
+                <GithubIcon className="w-[18px] h-[18px] text-white/80" />
+              </a>
+            </div>
+          </nav>
+
+          {/* Hero Section */}
+          <section className="hero-section">
+            <div className="hero-content">
+              <div className="flex justify-center items-center glass-tag px-4 border border-white/20 rounded-full w-auto h-[34px] font-medium text-white text-[12px] md:text-[14px] animate-fade-in">
+                <Sparkles className="w-3 h-3 mr-2" />
+                <span>{t.hero.badge}</span>
+              </div>
+
+              <h1 className="hero-title">
+                {t.hero.title.split('\n').map((line, i) => (
+                  <span key={i}>
+                    {line}
+                    {i < t.hero.title.split('\n').length - 1 && <br />}
+                  </span>
+                ))}
+              </h1>
+
+              <p className="hero-subtitle">
+                macOS 壁纸应用 · 支持 WallHaven、MotionBGs 和动漫视频
+              </p>
+
+              <div className="hero-buttons">
+                <a
+                  href="https://github.com/jipika/WallHaven/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-primary"
+                >
+                  <Download className="w-5 h-5" />
+                  {t.hero.downloadBtn}
+                </a>
+                <a
+                  href="https://github.com/jipika/WallHaven"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-secondary"
+                >
+                  <GithubIcon className="w-5 h-5" />
+                  {t.hero.sourceBtn}
+                </a>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
 
       {/* Features Section */}
       <section id="features" className="section">
         <div className="container mx-auto px-6">
-          <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between mb-20">
-            <div>
-              <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 glass rounded-lg flex items-center justify-center">
-                  <span className="font-bold text-indigo-500">01</span>
-                </div>
-                <span className="text-sm tracking-widest text-gray-500">功能特性</span>
-              </div>
-              <h2 className="text-5xl md:text-6xl font-bold text-white mb-4">强大的<br />壁纸管理</h2>
+          <div className="section-header">
+            <div className="section-badge">
+              <div className="section-number">{t.features.sectionNumber}</div>
+              <span className="section-label">{t.features.sectionTitle}</span>
             </div>
-            <p className="text-gray-400 max-w-md mt-4 lg:mt-0 text-lg">集成多种壁纸来源，一键切换，自动同步规则</p>
+            <h2 className="section-title">
+              {t.features.mainTitle.split('\n').map((line, i) => (
+                <span key={i}>
+                  {line}
+                  {i < t.features.mainTitle.split('\n').length - 1 && <br />}
+                </span>
+              ))}
+            </h2>
+            <p className="section-subtitle">{t.features.subtitle}</p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-indigo-500/20 rounded-xl flex items-center justify-center mb-6">
-                <Search className="w-7 h-7 text-indigo-500" />
+          <div className="features-grid">
+            <div className="feature-card">
+              <div className="feature-icon bg-indigo-500/20">
+                <Search className="w-7 h-7 text-indigo-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">智能搜索</h3>
-              <p className="text-gray-400">支持关键词、标签、分类等多种搜索方式</p>
+              <h3 className="feature-title">{t.features.cards.search.title}</h3>
+              <p className="feature-desc">{t.features.cards.search.desc}</p>
             </div>
 
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-cyan-500/20 rounded-xl flex items-center justify-center mb-6">
+            <div className="feature-card">
+              <div className="feature-icon bg-cyan-500/20">
                 <Sparkles className="w-7 h-7 text-cyan-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">动态壁纸</h3>
-              <p className="text-gray-400">支持 MotionBGs 动态视频壁纸</p>
+              <h3 className="feature-title">{t.features.cards.dynamic.title}</h3>
+              <p className="feature-desc">{t.features.cards.dynamic.desc}</p>
             </div>
 
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-indigo-500/20 rounded-xl flex items-center justify-center mb-6">
-                <Film className="w-7 h-7 text-indigo-500" />
+            <div className="feature-card">
+              <div className="feature-icon bg-pink-500/20">
+                <Film className="w-7 h-7 text-pink-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">动漫解析</h3>
-              <p className="text-gray-400">内置动漫视频解析功能</p>
+              <h3 className="feature-title">{t.features.cards.anime.title}</h3>
+              <p className="feature-desc">{t.features.cards.anime.desc}</p>
             </div>
 
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-cyan-500/20 rounded-xl flex items-center justify-center mb-6">
-                <RefreshCw className="w-7 h-7 text-cyan-400" />
+            <div className="feature-card">
+              <div className="feature-icon bg-emerald-500/20">
+                <RefreshCw className="w-7 h-7 text-emerald-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">自动同步</h3>
-              <p className="text-gray-400">GitHub 规则自动同步</p>
+              <h3 className="feature-title">{t.features.cards.sync.title}</h3>
+              <p className="feature-desc">{t.features.cards.sync.desc}</p>
             </div>
 
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-indigo-500/20 rounded-xl flex items-center justify-center mb-6">
-                <Download className="w-7 h-7 text-indigo-500" />
+            <div className="feature-card">
+              <div className="feature-icon bg-amber-500/20">
+                <Download className="w-7 h-7 text-amber-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">一键下载</h3>
-              <p className="text-gray-400">高清壁纸一键保存</p>
+              <h3 className="feature-title">{t.features.cards.download.title}</h3>
+              <p className="feature-desc">{t.features.cards.download.desc}</p>
             </div>
 
-            <div className="glass-card p-8 rounded-2xl">
-              <div className="w-14 h-14 bg-cyan-500/20 rounded-xl flex items-center justify-center mb-6">
-                <Settings className="w-7 h-7 text-cyan-400" />
+            <div className="feature-card">
+              <div className="feature-icon bg-violet-500/20">
+                <Settings className="w-7 h-7 text-violet-400" />
               </div>
-              <h3 className="text-xl font-bold mb-3 text-white">自定义规则</h3>
-              <p className="text-gray-400">支持自定义解析规则</p>
+              <h3 className="feature-title">{t.features.cards.custom.title}</h3>
+              <p className="feature-desc">{t.features.cards.custom.desc}</p>
             </div>
           </div>
         </div>
@@ -128,50 +178,52 @@ function App() {
       {/* Sources Section */}
       <section id="sources" className="section">
         <div className="container mx-auto px-6">
-          <div className="text-center mb-20">
-            <div className="flex items-center justify-center gap-4 mb-6">
-              <div className="w-12 h-px bg-gradient-to-r from-transparent to-indigo-500"></div>
-              <span className="text-sm tracking-widest text-gray-500">壁纸来源</span>
-              <div className="w-12 h-px bg-gradient-to-l from-transparent to-indigo-500"></div>
+          <div className="section-header-center">
+            <div className="section-badge-center">
+              <span className="section-label">{t.sources.sectionTitle}</span>
             </div>
-            <h2 className="text-5xl md:text-6xl font-bold text-white mb-6">丰富的内容来源</h2>
-            <p className="text-gray-400 text-lg max-w-2xl mx-auto">支持多种壁纸源，持续更新扩展</p>
+            <h2 className="section-title">{t.sources.mainTitle}</h2>
+            <p className="section-subtitle">{t.sources.subtitle}</p>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="source-card p-10 rounded-2xl">
-              <div className="w-16 h-16 glass rounded-xl flex items-center justify-center mb-6">
-                <Mountain className="w-8 h-8 text-indigo-500" />
+          <div className="sources-grid">
+            <div className="source-card">
+              <div className="source-icon">
+                <Mountain className="w-8 h-8 text-indigo-400" />
               </div>
-              <h3 className="text-2xl font-bold text-white mb-3">WALLHAVEN</h3>
-              <p className="text-gray-400 leading-relaxed mb-6">海量高清静态壁纸库</p>
-              <div className="flex flex-wrap gap-2">
-                <span className="tag">4K</span>
-                <span className="tag">分类丰富</span>
+              <h3 className="source-name">{t.sources.wallhaven.name}</h3>
+              <p className="source-desc">{t.sources.wallhaven.desc}</p>
+              <div className="source-tags">
+                {t.sources.wallhaven.tags.map((tag, i) => (
+                  <span key={i} className="tag">{tag}</span>
+                ))}
               </div>
             </div>
 
-            <div className="source-card p-10 rounded-2xl">
-              <div className="w-16 h-16 glass rounded-xl flex items-center justify-center mb-6">
+            <div className="source-card featured">
+              <div className="source-badge">HOT</div>
+              <div className="source-icon">
                 <Play className="w-8 h-8 text-cyan-400" />
               </div>
-              <h3 className="text-2xl font-bold text-white mb-3">MOTIONBGS</h3>
-              <p className="text-gray-400 leading-relaxed mb-6">精选动态视频壁纸</p>
-              <div className="flex flex-wrap gap-2">
-                <span className="tag">动态</span>
-                <span className="tag">视频</span>
+              <h3 className="source-name">{t.sources.motionbgs.name}</h3>
+              <p className="source-desc">{t.sources.motionbgs.desc}</p>
+              <div className="source-tags">
+                {t.sources.motionbgs.tags.map((tag, i) => (
+                  <span key={i} className="tag">{tag}</span>
+                ))}
               </div>
             </div>
 
-            <div className="source-card p-10 rounded-2xl">
-              <div className="w-16 h-16 glass rounded-xl flex items-center justify-center mb-6">
-                <Tv className="w-8 h-8 text-indigo-500" />
+            <div className="source-card">
+              <div className="source-icon">
+                <Tv className="w-8 h-8 text-pink-400" />
               </div>
-              <h3 className="text-2xl font-bold text-white mb-3">动漫视频</h3>
-              <p className="text-gray-400 leading-relaxed mb-6">多种动漫源解析</p>
-              <div className="flex flex-wrap gap-2">
-                <span className="tag">动漫</span>
-                <span className="tag">多源</span>
+              <h3 className="source-name">{t.sources.anime.name}</h3>
+              <p className="source-desc">{t.sources.anime.desc}</p>
+              <div className="source-tags">
+                {t.sources.anime.tags.map((tag, i) => (
+                  <span key={i} className="tag">{tag}</span>
+                ))}
               </div>
             </div>
           </div>
@@ -179,24 +231,31 @@ function App() {
       </section>
 
       {/* CTA Section */}
-      <section id="download" className="section cta-section">
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-500/10 rounded-full blur-[100px]"></div>
-        </div>
-
+      <section id="download" className="cta-section">
+        <div className="cta-glow" />
         <div className="container mx-auto px-6 relative z-10">
-          <div className="max-w-4xl mx-auto text-center">
-            <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold text-white mb-8">开始探索</h2>
-            <p className="text-gray-400 text-xl mb-12 max-w-2xl mx-auto">免费下载 WallHaven，让你的 macOS 桌面焕然一新</p>
+          <div className="cta-content">
+            <h2 className="cta-title">{t.cta.title}</h2>
+            <p className="cta-subtitle">{t.cta.subtitle}</p>
 
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
-              <a href="https://github.com/jipika/WallHaven/releases" target="_blank" className="btn-primary text-lg px-10 py-5 glow-purple">
+            <div className="cta-buttons">
+              <a
+                href="https://github.com/jipika/WallHaven/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-primary btn-large"
+              >
                 <Download className="w-6 h-6" />
-                下载最新版本
+                {t.cta.downloadBtn}
               </a>
-              <a href="https://github.com/jipika/WallHaven" target="_blank" className="btn-secondary text-lg px-10 py-5">
+              <a
+                href="https://github.com/jipika/WallHaven"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-secondary btn-large"
+              >
                 <GithubIcon className="w-6 h-6" />
-                STAR ON GITHUB
+                {t.cta.githubBtn}
               </a>
             </div>
           </div>
@@ -206,35 +265,53 @@ function App() {
       {/* Footer */}
       <footer className="footer">
         <div className="container mx-auto px-6">
-          <div className="grid grid-cols-12 gap-8">
-            <div className="col-span-12 lg:col-span-4">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-400 rounded-lg flex items-center justify-center">
+          <div className="footer-grid">
+            <div className="footer-brand">
+              <div className="footer-logo">
+                <div className="footer-logo-icon">
                   <span className="font-bold text-white text-lg">W</span>
                 </div>
-                <span className="font-bold text-xl">WALLHAVEN</span>
+                <span className="footer-logo-text">WALLHAVEN</span>
               </div>
-              <p className="text-gray-500 text-sm leading-relaxed">
-                macOS 壁纸应用<br />
-                支持 WallHaven、MotionBGs 和动漫视频
+              <p className="footer-desc">
+                {t.footer.description.split('\n').map((line, i) => (
+                  <span key={i}>
+                    {line}
+                    {i < t.footer.description.split('\n').length - 1 && <br />}
+                  </span>
+                ))}
               </p>
             </div>
 
-            <div className="col-span-12 lg:col-span-4 lg:col-start-6 mt-12 lg:mt-0">
-              <h4 className="font-bold mb-6 text-white">LINKS</h4>
-              <div className="space-y-3">
-                <a href="https://github.com/jipika/WallHaven" target="_blank" className="block text-gray-500 hover:text-white transition-colors">GitHub</a>
-                <a href="https://github.com/jipika/WallHaven-Profiles" target="_blank" className="block text-gray-500 hover:text-white transition-colors">规则仓库</a>
+            <div className="footer-links">
+              <h4 className="footer-heading">{t.footer.links}</h4>
+              <div className="footer-link-list">
+                <a href="https://github.com/jipika/WallHaven" target="_blank" rel="noopener noreferrer" className="footer-link">
+                  {t.footer.github}
+                </a>
+                <a href="https://github.com/jipika/WallHaven-Profiles" target="_blank" rel="noopener noreferrer" className="footer-link">
+                  {t.footer.rules}
+                </a>
               </div>
             </div>
 
-            <div className="col-span-12 lg:col-span-2 lg:col-start-10 mt-12 lg:mt-0">
-              <h4 className="font-bold mb-6 text-white">INFO</h4>
-              <p className="text-gray-500 text-sm">
-                © 2026 WallHaven<br />
-                MIT 协议开源
+            <div className="footer-info">
+              <h4 className="footer-heading">{t.footer.info}</h4>
+              <p className="footer-copyright">
+                {t.footer.copyright.split('\n').map((line, i) => (
+                  <span key={i}>
+                    {line}
+                    {i < t.footer.copyright.split('\n').length - 1 && <br />}
+                  </span>
+                ))}
               </p>
             </div>
+          </div>
+
+          <div className="footer-bottom">
+            <p className="footer-made-with">
+              Made with <Heart className="w-4 h-4 text-red-500 inline" fill="currentColor" /> by jipika
+            </p>
           </div>
         </div>
       </footer>

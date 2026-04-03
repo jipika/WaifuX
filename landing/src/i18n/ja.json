@@ -1,0 +1,84 @@
+{
+  "nav": {
+    "features": "機能",
+    "sources": "ソース",
+    "download": "ダウンロード"
+  },
+  "hero": {
+    "badge": "NEW",
+    "title": "美しい壁紙で\nデスクトップを彩る",
+    "downloadBtn": "無料ダウンロード",
+    "sourceBtn": "ソースを見る"
+  },
+  "features": {
+    "sectionTitle": "機能",
+    "sectionNumber": "01",
+    "mainTitle": "強力な\n壁紙マネージャー",
+    "subtitle": "複数の壁紙ソース、ワンクリック切り替え、自動同期",
+    "cards": {
+      "search": {
+        "title": "スマート検索",
+        "desc": "キーワード、タグ、カテゴリーで検索。理想の壁紙を素早く見つけよう"
+      },
+      "dynamic": {
+        "title": "ライブ壁紙",
+        "desc": "MotionBGs 動画壁紙対応。デスクトップを動きのあるものに"
+      },
+      "anime": {
+        "title": "アニメ解析",
+        "desc": "アニメ動画解析機能内蔵。オタクのデスクトップも二次元に"
+      },
+      "sync": {
+        "title": "自動同期",
+        "desc": "GitHub ルール自動同期。ソースが変わっても自動で対応"
+      },
+      "download": {
+        "title": "ワンクリックDL",
+        "desc": "高画質壁紙を即保存。4K、8K も対応"
+      },
+      "custom": {
+        "title": "カスタムルール",
+        "desc": "独自の解析ルールを定義。あなたの壁紙、あなたのルール"
+      }
+    }
+  },
+  "sources": {
+    "sectionTitle": "ソース",
+    "mainTitle": "豊富なコンテンツ",
+    "subtitle": "複数の壁紙ソースを継続的に更新",
+    "wallhaven": {
+      "name": "WALLHAVEN",
+      "desc": "風景から抽象アートまで、膨大な高画質壁紙ライブラリ",
+      "tags": ["4K", "豊富なカテゴリー"]
+    },
+    "motionbgs": {
+      "name": "MOTIONBGS",
+      "desc": "厳選された動画壁紙。退屈なデスクトップとはおさらば",
+      "tags": ["動画", "ライブ"]
+    },
+    "anime": {
+      "name": "アニメ動画",
+      "desc": "複数のアニメソース解析。いつでも二次元壁紙",
+      "tags": ["アニメ", "マルチソース"]
+    }
+  },
+  "cta": {
+    "title": "探索を始める",
+    "subtitle": "WallHaven を無料でダウンロードして、macOS デスクトップを一新",
+    "downloadBtn": "最新版をダウンロード",
+    "githubBtn": "GITHUB で STAR"
+  },
+  "footer": {
+    "description": "macOS 壁紙アプリ\nWallHaven、MotionBGs、アニメ対応",
+    "links": "リンク",
+    "github": "GitHub",
+    "rules": "ルールリポジトリ",
+    "info": "情報",
+    "copyright": "© 2026 WallHaven\nMIT ライセンスで公開"
+  },
+  "language": {
+    "zh": "中文",
+    "en": "English",
+    "ja": "日本語"
+  }
+}
