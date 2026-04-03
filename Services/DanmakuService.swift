@@ -105,7 +105,7 @@ class DanmakuService {
     ///   - withRelated: 是否包含相关视频的弹幕
     /// - Returns: 弹幕列表
     func getDanmaku(episodeId: Int, withRelated: Bool = true) async throws -> [Danmaku] {
-        var urlString = "\(baseURL)/comment/\(episodeId)?withRelated=\(withRelated)"
+        let urlString = "\(baseURL)/comment/\(episodeId)?withRelated=\(withRelated)"
 
         guard let url = URL(string: urlString) else {
             throw DanmakuError.invalidURL

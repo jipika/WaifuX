@@ -1,5 +1,26 @@
 import SwiftUI
 
+// MARK: - 控制栏定时器管理器
+final class ControlsTimerManager: ObservableObject {
+    var timer: Timer?
+    
+    deinit {
+        timer?.invalidate()
+    }
+    
+    func invalidate() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    func schedule(interval: TimeInterval, action: @escaping () -> Void) {
+        invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
+            action()
+        }
+    }
+}
+
 // MARK: - 全屏壁纸预览视图 - macOS 26 Liquid Glass 风格
 struct FullScreenWallpaperView: View {
     let initialWallpaper: Wallpaper
@@ -12,9 +33,8 @@ struct FullScreenWallpaperView: View {
     @State private var isLoading = true
     @State private var loadError: Error?
     @State private var imageScale: CGFloat = 1.0
-    @State private var lastTapTime: Date = Date()
     @State private var showControls = true
-    @State private var controlsTimer: Timer?
+    @StateObject private var controlsTimerManager = ControlsTimerManager()
 
     // 图片内存缓存
     @State private var cachedImage: NSImage?
@@ -22,7 +42,6 @@ struct FullScreenWallpaperView: View {
     // MARK: - 下一张弹窗相关
     @StateObject private var nextItemDataSource = NextItemDataSource()
     @State private var currentWallpaperIndex: Int = 0
-    @State private var viewAppearTime: Date = Date()
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
@@ -297,9 +316,9 @@ struct FullScreenWallpaperView: View {
     // MARK: - 方法
 
     private func setupWindow() {
-        // 进入全屏模式
+        // 进入全屏模式 - 使用 keyWindow 或 mainWindow 获取当前活动窗口
         DispatchQueue.main.async {
-            if let window = NSApp.windows.first(where: { $0.contentView != nil }) {
+            if let window = NSApp.keyWindow ?? NSApp.mainWindow {
                 window.setFrame(
                     window.screen?.frame ?? NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1200, height: 800),
                     display: true
@@ -311,12 +330,11 @@ struct FullScreenWallpaperView: View {
     }
 
     private func cleanup() {
-        controlsTimer?.invalidate()
-        controlsTimer = nil
+        controlsTimerManager.invalidate()
 
-        // 恢复窗口级别
+        // 恢复窗口级别 - 使用 keyWindow 或 mainWindow 获取当前活动窗口
         DispatchQueue.main.async {
-            if let window = NSApp.windows.first(where: { $0.contentView != nil }) {
+            if let window = NSApp.keyWindow ?? NSApp.mainWindow {
                 window.level = .normal
             }
         }
@@ -329,7 +347,8 @@ struct FullScreenWallpaperView: View {
     }
 
     private func toggleFullScreen() {
-        if let window = NSApp.windows.first(where: { $0.contentView != nil }) {
+        // 使用 keyWindow 或 mainWindow 获取当前活动窗口
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
             if isFullScreen {
                 window.setFrame(
                     window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800),
@@ -354,13 +373,12 @@ struct FullScreenWallpaperView: View {
         if showControls {
             startControlsTimer()
         } else {
-            controlsTimer?.invalidate()
+            controlsTimerManager.invalidate()
         }
     }
 
     private func startControlsTimer() {
-        controlsTimer?.invalidate()
-        controlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
+        controlsTimerManager.schedule(interval: 3.0) {
             withAnimation(.easeInOut(duration: 0.2)) {
                 showControls = false
             }
@@ -449,9 +467,11 @@ struct FullScreenWallpaperView: View {
         guard let url = URL(string: wallpaper.url) else { return }
         let picker = NSSharingServicePicker(items: [url])
         let rect = NSRect(x: 0, y: 0, width: 44, height: 44)
+        // 使用当前 keyWindow 或 mainWindow 而不是任意窗口
+        let targetView = NSApp.keyWindow?.contentView ?? NSApp.mainWindow?.contentView ?? NSView()
         picker.show(
             relativeTo: rect,
-            of: NSApp.windows.first?.contentView ?? NSView(),
+            of: targetView,
             preferredEdge: .minY
         )
     }

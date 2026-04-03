@@ -1,6 +1,5 @@
 import Foundation
 import SwiftSoup
-import Kanna
 
 // MARK: - 动漫解析服务
 
@@ -74,25 +73,23 @@ actor AnimeParser {
 
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
-        // 检测验证码
+        // 检测验证码 - 统一使用 WebView 验证方案
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
-                print("[AnimeParser] ⚠️ 检测到验证码")
+                print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
         }
 
         if detectCommonCaptcha(in: html) {
-            print("[AnimeParser] ⚠️ 检测到验证码（关键词）")
+            print("[AnimeParser] ⚠️ 检测到验证码（关键词），需要使用 WebView 验证")
             throw AnimeParserError.captchaRequired
         }
 
-        // 判断使用 XPath 还是 CSS 选择器
-        if rule.api != "1", let detailXPath = rule.xpath?.detail {
-            // 使用 XPath 解析 (Kazumi v2 规则)
+        // chapterRoads + chapterResult 为 XPath 时应用 Kanna 解析（与 api 字段无关，兼容 Kazumi 官方 api "1" 规则）
+        if shouldUseXPathChapterRoads(rule), let detailXPath = rule.xpath?.detail {
             return try await parseChapterRoadsWithXPath(html: html, url: url, rule: rule, detailXPath: detailXPath)
         } else {
-            // 使用 CSS 选择器解析 (v1 规则)
             return try await parseChapterRoadsWithCSS(html: html, url: url, rule: rule)
         }
     }
@@ -171,39 +168,55 @@ actor AnimeParser {
     }
 
     /// 使用 CSS 选择器解析剧集列表 (v1 规则)
+    /// 智能处理两种模式：
+    /// 1. episodeList 直接指向剧集链接（如 "a[href*='/play/']"）
+    /// 2. episodeList 指向播放列表容器（如 ".playlist"），每个容器内有多个剧集
     private func parseChapterRoadsWithCSS(html: String, url: String, rule: AnimeRule) async throws -> [AnimeDetail] {
         let document = try SwiftSoup.parse(html)
-        let roadElements = try document.select(rule.episodeList ?? "")
-        print("[AnimeParser] 使用 CSS 选择器解析，找到 \(roadElements.count) 个播放列表")
-
+        
+        guard let episodeListSelector = rule.episodeList, !episodeListSelector.isEmpty else {
+            throw AnimeParserError.parseError("缺少 episodeList 选择器")
+        }
+        
+        // 第一步：获取所有匹配 episodeList 的元素
+        let elements = try document.select(episodeListSelector)
+        print("[AnimeParser] 使用 CSS 选择器解析，找到 \(elements.count) 个元素")
+        
+        // 第二步：智能判断选择器类型
+        // 如果所有匹配的元素都是 <a> 标签，则直接将其作为剧集列表
+        let isDirectEpisodeLinks = elements.array().allSatisfy { element in
+            element.tagName().lowercased() == "a"
+        }
+        
         var details: [AnimeDetail] = []
-        var count = 1
-
-        for element in roadElements {
-            let roadName = (try? element.text().trimmingCharacters(in: .whitespacesAndNewlines)) ?? "播放列表\(count)"
-
-            let episodes: [AnimeDetail.AnimeEpisodeItem] = (try? element.select("a").array().compactMap { epElement in
-                guard let href = try? epElement.attr("href"), !href.isEmpty,
-                      let name = try? epElement.text().trimmingCharacters(in: .whitespacesAndNewlines) else {
-                    return nil
-                }
+        
+        if isDirectEpisodeLinks {
+            // 模式1：episodeList 直接指向剧集链接
+            print("[AnimeParser] 检测到直接剧集链接模式")
+            
+            let episodes: [AnimeDetail.AnimeEpisodeItem] = elements.array().enumerated().compactMap { (index, element) in
+                guard let href = try? element.attr("href"), !href.isEmpty else { return nil }
+                let name = (try? element.text().trimmingCharacters(in: .whitespacesAndNewlines)) 
+                    ?? "第\(index + 1)集"
+                
                 var finalURL = href
                 if !finalURL.hasPrefix("http") {
                     finalURL = rule.baseURL + (finalURL.hasPrefix("/") ? "" : "/") + finalURL
                 }
+                
                 return AnimeDetail.AnimeEpisodeItem(
                     id: finalURL,
                     name: name,
-                    episodeNumber: count,
+                    episodeNumber: index + 1,
                     url: finalURL,
                     thumbnailURL: nil
                 )
-            }) ?? []
-
+            }
+            
             if !episodes.isEmpty {
                 details.append(AnimeDetail(
                     id: url,
-                    title: roadName,
+                    title: "播放列表",
                     coverURL: nil,
                     description: nil,
                     status: nil,
@@ -211,12 +224,75 @@ actor AnimeParser {
                     episodes: episodes,
                     sourceId: rule.id
                 ))
-                count += 1
+            }
+        } else {
+            // 模式2：episodeList 指向播放列表容器
+            print("[AnimeParser] 检测到播放列表容器模式")
+            
+            var roadCount = 1
+            for element in elements {
+                let roadName = (try? element.select(".title, h3, h4, .playlist-title").first()?.text().trimmingCharacters(in: .whitespacesAndNewlines)) 
+                    ?? "播放列表\(roadCount)"
+                
+                // 在容器内查找剧集链接
+                // 优先使用 episodeLink 选择器，否则查找所有 <a> 标签
+                let episodeElements: Elements
+                if let episodeLink = rule.episodeLink, !episodeLink.isEmpty {
+                    episodeElements = try element.select(episodeLink)
+                } else {
+                    episodeElements = try element.select("a")
+                }
+                
+                let episodes: [AnimeDetail.AnimeEpisodeItem] = episodeElements.array().enumerated().compactMap { (index, epElement) in
+                    guard let href = try? epElement.attr("href"), !href.isEmpty,
+                          let name = try? epElement.text().trimmingCharacters(in: .whitespacesAndNewlines) else {
+                        return nil
+                    }
+                    
+                    // 过滤无效链接（导航链接等）
+                    let lowerHref = href.lowercased()
+                    let invalidPaths = ["/", "/index.html", "/index.php", "#", "javascript:", "javascript:void(0)"]
+                    if invalidPaths.contains(lowerHref) || href.hasPrefix("#") {
+                        return nil
+                    }
+                    
+                    var finalURL = href
+                    if !finalURL.hasPrefix("http") {
+                        finalURL = rule.baseURL + (finalURL.hasPrefix("/") ? "" : "/") + finalURL
+                    }
+                    
+                    return AnimeDetail.AnimeEpisodeItem(
+                        id: finalURL,
+                        name: name,
+                        episodeNumber: index + 1,
+                        url: finalURL,
+                        thumbnailURL: nil
+                    )
+                }
+                
+                if !episodes.isEmpty {
+                    details.append(AnimeDetail(
+                        id: url + "#\(roadCount)",
+                        title: roadName,
+                        coverURL: nil,
+                        description: nil,
+                        status: nil,
+                        rating: nil,
+                        episodes: episodes,
+                        sourceId: rule.id
+                    ))
+                    roadCount += 1
+                }
             }
         }
 
         if details.isEmpty {
             throw AnimeParserError.noResult
+        }
+
+        print("[AnimeParser] 成功解析 \(details.count) 个播放列表")
+        for (index, detail) in details.enumerated() {
+            print("[AnimeParser]   [\(index + 1)] \(detail.title): \(detail.episodes.count) 集")
         }
 
         return details
@@ -233,10 +309,11 @@ actor AnimeParser {
 
         var url = rule.searchURL
 
-        // 处理 XPath 格式 (API v2)
-        if rule.api != "1", let xpath = rule.xpath, let search = xpath.search {
+        // XPath 搜索 URL：许多 Kazumi 规则（如官方 AGE.json）在 JSON 里写 api 为 "1"，但 search 仍为 XPath，需与下方解析分支一致
+        if shouldUseXPathSearch(rule), let search = rule.xpath?.search,
+           !search.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             url = search.url
-            print("[AnimeParser] 使用 XPath 格式 URL: \(url)")
+            print("[AnimeParser] 使用 XPath 搜索 URL: \(url)")
         }
 
         // Kazumi 风格：对关键词进行百分编码
@@ -260,25 +337,24 @@ actor AnimeParser {
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
         // 检测验证码
+        // 检测验证码 - 统一使用 WebView 验证方案
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
-                print("[AnimeParser] ⚠️ 检测到验证码")
+                print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
         }
 
         if detectCommonCaptcha(in: html) {
-            print("[AnimeParser] ⚠️ 检测到验证码（关键词）")
+            print("[AnimeParser] ⚠️ 检测到验证码（关键词），需要使用 WebView 验证")
             throw AnimeParserError.captchaRequired
         }
 
-        // 根据 API 版本选择解析方式
+        // 根据规则字段选择解析方式（勿仅用 api：Kazumi 存在 api=="1" 且仍为 XPath 的规则）
         let results: [AnimeSearchResult]
-        if rule.api != "1", let search = rule.xpath?.search {
-            // 使用 XPath 解析 (v2 规则)
+        if shouldUseXPathSearch(rule), let search = rule.xpath?.search {
             results = try await parseSearchResultsWithXPath(html: html, rule: rule, search: search, searchQuery: query)
         } else {
-            // 使用 CSS 选择器解析 (v1 规则)
             results = try await parseSearchResults(html: html, rule: rule, searchQuery: query)
         }
 
@@ -356,6 +432,62 @@ actor AnimeParser {
             "请点击", "请滑动", "请勾选", "i'm not a robot"
         ]
         return captchaKeywords.contains { lowercased.contains($0) }
+    }
+    
+    /// 从 HTML 中提取验证码图片 URL（使用规则配置的选择器）
+    private func extractCaptchaImageURL(from html: String, config: AntiCrawlerConfig, baseURL: String) -> String? {
+        guard !config.captchaImage.isEmpty else { return nil }
+        
+        let document = try? SwiftSoup.parse(html)
+        guard let imgElement = try? document?.select(config.captchaImage).first() else {
+            return nil
+        }
+        
+        var imageURL = try? imgElement.attr("src")
+        if imageURL?.hasPrefix("//") == true {
+            imageURL = "https:" + imageURL!
+        } else if imageURL?.hasPrefix("/") == true {
+            imageURL = baseURL + imageURL!
+        }
+        
+        return imageURL
+    }
+    
+    /// 从 HTML 中提取验证码图片 URL（使用常见选择器）
+    private func extractCommonCaptchaImageURL(from html: String, baseURL: String) -> String? {
+        let document = try? SwiftSoup.parse(html)
+        
+        // 常见验证码图片选择器
+        let selectors = [
+            "img[src*='captcha']",
+            "img[src*='verify']",
+            "img[id*='captcha']",
+            "img[class*='captcha']",
+            ".captcha img",
+            "#captcha img",
+            "img[alt*='验证码']",
+            "img[alt*='captcha']"
+        ]
+        
+        for selector in selectors {
+            if let imgElement = try? document?.select(selector).first(),
+               var imageURL = try? imgElement.attr("src"), !imageURL.isEmpty {
+                
+                // 转换为绝对 URL
+                if imageURL.hasPrefix("//") {
+                    imageURL = "https:" + imageURL
+                } else if imageURL.hasPrefix("/") {
+                    imageURL = baseURL + imageURL
+                } else if !imageURL.hasPrefix("http") {
+                    imageURL = baseURL + "/" + imageURL
+                }
+                
+                print("[AnimeParser] 找到验证码图片: \(imageURL)")
+                return imageURL
+            }
+        }
+        
+        return nil
     }
 
     // MARK: - 获取详情
@@ -481,30 +613,78 @@ actor AnimeParser {
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = TimeInterval(rule.timeout ?? 30)
 
+        // 设置 headers
         if let headers = rule.headers {
             for (key, value) in headers {
                 request.setValue(value, forHTTPHeaderField: key)
             }
         }
 
+        // 设置 User-Agent
         if let userAgent = rule.userAgent, !userAgent.isEmpty {
             request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         }
 
-        let (data, _) = try await URLSession.shared.data(for: request)
-        return String(data: data, encoding: .utf8) ?? ""
+        // 设置 Referer（如果未指定）
+        if request.value(forHTTPHeaderField: "Referer") == nil {
+            request.setValue(rule.baseURL, forHTTPHeaderField: "Referer")
+        }
+
+        print("[AnimeParser] HTTP 请求: \(url)")
+        print("[AnimeParser] Headers: User-Agent=\(request.value(forHTTPHeaderField: "User-Agent") ?? "默认"), Referer=\(request.value(forHTTPHeaderField: "Referer") ?? "无")")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        // 检查 HTTP 状态码
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的响应"]))
+        }
+
+        print("[AnimeParser] HTTP 状态码: \(httpResponse.statusCode)")
+
+        // 检查状态码
+        switch httpResponse.statusCode {
+        case 200...299:
+            break // 成功
+        case 403:
+            // 可能是需要验证码
+            let html = String(data: data, encoding: .utf8) ?? ""
+            if detectCommonCaptcha(in: html) {
+                print("[AnimeParser] ⚠️ 403 响应中包含验证码标记，需要使用 WebView 验证")
+                throw AnimeParserError.captchaRequired
+            }
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 403, userInfo: [NSLocalizedDescriptionKey: "访问被拒绝 (403)"]))
+        case 404:
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 404, userInfo: [NSLocalizedDescriptionKey: "页面不存在 (404)"]))
+        case 500...599:
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "服务器错误 (\(httpResponse.statusCode))"]))
+        default:
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP 错误 (\(httpResponse.statusCode))"]))
+        }
+
+        let html = String(data: data, encoding: .utf8) ?? ""
+        print("[AnimeParser] 获取 HTML 成功: \(html.count) 字符")
+
+        // 检查返回的 HTML 是否包含常见的反爬/验证码标记
+        if html.contains("<title>403 Forbidden</title>") ||
+           html.contains("<title>Access Denied</title>") ||
+           html.contains("cf-browser-verification") ||
+           html.contains("__cf_chl_jschl_tk__") {
+            print("[AnimeParser] ⚠️ HTML 包含反爬标记，需要使用 WebView 验证")
+            throw AnimeParserError.captchaRequired
+        }
+
+        return html
     }
 
     // MARK: - 搜索结果解析
 
     private func parseSearchResults(html: String, rule: AnimeRule, searchQuery: String? = nil) async throws -> [AnimeSearchResult] {
-        // 如果 api == "2" 且有 xpath 配置，使用 XPath 解析
-        if rule.api != "1", let search = rule.xpath?.search {
-            print("[AnimeParser] 使用 XPath 解析搜索 (v2)")
+        if shouldUseXPathSearch(rule), let search = rule.xpath?.search {
+            print("[AnimeParser] 使用 XPath 解析搜索")
             return try await parseSearchResultsWithXPath(html: html, rule: rule, search: search, searchQuery: searchQuery)
         }
 
-        // 否则使用 CSS 选择器 (v1)
         print("[AnimeParser] 使用 CSS 选择器解析 (v1)")
         return try parseSearchResultsV1(html: html, rule: rule, searchQuery: searchQuery)
     }
@@ -523,7 +703,7 @@ actor AnimeParser {
         // 无效标题列表（导航、页脚等常见非内容链接）
         let invalidTitles = ["首页", "主页", "home", "上一页", "下一页", "尾页", "关于我们", "联系我们", "帮助", "登录", "注册"]
         // 无效 URL 路径
-        let invalidPaths = ["/", "/index.html", "/index.php", "#", ""]
+        _ = ["/", "/index.html", "/index.php", "#", ""]
 
         // 搜索查询关键词（用于匹配度评分）
         let queryKeywords = searchQuery?.lowercased().components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty } ?? []
@@ -546,16 +726,15 @@ actor AnimeParser {
                 continue
             }
 
-            // Kazumi 风格：标题匹配度检查
-            // 如果搜索结果标题与查询词完全不相关，可能是无效结果
-            if !queryKeywords.isEmpty {
+            // 拉丁语系关键词启发式（CJK 检索跳过，与 Kazumi / HTMLXPathParser 行为一致）
+            if AnimeSearchHeuristics.shouldApplyStrictTitleKeywordFilter(searchQuery: searchQuery),
+               !queryKeywords.isEmpty {
                 let titleKeywords = lowerTitle.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty }
                 let hasMatchingKeyword = queryKeywords.contains { queryWord in
                     titleKeywords.contains { titleWord in
                         titleWord.contains(queryWord) || queryWord.contains(titleWord)
                     }
                 }
-                // 如果没有匹配的关键词且标题很短（可能是广告/推荐），跳过
                 if !hasMatchingKeyword && finalTitle.count < 10 {
                     print("[AnimeParser] ⚠️ 跳过低匹配度结果: \(finalTitle)")
                     continue
@@ -596,10 +775,9 @@ actor AnimeParser {
                 continue
             }
 
-            // 跳过指向首页的链接
+            // 跳过指向首页的链接（只匹配完整的无效路径）
             let lowerDetailURL = detailURL.lowercased()
-            if invalidPaths.contains(lowerDetailURL) ||
-               invalidPaths.contains(where: { lowerDetailURL.hasSuffix($0) && $0 != "#" }) {
+            if lowerDetailURL == "/" || lowerDetailURL == "/index.html" || lowerDetailURL == "/index.php" {
                 print("[AnimeParser] ⚠️ 跳过首页链接: \(detailURL) (标题: \(finalTitle))")
                 continue
             }
@@ -643,13 +821,11 @@ actor AnimeParser {
 
     private func parseDetail(html: String, detailURL: String, rule: AnimeRule) throws -> AnimeDetail {
         let document = try SwiftSoup.parse(html)
-        
-        // 根据规则 API 版本选择解析方式
-        if rule.api != "1" {
+
+        if shouldUseXPathDetailParsing(rule) {
             return try parseDetailV2(html: html, detailURL: detailURL, rule: rule, document: document)
-        } else {
-            return try parseDetailV1(html: html, detailURL: detailURL, rule: rule, document: document)
         }
+        return try parseDetailV1(html: html, detailURL: detailURL, rule: rule, document: document)
     }
     
     /// API v1: 简化 CSS Selector 解析
@@ -807,6 +983,40 @@ actor AnimeParser {
         )
     }
 
+    // MARK: - XPath / CSS 分支判定（Kazumi 兼容）
+
+    /// 搜索页是否使用 Kanna XPath（`xpath.search` 齐全时优先，不依赖 `api != "1"`）
+    private func shouldUseXPathSearch(_ rule: AnimeRule) -> Bool {
+        guard let search = rule.xpath?.search else { return false }
+        let list = search.list.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = search.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = search.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !list.isEmpty && !title.isEmpty && !detail.isEmpty
+    }
+
+    /// 详情页剧集列表是否使用 `parseChapterRoadsWithXPath`（需 chapterRoads + chapterResult）
+    private func shouldUseXPathChapterRoads(_ rule: AnimeRule) -> Bool {
+        guard let detail = rule.xpath?.detail,
+              let episodesRaw = detail.episodes,
+              !episodesRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let listBlock = rule.xpath?.list else {
+            return false
+        }
+        let chapterResult = listBlock.list.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !chapterResult.isEmpty
+    }
+
+    /// `fetchDetail` 的详情解析：api 为 "2" 或存在可用的 `xpath.detail`（含 Kazumi api "1" + xpath）
+    private func shouldUseXPathDetailParsing(_ rule: AnimeRule) -> Bool {
+        guard let detail = rule.xpath?.detail else { return false }
+        if rule.api != "1" { return true }
+        let hasEpisodes = detail.episodes.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let hasTitle = detail.title.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let hasCover = detail.cover.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let hasDesc = detail.description.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        return hasEpisodes || hasTitle || hasCover || hasDesc
+    }
+
     // MARK: - 通用视频提取
 
     private func extractVideoFromHTML(html: String, baseURL: String) throws -> [VideoSource] {
@@ -876,9 +1086,15 @@ actor AnimeParser {
     }
 
     private func isVideoURL(_ url: String) -> Bool {
-        let videoExtensions = ["mp4", "m3u8", "webm", "mkv", "avi", "mov"]
         let lowercased = url.lowercased()
-        return videoExtensions.contains { lowercased.contains($0) }
+        let videoExtensions = ["mp4", "m3u8", "webm", "mkv", "avi", "mov", "mpegurl"]
+        if videoExtensions.contains(where: { lowercased.contains($0) }) { return true }
+        // 无扩展名的 HLS 常见 query
+        if lowercased.contains("format=m3u8") || lowercased.contains("type=m3u8")
+            || lowercased.contains("=.m3u8") || lowercased.contains("/hls/") {
+            return true
+        }
+        return false
     }
 
     private func isEmbedURL(_ url: String) -> Bool {
@@ -907,7 +1123,7 @@ enum AnimeParserError: Error, LocalizedError {
     case parseError(String)
     case noRulesAvailable
     case networkError(Error)
-    case captchaRequired
+    case captchaRequired  // 需要验证码验证（统一使用 WebView 方案）
     case noResult
 
     var errorDescription: String? {
@@ -924,6 +1140,16 @@ enum AnimeParserError: Error, LocalizedError {
             return "Captcha verification required"
         case .noResult:
             return "No search results found"
+        }
+    }
+    
+    /// 检查是否需要验证码
+    var isCaptchaRequired: Bool {
+        switch self {
+        case .captchaRequired:
+            return true
+        default:
+            return false
         }
     }
 }

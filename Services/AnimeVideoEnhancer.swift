@@ -300,6 +300,9 @@ class EnhancedVideoOutput: AVPlayerItemVideoOutput, @unchecked Sendable {
 
         self.playerItem = playerItem
         playerItem.add(self)
+        
+        // 设置代理
+        setDelegate(self, queue: DispatchQueue.main)
     }
 
     deinit {
@@ -324,8 +327,9 @@ class EnhancedVideoOutput: AVPlayerItemVideoOutput, @unchecked Sendable {
 // MARK: - AVPlayerItemOutputPullDelegate
 
 extension EnhancedVideoOutput: AVPlayerItemOutputPullDelegate {
-    func outputMediaDataWillChange(_ sender: AVPlayerItemOutput) {
+    nonisolated func outputMediaDataWillChange(_ sender: AVPlayerItemOutput) {
         // 数据即将变化时的处理
+        // 注意：此方法在非隔离上下文中调用，避免与 @MainActor 冲突
     }
 }
 

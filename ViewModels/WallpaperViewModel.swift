@@ -31,10 +31,8 @@ class WallpaperViewModel: ObservableObject {
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
     private var currentRandomSeed: String?
 
-    // MARK: - 图片加载限制
-    private let maxConcurrentImageLoads = 3
-    private var currentImageLoadCount = 0
-    private var imageLoadQueue: [() -> Task<Void, Never>] = []
+    // MARK: - 图片加载限制（使用 ImageLoader 的 LoadLimiter，避免忙等待）
+    private let imageLoadLimiter = ImageLoader.shared.makeLoadLimiter(slots: 3)
 
     // 分类开关
     @Published var categoryGeneral = true
@@ -209,7 +207,13 @@ class WallpaperViewModel: ObservableObject {
         searchTask?.cancel()
         debounceTask?.cancel()
 
-        guard !isLoading else { return }
+        // 等待当前搜索任务完成或取消，避免竞态条件
+        if isLoading {
+            // 给当前任务一个取消的机会
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            // 如果仍然加载中，继续执行（新搜索优先）
+        }
+
         isLoading = true
         errorMessage = nil
         currentPage = 1
@@ -355,13 +359,9 @@ class WallpaperViewModel: ObservableObject {
     func loadImage(for wallpaper: Wallpaper, priority: TaskPriority = .medium) async -> NSImage? {
         guard let thumbURL = wallpaper.thumbURL else { return nil }
 
-        // 如果并发数已满，等待
-        while currentImageLoadCount >= maxConcurrentImageLoads {
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
-        }
-
-        currentImageLoadCount += 1
-        defer { currentImageLoadCount -= 1 }
+        // 使用 ImageLoader 的 LoadLimiter 进行并发控制
+        await imageLoadLimiter.acquire()
+        defer { Task { await imageLoadLimiter.release() } }
 
         return await ImageLoader.shared.loadImage(from: thumbURL, priority: priority)
     }
@@ -559,16 +559,30 @@ class WallpaperViewModel: ObservableObject {
     }
 
     private func setLockScreenWallpaper(_ imageURL: URL) throws {
-        // 锁屏壁纸设置需要写入特定目录
-        // 这里只是一个占位实现
-        // 实际实现需要使用更底层的API或命令行工具
+        // macOS 锁屏壁纸设置
+        // 注意：macOS 不像 iOS 那样提供直接的锁屏壁纸 API
+        // 锁屏壁纸通常与桌面壁纸相同，或者通过系统偏好设置中的"屏幕保护程序"设置
+        // 这里我们尝试使用 defaults 命令设置锁屏壁纸（如果系统支持）
+
+        // 方法1：尝试设置桌面壁纸（macOS 锁屏通常显示桌面壁纸）
+        let workspace = NSWorkspace.shared
+        for screen in NSScreen.screens {
+            try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
+        }
+
+        // 方法2：尝试通过 defaults 命令设置锁屏图片（仅适用于某些 macOS 版本）
+        // 注意：这不会在所有 macOS 版本上都有效
         let task = Process()
-        task.launchPath = "/usr/bin/osascript"
+        task.launchPath = "/usr/bin/defaults"
         task.arguments = [
-            "-e",
-            "tell application \"System Events\" to tell every desktop to set picture to \"\(imageURL.path)\""
+            "write",
+            "/Library/Preferences/com.apple.loginwindow",
+            "DesktopPicture",
+            "-string",
+            imageURL.path
         ]
-        try task.run()
+        // 忽略错误，因为此方法可能需要管理员权限
+        try? task.run()
     }
 
     // MARK: - 获取精选壁纸（用于轮播）- 日榜，仅横版

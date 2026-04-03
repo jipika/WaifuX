@@ -41,15 +41,17 @@ actor RuleRepository {
     /// 从保存的配置加载仓库
     func loadConfiguredRepository() async {
         guard let savedURL = UserDefaults.standard.string(forKey: "rule_repository_url") else {
-            print("[RuleRepository] No saved repository URL")
+            print("[RuleRepository] 未配置规则仓库 URL，请在设置中配置")
             return
         }
+
+        print("[RuleRepository] 加载已配置的仓库: \(savedURL)")
 
         do {
             try await configure(repoURL: savedURL)
             try await syncAllRules()
         } catch {
-            print("[RuleRepository] Failed to load repository: \(error)")
+            print("[RuleRepository] 加载仓库失败: \(error.localizedDescription)")
         }
     }
 

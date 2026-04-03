@@ -45,6 +45,19 @@ struct SourceSearchResult: Identifiable {
     var detail: AnimeDetail?             // 解析后的剧集列表
 }
 
+// MARK: - 应用内验证码（WebView 会话）
+
+struct CaptchaVerificationSession: Identifiable {
+    let id = UUID()
+    let rule: AnimeRule
+    let startURL: URL
+    /// 若设置，同步 Cookie 后重新尝试解析该集（播放阶段验证码）
+    var replayEpisode: AnimeDetail.AnimeEpisodeItem?
+    var replaySourceIndex: Int?
+    /// 若设置，验证完成后重新获取该剧集的剧集列表
+    var selectedSearchItem: SourceSearchItem?
+}
+
 // MARK: - 动漫详情页 ViewModel
 
 @MainActor
@@ -68,6 +81,7 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var videoSources: [VideoSource] = []
     @Published var isLoadingVideo: Bool = false
     @Published var videoError: String?
+    @Published var showPlayerWindow: Bool = false
 
     // MARK: - 播放进度跟踪
     @Published var currentProgress: Double = 0
@@ -82,27 +96,68 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var isLoadingDanmaku: Bool = false
     @Published var showDanmakuSettings: Bool = false
     private var danmakuTask: Task<Void, Never>?
+    
+    // MARK: - 播放器增强设置
+    @Published var enhancementSettings: PlayerEnhancementSettings = .default
+    
+    struct PlayerEnhancementSettings: Codable {
+        var superResolution: Bool
+        var aiDenoise: Bool
+        var colorEnhancement: Bool
+        var autoPlayNext: Bool
+        var skipOpeningEnding: Bool
+        
+        static let `default` = PlayerEnhancementSettings(
+            superResolution: false,
+            aiDenoise: false,
+            colorEnhancement: false,
+            autoPlayNext: true,
+            skipOpeningEnding: false
+        )
+    }
 
     // MARK: - Bangumi 详情（用于展示信息）
     @Published var bangumiDetail: BangumiDetail?
     @Published var isLoadingBangumi: Bool = false
+    
+    // MARK: - 收藏状态
+    @Published var isFavorite: Bool = false
+
+    // MARK: - 验证码验证（统一使用 WebView 方案）
+    @Published var captchaVerificationSession: CaptchaVerificationSession?
+    
+    // MARK: - 别名搜索弹窗
+    @Published var showAliasSearchSheet: Bool = false
+    @Published var aliasSearchRule: AnimeRule?
+    @Published var aliasSearchText: String = ""
 
     init(anime: AnimeSearchResult) {
         self.anime = anime
         loadDanmakuSettings()
+        loadEnhancementSettings()
+        self.aliasSearchText = anime.title
+        loadFavoriteStatus()
     }
 
     // MARK: - 加载数据
 
+    /// 加载基本信息（规则和 Bangumi 详情），不触发搜索
     func loadData() async {
         // 加载规则
         await loadRules()
 
         // 加载 Bangumi 详情（用于展示）
         await loadBangumiDetail()
-
-        // 查询所有源的播放列表
-        await queryAllSourcesForBangumiDetail()
+        
+        // 注：不再自动查询源，改为用户手动触发
+        // 避免一进入页面就触发验证码
+    }
+    
+    /// 完整加载（包括搜索源）- 用于播放器窗口
+    func loadFullData() async {
+        await loadData()
+        // 查询所有源的播放列表（仅在需要时调用）
+        // await searchAllSources()
     }
 
     // MARK: - 加载规则
@@ -112,51 +167,25 @@ class AnimeDetailViewModel: ObservableObject {
         var rules = await AnimeRuleStore.shared.loadAllRules()
         print("[AnimeDetailViewModel] 本地规则数量: \(rules.count)")
 
-        // 如果本地没有规则，先尝试自动安装默认规则
+        // 本地无缓存时全量从 Kazumi 同步覆盖（与 App 启动后台任务一致）
         if rules.isEmpty {
-            print("[AnimeDetailViewModel] 本地无规则，尝试自动安装默认规则...")
+            print("[AnimeDetailViewModel] 本地无规则，从 Kazumi 全量同步…")
             await AnimeRuleStore.shared.ensureDefaultRulesCopied()
-
-            // 再次尝试加载
             rules = await AnimeRuleStore.shared.loadAllRules()
-            print("[AnimeDetailViewModel] 自动安装后规则数量: \(rules.count)")
+            print("[AnimeDetailViewModel] 同步后规则数量: \(rules.count)")
         }
 
-        // 如果仍然没有规则，尝试从远程直接加载
-        if rules.isEmpty {
-            print("[AnimeDetailViewModel] 尝试从远程加载所有规则...")
-            do {
-                let remoteRules = try await AnimeRuleStore.shared.loadRulesFromRemote()
-                print("[AnimeDetailViewModel] 从远程加载了 \(remoteRules.count) 个规则")
+        // loadAllRules / 远程加载已排除 deprecated
+        self.availableRules = rules
 
-                // 保存到本地
-                for rule in remoteRules {
-                    do {
-                        try await AnimeRuleStore.shared.saveRule(rule)
-                    } catch {
-                        print("[AnimeDetailViewModel] 保存规则失败: \(rule.name) - \(error)")
-                    }
-                }
-
-                // 重新加载
-                rules = await AnimeRuleStore.shared.loadAllRules()
-            } catch {
-                print("[AnimeDetailViewModel] 从远程加载规则失败: \(error)")
-            }
-        }
-
-        // 过滤废弃规则
-        let activeRules = rules.filter { !$0.deprecated }
-        self.availableRules = activeRules
-
-        print("[AnimeDetailViewModel] 可用规则: \(activeRules.count) 个")
-        for rule in activeRules {
+        print("[AnimeDetailViewModel] 可用规则: \(rules.count) 个")
+        for rule in rules {
             print("[AnimeDetailViewModel]   ✓ \(rule.name) (\(rule.id))")
         }
 
         // 初始化源搜索结果
         await MainActor.run {
-            self.sourceResults = activeRules.map { rule in
+            self.sourceResults = rules.map { rule in
                 SourceSearchResult(id: rule.id, rule: rule, status: .idle)
             }
 
@@ -167,7 +196,7 @@ class AnimeDetailViewModel: ObservableObject {
         }
 
         // 如果没有安装任何规则，提示用户
-        if activeRules.isEmpty {
+        if rules.isEmpty {
             print("[AnimeDetailViewModel] ⚠️ 未安装任何规则，需要从规则市场安装")
         }
     }
@@ -245,6 +274,7 @@ class AnimeDetailViewModel: ObservableObject {
             await MainActor.run {
                 switch error {
                 case .captchaRequired:
+                    // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
                     sourceResults[index].status = .captcha
                 case .noResult:
                     sourceResults[index].status = .noResult
@@ -260,6 +290,7 @@ class AnimeDetailViewModel: ObservableObject {
                 if errorString.contains("captcha") ||
                    errorString.contains("验证码") ||
                    errorString.contains("验证") {
+                    // 仅标记为需要验证码，不弹窗
                     sourceResults[index].status = .captcha
                 } else {
                     sourceResults[index].status = .error(error.localizedDescription)
@@ -279,9 +310,10 @@ class AnimeDetailViewModel: ObservableObject {
 
         guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
 
-        // 更新状态为加载中
+        // 更新状态为加载中，同时保存 selectedItem（即使出错也需要保存，用于验证码验证后重试）
         await MainActor.run {
             sourceResults[index].status = .loading
+            sourceResults[index].selectedItem = item
         }
 
         do {
@@ -314,6 +346,7 @@ class AnimeDetailViewModel: ObservableObject {
             await MainActor.run {
                 switch error {
                 case .captchaRequired:
+                    // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
                     sourceResults[index].status = .captcha
                 case .noResult:
                     sourceResults[index].status = .noResult
@@ -334,11 +367,46 @@ class AnimeDetailViewModel: ObservableObject {
     func selectSearchItem(_ item: SourceSearchItem, for rule: AnimeRule) async {
         await queryEpisodes(for: item, in: rule)
     }
+    
+    /// 触发 WebView 验证码验证（直接使用 WebView 完成验证）
+    /// 用于搜索阶段的验证码验证
+    func triggerCaptchaVerification(for rule: AnimeRule) {
+        guard let sourceIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+        
+        // 构建验证 URL（使用搜索页作为入口）
+        let searchQuery = anime.title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? anime.title
+        var verifyURL = rule.searchURL
+            .replacingOccurrences(of: "{keyword}", with: searchQuery)
+            .replacingOccurrences(of: "{page}", with: "1")
+            .replacingOccurrences(of: "@keyword", with: searchQuery)
+        
+        // 如果搜索 URL 无效，回退到 baseURL
+        if verifyURL.isEmpty || !verifyURL.hasPrefix("http") {
+            verifyURL = rule.baseURL
+        }
+        
+        guard let url = URL(string: verifyURL) else { return }
+        
+        // 获取当前已选择的 item（如果有），用于验证完成后重新获取剧集
+        let currentSelectedItem = sourceResults[sourceIndex].selectedItem
+        
+        // 创建 WebView 验证会话
+        captchaVerificationSession = CaptchaVerificationSession(
+            rule: rule,
+            startURL: url,
+            replayEpisode: nil,
+            replaySourceIndex: nil,
+            selectedSearchItem: currentSelectedItem  // 保存已选择的项
+        )
+    }
 
     // MARK: - 查询所有源 (Kazumi 风格)
 
     /// 参考 Kazumi QueryManager.queryAllSource: 并发搜索所有源
-    func queryAllSourcesForBangumiDetail() async {
+    // MARK: - 搜索所有源
+    
+    /// 搜索所有可用源（用户手动触发）
+    func searchAllSources() async {
         guard !sourceResults.isEmpty else { return }
 
         print("[AnimeDetailViewModel] ========== 开始查询所有源 ==========")
@@ -364,11 +432,124 @@ class AnimeDetailViewModel: ObservableObject {
     func retrySearch(for rule: AnimeRule) async {
         await searchInSource(rule)
     }
+    
+    /// 显示别名搜索弹窗
+    func showAliasSearch(for rule: AnimeRule) {
+        aliasSearchRule = rule
+        aliasSearchText = anime.title
+        showAliasSearchSheet = true
+    }
+    
+    /// 切换收藏状态（集成 AnimeFavoriteStore）
+    func toggleFavorite() {
+        let newStatus = AnimeFavoriteStore.shared.toggleFavorite(
+            anime: anime,
+            bangumiId: bangumiDetail?.id
+        )
+        isFavorite = newStatus
+        
+        // 如果收藏了，默认设置为"想看"状态
+        if newStatus {
+            AnimeFavoriteStore.shared.updateWatchStatus(animeId: anime.id, status: .planToWatch)
+        }
+    }
+    
+    /// 更新观看状态
+    func updateWatchStatus(_ status: FavoriteAnime.WatchStatus) {
+        guard isFavorite else { return }
+        AnimeFavoriteStore.shared.updateWatchStatus(animeId: anime.id, status: status)
+    }
+    
+    /// 加载收藏状态
+    func loadFavoriteStatus() {
+        isFavorite = AnimeFavoriteStore.shared.isFavorite(animeId: anime.id)
+    }
+    
+    /// 获取当前动漫的观看进度
+    func getEpisodeProgress(_ episodeId: String) -> EpisodeProgress? {
+        return AnimeProgressStore.shared.getProgress(animeId: anime.id, episodeId: episodeId)
+    }
+    
+    /// 获取上次播放的剧集
+    var lastPlayedEpisode: AnimeDetail.AnimeEpisodeItem? {
+        guard let summary = AnimeProgressStore.shared.getSummary(animeId: anime.id),
+              let lastEpisodeId = summary.lastEpisodeId else { return nil }
+        return currentEpisodes.first { $0.id == lastEpisodeId }
+    }
+
+    // MARK: - 验证码（应用内 WebView，对齐 Kazumi 用 WebView 提高兼容性）
+
+    func presentCaptchaVerificationForSearch(rule: AnimeRule) {
+        // 使用搜索 URL 进行验证码验证（而非首页），因为通常是在搜索时触发验证码
+        let searchQuery = anime.title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? anime.title
+        var verifyURL = rule.searchURL
+            .replacingOccurrences(of: "{keyword}", with: searchQuery)
+            .replacingOccurrences(of: "{page}", with: "1")
+            .replacingOccurrences(of: "@keyword", with: searchQuery)
+
+        // 如果搜索 URL 无效，回退到 baseURL
+        if verifyURL.isEmpty || !verifyURL.hasPrefix("http") {
+            verifyURL = rule.baseURL
+        }
+
+        guard let url = URL(string: verifyURL), url.scheme == "http" || url.scheme == "https" else { return }
+
+        print("[AnimeDetailViewModel] 打开验证码验证页面: \(url)")
+        captchaVerificationSession = CaptchaVerificationSession(
+            rule: rule,
+            startURL: url,
+            replayEpisode: nil,
+            replaySourceIndex: nil
+        )
+    }
+
+    func presentCaptchaVerificationForPlayback(rule: AnimeRule, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
+        guard let url = URL(string: episode.url) else { return }
+        captchaVerificationSession = CaptchaVerificationSession(
+            rule: rule,
+            startURL: url,
+            replayEpisode: episode,
+            replaySourceIndex: sourceIndex
+        )
+    }
+
+    func cancelCaptchaVerification() {
+        captchaVerificationSession = nil
+    }
+
+    func completeCaptchaVerificationAndContinue() async {
+        guard let session = captchaVerificationSession else { return }
+        let replayEp = session.replayEpisode
+        let replayIdx = session.replaySourceIndex
+        let rule = session.rule
+        let selectedItem = session.selectedSearchItem
+
+        await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
+        captchaVerificationSession = nil
+
+        if let ep = replayEp, let idx = replayIdx {
+            // 播放阶段的验证码验证完成，重新尝试播放
+            await playEpisode(ep, from: idx)
+        } else if let item = selectedItem {
+            // 剧集列表阶段的验证码验证完成，重新获取剧集列表
+            print("[AnimeDetailViewModel] 验证码验证完成，重新获取剧集列表...")
+            await queryEpisodes(for: item, in: rule)
+        } else {
+            // 搜索阶段的验证码验证完成，重新搜索
+            await searchInSource(rule)
+        }
+    }
 
     // MARK: - 播放剧集
 
     func playEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int) async {
         guard sourceIndex < sourceResults.count else { return }
+        
+        // 防止重复调用
+        guard !isLoadingVideo else {
+            print("[AnimeDetailViewModel] 视频正在加载中，忽略重复点击")
+            return
+        }
 
         let rule = sourceResults[sourceIndex].rule
         currentEpisode = episode
@@ -399,19 +580,41 @@ class AnimeDetailViewModel: ObservableObject {
             videoError = error
 
         case .captcha:
-            videoError = "需要验证码验证"
+            // 触发验证码验证弹窗，验证完成后会自动重试播放
+            presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
 
         case .timeout:
-            videoError = "视频解析超时"
+            videoError = "视频解析超时，请重试或切换其他视频源"
         }
     }
 
     /// 设置播放器并恢复进度
     private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
         let rule = sourceResults[sourceIndex].rule
-
-        // 创建播放器
-        let playerItem = AVPlayerItem(url: url)
+        
+        // 创建播放器项目，设置必要的 headers（如 Referer、User-Agent）
+        let playerItem: AVPlayerItem
+        
+        // 检查是否需要设置 headers
+        var headers: [String: String] = [:]
+        if let userAgent = rule.userAgent, !userAgent.isEmpty {
+            headers["User-Agent"] = userAgent
+        }
+        // 设置 Referer（某些视频源需要）
+        if let referer = rule.headers?["Referer"], !referer.isEmpty {
+            headers["Referer"] = referer
+        } else {
+            headers["Referer"] = rule.baseURL
+        }
+        
+        if !headers.isEmpty {
+            // 使用 AVURLAsset 设置 headers
+            let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+            playerItem = AVPlayerItem(asset: asset)
+        } else {
+            playerItem = AVPlayerItem(url: url)
+        }
+        
         self.player = AVPlayer(playerItem: playerItem)
         self.isPlaying = true
 
@@ -444,6 +647,22 @@ class AnimeDetailViewModel: ObservableObject {
         progressTracker?.$progress
             .sink { [weak self] progress in
                 self?.currentProgress = progress
+                
+                // 同时更新 AnimeProgressStore（每5%或每30秒保存一次）
+                if let self = self, let currentEpisode = self.currentEpisode {
+                    let shouldSave = Int(progress * 20) > Int(self.currentProgress * 20) || progress >= 0.95
+                    if shouldSave {
+                        AnimeProgressStore.shared.updateProgress(
+                            animeId: self.anime.id,
+                            animeTitle: self.anime.title,
+                            coverURL: self.anime.coverURL,
+                            episodeId: currentEpisode.id,
+                            episodeNumber: "\(currentEpisode.episodeNumber)",
+                            currentTime: self.currentTime,
+                            totalDuration: self.totalDuration
+                        )
+                    }
+                }
             }
             .store(in: &cancellables)
 
@@ -469,6 +688,19 @@ class AnimeDetailViewModel: ObservableObject {
 
     /// 停止播放并保存进度
     func stopPlayback() {
+        // 保存最终进度到 AnimeProgressStore
+        if let currentEpisode = currentEpisode {
+            AnimeProgressStore.shared.updateProgress(
+                animeId: anime.id,
+                animeTitle: anime.title,
+                coverURL: anime.coverURL,
+                episodeId: currentEpisode.id,
+                episodeNumber: "\(currentEpisode.episodeNumber)",
+                currentTime: currentTime,
+                totalDuration: totalDuration
+            )
+        }
+        
         progressObserver?.cancel()
         progressTracker?.detach()
         progressTracker = nil
@@ -575,6 +807,22 @@ class AnimeDetailViewModel: ObservableObject {
             danmakuSettings = settings
         }
     }
+    
+    // MARK: - 播放器增强设置
+    
+    func updateEnhancementSettings(_ settings: PlayerEnhancementSettings) {
+        enhancementSettings = settings
+        if let encoded = try? JSONEncoder().encode(settings) {
+            UserDefaults.standard.set(encoded, forKey: "playerEnhancementSettings")
+        }
+    }
+    
+    func loadEnhancementSettings() {
+        if let data = UserDefaults.standard.data(forKey: "playerEnhancementSettings"),
+           let settings = try? JSONDecoder().decode(PlayerEnhancementSettings.self, from: data) {
+            enhancementSettings = settings
+        }
+    }
 
     // MARK: - 获取当前选中的源结果
 
@@ -587,6 +835,11 @@ class AnimeDetailViewModel: ObservableObject {
 
     var currentEpisodes: [AnimeDetail.AnimeEpisodeItem] {
         currentSourceResult?.detail?.episodes ?? []
+    }
+    
+    /// 是否有可播放的剧集
+    var hasAvailableEpisodes: Bool {
+        sourceResults.contains { $0.detail?.episodes.isEmpty == false }
     }
 
     // MARK: - 获取 Bangumi 别名列表（用于别名检索）
@@ -601,7 +854,7 @@ class AnimeDetailViewModel: ObservableObject {
         }
 
         // Bangumi 详情中的其他标题
-        if let detail = bangumiDetail {
+        if bangumiDetail != nil {
             // 中文名
             // 英文名等其他名称
         }

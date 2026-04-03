@@ -86,6 +86,10 @@ struct WallpaperExploreContentView: View {
         .onChange(of: displayedWallpapers.first?.id) { _, _ in
             syncExploreAtmosphere()
         }
+        .onDisappear {
+            // 视图消失时取消所有任务
+            cancelAllTasks()
+        }
     }
 
     private func syncExploreAtmosphere() {
@@ -202,7 +206,7 @@ struct WallpaperExploreContentView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "aspectratio")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(hasRatio ? viewModel.selectedRatios.first!.replacingOccurrences(of:"x", with: ":") : t("ratio"))
+                        Text(hasRatio ? (viewModel.selectedRatios.first?.replacingOccurrences(of:"x", with: ":") ?? "") : t("ratio"))
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(.white.opacity(hasRatio ? 0.95 : 0.7))
@@ -1025,7 +1029,20 @@ private struct ExploreFilterChipData: Identifiable {
         case ratio(String)
     }
 
-    let id = UUID()
+    // 使用稳定的 ID 基于 kind，避免每次重建都生成新的 UUID 导致 ForEach 全量重建
+    var id: String {
+        switch kind {
+        case .purity(let purity):
+            return "purity_\(purity.rawValue)"
+        case .color(let hex):
+            return "color_\(hex)"
+        case .resolution(let resolution):
+            return "resolution_\(resolution)"
+        case .ratio(let ratio):
+            return "ratio_\(ratio)"
+        }
+    }
+
     let kind: Kind
     let title: String
     var subtitle: String? = nil

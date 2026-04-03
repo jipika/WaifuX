@@ -259,6 +259,45 @@ struct AnimeSearchResult: Identifiable, Codable {
     let sourceName: String
     let latestEpisode: String?
     let rating: String?
+    
+    // 可选的详细字段（用于详情页）
+    var summary: String?
+    var rank: Int?
+    var airDate: String?
+    var airWeekday: Int?
+    var tags: [AnimeTag]?
+    var originalName: String?  // 日文原名
+    
+    // 计算属性：显示标题
+    var displayTitle: String { title }
+    
+    // 星期几显示名称
+    var airWeekdayDisplay: String? {
+        guard let weekday = airWeekday else { return nil }
+        switch weekday {
+        case 1: return "星期日"
+        case 2: return "星期一"
+        case 3: return "星期二"
+        case 4: return "星期三"
+        case 5: return "星期四"
+        case 6: return "星期五"
+        case 7: return "星期六"
+        default: return nil
+        }
+    }
+    
+    // 类型显示名称
+    var typeDisplayName: String { "动画" }
+}
+
+struct AnimeTag: Codable, Identifiable {
+    let id = UUID()
+    let name: String
+    let count: Int?
+    
+    enum CodingKeys: String, CodingKey {
+        case name, count
+    }
 }
 
 struct AnimeDetail: Identifiable, Codable {

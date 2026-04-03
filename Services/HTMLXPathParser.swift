@@ -55,24 +55,31 @@ class HTMLXPathParser {
                     continue
                 }
 
-                // Kazumi 风格：标题匹配度检查
-                if !queryKeywords.isEmpty {
+                // 拉丁语系关键词启发式（CJK 检索跳过，避免葬送的芙莉莲等零结果）
+                if AnimeSearchHeuristics.shouldApplyStrictTitleKeywordFilter(searchQuery: searchQuery),
+                   !queryKeywords.isEmpty {
                     let titleKeywords = lowerTitle.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty }
                     let hasMatchingKeyword = queryKeywords.contains { queryWord in
                         titleKeywords.contains { titleWord in
                             titleWord.contains(queryWord) || queryWord.contains(titleWord)
                         }
                     }
-                    // 如果没有匹配的关键词且标题很短（可能是广告/推荐），跳过
                     if !hasMatchingKeyword && name.count < 10 {
                         print("[HTMLXPathParser] ⚠️ 跳过低匹配度结果: \(name)")
                         continue
                     }
                 }
 
-                // 过滤无效路径
+                // 过滤无效路径（只匹配完整的无效路径，不使用 hasSuffix 避免误判）
                 let lowerSrc = src.lowercased()
-                if invalidPaths.contains(lowerSrc) || invalidPaths.contains(where: { lowerSrc.hasSuffix($0) && $0 != "#" }) {
+                let invalidPaths = ["/", "/index.html", "/index.php", "#", ""]
+                if invalidPaths.contains(lowerSrc) {
+                    print("[HTMLXPathParser] ⚠️ 跳过无效链接: \(src) (标题: \(name))")
+                    continue
+                }
+                
+                // 额外检查：过滤常见的首页/导航链接（必须以 / 开头且没有路径深度）
+                if lowerSrc == "/" || lowerSrc == "/index.html" || lowerSrc == "/index.php" {
                     print("[HTMLXPathParser] ⚠️ 跳过首页链接: \(src) (标题: \(name))")
                     continue
                 }

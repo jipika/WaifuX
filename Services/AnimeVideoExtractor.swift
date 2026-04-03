@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 import Combine
 
-// MARK: - 视频提取结果
+// MARK: - Video Extraction Result
 
 enum VideoExtractionResult {
     case success([VideoSource])
@@ -11,827 +11,893 @@ enum VideoExtractionResult {
     case timeout
 }
 
-// MARK: - 视频提取器
+// MARK: - Anime Video Extractor
 
-/// 使用 WKWebView 提取视频 URL（参考 Kazumi 实现）
-/// 通过 JavaScript 注入拦截 M3U8 和视频请求
 @MainActor
-class AnimeVideoExtractor: NSObject {
+class AnimeVideoExtractor: NSObject, ObservableObject {
     static let shared = AnimeVideoExtractor()
-
+    
+    @Published var isLoading = false
+    @Published var progressMessage = ""
+    @Published var logMessages: [String] = []
+    
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<VideoExtractionResult, Never>?
-    private var timer: Timer?
-    private var foundSources: Set<String> = []
-    private var isLoading = false
-
-    // 配置
-    private let timeout: TimeInterval = 30.0
-    private let pollInterval: TimeInterval = 1.0
-
-    // 用户代理列表（随机选择）
-    private let userAgents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
-
+    private var timeoutTask: Task<Void, Never>?
+    private var resolveId = 0
+    
+    // Video source detection
+    private var detectedSources: Set<String> = []
+    private var isVideoFound = false
+    private var currentRule: AnimeRule?
+    
     private override init() {
         super.init()
     }
-
-    // MARK: - 提取视频
-
-    /// 从剧集页面提取视频 URL
-    func extractVideoSources(from episodeURL: String, rule: AnimeRule) async -> VideoExtractionResult {
-        print("[VideoExtractor] 开始提取视频: \(episodeURL)")
-
-        // 如果规则有直接视频选择器，先尝试直接解析
-        if rule.videoSelector != nil {
-            do {
-                let sources = try await AnimeParser.shared.fetchVideoSources(
-                    episodeURL: episodeURL,
-                    rule: rule
-                )
-                if !sources.isEmpty {
-                    print("[VideoExtractor] 直接解析成功，找到 \(sources.count) 个源")
-                    return .success(sources)
-                }
-            } catch {
-                print("[VideoExtractor] 直接解析失败: \(error)")
-            }
-        }
-
-        // 使用 WebView 拦截
-        return await extractWithWebView(url: episodeURL, rule: rule)
+    
+    // Note: cleanup() must be called manually before deinit
+    // deinit cannot call MainActor-isolated methods in Swift 6
+    
+    @MainActor
+    private func cleanup() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        continuation = nil
+        webView?.stopLoading()
+        webView?.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView = nil
+        detectedSources.removeAll()
+        isVideoFound = false
+        currentRule = nil
     }
+}
 
-    /// 使用 WKWebView 提取视频
-    private func extractWithWebView(url: String, rule: AnimeRule) async -> VideoExtractionResult {
-        // 先完成 WebView 设置（包括内容拦截规则的异步加载）
-        await setupWebView(rule: rule)
+// MARK: - Public Methods
 
+extension AnimeVideoExtractor {
+    /// Extract video sources from episode URL using Kazumi-style parsing
+    func extractVideoSources(from episodeURL: String, rule: AnimeRule, timeout: TimeInterval = 30.0) async -> VideoExtractionResult {
+        resolveId += 1
+        let currentResolveId = resolveId
+        self.currentRule = rule
+        
+        isLoading = true
+        progressMessage = "正在初始化解析器..."
+        logMessages.removeAll()
+        detectedSources.removeAll()
+        isVideoFound = false
+        
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
-            self.foundSources.removeAll()
-
-            // 设置超时
-            Task {
+            
+            // Setup timeout
+            self.timeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if self.continuation != nil {
-                    print("[VideoExtractor] 提取超时")
-                    self.finish(with: .timeout)
+                self?.handleTimeout(resolveId: currentResolveId)
+            }
+            
+            // Setup and load WebView
+            self.setupWebView()
+            
+            guard let url = URL(string: episodeURL) else {
+                self.finish(with: .error("无效的视频链接"), resolveId: currentResolveId)
+                return
+            }
+            
+            addLog("开始解析: \(episodeURL)")
+            
+            // Inject scripts before loading
+            self.injectKazumiScripts(resolveId: currentResolveId)
+            
+            // Load the URL
+            var request = URLRequest(url: url, timeoutInterval: timeout)
+            
+            // Add headers from rule
+            if let headers = rule.headers {
+                for (key, value) in headers {
+                    request.setValue(value, forHTTPHeaderField: key)
                 }
             }
-
-            // 加载页面
-            if let requestURL = URL(string: url) {
-                var request = URLRequest(url: requestURL)
-                request.timeoutInterval = timeout
-
-                // 添加规则自定义 headers
-                if let headers = rule.headers {
-                    for (key, value) in headers {
-                        request.setValue(value, forHTTPHeaderField: key)
-                    }
-                }
-
-                // 添加 Referer（如果规则有指定）
-                if let referer = rule.headers?["Referer"] {
-                    request.setValue(referer, forHTTPHeaderField: "Referer")
-                }
-
-                print("[VideoExtractor] 加载页面: \(url)")
-                isLoading = true
-                webView?.load(request)
-            } else {
-                finish(with: .error("Invalid URL"))
+            
+            // Add User-Agent from rule
+            if let userAgent = rule.userAgent {
+                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }
+            
+            self.webView?.load(request)
         }
     }
+    
+    func cancel() {
+        resolveId += 1
+        finish(with: .error("已取消"), resolveId: resolveId)
+    }
+}
 
-    // MARK: - WebView 设置
+// MARK: - WebView Setup
 
-    private func setupWebView(rule: AnimeRule) async {
+private extension AnimeVideoExtractor {
+    func setupWebView() {
         let config = WKWebViewConfiguration()
-
-        // 允许媒体自动播放
+        
+        // Enable JavaScript
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        
+        // Use default data store to share cookies with verification WebView
+        config.websiteDataStore = WKWebsiteDataStore.default()
+        
+        // Enable media playback (macOS doesn't require user action)
+        #if os(iOS)
+        config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-
-        // 配置用户内容控制器
+        #endif
+        
+        // Setup user content controller
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "VideoBridge")
         userContentController.add(self, name: "LogBridge")
         config.userContentController = userContentController
-
-        // 注入视频拦截脚本
-        let script = WKUserScript(
-            source: videoInterceptorScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        )
-        userContentController.addUserScript(script)
-
-        // 创建 WebView
-        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 360, height: 640), configuration: config)
+        
+        // Sync cookies from shared storage to WebView
+        syncCookiesToWebView(config: config)
+        
+        // Create WebView
+        webView = WKWebView(frame: .zero, configuration: config)
         webView?.navigationDelegate = self
-        webView?.isHidden = true
-
-        // 设置 User-Agent (优先使用规则指定的)
-        let userAgent: String
-        if let ruleUserAgent = rule.userAgent, !ruleUserAgent.isEmpty {
-            userAgent = ruleUserAgent
-        } else {
-            userAgent = userAgents.randomElement()!
-        }
-        webView?.customUserAgent = userAgent
-
-        // 配置内容拦截规则（参考 Kazumi 的 ContentBlocker）
-        await setupContentBlocking(for: config)
+        webView?.isInspectable = true
+        
+        // Setup content blocking for ads
+        setupContentBlocking()
     }
-
-    // MARK: - 内容拦截规则 (参考 Kazumi ContentBlocker)
-
-    private func setupContentBlocking(for config: WKWebViewConfiguration) async {
-        // 参考 Kazumi 的广告拦截规则
-        // 注意：在 JSON 字符串中，反斜杠需要转义
+    
+    func syncCookiesToWebView(config: WKWebViewConfiguration) {
+        // 将 HTTPCookieStorage 中的 Cookie 同步到 WKWebView
+        let cookies = HTTPCookieStorage.shared.cookies ?? []
+        for cookie in cookies {
+            config.websiteDataStore.httpCookieStore.setCookie(cookie)
+        }
+    }
+    
+    func setupContentBlocking() {
         let blockRules = """
         [
             {
                 "trigger": {
-                    "url-filter": ".*devtools-detector.*"
+                    "url-filter": ".*googleads.*",
+                    "resource-type": ["document", "script"]
                 },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             },
             {
                 "trigger": {
-                    "url-filter": ".*googleads.*"
+                    "url-filter": ".*googlesyndication\\.com.*",
+                    "resource-type": ["document", "script"]
                 },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             },
             {
                 "trigger": {
-                    "url-filter": ".*googlesyndication.com.*"
+                    "url-filter": ".*doubleclick\\.net.*",
+                    "resource-type": ["document", "script"]
                 },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             },
             {
                 "trigger": {
-                    "url-filter": ".*prestrain.html"
+                    "url-filter": ".*prestrain\\.html.*",
+                    "resource-type": ["document"]
                 },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             },
             {
                 "trigger": {
-                    "url-filter": ".*prestrain%2Ehtml"
+                    "url-filter": ".*devtools-detector.*",
+                    "resource-type": ["script"]
                 },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             },
             {
                 "trigger": {
-                    "url-filter": ".*adtrafficquality.*"
+                    "url-filter": ".*",
+                    "resource-type": ["image"]
                 },
-                "action": {
-                    "type": "block"
-                }
-            },
-            {
-                "trigger": {
-                    "url-filter": ".*popunder.*"
-                },
-                "action": {
-                    "type": "block"
-                }
-            },
-            {
-                "trigger": {
-                    "url-filter": ".*popup.*"
-                },
-                "action": {
-                    "type": "block"
-                }
+                "action": { "type": "block" }
             }
         ]
         """
-
-        await withCheckedContinuation { continuation in
-            WKContentRuleListStore.default().compileContentRuleList(
-                forIdentifier: "VideoAdBlocker",
-                encodedContentRuleList: blockRules
-            ) { ruleList, error in
-                if let error = error {
-                    print("[VideoExtractor] 内容拦截规则编译失败: \(error)")
-                } else if let ruleList = ruleList {
-                    config.userContentController.add(ruleList)
-                    print("[VideoExtractor] 内容拦截规则已启用")
-                }
-                continuation.resume()
+        
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "AdBlockingRules",
+            encodedContentRuleList: blockRules
+        ) { [weak self] ruleList, error in
+            if let ruleList = ruleList {
+                self?.webView?.configuration.userContentController.add(ruleList)
             }
         }
     }
+}
 
-    // MARK: - 视频拦截脚本
+// MARK: - Kazumi-Style Script Injection
 
-    /// 参考 Kazumi 的 JavaScript 注入脚本（增强版）
-    private var videoInterceptorScript: String {
-        """
+private extension AnimeVideoExtractor {
+    func injectKazumiScripts(resolveId: Int) {
+        guard let webView = webView else { return }
+        
+        // Script 1: Network Interception (injected at document start)
+        let networkInterceptorScript = """
         (function() {
             'use strict';
-
-            console.log('[VideoInterceptor] 脚本已加载');
-
-            // 视频 URL 缓存（避免重复发送）
-            const sentUrls = new Set();
-
-            // 广告/追踪域名黑名单
-            const blacklist = [
-                'googleads', 'googlesyndication', 'google-analytics',
-                'doubleclick', 'facebook', 'tracker', 'analytics',
-                'adtrafficquality', 'devtools-detector', 'prestrain',
-                'popup', 'popunder', 'cdn.jsdelivr.net', 'clarity.ms',
-                'gtag', 'googletagmanager', 'baidu.com', 'hm.baidu.com'
-            ];
-
-            // 通知原生端
-            function notifyNative(message) {
-                try {
-                    window.webkit.messageHandlers.LogBridge.postMessage(message);
-                } catch(e) {}
-            }
-
-            // 检查 URL 是否有效
-            function isValidVideoUrl(url) {
-                if (!url || typeof url !== 'string') return false;
-                if (url.startsWith('blob:')) return false;
-                if (url.startsWith('data:')) return false;
-                if (url.startsWith('javascript:')) return false;
-
-                // 检查黑名单
-                const lowerUrl = url.toLowerCase();
-                for (const domain of blacklist) {
-                    if (lowerUrl.includes(domain)) return false;
+            
+            // Mark as injected
+            window.__kazumiInjected = true;
+            
+            function sendToNative(message, handler) {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[handler]) {
+                    window.webkit.messageHandlers[handler].postMessage(message);
                 }
-
-                // 必须是有效的视频扩展名或包含视频特征
-                const videoPatterns = [
-                    '.m3u8', '.mp4', '.webm', '.mkv', '.ts',
-                    'video/', 'application/x-mpegURL', 'application/vnd.apple.mpegurl'
-                ];
-                return videoPatterns.some(pattern => lowerUrl.includes(pattern));
             }
-
-            // 发送视频 URL (用于从 video 标签/fetch 响应 URL 直接发现)
-            function sendVideoURL(url, source) {
-                if (!isValidVideoUrl(url)) return;
-                sendRawVideoURL(url, source);
+            
+            function sendLog(message) {
+                sendToNative(message, 'LogBridge');
             }
-
-            // 直接发送 URL (用于 M3U8 内容检测，跳过扩展名检查)
-            function sendRawVideoURL(url, source) {
-                if (!url || typeof url !== 'string') return;
-                if (url.startsWith('blob:')) return;
-                if (url.startsWith('data:')) return;
-                if (url.startsWith('javascript:')) return;
-                if (sentUrls.has(url)) return;
-
-                // 检查黑名单
+            
+            function sendVideo(url) {
+                if (!url || url.includes('googleads') || url.includes('googlesyndication')) return;
+                sendToNative(url, 'VideoBridge');
+            }
+            
+            function isM3U8(text) {
+                return text && text.trim().startsWith('#EXTM3U');
+            }
+            
+            function isVideoURL(url) {
+                if (!url) return false;
+                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov'];
                 const lowerUrl = url.toLowerCase();
-                for (const domain of blacklist) {
-                    if (lowerUrl.includes(domain)) return;
-                }
-
-                sentUrls.add(url);
-
-                try {
-                    window.webkit.messageHandlers.VideoBridge.postMessage({
-                        type: 'video',
-                        url: url,
-                        source: source || 'unknown'
-                    });
-                    notifyNative('[' + (source || 'unknown') + '] 找到视频: ' + url);
-                } catch(e) {}
+                return videoExtensions.some(ext => lowerUrl.includes(ext)) || 
+                       lowerUrl.includes('video') ||
+                       lowerUrl.includes('stream') ||
+                       lowerUrl.includes('playback');
             }
-
-            // 拦截 Response.text() 和 Response.json()
-            const _r_text = window.Response.prototype.text;
-            window.Response.prototype.text = function() {
-                return new Promise((resolve, reject) => {
-                    _r_text.call(this).then((text) => {
-                        resolve(text);
-                        // 检测 M3U8 内容
-                        if (text && text.trim().startsWith('#EXTM3U')) {
-                            notifyNative('M3U8 响应: ' + this.url);
-                            sendRawVideoURL(this.url, 'response.text');
-                        }
-                    }).catch(reject);
-                });
-            };
-
-            // 拦截 fetch API
-            const _fetch = window.fetch;
+            
+            sendLog('Kazumi network interceptor loaded: ' + window.location.href);
+            
+            // Intercept fetch
+            const originalFetch = window.fetch;
             window.fetch = function(...args) {
                 const url = args[0];
-                const urlString = typeof url === 'string' ? url : (url.url || url.toString());
-
-                return _fetch.apply(this, args).then(response => {
-                    // 检查响应 URL
-                    if (isValidVideoUrl(response.url)) {
-                        notifyNative('Fetch 视频响应: ' + response.url);
-                        sendVideoURL(response.url, 'fetch.response');
-                    }
-
-                    // 克隆响应以读取内容
+                if (typeof url === 'string' && isVideoURL(url)) {
+                    sendLog('Fetch detected video URL: ' + url);
+                    sendVideo(url);
+                }
+                
+                return originalFetch.apply(this, args).then(response => {
                     const clonedResponse = response.clone();
                     clonedResponse.text().then(text => {
-                        if (text && text.trim().startsWith('#EXTM3U')) {
-                            notifyNative('Fetch M3U8: ' + urlString);
-                            sendRawVideoURL(urlString, 'fetch.m3u8');
+                        if (isM3U8(text)) {
+                            sendLog('M3U8 found in fetch response: ' + url);
+                            sendVideo(url);
                         }
                     }).catch(() => {});
-
                     return response;
                 });
             };
-
-            // 拦截 XMLHttpRequest
-            const _open = window.XMLHttpRequest.prototype.open;
-            const _send = window.XMLHttpRequest.prototype.send;
-
+            
+            // Intercept XMLHttpRequest
+            const originalXHROpen = window.XMLHttpRequest.prototype.open;
             window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
                 this._url = url;
-                return _open.call(this, method, url, ...rest);
-            };
-
-            window.XMLHttpRequest.prototype.send = function(...args) {
-                this.addEventListener('load', () => {
+                if (typeof url === 'string' && isVideoURL(url)) {
+                    sendLog('XHR detected video URL: ' + url);
+                    sendVideo(url);
+                }
+                
+                this.addEventListener('load', function() {
                     try {
-                        let content = this.responseText;
-                        if (content && content.trim().startsWith('#EXTM3U')) {
-                            notifyNative('XHR M3U8: ' + this._url);
-                            sendRawVideoURL(this._url, 'xhr.m3u8');
+                        const responseText = this.responseText;
+                        if (isM3U8(responseText)) {
+                            sendLog('M3U8 found in XHR response: ' + this._url);
+                            sendVideo(this._url);
                         }
                     } catch(e) {}
                 });
-                return _send.apply(this, args);
+                
+                return originalXHROpen.call(this, method, url, ...rest);
             };
-
-            // 递归注入 iframe
-            function injectIntoIframe(iframe) {
-                try {
-                    const iframeWindow = iframe.contentWindow;
-                    if (!iframeWindow || !iframeWindow.Response || !iframeWindow.XMLHttpRequest) return;
-
-                    notifyNative('注入 iframe: ' + (iframe.src || 'inline'));
-
-                    // 拦截 iframe 的 Response
-                    const iframe_r_text = iframeWindow.Response.prototype.text;
-                    iframeWindow.Response.prototype.text = function() {
-                        return new Promise((resolve, reject) => {
-                            iframe_r_text.call(this).then((text) => {
-                                resolve(text);
-                                if (text && text.trim().startsWith('#EXTM3U')) {
-                                    notifyNative('iframe M3U8: ' + this.url);
-                                    sendVideoURL(this.url, 'iframe.response');
+            
+            // Intercept createElement for iframes
+            const originalCreateElement = document.createElement;
+            document.createElement = function(tagName) {
+                const element = originalCreateElement.call(document, tagName);
+                if (tagName.toLowerCase() === 'iframe') {
+                    // Watch for iframe src changes
+                    const originalSrcSetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src')?.set;
+                    if (originalSrcSetter) {
+                        Object.defineProperty(element, 'src', {
+                            set: function(value) {
+                                sendLog('Iframe src set: ' + value);
+                                if (isVideoURL(value)) {
+                                    sendVideo(value);
                                 }
-                            }).catch(reject);
-                        });
-                    };
-
-                    // 拦截 iframe 的 fetch
-                    const iframe_fetch = iframeWindow.fetch;
-                    iframeWindow.fetch = function(...args) {
-                        const url = args[0];
-                        const urlString = typeof url === 'string' ? url : (url.url || url.toString());
-
-                        return iframe_fetch.apply(this, args).then(response => {
-                            if (isValidVideoUrl(response.url)) {
-                                notifyNative('iframe fetch 视频: ' + response.url);
-                                sendVideoURL(response.url, 'iframe.fetch');
+                                return originalSrcSetter.call(this, value);
+                            },
+                            get: function() {
+                                return this.getAttribute('src');
                             }
-                            return response;
                         });
-                    };
-
-                    // 拦截 iframe 的 XHR
-                    const iframe_xhr_open = iframeWindow.XMLHttpRequest.prototype.open;
-                    const iframe_xhr_send = iframeWindow.XMLHttpRequest.prototype.send;
-
-                    iframeWindow.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-                        this._url = url;
-                        return iframe_xhr_open.call(this, method, url, ...rest);
-                    };
-
-                    iframeWindow.XMLHttpRequest.prototype.send = function(...args) {
-                        this.addEventListener('load', () => {
-                            try {
-                                let content = this.responseText;
-                                if (content && content.trim().startsWith('#EXTM3U')) {
-                                    notifyNative('iframe XHR M3U8: ' + this._url);
-                                    sendVideoURL(this._url, 'iframe.xhr');
-                                }
-                            } catch(e) {}
-                        });
-                        return iframe_xhr_send.apply(this, args);
-                    };
-
-                    // 递归注入嵌套 iframe
-                    setupIframeListenersInWindow(iframeWindow);
-                } catch(e) {
-                    console.error('iframe 注入失败:', e);
+                    }
+                }
+                return element;
+            };
+        })();
+        """
+        
+        // Script 2: Video Element Scanner (injected at document end)
+        let videoScannerScript = """
+        (function() {
+            'use strict';
+            
+            function sendToNative(message, handler) {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[handler]) {
+                    window.webkit.messageHandlers[handler].postMessage(message);
                 }
             }
-
-            // 在指定 window 中设置 iframe 监听
-            function setupIframeListenersInWindow(targetWindow) {
-                try {
-                    const doc = targetWindow.document;
-                    if (!doc) return;
-
-                    doc.querySelectorAll('iframe').forEach(iframe => {
-                        if (iframe.contentDocument) {
-                            injectIntoIframe(iframe);
-                        }
-                        iframe.addEventListener('load', () => injectIntoIframe(iframe));
-                    });
-                } catch(e) {}
+            
+            function sendLog(message) {
+                sendToNative(message, 'LogBridge');
             }
-
-            // 监听 iframe 变化
-            function setupIframeListeners() {
-                setupIframeListenersInWindow(window);
-
-                const observer = new MutationObserver(mutations => {
-                    mutations.forEach(mutation => {
-                        if (mutation.type === 'childList') {
-                            mutation.addedNodes.forEach(node => {
-                                if (node.nodeName === 'IFRAME') {
-                                    node.addEventListener('load', () => injectIntoIframe(node));
-                                }
-                                if (node.querySelectorAll) {
-                                    node.querySelectorAll('iframe').forEach(iframe => {
-                                        iframe.addEventListener('load', () => injectIntoIframe(iframe));
-                                    });
-                                }
-                            });
-                        }
-                    });
-                });
-
-                if (document.body) {
-                    observer.observe(document.body, { childList: true, subtree: true });
-                } else {
-                    document.addEventListener('DOMContentLoaded', () => {
-                        observer.observe(document.body, { childList: true, subtree: true });
-                    });
+            
+            function sendVideo(url) {
+                if (!url || url.startsWith('blob:') || url.includes('googleads')) return;
+                sendToNative(url, 'VideoBridge');
+            }
+            
+            function processVideoElement(video) {
+                sendLog('Scanning video element...');
+                
+                // Check src attribute
+                let src = video.getAttribute('src');
+                if (src && src.trim() !== '' && !src.startsWith('blob:')) {
+                    sendLog('VIDEO src found: ' + src);
+                    sendVideo(src);
+                    return;
+                }
+                
+                // Check currentSrc property
+                if (video.currentSrc && video.currentSrc.trim() !== '' && !video.currentSrc.startsWith('blob:')) {
+                    sendLog('VIDEO currentSrc found: ' + video.currentSrc);
+                    sendVideo(video.currentSrc);
+                    return;
+                }
+                
+                // Check source elements
+                const sources = video.getElementsByTagName('source');
+                for (let source of sources) {
+                    src = source.getAttribute('src');
+                    if (src && src.trim() !== '' && !src.startsWith('blob:')) {
+                        sendLog('VIDEO source tag found: ' + src);
+                        sendVideo(src);
+                        return;
+                    }
+                }
+                
+                // Check data-src (lazy loading)
+                src = video.getAttribute('data-src');
+                if (src && src.trim() !== '' && !src.startsWith('blob:')) {
+                    sendLog('VIDEO data-src found: ' + src);
+                    sendVideo(src);
                 }
             }
-
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', setupIframeListeners);
-            } else {
-                setupIframeListeners();
-            }
-
-            // 扫描 video 元素
-            function scanVideoElements() {
-                document.querySelectorAll('video').forEach(video => {
-                    // 检查 video 的 src
-                    let src = video.getAttribute('src');
-                    if (src && src.trim() !== '') {
-                        notifyNative('video src: ' + src);
-                        sendVideoURL(src, 'video.src');
-                    }
-
-                    // 检查 source 标签
-                    const sources = video.getElementsByTagName('source');
-                    for (let source of sources) {
-                        src = source.getAttribute('src');
-                        if (src && src.trim() !== '') {
-                            notifyNative('video source: ' + src);
-                            sendVideoURL(src, 'video.source');
-                        }
-                    }
-
-                    // 检查 data-src (懒加载)
-                    const dataSrc = video.getAttribute('data-src');
-                    if (dataSrc && dataSrc.trim() !== '') {
-                        notifyNative('video data-src: ' + dataSrc);
-                        sendVideoURL(dataSrc, 'video.dataSrc');
-                    }
-                });
-
-                // 检查常见播放器容器的 data 属性
-                document.querySelectorAll('[data-video], [data-src], [data-url]').forEach(el => {
-                    const videoUrl = el.getAttribute('data-video') ||
-                                    el.getAttribute('data-src') ||
-                                    el.getAttribute('data-url');
-                    if (videoUrl && isValidVideoUrl(videoUrl)) {
-                        notifyNative('data attribute: ' + videoUrl);
-                        sendVideoURL(videoUrl, 'data.attribute');
-                    }
-                });
-            }
-
-            // 监听 video 元素变化
-            const videoObserver = new MutationObserver((mutations) => {
-                for (const mutation of mutations) {
+            
+            // Process existing videos
+            sendLog('Video scanner loaded, checking existing videos...');
+            document.querySelectorAll('video').forEach(processVideoElement);
+            
+            // Setup MutationObserver for dynamic content
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach(mutation => {
+                    // Check attribute changes on video elements
                     if (mutation.type === 'attributes' && mutation.target.nodeName === 'VIDEO') {
-                        scanVideoElements();
-                        continue;
+                        if (mutation.attributeName === 'src' || mutation.attributeName === 'data-src') {
+                            processVideoElement(mutation.target);
+                        }
                     }
-                    for (const node of mutation.addedNodes) {
+                    
+                    // Check added nodes
+                    mutation.addedNodes.forEach(node => {
                         if (node.nodeName === 'VIDEO') {
-                            scanVideoElements();
+                            sendLog('New video element detected');
+                            processVideoElement(node);
                         }
                         if (node.querySelectorAll) {
-                            node.querySelectorAll('video').forEach(scanVideoElements);
+                            node.querySelectorAll('video').forEach(processVideoElement);
                         }
-                    }
-                }
+                    });
+                });
             });
-
+            
             if (document.body) {
-                videoObserver.observe(document.body, {
+                observer.observe(document.body, {
                     childList: true,
                     subtree: true,
                     attributes: true,
-                    attributeFilter: ['src']
+                    attributeFilter: ['src', 'data-src']
                 });
-                scanVideoElements();
-            } else {
-                document.addEventListener('DOMContentLoaded', () => {
-                    videoObserver.observe(document.body, {
-                        childList: true,
-                        subtree: true,
-                        attributes: true,
-                        attributeFilter: ['src']
-                    });
-                    scanVideoElements();
-                });
+                sendLog('MutationObserver started');
             }
-
-            // 定期扫描
-            setInterval(scanVideoElements, 1000);
-
-            console.log('[VideoInterceptor] 初始化完成');
-        })();
-        """
-    }
-
-    // MARK: - 完成处理
-
-    private func finish(with result: VideoExtractionResult) {
-        timer?.invalidate()
-        timer = nil
-        isLoading = false
-
-        if let continuation = self.continuation {
-            self.continuation = nil
-            continuation.resume(returning: result)
-        }
-
-        // 清理 WebView
-        webView?.stopLoading()
-        webView?.navigationDelegate = nil
-        webView = nil
-    }
-
-    // MARK: - 轮询检查
-
-    private func startPolling() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            self?.pollVideoSource()
-        }
-    }
-
-    private func pollVideoSource() {
-        guard !foundSources.isEmpty || isLoading else { return }
-
-        // 如果找到了视频源，可以结束
-        if !foundSources.isEmpty {
-            // 过滤掉可能的无效 URL
-            let validSources = foundSources.filter { url in
-                let lower = url.lowercased()
-                // 排除广告/追踪域名
-                let isAd = ["google", "facebook", "tracker", "analytics", "gtag", "baidu", "clarity.ms"].contains { lower.contains($0) }
-                return !isAd
-            }
-
-            guard !validSources.isEmpty else { return }
-
-            let sources = validSources.map { url in
-                VideoSource(
-                    quality: extractQuality(from: url) ?? "auto",
-                    url: url,
-                    type: url.contains(".m3u8") ? "hls" : "mp4",
-                    label: nil
-                )
-            }
-
-            print("[VideoExtractor] ✅ 找到 \(sources.count) 个有效视频源")
-            for (index, source) in sources.enumerated() {
-                print("[VideoExtractor]   [\(index + 1)] \(source.url.prefix(80))...")
-            }
-
-            finish(with: .success(sources))
-        }
-    }
-
-    private func extractQuality(from url: String) -> String? {
-        let patterns = ["(\\d{3,4})p", "(\\d{3,4})_", "quality=(\\w+)", "(\\d{3,4})\\."]
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-               let match = regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)),
-               let range = Range(match.range(at: 1), in: url) {
-                return String(url[range])
-            }
-        }
-        return nil
-    }
-}
-
-// MARK: - WKNavigationDelegate
-
-extension AnimeVideoExtractor: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        print("[VideoExtractor] ✅ 页面加载完成")
-        isLoading = false
-        startPolling()
-
-        // 获取页面信息
-        webView.evaluateJavaScript("document.title") { [weak self] result, error in
-            if let title = result as? String {
-                print("[VideoExtractor] 📄 页面标题: \(title)")
-            }
-        }
-
-        webView.evaluateJavaScript("document.querySelectorAll('iframe').length") { [weak self] result, error in
-            if let count = result as? Int {
-                print("[VideoExtractor] 📄 iframe 数量: \(count)")
-            }
-        }
-
-        webView.evaluateJavaScript("document.querySelectorAll('video').length") { [weak self] result, error in
-            if let count = result as? Int {
-                print("[VideoExtractor] 📄 video 元素数量: \(count)")
-            }
-        }
-
-        // 注入深度扫描脚本
-        let scanScript = """
-        (function() {
-            console.log('[Scanner] 开始深度扫描...');
-
-            // 扫描所有 iframe
-            const iframes = document.querySelectorAll('iframe');
-            console.log('[Scanner] 找到 ' + iframes.length + ' 个 iframe');
-
-            iframes.forEach((iframe, index) => {
-                let src = iframe.getAttribute('src') || iframe.getAttribute('data-src');
-                if (src) {
+            
+            // Also check for iframe videos
+            function checkIframes() {
+                document.querySelectorAll('iframe').forEach(iframe => {
                     try {
-                        window.webkit.messageHandlers.LogBridge.postMessage('iframe[' + index + '] src: ' + src);
-                    } catch(e) {}
-                }
-            });
-
-            // 扫描所有 video 元素
-            const videos = document.querySelectorAll('video');
-            console.log('[Scanner] 找到 ' + videos.length + ' 个 video 元素');
-
-            videos.forEach((video, index) => {
-                let src = video.getAttribute('src') || video.getAttribute('data-src');
-                if (src) {
-                    try {
-                        window.webkit.messageHandlers.LogBridge.postMessage('video[' + index + '] src: ' + src);
-                        window.webkit.messageHandlers.VideoBridge.postMessage({
-                            type: 'video',
-                            url: src,
-                            source: 'scan.video'
-                        });
-                    } catch(e) {}
-                }
-            });
-
-            // 扫描包含视频 URL 的 data 属性
-            document.querySelectorAll('*').forEach(el => {
-                const attrs = ['data-video', 'data-src', 'data-url', 'data-play', 'data-link'];
-                attrs.forEach(attr => {
-                    const value = el.getAttribute(attr);
-                    if (value && (value.includes('.m3u8') || value.includes('.mp4'))) {
-                        try {
-                            window.webkit.messageHandlers.LogBridge.postMessage('Found ' + attr + ': ' + value);
-                            window.webkit.messageHandlers.VideoBridge.postMessage({
-                                type: 'video',
-                                url: value,
-                                source: 'scan.' + attr
-                            });
-                        } catch(e) {}
+                        if (iframe.contentDocument) {
+                            iframe.contentDocument.querySelectorAll('video').forEach(processVideoElement);
+                        }
+                    } catch(e) {
+                        // Cross-origin iframe, can't access
                     }
                 });
-            });
-
-            console.log('[Scanner] 扫描完成');
+            }
+            
+            // Periodic check for iframes
+            setInterval(checkIframes, 2000);
         })();
         """
-        webView.evaluateJavaScript(scanScript) { result, error in
-            if let error = error {
-                print("[VideoExtractor] ⚠️ 扫描脚本执行失败: \(error)")
+        
+        // Script 3: Iframe Injector (for recursive iframe injection)
+        let iframeInjectorScript = """
+        (function() {
+            'use strict';
+            
+            function sendToNative(message, handler) {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[handler]) {
+                    window.webkit.messageHandlers[handler].postMessage(message);
+                }
             }
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        print("[VideoExtractor] 页面加载失败: \(error)")
-        if !foundSources.isEmpty {
-            let sources = foundSources.map { url in
-                VideoSource(
-                    quality: extractQuality(from: url) ?? "auto",
-                    url: url,
-                    type: url.contains(".m3u8") ? "hls" : "mp4",
-                    label: nil
-                )
+            
+            function sendLog(message) {
+                sendToNative(message, 'LogBridge');
             }
-            finish(with: .success(sources))
-        } else {
-            finish(with: .error(error.localizedDescription))
-        }
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        let url = navigationResponse.response.url?.absoluteString ?? ""
-        let lowercasedURL = url.lowercased()
-
-        // 黑名单过滤
-        let blacklist = ["googleads", "googlesyndication", "doubleclick", "facebook",
-                        "analytics", "tracker", "gtag", "clarity.ms", "baidu.com"]
-        let isBlacklisted = blacklist.contains { lowercasedURL.contains($0) }
-
-        // 检测 M3U8 响应
-        if let mimeType = navigationResponse.response.mimeType {
-            if (mimeType.contains("mpegurl") || lowercasedURL.contains(".m3u8")) && !isBlacklisted {
-                print("[VideoExtractor] ✅ 检测到 M3U8: \(url)")
-                foundSources.insert(url)
+            
+            function sendVideo(url) {
+                if (!url || url.startsWith('blob:') || url.includes('googleads')) return;
+                sendToNative(url, 'VideoBridge');
             }
-        }
-
-        // 检测视频响应
-        if let httpResponse = navigationResponse.response as? HTTPURLResponse {
-            let contentType = (httpResponse.allHeaderFields["Content-Type"] as? String ?? "").lowercased()
-            if (contentType.contains("video/") || contentType.contains("application/x-mpegurl")) && !isBlacklisted {
-                print("[VideoExtractor] ✅ 检测到视频响应: \(url)")
-                foundSources.insert(url)
+            
+            function isVideoURL(url) {
+                if (!url) return false;
+                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov'];
+                const lowerUrl = url.toLowerCase();
+                return videoExtensions.some(ext => lowerUrl.includes(ext));
             }
+            
+            function injectIntoIframe(iframe) {
+                if (iframe.__kazumiInjected) return;
+                iframe.__kazumiInjected = true;
+                
+                try {
+                    const iframeWindow = iframe.contentWindow;
+                    const iframeDoc = iframe.contentDocument;
+                    
+                    if (!iframeWindow || !iframeDoc) {
+                        sendLog('Cannot access iframe content (cross-origin)');
+                        return;
+                    }
+                    
+                    sendLog('Injecting into iframe: ' + iframe.src);
+                    
+                    // Inject network interceptors into iframe
+                    if (!iframeWindow.__kazumiInjected) {
+                        iframeWindow.__kazumiInjected = true;
+                        
+                        // Intercept fetch in iframe
+                        const originalFetch = iframeWindow.fetch;
+                        iframeWindow.fetch = function(...args) {
+                            const url = args[0];
+                            if (typeof url === 'string' && isVideoURL(url)) {
+                                sendLog('Iframe fetch detected: ' + url);
+                                sendVideo(url);
+                            }
+                            return originalFetch.apply(this, args);
+                        };
+                        
+                        // Intercept XHR in iframe
+                        const originalXHROpen = iframeWindow.XMLHttpRequest.prototype.open;
+                        iframeWindow.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                            if (typeof url === 'string' && isVideoURL(url)) {
+                                sendLog('Iframe XHR detected: ' + url);
+                                sendVideo(url);
+                            }
+                            return originalXHROpen.call(this, method, url, ...rest);
+                        };
+                    }
+                    
+                    // Scan for videos in iframe
+                    iframeDoc.querySelectorAll('video').forEach(video => {
+                        const src = video.getAttribute('src') || video.currentSrc;
+                        if (src && !src.startsWith('blob:')) {
+                            sendLog('Iframe video found: ' + src);
+                            sendVideo(src);
+                        }
+                    });
+                    
+                    // Recurse into nested iframes
+                    iframeDoc.querySelectorAll('iframe').forEach(injectIntoIframe);
+                    
+                    // Watch for new iframes in this iframe
+                    const observer = new MutationObserver((mutations) => {
+                        mutations.forEach(mutation => {
+                            mutation.addedNodes.forEach(node => {
+                                if (node.nodeName === 'IFRAME') {
+                                    injectIntoIframe(node);
+                                }
+                                if (node.querySelectorAll) {
+                                    node.querySelectorAll('iframe').forEach(injectIntoIframe);
+                                }
+                            });
+                        });
+                    });
+                    
+                    observer.observe(iframeDoc.body, {
+                        childList: true,
+                        subtree: true
+                    });
+                    
+                } catch(e) {
+                    sendLog('Iframe injection error: ' + e.message);
+                }
+            }
+            
+            // Inject into existing iframes
+            function injectAllIframes() {
+                document.querySelectorAll('iframe').forEach(injectIntoIframe);
+            }
+            
+            // Initial injection
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', injectAllIframes);
+            } else {
+                injectAllIframes();
+            }
+            
+            // Watch for new iframes
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach(mutation => {
+                    mutation.addedNodes.forEach(node => {
+                        if (node.nodeName === 'IFRAME') {
+                            sendLog('New iframe detected: ' + node.src);
+                            injectIntoIframe(node);
+                        }
+                        if (node.querySelectorAll) {
+                            node.querySelectorAll('iframe').forEach(injectIntoIframe);
+                        }
+                    });
+                });
+            });
+            
+            if (document.body) {
+                observer.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+            } else {
+                document.addEventListener('DOMContentLoaded', () => {
+                    observer.observe(document.body, {
+                        childList: true,
+                        subtree: true
+                    });
+                });
+            }
+            
+            sendLog('Iframe injector loaded');
+        })();
+        """
+        
+        // Script 4: Legacy iframe src extractor (for simple sites)
+        let legacyIframeScript = """
+        (function() {
+            'use strict';
+            
+            function sendToNative(message, handler) {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[handler]) {
+                    window.webkit.messageHandlers[handler].postMessage(message);
+                }
+            }
+            
+            function sendLog(message) {
+                sendToNative(message, 'LogBridge');
+            }
+            
+            function sendVideo(url) {
+                sendToNative(url, 'VideoBridge');
+            }
+            
+            sendLog('Legacy iframe scanner loaded');
+            
+            const iframes = document.getElementsByTagName('iframe');
+            sendLog('Found ' + iframes.length + ' iframes');
+            
+            for (let i = 0; i < iframes.length; i++) {
+                const iframe = iframes[i];
+                const src = iframe.getAttribute('src');
+                if (src && src.trim() !== '') {
+                    sendLog('Iframe ' + i + ' src: ' + src);
+                    if (src.includes('http') && !src.includes('googleads')) {
+                        sendVideo(src);
+                    }
+                }
+            }
+        })();
+        """
+        
+        // Add all user scripts
+        let scripts: [(String, WKUserScriptInjectionTime)] = [
+            (networkInterceptorScript, .atDocumentStart),
+            (videoScannerScript, .atDocumentEnd),
+            (iframeInjectorScript, .atDocumentEnd),
+            (legacyIframeScript, .atDocumentEnd)
+        ]
+        
+        for script in scripts {
+            let userScript = WKUserScript(
+                source: script.0,
+                injectionTime: script.1,
+                forMainFrameOnly: false  // Important: inject into all frames
+            )
+            webView.configuration.userContentController.addUserScript(userScript)
         }
-
-        // 日志：记录所有网络请求（用于调试）
-        if !isBlacklisted && (lowercasedURL.contains(".mp4") || lowercasedURL.contains(".m3u8") ||
-           lowercasedURL.contains("video") || lowercasedURL.contains("stream")) {
-            print("[VideoExtractor] 📝 可疑 URL: \(url)")
-        }
-
-        decisionHandler(.allow)
-    }
-
-    // 拦截所有网络请求（iOS 15+ / macOS 12+）
-    @available(macOS 12.0, *)
-    func webView(_ webView: WKWebView, authenticationChallenge challenge: URLAuthenticationChallenge, shouldAllowDeprecatedTLS decisionHandler: @escaping (Bool) -> Void) {
-        decisionHandler(true)
+        
+        addLog("所有脚本已注入 (\(scripts.count) 个)")
     }
 }
 
-// MARK: - WKScriptMessageHandler
+// MARK: - JavaScript Message Handling
 
 extension AnimeVideoExtractor: WKScriptMessageHandler {
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "VideoBridge" {
-            if let body = message.body as? [String: Any],
-               let url = body["url"] as? String {
-                let source = body["source"] as? String ?? "unknown"
-                print("[VideoExtractor] ✅ JS 发现视频 [\(source)]: \(url.prefix(100))...")
-                foundSources.insert(url)
+    nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        Task { @MainActor in
+            switch message.name {
+            case "LogBridge":
+                if let log = message.body as? String {
+                    self.addLog(log)
+                }
+                
+            case "VideoBridge":
+                if let urlString = message.body as? String {
+                    self.handleVideoURL(urlString)
+                }
+                
+            default:
+                break
             }
-        } else if message.name == "LogBridge" {
-            if let log = message.body as? String {
-                // 过滤掉无关日志，只保留重要信息
-                let lowerLog = log.lowercased()
-                if lowerLog.contains("找到") || lowerLog.contains("m3u8") ||
-                   lowerLog.contains("视频") || lowerLog.contains("error") ||
-                   lowerLog.contains("失败") {
-                    print("[VideoExtractor] 📝 JS: \(log)")
+        }
+    }
+    
+    private func handleVideoURL(_ urlString: String) {
+        // Avoid duplicates
+        guard !detectedSources.contains(urlString) else { return }
+        detectedSources.insert(urlString)
+        
+        addLog("✅ 发现视频源: \(urlString.prefix(60))...")
+        
+        // Check if it's a valid video URL
+        let lowercased = urlString.lowercased()
+        let isM3U8 = lowercased.contains(".m3u8") || lowercased.contains("application/vnd.apple.mpegurl")
+        let isMP4 = lowercased.contains(".mp4") || lowercased.contains("video/mp4")
+        let isTS = lowercased.contains(".ts") || lowercased.contains("video/MP2T")
+        let isFLV = lowercased.contains(".flv")
+        let isWebM = lowercased.contains(".webm")
+        
+        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || lowercased.contains("video") else {
+            addLog("⚠️ URL 格式不符合视频特征，继续等待")
+            return
+        }
+        
+        // Determine quality label and type
+        var quality = "Unknown"
+        var type = "mp4"
+        
+        if isM3U8 {
+            quality = "Auto"
+            type = "m3u8"
+        } else if isMP4 {
+            if lowercased.contains("1080") || lowercased.contains("fhd") {
+                quality = "1080P"
+            } else if lowercased.contains("720") || lowercased.contains("hd") {
+                quality = "720P"
+            } else if lowercased.contains("480") || lowercased.contains("sd") {
+                quality = "480P"
+            } else {
+                quality = "MP4"
+            }
+            type = "mp4"
+        } else if isFLV {
+            quality = "FLV"
+            type = "flv"
+        } else if isWebM {
+            quality = "WebM"
+            type = "webm"
+        }
+        
+        // Create VideoSource
+        let source = VideoSource(
+            quality: quality,
+            url: urlString,
+            type: type,
+            label: nil
+        )
+        
+        // For now, take the first valid source found
+        isVideoFound = true
+        progressMessage = "找到视频源: \(quality)"
+        
+        // Small delay to potentially find better quality sources
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            if !self.isVideoFound { return }
+            
+            let sources = [source]
+            self.finish(with: .success(sources), resolveId: self.resolveId)
+        }
+    }
+}
+
+// MARK: - Navigation Delegate
+
+extension AnimeVideoExtractor: WKNavigationDelegate {
+    nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        Task { @MainActor in
+            self.progressMessage = "正在加载页面..."
+            self.addLog("页面开始加载")
+        }
+    }
+    
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor in
+            self.progressMessage = "页面加载完成，扫描视频..."
+            self.addLog("✅ 页面加载完成")
+            
+            // Inject additional scripts after page load
+            self.injectPostLoadScripts()
+            
+            // Set a fallback timeout for video detection
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                if !self.isVideoFound && self.continuation != nil {
+                    self.addLog("⚠️ 5秒内未检测到视频，继续等待...")
                 }
             }
         }
+    }
+    
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor in
+            self.addLog("❌ 页面加载失败: \(error.localizedDescription)")
+            if !self.isVideoFound {
+                self.finish(with: .error("页面加载失败: \(error.localizedDescription)"), resolveId: self.resolveId)
+            }
+        }
+    }
+    
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor in
+            self.addLog("❌ 页面加载失败: \(error.localizedDescription)")
+            if !self.isVideoFound {
+                self.finish(with: .error("页面加载失败: \(error.localizedDescription)"), resolveId: self.resolveId)
+            }
+        }
+    }
+    
+    // Handle captcha detection
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        Task { @MainActor in
+            if let url = navigationResponse.response.url?.absoluteString {
+                // Check for captcha indicators
+                let captchaIndicators = ["captcha", "verify", "challenge", "recaptcha", "hcaptcha"]
+                if captchaIndicators.contains(where: { url.lowercased().contains($0) }) {
+                    self.addLog("⚠️ 检测到验证码页面")
+                    self.finish(with: .captcha, resolveId: self.resolveId)
+                    decisionHandler(.cancel)
+                    return
+                }
+            }
+            decisionHandler(.allow)
+        }
+    }
+}
+
+// MARK: - Post-Load Scripts
+
+private extension AnimeVideoExtractor {
+    func injectPostLoadScripts() {
+        // Script to force play hidden videos (some sites hide the player initially)
+        let forcePlayScript = """
+        (function() {
+            document.querySelectorAll('video').forEach(v => {
+                v.style.display = 'block';
+                v.style.visibility = 'visible';
+                v.style.opacity = '1';
+                v.muted = true;
+                v.play().catch(() => {});
+            });
+        })();
+        """
+        
+        webView?.evaluateJavaScript(forcePlayScript, completionHandler: nil)
+        
+        // Script to remove common anti-debugger checks
+        let antiDebuggerScript = """
+        (function() {
+            window.debugger = function() {};
+            const originalFunction = Function;
+            window.Function = new Proxy(originalFunction, {
+                construct(target, args) {
+                    const code = args.join('');
+                    if (code.includes('debugger')) {
+                        return function() {};
+                    }
+                    return new target(...args);
+                }
+            });
+        })();
+        """
+        
+        webView?.evaluateJavaScript(antiDebuggerScript, completionHandler: nil)
+    }
+}
+
+// MARK: - Helper Methods
+
+private extension AnimeVideoExtractor {
+    func addLog(_ message: String) {
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let logMessage = "[\(timestamp)] \(message)"
+        logMessages.append(logMessage)
+        print("🎬 [VideoExtractor] \(message)")
+    }
+    
+    func handleTimeout(resolveId: Int) {
+        guard resolveId == self.resolveId else { return }
+        
+        if isVideoFound {
+            // Already found video, ignore timeout
+            return
+        }
+        
+        addLog("❌ 解析超时")
+        finish(with: .timeout, resolveId: resolveId)
+    }
+    
+    func finish(with result: VideoExtractionResult, resolveId: Int) {
+        guard resolveId == self.resolveId else { return }
+        
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        
+        isLoading = false
+        
+        switch result {
+        case .success(let sources):
+            progressMessage = "找到 \(sources.count) 个视频源"
+            addLog("✅ 解析完成，找到 \(sources.count) 个视频源")
+        case .error(let error):
+            progressMessage = error
+            addLog("❌ \(error)")
+        case .captcha:
+            progressMessage = "需要验证码验证"
+            addLog("⛔ 需要验证码")
+        case .timeout:
+            progressMessage = "视频解析超时"
+            addLog("⏱️ 解析超时")
+        }
+        
+        // Clean up WebView
+        webView?.stopLoading()
+        webView?.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView = nil
+        
+        // Resume continuation
+        continuation?.resume(returning: result)
+        continuation = nil
     }
 }

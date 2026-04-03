@@ -24,7 +24,13 @@ actor UserLibrary {
     private var downloads: [DownloadRecord] = []
 
     init() {
-        let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            // 使用临时目录作为回退
+            self.libraryDirectory = fileManager.temporaryDirectory
+                .appendingPathComponent("WallHaven", isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+            return
+        }
         self.libraryDirectory = supportDir
             .appendingPathComponent("WallHaven", isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)

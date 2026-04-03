@@ -139,15 +139,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // 启动时预加载动漫规则（后台异步）
-        Task {
-            print("[AppDelegate] 启动时预加载动漫规则...")
-            await AnimeRuleStore.shared.ensureDefaultRulesCopied()
-            let rules = await AnimeRuleStore.shared.loadAllRules()
-            print("[AppDelegate] 预加载完成，共 \(rules.count) 个规则")
-            for rule in rules {
-                print("[AppDelegate]   - \(rule.name) (\(rule.id))")
-            }
+        // 启动时在后台同步规则：Kazumi 动漫（安装缺失 + 版本更新）+ 已配置的 GitHub 规则仓库
+        Task(priority: .utility) {
+            print("[AppDelegate] 开始后台规则同步…")
+
+            // 1. 同步 Kazumi 动漫规则
+            print("[AppDelegate] 同步 Kazumi 动漫规则…")
+            await AnimeRuleStore.shared.syncOnLaunchInBackground()
+            let animeRules = await AnimeRuleStore.shared.loadAllRules()
+            print("[AppDelegate] 动漫规则同步完成，共 \(animeRules.count) 个")
+
+            // 2. 加载已配置的 GitHub 规则仓库
+            print("[AppDelegate] 加载已配置的 GitHub 规则仓库…")
+            await RuleRepository.shared.loadConfiguredRepository()
+            let wallpaperRules = await RuleLoader.shared.allRules()
+            print("[AppDelegate] 壁纸规则加载完成，共 \(wallpaperRules.count) 个")
+
+            print("[AppDelegate] 后台规则同步结束")
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {

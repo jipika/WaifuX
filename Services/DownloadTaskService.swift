@@ -10,6 +10,12 @@ class DownloadTaskService: ObservableObject {
     private let userDefaultsKey = "download_tasks"
     private var scheduledSaveWorkItem: DispatchWorkItem?
 
+    // MARK: - Active Download Tasks Management
+    /// 存储正在进行的下载任务，用于暂停/恢复/取消控制
+    private var activeDownloads: [String: Task<Void, Error>] = [:]
+    /// 存储下载取消标志，用于协作式取消检查
+    private var downloadCancellationFlags: [String: Bool] = [:]
+
     private init() {
         loadTasks()
     }
@@ -55,27 +61,82 @@ class DownloadTaskService: ObservableObject {
 
     func pauseTask(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+
+        // 取消正在进行的下载任务（但保留进度）
+        if let downloadTask = activeDownloads[id] {
+            downloadTask.cancel()
+            activeDownloads.removeValue(forKey: id)
+        }
+
         objectWillChange.send()
         tasks[index].status = .paused
         tasks[index].lastUpdatedAt = .now
         persistTasks()
+
+        print("[DownloadTaskService] Task \(id) paused")
     }
 
     func resumeTask(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        guard tasks[index].status == .paused else { return }
+
         objectWillChange.send()
         tasks[index].status = .downloading
         tasks[index].lastUpdatedAt = .now
         persistTasks()
+
+        // 注意：实际的下载恢复需要由调用方（如 WallpaperViewModel）重新启动下载
+        // 这里只是更新状态，实际的下载逻辑在调用方处理
+        print("[DownloadTaskService] Task \(id) marked for resume")
     }
 
     func cancelTask(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+
+        // 取消正在进行的下载任务
+        if let downloadTask = activeDownloads[id] {
+            downloadTask.cancel()
+            activeDownloads.removeValue(forKey: id)
+        }
+
+        // 设置取消标志
+        downloadCancellationFlags[id] = true
+
         objectWillChange.send()
         tasks[index].status = .cancelled
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
         persistTasks()
+
+        print("[DownloadTaskService] Task \(id) cancelled")
+    }
+
+    // MARK: - Active Download Management
+
+    /// 注册一个活动的下载任务
+    func registerDownloadTask(id: String, task: Task<Void, Error>) {
+        activeDownloads[id] = task
+        downloadCancellationFlags[id] = false
+    }
+
+    /// 注销一个活动的下载任务
+    func unregisterDownloadTask(id: String) {
+        activeDownloads.removeValue(forKey: id)
+        downloadCancellationFlags.removeValue(forKey: id)
+    }
+
+    /// 检查下载是否被取消
+    func isDownloadCancelled(id: String) -> Bool {
+        return downloadCancellationFlags[id] ?? false
+    }
+
+    /// 取消所有活动的下载
+    func cancelAllActiveDownloads() {
+        for (id, task) in activeDownloads {
+            task.cancel()
+            downloadCancellationFlags[id] = true
+        }
+        activeDownloads.removeAll()
     }
 
     func removeTask(id: String) {

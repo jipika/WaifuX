@@ -10,7 +10,7 @@ struct ContentView: View {
     @State private var showFilters = false
     @State private var selectedWallpaper: Wallpaper?
     @State private var selectedMedia: MediaItem?
-    @State private var selectedAnime: UniversalContentItem?
+    @State private var selectedAnime: AnimeSearchResult?
 
     var body: some View {
         ZStack {
@@ -34,7 +34,7 @@ struct ContentView: View {
                 case .wallpaperExplore:
                     WallpaperExploreContentView(viewModel: viewModel, selectedWallpaper: $selectedWallpaper)
                 case .animeExplore:
-                    AnimeExploreView()
+                    AnimeExploreView(selectedAnime: $selectedAnime)
                 case .mediaExplore:
                     MediaExploreContentView(viewModel: mediaViewModel, selectedMedia: $selectedMedia)
                 case .myMedia:
@@ -79,6 +79,17 @@ struct ContentView: View {
                     removal: .opacity.animation(.easeIn(duration: 0.12))
                 ))
                 .zIndex(300)
+            }
+
+            if let anime = selectedAnime {
+                AnimeDetailSheet(anime: anime, selectedAnime: $selectedAnime)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.18)),
+                        removal: .opacity.animation(.easeIn(duration: 0.12))
+                    ))
+                    .zIndex(500)
             }
 
             DownloadProgressToastHost(viewModel: downloadTaskViewModel)

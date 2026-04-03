@@ -230,7 +230,7 @@ enum DataSourceProfileStore {
 
     /// 从 Bundle 的 Resources/DataSourceProfile.json 加载配置
     private static func loadBuiltinCatalog() -> DataSourceCatalog {
-        // 首先尝试从应用 Bundle 加载
+        // 首先尝试从应用 Bundle 加载（生产环境）
         if let url = Bundle.main.url(forResource: "DataSourceProfile", withExtension: "json", subdirectory: "Resources"),
            let data = try? Data(contentsOf: url),
            let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
@@ -238,13 +238,26 @@ enum DataSourceProfileStore {
             return catalog
         }
 
-        // 尝试从项目目录加载（开发时）
-        let projectURL = URL(fileURLWithPath: "/Volumes/mac/CodeLibrary/Claude/WallHaven/Resources/DataSourceProfile.json")
-        if let data = try? Data(contentsOf: projectURL),
+        // 尝试从 Bundle 根目录加载（备用）
+        if let url = Bundle.main.url(forResource: "DataSourceProfile", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
            let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
-            print("[DataSourceProfileStore] Loaded built-in config from project directory")
+            print("[DataSourceProfileStore] Loaded built-in config from Bundle root")
             return catalog
         }
+
+        // 开发环境：尝试从当前工作目录的 Resources 目录加载
+        #if DEBUG
+        let fileManager = FileManager.default
+        if let currentPath = fileManager.currentDirectoryPath as String?,
+           let projectURL = URL(string: "file://\(currentPath)/Resources/DataSourceProfile.json"),
+           fileManager.fileExists(atPath: projectURL.path),
+           let data = try? Data(contentsOf: projectURL),
+           let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
+            print("[DataSourceProfileStore] Loaded built-in config from current directory")
+            return catalog
+        }
+        #endif
 
         // 失败时返回空 catalog
         print("[DataSourceProfileStore] Failed to load built-in config, using empty catalog")

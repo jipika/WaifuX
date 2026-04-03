@@ -15,7 +15,13 @@ actor AnimeRuleStore {
     // 与壁纸/媒体规则完全分离，不走用户配置的 Profiles 仓库
 
     init() {
-        let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            // 使用临时目录作为回退
+            self.rulesDirectory = fileManager.temporaryDirectory
+                .appendingPathComponent("WallHaven", isDirectory: true)
+                .appendingPathComponent("AnimeRules", isDirectory: true)
+            return
+        }
         self.rulesDirectory = supportDir
             .appendingPathComponent("WallHaven", isDirectory: true)
             .appendingPathComponent("AnimeRules", isDirectory: true)
@@ -24,20 +30,80 @@ actor AnimeRuleStore {
         try? fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
     }
 
-    /// 确保默认规则已复制完成
-    /// 用户要求直接加载所有可用规则，因此自动安装全部 Kazumi 规则
+    /// 本地仅作缓存：与远程索引对齐，清空磁盘上的动漫规则后按 Kazumi 全量重新下载（非弃用项）
     func ensureDefaultRulesCopied() async {
         do {
-            let index = try await KazumiRuleLoader.shared.fetchRuleIndex()
-            for item in index {
-                if !isRuleInstalled(item.name.lowercased()) {
-                    _ = await installRuleByName(item.name)
-                }
-            }
-            print("[AnimeRuleStore] 自动安装规则完成，共 \(allRules().count) 个")
+            try await replaceAllRulesFromKazumiRemote()
+            print("[AnimeRuleStore] Kazumi 全量覆盖完成，共 \(allRules().count) 个")
         } catch {
-            print("[AnimeRuleStore] 自动安装规则失败: \(error)")
+            print("[AnimeRuleStore] Kazumi 全量同步失败（保留上次本地缓存）: \(error)")
         }
+    }
+
+    /// 应用启动时在后台执行一次：始终以远程为准覆盖本地缓存（不合并、不以本地版本为准）
+    func syncOnLaunchInBackground() async {
+        print("[AnimeRuleStore] [启动同步] 开始从 Kazumi 远程仓库同步规则…")
+        print("[AnimeRuleStore] [启动同步] 规则存储目录: \(rulesDirectory.path)")
+
+        // 确保目录存在
+        do {
+            try fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+            print("[AnimeRuleStore] [启动同步] 规则目录已确保存在")
+        } catch {
+            print("[AnimeRuleStore] [启动同步] 创建规则目录失败: \(error.localizedDescription)")
+        }
+
+        do {
+            try await replaceAllRulesFromKazumiRemote()
+            let rules = await loadAllRules()
+            print("[AnimeRuleStore] [启动同步] Kazumi 全量覆盖完成，共 \(rules.count) 个规则")
+        } catch {
+            print("[AnimeRuleStore] [启动同步] 全量同步失败: \(error.localizedDescription)")
+            // 同步失败时，尝试加载本地缓存
+            let cachedRules = await loadAllRules()
+            print("[AnimeRuleStore] [启动同步] 使用本地缓存: \(cachedRules.count) 个规则")
+        }
+    }
+
+    /// 删除 `AnimeRules` 目录下所有 `.json` 并清空内存字典（成功拉取索引后再调用）
+    private func clearAllLocalRuleFiles() throws {
+        rules.removeAll()
+        guard let files = try? fileManager.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil) else {
+            return
+        }
+        for file in files where file.pathExtension == "json" {
+            try? fileManager.removeItem(at: file)
+        }
+    }
+
+    /// 从 Kazumi 官方索引全量同步：远程成功后再清空本地并逐条下载覆盖（与索引一致，弃用项不安装）
+    func replaceAllRulesFromKazumiRemote() async throws {
+        print("[AnimeRuleStore] 开始获取 Kazumi 远程索引…")
+        let indexData = try await fetchIndexData()
+        print("[AnimeRuleStore] 索引数据获取成功，大小: \(indexData.count) bytes")
+
+        guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
+            print("[AnimeRuleStore] 索引数据解码失败")
+            throw AnimeRuleStoreError.invalidIndex
+        }
+        print("[AnimeRuleStore] 索引解码成功，共 \(index.count) 个规则")
+
+        await KazumiRuleLoader.shared.clearCache()
+        try clearAllLocalRuleFiles()
+
+        var installedCount = 0
+        var skippedCount = 0
+        for item in index {
+            if item.deprecated == true {
+                skippedCount += 1
+                continue
+            }
+            let rule = await installRuleByName(item.name)
+            if rule != nil {
+                installedCount += 1
+            }
+        }
+        print("[AnimeRuleStore] 全量同步完成: 安装 \(installedCount) 个, 跳过弃用 \(skippedCount) 个")
     }
 
     // MARK: - 初始化
@@ -50,7 +116,9 @@ actor AnimeRuleStore {
             guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
                 return []
             }
-            return index.map { $0.asRuleInfo }
+            return index
+                .filter { $0.deprecated != true }
+                .map { $0.asRuleInfo }
         } catch {
             print("[AnimeRuleStore] 获取可用规则列表失败: \(error)")
             return []
@@ -109,7 +177,9 @@ actor AnimeRuleStore {
             }
         }
 
-        return loadedRules.sorted { $0.name < $1.name }
+        return loadedRules
+            .filter { !$0.deprecated }
+            .sorted { $0.name < $1.name }
     }
 
     /// 从文件加载规则
@@ -150,44 +220,41 @@ actor AnimeRuleStore {
         return try await installRule(from: rawURL)
     }
 
-    /// 批量安装 Kazumi 动漫规则
+    /// 批量安装 Kazumi 动漫规则（与全量覆盖一致）
     func installKazumiAnimeRules() async throws -> [AnimeRule] {
-        // 首先获取索引文件
-        let indexData = try await fetchIndexData()
-
-        guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
-            throw AnimeRuleStoreError.invalidIndex
-        }
-
-        var installedRules: [AnimeRule] = []
-
-        for item in index {
-            do {
-                let rule = try await installRule(from: item.ruleURL)
-                installedRules.append(rule)
-            } catch {
-                print("[AnimeRuleStore] Failed to install \(item.name): \(error)")
-            }
-        }
-
-        return installedRules
+        try await replaceAllRulesFromKazumiRemote()
+        return await loadAllRules()
     }
 
     /// 从 Kazumi 官方仓库获取索引
     private func fetchIndexData() async throws -> Data {
         let kazumiIndexURL = "https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json"
+        print("[AnimeRuleStore] 获取索引: \(kazumiIndexURL)")
+
         guard let url = URL(string: kazumiIndexURL) else {
+            print("[AnimeRuleStore] 索引 URL 无效")
             throw AnimeRuleStoreError.invalidURL
         }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw AnimeRuleStoreError.downloadFailed
+            guard let httpResponse = response as? HTTPURLResponse else {
+                print("[AnimeRuleStore] 响应类型无效")
+                throw AnimeRuleStoreError.downloadFailed
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                print("[AnimeRuleStore] HTTP 错误: \(httpResponse.statusCode)")
+                throw AnimeRuleStoreError.downloadFailed
+            }
+
+            print("[AnimeRuleStore] 索引获取成功: HTTP \(httpResponse.statusCode)")
+            return data
+        } catch {
+            print("[AnimeRuleStore] 网络请求失败: \(error.localizedDescription)")
+            throw error
         }
-
-        return data
     }
 
     // MARK: - 保存规则
@@ -208,16 +275,16 @@ actor AnimeRuleStore {
         return rules[id]
     }
 
-    /// 获取所有规则
+    /// 获取所有规则（弃用项不返回，避免占列表空间）
     func allRules() -> [AnimeRule] {
-        return Array(rules.values).sorted { $0.name < $1.name }
+        return rules.values
+            .filter { !$0.deprecated }
+            .sorted { $0.name < $1.name }
     }
 
     /// 获取可用规则（未弃用）
     func availableRules() -> [AnimeRule] {
-        return rules.values
-            .filter { !$0.deprecated }
-            .sorted { $0.name < $1.name }
+        return allRules()
     }
 
     // MARK: - 删除规则
@@ -234,30 +301,10 @@ actor AnimeRuleStore {
 
     // MARK: - 更新规则
 
-    /// 检查并更新规则
+    /// 与「全量覆盖」一致：始终以远程索引为准覆盖本地
     func checkForUpdates() async throws -> [String] {
-        let indexData = try await fetchIndexData()
-
-        guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
-            throw AnimeRuleStoreError.invalidIndex
-        }
-
-        var updatedRules: [String] = []
-
-        for item in index {
-            if let localRule = rules[item.name.lowercased()],
-               let remoteVersion = item.version,
-               remoteVersion != localRule.version {
-                do {
-                    _ = try await installRule(from: item.ruleURL)
-                    updatedRules.append(item.name)
-                } catch {
-                    print("[AnimeRuleStore] Failed to update \(item.name): \(error)")
-                }
-            }
-        }
-
-        return updatedRules
+        try await replaceAllRulesFromKazumiRemote()
+        return allRules().map(\.name)
     }
 
     /// 更新单个规则
@@ -312,6 +359,8 @@ private struct KazumiRuleItem: Codable {
     let antiCrawlerEnabled: Bool?
     let author: String?
     let lastUpdate: Int64?
+    /// Kazumi / 自建索引可选字段：为 true 时不展示、不自动安装
+    let deprecated: Bool?
 }
 
 // MARK: - 公开规则信息类型

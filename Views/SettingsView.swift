@@ -100,32 +100,17 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 标题栏（红绿灯 + 标题 + 站位）
+            // 红绿灯
             HStack {
-                // 红绿灯
                 WindowControlButtons()
-                    .frame(width: 60, alignment: .leading)
 
                 Spacer()
-
-                // 标题
-                Text(t("settings.title"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                // 站位
-                Color.clear
-                    .frame(width: 60)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 16)
             .background(.ultraThinMaterial)
 
-            Divider()
-
-            // TabView 内容
+            // TabView 需占满剩余高度，否则会在标题栏下方留出一大块空白
             TabView(selection: $selectedTab) {
                 GeneralSettingsTab(viewModel: viewModel)
                     .tabItem {
@@ -151,8 +136,9 @@ struct SettingsView: View {
                     }
                     .tag(SettingsTab.about)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 600, height: 480)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id(localization.currentLanguage)
     }
 }
@@ -161,6 +147,7 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showClearCacheAlert = false
+    @State private var importProfileURL = ""
 
     private var apiKeyBinding: Binding<String> {
         Binding(
@@ -243,6 +230,50 @@ private struct GeneralSettingsTab: View {
                 Text(t("ruleRepository"))
             } footer: {
                 Text(t("ruleRepositoryDesc"))
+                    .font(.caption)
+            }
+
+            // 数据来源配置
+            Section {
+                Picker(t("activeProfile"), selection: Binding(
+                    get: { viewModel.activeDataSourceProfileID },
+                    set: { viewModel.selectDataSourceProfile(id: $0) }
+                )) {
+                    ForEach(viewModel.dataSourceProfiles) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                HStack(spacing: 12) {
+                    Button(t("testProfile")) {
+                        Task { await viewModel.runDataSourceDiagnostics() }
+                    }
+
+                    Spacer()
+
+                    Button(t("resetProfile")) {
+                        viewModel.resetDataSourceProfiles()
+                    }
+                }
+
+                HStack {
+                    TextField("https://example.com/profile.json", text: $importProfileURL)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button(t("importFromURL")) {
+                        guard let url = URL(string: importProfileURL) else { return }
+                        Task {
+                            await viewModel.importDataSourceProfiles(fromRemoteURL: url)
+                            importProfileURL = ""
+                        }
+                    }
+                    .disabled(importProfileURL.isEmpty)
+                }
+            } header: {
+                Text(t("dataSourceProfiles"))
+            } footer: {
+                Text(t("dataSourceProfilesDesc"))
                     .font(.caption)
             }
 
@@ -449,6 +480,7 @@ private struct AboutSettingsTab: View {
             Section {
                 LabeledContent(t("developer"), value: "jipika")
                 LabeledContent(t("dataSource"), value: "wallhaven.cc / motionbgs.com")
+                LabeledContent(t("animeSource"), value: "Predidit / KazumiRules")
                 LabeledContent(t("techStack"), value: "SwiftUI + AppKit")
             } header: {
                 Text(t("projectInfo"))
@@ -504,4 +536,5 @@ private struct AboutSettingsTab: View {
         }
     }
 }
+
 

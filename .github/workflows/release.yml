@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26-arm64
+    runs-on: macos-26
 
     steps:
       - name: Checkout
@@ -45,7 +45,7 @@ jobs:
           ./scripts/package.sh
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: build/WallHaven.dmg
           draft: true

@@ -277,31 +277,26 @@ actor HTMLParser {
         // [contains(@class, 'name')] -> [class*="name"] (重复处理, 因为上一个可能没匹配到)
         if let regex = try? NSRegularExpression(pattern: containsClassPattern),
            regex.firstMatch(in: result, range: NSRange(result.startIndex..., in: result)) != nil {
-            result = (try? regex.stringByReplacingMatches(
+            result = regex.stringByReplacingMatches(
                 in: result,
                 range: NSRange(result.startIndex..., in: result),
                 withTemplate: "[class*=\"$1\"]"
-            )) ?? result
+            )
         }
 
-        // [@class='name'] -> .name
+        // [@class='name'] -> .name (正确处理 class 转换)
         let exactClassPattern = #"\[@class=['"]([^'"]+)['"]\]"#
-        if let regex = try? NSRegularExpression(pattern: exactClassPattern),
-           let match = regex.firstMatch(in: result, range: NSRange(result.startIndex..., in: result)),
-           let range = Range(match.range(at: 1), in: result) {
-            let className = String(result[range])
-            // 先移除原始的 [@class='name']
-            result = result.replacingOccurrences(of: "[@class='\(className)']", with: "")
-            result = result.replacingOccurrences(of: "[@class=\"\(className)\"]", with: "")
-            // 如果 tag 在前面, 把 class 加到 tag 上
-            if result.contains("<tag>") {
-                // shouldn't happen with our patterns
-            }
-            // 插入 class
-            let insertIndex = result.firstIndex(where: { $0 == "[" || $0 == "]" || $0 == "/" || $0 == Character("") }) ?? result.endIndex
-            // 简单策略: 在 tag 后插入 .className
-            if !result.contains(".\(className)") && !result.hasSuffix(".\(className)") {
-                // 已经移除的 [@class='name'] 不再添加
+        if let regex = try? NSRegularExpression(pattern: exactClassPattern) {
+            // 查找所有 class 属性并转换为 CSS 类选择器
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            // 从后往前处理，避免替换后范围变化
+            for match in matches.reversed() {
+                guard let classRange = Range(match.range(at: 1), in: result) else { continue }
+                let className = String(result[classRange])
+                // 将 [@class='name'] 替换为 .name
+                if let fullRange = Range(match.range, in: result) {
+                    result.replaceSubrange(fullRange, with: ".\(className)")
+                }
             }
         }
 
@@ -311,11 +306,11 @@ actor HTMLParser {
            let match = regex.firstMatch(in: result, range: NSRange(result.startIndex..., in: result)),
            let range = Range(match.range(at: 1), in: result) {
             let id = String(result[range])
-            result = (try? regex.stringByReplacingMatches(
+            result = regex.stringByReplacingMatches(
                 in: result,
                 range: NSRange(result.startIndex..., in: result),
                 withTemplate: "#\(id)"
-            )) ?? result
+            )
         }
 
         // [@attr='value'] -> [attr="value"]
@@ -327,11 +322,11 @@ actor HTMLParser {
             let attr = String(result[attrRange])
             let val = String(result[valRange])
             if attr != "class" && attr != "id" {
-                result = (try? regex.stringByReplacingMatches(
+                result = regex.stringByReplacingMatches(
                     in: result,
                     range: NSRange(result.startIndex..., in: result),
                     withTemplate: "[\(attr)=\"\(val)\"]"
-                )) ?? result
+                )
             }
         }
 
@@ -339,11 +334,11 @@ actor HTMLParser {
         // 移除末尾的 /text() 或 /@xxx
         let trailingExtraction = #"(/text\(\)|/@[a-zA-Z]+)$"#
         if let regex = try? NSRegularExpression(pattern: trailingExtraction) {
-            result = (try? regex.stringByReplacingMatches(
+            result = regex.stringByReplacingMatches(
                 in: result,
                 range: NSRange(result.startIndex..., in: result),
                 withTemplate: ""
-            )) ?? result
+            )
         }
 
         return result.isEmpty ? nil : result
@@ -656,7 +651,7 @@ actor HTMLParser {
 
         // .//tag/@attr
         if trimmed.hasPrefix(".//") {
-            var inner = String(trimmed.dropFirst(3))
+            let inner = String(trimmed.dropFirst(3))
 
             // .//@src -> 直接从当前元素提取属性
             if inner.hasPrefix("@") {

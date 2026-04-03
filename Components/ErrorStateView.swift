@@ -94,7 +94,7 @@ struct ErrorStateView: View {
                 .lineLimit(3)
             
             // 重试按钮
-            if let retryAction {
+            if retryAction != nil {
                 Button {
                     performRetry()
                 } label: {

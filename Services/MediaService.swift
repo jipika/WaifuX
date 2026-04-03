@@ -6,8 +6,84 @@ actor MediaService {
 
     private let networkService = NetworkService.shared
     private let htmlParser = HTMLParser.shared
-    private var listCache: [String: MediaListPage] = [:]
-    private var detailCache: [String: MediaItem] = [:]
+
+    // MARK: - LRU Cache with Size Limit
+    private final class LRUCache<Key: Hashable, Value> {
+        private let maxSize: Int
+        private var cache: [Key: Value] = [:]
+        private var accessOrder: [Key] = []
+        private let lock = NSLock()
+
+        init(maxSize: Int) {
+            self.maxSize = maxSize
+        }
+
+        func get(_ key: Key) -> Value? {
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard let value = cache[key] else { return nil }
+
+            // Move to front (most recently used)
+            if let index = accessOrder.firstIndex(of: key) {
+                accessOrder.remove(at: index)
+            }
+            accessOrder.append(key)
+
+            return value
+        }
+
+        func set(_ key: Key, _ value: Value) {
+            lock.lock()
+            defer { lock.unlock() }
+
+            // If key exists, update and move to front
+            if cache[key] != nil {
+                cache[key] = value
+                if let index = accessOrder.firstIndex(of: key) {
+                    accessOrder.remove(at: index)
+                }
+                accessOrder.append(key)
+                return
+            }
+
+            // Evict oldest if at capacity
+            if cache.count >= maxSize, let oldestKey = accessOrder.first {
+                cache.removeValue(forKey: oldestKey)
+                accessOrder.removeFirst()
+            }
+
+            cache[key] = value
+            accessOrder.append(key)
+        }
+
+        func remove(_ key: Key) -> Value? {
+            lock.lock()
+            defer { lock.unlock() }
+
+            if let index = accessOrder.firstIndex(of: key) {
+                accessOrder.remove(at: index)
+            }
+            return cache.removeValue(forKey: key)
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+
+            cache.removeAll()
+            accessOrder.removeAll()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return cache.count
+        }
+    }
+
+    private let listCache = LRUCache<String, MediaListPage>(maxSize: 50)
+    private let detailCache = LRUCache<String, MediaItem>(maxSize: 100)
 
     private var config: MediaSourceProfile {
         DataSourceProfileStore.activeProfile().media
@@ -26,11 +102,11 @@ actor MediaService {
         detailCache.removeAll()
         print("[MediaService] 🗑️ 缓存已清除")
     }
-    
+
     /// 清除特定 URL 的缓存
     func clearCache(for url: URL) async {
         let cacheKey = url.absoluteString
-        if listCache.removeValue(forKey: cacheKey) != nil {
+        if listCache.remove(cacheKey) != nil {
             print("[MediaService] 🗑️ 已清除缓存: \(cacheKey)")
         }
     }
@@ -46,7 +122,7 @@ actor MediaService {
 
         print("[MediaService] fetchPage: source=\(source), url=\(url)")
 
-        if let cached = listCache[cacheKey] {
+        if let cached = listCache.get(cacheKey) {
             print("[MediaService] fetchPage: returning cached data")
             return cached
         }
@@ -66,7 +142,7 @@ actor MediaService {
 
         print("[MediaService] fetchPage: received html length=\(html.count)")
         let page = parseListPage(html: html, source: source, pageURL: url)
-        listCache[cacheKey] = page
+        listCache.set(cacheKey, page)
         return page
     }
 
@@ -87,14 +163,14 @@ actor MediaService {
     }
 
     func fetchDetail(slug: String) async throws -> MediaItem {
-        if let cached = detailCache[slug] {
+        if let cached = detailCache.get(slug) {
             return cached
         }
 
         let url = absoluteURL(for: resolvedRoute(config.routes.detail, substitutions: ["slug": slug]))
         let html = try await networkService.fetchString(from: url, headers: htmlHeaders)
         let item = try parseDetailPage(html: html, slug: slug, pageURL: url)
-        detailCache[slug] = item
+        detailCache.set(slug, item)
         return item
     }
 
@@ -207,9 +283,6 @@ actor MediaService {
                 }
                 guard !titleText.isEmpty else { continue }
 
-                // 提取详情链接 - 直接从当前元素获取 href 属性
-                let detailLink = try? element.attr("href")
-
                 // 提取封面图
                 let coverSelector = config.parsing.searchCover ?? "img"
                 var coverLink: String? = nil
@@ -264,7 +337,7 @@ actor MediaService {
     /// 从图片 src 路径中提取 ID、slug 和分辨率
     /// 路径格式: /i/c/364x205/media/9147/yuji-itadori-city.3840x2160.jpg
     private func extractIdSlugResolution(from src: String) -> (id: String, slug: String, resolution: String)? {
-        // 匹配 /i/c/.../media/{id}/{slug}.{resolution}.jpg 格式
+        // 匹配 /i/c/.../media/{id}/{slug}.{resolution}.[^.]+$ 格式
         let pattern = #"/media/(\d+)/([^/]+)\.([0-9]+x[0-9]+)\.[^.]+$"#
 
         guard let regex = compileRegex(pattern) else {
@@ -380,7 +453,7 @@ actor MediaService {
                 let cssSelector = htmlParser.convertXPathToCSS(nextPageXPath) ?? nextPageXPath
                 if let nextLink = try? document.select(cssSelector).first()?.attr("href"),
                    !nextLink.isEmpty {
-                    print("[MediaService] parseNextPagePath: ✅ 配置选择器匹配成功: '\(nextLink)'")
+                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功: '\(nextLink)'")
                     return pathPreservingQuery(from: nextLink)
                 }
             }
@@ -393,7 +466,7 @@ actor MediaService {
 
                 // 匹配 text 为 "Next" 且 href 包含数字路径的链接
                 if text.lowercased() == "next" && href.matches(regex: #"/\d+/?$"#) {
-                    print("[MediaService] parseNextPagePath: ✅ 后备匹配成功 (text='Next'): '\(href)'")
+                    print("[MediaService] parseNextPagePath: 后备匹配成功 (text='Next'): '\(href)'")
                     return pathPreservingQuery(from: href)
                 }
             }
@@ -408,13 +481,13 @@ actor MediaService {
                     // 排除导航链接（Guides, About 等）
                     let isNav = text.lowercased().matches(regex: #"^(guides?|about|privacy|dmca|contact)$"#)
                     if !isNav {
-                        print("[MediaService] parseNextPagePath: ✅ 后备匹配成功 (href pattern): '\(href)'")
+                        print("[MediaService] parseNextPagePath: 后备匹配成功 (href pattern): '\(href)'")
                         return pathPreservingQuery(from: href)
                     }
                 }
             }
 
-            print("[MediaService] parseNextPagePath: ❌ 未找到分页链接")
+            print("[MediaService] parseNextPagePath: 未找到分页链接")
 
         } catch {
             print("[MediaService] parseNextPagePath: 解析失败: \(error)")
@@ -650,17 +723,78 @@ actor MediaService {
 }
 
 private extension String {
+    /// 高效的 HTML 实体解码（不使用 NSAttributedString）
     var htmlDecoded: String {
-        guard let data = data(using: .utf8) else { return self }
-
-        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue
+        // 常见的 HTML 实体映射表
+        let entities: [String: String] = [
+            "&amp;": "&",
+            "&lt;": "<",
+            "&gt;": ">",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&apos;": "'",
+            "&nbsp;": " ",
+            "&copy;": "©",
+            "&reg;": "®",
+            "&trade;": "™",
+            "&hellip;": "…",
+            "&mdash;": "—",
+            "&ndash;": "–",
+            "&ldquo;": "\"",
+            "&rdquo;": "\"",
+            "&lsquo;": "'",
+            "&rsquo;": "'"
         ]
 
-        return (try? NSAttributedString(data: data, options: options, documentAttributes: nil).string) ?? self
+        var result = self
+
+        // 处理命名实体
+        for (entity, char) in entities {
+            result = result.replacingOccurrences(of: entity, with: char)
+        }
+
+        // 处理数字实体（如 &#123; 或 &#x7B;）
+        result = decodeNumericEntities(result)
+
+        return result
     }
-    
+
+    private func decodeNumericEntities(_ input: String) -> String {
+        var result = input
+
+        // 匹配十进制实体: &#123;
+        let decimalPattern = #"&#(\d+);"#
+        if let regex = try? NSRegularExpression(pattern: decimalPattern) {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                guard let numRange = Range(match.range(at: 1), in: result),
+                      let num = Int(result[numRange]),
+                      let scalar = UnicodeScalar(num) else { continue }
+                let char = String(Character(scalar))
+                if let fullRange = Range(match.range, in: result) {
+                    result.replaceSubrange(fullRange, with: char)
+                }
+            }
+        }
+
+        // 匹配十六进制实体: &#x7B;
+        let hexPattern = #"&#x([0-9A-Fa-f]+);"#
+        if let regex = try? NSRegularExpression(pattern: hexPattern) {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                guard let hexRange = Range(match.range(at: 1), in: result),
+                      let num = Int(result[hexRange], radix: 16),
+                      let scalar = UnicodeScalar(num) else { continue }
+                let char = String(Character(scalar))
+                if let fullRange = Range(match.range, in: result) {
+                    result.replaceSubrange(fullRange, with: char)
+                }
+            }
+        }
+
+        return result
+    }
+
     /// 检查字符串是否匹配正则表达式
     func matches(regex pattern: String) -> Bool {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {

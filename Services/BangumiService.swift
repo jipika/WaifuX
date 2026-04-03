@@ -69,7 +69,34 @@ struct BangumiSubject: Codable, Identifiable {
     var largeCoverURL: String? {
         return images?.large ?? images?.common ?? images?.medium
     }
-    
+
+    /// 类型显示名称
+    var typeDisplayName: String {
+        switch type {
+        case 1: return "书籍"
+        case 2: return "动画"
+        case 3: return "音乐"
+        case 4: return "游戏"
+        case 6: return "三次元"
+        default: return "其他"
+        }
+    }
+
+    /// 星期几显示名称
+    var airWeekdayDisplay: String? {
+        guard let weekday = airWeekday else { return nil }
+        switch weekday {
+        case 1: return "星期日"
+        case 2: return "星期一"
+        case 3: return "星期二"
+        case 4: return "星期三"
+        case 5: return "星期四"
+        case 6: return "星期五"
+        case 7: return "星期六"
+        default: return nil
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         
@@ -260,6 +287,51 @@ actor BangumiService {
         return (trendingResponse.data.map { $0.subject }, trendingResponse.total)
     }
 
+    // MARK: - 搜索番组 (按关键词)
+
+    func searchByKeyword(keyword: String, limit: Int = 24, offset: Int = 0) async throws -> (items: [BangumiSubject], total: Int?) {
+        let urlString = "\(BangumiAPI.baseURL)\(BangumiAPI.search(limit: limit, offset: offset))"
+
+        guard let url = URL(string: urlString) else {
+            throw BangumiError.invalidURL
+        }
+
+        print("[BangumiService] Searching by keyword '\(keyword)': \(urlString)")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+
+        // 构建搜索参数 - 使用 keyword 进行搜索
+        let searchRequest: [String: Any] = [
+            "keyword": keyword,
+            "sort": "rank",
+            "filter": [
+                "type": [2],  // 2 = 动画
+                "rank": [">0", "<=99999"],
+                "nsfw": false
+            ]
+        ]
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: searchRequest)
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let errorString = String(data: data, encoding: .utf8) ?? "Unknown"
+            print("[BangumiService] Search error: \(errorString)")
+            throw BangumiError.invalidResponse
+        }
+
+        let searchResponse = try decoder.decode(BangumiSearchResponse.self, from: data)
+        print("[BangumiService] Found \(searchResponse.data.count) items for keyword '\(keyword)', total: \(searchResponse.total ?? -1)")
+
+        return (searchResponse.data, searchResponse.total)
+    }
+
     // MARK: - 搜索番组 (按标签)
 
     func searchByTag(tag: String, limit: Int = 24, offset: Int = 0) async throws -> (items: [BangumiSubject], total: Int?) {
@@ -277,7 +349,7 @@ actor BangumiService {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
 
-        // 构建搜索参数 (参考 Kazumi)
+        // 构建搜索参数 (参考 Kazumi) - 使用 tag 过滤
         let searchRequest: [String: Any] = [
             "keyword": "",
             "sort": "rank",
@@ -401,6 +473,42 @@ struct BangumiDetail: Codable {
     let airDate: String?
     let airWeekday: Int?
 
+    /// 类型显示名称
+    var typeDisplayName: String {
+        return "动画"
+    }
+
+    /// 星期几显示名称
+    var airWeekdayDisplay: String? {
+        guard let weekday = airWeekday else { return nil }
+        switch weekday {
+        case 1: return "星期日"
+        case 2: return "星期一"
+        case 3: return "星期二"
+        case 4: return "星期三"
+        case 5: return "星期四"
+        case 6: return "星期五"
+        case 7: return "星期六"
+        default: return nil
+        }
+    }
+
+    /// 播出状态
+    var airStatus: String {
+        guard let airDate = airDate else { return "未知" }
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        guard let date = dateFormatter.date(from: airDate) else { return "未知" }
+        
+        if date > Date() {
+            return "未开播"
+        } else if let total = totalEpisodes, total > 0 {
+            return "已完结"
+        } else {
+            return "连载中"
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, name, summary, rating, images
         case nameCN = "name_cn"
@@ -439,7 +547,8 @@ extension BangumiSubject {
             sourceId: "bangumi",
             sourceName: "Bangumi",
             latestEpisode: nil,
-            rating: ratingString
+            rating: ratingString,
+            summary: summary
         )
     }
 }

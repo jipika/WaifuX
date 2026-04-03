@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import AVFoundation
 import CoreGraphics
+import ScreenCaptureKit
 
 @MainActor
 final class VideoWallpaperManager: ObservableObject {
@@ -284,6 +285,94 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
+        // 使用 ScreenCaptureKit 替代废弃的 CGWindowListCopyWindowInfo
+        Task {
+            await checkScreenCoverageWithScreenCaptureKit()
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func checkScreenCoverageWithScreenCaptureKit() async {
+        do {
+            // 使用 ScreenCaptureKit 获取窗口信息
+            let content = try await SCShareableContent.current
+            let currentPID = ProcessInfo.processInfo.processIdentifier
+
+            for screen in NSScreen.screens {
+                let screenID = screen.wallpaperScreenIdentifier
+                guard let player = players[screenID] else { continue }
+
+                let covered = await isScreenMostlyCoveredWithSCContent(
+                    screenFrame: screen.frame,
+                    windows: content.windows,
+                    excludingPID: currentPID
+                )
+
+                await MainActor.run {
+                    if covered {
+                        if !pausedScreenIDs.contains(screenID) {
+                            player.pause()
+                            pausedScreenIDs.insert(screenID)
+                        }
+                    } else {
+                        if pausedScreenIDs.contains(screenID) {
+                            pausedScreenIDs.remove(screenID)
+                        }
+                        if player.rate == 0 {
+                            player.play()
+                        }
+                    }
+                }
+            }
+        } catch {
+            // 如果 ScreenCaptureKit 失败，回退到基于可见性的简单逻辑
+            // 在 macOS 14 以下版本使用 CGWindowListCopyWindowInfo（仍然可用）
+            await fallbackScreenCoverageCheck()
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func isScreenMostlyCoveredWithSCContent(
+        screenFrame: CGRect,
+        windows: [SCWindow],
+        excludingPID: Int32
+    ) async -> Bool {
+        var largeCoverCount = 0
+        var totalCoveredRatio: CGFloat = 0
+
+        for window in windows {
+            // 跳过当前应用的窗口
+            guard window.owningApplication?.processID != excludingPID else { continue }
+
+            // 只考虑正常层级的窗口（layer 0 等效）
+            guard window.windowLayer == 0 else { continue }
+
+            let bounds = window.frame
+            guard !bounds.isEmpty else { continue }
+
+            let intersection = screenFrame.intersection(bounds)
+            guard !intersection.isNull, !intersection.isEmpty else { continue }
+
+            let ratio = (intersection.width * intersection.height) / max(screenFrame.width * screenFrame.height, 1)
+            if ratio >= 0.88 {
+                return true
+            }
+            if ratio >= 0.42 {
+                largeCoverCount += 1
+            }
+            totalCoveredRatio += ratio
+        }
+
+        if largeCoverCount >= 2 {
+            return true
+        }
+
+        return totalCoveredRatio >= 0.96
+    }
+
+    /// 回退方案：使用 CGWindowListCopyWindowInfo（在 macOS 15+ 被标记为废弃但仍可用）
+    @available(macOS, deprecated: 15.0, message: "Use ScreenCaptureKit instead")
+    private func fallbackScreenCoverageCheck() async {
         let windowInfo = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
         let currentPID = ProcessInfo.processInfo.processIdentifier
 
@@ -291,29 +380,32 @@ final class VideoWallpaperManager: ObservableObject {
             let screenID = screen.wallpaperScreenIdentifier
             guard let player = players[screenID] else { continue }
 
-            let covered = isScreenMostlyCovered(
+            let covered = isScreenMostlyCoveredLegacy(
                 screenFrame: screen.frame,
                 windows: windowInfo,
                 excludingPID: currentPID
             )
 
-            if covered {
-                if !pausedScreenIDs.contains(screenID) {
-                    player.pause()
-                    pausedScreenIDs.insert(screenID)
-                }
-            } else {
-                if pausedScreenIDs.contains(screenID) {
-                    pausedScreenIDs.remove(screenID)
-                }
-                if player.rate == 0 {
-                    player.play()
+            await MainActor.run {
+                if covered {
+                    if !pausedScreenIDs.contains(screenID) {
+                        player.pause()
+                        pausedScreenIDs.insert(screenID)
+                    }
+                } else {
+                    if pausedScreenIDs.contains(screenID) {
+                        pausedScreenIDs.remove(screenID)
+                    }
+                    if player.rate == 0 {
+                        player.play()
+                    }
                 }
             }
         }
     }
 
-    private func isScreenMostlyCovered(
+    @available(macOS, deprecated: 15.0)
+    private func isScreenMostlyCoveredLegacy(
         screenFrame: CGRect,
         windows: [[String: Any]],
         excludingPID: Int32

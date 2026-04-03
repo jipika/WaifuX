@@ -13,15 +13,23 @@ actor KazumiRuleLoader {
     private var cachedRules: [String: AnimeRule] = [:]
     private var cachedIndex: [KazumiRuleIndex] = []
     
-    /// Kazumi 规则索引
+    /// Kazumi 规则索引（字段尽量可选，避免官方 index 微调导致整表解码失败）
     struct KazumiRuleIndex: Codable {
         let name: String
-        let version: String
+        let version: String?
         let useNativePlayer: Bool?
         let antiCrawlerEnabled: Bool?
-        let lastUpdate: Int64 // Unix 时间戳 (毫秒)
+        let lastUpdate: Int64?
+        /// 与 Kazumi 索引对齐：弃用源不再下载/展示
+        let deprecated: Bool?
     }
     
+    /// 清空内存缓存，避免全量同步后仍使用旧的已解析规则
+    func clearCache() {
+        cachedRules.removeAll()
+        cachedIndex.removeAll()
+    }
+
     /// 获取规则索引列表
     func fetchRuleIndex() async throws -> [KazumiRuleIndex] {
         guard let url = URL(string: indexURL) else {
@@ -68,10 +76,14 @@ actor KazumiRuleLoader {
         var rules: [AnimeRule] = []
         
         for ruleIndex in index {
+            if ruleIndex.deprecated == true {
+                print("[KazumiRuleLoader] 跳过弃用规则: \(ruleIndex.name)")
+                continue
+            }
             do {
                 let rule = try await loadRule(name: ruleIndex.name)
                 rules.append(rule)
-                print("[KazumiRuleLoader] ✓ 成功加载: \(ruleIndex.name) v\(ruleIndex.version)")
+                print("[KazumiRuleLoader] ✓ 成功加载: \(ruleIndex.name) v\(ruleIndex.version ?? "?")")
             } catch {
                 print("[KazumiRuleLoader] ✗ 加载失败: \(ruleIndex.name) - \(error)")
             }

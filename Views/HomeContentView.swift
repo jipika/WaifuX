@@ -1,5 +1,27 @@
 import SwiftUI
 
+// MARK: - CarouselTimerManager（管理轮播定时器的引用类型）
+final class CarouselTimerManager: ObservableObject {
+    var timer: Timer?
+    var loopResetWorkItem: DispatchWorkItem?
+    var interactionResetWorkItem: DispatchWorkItem?
+    
+    deinit {
+        timer?.invalidate()
+        loopResetWorkItem?.cancel()
+        interactionResetWorkItem?.cancel()
+    }
+    
+    func invalidateAll() {
+        timer?.invalidate()
+        timer = nil
+        loopResetWorkItem?.cancel()
+        loopResetWorkItem = nil
+        interactionResetWorkItem?.cancel()
+        interactionResetWorkItem = nil
+    }
+}
+
 struct HomeContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
     @ObservedObject var mediaViewModel: MediaExploreViewModel
@@ -9,9 +31,7 @@ struct HomeContentView: View {
     @State private var currentCarouselIndex = 0
     @State private var currentCarouselDisplayIndex = 0
     @State private var currentHeroID: String?
-    @State private var carouselTimer: Timer?
-    @State private var carouselLoopResetWorkItem: DispatchWorkItem?
-    @State private var carouselInteractionResetWorkItem: DispatchWorkItem?
+    @StateObject private var timerManager = CarouselTimerManager()
     @State private var isCarouselInteracting = false
     @State private var isCarouselAnimating = false
     @State private var carouselDragOffset: CGFloat = 0
@@ -385,14 +405,6 @@ struct HomeContentView: View {
         return heroWallpapers[clampedIndex]
     }
 
-    private var recommendedWallpapers: [Wallpaper] {
-        let top = Array(viewModel.topWallpapers.prefix(10))
-        if !top.isEmpty {
-            return top
-        }
-        return Array(viewModel.wallpapers.prefix(10))
-    }
-
     private var recentWallpapers: [Wallpaper] {
         let latest = Array(viewModel.latestWallpapers.prefix(10))
         if !latest.isEmpty {
@@ -446,17 +458,17 @@ struct HomeContentView: View {
     }
 
     private func startCarouselAutoPlay() {
-        guard carouselTimer == nil, heroWallpapers.count > 1 else { return }
+        guard timerManager.timer == nil, heroWallpapers.count > 1 else { return }
 
-        carouselTimer = Timer.scheduledTimer(withTimeInterval: carouselAutoPlayInterval, repeats: true) { _ in
+        timerManager.timer = Timer.scheduledTimer(withTimeInterval: carouselAutoPlayInterval, repeats: true) { _ in
             guard !isCarouselInteracting, !isCarouselAnimating, heroWallpapers.count > 1 else { return }
             showNextHero()
         }
     }
 
     private func stopCarouselAutoPlay() {
-        carouselTimer?.invalidate()
-        carouselTimer = nil
+        timerManager.timer?.invalidate()
+        timerManager.timer = nil
     }
 
     private func showPreviousHero() {
@@ -529,7 +541,7 @@ struct HomeContentView: View {
         let workItem = DispatchWorkItem {
             completeCarouselLoopResetIfNeeded(for: displayIndex, count: count)
         }
-        carouselLoopResetWorkItem = workItem
+        timerManager.loopResetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + carouselPageSnapDuration, execute: workItem)
     }
 
@@ -568,8 +580,8 @@ struct HomeContentView: View {
     }
 
     private func cancelCarouselLoopReset() {
-        carouselLoopResetWorkItem?.cancel()
-        carouselLoopResetWorkItem = nil
+        timerManager.loopResetWorkItem?.cancel()
+        timerManager.loopResetWorkItem = nil
     }
 
     private func scheduleCarouselInteractionReset(after delay: TimeInterval) {
@@ -580,13 +592,13 @@ struct HomeContentView: View {
             startCarouselAutoPlay()
         }
 
-        carouselInteractionResetWorkItem = workItem
+        timerManager.interactionResetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func cancelCarouselInteractionReset() {
-        carouselInteractionResetWorkItem?.cancel()
-        carouselInteractionResetWorkItem = nil
+        timerManager.interactionResetWorkItem?.cancel()
+        timerManager.interactionResetWorkItem = nil
     }
 
     private func heroCarouselDragGesture(width: CGFloat) -> some Gesture {

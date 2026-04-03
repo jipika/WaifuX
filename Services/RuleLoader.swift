@@ -10,7 +10,13 @@ actor RuleLoader {
     private let fileManager = FileManager.default
 
     init() {
-        let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            // 使用临时目录作为回退
+            self.rulesDirectory = fileManager.temporaryDirectory
+                .appendingPathComponent("WallHaven", isDirectory: true)
+                .appendingPathComponent("Rules", isDirectory: true)
+            return
+        }
         self.rulesDirectory = supportDir
             .appendingPathComponent("WallHaven", isDirectory: true)
             .appendingPathComponent("Rules", isDirectory: true)
@@ -54,7 +60,7 @@ actor RuleLoader {
             print("[RuleLoader] Default rules copied successfully")
 
             // 重新加载规则
-            await loadAllRules()
+            _ = await loadAllRules()
         } catch {
             print("[RuleLoader] Failed to copy default rules: \(error)")
         }
@@ -114,7 +120,7 @@ actor RuleLoader {
         let rule = try JSONDecoder().decode(DataSourceRule.self, from: data)
 
         // 保存到本地
-        try await saveRule(rule)
+        try saveRule(rule)
 
         return rule
     }

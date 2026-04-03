@@ -59,6 +59,7 @@ struct TopNavigationBar: View {
                     onOpenSettings()
                 }
             }
+            .frame(width: 88, alignment: .trailing)  // 与左侧等宽，保持居中
         }
         .padding(.horizontal, 26)
         .padding(.top, 8)

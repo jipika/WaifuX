@@ -199,8 +199,6 @@ class PlaybackProgressCache: ObservableObject {
 
 // MARK: - 播放进度跟踪器（用于 AVPlayer）
 
-import AVFoundation
-
 @MainActor
 class PlaybackProgressTracker: NSObject, ObservableObject {
     @Published var currentTime: Double = 0
@@ -232,15 +230,17 @@ class PlaybackProgressTracker: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
-        // 监听播放状态
-        NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
-            .sink { [weak self] _ in
-                Task { @MainActor in
-                    self?.progress = 1.0
-                    self?.currentTime = self?.duration ?? 0
+        // 监听播放状态 - 使用 object 参数过滤，确保只响应当前 playerItem 的通知
+        if let currentItem = player.currentItem {
+            NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime, object: currentItem)
+                .sink { [weak self] _ in
+                    Task { @MainActor in
+                        self?.progress = 1.0
+                        self?.currentTime = self?.duration ?? 0
+                    }
                 }
-            }
-            .store(in: &cancellables)
+                .store(in: &cancellables)
+        }
     }
 
     func detach() {

@@ -15,20 +15,25 @@ struct AnimePortraitCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 // 图片区域 - 竖版长方形
                 ZStack(alignment: .topTrailing) {
-                    OptimizedAsyncImage(
-                        url: anime.coverURL.flatMap { URL(string: $0) },
-                        priority: .medium
-                    ) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        ZStack {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.08))
-                            Image(systemName: "tv")
-                                .font(.system(size: 40, weight: .light))
-                                .foregroundStyle(.white.opacity(0.25))
+                    // 图片层
+                    GeometryReader { geometry in
+                        OptimizedAsyncImage(
+                            url: anime.coverURL.flatMap { URL(string: $0) },
+                            priority: .medium
+                        ) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                        } placeholder: {
+                            ZStack {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.08))
+                                Image(systemName: "tv")
+                                    .font(.system(size: 40, weight: .light))
+                                    .foregroundStyle(.white.opacity(0.25))
+                            }
                         }
                     }
 
@@ -46,10 +51,11 @@ struct AnimePortraitCard: View {
                         .padding(.vertical, 4)
                         .background(.black.opacity(0.5))
                         .clipShape(Capsule())
-                        .padding(8)
+                        .padding(.top, 10)
+                        .padding(.trailing, 8)
                     }
                 }
-                .frame(maxWidth: .infinity, minHeight: 300, idealHeight: 300, maxHeight: 300)
+                .frame(height: 300)
                 .clipped()
 
                 // 信息栏 - 深色半透明背景
@@ -76,6 +82,7 @@ struct AnimePortraitCard: View {
                 .background(Color.black.opacity(0.46))
             }
             .frame(maxWidth: .infinity)
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

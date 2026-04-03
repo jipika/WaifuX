@@ -71,6 +71,13 @@ struct MediaExploreContentView: View {
         .onChange(of: displayedMediaItems.first?.id) { _, _ in
             syncExploreMediaAtmosphere()
         }
+        .onDisappear {
+            // 视图消失时取消所有任务
+            searchTask?.cancel()
+            loadMoreTask?.cancel()
+            searchTask = nil
+            loadMoreTask = nil
+        }
     }
 
     private func syncExploreMediaAtmosphere() {
@@ -286,7 +293,7 @@ struct MediaExploreContentView: View {
 
                 // 没有更多数据提示
                 if !viewModel.hasMorePages && displayedMediaItems.count > 20 {
-                    Text("已经到底啦")
+                    Text(t("noMoreData"))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.4))
                         .frame(height: 50)

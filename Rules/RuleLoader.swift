@@ -8,10 +8,21 @@ actor RuleLoader {
 
     init() {
         let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            // 使用临时目录作为回退
+            rulesDirectory = fileManager.temporaryDirectory.appendingPathComponent("WallHaven/Rules", isDirectory: true)
+            print("[RuleLoader] 使用临时目录: \(rulesDirectory.path)")
+            return
+        }
         rulesDirectory = appSupport.appendingPathComponent("WallHaven/Rules", isDirectory: true)
+        print("[RuleLoader] 规则目录: \(rulesDirectory.path)")
 
-        try? fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+        do {
+            try fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+            print("[RuleLoader] 规则目录已创建/已存在")
+        } catch {
+            print("[RuleLoader] 创建规则目录失败: \(error.localizedDescription)")
+        }
     }
 
     func allRules() -> [DataSourceRule] {
@@ -61,16 +72,35 @@ actor RuleLoader {
     }
 
     private func loadRulesFromDisk() -> [DataSourceRule] {
+        print("[RuleLoader] 从磁盘加载规则…")
+
         guard let files = try? FileManager.default.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil) else {
+            print("[RuleLoader] 无法读取规则目录内容")
             return []
         }
 
+        let jsonFiles = files.filter { $0.pathExtension == "json" }
+        print("[RuleLoader] 找到 \(jsonFiles.count) 个 JSON 文件")
+
         let decoder = JSONDecoder()
-        return files.compactMap { url in
-            guard url.pathExtension == "json" else { return nil }
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? decoder.decode(DataSourceRule.self, from: data)
+        var loadedRules: [DataSourceRule] = []
+
+        for url in jsonFiles {
+            guard let data = try? Data(contentsOf: url) else {
+                print("[RuleLoader] 无法读取文件: \(url.lastPathComponent)")
+                continue
+            }
+            do {
+                let rule = try decoder.decode(DataSourceRule.self, from: data)
+                loadedRules.append(rule)
+                print("[RuleLoader] ✓ 加载规则: \(rule.id)")
+            } catch {
+                print("[RuleLoader] ✗ 解码失败: \(url.lastPathComponent) - \(error.localizedDescription)")
+            }
         }
+
+        print("[RuleLoader] 共加载 \(loadedRules.count) 个规则")
+        return loadedRules
     }
 }
 

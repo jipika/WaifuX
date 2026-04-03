@@ -96,7 +96,7 @@ class SettingsViewModel: ObservableObject {
             ruleRepositoryURL = savedURL
             isRuleRepositoryConfigured = true
         }
-        
+
     }
 
     func saveRuleRepository() async {
@@ -120,7 +120,11 @@ class SettingsViewModel: ObservableObject {
         let cacheServiceBytes = await CacheService.shared.cacheSize
 
         // 获取 URLCache 大小
-        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        guard let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            cacheSize = "0 MB"
+            cacheProgress = 0
+            return
+        }
         let urlCacheURL = cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache")
         var urlCacheBytes = 0
         if let enumerator = FileManager.default.enumerator(at: urlCacheURL, includingPropertiesForKeys: [.fileSizeKey]) {
@@ -140,12 +144,15 @@ class SettingsViewModel: ObservableObject {
     func clearCache() async {
         // 清除 CacheService 缓存
         try? await CacheService.shared.clearCache()
-        
+
         // 清除 MediaService 缓存（包含分页数据）
         await MediaService.shared.clearCache()
 
         // 清除 URLCache 缓存
-        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        guard let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            await updateCacheSize()
+            return
+        }
         let urlCacheURL = cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache")
         try? FileManager.default.removeItem(at: urlCacheURL)
         try? FileManager.default.createDirectory(at: cacheURL.appendingPathComponent("com.wallhaven.app"), withIntermediateDirectories: true)

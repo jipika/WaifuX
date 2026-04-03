@@ -14,9 +14,13 @@ struct AnimeExploreView: View {
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var sortAscending = false
 
-    // 详情页导航
-    @State private var selectedAnime: AnimeSearchResult?
-    @State private var showDetail = false
+    // 详情页导航 - 通过 Binding 暴露给父视图
+    @Binding var selectedAnime: AnimeSearchResult?
+
+    // 搜索防抖
+    @State private var searchTask: Task<Void, Never>?
+    // 防止标签点击时触发搜索框的自动刷新
+    @State private var isTagSearchActive = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -40,15 +44,7 @@ struct AnimeExploreView: View {
                     referenceImage: exploreAtmosphere.referenceImage
                 )
             )
-            .overlay {
-                if showDetail, let anime = selectedAnime {
-                    AnimeDetailView(
-                        anime: anime,
-                        isPresented: $showDetail
-                    )
-                    .transition(.move(edge: .trailing))
-                }
-            }
+
         }
         .task {
             await viewModel.loadInitialData()
@@ -56,6 +52,30 @@ struct AnimeExploreView: View {
         }
         .onChange(of: searchText) { _, newValue in
             viewModel.searchText = newValue
+            
+            // 如果正在进行标签搜索，忽略搜索框的变化
+            if isTagSearchActive {
+                isTagSearchActive = false
+                return
+            }
+            
+            // 防抖搜索
+            searchTask?.cancel()
+            
+            // 如果清空搜索框，立即刷新
+            if newValue.isEmpty {
+                Task {
+                    await viewModel.fetchPopular()
+                }
+                return
+            }
+            
+            searchTask = Task {
+                // 延迟 300ms 再搜索，避免频繁输入时触发过多请求
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                await viewModel.search()
+            }
         }
         .onChange(of: viewModel.animeItems.first?.id) { _, _ in
             syncExploreAtmosphere()
@@ -90,6 +110,8 @@ struct AnimeExploreView: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.92))
                         .onSubmit {
+                            // 取消防抖任务，立即执行搜索
+                            searchTask?.cancel()
                             Task {
                                 await viewModel.search()
                             }
@@ -136,6 +158,30 @@ struct AnimeExploreView: View {
             }
             .frame(maxWidth: 460, alignment: .leading)
 
+            // 分类选择器
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(AnimeCategory.allCases) { category in
+                        AnimeCategoryChip(
+                            category: category,
+                            isSelected: selectedCategory == category
+                        ) {
+                            withAnimation(AppFluidMotion.interactiveSpring) {
+                                selectedCategory = category
+                                selectedHotTag = nil
+                                isTagSearchActive = true
+                                searchTask?.cancel()
+                                searchText = ""
+                                viewModel.searchText = ""
+                                Task {
+                                    await viewModel.fetchByCategory(category)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 热门标签（横向滚动布局，与 WallpaperExploreContentView 一致）
             VStack(alignment: .leading, spacing: 12) {
                 Text("热门标签")
@@ -149,11 +195,20 @@ struct AnimeExploreView: View {
                                 withAnimation(AppFluidMotion.interactiveSpring) {
                                     let newTag = selectedHotTag == tag ? nil : tag
                                     selectedHotTag = newTag
-                                    // 标签搜索不填充搜索栏
+                                    selectedCategory = .all
+                                    // 标记正在进行标签搜索，防止触发搜索框的自动刷新
+                                    isTagSearchActive = true
+                                    // 取消搜索框的防抖任务并清空搜索框
+                                    searchTask?.cancel()
+                                    searchText = ""
+                                    viewModel.searchText = ""
+                                    // 标签搜索不填充搜索栏，使用中文标签名
                                     Task {
                                         if let tagToSearch = newTag {
-                                            await viewModel.searchByTag(tagToSearch)
+                                            print("[AnimeExploreView] Tag clicked: \(tagToSearch.displayName)")
+                                            await viewModel.searchByTagName(tagToSearch.displayName)
                                         } else {
+                                            print("[AnimeExploreView] Tag deselected, fetching popular")
                                             await viewModel.fetchPopular()
                                         }
                                     }
@@ -229,9 +284,8 @@ struct AnimeExploreView: View {
                 ) {
                     ForEach(viewModel.animeItems) { anime in
                         AnimePortraitCard(anime: anime) {
-                            selectedAnime = anime
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                showDetail = true
+                                selectedAnime = anime
                             }
                         }
                     }
@@ -249,6 +303,7 @@ struct AnimeExploreView: View {
                             }
                     }
                 }
+                .id("grid-\(selectedCategory.rawValue)-\(selectedHotTag?.rawValue ?? "all")")
 
                 // 加载更多指示器（非网格内）
                 if viewModel.isLoadingMore {
@@ -482,13 +537,14 @@ private struct AnimeGridSkeleton: View {
 private struct AnimePortraitCardSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 竖版图片区域骨架
+            // 竖版图片区域骨架 - 与实际卡片保持相同的尺寸
             LinearGradient(
                 colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             .frame(height: 300)
+            .clipped()
 
             // 信息栏骨架 - 深色半透明背景
             VStack(alignment: .leading, spacing: 4) {

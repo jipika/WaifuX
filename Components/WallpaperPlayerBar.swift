@@ -5,6 +5,7 @@ import Combine
 struct WallpaperPlayerBar: View {
     let wallpaper: Wallpaper?
     let isPlaying: Bool
+    let isLiked: Bool  // 外部传入的收藏状态
     let onPlayPause: () -> Void
     let onPrevious: () -> Void
     let onNext: () -> Void
@@ -14,7 +15,6 @@ struct WallpaperPlayerBar: View {
     let onMusic: () -> Void
 
     @State private var playbackSpeed: Double = 1.0
-    @State private var isLiked = false
     @State private var isHoveringLike = false
     @State private var isHoveringPlaylist = false
     @State private var isHoveringMusic = false
@@ -38,10 +38,7 @@ struct WallpaperPlayerBar: View {
                 isHoveringMusic: $isHoveringMusic,
                 isHoveringSpeed: $isHoveringSpeed,
                 onPlaylist: onPlaylist,
-                onLike: {
-                    isLiked.toggle()
-                    onLike()
-                },
+                onLike: onLike,
                 onMusic: onMusic,
                 onPrevious: onPrevious,
                 onPlayPause: onPlayPause,

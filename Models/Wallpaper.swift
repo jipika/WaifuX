@@ -64,11 +64,11 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     var categoryDisplayName: String {
         switch category.lowercased() {
         case "general":
-            return "通用"
+            return t("general")
         case "anime":
-            return "动漫"
+            return t("anime")
         case "people":
-            return "人物"
+            return t("people")
         default:
             return category.capitalized
         }
@@ -90,11 +90,11 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     var purityDetailLabel: String {
         switch purity.lowercased() {
         case "sfw":
-            return "SFW (安全)"
+            return t("purity.sfw.detail")
         case "sketchy":
-            return "Sketchy (暧昧)"
+            return t("purity.sketchy.detail")
         case "nsfw":
-            return "NSFW (成人)"
+            return t("purity.nsfw.detail")
         default:
             return purity.uppercased()
         }
