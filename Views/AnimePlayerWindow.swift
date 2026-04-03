@@ -105,12 +105,6 @@ private struct PlayerSection: View {
                         Text(t("player.loadingVideo"))
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
-                        
-                        if let episode = viewModel.currentEpisode {
-                            Text(t("player.episodeNumber").replacingOccurrences(of: "\\{episode\\.episodeNumber\\}", with: "\(episode.episodeNumber)"))
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
                     }
                     
                     Spacer()
