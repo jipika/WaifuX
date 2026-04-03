@@ -45,3 +45,9 @@ LocalConfig.json
 # Temp
 *.tmp
 .gstack/
+
+# Landing page build output (CI generates these)
+Docs/assets/
+Docs/index.html
+landing/dist/
+landing/node_modules/
