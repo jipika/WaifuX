@@ -224,11 +224,10 @@ private extension AnimeVideoExtractor {
         guard let webView = webView else { return }
         
         // Script 1: Network Interception (injected at document start)
-        let networkInterceptorScript = """
+        let networkInterceptorScript = #"""
         (function() {
             'use strict';
             
-            // Mark as injected
             window.__kazumiInjected = true;
             
             function sendToNative(message, handler) {
@@ -252,12 +251,15 @@ private extension AnimeVideoExtractor {
             
             function isVideoURL(url) {
                 if (!url) return false;
-                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov'];
+                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov', '.mpd'];
                 const lowerUrl = url.toLowerCase();
                 return videoExtensions.some(ext => lowerUrl.includes(ext)) || 
                        lowerUrl.includes('video') ||
                        lowerUrl.includes('stream') ||
-                       lowerUrl.includes('playback');
+                       lowerUrl.includes('playback') ||
+                       lowerUrl.includes('play') ||
+                       lowerUrl.includes('hls') ||
+                       lowerUrl.includes('dash');
             }
             
             sendLog('Kazumi network interceptor loaded: ' + window.location.href);
@@ -305,12 +307,61 @@ private extension AnimeVideoExtractor {
                 return originalXHROpen.call(this, method, url, ...rest);
             };
             
+            // Intercept WebSocket
+            const OriginalWebSocket = window.WebSocket;
+            window.WebSocket = function(url, protocols) {
+                sendLog('WebSocket created: ' + url);
+                const ws = new OriginalWebSocket(url, protocols);
+                ws.addEventListener('message', function(event) {
+                    const data = event.data;
+                    if (typeof data === 'string') {
+                        const matches = data.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|webm|ts|flv|mov|mkv|mpd))/gi);
+                        if (matches) {
+                            matches.forEach(match => sendVideo(match));
+                        }
+                    }
+                });
+                return ws;
+            };
+            window.WebSocket.prototype = OriginalWebSocket.prototype;
+            
+            // Intercept sendBeacon
+            const originalSendBeacon = navigator.sendBeacon;
+            navigator.sendBeacon = function(url, data) {
+                if (typeof url === 'string' && isVideoURL(url)) {
+                    sendLog('sendBeacon detected video URL: ' + url);
+                    sendVideo(url);
+                }
+                if (originalSendBeacon) {
+                    return originalSendBeacon.call(navigator, url, data);
+                }
+                return true;
+            };
+            
+            // Intercept HTMLMediaElement src setter (covers video and audio)
+            try {
+                const originalSrcSetter = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src')?.set;
+                if (originalSrcSetter) {
+                    Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+                        set: function(value) {
+                            sendLog('Media src set: ' + value);
+                            if (isVideoURL(value) || value.startsWith('blob:')) {
+                                sendVideo(value);
+                            }
+                            return originalSrcSetter.call(this, value);
+                        },
+                        get: function() {
+                            return this.getAttribute('src');
+                        }
+                    });
+                }
+            } catch(e) {}
+            
             // Intercept createElement for iframes
             const originalCreateElement = document.createElement;
             document.createElement = function(tagName) {
                 const element = originalCreateElement.call(document, tagName);
                 if (tagName.toLowerCase() === 'iframe') {
-                    // Watch for iframe src changes
                     const originalSrcSetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src')?.set;
                     if (originalSrcSetter) {
                         Object.defineProperty(element, 'src', {
@@ -329,11 +380,28 @@ private extension AnimeVideoExtractor {
                 }
                 return element;
             };
+            
+            // PerformanceObserver for resource loading
+            if (window.PerformanceObserver) {
+                try {
+                    const perfObserver = new PerformanceObserver((list) => {
+                        list.getEntries().forEach(entry => {
+                            if (entry.initiatorType === 'video' || entry.initiatorType === 'xmlhttprequest' || entry.initiatorType === 'fetch') {
+                                if (isVideoURL(entry.name)) {
+                                    sendLog('PerformanceObserver detected: ' + entry.name);
+                                    sendVideo(entry.name);
+                                }
+                            }
+                        });
+                    });
+                    perfObserver.observe({ entryTypes: ['resource'] });
+                } catch(e) {}
+            }
         })();
-        """
+        """#
         
         // Script 2: Video Element Scanner (injected at document end)
-        let videoScannerScript = """
+        let videoScannerScript = #"""
         (function() {
             'use strict';
             
@@ -348,69 +416,68 @@ private extension AnimeVideoExtractor {
             }
             
             function sendVideo(url) {
-                if (!url || url.startsWith('blob:') || url.includes('googleads')) return;
+                if (!url || url.includes('googleads')) return;
                 sendToNative(url, 'VideoBridge');
             }
             
             function processVideoElement(video) {
-                sendLog('Scanning video element...');
-                
-                // Check src attribute
-                let src = video.getAttribute('src');
-                if (src && src.trim() !== '' && !src.startsWith('blob:')) {
-                    sendLog('VIDEO src found: ' + src);
-                    sendVideo(src);
-                    return;
-                }
-                
-                // Check currentSrc property
-                if (video.currentSrc && video.currentSrc.trim() !== '' && !video.currentSrc.startsWith('blob:')) {
-                    sendLog('VIDEO currentSrc found: ' + video.currentSrc);
-                    sendVideo(video.currentSrc);
-                    return;
-                }
-                
-                // Check source elements
-                const sources = video.getElementsByTagName('source');
-                for (let source of sources) {
-                    src = source.getAttribute('src');
-                    if (src && src.trim() !== '' && !src.startsWith('blob:')) {
-                        sendLog('VIDEO source tag found: ' + src);
-                        sendVideo(src);
-                        return;
+                const attrs = ['src', 'currentSrc', 'data-src', 'data-url', 'data-video', 'data-original'];
+                for (const attr of attrs) {
+                    let value;
+                    if (attr === 'currentSrc') {
+                        value = video.currentSrc;
+                    } else {
+                        value = video.getAttribute(attr);
+                    }
+                    if (value && value.trim() !== '') {
+                        sendLog('VIDEO ' + attr + ' found: ' + value);
+                        sendVideo(value);
                     }
                 }
                 
-                // Check data-src (lazy loading)
-                src = video.getAttribute('data-src');
-                if (src && src.trim() !== '' && !src.startsWith('blob:')) {
-                    sendLog('VIDEO data-src found: ' + src);
+                const sources = video.getElementsByTagName('source');
+                for (let source of sources) {
+                    const src = source.getAttribute('src');
+                    if (src && src.trim() !== '') {
+                        sendLog('VIDEO source tag found: ' + src);
+                        sendVideo(src);
+                    }
+                }
+            }
+            
+            function processAudioElement(audio) {
+                const src = audio.getAttribute('src') || audio.currentSrc;
+                if (src && src.trim() !== '') {
+                    sendLog('AUDIO src found: ' + src);
                     sendVideo(src);
                 }
             }
             
-            // Process existing videos
             sendLog('Video scanner loaded, checking existing videos...');
             document.querySelectorAll('video').forEach(processVideoElement);
+            document.querySelectorAll('audio').forEach(processAudioElement);
             
-            // Setup MutationObserver for dynamic content
             const observer = new MutationObserver((mutations) => {
                 mutations.forEach(mutation => {
-                    // Check attribute changes on video elements
-                    if (mutation.type === 'attributes' && mutation.target.nodeName === 'VIDEO') {
-                        if (mutation.attributeName === 'src' || mutation.attributeName === 'data-src') {
+                    if (mutation.type === 'attributes') {
+                        if (mutation.target.nodeName === 'VIDEO') {
                             processVideoElement(mutation.target);
+                        } else if (mutation.target.nodeName === 'AUDIO') {
+                            processAudioElement(mutation.target);
                         }
                     }
                     
-                    // Check added nodes
                     mutation.addedNodes.forEach(node => {
                         if (node.nodeName === 'VIDEO') {
                             sendLog('New video element detected');
                             processVideoElement(node);
+                        } else if (node.nodeName === 'AUDIO') {
+                            sendLog('New audio element detected');
+                            processAudioElement(node);
                         }
                         if (node.querySelectorAll) {
                             node.querySelectorAll('video').forEach(processVideoElement);
+                            node.querySelectorAll('audio').forEach(processAudioElement);
                         }
                     });
                 });
@@ -421,31 +488,28 @@ private extension AnimeVideoExtractor {
                     childList: true,
                     subtree: true,
                     attributes: true,
-                    attributeFilter: ['src', 'data-src']
+                    attributeFilter: ['src', 'data-src', 'data-url', 'data-video']
                 });
                 sendLog('MutationObserver started');
             }
             
-            // Also check for iframe videos
             function checkIframes() {
                 document.querySelectorAll('iframe').forEach(iframe => {
                     try {
                         if (iframe.contentDocument) {
                             iframe.contentDocument.querySelectorAll('video').forEach(processVideoElement);
+                            iframe.contentDocument.querySelectorAll('audio').forEach(processAudioElement);
                         }
-                    } catch(e) {
-                        // Cross-origin iframe, can't access
-                    }
+                    } catch(e) {}
                 });
             }
             
-            // Periodic check for iframes
             setInterval(checkIframes, 2000);
         })();
-        """
+        """#
         
         // Script 3: Iframe Injector (for recursive iframe injection)
-        let iframeInjectorScript = """
+        let iframeInjectorScript = #"""
         (function() {
             'use strict';
             
@@ -460,15 +524,78 @@ private extension AnimeVideoExtractor {
             }
             
             function sendVideo(url) {
-                if (!url || url.startsWith('blob:') || url.includes('googleads')) return;
+                if (!url || url.includes('googleads')) return;
                 sendToNative(url, 'VideoBridge');
             }
             
             function isVideoURL(url) {
                 if (!url) return false;
-                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov'];
+                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov', '.mpd'];
                 const lowerUrl = url.toLowerCase();
-                return videoExtensions.some(ext => lowerUrl.includes(ext));
+                return videoExtensions.some(ext => lowerUrl.includes(ext)) ||
+                       lowerUrl.includes('video') ||
+                       lowerUrl.includes('stream') ||
+                       lowerUrl.includes('playback') ||
+                       lowerUrl.includes('play') ||
+                       lowerUrl.includes('hls') ||
+                       lowerUrl.includes('dash');
+            }
+            
+            function injectNetworkInterceptors(win) {
+                if (win.__kazumiNetworkInjected) return;
+                win.__kazumiNetworkInjected = true;
+                
+                const originalFetch = win.fetch;
+                win.fetch = function(...args) {
+                    const url = args[0];
+                    if (typeof url === 'string' && isVideoURL(url)) {
+                        sendLog('Iframe fetch detected: ' + url);
+                        sendVideo(url);
+                    }
+                    return originalFetch.apply(this, args);
+                };
+                
+                const originalXHROpen = win.XMLHttpRequest.prototype.open;
+                win.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                    if (typeof url === 'string' && isVideoURL(url)) {
+                        sendLog('Iframe XHR detected: ' + url);
+                        sendVideo(url);
+                    }
+                    return originalXHROpen.call(this, method, url, ...rest);
+                };
+                
+                try {
+                    const OriginalWebSocket = win.WebSocket;
+                    win.WebSocket = function(url, protocols) {
+                        const ws = new OriginalWebSocket(url, protocols);
+                        ws.addEventListener('message', function(event) {
+                            const data = event.data;
+                            if (typeof data === 'string') {
+                                const matches = data.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|webm|ts|flv|mov|mkv|mpd))/gi);
+                                if (matches) matches.forEach(match => sendVideo(match));
+                            }
+                        });
+                        return ws;
+                    };
+                    win.WebSocket.prototype = OriginalWebSocket.prototype;
+                } catch(e) {}
+                
+                try {
+                    const originalSrcSetter = Object.getOwnPropertyDescriptor(win.HTMLMediaElement.prototype, 'src')?.set;
+                    if (originalSrcSetter) {
+                        Object.defineProperty(win.HTMLMediaElement.prototype, 'src', {
+                            set: function(value) {
+                                if (isVideoURL(value) || value.startsWith('blob:')) {
+                                    sendVideo(value);
+                                }
+                                return originalSrcSetter.call(this, value);
+                            },
+                            get: function() {
+                                return this.getAttribute('src');
+                            }
+                        });
+                    }
+                } catch(e) {}
             }
             
             function injectIntoIframe(iframe) {
@@ -485,46 +612,26 @@ private extension AnimeVideoExtractor {
                     }
                     
                     sendLog('Injecting into iframe: ' + iframe.src);
+                    injectNetworkInterceptors(iframeWindow);
                     
-                    // Inject network interceptors into iframe
-                    if (!iframeWindow.__kazumiInjected) {
-                        iframeWindow.__kazumiInjected = true;
-                        
-                        // Intercept fetch in iframe
-                        const originalFetch = iframeWindow.fetch;
-                        iframeWindow.fetch = function(...args) {
-                            const url = args[0];
-                            if (typeof url === 'string' && isVideoURL(url)) {
-                                sendLog('Iframe fetch detected: ' + url);
-                                sendVideo(url);
-                            }
-                            return originalFetch.apply(this, args);
-                        };
-                        
-                        // Intercept XHR in iframe
-                        const originalXHROpen = iframeWindow.XMLHttpRequest.prototype.open;
-                        iframeWindow.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-                            if (typeof url === 'string' && isVideoURL(url)) {
-                                sendLog('Iframe XHR detected: ' + url);
-                                sendVideo(url);
-                            }
-                            return originalXHROpen.call(this, method, url, ...rest);
-                        };
-                    }
-                    
-                    // Scan for videos in iframe
                     iframeDoc.querySelectorAll('video').forEach(video => {
                         const src = video.getAttribute('src') || video.currentSrc;
-                        if (src && !src.startsWith('blob:')) {
+                        if (src) {
                             sendLog('Iframe video found: ' + src);
                             sendVideo(src);
                         }
                     });
                     
-                    // Recurse into nested iframes
+                    iframeDoc.querySelectorAll('audio').forEach(audio => {
+                        const src = audio.getAttribute('src') || audio.currentSrc;
+                        if (src) {
+                            sendLog('Iframe audio found: ' + src);
+                            sendVideo(src);
+                        }
+                    });
+                    
                     iframeDoc.querySelectorAll('iframe').forEach(injectIntoIframe);
                     
-                    // Watch for new iframes in this iframe
                     const observer = new MutationObserver((mutations) => {
                         mutations.forEach(mutation => {
                             mutation.addedNodes.forEach(node => {
@@ -548,19 +655,16 @@ private extension AnimeVideoExtractor {
                 }
             }
             
-            // Inject into existing iframes
             function injectAllIframes() {
                 document.querySelectorAll('iframe').forEach(injectIntoIframe);
             }
             
-            // Initial injection
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', injectAllIframes);
             } else {
                 injectAllIframes();
             }
             
-            // Watch for new iframes
             const observer = new MutationObserver((mutations) => {
                 mutations.forEach(mutation => {
                     mutation.addedNodes.forEach(node => {
@@ -591,10 +695,10 @@ private extension AnimeVideoExtractor {
             
             sendLog('Iframe injector loaded');
         })();
-        """
+        """#
         
-        // Script 4: Legacy iframe src extractor (for simple sites)
-        let legacyIframeScript = """
+        // Script 4: Legacy iframe & embed scanner
+        let legacyIframeScript = #"""
         (function() {
             'use strict';
             
@@ -619,7 +723,7 @@ private extension AnimeVideoExtractor {
             
             for (let i = 0; i < iframes.length; i++) {
                 const iframe = iframes[i];
-                const src = iframe.getAttribute('src');
+                const src = iframe.getAttribute('src') || iframe.getAttribute('data-src');
                 if (src && src.trim() !== '') {
                     sendLog('Iframe ' + i + ' src: ' + src);
                     if (src.includes('http') && !src.includes('googleads')) {
@@ -627,22 +731,84 @@ private extension AnimeVideoExtractor {
                     }
                 }
             }
+            
+            // Scan embed and object tags
+            document.querySelectorAll('embed[src], object[data]').forEach(el => {
+                const url = el.getAttribute('src') || el.getAttribute('data');
+                if (url && url.includes('http') && !url.includes('googleads')) {
+                    sendLog('Embed/Object found: ' + url);
+                    sendVideo(url);
+                }
+            });
         })();
-        """
+        """#
+        
+        // Script 5: Performance fallback scanner
+        let performanceFallbackScript = #"""
+        (function() {
+            'use strict';
+            
+            function sendToNative(message, handler) {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[handler]) {
+                    window.webkit.messageHandlers[handler].postMessage(message);
+                }
+            }
+            
+            function sendVideo(url) {
+                if (!url || url.includes('googleads')) return;
+                sendToNative(url, 'VideoBridge');
+            }
+            
+            function isVideoURL(url) {
+                if (!url) return false;
+                const videoExtensions = ['.m3u8', '.mp4', '.webm', '.mkv', '.ts', '.flv', '.mov', '.mpd'];
+                const lowerUrl = url.toLowerCase();
+                return videoExtensions.some(ext => lowerUrl.includes(ext)) ||
+                       lowerUrl.includes('video') ||
+                       lowerUrl.includes('stream') ||
+                       lowerUrl.includes('playback') ||
+                       lowerUrl.includes('play') ||
+                       lowerUrl.includes('hls') ||
+                       lowerUrl.includes('dash');
+            }
+            
+            function scanPerformanceEntries() {
+                if (!window.performance || !window.performance.getEntriesByType) return;
+                const entries = window.performance.getEntriesByType('resource');
+                entries.forEach(entry => {
+                    if (isVideoURL(entry.name)) {
+                        sendVideo(entry.name);
+                    }
+                });
+            }
+            
+            // Scan after page load and periodically
+            if (document.readyState === 'complete') {
+                setTimeout(scanPerformanceEntries, 1500);
+            } else {
+                window.addEventListener('load', () => {
+                    setTimeout(scanPerformanceEntries, 1500);
+                });
+            }
+            
+            setInterval(scanPerformanceEntries, 3000);
+        })();
+        """#
         
         // Add all user scripts
         let scripts: [(String, WKUserScriptInjectionTime)] = [
             (networkInterceptorScript, .atDocumentStart),
             (videoScannerScript, .atDocumentEnd),
             (iframeInjectorScript, .atDocumentEnd),
-            (legacyIframeScript, .atDocumentEnd)
+            (legacyIframeScript, .atDocumentEnd),
+            (performanceFallbackScript, .atDocumentEnd)
         ]
         
         for script in scripts {
             let userScript = WKUserScript(
                 source: script.0,
                 injectionTime: script.1,
-                forMainFrameOnly: false  // Important: inject into all frames
+                forMainFrameOnly: false
             )
             webView.configuration.userContentController.addUserScript(userScript)
         }
@@ -680,15 +846,20 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         
         addLog("✅ 发现视频源: \(urlString.prefix(60))...")
         
-        // Check if it's a valid video URL
+        // Check if it's a valid video URL (relaxed matching)
         let lowercased = urlString.lowercased()
         let isM3U8 = lowercased.contains(".m3u8") || lowercased.contains("application/vnd.apple.mpegurl")
         let isMP4 = lowercased.contains(".mp4") || lowercased.contains("video/mp4")
         let isTS = lowercased.contains(".ts") || lowercased.contains("video/MP2T")
         let isFLV = lowercased.contains(".flv")
         let isWebM = lowercased.contains(".webm")
+        let isMKV = lowercased.contains(".mkv")
+        let isMPD = lowercased.contains(".mpd") || lowercased.contains("application/dash+xml")
+        let isHLS = lowercased.contains("/hls/") || lowercased.contains("format=m3u8") || lowercased.contains("type=m3u8")
+        let isStream = lowercased.contains("stream") || lowercased.contains("playback") || lowercased.contains("play") || lowercased.contains("video")
+        let isEmbedPlayer = lowercased.contains("player") || lowercased.contains("embed") || lowercased.contains("iframe")
         
-        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || lowercased.contains("video") else {
+        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || isMKV || isMPD || isHLS || isStream || isEmbedPlayer || lowercased.hasPrefix("blob:") else {
             addLog("⚠️ URL 格式不符合视频特征，继续等待")
             return
         }
@@ -697,9 +868,12 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         var quality = "Unknown"
         var type = "mp4"
         
-        if isM3U8 {
+        if isM3U8 || isHLS {
             quality = "Auto"
             type = "m3u8"
+        } else if isMPD {
+            quality = "Auto"
+            type = "mpd"
         } else if isMP4 {
             if lowercased.contains("1080") || lowercased.contains("fhd") {
                 quality = "1080P"
@@ -717,6 +891,15 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         } else if isWebM {
             quality = "WebM"
             type = "webm"
+        } else if isMKV {
+            quality = "MKV"
+            type = "mkv"
+        } else if lowercased.hasPrefix("blob:") {
+            quality = "Blob"
+            type = "blob"
+        } else if isEmbedPlayer {
+            quality = "Embed"
+            type = "embed"
         }
         
         // Create VideoSource
@@ -790,17 +973,24 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
     
     // Handle captcha detection
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        Task { @MainActor in
-            if let url = navigationResponse.response.url?.absoluteString {
-                // Check for captcha indicators
-                let captchaIndicators = ["captcha", "verify", "challenge", "recaptcha", "hcaptcha"]
-                if captchaIndicators.contains(where: { url.lowercased().contains($0) }) {
-                    self.addLog("⚠️ 检测到验证码页面")
-                    self.finish(with: .captcha, resolveId: self.resolveId)
-                    decisionHandler(.cancel)
-                    return
-                }
+        // 同步检查 URL
+        let isCaptcha: Bool
+        if let url = navigationResponse.response.url?.absoluteString {
+            let captchaIndicators = ["captcha", "verify", "challenge", "recaptcha", "hcaptcha"]
+            isCaptcha = captchaIndicators.contains(where: { url.lowercased().contains($0) })
+        } else {
+            isCaptcha = false
+        }
+        
+        if isCaptcha {
+            // 立即调用 decisionHandler
+            decisionHandler(.cancel)
+            // 异步执行其他操作
+            Task { @MainActor in
+                self.addLog("⚠️ 检测到验证码页面")
+                self.finish(with: .captcha, resolveId: self.resolveId)
             }
+        } else {
             decisionHandler(.allow)
         }
     }

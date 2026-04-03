@@ -93,10 +93,31 @@ private struct PlayerSection: View {
         ZStack {
             Color.black
             
-            if let player = viewModel.player {
+            if viewModel.isLoadingVideo {
+                VStack(spacing: 28) {
+                    Spacer()
+                    
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .tint(.white.opacity(0.7))
+                    
+                    VStack(spacing: 10) {
+                        Text(t("player.loadingVideo"))
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                        
+                        if let episode = viewModel.currentEpisode {
+                            Text(t("player.episodeNumber").replacingOccurrences(of: "\\{episode\\.episodeNumber\\}", with: "\(episode.episodeNumber)"))
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    
+                    Spacer()
+                }
+            } else if let player = viewModel.player {
                 PlayerContainerView(player: player)
             } else {
-                // 未选择剧集时的提示
                 VStack(spacing: 28) {
                     Spacer()
                     
@@ -119,7 +140,7 @@ private struct PlayerSection: View {
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
                         
-                        Text("在右侧选择播放源和集数开始观看")
+                        Text(t("player.selectSourceOnRight"))
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.white.opacity(0.5))
                     }
@@ -136,7 +157,7 @@ private struct PlayerSection: View {
                         .font(.system(size: 44))
                         .foregroundStyle(Color(hex: "FF9F43"))
                     
-                    Text("播放失败")
+                    Text(t("player.playFailed"))
                         .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(.white)
                     
@@ -251,13 +272,18 @@ private class FullScreenAVPlayerView: AVPlayerView {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.toggleFullScreen(nil)
+            Task { @MainActor in
+                self?.window?.toggleFullScreen(nil)
+            }
         }
     }
 
     deinit {
-        if let observer = fullScreenObserver {
-            NotificationCenter.default.removeObserver(observer)
+        // 安全地移除观察者
+        MainActor.assumeIsolated {
+            if let observer = fullScreenObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
         }
     }
 }
@@ -302,7 +328,7 @@ private struct PanelHeader: View {
             HStack(spacing: 4) {
                 TabButton(
                     icon: "play.tv",
-                    title: "播放",
+                    title: t("player.play"),
                     isSelected: selectedTab == .sources
                 ) {
                     selectedTab = .sources
@@ -310,7 +336,7 @@ private struct PanelHeader: View {
                 
                 TabButton(
                     icon: "text.bubble",
-                    title: "弹幕",
+                    title: t("danmaku.settings"),
                     isSelected: selectedTab == .danmaku
                 ) {
                     selectedTab = .danmaku
@@ -318,7 +344,7 @@ private struct PanelHeader: View {
                 
                 TabButton(
                     icon: "sparkles",
-                    title: "增强",
+                    title: t("player.enhancement"),
                     isSelected: selectedTab == .enhancement
                 ) {
                     selectedTab = .enhancement
@@ -379,8 +405,8 @@ private struct SourcesContentView: View {
             if sources.isEmpty {
                 EmptyStateView(
                     icon: "exclamationmark.triangle.fill",
-                    title: "暂无可用规则",
-                    message: "请先安装视频源规则"
+                    title: t("player.noRulesAvailable"),
+                    message: t("player.installRulesFirst")
                 )
             } else {
                 // 源标签选择
@@ -534,22 +560,22 @@ private struct SourceDetailView: View {
             } else {
                 EmptyStateView(
                     icon: "film.fill",
-                    title: "暂无剧集",
-                    message: "该源未找到可播放的剧集"
+                    title: t("player.noEpisodes"),
+                    message: t("player.noPlayableEpisodes")
                 )
             }
             
         case .noResult:
             EmptyStateView(
                 icon: "magnifyingglass.circle.fill",
-                title: "未找到结果",
-                message: "该源未搜索到相关内容"
+                title: t("player.noResults"),
+                message: t("player.noSearchResults")
             )
             
         case .error(let message):
             EmptyStateView(
                 icon: "exclamationmark.triangle.fill",
-                title: "搜索失败",
+                title: t("player.searchFailed"),
                 message: message
             )
             
@@ -612,9 +638,24 @@ private struct EpisodeButton: View {
     let action: () -> Void
     @State private var isHovered = false
 
+    var displayText: String {
+        if let name = episode.name, !name.isEmpty {
+            // 如果名字很短（如 "SP1", "OVA1"），直接显示
+            if name.count <= 4 {
+                return name
+            }
+            // 尝试从名字中提取纯数字
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            if let intValue = Int(trimmed), intValue == episode.episodeNumber {
+                return trimmed
+            }
+        }
+        return "\(episode.episodeNumber)"
+    }
+
     var body: some View {
         Button(action: action) {
-            Text("\(episode.episodeNumber)")
+            Text(displayText)
                 .font(.system(size: 12, weight: isPlaying ? .bold : .medium, design: .rounded))
                 .foregroundStyle(isPlaying ? .white : .white.opacity(0.8))
                 .frame(minHeight: 32)
@@ -635,6 +676,7 @@ private struct EpisodeButton: View {
         )
         .scaleEffect(isPlaying ? 1.02 : (isHovered ? 1.02 : 1.0))
         .animation(.easeOut(duration: 0.08), value: isPlaying || isHovered)
+        .help(episode.name ?? "第 \(episode.episodeNumber) 集")
         .onHover { hovering in
             isHovered = hovering
         }
@@ -660,7 +702,7 @@ private struct DanmakuSettingsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 // 主开关
                 SettingsToggleRow(
-                    title: "启用弹幕",
+                    title: t("danmaku.enableDanmaku"),
                     isOn: binding(for: \.isEnabled)
                 )
                 
@@ -670,21 +712,21 @@ private struct DanmakuSettingsView: View {
                 // 滑块设置
                 VStack(spacing: 12) {
                     SettingsSliderRow(
-                        title: "透明度",
+                        title: t("player.opacity"),
                         value: binding(for: \.opacity),
                         range: 0.1...1.0,
                         format: { String(format: "%.0f%%", $0 * 100) }
                     )
                     
                     SettingsSliderRow(
-                        title: "字体大小",
+                        title: t("danmaku.fontSize"),
                         value: binding(for: \.fontSize),
                         range: 12...24,
                         format: { String(format: "%.0f", $0) }
                     )
                     
                     SettingsSliderRow(
-                        title: "滚动速度",
+                        title: t("player.scrollSpeed"),
                         value: binding(for: \.speed),
                         range: 0.5...2.0,
                         format: { String(format: "%.1fx", $0) }
@@ -696,8 +738,8 @@ private struct DanmakuSettingsView: View {
                 
                 // 去重
                 SettingsToggleRow(
-                    title: "开启去重",
-                    subtitle: "隐藏重复弹幕",
+                    title: t("player.enableDeduplication"),
+                    subtitle: t("player.hideDuplicate"),
                     isOn: binding(for: \.enableDeduplication)
                 )
                 
@@ -706,13 +748,13 @@ private struct DanmakuSettingsView: View {
                 
                 // 弹幕类型
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("弹幕类型")
+                    Text(t("danmaku.type"))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.6))
                     
-                    SettingsToggleRow(title: "顶部弹幕", isOn: binding(for: \.enableTop))
-                    SettingsToggleRow(title: "底部弹幕", isOn: binding(for: \.enableBottom))
-                    SettingsToggleRow(title: "滚动弹幕", isOn: binding(for: \.enableScroll))
+                    SettingsToggleRow(title: t("danmaku.top"), isOn: binding(for: \.enableTop))
+                    SettingsToggleRow(title: t("danmaku.bottom"), isOn: binding(for: \.enableBottom))
+                    SettingsToggleRow(title: t("danmaku.scroll"), isOn: binding(for: \.enableScroll))
                 }
             }
             .padding(12)
@@ -749,24 +791,24 @@ private struct EnhancementSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: "画面增强", icon: "wand.and.stars")
+                SectionHeader(title: t("player.imageEnhancement"), icon: "wand.and.stars")
                 
                 VStack(spacing: 8) {
                     SettingsToggleRow(
-                        title: "超分辨率",
-                        subtitle: "AI 提升视频清晰度",
+                        title: t("player.superResolution"),
+                        subtitle: t("player.aiUpscale"),
                         isOn: binding(for: \.superResolution)
                     )
                     
                     SettingsToggleRow(
-                        title: "AI 降噪",
-                        subtitle: "减少画面噪点",
+                        title: t("player.aiDenoise"),
+                        subtitle: t("player.reduceNoise"),
                         isOn: binding(for: \.aiDenoise)
                     )
                     
                     SettingsToggleRow(
-                        title: "色彩增强",
-                        subtitle: "提升色彩饱和度",
+                        title: t("player.colorEnhance"),
+                        subtitle: t("player.boostSaturation"),
                         isOn: binding(for: \.colorEnhancement)
                     )
                 }
@@ -774,18 +816,18 @@ private struct EnhancementSettingsView: View {
                 Divider()
                     .background(Color.white.opacity(0.06))
                 
-                SectionHeader(title: "播放设置", icon: "gear")
+                SectionHeader(title: t("player.playbackSettings"), icon: "gear")
                 
                 VStack(spacing: 8) {
                     SettingsToggleRow(
-                        title: "自动连播",
-                        subtitle: "当前集结束后自动播放下一集",
+                        title: t("player.autoPlay"),
+                        subtitle: t("player.autoPlayNext"),
                         isOn: binding(for: \.autoPlayNext)
                     )
                     
                     SettingsToggleRow(
-                        title: "跳过片头片尾",
-                        subtitle: "智能跳过 OP/ED",
+                        title: t("player.skipOpEd"),
+                        subtitle: t("player.smartSkip"),
                         isOn: binding(for: \.skipOpeningEnding)
                     )
                 }
@@ -823,41 +865,84 @@ private struct SectionHeader: View {
     }
 }
 
-// MARK: - 设置切换行（优化性能版本）
+// MARK: - 设置切换行（液态玻璃版本）
 private struct SettingsToggleRow: View {
     let title: String
     var subtitle: String? = nil
     @Binding var isOn: Bool
+    @State private var isHovered = false
     
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                if let subtitle = subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
+        HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(isOn ? Color(hex: "FF3366") : .white.opacity(0.4))
+                    .contentTransition(.symbolEffect(.replace))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    if let subtitle = subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
                 }
             }
             
             Spacer()
             
-            Toggle("", isOn: $isOn)
-                .toggleStyle(SwitchToggleStyle(tint: Color(hex: "FF3366")))
-                .labelsHidden()
-                .scaleEffect(0.85)
+            // 液态玻璃开关
+            LiquidGlassSwitchInternal(isOn: $isOn)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.03))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .liquidGlassSurface(
+            isHovered ? .prominent : .subtle,
+            tint: isOn ? Color(hex: "FF3366").opacity(0.1) : nil,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.white.opacity(0.05), lineWidth: 0.5)
-        )
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - 液态玻璃开关 (内部组件)
+private struct LiquidGlassSwitchInternal: View {
+    @Binding var isOn: Bool
+    @State private var isPressed = false
+    
+    var body: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                isOn.toggle()
+            }
+        }) {
+            ZStack {
+                // 背景轨道
+                Capsule()
+                    .fill(isOn ? Color(hex: "FF3366").opacity(0.35) : Color.white.opacity(0.12))
+                    .frame(width: 44, height: 24)
+                
+                // 玻璃滑块
+                Circle()
+                    .fill(.white)
+                    .frame(width: 20, height: 20)
+                    .shadow(color: .black.opacity(0.25), radius: 3, x: 0, y: 1)
+                    .offset(x: isOn ? 10 : -10)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.6), lineWidth: 0.5)
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isPressed ? 0.92 : 1.0)
     }
 }
 
@@ -954,7 +1039,7 @@ private struct NeedsSelectionView: View {
     
     var body: some View {
         VStack(spacing: 10) {
-            Text("请选择匹配项")
+            Text(t("player.selectMatch"))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.7))
                 .padding(.top, 10)
@@ -1025,11 +1110,11 @@ private struct CaptchaRequiredView: View {
                 .font(.system(size: 44))
                 .foregroundStyle(Color(hex: "FF9F43").opacity(0.8))
             
-            Text("需要验证码")
+            Text(t("player.captchaRequired"))
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white)
             
-            Text("该源需要验证码验证才能继续")
+            Text(t("captcha.sourceRequiresContinue"))
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.5))
                 .multilineTextAlignment(.center)
@@ -1040,7 +1125,7 @@ private struct CaptchaRequiredView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "lock.open")
-                    Text("输入验证码")
+                    Text(t("captcha.enterCode"))
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white)
@@ -1075,7 +1160,7 @@ private struct LiquidGlassCaptchaSheet: View {
             VStack(spacing: 0) {
                 // 标题栏
                 HStack {
-                    Text("验证 - \(session.rule.name)")
+                    Text("\(t("player.verification")) - \(session.rule.name)")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white)
                     
@@ -1101,7 +1186,7 @@ private struct LiquidGlassCaptchaSheet: View {
                 .padding(.bottom, 12)
                 
                 // 提示文字
-                Text("在页面中完成验证后，点击下方按钮继续")
+                Text(t("player.completeVerification"))
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1113,7 +1198,7 @@ private struct LiquidGlassCaptchaSheet: View {
                     url: session.startURL,
                     customUserAgent: session.rule.userAgent
                 )
-                .frame(minWidth: 580, minHeight: 420)
+                .frame(minWidth: 860, minHeight: 580)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.black.opacity(0.3))
@@ -1126,7 +1211,7 @@ private struct LiquidGlassCaptchaSheet: View {
                         dismiss()
                         onCancel()
                     } label: {
-                        Text("取消")
+                        Text(t("cancel"))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.white.opacity(0.8))
                             .padding(.horizontal, 16)
@@ -1146,7 +1231,7 @@ private struct LiquidGlassCaptchaSheet: View {
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "checkmark.circle.fill")
-                            Text("验证完成")
+                            Text(t("player.verificationComplete"))
                         }
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
@@ -1163,6 +1248,6 @@ private struct LiquidGlassCaptchaSheet: View {
                 .padding(.vertical, 16)
             }
         }
-        .frame(minWidth: 620, minHeight: 540)
+        .frame(minWidth: 900, minHeight: 700)
     }
 }

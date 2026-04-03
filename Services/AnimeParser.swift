@@ -138,7 +138,7 @@ actor AnimeParser {
                 return AnimeDetail.AnimeEpisodeItem(
                     id: finalURL,
                     name: ep.name,
-                    episodeNumber: index + 1,  // 使用索引作为剧集编号
+                    episodeNumber: extractEpisodeNumber(from: ep.name, fallback: index + 1),
                     url: finalURL,
                     thumbnailURL: nil
                 )
@@ -207,7 +207,7 @@ actor AnimeParser {
                 return AnimeDetail.AnimeEpisodeItem(
                     id: finalURL,
                     name: name,
-                    episodeNumber: index + 1,
+                    episodeNumber: extractEpisodeNumber(from: name, fallback: index + 1),
                     url: finalURL,
                     thumbnailURL: nil
                 )
@@ -264,7 +264,7 @@ actor AnimeParser {
                     return AnimeDetail.AnimeEpisodeItem(
                         id: finalURL,
                         name: name,
-                        episodeNumber: index + 1,
+                        episodeNumber: extractEpisodeNumber(from: name, fallback: index + 1),
                         url: finalURL,
                         thumbnailURL: nil
                     )
@@ -888,7 +888,7 @@ actor AnimeParser {
                 episodes.append(AnimeDetail.AnimeEpisodeItem(
                     id: fullLink,
                     name: name?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines),
-                    episodeNumber: index + 1,
+                    episodeNumber: extractEpisodeNumber(from: name, fallback: index + 1),
                     url: fullLink,
                     thumbnailURL: fullThumb
                 ))
@@ -962,7 +962,7 @@ actor AnimeParser {
                 episodes.append(AnimeDetail.AnimeEpisodeItem(
                     id: fullLink,
                     name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    episodeNumber: index + 1,
+                    episodeNumber: extractEpisodeNumber(from: name, fallback: index + 1),
                     url: fullLink,
                     thumbnailURL: fullThumb
                 ))
@@ -1101,6 +1101,34 @@ actor AnimeParser {
         let embedHosts = ["player", "embed", "stream", "video", "watch"]
         let lowercased = url.lowercased()
         return embedHosts.contains { lowercased.contains($0) } && url.contains("://")
+    }
+
+    private func extractEpisodeNumber(from name: String?, fallback: Int) -> Int {
+        guard let name = name, !name.isEmpty else { return fallback }
+        
+        let patterns = [
+            #"第\s*(\d+)\s*[集話话]"#,
+            #"EP\s*(\d+)"#,
+            #"\b(\d+)\s*[集話话]"#,
+            #"SP\s*(\d+)"#,
+            #"OVA\s*(\d+)"#,
+            #"剧场版\s*(\d+)"#,
+            #"^\s*(\d+)\s*$"#,
+            #"第\s*(\d+)\s*季"#,
+            #"\b(\d+)\s*\.\s*"#,
+            #"[^\d](\d+)[^\d]*$"#
+        ]
+        
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+               let match = regex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
+               let range = Range(match.range(at: 1), in: name),
+               let number = Int(name[range]) {
+                return number
+            }
+        }
+        
+        return fallback
     }
 
     private func extractQuality(from url: String) -> String? {

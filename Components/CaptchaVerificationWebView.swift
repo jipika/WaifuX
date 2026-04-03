@@ -14,7 +14,7 @@ struct CaptchaVerificationWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 860, height: 600), configuration: config)
         webView.navigationDelegate = context.coordinator
         if let ua = customUserAgent, !ua.isEmpty {
             webView.customUserAgent = ua
