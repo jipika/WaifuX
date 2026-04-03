@@ -85,7 +85,7 @@ private struct WallpaperInfoView: View {
     }
 }
 
-// MARK: - 缩略图视图
+// MARK: - 缩略图视图（优化版 - 增强玻璃效果）
 private struct ThumbnailView: View {
     let wallpaper: Wallpaper?
     @State private var isHovered = false
@@ -104,33 +104,34 @@ private struct ThumbnailView: View {
                 PlaceholderView()
             }
         }
-        .frame(width: 48, height: 48)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: 52, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.3),
-                            Color.white.opacity(0.1)
+                            LiquidGlassColors.glassBorder,
+                            LiquidGlassColors.glassBorder.opacity(0.3)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.5
+                    lineWidth: 1
                 )
         )
         .shadow(
-            color: Color.black.opacity(0.2),
-            radius: 8,
-            y: 4
+            color: Color.black.opacity(isHovered ? 0.3 : 0.2),
+            radius: isHovered ? 12 : 8,
+            y: isHovered ? 6 : 4
         )
+        .scaleEffect(isHovered ? 1.05 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
                 isHovered = hovering
             }
         }
-        .scaleEffect(isHovered ? 1.02 : 1.0)
     }
 }
 
@@ -236,64 +237,84 @@ private struct ControlButtons: View {
     }
 }
 
-// MARK: - 播放器图标按钮
+// MARK: - 播放器图标按钮（优化版 - Liquid Glass）
 private struct PlayerIconButton: View {
     let icon: String
     @Binding var isHovered: Bool
     let tooltip: String
     let action: () -> Void
+    @State private var isPressed = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
-                .frame(width: 36, height: 36)
-                .background(
-                    Circle()
-                        .fill(isHovered ? LiquidGlassColors.glassWhite : Color.clear)
-                )
+                .frame(width: 40, height: 40)
         }
         .buttonStyle(.plain)
+        .liquidGlassSurface(
+            isHovered ? .prominent : .subtle,
+            in: Circle()
+        )
+        .scaleEffect(isPressed ? 0.92 : 1.0)
         .help(tooltip)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 
-// MARK: - 收藏按钮
+// MARK: - 收藏按钮（优化版 - 增强视觉效果）
 private struct LikeButton: View {
     let isLiked: Bool
     @Binding var isHovered: Bool
     let action: () -> Void
+    @State private var isPressed = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: isLiked ? "heart.fill" : "heart")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(isLiked ? LiquidGlassColors.primaryPink : (isHovered ? .white : LiquidGlassColors.textSecondary))
-                .frame(width: 36, height: 36)
-                .background(
-                    Circle()
-                        .fill(isHovered && !isLiked ? LiquidGlassColors.glassWhite : Color.clear)
-                )
+                .frame(width: 40, height: 40)
         }
         .buttonStyle(.plain)
-        .help(isLiked ? t("player.unfavorite") : t("player.favorite"))
-        .scaleEffect(isLiked ? 1.1 : 1.0)
+        .liquidGlassSurface(
+            isLiked ? .max : (isHovered ? .prominent : .subtle),
+            tint: isLiked ? LiquidGlassColors.primaryPink.opacity(0.2) : nil,
+            in: Circle()
+        )
+        .shadow(
+            color: isLiked ? LiquidGlassColors.primaryPink.opacity(0.3) : Color.clear,
+            radius: isLiked ? 12 : 0,
+            y: 4
+        )
+        .scaleEffect(isPressed ? 0.88 : (isLiked ? 1.1 : 1.0))
         .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isLiked)
+        .animation(.easeInOut(duration: 0.1), value: isPressed)
+        .help(isLiked ? t("player.unfavorite") : t("player.favorite"))
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 
-// MARK: - 控制按钮
+// MARK: - 控制按钮（优化版 - Liquid Glass）
 private struct ControlButton: View {
     let icon: String
     let tooltip: String
@@ -306,11 +327,16 @@ private struct ControlButton: View {
             Image(systemName: icon)
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isHovered ? .white : LiquidGlassColors.textPrimary)
-                .frame(width: 36, height: 36)
+                .frame(width: 40, height: 40)
         }
         .buttonStyle(.plain)
+        .liquidGlassSurface(
+            isHovered ? .prominent : .subtle,
+            in: Circle()
+        )
+        .scaleEffect(isPressed ? 0.92 : (isHovered ? 1.05 : 1.0))
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
         .help(tooltip)
-        .scaleEffect(isPressed ? 0.9 : 1.0)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
@@ -324,7 +350,7 @@ private struct ControlButton: View {
     }
 }
 
-// MARK: - 播放/暂停按钮
+// MARK: - 播放/暂停按钮（优化版 - 增强视觉冲击力）
 private struct PlayPauseButton: View {
     let isPlaying: Bool
     let action: () -> Void
@@ -334,16 +360,17 @@ private struct PlayPauseButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
+                .frame(width: 52, height: 52)
                 .background(
                     Circle()
                         .fill(
                             LinearGradient(
                                 colors: [
                                     LiquidGlassColors.primaryPink,
-                                    LiquidGlassColors.primaryPink.opacity(0.8)
+                                    LiquidGlassColors.primaryPink.opacity(0.85),
+                                    LiquidGlassColors.secondaryViolet.opacity(0.7)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
@@ -355,24 +382,63 @@ private struct PlayPauseButton: View {
                         .stroke(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.4),
-                                    Color.white.opacity(0.1)
+                                    Color.white.opacity(0.5),
+                                    Color.white.opacity(0.2),
+                                    Color.white.opacity(0.05)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 0.5
+                            lineWidth: 1.5
                         )
                 )
                 .shadow(
-                    color: LiquidGlassColors.primaryPink.opacity(isHovered ? 0.5 : 0.3),
-                    radius: isHovered ? 16 : 12,
-                    y: isHovered ? 6 : 4
+                    color: LiquidGlassColors.primaryPink.opacity(isHovered ? 0.6 : 0.4),
+                    radius: isHovered ? 20 : 15,
+                    y: isHovered ? 8 : 5
                 )
         }
         .buttonStyle(.plain)
         .help(isPlaying ? t("player.pause") : t("player.play"))
+        .scaleEffect(isPressed ? 0.92 : (isHovered ? 1.05 : 1.0))
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
+        .animation(.easeInOut(duration: 0.1), value: isPressed)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                isHovered = hovering
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+}
+
+// MARK: - 倍速按钮（优化版 - Liquid Glass）
+private struct SpeedButton: View {
+    let speed: Double
+    @Binding var isHovered: Bool
+    let action: () -> Void
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("\(String(format: "%.1f", speed))×")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
+                .frame(width: 40, height: 28)
+        }
+        .buttonStyle(.plain)
+        .liquidGlassSurface(
+            isHovered ? .prominent : .subtle,
+            tint: isHovered ? LiquidGlassColors.tertiaryBlue.opacity(0.15) : nil,
+            in: Capsule()
+        )
         .scaleEffect(isPressed ? 0.92 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .help(t("player.speed"))
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
@@ -386,53 +452,27 @@ private struct PlayPauseButton: View {
     }
 }
 
-// MARK: - 倍速按钮
-private struct SpeedButton: View {
-    let speed: Double
-    @Binding var isHovered: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text("\(String(format: "%.1f", speed))×")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
-                .frame(width: 36, height: 24)
-                .background(
-                    Capsule()
-                        .fill(isHovered ? LiquidGlassColors.tertiaryBlue.opacity(0.8) : LiquidGlassColors.glassWhiteSubtle)
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(isHovered ? 0.4 : 0.2),
-                                    Color.white.opacity(isHovered ? 0.2 : 0.05)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.5
-                        )
-                )
-        }
-        .buttonStyle(.plain)
-        .help(t("player.speed"))
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isHovered = hovering
-            }
-        }
-    }
-}
-
-// MARK: - 播放器背景 (使用 DesignSystem)
+// MARK: - 播放器背景（优化版 - 增强Liquid Glass）
 private struct PlayerBarBackground: View {
     var body: some View {
-        LiquidGlassCard(padding: 0, cornerRadius: 24, variant: .regular) {
-            Color.clear
-        }
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .fill(.thickMaterial)
+            .opacity(0.92)
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                LiquidGlassColors.glassBorder,
+                                LiquidGlassColors.glassBorder.opacity(0.3)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.5
+                    )
+            )
+            .shadow(color: .black.opacity(0.25), radius: 24, y: 10)
     }
 }
 

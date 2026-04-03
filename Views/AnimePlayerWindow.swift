@@ -44,41 +44,67 @@ struct AnimePlayerWindow: View {
     }
 }
 
-// MARK: - 播放器侧边栏背景
+// MARK: - 播放器侧边栏背景（优化版 - 增强Liquid Glass效果）
 private struct PlayerSidebarBackground: View {
     var body: some View {
         ZStack {
-            // 基础背景色 - 比播放器区域稍亮的深色
-            Color(hex: "121216")
+            // 基础背景色 - 使用DesignSystem
+            LiquidGlassColors.midBackground
                 .ignoresSafeArea()
             
-            // 微妙的顶部渐变
-            LinearGradient(
-                colors: [
-                    Color(hex: "1A1A20").opacity(0.5),
-                    Color.clear
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            // 应用Liquid Glass材质
+            Rectangle()
+                .fill(.regularMaterial)
+                .opacity(0.35)
+                .ignoresSafeArea()
             
-            // 左侧分隔线
+            // 顶部微妙渐变
+            VStack {
+                LinearGradient(
+                    colors: [
+                        LiquidGlassColors.glassWhite.opacity(0.08),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 120)
+                Spacer()
+            }
+            
+            // 左侧边缘高光（增强深度感）
             HStack {
                 Rectangle()
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.black.opacity(0.3),
-                                Color.white.opacity(0.05),
-                                Color.black.opacity(0.3)
+                                LiquidGlassColors.glassBorder,
+                                LiquidGlassColors.glassBorder.opacity(0.3),
+                                Color.clear
                             ],
-                            startPoint: .top,
-                            endPoint: .bottom
+                            startPoint: .leading,
+                            endPoint: .trailing
                         )
                     )
-                    .frame(width: 1)
+                    .frame(width: 1.5)
                 Spacer()
+            }
+            
+            // 右侧微妙阴影（增强层次）
+            HStack {
+                Spacer()
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.clear,
+                                Color.black.opacity(0.15)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: 8)
             }
         }
     }
@@ -199,32 +225,42 @@ private struct PlayerSection: View {
     }
 }
 
-// MARK: - 播放器控制按钮
+// MARK: - 播放器控制按钮（优化版 - Liquid Glass）
 private struct PlayerControlButton: View {
     let icon: String
     let action: () -> Void
     @State private var isHovered = false
+    @State private var isPressed = false
     
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(width: 32, height: 32)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
+                .frame(width: 36, height: 36)
         }
         .buttonStyle(.plain)
-        .background(
-            Circle()
-                .fill(Color.black.opacity(0.4))
+        .liquidGlassSurface(
+            isHovered ? .prominent : .regular,
+            in: Circle()
         )
-        .overlay(
-            Circle()
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+        .shadow(
+            color: isHovered ? Color.black.opacity(0.3) : Color.black.opacity(0.2),
+            radius: isHovered ? 12 : 8,
+            y: isHovered ? 6 : 4
         )
-        .opacity(isHovered ? 1.0 : 0.7)
+        .scaleEffect(isPressed ? 0.92 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
         .onHover { hovering in
-            isHovered = hovering
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 
@@ -357,7 +393,7 @@ private struct PanelHeader: View {
     }
 }
 
-// MARK: - Tab 按钮
+// MARK: - Tab 按钮（优化版 - 使用Liquid Glass）
 private struct TabButton: View {
     let icon: String
     let title: String
@@ -367,23 +403,29 @@ private struct TabButton: View {
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                 Text(title)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
             }
-            .foregroundStyle(isSelected ? .white : .white.opacity(0.55))
+            .foregroundStyle(isSelected ? .white : LiquidGlassColors.textSecondary)
             .frame(maxWidth: .infinity)
-            .frame(height: 30)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
-            )
+            .frame(height: 34)
+            .padding(.horizontal, 12)
         }
         .buttonStyle(.plain)
+        .liquidGlassSurface(
+            isSelected ? .prominent : (isHovered ? .regular : .subtle),
+            tint: isSelected ? LiquidGlassColors.primaryPink.opacity(0.2) : nil,
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
         .onHover { hovering in
-            isHovered = hovering
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
     }
 }
@@ -625,7 +667,7 @@ private struct EpisodeListView: View {
     }
 }
 
-// MARK: - 剧集按钮（优化性能版本）
+// MARK: - 剧集按钮（优化版 - Liquid Glass效果）
 private struct EpisodeButton: View {
     let episode: AnimeDetail.AnimeEpisodeItem
     let isPlaying: Bool
@@ -634,11 +676,9 @@ private struct EpisodeButton: View {
 
     var displayText: String {
         if let name = episode.name, !name.isEmpty {
-            // 如果名字很短（如 "SP1", "OVA1"），直接显示
             if name.count <= 4 {
                 return name
             }
-            // 尝试从名字中提取纯数字
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if let intValue = Int(trimmed), intValue == episode.episodeNumber {
                 return trimmed
@@ -650,39 +690,34 @@ private struct EpisodeButton: View {
     var body: some View {
         Button(action: action) {
             Text(displayText)
-                .font(.system(size: 12, weight: isPlaying ? .bold : .medium, design: .rounded))
-                .foregroundStyle(isPlaying ? .white : .white.opacity(0.8))
-                .frame(minHeight: 32)
+                .font(.system(size: 13, weight: isPlaying ? .bold : .medium, design: .rounded))
+                .foregroundStyle(isPlaying ? .white : LiquidGlassColors.textPrimary)
+                .frame(minHeight: 36)
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(backgroundColor)
+        .liquidGlassSurface(
+            isPlaying ? .max : (isHovered ? .prominent : .subtle),
+            tint: isPlaying ? LiquidGlassColors.primaryPink.opacity(0.3) : nil,
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(
-                    isPlaying ? Color.white.opacity(0.25) : Color.white.opacity(0.06),
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    isPlaying 
+                        ? LiquidGlassColors.primaryPink.opacity(0.5)
+                        : LiquidGlassColors.borderSubtle,
                     lineWidth: isPlaying ? 1.5 : 0.5
                 )
         )
-        .scaleEffect(isPlaying ? 1.02 : (isHovered ? 1.02 : 1.0))
-        .animation(.easeOut(duration: 0.08), value: isPlaying || isHovered)
+        .scaleEffect(isHovered && !isPlaying ? 1.02 : 1.0)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
         .help(episode.name ?? "第 \(episode.episodeNumber) 集")
         .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-    
-    private var backgroundColor: Color {
-        if isPlaying {
-            return Color(hex: "FF3366").opacity(0.85)
-        } else if isHovered {
-            return Color.white.opacity(0.08)
-        } else {
-            return Color.white.opacity(0.03)
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
     }
 }
