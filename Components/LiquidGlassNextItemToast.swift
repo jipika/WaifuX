@@ -78,34 +78,6 @@ public class NextItemDataSource: ObservableObject {
     }
 }
 
-// MARK: - 滚动事件监测视图
-private struct ScrollWheelMonitorView: NSViewRepresentable {
-    let onScroll: (CGFloat) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = ScrollWheelMonitorNSView()
-        view.onScroll = onScroll
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard let monitorView = nsView as? ScrollWheelMonitorNSView else { return }
-        monitorView.onScroll = onScroll
-    }
-}
-
-// MARK: - 滚动监测 NSView
-private class ScrollWheelMonitorNSView: NSView {
-    var onScroll: ((CGFloat) -> Void)?
-
-    override func scrollWheel(with event: NSEvent) {
-        onScroll?(event.scrollingDeltaY)
-        super.scrollWheel(with: event)
-    }
-
-    override var acceptsFirstResponder: Bool { true }
-}
-
 // MARK: - 液态玻璃下一张弹窗
 public struct LiquidGlassNextItemToast: View {
     let nextItem: NextItemPreviewable?
@@ -115,17 +87,11 @@ public struct LiquidGlassNextItemToast: View {
 
     @State private var isVisible = false
     @State private var viewTimer: Timer?
-    @State private var scrollOffset: CGFloat = 0
-    @State private var isAnimating = false
     @State private var isHovered = false
     @State private var isPressed = false
 
-    // 滚轮累积
-    @State private var accumulatedScrollDelta: CGFloat = 0
-
     // 配置
     private let appearDelay: TimeInterval = 3.0
-    private let scrollThreshold: CGFloat = 60.0
     private let toastHeight: CGFloat = 80
     private let toastWidth: CGFloat = 260
 
@@ -151,7 +117,6 @@ public struct LiquidGlassNextItemToast: View {
                             x: geometry.size.width - toastWidth / 2 - 20,
                             y: geometry.size.height - toastHeight / 2 - 20
                         )
-                        .offset(y: scrollOffset)
                         .transition(
                             .asymmetric(
                                 insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -159,13 +124,6 @@ public struct LiquidGlassNextItemToast: View {
                             )
                         )
                 }
-
-                // 滚动事件监测层（覆盖整个屏幕）
-                ScrollWheelMonitorView { delta in
-                    handleScrollWheel(delta: delta)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .allowsHitTesting(false)
             }
             .onAppear {
                 startViewTimer()
@@ -179,28 +137,14 @@ public struct LiquidGlassNextItemToast: View {
         }
     }
 
-    // MARK: - 滚轮事件处理
-    private func handleScrollWheel(delta: CGFloat) {
-        guard !isAnimating, nextItem != nil else { return }
-
-        accumulatedScrollDelta += delta
-
-        // 检测滚动阈值
-        if accumulatedScrollDelta < -scrollThreshold {
-            // 向上滚动超过阈值，翻到下一张
-            accumulatedScrollDelta = 0
-            performFlipAnimation(direction: .up)
-        } else if accumulatedScrollDelta > scrollThreshold {
-            // 向下滚动超过阈值，翻到上一张
-            accumulatedScrollDelta = 0
-            performFlipAnimation(direction: .down)
-        }
-    }
-
     // MARK: - Toast 内容 - 深色原生液态玻璃（参考 detailGlassCircleChrome 样式）
     private func toastContent(item: NextItemPreviewable) -> some View {
         Button(action: {
-            performFlipAnimation(direction: .up)
+            // 点击后隐藏弹窗并触发回调
+            withAnimation(.easeOut(duration: 0.2)) {
+                isVisible = false
+            }
+            onTap()
         }) {
             HStack(spacing: 10) {
                 // 缩略图
@@ -266,15 +210,6 @@ public struct LiquidGlassNextItemToast: View {
         .shadow(color: .black.opacity(0.22), radius: 16, y: 8)
         .scaleEffect(isPressed ? 0.96 : 1.0)
         .animation(.easeInOut(duration: 0.1), value: isPressed)
-        .gesture(
-            DragGesture(minimumDistance: 10)
-                .onChanged { value in
-                    handleDragChanged(value: value)
-                }
-                .onEnded { value in
-                    handleDragEnded(value: value)
-                }
-        )
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.2)) {
                 isHovered = hovering
@@ -320,76 +255,6 @@ public struct LiquidGlassNextItemToast: View {
             )
     }
 
-    // MARK: - 拖拽处理
-    private func handleDragChanged(value: DragGesture.Value) {
-        guard !isAnimating else { return }
-
-        let translation = value.translation.height
-
-        // 添加阻尼效果
-        if translation < 0 {
-            // 向上拖拽（负数）
-            scrollOffset = translation * 0.6
-        } else {
-            // 向下拖拽（正数）
-            scrollOffset = translation * 0.4
-        }
-    }
-
-    private func handleDragEnded(value: DragGesture.Value) {
-        let translation = value.translation.height
-        let velocity = value.predictedEndLocation.y - value.location.y
-
-        // 判断是否超过阈值或有足够速度
-        let shouldGoNext = translation < -scrollThreshold || (translation < -20 && velocity < -100)
-        let shouldGoPrev = translation > scrollThreshold || (translation > 20 && velocity > 100)
-
-        if shouldGoNext {
-            performFlipAnimation(direction: .up)
-        } else if shouldGoPrev {
-            performFlipAnimation(direction: .down)
-        } else {
-            // 回弹
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                scrollOffset = 0
-            }
-        }
-    }
-
-    // MARK: - 翻页动画
-    private func performFlipAnimation(direction: FlipDirection) {
-        guard !isAnimating else { return }
-        isAnimating = true
-
-        let offsetAmount: CGFloat = direction == .up ? -50 : 50
-
-        // 第一阶段：向上/下移动并淡出
-        withAnimation(.easeOut(duration: 0.12)) {
-            scrollOffset = offsetAmount
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            // 触发回调
-            if direction == .up {
-                onScrollUp()
-            } else {
-                onScrollDown()
-            }
-
-            // 第二阶段：复位（从反方向弹回）
-            scrollOffset = -offsetAmount * 0.3
-
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) {
-                scrollOffset = 0
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                isAnimating = false
-                resetViewTimer()
-            }
-        }
-    }
-
     // MARK: - 计时器管理
     private func startViewTimer() {
         stopViewTimer()
@@ -406,15 +271,10 @@ public struct LiquidGlassNextItemToast: View {
     }
 
     private func resetViewTimer() {
-        accumulatedScrollDelta = 0
         withAnimation(.easeOut(duration: 0.2)) {
             isVisible = false
         }
         startViewTimer()
-    }
-
-    enum FlipDirection {
-        case up, down
     }
 }
 

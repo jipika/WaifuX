@@ -4,6 +4,7 @@ struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
+    @StateObject private var animeFavoriteStore = AnimeFavoriteStore.shared
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
@@ -83,7 +84,33 @@ struct MyLibraryContentView: View {
         .task {
             await viewModel.initialLoad()
             // mediaViewModel.favoriteItems 和 downloadedItems 是计算属性，自动从 MediaLibraryService 获取
-            animeFavorites = await UserLibrary.shared.getFavorites(for: .anime)
+            await loadAnimeFavorites()
+        }
+        .onReceive(animeFavoriteStore.$favorites) { _ in
+            Task {
+                await loadAnimeFavorites()
+            }
+        }
+    }
+
+    // MARK: - 加载动漫收藏
+    private func loadAnimeFavorites() async {
+        let favorites = animeFavoriteStore.allFavorites
+        animeFavorites = favorites.map { favorite in
+            UniversalContentItem(
+                id: favorite.id,
+                contentType: .anime,
+                title: favorite.title,
+                thumbnailURL: favorite.coverURL ?? "",
+                metadata: .anime(AnimeMetadata(
+                    episodes: [],
+                    currentEpisode: nil,
+                    totalEpisodes: nil,
+                    status: favorite.watchStatus.displayName,
+                    aired: nil,
+                    rating: nil
+                ))
+            )
         }
     }
 
@@ -526,11 +553,11 @@ struct MyLibraryContentView: View {
                 // mediaViewModel.removeDownloads(withIDs: selectedItems)
             }
         case .anime:
+            for id in selectedItems {
+                AnimeFavoriteStore.shared.removeFavorite(animeId: id)
+            }
             Task {
-                for id in selectedItems {
-                    try? await UserLibrary.shared.removeFromFavorites(id: id, contentType: .anime)
-                }
-                animeFavorites = await UserLibrary.shared.getFavorites(for: .anime)
+                await loadAnimeFavorites()
             }
         }
         selectedItems.removeAll()

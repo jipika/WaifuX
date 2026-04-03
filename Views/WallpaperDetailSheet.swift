@@ -3,9 +3,11 @@ import AppKit
 
 // MARK: - 壁纸详情页 - macOS 26 Liquid Glass 沉浸式全屏风格
 struct WallpaperDetailSheet: View {
-    let wallpaper: Wallpaper
+    let initialWallpaper: Wallpaper
     @ObservedObject var viewModel: WallpaperViewModel
     let onClose: () -> Void
+
+    @State private var resolvedWallpaper: Wallpaper
     @State private var isDownloading = false
     @State private var showError = false
     @State private var errorMessage = ""
@@ -23,6 +25,9 @@ struct WallpaperDetailSheet: View {
     // MARK: - 下一张弹窗相关
     @StateObject private var nextItemDataSource = NextItemDataSource()
     @State private var currentWallpaperIndex: Int = 0
+
+    // 计算属性：当前壁纸
+    var wallpaper: Wallpaper { resolvedWallpaper }
 
     var body: some View {
         GeometryReader { geometry in
@@ -159,9 +164,10 @@ struct WallpaperDetailSheet: View {
     }
 
     init(wallpaper: Wallpaper, viewModel: WallpaperViewModel, onClose: @escaping () -> Void) {
-        self.wallpaper = wallpaper
+        self.initialWallpaper = wallpaper
         self.viewModel = viewModel
         self.onClose = onClose
+        _resolvedWallpaper = State(initialValue: wallpaper)
     }
 
     /// 主壁纸 URL（原图优先）
@@ -930,17 +936,12 @@ struct WallpaperDetailSheet: View {
 
     private func reloadWallpaper(_ newWallpaper: Wallpaper) {
         withAnimation(.easeInOut(duration: 0.3)) {
+            // 更新当前壁纸
+            resolvedWallpaper = newWallpaper
+
             // 重置状态来触发重新加载
             isImageLoaded = false
             showInfoBubble = false
-
-            // 更新当前壁纸 - 由于 wallpaper 是 let，我们需要通过重新创建视图来切换
-            // 这里使用通知或代理模式来通知父视图切换壁纸
-            NotificationCenter.default.post(
-                name: .init("SwitchWallpaper"),
-                object: nil,
-                userInfo: ["wallpaper": newWallpaper]
-            )
         }
     }
 }

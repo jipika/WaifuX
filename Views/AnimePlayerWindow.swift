@@ -1,6 +1,11 @@
 import SwiftUI
 import AVKit
 
+// MARK: - 通知名称
+extension Notification.Name {
+    static let togglePlayerFullScreen = Notification.Name("togglePlayerFullScreen")
+}
+
 // MARK: - AnimePlayerWindow - 独立播放器窗口
 struct AnimePlayerWindow: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
@@ -155,7 +160,7 @@ private struct PlayerSection: View {
                 .padding(40)
             }
             
-            // 全屏按钮
+            // 全屏按钮 - 放在播放器控件层之上
             VStack {
                 HStack {
                     Spacer()
@@ -169,14 +174,13 @@ private struct PlayerSection: View {
                 }
                 Spacer()
             }
+            .allowsHitTesting(true)
         }
     }
     
     private func toggleFullScreen() {
-        if let window = NSApp.keyWindow {
-            window.toggleFullScreen(nil)
-            isFullScreen.toggle()
-        }
+        // 使用 AVPlayerView 的真正视频全屏
+        NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil)
     }
 }
 
@@ -212,19 +216,49 @@ private struct PlayerControlButton: View {
 // MARK: - 播放器容器
 private struct PlayerContainerView: NSViewRepresentable {
     let player: AVPlayer
-    
+
     func makeNSView(context: Context) -> AVPlayerView {
-        let playerView = AVPlayerView()
+        let playerView = FullScreenAVPlayerView()
         playerView.player = player
         playerView.controlsStyle = .floating
         playerView.showsSharingServiceButton = false
         playerView.allowsPictureInPicturePlayback = true
         playerView.updatesNowPlayingInfoCenter = true
+        playerView.showsFullScreenToggleButton = true
         return playerView
     }
-    
+
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         nsView.player = player
+    }
+}
+
+// MARK: - 支持全屏的 AVPlayerView
+private class FullScreenAVPlayerView: AVPlayerView {
+    private var fullScreenObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        // 移除之前的观察者
+        if let observer = fullScreenObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        // 添加全屏切换通知观察者
+        fullScreenObserver = NotificationCenter.default.addObserver(
+            forName: .togglePlayerFullScreen,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.toggleFullScreen(nil)
+        }
+    }
+
+    deinit {
+        if let observer = fullScreenObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 }
 
@@ -577,7 +611,7 @@ private struct EpisodeButton: View {
     let isPlaying: Bool
     let action: () -> Void
     @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: action) {
             Text("\(episode.episodeNumber)")
@@ -585,9 +619,9 @@ private struct EpisodeButton: View {
                 .foregroundStyle(isPlaying ? .white : .white.opacity(0.8))
                 .frame(minHeight: 32)
                 .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(backgroundColor)
