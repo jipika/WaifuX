@@ -30,7 +30,7 @@ struct MediaExploreContentView: View {
                     mediaSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
-                .padding(.top, 108)
+                .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -92,7 +92,7 @@ struct MediaExploreContentView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.56))
 
-                    Text("MotionBGs")
+                    Text("MotionBG")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
                         .padding(.horizontal, 8)
@@ -108,11 +108,6 @@ struct MediaExploreContentView: View {
                     .font(.system(size: 32, weight: .bold, design: .serif))
                     .tracking(-0.5)
                     .foregroundStyle(.white.opacity(0.98))
-                    .lineLimit(1)
-
-                Text("\(viewModel.currentFeedTitle) · \(t("filter.all")) \(formattedMediaCount) \(t("media.count")) / \(t("media.loaded")) \(formattedLoadedCount)")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
             }
 

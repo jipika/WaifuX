@@ -28,7 +28,7 @@ struct WallpaperExploreContentView: View {
                     wallpaperSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
-                .padding(.top, 112)
+                .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -100,17 +100,27 @@ struct WallpaperExploreContentView: View {
     private var heroSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(greetingText)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
+                HStack(spacing: 8) {
+                    Text(greetingText)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+
+                    Text("Wallhaven")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 8)
+                        .frame(height: 20)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+
                 Text(t("wallpaperLibrary"))
                     .font(.system(size: 32, weight: .bold, design: .serif))
                     .tracking(-0.5)
                     .foregroundStyle(.white.opacity(0.98))
-                    .lineLimit(1)
-                Text("\(t("discoverQuality")) \(formattedWallpaperCount) \(t("wallpaperCount"))")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
             }
             HStack(spacing: 12) {
@@ -1342,7 +1352,7 @@ extension WallpaperExploreContentView {
 
 // MARK: - Scroll offset (shared with HomeContentView, WallpaperDetailSheet)
 struct ScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }

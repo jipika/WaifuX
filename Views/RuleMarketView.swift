@@ -31,10 +31,10 @@ struct RuleMarketView: View {
     private var headerView: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("规则市场")
+                Text(t("ruleMarket.title"))
                     .font(.title2)
                     .fontWeight(.semibold)
-                Text("浏览并安装来自社区的解析规则")
+                Text(t("ruleMarket.browseCommunity"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -43,17 +43,8 @@ struct RuleMarketView: View {
 
             HStack(spacing: 12) {
                 // 搜索框
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("搜索规则...", text: $viewModel.searchQuery)
-                        .textFieldStyle(.plain)
-                        .frame(width: 160)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(6)
+                LiquidGlassSearchField("搜索规则...", text: $viewModel.searchQuery)
+                    .frame(width: 180)
 
                 // 刷新按钮
                 Button(action: { viewModel.loadIndex() }) {
@@ -90,7 +81,7 @@ struct RuleMarketView: View {
 
     private var categorySidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("分类")
+            Text(t("ruleMarket.category"))
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 12)
@@ -131,7 +122,7 @@ struct RuleMarketView: View {
                 HStack {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .frame(width: 20)
-                    Text("一键同步")
+                    Text(t("ruleMarket.syncAll"))
                         .font(.caption)
                 }
                 .padding(.horizontal, 12)
@@ -171,7 +162,7 @@ struct RuleMarketView: View {
     private var loadingView: some View {
         VStack(spacing: 16) {
             ProgressView()
-            Text("正在加载规则索引...")
+            Text(t("ruleMarket.loading"))
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -184,13 +175,13 @@ struct RuleMarketView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.largeTitle)
                 .foregroundColor(.orange)
-            Text("加载失败")
+            Text(t("loadFailed"))
                 .font(.headline)
             Text(message)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            Button("重试") {
+            Button(t("ruleMarket.retry")) {
                 viewModel.loadIndex()
             }
             .buttonStyle(.borderedProminent)
@@ -228,7 +219,7 @@ struct RuleMarketItemView: View {
                     Text(rule.name)
                         .font(.headline)
                     if rule.deprecated {
-                        Text("已弃用")
+                        Text(t("sourceRules.deprecated"))
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -237,7 +228,7 @@ struct RuleMarketItemView: View {
                             .cornerRadius(4)
                     }
                     if isInstalled {
-                        Text("已安装")
+                        Text(t("animeRules.installed"))
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)

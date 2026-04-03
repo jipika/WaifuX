@@ -23,11 +23,11 @@ struct FavoriteAnime: Codable, Identifiable, Equatable {
         
         var displayName: String {
             switch self {
-            case .planToWatch: return "想看"
-            case .watching: return "在看"
-            case .completed: return "看过"
-            case .onHold: return "搁置"
-            case .dropped: return "弃番"
+            case .planToWatch: return t("favorite.planToWatch")
+            case .watching: return t("favorite.watching")
+            case .completed: return t("favorite.completed")
+            case .onHold: return t("favorite.onHold")
+            case .dropped: return t("favorite.dropped")
             }
         }
         
@@ -62,10 +62,10 @@ enum FavoriteSortOption: String, CaseIterable {
     
     var displayName: String {
         switch self {
-        case .addedAt: return "添加时间"
-        case .title: return "标题"
-        case .score: return "评分"
-        case .updatedAt: return "更新时间"
+        case .addedAt: return t("favorite.addedAt")
+        case .title: return t("favorite.title")
+        case .score: return t("favorite.score")
+        case .updatedAt: return t("favorite.updatedAt")
         }
     }
 }

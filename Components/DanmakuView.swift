@@ -220,8 +220,12 @@ struct DanmakuView: View {
     // MARK: - 定时器
 
     private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-            updateScrollPositions()
+        Task { @MainActor in
+            timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+                Task { @MainActor in
+                    updateScrollPositions()
+                }
+            }
         }
     }
 
@@ -292,10 +296,10 @@ struct DanmakuControlPanel: View {
         VStack(spacing: 16) {
             // 标题栏
             HStack {
-                Text("弹幕设置")
+                Text(t("danmaku.settings"))
                     .font(.headline)
                 Spacer()
-                Button("完成") {
+                Button(t("done")) {
                     isPresented = false
                 }
             }
@@ -304,7 +308,7 @@ struct DanmakuControlPanel: View {
             Divider()
 
             // 开关
-            Toggle("启用弹幕", isOn: $settings.isEnabled)
+            DanmakuLiquidToggle(t("danmaku.enableDanmaku"), isOn: $settings.isEnabled)
                 .padding(.horizontal)
 
             Divider()
@@ -312,51 +316,54 @@ struct DanmakuControlPanel: View {
             // 速度
             VStack(alignment: .leading) {
                 HStack {
-                    Text("弹幕速度")
+                    Text(t("danmaku.speed"))
                     Spacer()
                     Text("\(String(format: "%.1f", settings.speed))x")
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $settings.speed, in: 0.5...2.0, step: 0.1)
+                    .tint(LiquidGlassColors.primaryPink)
             }
             .padding(.horizontal)
 
             // 透明度
             VStack(alignment: .leading) {
                 HStack {
-                    Text("弹幕透明度")
+                    Text(t("danmaku.opacity"))
                     Spacer()
                     Text("\(Int(settings.opacity * 100))%")
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $settings.opacity, in: 0.1...1.0, step: 0.1)
+                    .tint(LiquidGlassColors.primaryPink)
             }
             .padding(.horizontal)
 
             // 字体大小
             VStack(alignment: .leading) {
                 HStack {
-                    Text("字体大小")
+                    Text(t("danmaku.fontSize"))
                     Spacer()
                     Text("\(Int(settings.fontSize))px")
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $settings.fontSize, in: 12...24, step: 1)
+                    .tint(LiquidGlassColors.primaryPink)
             }
             .padding(.horizontal)
 
             Divider()
 
             // 显示选项
-            VStack(alignment: .leading, spacing: 12) {
-                Text("显示选项")
+            VStack(alignment: .leading, spacing: 10) {
+                Text(t("danmaku.displayOptions"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Toggle("滚动弹幕", isOn: $settings.enableScroll)
-                Toggle("顶部弹幕", isOn: $settings.enableTop)
-                Toggle("底部弹幕", isOn: $settings.enableBottom)
-                Toggle("弹幕去重", isOn: $settings.enableDeduplication)
+                DanmakuLiquidToggle(t("danmaku.scroll"), isOn: $settings.enableScroll)
+                DanmakuLiquidToggle(t("danmaku.top"), isOn: $settings.enableTop)
+                DanmakuLiquidToggle(t("danmaku.bottom"), isOn: $settings.enableBottom)
+                DanmakuLiquidToggle(t("danmaku.deduplication"), isOn: $settings.enableDeduplication)
             }
             .padding(.horizontal)
 
@@ -366,6 +373,76 @@ struct DanmakuControlPanel: View {
         .frame(width: 300)
         .background(.ultraThinMaterial)
         .cornerRadius(12)
+    }
+}
+
+// MARK: - 弹幕液态玻璃 Toggle
+private struct DanmakuLiquidToggle: View {
+    let title: String
+    @Binding var isOn: Bool
+    @State private var isHovered = false
+    @State private var isPressed = false
+    
+    init(_ title: String, isOn: Binding<Bool>) {
+        self.title = title
+        self._isOn = isOn
+    }
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isOn ? Color(hex: "FF3366") : .white.opacity(0.4))
+                    .contentTransition(.symbolEffect(.replace))
+                
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+            
+            Spacer()
+            
+            // 液态玻璃开关
+            Button(action: {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                    isOn.toggle()
+                }
+            }) {
+                ZStack {
+                    Capsule()
+                        .fill(isOn ? Color(hex: "FF3366").opacity(0.35) : Color.white.opacity(0.12))
+                        .frame(width: 40, height: 22)
+                    
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 18, height: 18)
+                        .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 1)
+                        .offset(x: isOn ? 9 : -9)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.6), lineWidth: 0.5)
+                        )
+                }
+            }
+            .buttonStyle(.plain)
+            .scaleEffect(isPressed ? 0.92 : 1.0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isHovered ? Color.white.opacity(0.08) : Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+        )
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 

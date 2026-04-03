@@ -13,10 +13,12 @@ final class ControlsTimerManager: ObservableObject {
         timer = nil
     }
     
-    func schedule(interval: TimeInterval, action: @escaping () -> Void) {
+    func schedule(interval: TimeInterval, action: @escaping @MainActor () -> Void) {
         invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
-            action()
+            Task { @MainActor in
+                action()
+            }
         }
     }
 }

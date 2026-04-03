@@ -152,7 +152,7 @@ public struct LiquidGlassNextItemToast: View {
 
                 // 文字信息
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("下一张")
+                    Text(t("library.nextOne"))
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.5))
 
@@ -258,9 +258,13 @@ public struct LiquidGlassNextItemToast: View {
     // MARK: - 计时器管理
     private func startViewTimer() {
         stopViewTimer()
-        viewTimer = Timer.scheduledTimer(withTimeInterval: appearDelay, repeats: false) { _ in
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                isVisible = true
+        Task { @MainActor in
+            viewTimer = Timer.scheduledTimer(withTimeInterval: appearDelay, repeats: false) { _ in
+                Task { @MainActor in
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                        isVisible = true
+                    }
+                }
             }
         }
     }

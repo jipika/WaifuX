@@ -523,11 +523,11 @@ struct AnimeDetailSheet: View {
                     .frame(width: 70)
                 
                 Button {
-                    // TODO: 收藏
+                    viewModel.toggleFavorite()
                 } label: {
-                    Image(systemName: "heart")
+                    Image(systemName: viewModel.isFavorite ? "heart.fill" : "heart")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(viewModel.isFavorite ? Color(hex: "FF5A7D") : .white)
                         .frame(width: 42, height: 42)
                         .detailGlassCircleChrome()
                 }

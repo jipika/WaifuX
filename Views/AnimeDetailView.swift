@@ -357,14 +357,14 @@ private struct AliasSearchSheet: View {
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(Color(hex: "3B8BFF"))
                 
-                Text("别名检索")
+                Text(t("anime.aliasSearch"))
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.white)
             }
             
             if !viewModel.bangumiAliases.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("选择别名搜索")
+                    Text(t("anime.selectAlias"))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))
                     
@@ -394,29 +394,22 @@ private struct AliasSearchSheet: View {
                 .background(.white.opacity(0.1))
             
             VStack(alignment: .leading, spacing: 12) {
-                Text("或手动输入")
+                Text(t("anime.orManualInput"))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
                 
-                TextField("", text: $viewModel.aliasSearchText)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(.white.opacity(0.08))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(.white.opacity(0.15), lineWidth: 1)
-                    )
+                LiquidGlassTextField(
+                    t("anime.aliasInputPlaceholder"),
+                    text: $viewModel.aliasSearchText,
+                    icon: "textformat"
+                )
             }
             
             Spacer()
             
             HStack(spacing: 16) {
                 Button(action: { dismiss() }) {
-                    Text("取消")
+                    Text(t("cancel"))
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
@@ -437,7 +430,7 @@ private struct AliasSearchSheet: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
-                        Text("搜索")
+                        Text(t("general.search"))
                     }
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
@@ -474,12 +467,12 @@ struct CaptchaInputSheet: View {
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(Color(hex: "3B8BFF"))
                 
-                Text("请输入验证码")
+                Text(t("captcha.pleaseEnter"))
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
             }
             
-            Text("该视频源需要验证码，请输入图片中的字符")
+            Text(t("captcha.sourceRequires"))
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
@@ -509,20 +502,12 @@ struct CaptchaInputSheet: View {
             }
             
             HStack(spacing: 12) {
-                TextField("验证码", text: $captchaCode)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.white)
-                    .textFieldStyle(.plain)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(.white.opacity(0.08))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .onSubmit { submit() }
+                LiquidGlassTextField(
+                    "验证码",
+                    text: $captchaCode,
+                    icon: "number",
+                    onSubmit: submit
+                )
                 
                 Button(action: { captchaCode = "" }) {
                     Image(systemName: "arrow.clockwise")
@@ -537,7 +522,7 @@ struct CaptchaInputSheet: View {
             
             HStack(spacing: 16) {
                 Button(action: onCancel) {
-                    Text("取消")
+                    Text(t("cancel"))
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
@@ -552,7 +537,7 @@ struct CaptchaInputSheet: View {
                                 .progressViewStyle(CircularProgressViewStyle(tint: .white))
                                 .scaleEffect(0.8)
                         }
-                        Text("确认")
+                        Text(t("general.confirm"))
                     }
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)

@@ -19,86 +19,106 @@ public enum LiquidGlassColors {
     public static let warningOrange = Color(hex: "FF9F43")
 
     // 背景色（随主题变化，默认为深色）
+    @MainActor
     public static var deepBackground: Color {
         ThemeManager.shared.isDarkMode ? Color(hex: "0D0D0D") : Color(hex: "F5F5F7")
     }
     
+    @MainActor
     public static var midBackground: Color {
         ThemeManager.shared.isDarkMode ? Color(hex: "12121F") : Color(hex: "EBEBF0")
     }
     
+    @MainActor
     public static var surfaceBackground: Color {
         ThemeManager.shared.isDarkMode ? Color(hex: "1A1A2E") : Color(hex: "FFFFFF")
     }
     
+    @MainActor
     public static var elevatedBackground: Color {
         ThemeManager.shared.isDarkMode ? Color(hex: "1E1E28") : Color(hex: "F0F0F5")
     }
 
     // 玻璃效果颜色（随主题变化）
+    @MainActor
     public static var glassWhite: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.26) : Color.black.opacity(0.12)
     }
     
+    @MainActor
     public static var glassWhiteLight: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.34) : Color.black.opacity(0.16)
     }
     
+    @MainActor
     public static var glassWhiteSubtle: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.16) : Color.black.opacity(0.08)
     }
     
+    @MainActor
     public static var glassBorder: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.34) : Color.black.opacity(0.2)
     }
     
+    @MainActor
     public static var glassBorderLight: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.46) : Color.black.opacity(0.24)
     }
     
+    @MainActor
     public static var glassWhiteStrong: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.42) : Color.black.opacity(0.22)
     }
     
+    @MainActor
     public static var glassTint: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.12) : Color.black.opacity(0.05)
     }
 
     // 玻璃高光
+    @MainActor
     public static var glassHighlight: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.7) : Color.black.opacity(0.36)
     }
     
+    @MainActor
     public static var glassHighlightSubtle: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.4) : Color.black.opacity(0.2)
     }
 
     // 文字颜色（随主题变化）
+    @MainActor
     public static var textPrimary: Color {
         ThemeManager.shared.isDarkMode ? Color.white : Color(hex: "1A1A1A")
     }
     
+    @MainActor
     public static var textSecondary: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.7) : Color(hex: "666666")
     }
     
+    @MainActor
     public static var textTertiary: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.5) : Color(hex: "999999")
     }
     
+    @MainActor
     public static var textQuaternary: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.3) : Color(hex: "BBBBBB")
     }
 
     // 边框颜色
+    @MainActor
     public static var borderSubtle: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.1) : Color.black.opacity(0.08)
     }
     
+    @MainActor
     public static var borderDefault: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.2) : Color.black.opacity(0.12)
     }
     
+    @MainActor
     public static var borderStrong: Color {
         ThemeManager.shared.isDarkMode ? Color.white.opacity(0.3) : Color.black.opacity(0.18)
     }
@@ -843,6 +863,7 @@ enum ThemeMode: String, CaseIterable, Identifiable {
 }
 
 // MARK: - 主题管理器
+@MainActor
 class ThemeManager: ObservableObject {
     static let shared = ThemeManager()
     
@@ -888,8 +909,9 @@ class ThemeManager: ObservableObject {
         objectWillChange.send()
         
         // 更新应用外观
+        let isDark = isDarkMode
         DispatchQueue.main.async {
-            NSApp.appearance = NSAppearance(named: self.isDarkMode ? .darkAqua : .aqua)
+            NSApp.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
         }
     }
     

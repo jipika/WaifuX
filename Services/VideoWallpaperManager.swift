@@ -327,7 +327,17 @@ final class VideoWallpaperManager: ObservableObject {
         } catch {
             // 如果 ScreenCaptureKit 失败，回退到基于可见性的简单逻辑
             // 在 macOS 14 以下版本使用 CGWindowListCopyWindowInfo（仍然可用）
-            await fallbackScreenCoverageCheck()
+            if #available(macOS 15.0, *) {
+                // macOS 15+ 上已废弃，但 ScreenCaptureKit 应该已经工作
+                // 如果失败，简单地暂停所有播放器
+                await MainActor.run {
+                    for (_, player) in players {
+                        player.pause()
+                    }
+                }
+            } else {
+                await fallbackScreenCoverageCheck()
+            }
         }
     }
 

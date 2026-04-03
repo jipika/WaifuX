@@ -5,6 +5,7 @@ import WebKit
 /// 使 `URLSession` / `AnimeParser` 后续请求能带上用户刚完成的验证码会话。
 enum WebViewCookieSync {
 
+    @MainActor
     static func syncWKWebsiteDataStoreToSharedHTTPCookieStorage() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in

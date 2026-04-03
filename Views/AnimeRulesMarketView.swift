@@ -33,14 +33,14 @@ struct AnimeRulesMarketView: View {
         .alert("错误", isPresented: $showingError) {
             Button("确定") {}
         } message: {
-            Text(errorMessage ?? "未知错误")
+            Text(errorMessage ?? t("unknown"))
         }
     }
 
     // MARK: - 工具栏
     private var toolbar: some View {
         HStack {
-            Text("规则市场")
+            Text(t("ruleMarket.title"))
                 .font(.title2.bold())
 
             Spacer()
@@ -56,7 +56,7 @@ struct AnimeRulesMarketView: View {
             }
             .buttonStyle(.borderless)
             .disabled(isLoading)
-            .help("刷新规则列表")
+            .help(t("ruleMarket.refresh"))
 
             // 安装全部按钮
             Button {
@@ -64,7 +64,7 @@ struct AnimeRulesMarketView: View {
                     await installAllRules()
                 }
             } label: {
-                Text("安装全部")
+                Text(t("animeRules.installAll"))
                     .font(.system(size: 13))
             }
             .buttonStyle(.borderedProminent)
@@ -79,7 +79,7 @@ struct AnimeRulesMarketView: View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.2)
-            Text("正在加载规则列表...")
+            Text(t("ruleMarket.loading"))
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
         }
@@ -92,7 +92,7 @@ struct AnimeRulesMarketView: View {
             Image(systemName: "shippingbox")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("暂无可用规则")
+            Text(t("ruleMarket.noRules"))
                 .font(.system(size: 16))
                 .foregroundStyle(.secondary)
         }
@@ -206,7 +206,7 @@ private struct RuleMarketItem: View {
                         .font(.system(size: 14, weight: .semibold))
 
                     if isInstalled {
-                        Text("已安装")
+                        Text(t("animeRules.installed"))
                             .font(.system(size: 10))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)

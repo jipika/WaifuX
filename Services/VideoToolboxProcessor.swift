@@ -10,7 +10,7 @@ import VideoToolbox
 actor VideoToolboxProcessor {
     static let shared = VideoToolboxProcessor()
 
-    private var decompressionSession: VTDecompressionSession?
+    private nonisolated(unsafe) var decompressionSession: VTDecompressionSession?
 
     // MARK: - 视频信息
 
@@ -26,7 +26,7 @@ actor VideoToolboxProcessor {
 
     /// 从 URL 获取视频信息
     func getVideoInfo(url: URL) async throws -> VideoInfo {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw VideoToolboxError.noVideoTrack
         }
@@ -55,7 +55,7 @@ actor VideoToolboxProcessor {
 
     /// 从视频中提取指定时间的帧
     func extractFrame(from url: URL, at time: CMTime) async throws -> CGImage {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = .zero
@@ -196,7 +196,10 @@ actor VideoToolboxProcessor {
     }
 
     deinit {
-        Task { await invalidate() }
+        // 同步释放解码会话
+        if let session = decompressionSession {
+            VTDecompressionSessionInvalidate(session)
+        }
     }
 }
 

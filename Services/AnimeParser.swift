@@ -73,17 +73,12 @@ actor AnimeParser {
 
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
-        // 检测验证码 - 统一使用 WebView 验证方案
+        // 检测验证码 - 仅在规则启用反爬虫配置时检测（对齐 Kazumi）
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
                 print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
-        }
-
-        if detectCommonCaptcha(in: html) {
-            print("[AnimeParser] ⚠️ 检测到验证码（关键词），需要使用 WebView 验证")
-            throw AnimeParserError.captchaRequired
         }
 
         // chapterRoads + chapterResult 为 XPath 时应用 Kanna 解析（与 api 字段无关，兼容 Kazumi 官方 api "1" 规则）
@@ -336,18 +331,12 @@ actor AnimeParser {
 
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
-        // 检测验证码
-        // 检测验证码 - 统一使用 WebView 验证方案
+        // 检测验证码 - 仅在规则启用反爬虫配置时检测（对齐 Kazumi）
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
                 print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
-        }
-
-        if detectCommonCaptcha(in: html) {
-            print("[AnimeParser] ⚠️ 检测到验证码（关键词），需要使用 WebView 验证")
-            throw AnimeParserError.captchaRequired
         }
 
         // 根据规则字段选择解析方式（勿仅用 api：Kazumi 存在 api=="1" 且仍为 XPath 的规则）
@@ -643,15 +632,18 @@ actor AnimeParser {
         print("[AnimeParser] HTTP 状态码: \(httpResponse.statusCode)")
 
         // 检查状态码
+        let antiCrawlerEnabled = rule.antiCrawlerConfig?.enabled ?? false
         switch httpResponse.statusCode {
         case 200...299:
             break // 成功
         case 403:
-            // 可能是需要验证码
-            let html = String(data: data, encoding: .utf8) ?? ""
-            if detectCommonCaptcha(in: html) {
-                print("[AnimeParser] ⚠️ 403 响应中包含验证码标记，需要使用 WebView 验证")
-                throw AnimeParserError.captchaRequired
+            // 仅在规则启用反爬虫配置时检测验证码（对齐 Kazumi）
+            if antiCrawlerEnabled {
+                let html = String(data: data, encoding: .utf8) ?? ""
+                if detectCaptcha(in: html, config: rule.antiCrawlerConfig!) {
+                    print("[AnimeParser] ⚠️ 403 响应中检测到验证码，需要使用 WebView 验证")
+                    throw AnimeParserError.captchaRequired
+                }
             }
             throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 403, userInfo: [NSLocalizedDescriptionKey: "访问被拒绝 (403)"]))
         case 404:
@@ -666,12 +658,15 @@ actor AnimeParser {
         print("[AnimeParser] 获取 HTML 成功: \(html.count) 字符")
 
         // 检查返回的 HTML 是否包含常见的反爬/验证码标记
-        if html.contains("<title>403 Forbidden</title>") ||
-           html.contains("<title>Access Denied</title>") ||
-           html.contains("cf-browser-verification") ||
-           html.contains("__cf_chl_jschl_tk__") {
-            print("[AnimeParser] ⚠️ HTML 包含反爬标记，需要使用 WebView 验证")
-            throw AnimeParserError.captchaRequired
+        // 仅在规则启用反爬虫配置时检测（对齐 Kazumi）
+        if antiCrawlerEnabled {
+            if html.contains("<title>403 Forbidden</title>") ||
+               html.contains("<title>Access Denied</title>") ||
+               html.contains("cf-browser-verification") ||
+               html.contains("__cf_chl_jschl_tk__") {
+                print("[AnimeParser] ⚠️ HTML 包含反爬标记，需要使用 WebView 验证")
+                throw AnimeParserError.captchaRequired
+            }
         }
 
         return html

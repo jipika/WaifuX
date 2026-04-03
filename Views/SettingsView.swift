@@ -167,10 +167,13 @@ private struct GeneralSettingsTab: View {
         Form {
             // 启动设置
             Section {
-                Toggle(t("launchAtLogin"), isOn: Binding(
-                    get: { viewModel.launchAtLogin },
-                    set: { _ in viewModel.toggleLaunchAtLogin() }
-                ))
+                LiquidGlassToggle(
+                    t("launchAtLogin"),
+                    isOn: Binding(
+                        get: { viewModel.launchAtLogin },
+                        set: { _ in viewModel.toggleLaunchAtLogin() }
+                    )
+                )
             } header: {
                 Text(t("startup"))
             }
@@ -190,8 +193,12 @@ private struct GeneralSettingsTab: View {
 
             // API Key 设置
             Section {
-                SecureField(t("api.key.placeholder"), text: apiKeyBinding)
-                    .textFieldStyle(.roundedBorder)
+                LiquidGlassTextField(
+                    t("api.key.placeholder"),
+                    text: apiKeyBinding,
+                    icon: "key.fill",
+                    isSecure: true
+                )
 
                 HStack {
                     Text(viewModel.apiKey.isEmpty ? t("apiNotConfigured") : t("apiConfigured"))
@@ -211,14 +218,19 @@ private struct GeneralSettingsTab: View {
 
             // 规则仓库
             Section {
-                HStack {
-                    TextField("https://github.com/owner/repo", text: $viewModel.ruleRepositoryURL)
-                        .textFieldStyle(.roundedBorder)
+                HStack(spacing: 12) {
+                    LiquidGlassTextField(
+                        "https://github.com/owner/repo",
+                        text: $viewModel.ruleRepositoryURL,
+                        icon: "globe"
+                    )
 
                     Button(t("save")) {
                         Task { await viewModel.saveRuleRepository() }
                     }
                     .disabled(viewModel.ruleRepositoryURL.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .tint(LiquidGlassColors.primaryPink)
                 }
 
                 if viewModel.isRuleRepositoryConfigured {
@@ -257,9 +269,12 @@ private struct GeneralSettingsTab: View {
                     }
                 }
 
-                HStack {
-                    TextField("https://example.com/profile.json", text: $importProfileURL)
-                        .textFieldStyle(.roundedBorder)
+                HStack(spacing: 12) {
+                    LiquidGlassTextField(
+                        "https://example.com/profile.json",
+                        text: $importProfileURL,
+                        icon: "arrow.down.document"
+                    )
 
                     Button(t("importFromURL")) {
                         guard let url = URL(string: importProfileURL) else { return }
@@ -269,6 +284,8 @@ private struct GeneralSettingsTab: View {
                         }
                     }
                     .disabled(importProfileURL.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .tint(LiquidGlassColors.tertiaryBlue)
                 }
             } header: {
                 Text(t("dataSourceProfiles"))
@@ -331,8 +348,10 @@ private struct DownloadSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle(t("autoDownloadOriginal"), isOn: $viewModel.autoDownloadOriginal)
-                Toggle(t("saveToDownloadsFolder"), isOn: $viewModel.saveToDownloads)
+                LiquidGlassToggle(t("autoDownloadOriginal"), isOn: $viewModel.autoDownloadOriginal)
+                    .padding(.vertical, 4)
+                LiquidGlassToggle(t("saveToDownloadsFolder"), isOn: $viewModel.saveToDownloads)
+                    .padding(.vertical, 4)
             } header: {
                 Text(t("downloadPrefs"))
             } footer: {
@@ -362,7 +381,8 @@ private struct SchedulerSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle(t("enableAutoReplace"), isOn: schedulerEnabledBinding)
+                LiquidGlassToggle(t("enableAutoReplace"), isOn: schedulerEnabledBinding)
+                    .padding(.vertical, 4)
 
                 HStack {
                     Text(t("status"))

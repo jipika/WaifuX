@@ -32,7 +32,7 @@ struct AnimeExploreView: View {
                     animeSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
-                .padding(.top, 108)
+                .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -87,15 +87,27 @@ struct AnimeExploreView: View {
     private var heroSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("探索动漫")
+                HStack(spacing: 8) {
+                    Text(greetingText)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+
+                    Text("Kazumi")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 8)
+                        .frame(height: 20)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+
+                Text(t("anime.exploreAnime"))
                     .font(.system(size: 32, weight: .bold, design: .serif))
                     .tracking(-0.5)
                     .foregroundStyle(.white.opacity(0.98))
-                    .lineLimit(1)
-
-                Text("发现热门动漫，追踪最新剧集")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
             }
 
@@ -105,7 +117,7 @@ struct AnimeExploreView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.52))
 
-                    TextField("搜索动漫...", text: $searchText)
+                    TextField(t("anime.searchAnime"), text: $searchText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.92))
@@ -184,7 +196,7 @@ struct AnimeExploreView: View {
 
             // 热门标签（横向滚动布局，与 WallpaperExploreContentView 一致）
             VStack(alignment: .leading, spacing: 12) {
-                Text("热门标签")
+                Text(t("anime.hotTags"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.4))
 
@@ -228,7 +240,7 @@ struct AnimeExploreView: View {
         VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .center) {
                 HStack(spacing: 8) {
-                    Text("\(viewModel.animeItems.count) 部动漫")
+                    Text("\(viewModel.animeItems.count) \(t("content.animes"))")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.66))
 
@@ -314,7 +326,7 @@ struct AnimeExploreView: View {
 
                 // 没有更多数据提示
                 if !viewModel.hasMorePages && viewModel.animeItems.count > 20 {
-                    Text("已经到底啦")
+                    Text(t("anime.endOfList"))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.4))
                         .frame(height: 50)
@@ -339,8 +351,8 @@ struct AnimeExploreView: View {
                 // 空数据状态
                 ErrorStateView(
                     type: .empty,
-                    title: "暂无动漫数据",
-                    message: "尝试切换不同的动漫源或检查网络连接",
+                    title: t("anime.noData"),
+                    message: t("anime.tryDifferentSource"),
                     retryAction: {
                         Task { await viewModel.loadInitialData() }
                     }
@@ -373,6 +385,15 @@ struct AnimeExploreView: View {
             }
         }
         return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: 2)
+    }
+
+    private var greetingText: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return "Good Morning"
+        case 12..<18: return "Good Afternoon"
+        default: return "Good Evening"
+        }
     }
 
     private func syncExploreAtmosphere() {
@@ -488,17 +509,17 @@ private enum AnimeSortOption: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .newest: return "最新"
-        case .title: return "名称"
-        case .popular: return "热门"
+        case .newest: return t("anime.sortNewest")
+        case .title: return t("anime.sortTitle")
+        case .popular: return t("anime.sortPopular")
         }
     }
-
+    
     var menuTitle: String {
         switch self {
-        case .newest: return "按最新排序"
-        case .title: return "按名称排序"
-        case .popular: return "按热门排序"
+        case .newest: return t("anime.sortByNewest")
+        case .title: return t("anime.sortByTitle")
+        case .popular: return t("anime.sortByPopular")
         }
     }
 }

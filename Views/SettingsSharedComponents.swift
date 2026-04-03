@@ -94,6 +94,7 @@ struct SettingsPage<Content: View>: View {
     }
 }
 
+@MainActor
 func settingsPage<Content: View>(@ViewBuilder content: () -> Content) -> some View {
     SettingsPage(content: content)
 }

@@ -1,70 +1,95 @@
 .language-switcher {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  gap: 10px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 24px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+}
+
+.language-switcher:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 6px 24px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 
 .language-icon {
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.6);
   flex-shrink: 0;
 }
 
 .language-buttons {
   display: flex;
-  gap: 2px;
+  gap: 4px;
 }
 
 .language-btn {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
+  gap: 6px;
+  padding: 6px 12px;
   border: none;
   background: transparent;
   color: rgba(255, 255, 255, 0.6);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  border-radius: 12px;
-  transition: all 0.2s ease;
+  border-radius: 16px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .language-btn:hover {
   color: white;
   background: rgba(255, 255, 255, 0.1);
+  transform: translateY(-1px);
 }
 
 .language-btn.active {
   color: white;
-  background: rgba(99, 102, 241, 0.5);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.6) 0%, rgba(79, 70, 229, 0.6) 100%);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.language-btn.active:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
 }
 
 .language-flag {
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
 }
 
 .language-label {
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Mobile adjustments */
 @media (max-width: 768px) {
   .language-switcher {
-    padding: 3px 6px;
+    padding: 5px 10px;
+    gap: 8px;
   }
 
   .language-btn {
-    padding: 3px 6px;
+    padding: 5px 10px;
   }
 
   .language-label {
     display: none;
+  }
+
+  .language-flag {
+    font-size: 18px;
   }
 }

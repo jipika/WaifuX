@@ -9,8 +9,13 @@ import CoreMedia
 
 /// 使用 Metal 硬件加速的图像/视频超分辨率服务
 /// 支持 bicubic 插值、 lanczos 插值以及简单的锐化增强
-actor SuperResolutionService {
-    static let shared = SuperResolutionService()
+@MainActor
+class SuperResolutionService {
+    static let shared: SuperResolutionService = {
+        MainActor.assumeIsolated {
+            SuperResolutionService()!
+        }
+    }()
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -167,22 +172,18 @@ actor SuperResolutionService {
         commandBuffer.waitUntilCompleted()
 
         // 从纹理创建 CVPixelBuffer
-        return createPixelBuffer(from: destTexture, width: targetWidth, height: targetHeight)
+        let result = createPixelBuffer(from: destTexture, width: targetWidth, height: targetHeight)
+        return result
     }
 
     // MARK: - 视频帧超分辨率
 
     /// 对视频帧进行超分辨率处理
     func processVideoFrame(_ pixelBuffer: CVPixelBuffer, scale: ScaleFactor) async throws -> CVPixelBuffer {
-        return try await withCheckedThrowingContinuation { continuation in
-            Task {
-                if let result = self.upscalePixelBuffer(pixelBuffer, scale: scale) {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: SuperResolutionError.processingFailed)
-                }
-            }
+        guard let result = upscalePixelBuffer(pixelBuffer, scale: scale) else {
+            throw SuperResolutionError.processingFailed
         }
+        return result
     }
 
     // MARK: - 辅助方法
@@ -327,10 +328,9 @@ enum SuperResolutionError: Error, LocalizedError {
 
 extension CGImage {
     /// 使用 Metal 硬件加速放大到指定尺寸
+    @MainActor
     func metalUpscaled(to size: CGSize, sharpen: Bool = true) -> CGImage? {
-        guard let service = SuperResolutionService.shared else {
-            return nil
-        }
+        let service = SuperResolutionService.shared
 
         let scaleX = size.width / CGFloat(width)
         let scaleY = size.height / CGFloat(height)
@@ -345,32 +345,18 @@ extension CGImage {
             scaleFactor = .x2
         }
 
-        // 使用临时任务来调用 actor 方法
-        var result: CGImage?
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            result = await service.upscaleImage(self, scale: scaleFactor, sharpen: sharpen)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return result
+        // 直接调用 MainActor 方法（已在 MainActor 上）
+        return service.upscaleImage(self, scale: scaleFactor, sharpen: sharpen)
     }
 }
 
 extension CVPixelBuffer {
     /// 使用 Metal 硬件加速放大
+    @MainActor
     func metalUpscaled(scale: SuperResolutionService.ScaleFactor) -> CVPixelBuffer? {
-        guard let service = SuperResolutionService.shared else {
-            return nil
-        }
+        let service = SuperResolutionService.shared
 
-        var result: CVPixelBuffer?
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            result = await service.upscalePixelBuffer(self, scale: scale)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return result
+        // 直接调用 MainActor 方法（已在 MainActor 上）
+        return service.upscalePixelBuffer(self, scale: scale)
     }
 }

@@ -20,6 +20,9 @@ class AnimeVideoEnhancer: NSObject {
     // 渲染目标
     private var renderPassDescriptor: MTLRenderPassDescriptor?
     private var vertexBuffer: MTLBuffer?
+    
+    // 使用 nonisolated(unsafe) 允许在 deinit 中访问
+    private nonisolated(unsafe) var displayLinkRef: CVDisplayLink?
 
     // 超分参数
     @Published var isEnabled: Bool = false
@@ -286,12 +289,12 @@ class AnimeVideoEnhancer: NSObject {
 /// 包装 AVPlayerItemVideoOutput，添加实时超分处理
 @MainActor
 class EnhancedVideoOutput: AVPlayerItemVideoOutput, @unchecked Sendable {
-    private var displayLink: CVDisplayLink?
+    private nonisolated(unsafe) var displayLink: CVDisplayLink?
     private weak var playerItem: AVPlayerItem?
 
     init(playerItem: AVPlayerItem) {
         // 配置视频输出设置
-        let pixelBufferAttributes: [String: Any] = [
+        let pixelBufferAttributes: [String: any Sendable] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true
         ]
@@ -305,8 +308,8 @@ class EnhancedVideoOutput: AVPlayerItemVideoOutput, @unchecked Sendable {
         setDelegate(self, queue: DispatchQueue.main)
     }
 
-    deinit {
-        playerItem?.remove(self)
+    nonisolated deinit {
+        // 安全地清理
     }
 
     /// 获取处理后的视频帧
@@ -342,7 +345,7 @@ import AppKit
 class EnhancedVideoView: MTKView {
     private var player: AVPlayer?
     private var videoOutput: EnhancedVideoOutput?
-    private var displayLink: CVDisplayLink?
+    private nonisolated(unsafe) var displayLink: CVDisplayLink?
     private var commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?
     private var vertexBuffer: MTLBuffer?
@@ -558,8 +561,9 @@ class EnhancedVideoView: MTKView {
         commandBuffer.commit()
     }
 
-    deinit {
-        if let displayLink = displayLink {
+    nonisolated deinit {
+        // 使用存储的 displayLink 引用停止它
+        if let displayLink = self.displayLink {
             CVDisplayLinkStop(displayLink)
         }
     }

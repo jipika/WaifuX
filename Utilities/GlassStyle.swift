@@ -3,24 +3,35 @@ import AppKit
 
 // MARK: - Glass 风格颜色 (兼容旧代码)
 enum GlassStyleColors {
-    static let backgroundDark = LiquidGlassColors.deepBackground
-    static let backgroundMedium = LiquidGlassColors.midBackground
-    static let cardBackground = LiquidGlassColors.glassWhiteSubtle
-    static let cardBackgroundLight = LiquidGlassColors.glassWhite
-    static let glassHighlight = LiquidGlassColors.glassHighlight
-    static let glassBorder = LiquidGlassColors.glassBorder
+    @MainActor
+    static var backgroundDark: Color { LiquidGlassColors.deepBackground }
+    @MainActor
+    static var backgroundMedium: Color { LiquidGlassColors.midBackground }
+    @MainActor
+    static var cardBackground: Color { LiquidGlassColors.glassWhiteSubtle }
+    @MainActor
+    static var cardBackgroundLight: Color { LiquidGlassColors.glassWhite }
+    @MainActor
+    static var glassHighlight: Color { LiquidGlassColors.glassHighlight }
+    @MainActor
+    static var glassBorder: Color { LiquidGlassColors.glassBorder }
 
     static let primaryPink = LiquidGlassColors.primaryPink
     static let secondaryViolet = LiquidGlassColors.secondaryViolet
     static let onlineGreen = LiquidGlassColors.onlineGreen
     static let warningOrange = LiquidGlassColors.warningOrange
 
-    static let textPrimary = LiquidGlassColors.textPrimary
-    static let textSecondary = LiquidGlassColors.textSecondary
-    static let textTertiary = LiquidGlassColors.textTertiary
+    @MainActor
+    static var textPrimary: Color { LiquidGlassColors.textPrimary }
+    @MainActor
+    static var textSecondary: Color { LiquidGlassColors.textSecondary }
+    @MainActor
+    static var textTertiary: Color { LiquidGlassColors.textTertiary }
 
-    static let gradientStart = LiquidGlassColors.surfaceBackground
-    static let gradientEnd = LiquidGlassColors.deepBackground
+    @MainActor
+    static var gradientStart: Color { LiquidGlassColors.surfaceBackground }
+    @MainActor
+    static var gradientEnd: Color { LiquidGlassColors.deepBackground }
 }
 
 // MARK: - Glass 风格常量
@@ -478,55 +489,13 @@ struct LiquidGlassDivider: View {
 }
 
 
-// MARK: - 液态玻璃文本框
-struct LiquidGlassTextField: View {
-    var placeholder: String
-    @Binding var text: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            TextField(placeholder, text: $text)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundColor(LiquidGlassColors.textPrimary)
-        }
-        .padding(.horizontal, 16)
-        .frame(height: 40)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: GlassStyle.CornerRadius.medium, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                RoundedRectangle(cornerRadius: GlassStyle.CornerRadius.medium, style: .continuous)
-                    .fill(LiquidGlassColors.glassWhiteSubtle)
-            }
-        )
-        .overlay(
-            ZStack {
-                RoundedRectangle(cornerRadius: GlassStyle.CornerRadius.medium, style: .continuous)
-                    .stroke(LiquidGlassColors.glassBorder, lineWidth: 1)
-                RoundedRectangle(cornerRadius: GlassStyle.CornerRadius.medium, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.25),
-                                Color.white.opacity(0.05)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.5
-                    )
-            }
-        )
-    }
-}
-
 // MARK: - Glass 文本框 (保留兼容)
 struct GlassTextField: View {
     var placeholder: String
     @Binding var text: String
 
     var body: some View {
-        LiquidGlassTextField(placeholder: placeholder, text: $text)
+        LiquidGlassTextField(placeholder, text: $text)
     }
 }
 

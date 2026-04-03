@@ -190,14 +190,14 @@ struct MediaDetailSheet: View {
                 LoopingVideoBackgroundView(
                     url: previewVideoURL,
                     isMuted: isMuted,
-                    onReady: {
+                    onReady: { @MainActor in
                         withAnimation(.easeInOut(duration: 0.3)) {
                             isMediaLoaded = true
                         }
                     }
                 )
             } else {
-                OptimizedAsyncImage(url: heroImageURL, priority: .high, onLoad: {
+                OptimizedAsyncImage(url: heroImageURL, priority: .high, onLoad: { @MainActor in
                     withAnimation(.easeInOut(duration: 0.3)) {
                         isMediaLoaded = true
                     }
@@ -753,7 +753,7 @@ struct MediaDetailSheet: View {
 private struct LoopingVideoBackgroundView: NSViewRepresentable {
     let url: URL
     let isMuted: Bool
-    let onReady: (() -> Void)?
+    let onReady: (@MainActor @Sendable () -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onReady: onReady)
@@ -774,15 +774,16 @@ private struct LoopingVideoBackgroundView: NSViewRepresentable {
         coordinator.teardown()
     }
 
+    @MainActor
     final class Coordinator {
         private weak var containerView: PlayerContainerView?
         private var currentURL: URL?
         private var player: AVQueuePlayer?
         private var looper: AVPlayerLooper?
-        private var onReady: (() -> Void)?
+        private var onReady: (@MainActor @Sendable () -> Void)?
         private var readyObserver: NSObjectProtocol?
 
-        init(onReady: (() -> Void)?) {
+        init(onReady: (@MainActor @Sendable () -> Void)?) {
             self.onReady = onReady
         }
 

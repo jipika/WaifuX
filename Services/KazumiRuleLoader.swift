@@ -113,6 +113,7 @@ actor KazumiRuleLoader {
         let userAgent: String?
         let headers: [String: String]?
         let antiCrawler: Bool?
+        let antiCrawlerConfig: KazumiAntiCrawlerConfig?
         let adBlocker: Bool?
 
         enum CodingKeys: String, CodingKey {
@@ -120,12 +121,21 @@ actor KazumiRuleLoader {
             case searchList, searchName, searchResult
             case chapterRoads, chapterResult, chapterName
             case useWebview, useNativePlayer, multiSource, muliSources
-            case userAgent, headers, antiCrawler, adBlocker
+            case userAgent, headers, antiCrawler, antiCrawlerConfig, adBlocker
         }
 
         /// 获取多源标志（兼容 muliSources 拼写错误）
         var hasMultiSources: Bool {
             multiSource ?? muliSources ?? false
+        }
+        
+        /// Kazumi 反爬虫配置格式
+        struct KazumiAntiCrawlerConfig: Codable {
+            let enabled: Bool?
+            let captchaType: Int?
+            let captchaImage: String?
+            let captchaInput: String?
+            let captchaButton: String?
         }
     }
     
@@ -171,12 +181,35 @@ actor KazumiRuleLoader {
             list: xpathList
         )
         
-        // 构建反爬虫配置
-        let antiCrawlerConfig = AntiCrawlerConfig(
-            enabled: kazumiRule.antiCrawler ?? false,
-            captchaImage: "",
-            captchaButton: ""
-        )
+        // 构建反爬虫配置（对齐 Kazumi）
+        let antiCrawlerConfig: AntiCrawlerConfig
+        if let kazumiConfig = kazumiRule.antiCrawlerConfig {
+            let captchaType: CaptchaType
+            switch kazumiConfig.captchaType {
+            case 1:
+                captchaType = .imageCaptcha
+            case 2:
+                captchaType = .autoClickButton
+            default:
+                captchaType = .imageCaptcha
+            }
+            antiCrawlerConfig = AntiCrawlerConfig(
+                enabled: kazumiConfig.enabled ?? kazumiRule.antiCrawler ?? false,
+                captchaType: captchaType,
+                captchaImage: kazumiConfig.captchaImage ?? "",
+                captchaInput: kazumiConfig.captchaInput ?? "",
+                captchaButton: kazumiConfig.captchaButton ?? ""
+            )
+        } else {
+            // 兼容旧版规则：只有 antiCrawler 布尔字段
+            antiCrawlerConfig = AntiCrawlerConfig(
+                enabled: kazumiRule.antiCrawler ?? false,
+                captchaType: .imageCaptcha,
+                captchaImage: "",
+                captchaInput: "",
+                captchaButton: ""
+            )
+        }
 
         // 构建 AnimeRule
         return AnimeRule(

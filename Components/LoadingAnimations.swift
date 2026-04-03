@@ -322,6 +322,7 @@ enum SkeletonType {
     case text
     
     @ViewBuilder
+    @MainActor
     var view: some View {
         switch self {
         case .card:

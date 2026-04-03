@@ -213,19 +213,41 @@ struct AnimeListXPath: Codable {
 
 // MARK: - 反爬虫配置 (参考 Kazumi AntiCrawlerConfig)
 
+/// 验证码类型（对齐 Kazumi CaptchaType）
+enum CaptchaType: Int, Codable {
+    case imageCaptcha = 1  // 图片验证码，需要用户手动输入
+    case autoClickButton = 2  // 自动点击验证按钮
+}
+
 struct AntiCrawlerConfig: Codable {
     let enabled: Bool
+    let captchaType: CaptchaType
     let captchaImage: String
+    let captchaInput: String
     let captchaButton: String
 
-    init(enabled: Bool = false, captchaImage: String = "", captchaButton: String = "") {
+    init(
+        enabled: Bool = false,
+        captchaType: CaptchaType = .imageCaptcha,
+        captchaImage: String = "",
+        captchaInput: String = "",
+        captchaButton: String = ""
+    ) {
         self.enabled = enabled
+        self.captchaType = captchaType
         self.captchaImage = captchaImage
+        self.captchaInput = captchaInput
         self.captchaButton = captchaButton
     }
 
     static func empty() -> AntiCrawlerConfig {
-        AntiCrawlerConfig(enabled: false, captchaImage: "", captchaButton: "")
+        AntiCrawlerConfig(
+            enabled: false,
+            captchaType: .imageCaptcha,
+            captchaImage: "",
+            captchaInput: "",
+            captchaButton: ""
+        )
     }
 }
 

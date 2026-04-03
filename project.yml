@@ -36,6 +36,9 @@ targets:
       - path: Resources
         type: folder
         buildPhase: resources
+      - path: AnimeRules
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: WallHaven

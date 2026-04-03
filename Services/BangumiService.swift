@@ -73,26 +73,26 @@ struct BangumiSubject: Codable, Identifiable {
     /// 类型显示名称
     var typeDisplayName: String {
         switch type {
-        case 1: return "书籍"
-        case 2: return "动画"
-        case 3: return "音乐"
-        case 4: return "游戏"
-        case 6: return "三次元"
-        default: return "其他"
+        case 1: return t("bangumi.book")
+        case 2: return t("bangumi.animation")
+        case 3: return t("bangumi.music")
+        case 4: return t("bangumi.game")
+        case 6: return t("bangumi.real")
+        default: return t("bangumi.other")
         }
     }
-
+    
     /// 星期几显示名称
     var airWeekdayDisplay: String? {
         guard let weekday = airWeekday else { return nil }
         switch weekday {
-        case 1: return "星期日"
-        case 2: return "星期一"
-        case 3: return "星期二"
-        case 4: return "星期三"
-        case 5: return "星期四"
-        case 6: return "星期五"
-        case 7: return "星期六"
+        case 1: return t("bangumi.sunday")
+        case 2: return t("bangumi.monday")
+        case 3: return t("bangumi.tuesday")
+        case 4: return t("bangumi.wednesday")
+        case 5: return t("bangumi.thursday")
+        case 6: return t("bangumi.friday")
+        case 7: return t("bangumi.saturday")
         default: return nil
         }
     }
@@ -182,7 +182,7 @@ struct BangumiEpisodeItem: Codable, Identifiable {
     }
 
     var displayName: String {
-        return nameCN?.isEmpty == false ? nameCN! : (name ?? "第\(ep)集")
+        return nameCN?.isEmpty == false ? nameCN! : (name ?? "\(t("anime.episode"))\(ep)")
     }
 }
 
@@ -475,37 +475,37 @@ struct BangumiDetail: Codable {
 
     /// 类型显示名称
     var typeDisplayName: String {
-        return "动画"
+        return t("bangumi.animation")
     }
-
+    
     /// 星期几显示名称
     var airWeekdayDisplay: String? {
         guard let weekday = airWeekday else { return nil }
         switch weekday {
-        case 1: return "星期日"
-        case 2: return "星期一"
-        case 3: return "星期二"
-        case 4: return "星期三"
-        case 5: return "星期四"
-        case 6: return "星期五"
-        case 7: return "星期六"
+        case 1: return t("bangumi.sunday")
+        case 2: return t("bangumi.monday")
+        case 3: return t("bangumi.tuesday")
+        case 4: return t("bangumi.wednesday")
+        case 5: return t("bangumi.thursday")
+        case 6: return t("bangumi.friday")
+        case 7: return t("bangumi.saturday")
         default: return nil
         }
     }
-
+    
     /// 播出状态
     var airStatus: String {
-        guard let airDate = airDate else { return "未知" }
+        guard let airDate = airDate else { return t("bangumi.unknown") }
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
-        guard let date = dateFormatter.date(from: airDate) else { return "未知" }
+        guard let date = dateFormatter.date(from: airDate) else { return t("bangumi.unknown") }
         
         if date > Date() {
-            return "未开播"
+            return t("bangumi.notStarted")
         } else if let total = totalEpisodes, total > 0 {
-            return "已完结"
+            return t("bangumi.finished")
         } else {
-            return "连载中"
+            return t("bangumi.airing")
         }
     }
 

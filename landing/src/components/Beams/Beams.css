@@ -1,8 +1,27 @@
 .beams-container {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: -1 !important;
+}
+
+.beams-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: -2 !important;
+}
+
+.app {
+  position: relative;
   z-index: 0;
+}
+
+.app > *:not(.beams-container) {
+  position: relative;
+  z-index: 1;
 }

@@ -64,17 +64,17 @@
   },
   "cta": {
     "title": "探索を始める",
-    "subtitle": "WallHaven を無料でダウンロードして、macOS デスクトップを一新",
+    "subtitle": "WaifuX を無料でダウンロードして、macOS デスクトップを一新",
     "downloadBtn": "最新版をダウンロード",
     "githubBtn": "GITHUB で STAR"
   },
   "footer": {
-    "description": "macOS 壁紙アプリ\nWallHaven、MotionBGs、アニメ対応",
+    "description": "macOS 壁纸アプリ\nWallHaven、MotionBGs、アニメ対応",
     "links": "リンク",
     "github": "GitHub",
     "rules": "ルールリポジトリ",
     "info": "情報",
-    "copyright": "© 2026 WallHaven\nMIT ライセンスで公開"
+    "copyright": "© 2026 WaifuX\nMIT ライセンスで公開"
   },
   "language": {
     "zh": "中文",

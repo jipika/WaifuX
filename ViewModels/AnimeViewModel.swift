@@ -312,10 +312,10 @@ enum AnimeCategory: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .trending: return "热门"
-        case .topRated: return "高分"
-        case .newArrivals: return "新番"
+        case .all: return LocalizationService.shared.t("anime.all")
+        case .trending: return LocalizationService.shared.t("anime.trending")
+        case .topRated: return LocalizationService.shared.t("anime.topRated")
+        case .newArrivals: return LocalizationService.shared.t("anime.newArrivals")
         }
     }
 
@@ -361,21 +361,21 @@ enum AnimeHotTag: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .daily: return "日常"
-        case .original: return "原创"
-        case .school: return "校园"
-        case .comedy: return "搞笑"
-        case .fantasy: return "奇幻"
-        case .yuri: return "百合"
-        case .romance: return "恋爱"
-        case .mystery: return "悬疑"
-        case .action: return "热血"
-        case .harem: return "后宫"
-        case .mecha: return "机战"
-        case .lightNovel: return "轻改"
-        case .idol: return "偶像"
-        case .healing: return "治愈"
-        case .otherWorld: return "异世界"
+        case .daily: return LocalizationService.shared.t("animeTag.daily")
+        case .original: return LocalizationService.shared.t("animeTag.original")
+        case .school: return LocalizationService.shared.t("animeTag.school")
+        case .comedy: return LocalizationService.shared.t("animeTag.comedy")
+        case .fantasy: return LocalizationService.shared.t("animeTag.fantasy")
+        case .yuri: return LocalizationService.shared.t("animeTag.yuri")
+        case .romance: return LocalizationService.shared.t("animeTag.romance")
+        case .mystery: return LocalizationService.shared.t("animeTag.mystery")
+        case .action: return LocalizationService.shared.t("animeTag.action")
+        case .harem: return LocalizationService.shared.t("animeTag.harem")
+        case .mecha: return LocalizationService.shared.t("animeTag.mecha")
+        case .lightNovel: return LocalizationService.shared.t("animeTag.lightNovel")
+        case .idol: return LocalizationService.shared.t("animeTag.idol")
+        case .healing: return LocalizationService.shared.t("animeTag.healing")
+        case .otherWorld: return LocalizationService.shared.t("animeTag.otherWorld")
         }
     }
 }

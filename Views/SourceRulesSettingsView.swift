@@ -20,12 +20,12 @@ struct SourceRulesSettingsView: View {
                             Image(systemName: "info.circle")
                                 .foregroundStyle(LiquidGlassColors.tertiaryBlue)
 
-                            Text("支持从 URL 或 GitHub 导入规则")
+                            Text(t("sourceRules.supportImport"))
                                 .font(.system(size: 13))
                                 .foregroundStyle(LiquidGlassColors.textSecondary)
                         }
 
-                        Text("规则定义了如何从网站获取内容。你可以安装社区维护的规则或创建自己的规则。")
+                        Text(t("sourceRules.defineHowToFetch"))
                             .font(.system(size: 12))
                             .foregroundStyle(LiquidGlassColors.textTertiary)
                             .lineLimit(2)
@@ -36,8 +36,8 @@ struct SourceRulesSettingsView: View {
 
             // 已安装规则列表
             SettingsSection(
-                title: "已安装的规则",
-                subtitle: "管理你安装的内容源规则",
+                title: t("sourceRules.installed"),
+                subtitle: t("sourceRules.manageRules"),
                 accentColor: LiquidGlassColors.secondaryViolet
             ) {
                 VStack(spacing: 8) {
@@ -57,14 +57,14 @@ struct SourceRulesSettingsView: View {
 
             // 动漫规则市场
             SettingsSection(
-                title: "动漫规则",
-                subtitle: "从 Kazumi 规则市场安装动漫源",
+                title: t("sourceRules.animeRules"),
+                subtitle: t("sourceRules.kazumiSource"),
                 accentColor: .pink
             ) {
                 AddRuleButton(
                     icon: "play.tv",
-                    title: "规则市场",
-                    subtitle: "浏览并安装 Kazumi 官方规则",
+                    title: t("sourceRules.market"),
+                    subtitle: t("sourceRules.kazumiOfficial"),
                     color: .pink
                 ) {
                     showAnimeRulesMarket = true
@@ -73,15 +73,15 @@ struct SourceRulesSettingsView: View {
 
             // 添加按钮
             SettingsSection(
-                title: "添加规则",
-                subtitle: "从 URL 或 GitHub 导入新规则",
+                title: t("sourceRules.add"),
+                subtitle: t("sourceRules.importNew"),
                 accentColor: LiquidGlassColors.accentCyan
             ) {
                 VStack(spacing: 12) {
                     AddRuleButton(
                         icon: "link",
-                        title: "从 URL 安装",
-                        subtitle: "输入规则 JSON 文件的 URL",
+                        title: t("sourceRules.installUrl"),
+                        subtitle: t("sourceRules.enterJsonUrl"),
                         color: LiquidGlassColors.accentCyan
                     ) {
                         showAddRuleSheet = true
@@ -89,8 +89,8 @@ struct SourceRulesSettingsView: View {
 
                     AddRuleButton(
                         icon: "globe",
-                        title: "从 GitHub 安装",
-                        subtitle: "从 GitHub 仓库导入规则",
+                        title: t("sourceRules.installGithub"),
+                        subtitle: t("sourceRules.importFromGithub"),
                         color: LiquidGlassColors.onlineGreen
                     ) {
                         showGitHubImportSheet = true
@@ -143,7 +143,7 @@ struct RuleCard: View {
                             .foregroundStyle(LiquidGlassColors.textPrimary)
 
                         if rule.deprecated {
-                            Text("已弃用")
+                            Text(t("sourceRules.deprecated"))
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
@@ -161,7 +161,7 @@ struct RuleCard: View {
                         }
                     }
 
-                    Text("\(rule.contentType.displayName) • 版本 \(rule.version)")
+                    Text("\(rule.contentType.displayName) • \(t("sourceRules.version")) \(rule.version)")
                         .font(.system(size: 12))
                         .foregroundStyle(LiquidGlassColors.textSecondary)
                 }
@@ -230,11 +230,11 @@ struct EmptyRulesView: View {
                 .font(.system(size: 40))
                 .foregroundStyle(LiquidGlassColors.textTertiary)
 
-            Text("还没有安装规则")
+            Text(t("sourceRules.noRules"))
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
 
-            Text("点击下方的按钮添加规则")
+            Text(t("sourceRules.clickToAdd"))
                 .font(.system(size: 12))
                 .foregroundStyle(LiquidGlassColors.textTertiary)
         }
@@ -309,7 +309,7 @@ struct AddRuleSheet: View {
         VStack(spacing: 20) {
             // Header
             HStack {
-                Text("从 URL 安装规则")
+                Text(t("sourceRules.importFromUrl"))
                     .font(.system(size: 18, weight: .bold))
 
                 Spacer()
@@ -331,22 +331,15 @@ struct AddRuleSheet: View {
 
             // URL 输入
             VStack(alignment: .leading, spacing: 8) {
-                Text("规则 URL")
+                Text(t("sourceRules.ruleUrl"))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
 
-                TextField("https://example.com/rule.json", text: $urlString)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14))
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.white.opacity(0.05))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                    )
+                LiquidGlassTextField(
+                    "https://example.com/rule.json",
+                    text: $urlString,
+                    icon: "link"
+                )
             }
 
             if let error = errorMessage {
@@ -367,7 +360,7 @@ struct AddRuleSheet: View {
                 Button {
                     dismiss()
                 } label: {
-                    Text("取消")
+                    Text(t("cancel"))
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                         .frame(maxWidth: .infinity)
@@ -388,7 +381,7 @@ struct AddRuleSheet: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                     } else {
-                        Text("安装")
+                        Text(t("sourceRules.install"))
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -439,7 +432,7 @@ struct GitHubImportSheet: View {
         VStack(spacing: 20) {
             // Header
             HStack {
-                Text("从 GitHub 安装")
+                Text(t("sourceRules.installGithub"))
                     .font(.system(size: 18, weight: .bold))
 
                 Spacer()
@@ -485,7 +478,7 @@ struct GitHubImportSheet: View {
                 Button {
                     dismiss()
                 } label: {
-                    Text("取消")
+                    Text(t("cancel"))
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                         .frame(maxWidth: .infinity)
@@ -506,7 +499,7 @@ struct GitHubImportSheet: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                     } else {
-                        Text("安装")
+                        Text(t("sourceRules.install"))
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -558,18 +551,7 @@ struct GitHubInputField: View {
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(.white.opacity(0.6))
 
-        TextField(placeholder, text: $text)
-            .textFieldStyle(.plain)
-            .font(.system(size: 14))
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
+        LiquidGlassTextField(placeholder, text: $text)
         }
     }
 }

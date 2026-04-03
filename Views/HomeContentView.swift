@@ -1,15 +1,18 @@
 import SwiftUI
 
 // MARK: - CarouselTimerManager（管理轮播定时器的引用类型）
+@MainActor
 final class CarouselTimerManager: ObservableObject {
     var timer: Timer?
     var loopResetWorkItem: DispatchWorkItem?
     var interactionResetWorkItem: DispatchWorkItem?
     
-    deinit {
-        timer?.invalidate()
-        loopResetWorkItem?.cancel()
-        interactionResetWorkItem?.cancel()
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            timer?.invalidate()
+            loopResetWorkItem?.cancel()
+            interactionResetWorkItem?.cancel()
+        }
     }
     
     func invalidateAll() {
@@ -460,9 +463,13 @@ struct HomeContentView: View {
     private func startCarouselAutoPlay() {
         guard timerManager.timer == nil, heroWallpapers.count > 1 else { return }
 
-        timerManager.timer = Timer.scheduledTimer(withTimeInterval: carouselAutoPlayInterval, repeats: true) { _ in
-            guard !isCarouselInteracting, !isCarouselAnimating, heroWallpapers.count > 1 else { return }
-            showNextHero()
+        Task { @MainActor in
+            timerManager.timer = Timer.scheduledTimer(withTimeInterval: carouselAutoPlayInterval, repeats: true) { _ in
+                Task { @MainActor in
+                    guard !isCarouselInteracting, !isCarouselAnimating, heroWallpapers.count > 1 else { return }
+                    showNextHero()
+                }
+            }
         }
     }
 

@@ -13,7 +13,7 @@ struct AnimeContentView: View {
 
 struct AnimeContentViewPlaceholder: View {
     var body: some View {
-        Text("使用 AnimeExploreView 替代")
+        Text(t("anime.useExploreView"))
             .foregroundColor(.white)
     }
 }

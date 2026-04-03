@@ -22,7 +22,7 @@ class HTMLXPathParser {
 
         // 无效标题列表（导航、页脚等常见非内容链接）
         let invalidTitles = ["首页", "主页", "home", "上一页", "下一页", "尾页", "关于我们", "联系我们", "帮助", "登录", "注册"]
-        let invalidPaths = ["/", "/index.html", "/index.php", "#", ""]
+        _ = ["/", "/index.html", "/index.php", "#", ""] // invalidPaths 保留供将来使用
 
         // 搜索查询关键词（用于匹配度评分）
         let queryKeywords = searchQuery?.lowercased().components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty } ?? []
@@ -93,9 +93,6 @@ class HTMLXPathParser {
                 if !name.isEmpty && !src.isEmpty {
                     results.append((name: name, src: src))
                 }
-            } catch {
-                // 忽略单个解析错误，继续下一个
-                continue
             }
         }
 

@@ -102,14 +102,22 @@ struct MyLibraryContentView: View {
                 contentType: .anime,
                 title: favorite.title,
                 thumbnailURL: favorite.coverURL ?? "",
-                metadata: .anime(AnimeMetadata(
+                coverURL: favorite.coverURL,
+                description: nil,
+                tags: favorite.tags,
+                sourceType: "bangumi",
+                sourceURL: "",
+                sourceName: "Bangumi",
+                metadata: .anime(ContentMetadata.AnimeMetadata(
                     episodes: [],
                     currentEpisode: nil,
                     totalEpisodes: nil,
                     status: favorite.watchStatus.displayName,
                     aired: nil,
                     rating: nil
-                ))
+                )),
+                createdAt: favorite.addedAt,
+                updatedAt: favorite.updatedAt
             )
         }
     }
@@ -643,7 +651,7 @@ struct AnimeLibraryCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                 if case .anime(let metadata) = anime.metadata, let total = metadata.totalEpisodes {
-                    Text("\(total)集")
+                    Text("\(total)\(t("library.episodes"))")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6)

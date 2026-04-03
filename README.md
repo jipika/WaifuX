@@ -1,4 +1,4 @@
-# WallHaven
+# WaifuX
 
 <p align="center">
   <img src="Design/Logo/AppIcon_Glass.png" width="120" height="120" />
@@ -13,13 +13,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WallHaven/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WallHaven?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/jipika/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://jipika.github.io/WallHaven">
+  <a href="https://jipika.github.io/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -28,7 +28,7 @@
 
 ## 🎯 这是什么？
 
-**WallHaven** 是一款为 macOS 打造的壁纸应用——但不是那种普普通通的壁纸工具。
+**WaifuX** 是一款为 macOS 打造的壁纸应用——但不是那种普普通通的壁纸工具。
 
 想象一下：早上打开电脑，桌面是 Wallhaven 的 4K 风景大片；下午摸鱼时切到 MotionBGs 的动态流水；晚上追番前再换成二次元壁纸... 是的，我们全都要！
 
@@ -54,10 +54,10 @@
 ## 📥 下载安装
 
 ### 方式一：官网下载（推荐）
-👉 **[https://jipika.github.io/WallHaven](https://jipika.github.io/WallHaven)**
+👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
 
 ### 方式二：GitHub Releases
-👉 **[https://github.com/jipika/WallHaven/releases](https://github.com/jipika/WallHaven/releases)**
+👉 **[https://github.com/jipika/WaifuX/releases](https://github.com/jipika/WaifuX/releases)**
 
 > ⚠️ **注意**：首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行
 
@@ -72,9 +72,9 @@
 
 ## 🔧 规则配置
 
-WallHaven 的规则是**动态加载**的——这意味着即使源站改版，我们也能快速适配。
+WaifuX 的规则是**动态加载**的——这意味着即使源站改版，我们也能快速适配。
 
-规则托管在独立仓库：**[WallHaven-Profiles](https://github.com/jipika/WallHaven-Profiles)**
+规则托管在独立仓库：**[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
 
 - 应用启动时自动同步最新规则
 - 支持手动导入自定义规则
@@ -100,7 +100,7 @@ WallHaven 的规则是**动态加载**的——这意味着即使源站改版，
 
 ## ☕️ 支持作者
 
-如果 WallHaven 让你的桌面变得更好看了，可以请作者喝杯咖啡：
+如果 WaifuX 让你的桌面变得更好看了，可以请作者喝杯咖啡：
 
 <p align="center">
   <img src="reward.jpg" width="280" />
@@ -118,7 +118,7 @@ WallHaven 的规则是**动态加载**的——这意味着即使源站改版，
 
 ## ⚠️ 免责声明
 
-WallHaven 只是一个**壁纸聚合工具**，本身不存储任何壁纸内容：
+WaifuX 只是一个**壁纸聚合工具**，本身不存储任何壁纸内容：
 
 - [Wallhaven](https://wallhaven.cc) 壁纸通过官方 API 获取
 - [MotionBGs](https://motionbgs.com) 内容由用户自行配置
@@ -134,7 +134,7 @@ WallHaven 只是一个**壁纸聚合工具**，本身不存储任何壁纸内容
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WallHaven/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WallHaven?style=social" alt="Stars">
+  <a href="https://github.com/jipika/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
   </a>
 </p>

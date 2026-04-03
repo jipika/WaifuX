@@ -113,7 +113,7 @@ final class NetworkMonitor: ObservableObject {
     func waitForConnection(timeout: TimeInterval = 30) async -> Bool {
         guard isOffline else { return true }
         
-        return await withTimeout(timeout: timeout) {
+        return await withTimeout(timeout: timeout) { @MainActor in
             await withCheckedContinuation { continuation in
                 var cancellable: AnyCancellable?
                 cancellable = self.$status
@@ -208,7 +208,8 @@ final class NetworkMonitor: ObservableObject {
     }
     
     /// 带超时的异步操作
-    private func withTimeout<T>(timeout: TimeInterval, operation: @escaping () async -> T) async -> T? {
+    @MainActor
+    private func withTimeout<T: Sendable>(timeout: TimeInterval, operation: @escaping @Sendable () async -> T) async -> T? {
         try? await withThrowingTaskGroup(of: T.self) { group in
             group.addTask {
                 await operation()

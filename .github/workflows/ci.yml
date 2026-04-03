@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Select Xcode 26.4
         run: |
@@ -31,7 +31,7 @@ jobs:
         run: xcodegen generate
 
       - name: Cache SPM Dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/Library/Caches/org.swift.swiftpm
@@ -44,11 +44,14 @@ jobs:
           xcodebuild -project WallHaven.xcodeproj \
             -scheme WallHaven \
             -destination 'platform=macOS' \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             clean build
 
       - name: Upload Build Artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: WallHaven-CI-Build
           path: |

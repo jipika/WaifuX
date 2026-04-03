@@ -79,7 +79,12 @@ function extendMaterial<T extends THREE.Material = THREE.Material>(
 }
 
 const CanvasWrapper: FC<{ children: ReactNode }> = ({ children }) => (
-  <Canvas dpr={[1, 2]} frameloop="always" className="beams-container">
+  <Canvas
+    dpr={[1, 2]}
+    frameloop="always"
+    className="beams-container beams-fullscreen"
+    style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh' }}
+  >
     {children}
   </Canvas>
 );
@@ -256,8 +261,8 @@ const Beams: FC<BeamsProps> = ({
         <DirLight color={lightColor} position={[0, 3, 10]} />
       </group>
       <ambientLight intensity={1} />
-      <color attach="background" args={['#000000']} />
-      <PerspectiveCamera makeDefault position={[0, 0, 20]} fov={30} />
+      <color attach="background" args={['#0a0a0f']} />
+      <PerspectiveCamera makeDefault position={[0, 0, 20]} fov={45} />
     </CanvasWrapper>
   );
 };
