@@ -27,6 +27,9 @@ jobs:
       - name: Check XcodeGen
         run: which xcodegen || brew install xcodegen
 
+      - name: Install create-dmg
+        run: brew install create-dmg || true
+
       - name: Generate Xcode Project
         run: xcodegen generate
 
@@ -39,7 +42,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
-      - name: Build
+      - name: Build & Package
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          chmod +x ./scripts/package.sh
+          ./scripts/package.sh
+
+      - name: Build (for PRs)
+        if: github.event_name == 'pull_request'
         run: |
           mkdir -p build
           xcodebuild -project WaifuX.xcodeproj \
@@ -52,11 +62,29 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             clean build
 
-      - name: Upload Build Artifact
+      - name: Create Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v5
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: WaifuX-CI-Build
-          path: |
-            build/Build/Products/Release/WaifuX.app
-          retention-days: 7
+          tag_name: v${{ github.run_number }}
+          release_name: Build ${{ github.run_number }}
+          body: |
+            Auto-generated CI build
+            
+            Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: build/WaifuX.dmg
+          asset_name: WaifuX.dmg
+          asset_content_type: application/x-apple-diskimage
