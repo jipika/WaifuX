@@ -41,9 +41,12 @@ jobs:
 
       - name: Build
         run: |
+          mkdir -p build
           xcodebuild -project WallHaven.xcodeproj \
             -scheme WallHaven \
             -destination 'platform=macOS' \
+            -configuration Release \
+            -derivedDataPath build \
             SWIFT_STRICT_CONCURRENCY=minimal \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -55,5 +58,5 @@ jobs:
         with:
           name: WallHaven-CI-Build
           path: |
-            build/Release/WallHaven.app
+            build/Build/Products/Release/WallHaven.app
           retention-days: 7
