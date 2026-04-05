@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.waifux
   deploymentTarget:
     macOS: "26.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "26.4"
 
 packages:
   SwiftSoup:
@@ -43,7 +43,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 0.0.6
+        MARKETING_VERSION: 0.0.7
         CURRENT_PROJECT_VERSION: 1
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "26.0"

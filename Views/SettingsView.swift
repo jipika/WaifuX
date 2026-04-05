@@ -30,48 +30,26 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 }
 
 // MARK: - 窗口控制按钮
-private struct WindowControlButtons: View {
+private struct SettingsWindowControlButtons: View {
     var body: some View {
         HStack(spacing: 8) {
-            Button(action: closeWindow) {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(.black.opacity(0.5))
-                            .opacity(0)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            Button(action: minimizeWindow) {
-                Circle()
-                    .fill(Color.yellow)
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Image(systemName: "minus")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(.black.opacity(0.5))
-                            .opacity(0)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            Button(action: maximizeWindow) {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 6, weight: .bold))
-                            .foregroundColor(.black.opacity(0.5))
-                            .opacity(0)
-                    )
-            }
-            .buttonStyle(.plain)
+            SettingsWindowControlButton(
+                fillColor: Color(hex: "FF5F57"),
+                symbol: "xmark",
+                action: closeWindow
+            )
+            SettingsWindowControlButton(
+                fillColor: Color(hex: "FFBD2E"),
+                symbol: "minus",
+                action: minimizeWindow
+            )
+            SettingsWindowControlButton(
+                fillColor: Color(hex: "28C840"),
+                symbol: "plus",
+                action: maximizeWindow
+            )
         }
+        .frame(height: 34, alignment: .center)
     }
 
     private func closeWindow() {
@@ -92,49 +70,166 @@ private struct WindowControlButtons: View {
     }
 }
 
+private struct SettingsWindowControlButton: View {
+    let fillColor: Color
+    let symbol: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Circle()
+                .fill(fillColor.opacity(isHovered ? 0.95 : 0.88))
+                .frame(width: 13, height: 13)
+                .overlay(
+                    Circle()
+                        .stroke(Color.black.opacity(0.22), lineWidth: 0.5)
+                )
+                .overlay {
+                    Image(systemName: symbol)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Color.black.opacity(isHovered ? 0.58 : 0.0))
+                }
+                .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - 设置标签栏组件
+private struct SettingsSegmentedControl: View {
+    @Binding var selectedTab: SettingsTab
+    let controlHeight: CGFloat
+
+    @Namespace private var selectionNamespace
+    @State private var hoveredTab: SettingsTab?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(SettingsTab.allCases, id: \.self) { tab in
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                        selectedTab = tab
+                    }
+                } label: {
+                    Text(tab.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(labelColor(for: tab))
+                        .frame(width: itemWidth(for: tab), height: controlHeight - 8)
+                        .background {
+                            if selectedTab == tab {
+                                selectedTabGlass(for: tab)
+                            } else if hoveredTab == tab {
+                                Capsule(style: .continuous)
+                                    .fill(Color.white.opacity(0.05))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .contentShape(Capsule(style: .continuous))
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
+        .glassContainer(spacing: 10)
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+    }
+
+    private func itemWidth(for tab: SettingsTab) -> CGFloat {
+        switch tab {
+        case .general: return 60
+        case .download: return 72
+        case .scheduler: return 72
+        case .about: return 56
+        }
+    }
+
+    private func labelColor(for tab: SettingsTab) -> Color {
+        if selectedTab == tab {
+            return .white.opacity(0.96)
+        }
+        if hoveredTab == tab {
+            return .white.opacity(0.86)
+        }
+        return .white.opacity(0.72)
+    }
+
+    @ViewBuilder
+    private func selectedTabGlass(for tab: SettingsTab) -> some View {
+        Capsule(style: .continuous)
+            .liquidGlassSurface(.max, in: Capsule(style: .continuous))
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.34),
+                                Color.white.opacity(0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                            lineWidth: 0.8
+                    )
+            )
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            .matchedGeometryEffect(id: "settingsSelectedTabGlass", in: selectionNamespace)
+    }
+}
+
 // MARK: - 主视图
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject private var localization = LocalizationService.shared
     @State private var selectedTab: SettingsTab = .general
 
+    private let controlHeight: CGFloat = 34
+
     var body: some View {
         VStack(spacing: 0) {
-            // 红绿灯
-            HStack {
-                WindowControlButtons()
+            HStack(alignment: .top) {
+                SettingsWindowControlButtons()
+                    .frame(width: 88, alignment: .leading)
 
                 Spacer()
+
+                SettingsSegmentedControl(
+                    selectedTab: $selectedTab,
+                    controlHeight: controlHeight
+                )
+
+                Spacer()
+
+                Spacer()
+                    .frame(width: 88)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
-            .background(.ultraThinMaterial)
+            .padding(.horizontal, 26)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
 
-            // TabView 需占满剩余高度，否则会在标题栏下方留出一大块空白
-            TabView(selection: $selectedTab) {
-                GeneralSettingsTab(viewModel: viewModel)
-                    .tabItem {
-                        Label(SettingsTab.general.title, systemImage: SettingsTab.general.icon)
-                    }
-                    .tag(SettingsTab.general)
-
-                DownloadSettingsTab(viewModel: viewModel)
-                    .tabItem {
-                        Label(SettingsTab.download.title, systemImage: SettingsTab.download.icon)
-                    }
-                    .tag(SettingsTab.download)
-
-                SchedulerSettingsTab(viewModel: viewModel)
-                    .tabItem {
-                        Label(SettingsTab.scheduler.title, systemImage: SettingsTab.scheduler.icon)
-                    }
-                    .tag(SettingsTab.scheduler)
-
-                AboutSettingsTab(viewModel: viewModel)
-                    .tabItem {
-                        Label(SettingsTab.about.title, systemImage: SettingsTab.about.icon)
-                    }
-                    .tag(SettingsTab.about)
+            Group {
+                switch selectedTab {
+                case .general:
+                    GeneralSettingsTab(viewModel: viewModel)
+                case .download:
+                    DownloadSettingsTab(viewModel: viewModel)
+                case .scheduler:
+                    SchedulerSettingsTab(viewModel: viewModel)
+                case .about:
+                    AboutSettingsTab(viewModel: viewModel)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

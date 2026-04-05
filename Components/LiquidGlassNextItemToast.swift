@@ -137,7 +137,7 @@ public struct LiquidGlassNextItemToast: View {
         }
     }
 
-    // MARK: - Toast 内容 - 深色原生液态玻璃（参考 detailGlassCircleChrome 样式）
+    // MARK: - Toast 内容 - Mac 原生液态玻璃材质
     private func toastContent(item: NextItemPreviewable) -> some View {
         Button(action: {
             // 点击后隐藏弹窗并触发回调
@@ -152,7 +152,7 @@ public struct LiquidGlassNextItemToast: View {
 
                 // 文字信息
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(t("library.nextOne"))
+                    Text("下一张")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.5))
 
@@ -183,17 +183,14 @@ public struct LiquidGlassNextItemToast: View {
             .padding(.vertical, 8)
         }
         .buttonStyle(.plain)
-        // 应用深色原生液态玻璃样式（与 detailGlassCircleChrome 一致）
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.05))
-                )
+        // 应用 Mac 原生液态玻璃材质
+        .liquidGlassSurface(
+            .max,
+            tint: nil,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
         .overlay(
-            // 边框 - 与 detailGlassCircleChrome 样式一致
+            // 边框 - Mac 液态玻璃风格
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(
                     LinearGradient(

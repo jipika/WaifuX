@@ -23,11 +23,14 @@ actor NetworkService {
         let config = URLSessionConfiguration.default
         config.requestCachePolicy = .returnCacheDataElseLoad  // 使用缓存加快加载
         config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60  // 资源超时时间
         config.urlCache = cache
         // 允许蜂窝网络访问
         config.allowsCellularAccess = true
         // 等待网络连接
         config.waitsForConnectivity = true
+        // 启用后台会话
+        config.isDiscretionary = false
 
         self.session = URLSession(configuration: config)
     }
@@ -49,6 +52,9 @@ actor NetworkService {
         if let custom = customConfig {
             return custom
         }
+        
+        // 暂时使用默认配置，避免访问NetworkMonitor的@MainActor属性
+        // 后续可以通过其他方式实现网络质量检测
         return defaultRetryConfig
     }
 
@@ -63,27 +69,13 @@ actor NetworkService {
         let config = effectiveRetryConfiguration(retryConfig)
         
         return try await executeWithRetry(config: config, operation: { attempt in
-            print("[NetworkService] 🌐 Fetching (attempt \(attempt)): \(url.absoluteString)")
-            
             let data = try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt)
-            
-            if let jsonString = String(data: data, encoding: .utf8) {
-                print("[NetworkService] 📥 Response: \(jsonString.prefix(500))...")
-            }
             
             let decoder = JSONDecoder()
             do {
                 let result = try decoder.decode(T.self, from: data)
-                print("[NetworkService] ✅ Decode success")
                 return result
             } catch {
-                print("[NetworkService] ❌ Decode error: \(error)")
-                // 打印更多解码错误详情
-                if let jsonObject = try? JSONSerialization.jsonObject(with: data),
-                   let prettyData = try? JSONSerialization.data(withJSONObject: jsonObject, options: .prettyPrinted),
-                   let prettyString = String(data: prettyData, encoding: .utf8) {
-                    print("[NetworkService] 📄 JSON structure: \(prettyString.prefix(1000))")
-                }
                 throw error
             }
         })
@@ -112,25 +104,18 @@ actor NetworkService {
         attempt: Int = 1,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> Data {
-        print("[NetworkService] 📤 Starting request to: \(url.absoluteString) (attempt \(attempt))")
         var request = URLRequest(url: url)
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        print("[NetworkService] 📋 Request headers: \(headers)")
-        print("[NetworkService] ⏳ Awaiting response from: \(url.absoluteString)")
 
         if let progressHandler {
             let (bytes, response) = try await session.bytes(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                print("[NetworkService] ❌ Invalid response type")
                 throw NetworkError.invalidResponse
             }
 
-            print("[NetworkService] 📊 Status code: \(httpResponse.statusCode) for \(url.absoluteString)")
-
             guard (200...299).contains(httpResponse.statusCode) else {
-                print("[NetworkService] ❌ HTTP error: \(httpResponse.statusCode)")
                 throw NetworkError.httpError(httpResponse.statusCode)
             }
 
@@ -168,28 +153,16 @@ actor NetworkService {
                 progressHandler(1.0)
             }
 
-            print("[NetworkService] 📥 Received response: \(data.count) bytes from \(url.absoluteString)")
             return data
         }
 
         let (data, response) = try await session.data(for: request)
-        print("[NetworkService] 📥 Received response: \(data.count) bytes from \(url.absoluteString)")
-
-        // 打印响应内容（截断）
-        if let content = String(data: data, encoding: .utf8) {
-            let preview = content.prefix(2000)
-            print("[NetworkService] 📄 Response content preview:\n\(preview)")
-        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            print("[NetworkService] ❌ Invalid response type")
             throw NetworkError.invalidResponse
         }
 
-        print("[NetworkService] 📊 Status code: \(httpResponse.statusCode) for \(url.absoluteString)")
-
         guard (200...299).contains(httpResponse.statusCode) else {
-            print("[NetworkService] ❌ HTTP error: \(httpResponse.statusCode)")
             throw NetworkError.httpError(httpResponse.statusCode)
         }
 
@@ -197,15 +170,10 @@ actor NetworkService {
     }
 
     func fetchString(from url: URL, headers: [String: String] = [:]) async throws -> String {
-        print("[NetworkService] fetchString called: \(url.absoluteString)")
-        print("[NetworkService] headers: \(headers)")
         let data = try await fetchData(from: url, headers: headers)
-        let result = String(decoding: data, as: UTF8.self)
-        print("[NetworkService] fetchString result length: \(result.count)")
-        print("[NetworkService] fetchString preview: \(result.prefix(500))")
-        return result
+        return String(decoding: data, as: UTF8.self)
     }
-
+    
     func fetchImage(
         from url: URL,
         progressHandler: (@Sendable (Double) -> Void)? = nil,
@@ -214,10 +182,38 @@ actor NetworkService {
         let config = effectiveRetryConfiguration(retryConfig)
         
         return try await executeWithRetry(config: config) { attempt in
-            print("[NetworkService] 🖼️ Fetching image: \(url.absoluteString) (attempt \(attempt))")
             let data = try await self.fetchDataInternal(from: url, attempt: attempt, progressHandler: progressHandler)
-            print("[NetworkService] ✅ Image fetched: \(data.count) bytes")
             return data
+        }
+    }
+    
+    // MARK: - 缓存管理
+    
+    /// 清除所有缓存
+    func clearCache() {
+        cache.removeAllCachedResponses()
+        print("[NetworkService] 🗑️ Cache cleared")
+    }
+    
+    /// 清除特定 URL 的缓存
+    func clearCache(for url: URL) {
+        let request = URLRequest(url: url)
+        cache.removeCachedResponse(for: request)
+        print("[NetworkService] 🗑️ Cache cleared for: \(url.absoluteString)")
+    }
+    
+    /// 获取缓存大小
+    func getCacheSize() -> String {
+        let memorySize = cache.currentMemoryUsage
+        let diskSize = cache.currentDiskUsage
+        let totalSize = memorySize + diskSize
+        
+        if totalSize < 1024 {
+            return "\(totalSize) bytes"
+        } else if totalSize < 1024 * 1024 {
+            return "\(String(format: "%.2f", Double(totalSize) / 1024)) KB"
+        } else {
+            return "\(String(format: "%.2f", Double(totalSize) / (1024 * 1024))) MB"
         }
     }
     
@@ -232,10 +228,6 @@ actor NetworkService {
         for attempt in 1...(config.maxRetries + 1) {
             do {
                 let result = try await operation(attempt)
-                // 如果成功且有之前的错误，记录重试成功
-                if attempt > 1 {
-                    print("[NetworkService] ✅ Request succeeded after \(attempt) attempts")
-                }
                 return result
             } catch {
                 lastError = error
@@ -247,7 +239,6 @@ actor NetworkService {
                 
                 // 检查错误是否可重试
                 guard error.isRetryable else {
-                    print("[NetworkService] ❌ Error not retryable: \(error)")
                     throw error
                 }
                 
@@ -258,7 +249,6 @@ actor NetworkService {
                 
                 // 计算延迟时间
                 let delay = config.delayForRetry(attempt: attempt)
-                print("[NetworkService] ⏱️ Retrying in \(String(format: "%.1f", delay))s... (attempt \(attempt + 1)/\(config.maxRetries + 1))")
                 
                 // 等待延迟时间
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -269,7 +259,6 @@ actor NetworkService {
         }
         
         // 所有重试都失败了
-        print("[NetworkService] ❌ All \(config.maxRetries + 1) attempts failed")
         throw lastError ?? NetworkError.networkError(URLError(.unknown))
     }
 }

@@ -90,11 +90,11 @@ WaifuX 的规则是**动态加载**的——这意味着即使源站改版，我
 
 ## 🌍 多语言支持
 
-| 语言 | 状态 |
-|------|------|
-| 🇨🇳 简体中文 | ✅ 完整支持 |
-| 🇺🇸 English | ✅ Full Support |
-| 🇯🇵 日本語 | ✅ 完全対応 |
+| 语言 | 状态 | 链接 |
+|------|------|------|
+| 🇨🇳 简体中文 | ✅ 完整支持 | [README.md](README.md) |
+| 🇺🇸 English | ✅ Full Support | [README.en.md](README.en.md) |
+| 🇯🇵 日本語 | ✅ 完全対応 | [README.ja.md](README.ja.md) |
 
 ---
 

@@ -731,10 +731,6 @@ struct NativeGlassModifier<S: Shape>: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background {
-                shape
-                    .fill(Color.black.opacity(backdropOpacity))
-            }
             .glassEffect(glass, in: shape)
     }
 }
@@ -761,17 +757,30 @@ struct FallbackGlassModifier: ViewModifier {
                             .fill(tint.opacity(level.tintOpacity))
                     }
 
-                    // 高光效果
+                    // 高光效果 - 增强视觉效果
                     AnyShape(shape)
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(level.highlightOpacity),
-                                    Color.white.opacity(0.02),
+                                    Color.white.opacity(level.highlightOpacity * 1.2),
+                                    Color.white.opacity(0.03),
                                     Color.clear
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
+                            )
+                        )
+
+                    // 底部渐变 - 增强层次感
+                    AnyShape(shape)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.clear,
+                                    Color.black.opacity(0.05)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
                             )
                         )
                 }
@@ -782,9 +791,9 @@ struct FallbackGlassModifier: ViewModifier {
                     .stroke(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(level.borderOpacity),
-                                Color.white.opacity(level.borderOpacity * 0.45),
-                                tint?.opacity(level.borderOpacity * 0.4) ?? Color.clear
+                                Color.white.opacity(level.borderOpacity * 1.3),
+                                Color.white.opacity(level.borderOpacity * 0.5),
+                                tint?.opacity(level.borderOpacity * 0.5) ?? Color.clear
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -792,7 +801,7 @@ struct FallbackGlassModifier: ViewModifier {
                         lineWidth: 1
                     )
             }
-            .shadow(color: .black.opacity(level.shadowOpacity), radius: level.shadowRadius, y: level.shadowYOffset)
+            .shadow(color: .black.opacity(level.shadowOpacity * 1.2), radius: level.shadowRadius, y: level.shadowYOffset)
     }
 }
 

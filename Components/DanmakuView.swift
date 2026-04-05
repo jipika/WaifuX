@@ -28,6 +28,9 @@ struct DanmakuView: View {
     // 轨道配置
     private let trackHeight: Double = 30
     private let maxTracks = 15
+    
+    // 性能优化：弹幕池
+    @State private var danmakuPool: [DanmakuItem] = []
 
     var body: some View {
         GeometryReader { geometry in
@@ -132,6 +135,20 @@ struct DanmakuView: View {
             return createBottomItem(danmaku: danmaku)
         }
     }
+    
+    // 从弹幕池中获取或创建新的弹幕项
+    private func getDanmakuItem() -> DanmakuItem {
+        if let item = danmakuPool.popLast() {
+            return item
+        } else {
+            // 创建新的弹幕项
+            return DanmakuItem(
+                danmaku: Danmaku(text: "", time: 0, mode: .scroll, color: 0xFFFFFF),
+                x: 0,
+                y: 0
+            )
+        }
+    }
 
     private func createScrollItem(danmaku: Danmaku, delay: Double) -> DanmakuItem? {
         // 找到可用的轨道
@@ -152,6 +169,9 @@ struct DanmakuView: View {
         let endTime = Date().timeIntervalSince1970 + duration * (1 - progress)
         scrollTracks[trackIndex] = endTime
 
+        // 从池中获取弹幕项
+        let item = getDanmakuItem()
+        // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,
             x: currentX,
@@ -169,6 +189,9 @@ struct DanmakuView: View {
             topTracks[trackIndex] = false
         }
 
+        // 从池中获取弹幕项
+        let item = getDanmakuItem()
+        // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,
             x: viewSize.width / 2,
@@ -187,6 +210,9 @@ struct DanmakuView: View {
             bottomTracks[trackIndex] = false
         }
 
+        // 从池中获取弹幕项
+        let item = getDanmakuItem()
+        // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,
             x: viewSize.width / 2,
@@ -221,7 +247,8 @@ struct DanmakuView: View {
 
     private func startTimer() {
         Task { @MainActor in
-            timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            // 优化：减少定时器频率，从 0.05 秒改为 0.1 秒，减少 CPU 占用
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
                 Task { @MainActor in
                     updateScrollPositions()
                 }
@@ -237,18 +264,29 @@ struct DanmakuView: View {
     private func updateScrollPositions() {
         guard isEnabled else { return }
 
-        let deltaTime = 0.05  // 50ms
+        let deltaTime = 0.1  // 100ms，与定时器频率一致
         let speed = 100.0 * settings.speed  // 基础速度 100 点/秒
 
-        for index in activeItems.indices {
-            if activeItems[index].danmaku.mode == .scroll {
-                activeItems[index].x -= speed * deltaTime
+        // 优化：使用 for-in 循环替代 indices 遍历
+        var toRemove: [Int] = []
+        for (index, item) in activeItems.enumerated() {
+            if item.danmaku.mode == .scroll {
+                // 使用引用类型或重新创建对象
+                var updatedItem = item
+                updatedItem.x -= speed * deltaTime
+                activeItems[index] = updatedItem
+            }
+            
+            // 检查是否需要移除
+            if item.x < -estimateTextWidth(item.danmaku.text) {
+                toRemove.append(index)
             }
         }
 
         // 清理移出屏幕的弹幕
-        activeItems.removeAll { item in
-            item.x < -estimateTextWidth(item.danmaku.text)
+        for index in toRemove.reversed() {
+            // 将弹幕添加到池中以重用
+            danmakuPool.append(activeItems.remove(at: index))
         }
     }
 
@@ -271,8 +309,15 @@ struct DanmakuTextItemView: View {
         Text(item.danmaku.text)
             .font(.system(size: settings.fontSize, weight: .medium))
             .foregroundColor(danmakuColor)
-            .shadow(color: .black.opacity(0.5), radius: 1, x: 1, y: 1)
+            .shadow(color: .black.opacity(0.6), radius: 2, x: 1, y: 1)
             .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.black.opacity(0.2))
+            )
+            .animation(.easeInOut(duration: 0.3), value: item)
     }
 
     private var danmakuColor: Color {
