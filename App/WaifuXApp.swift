@@ -41,13 +41,13 @@ final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
 }
 
 @main
-struct WallHavenApp {
+struct WaifuXApp {
     static func main() {
         // 配置全局 URLCache
         let cache = URLCache(
             memoryCapacity: 100_000_000,  // 100 MB 内存缓存
             diskCapacity: 500_000_000,   // 500 MB 磁盘缓存
-            diskPath: "WallHavenImageCache"
+            diskPath: "WaifuXImageCache"
         )
         URLCache.shared = cache
 
@@ -95,7 +95,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
 
-        window?.title = "WallHaven"
+        window?.title = "WaifuX"
         // 完全隐藏系统标题栏
         window?.titlebarAppearsTransparent = true
         window?.titleVisibility = .hidden
@@ -156,6 +156,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             print("[AppDelegate] 壁纸规则加载完成，共 \(wallpaperRules.count) 个")
 
             print("[AppDelegate] 后台规则同步结束")
+        }
+
+        // 启动时检查更新
+        Task(priority: .utility) {
+            print("[AppDelegate] 开始检查更新…")
+            let result = await UpdateChecker.shared.checkForUpdates()
+            switch result {
+            case .updateAvailable(let current, let latest):
+                print("[AppDelegate] 发现新版本：\(latest.version) (当前版本：\(current))")
+                // 在主线程显示更新弹窗
+                await MainActor.run {
+                    showUpdateDialog(latest: latest)
+                }
+            case .noUpdate(let current):
+                print("[AppDelegate] 已是最新版本：\(current)")
+            case .error(let message):
+                print("[AppDelegate] 更新检查失败：\(message)")
+            }
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -250,6 +268,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let desiredPolicy: NSApplication.ActivationPolicy = showDockIcon ? .regular : .accessory
         if NSApp.activationPolicy() != desiredPolicy {
             NSApp.setActivationPolicy(desiredPolicy)
+        }
+    }
+
+    /// 显示更新弹窗
+    private func showUpdateDialog(latest: GitHubRelease) {
+        let dialog = NSAlert()
+        dialog.messageText = "发现新版本"
+        dialog.informativeText = "WaifuX \(latest.version) 已发布！\n\n\(latest.body ?? "")"
+        dialog.addButton(withTitle: "立即更新")
+        dialog.addButton(withTitle: "取消")
+        
+        // 自定义弹窗样式为液态玻璃风格
+        let window = dialog.window
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 0.8)
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.cornerRadius = 12
+        window.contentView?.layer?.masksToBounds = true
+        
+        // 添加模糊效果
+        if #available(macOS 10.14, *) {
+            let visualEffectView = NSVisualEffectView()
+            visualEffectView.blendingMode = .behindWindow
+            visualEffectView.material = .hudWindow
+            visualEffectView.state = .active
+            visualEffectView.frame = window.contentView!.bounds
+            visualEffectView.autoresizingMask = [.width, .height]
+            window.contentView?.addSubview(visualEffectView, positioned: .below, relativeTo: nil)
+        }
+        
+        let response = dialog.runModal()
+        if response == .alertFirstButtonReturn {
+            // 打开下载页面
+            UpdateChecker.shared.openDownloadPage(for: latest)
         }
     }
 }

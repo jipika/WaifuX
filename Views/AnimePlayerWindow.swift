@@ -20,13 +20,13 @@ struct AnimePlayerWindow: View {
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
-                // 左侧播放器（70%）
+                // 左侧播放器（65%）- 优化比例
                 PlayerSection(viewModel: viewModel)
-                    .frame(width: geometry.size.width * 0.7)
+                    .frame(width: geometry.size.width * 0.65)
                 
-                // 右侧面板（30%）- 使用统一背景
+                // 右侧面板（35%）- 优化比例，使用统一背景
                 RightPanel(viewModel: viewModel, selectedTab: $selectedTab)
-                    .frame(width: geometry.size.width * 0.3)
+                    .frame(width: geometry.size.width * 0.35)
                     .background(
                         PlayerSidebarBackground()
                             .ignoresSafeArea()
@@ -59,53 +59,42 @@ private struct PlayerSidebarBackground: View {
                 .ignoresSafeArea()
             
             // 顶部微妙渐变
-            VStack {
-                LinearGradient(
-                    colors: [
-                        LiquidGlassColors.glassWhite.opacity(0.08),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 120)
-                Spacer()
-            }
+            LinearGradient(
+                colors: [
+                    LiquidGlassColors.glassWhite.opacity(0.08),
+                    Color.clear
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 120)
+            .ignoresSafeArea()
             
             // 左侧边缘高光（增强深度感）
-            HStack {
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                LiquidGlassColors.glassBorder,
-                                LiquidGlassColors.glassBorder.opacity(0.3),
-                                Color.clear
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: 1.5)
-                Spacer()
-            }
+            LinearGradient(
+                colors: [
+                    LiquidGlassColors.glassBorder,
+                    LiquidGlassColors.glassBorder.opacity(0.3),
+                    Color.clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 1.5)
+            .ignoresSafeArea()
             
             // 右侧微妙阴影（增强层次）
-            HStack {
-                Spacer()
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.black.opacity(0.15)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: 8)
-            }
+            LinearGradient(
+                colors: [
+                    Color.clear,
+                    Color.black.opacity(0.15)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 8)
+            .ignoresSafeArea()
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 }
@@ -250,9 +239,11 @@ private struct PlayerControlButton: View {
             y: isHovered ? 6 : 4
         )
         .scaleEffect(isPressed ? 0.92 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        // 优化：使用更轻量的动画
+        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
+        .animation(.spring(response: 0.1, dampingFraction: 0.8), value: isPressed)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation {
                 isHovered = hovering
             }
         }
@@ -353,9 +344,9 @@ private struct PanelHeader: View {
     @Binding var selectedTab: AnimePlayerWindow.Tab
     
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             // Tab 切换按钮
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 TabButton(
                     icon: "play.tv",
                     title: t("player.play"),
@@ -380,14 +371,14 @@ private struct PanelHeader: View {
                     selectedTab = .enhancement
                 }
             }
-            .padding(3)
+            .padding(4)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(0.04))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
             )
         }
     }
@@ -403,27 +394,27 @@ private struct TabButton: View {
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
                 Text(title)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
             }
             .foregroundStyle(isSelected ? .white : LiquidGlassColors.textSecondary)
             .frame(maxWidth: .infinity)
-            .frame(height: 34)
-            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .padding(.horizontal, 14)
         }
         .buttonStyle(.plain)
         .liquidGlassSurface(
             isSelected ? .prominent : (isHovered ? .regular : .subtle),
-            tint: isSelected ? LiquidGlassColors.primaryPink.opacity(0.2) : nil,
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            tint: isSelected ? LiquidGlassColors.primaryPink.opacity(0.25) : nil,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
-        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
-        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .scaleEffect(isHovered && !isSelected ? 1.03 : 1.0)
+        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation {
                 isHovered = hovering
             }
         }
@@ -450,12 +441,12 @@ private struct SourcesContentView: View {
                     sources: sources,
                     selectedIndex: $selectedSourceIndex
                 )
-                .padding(.top, 8)
-                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.horizontal, 16)
                 
                 Divider()
-                    .background(Color.white.opacity(0.06))
-                    .padding(.horizontal, 12)
+                    .background(Color.white.opacity(0.08))
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                 
                 // 源内容

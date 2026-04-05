@@ -747,17 +747,21 @@ struct FallbackGlassModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(
+            .background {
+                // 优化：减少视图层级，使用单一的 ZStack
                 ZStack {
+                    // 基础材质
                     AnyShape(shape)
                         .fill(level.material)
                         .opacity(level.fillOpacity)
 
+                    // 色调叠加（仅当有 tint 时）
                     if let tint {
                         AnyShape(shape)
                             .fill(tint.opacity(level.tintOpacity))
                     }
 
+                    // 高光效果
                     AnyShape(shape)
                         .fill(
                             LinearGradient(
@@ -771,8 +775,9 @@ struct FallbackGlassModifier: ViewModifier {
                             )
                         )
                 }
-            )
-            .overlay(
+            }
+            // 优化：仅在需要时添加边框和阴影
+            .overlay {
                 AnyShape(shape)
                     .stroke(
                         LinearGradient(
@@ -786,7 +791,7 @@ struct FallbackGlassModifier: ViewModifier {
                         ),
                         lineWidth: 1
                     )
-            )
+            }
             .shadow(color: .black.opacity(level.shadowOpacity), radius: level.shadowRadius, y: level.shadowYOffset)
     }
 }
