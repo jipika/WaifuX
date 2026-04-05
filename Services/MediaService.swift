@@ -156,9 +156,18 @@ actor MediaService {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 throw NetworkError.timeout
             }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+            
+            do {
+                let result = try await group.next()
+                group.cancelAll()
+                guard let result = result else {
+                    throw NetworkError.timeout
+                }
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
         }
     }
 

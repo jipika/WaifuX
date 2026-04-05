@@ -1,6 +1,46 @@
 import Foundation
 import Combine
 
+// MARK: - Actor 隔离的下载任务存储
+private actor DownloadTaskStorage {
+    var activeDownloads: [String: Task<Void, Error>] = [:]
+    var cancellationFlags: [String: Bool] = [:]
+    
+    func register(id: String, task: Task<Void, Error>) {
+        activeDownloads[id] = task
+        cancellationFlags[id] = false
+    }
+    
+    func unregister(id: String) {
+        activeDownloads.removeValue(forKey: id)
+        cancellationFlags.removeValue(forKey: id)
+    }
+    
+    func cancel(id: String) {
+        activeDownloads[id]?.cancel()
+        activeDownloads.removeValue(forKey: id)
+        cancellationFlags[id] = true
+    }
+    
+    func cancelAll() {
+        for (_, task) in activeDownloads {
+            task.cancel()
+        }
+        for id in activeDownloads.keys {
+            cancellationFlags[id] = true
+        }
+        activeDownloads.removeAll()
+    }
+    
+    func isCancelled(id: String) -> Bool {
+        cancellationFlags[id] ?? false
+    }
+    
+    func resetCancellationFlag(id: String) {
+        cancellationFlags[id] = false
+    }
+}
+
 @MainActor
 class DownloadTaskService: ObservableObject {
     static let shared = DownloadTaskService()
@@ -8,13 +48,11 @@ class DownloadTaskService: ObservableObject {
     @Published var tasks: [DownloadTask] = []
 
     private let userDefaultsKey = "download_tasks"
-    private var scheduledSaveWorkItem: DispatchWorkItem?
+    private var saveTask: Task<Void, Never>?
 
     // MARK: - Active Download Tasks Management
-    /// 存储正在进行的下载任务，用于暂停/恢复/取消控制
-    private var activeDownloads: [String: Task<Void, Error>] = [:]
-    /// 存储下载取消标志，用于协作式取消检查
-    private var downloadCancellationFlags: [String: Bool] = [:]
+    /// 使用 actor 隔离存储确保线程安全
+    private let taskStorage = DownloadTaskStorage()
 
     private init() {
         loadTasks()
@@ -63,9 +101,8 @@ class DownloadTaskService: ObservableObject {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
 
         // 取消正在进行的下载任务（但保留进度）
-        if let downloadTask = activeDownloads[id] {
-            downloadTask.cancel()
-            activeDownloads.removeValue(forKey: id)
+        Task {
+            await taskStorage.cancel(id: id)
         }
 
         objectWillChange.send()
@@ -94,13 +131,9 @@ class DownloadTaskService: ObservableObject {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
 
         // 取消正在进行的下载任务
-        if let downloadTask = activeDownloads[id] {
-            downloadTask.cancel()
-            activeDownloads.removeValue(forKey: id)
+        Task {
+            await taskStorage.cancel(id: id)
         }
-
-        // 设置取消标志
-        downloadCancellationFlags[id] = true
 
         objectWillChange.send()
         tasks[index].status = .cancelled
@@ -115,28 +148,37 @@ class DownloadTaskService: ObservableObject {
 
     /// 注册一个活动的下载任务
     func registerDownloadTask(id: String, task: Task<Void, Error>) {
-        activeDownloads[id] = task
-        downloadCancellationFlags[id] = false
+        Task {
+            await taskStorage.register(id: id, task: task)
+        }
     }
 
     /// 注销一个活动的下载任务
     func unregisterDownloadTask(id: String) {
-        activeDownloads.removeValue(forKey: id)
-        downloadCancellationFlags.removeValue(forKey: id)
+        Task {
+            await taskStorage.unregister(id: id)
+        }
     }
 
     /// 检查下载是否被取消
     func isDownloadCancelled(id: String) -> Bool {
-        return downloadCancellationFlags[id] ?? false
+        // 使用同步方式获取，因为 actor 调用是异步的
+        // 这里使用 Task 包装来同步等待结果
+        let semaphore = DispatchSemaphore(value: 0)
+        var result = false
+        Task {
+            result = await taskStorage.isCancelled(id: id)
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result
     }
 
     /// 取消所有活动的下载
     func cancelAllActiveDownloads() {
-        for (id, task) in activeDownloads {
-            task.cancel()
-            downloadCancellationFlags[id] = true
+        Task {
+            await taskStorage.cancelAll()
         }
-        activeDownloads.removeAll()
     }
 
     func removeTask(id: String) {
@@ -187,25 +229,25 @@ class DownloadTaskService: ObservableObject {
     // MARK: - Persistence
 
     private func persistTasks() {
-        scheduledSaveWorkItem?.cancel()
+        saveTask?.cancel()
         if let encoded = try? JSONEncoder().encode(tasks) {
             UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
         }
     }
 
     private func schedulePersistTasks() {
-        scheduledSaveWorkItem?.cancel()
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.persistTasks()
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
+            guard !Task.isCancelled else { return }
+            persistTasks()
         }
-        scheduledSaveWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
     }
 
     private func scheduleVisibilityRefresh() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.9) { [weak self] in
-            self?.objectWillChange.send()
+        Task {
+            try? await Task.sleep(nanoseconds: 1_900_000_000) // 1.9s
+            objectWillChange.send()
         }
     }
 

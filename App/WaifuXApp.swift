@@ -51,12 +51,9 @@ struct WaifuXApp {
         )
         URLCache.shared = cache
 
-        // 配置默认 URLSession 使用缓存
-        let config = URLSessionConfiguration.default
-        config.requestCachePolicy = .returnCacheDataElseLoad
-        config.urlCache = cache
-        URLSession.shared.configuration.urlCache = cache
-        URLSession.shared.configuration.requestCachePolicy = .returnCacheDataElseLoad
+        // 注意：不要修改 URLSession.shared 的配置
+        // 因为它是一个共享的单例，修改可能影响其他代码
+        // 各服务应该使用自定义的 URLSession 配置
 
         let app = NSApplication.shared
         let delegate = AppDelegate()

@@ -6,32 +6,38 @@ extension Notification.Name {
     static let togglePlayerFullScreen = Notification.Name("togglePlayerFullScreen")
 }
 
-// MARK: - AnimePlayerWindow - 独立播放器窗口
+// MARK: - AnimePlayerWindow - 拟物化播放器窗口
 struct AnimePlayerWindow: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @State private var selectedTab: Tab = .sources
-    
+
     enum Tab {
         case sources
         case danmaku
         case enhancement
     }
-    
+
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
-                // 左侧播放器（65%）- 优化比例
+                // 左侧播放器区域 - 监视器风格
                 PlayerSection(viewModel: viewModel)
                     .frame(width: geometry.size.width * 0.65)
-                
-                // 右侧面板（35%）- 优化比例，使用统一背景
+                    .background(SkeuomorphicColors.metalDark)
+
+                // 右侧面板 - 控制面板风格
                 RightPanel(viewModel: viewModel, selectedTab: $selectedTab)
                     .frame(width: geometry.size.width * 0.35)
                     .background(
-                        PlayerSidebarBackground()
+                        ControlPanelBackground()
                             .ignoresSafeArea()
                     )
             }
+            // 设备外壳效果
+            .background(
+                RoundedRectangle(cornerRadius: 0)
+                    .stroke(Color.black.opacity(0.5), lineWidth: 2)
+            )
         }
         // 验证码 WebView Sheet
         .sheet(item: $viewModel.captchaVerificationSession) { session in
@@ -44,214 +50,246 @@ struct AnimePlayerWindow: View {
     }
 }
 
-// MARK: - 播放器侧边栏背景（优化版 - 增强Liquid Glass效果）
-private struct PlayerSidebarBackground: View {
+// MARK: - 控制面板背景
+private struct ControlPanelBackground: View {
     var body: some View {
         ZStack {
-            // 基础背景色 - 使用DesignSystem
-            LiquidGlassColors.midBackground
+            // 基础金属背景
+            SkeuomorphicColors.metalMid
                 .ignoresSafeArea()
-            
-            // 应用Liquid Glass材质
-            Rectangle()
-                .fill(.regularMaterial)
-                .opacity(0.35)
-                .ignoresSafeArea()
-            
-            // 顶部微妙渐变
+
+            // 金属质感渐变
             LinearGradient(
                 colors: [
-                    LiquidGlassColors.glassWhite.opacity(0.08),
-                    Color.clear
+                    SkeuomorphicColors.metalLight.opacity(0.3),
+                    Color.clear,
+                    SkeuomorphicColors.metalDark.opacity(0.5)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 120)
             .ignoresSafeArea()
-            
-            // 左侧边缘高光（增强深度感）
-            LinearGradient(
-                colors: [
-                    LiquidGlassColors.glassBorder,
-                    LiquidGlassColors.glassBorder.opacity(0.3),
-                    Color.clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 1.5)
-            .ignoresSafeArea()
-            
-            // 右侧微妙阴影（增强层次）
-            LinearGradient(
-                colors: [
-                    Color.clear,
-                    Color.black.opacity(0.15)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 8)
-            .ignoresSafeArea()
-            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            // 左侧金属接缝高光
+            HStack {
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.2),
+                                Color.white.opacity(0.05),
+                                Color.clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: 2)
+                    .ignoresSafeArea()
+
+                Spacer()
+            }
+
+            // 顶部高光
+            VStack {
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.1),
+                                Color.clear
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(height: 1)
+                    .ignoresSafeArea()
+
+                Spacer()
+            }
         }
     }
 }
 
-// MARK: - 播放器区域
+// MARK: - 播放器区域（监视器风格）
 private struct PlayerSection: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @State private var isFullScreen = false
-    
+
     var body: some View {
         ZStack {
-            Color.black
-            
-            if viewModel.isLoadingVideo {
-                VStack(spacing: 28) {
-                    Spacer()
-                    
-                    ProgressView()
-                        .scaleEffect(1.2)
-                        .tint(.white.opacity(0.7))
-                    
-                    VStack(spacing: 10) {
-                        Text(t("player.loadingVideo"))
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.white)
-                    }
-                    
-                    Spacer()
-                }
-            } else if let player = viewModel.player {
-                PlayerContainerView(player: player)
-            } else {
-                VStack(spacing: 28) {
-                    Spacer()
-                    
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 72, weight: .ultraLight))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [
-                                    Color(hex: "FF3366").opacity(0.8),
-                                    Color(hex: "8B5CF6").opacity(0.6)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    
-                    VStack(spacing: 10) {
-                        Text(viewModel.anime.title)
-                            .font(.system(size: 22, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                        
-                        Text(t("player.selectSourceOnRight"))
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .padding(.horizontal, 40)
-                    
-                    Spacer()
-                }
-            }
-            
-            // 错误提示
-            if let error = viewModel.videoError {
-                VStack(spacing: 14) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 44))
-                        .foregroundStyle(Color(hex: "FF9F43"))
-                    
-                    Text(t("player.playFailed"))
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(.white)
-                    
-                    Text(error)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(3)
-                        .padding(.horizontal, 40)
-                }
-                .padding(28)
-                .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(Color(hex: "1C1C24").opacity(0.95))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
+            // 监视器边框
+            RoundedRectangle(cornerRadius: 4)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            SkeuomorphicColors.metalLight,
+                            SkeuomorphicColors.metalMid,
+                            SkeuomorphicColors.metalDark
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
-                .shadow(color: .black.opacity(0.4), radius: 20, y: 10)
-                .padding(40)
+                .padding(8)
+
+            // 屏幕区域
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.black)
+                .padding(12)
+                .overlay(
+                    // 屏幕内容
+                    Group {
+                        if viewModel.isLoadingVideo {
+                            LoadingScreen()
+                        } else if let player = viewModel.player {
+                            PlayerContainerView(player: player)
+                                .padding(12)
+                        } else {
+                            StandbyScreen(viewModel: viewModel)
+                        }
+                    }
+                )
+
+            // 错误提示覆盖层
+            if let error = viewModel.videoError {
+                ErrorOverlay(error: error)
+                    .padding(40)
             }
-            
-            // 全屏按钮 - 放在播放器控件层之上
+
+            // 全屏按钮
             VStack {
                 HStack {
                     Spacer()
-                    PlayerControlButton(
-                        icon: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
-                    ) {
-                        toggleFullScreen()
-                    }
-                    .padding(.top, 16)
-                    .padding(.trailing, 16)
+                    MechanicalIconButton(
+                        icon: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                        action: toggleFullScreen
+                    )
+                    .padding(.top, 20)
+                    .padding(.trailing, 20)
                 }
                 Spacer()
             }
-            .allowsHitTesting(true)
         }
     }
-    
+
     private func toggleFullScreen() {
-        // 使用 AVPlayerView 的真正视频全屏
         NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil)
     }
 }
 
-// MARK: - 播放器控制按钮（优化版 - Liquid Glass）
-private struct PlayerControlButton: View {
+// MARK: - 加载屏幕
+private struct LoadingScreen: View {
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            // 旋转的 LED 指示灯效果
+            HStack(spacing: 8) {
+                ForEach(0..<3) { i in
+                    LEDIndicator(
+                        color: SkeuomorphicColors.activeAmber,
+                        isOn: true,
+                        size: 8
+                    )
+                    .opacity(0.3 + Double(i) * 0.35)
+                }
+            }
+
+            Text(t("player.loadingVideo"))
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
+
+            Spacer()
+        }
+    }
+}
+
+// MARK: - 待机屏幕
+private struct StandbyScreen: View {
+    @ObservedObject var viewModel: AnimeDetailViewModel
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            // 电源指示灯
+            ZStack {
+                Circle()
+                    .fill(SkeuomorphicColors.metalDark)
+                    .frame(width: 80, height: 80)
+                    .shadow(color: Color.black.opacity(0.5), radius: 4, x: 0, y: 2)
+
+                Image(systemName: "power")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(SkeuomorphicColors.ledAmber.opacity(0.6))
+            }
+
+            VStack(spacing: 8) {
+                Text(viewModel.anime.title)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(SkeuomorphicColors.textPrimary)
+                    .multilineTextAlignment(.center)
+
+                Text(t("player.selectSourceOnRight"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(SkeuomorphicColors.textMuted)
+            }
+            .padding(.horizontal, 40)
+
+            Spacer()
+        }
+    }
+}
+
+// MARK: - 错误覆盖层
+private struct ErrorOverlay: View {
+    let error: String
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // 错误指示灯
+            LEDIndicator(color: SkeuomorphicColors.ledRed, isOn: true, size: 16)
+
+            Text(t("player.playFailed"))
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(SkeuomorphicColors.textPrimary)
+
+            Text(error)
+                .font(.system(size: 12))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 20)
+        }
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(SkeuomorphicColors.metalMid.opacity(0.95))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(SkeuomorphicColors.ledRed.opacity(0.3), lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.5), radius: 10, x: 0, y: 5)
+    }
+}
+
+// MARK: - 机械图标按钮
+private struct MechanicalIconButton: View {
     let icon: String
     let action: () -> Void
     @State private var isHovered = false
-    @State private var isPressed = false
-    
+
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
-                .frame(width: 36, height: 36)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SkeuomorphicColors.textPrimary)
+                .frame(width: 32, height: 32)
         }
-        .buttonStyle(.plain)
-        .liquidGlassSurface(
-            isHovered ? .prominent : .regular,
-            in: Circle()
-        )
-        .shadow(
-            color: isHovered ? Color.black.opacity(0.3) : Color.black.opacity(0.2),
-            radius: isHovered ? 12 : 8,
-            y: isHovered ? 6 : 4
-        )
-        .scaleEffect(isPressed ? 0.92 : 1.0)
-        // 优化：使用更轻量的动画
-        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
-        .animation(.spring(response: 0.1, dampingFraction: 0.8), value: isPressed)
-        .onHover { hovering in
-            withAnimation {
-                isHovered = hovering
-            }
-        }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded { _ in isPressed = false }
-        )
+        .buttonStyle(MechanicalButtonStyle())
     }
 }
 
@@ -282,12 +320,10 @@ private class FullScreenAVPlayerView: AVPlayerView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
 
-        // 移除之前的观察者
         if let observer = fullScreenObserver {
             NotificationCenter.default.removeObserver(observer)
         }
 
-        // 添加全屏切换通知观察者
         fullScreenObserver = NotificationCenter.default.addObserver(
             forName: .togglePlayerFullScreen,
             object: nil,
@@ -300,7 +336,6 @@ private class FullScreenAVPlayerView: AVPlayerView {
     }
 
     deinit {
-        // 安全地移除观察者
         MainActor.assumeIsolated {
             if let observer = fullScreenObserver {
                 NotificationCenter.default.removeObserver(observer)
@@ -309,23 +344,23 @@ private class FullScreenAVPlayerView: AVPlayerView {
     }
 }
 
-// MARK: - 右侧面板
+// MARK: - 右侧面板（控制面板）
 private struct RightPanel: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @Binding var selectedTab: AnimePlayerWindow.Tab
-    
+
     var activeSources: [SourceSearchResult] {
         viewModel.sourceResults.filter { !$0.rule.deprecated }
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // 顶部标题栏
-            PanelHeader(selectedTab: $selectedTab)
-                .padding(.horizontal, 16)
+            // 模式选择器（机械按键组）
+            ModeSelector(selectedTab: $selectedTab)
+                .padding(.horizontal, 12)
                 .padding(.top, 16)
                 .padding(.bottom, 12)
-            
+
             // 内容区域
             switch selectedTab {
             case .sources:
@@ -339,85 +374,49 @@ private struct RightPanel: View {
     }
 }
 
-// MARK: - 面板头部
-private struct PanelHeader: View {
+// MARK: - 模式选择器（机械按键组）
+private struct ModeSelector: View {
     @Binding var selectedTab: AnimePlayerWindow.Tab
-    
+
     var body: some View {
-        VStack(spacing: 16) {
-            // Tab 切换按钮
-            HStack(spacing: 6) {
-                TabButton(
-                    icon: "play.tv",
-                    title: t("player.play"),
-                    isSelected: selectedTab == .sources
-                ) {
-                    selectedTab = .sources
-                }
-                
-                TabButton(
-                    icon: "text.bubble",
-                    title: t("danmaku.settings"),
-                    isSelected: selectedTab == .danmaku
-                ) {
-                    selectedTab = .danmaku
-                }
-                
-                TabButton(
-                    icon: "sparkles",
-                    title: t("player.enhancement"),
-                    isSelected: selectedTab == .enhancement
-                ) {
-                    selectedTab = .enhancement
-                }
+        HStack(spacing: 8) {
+            ModeButton(
+                title: t("player.play"),
+                isSelected: selectedTab == .sources
+            ) {
+                selectedTab = .sources
             }
-            .padding(4)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
+
+            ModeButton(
+                title: t("danmaku.settings"),
+                isSelected: selectedTab == .danmaku
+            ) {
+                selectedTab = .danmaku
+            }
+
+            ModeButton(
+                title: t("player.enhancement"),
+                isSelected: selectedTab == .enhancement
+            ) {
+                selectedTab = .enhancement
+            }
         }
     }
 }
 
-// MARK: - Tab 按钮（优化版 - 使用Liquid Glass）
-private struct TabButton: View {
-    let icon: String
+// MARK: - 模式按钮
+private struct ModeButton: View {
     let title: String
     let isSelected: Bool
     let action: () -> Void
-    @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
-                Text(title)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-            }
-            .foregroundStyle(isSelected ? .white : LiquidGlassColors.textSecondary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 36)
-            .padding(.horizontal, 14)
+            Text(title)
+                .font(.system(size: 12, weight: isSelected ? .bold : .medium))
         }
-        .buttonStyle(.plain)
-        .liquidGlassSurface(
-            isSelected ? .prominent : (isHovered ? .regular : .subtle),
-            tint: isSelected ? LiquidGlassColors.primaryPink.opacity(0.25) : nil,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .scaleEffect(isHovered && !isSelected ? 1.03 : 1.0)
-        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
-        .onHover { hovering in
-            withAnimation {
-                isHovered = hovering
-            }
-        }
+        .buttonStyle(MechanicalButtonStyle(isActive: isSelected, cornerRadius: 6))
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -426,7 +425,7 @@ private struct SourcesContentView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     let sources: [SourceSearchResult]
     @State private var selectedSourceIndex: Int = 0
-    
+
     var body: some View {
         VStack(spacing: 0) {
             if sources.isEmpty {
@@ -436,19 +435,21 @@ private struct SourcesContentView: View {
                     message: t("player.installRulesFirst")
                 )
             } else {
-                // 源标签选择
+                // 源选择器
                 SourceTabSelector(
                     sources: sources,
                     selectedIndex: $selectedSourceIndex
                 )
                 .padding(.top, 12)
-                .padding(.horizontal, 16)
-                
-                Divider()
-                    .background(Color.white.opacity(0.08))
-                    .padding(.horizontal, 16)
+                .padding(.horizontal, 12)
+
+                // 分隔线
+                Rectangle()
+                    .fill(Color.black.opacity(0.3))
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
                     .padding(.vertical, 12)
-                
+
                 // 源内容
                 if selectedSourceIndex < sources.count {
                     let source = sources[selectedSourceIndex]
@@ -467,11 +468,11 @@ private struct SourcesContentView: View {
 private struct SourceTabSelector: View {
     let sources: [SourceSearchResult]
     @Binding var selectedIndex: Int
-    
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
                         SourceTabButton(
                             source: source,
@@ -497,64 +498,51 @@ private struct SourceTabButton: View {
     let source: SourceSearchResult
     let isSelected: Bool
     let action: () -> Void
-    @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                StatusDot(status: source.status)
-                
+            HStack(spacing: 8) {
+                // LED 状态指示灯
+                SourceStatusLED(status: source.status)
+
                 Text(source.rule.name)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 11, weight: isSelected ? .bold : .medium))
             }
-            .foregroundStyle(isSelected ? .white : .white.opacity(0.65))
-            .padding(.horizontal, 12)
-            .frame(height: 32)
+            .foregroundStyle(isSelected ? SkeuomorphicColors.activeAmber : SkeuomorphicColors.textSecondary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
         }
-        .buttonStyle(.plain)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isSelected ? Color.white.opacity(0.08) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(
-                    isSelected ? Color.white.opacity(0.15) : Color.clear,
-                    lineWidth: 1
-                )
-        )
-        .onHover { hovering in
-            isHovered = hovering
-        }
+        .buttonStyle(MechanicalButtonStyle(isActive: isSelected, cornerRadius: 6))
     }
 }
 
-// MARK: - 状态点
-private struct StatusDot: View {
+// MARK: - 源状态 LED
+private struct SourceStatusLED: View {
     let status: SourceQueryStatus
-    
+
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 5, height: 5)
-            .overlay(
-                Group {
-                    if case .loading = status {
-                        ProgressView()
-                            .scaleEffect(0.35)
-                            .tint(.white)
-                    }
-                }
-            )
+        LEDIndicator(
+            color: ledColor,
+            isOn: isOn,
+            size: 6
+        )
     }
-    
-    private var color: Color {
+
+    private var ledColor: Color {
         switch status {
-        case .success: return Color(hex: "34D399")
-        case .loading: return .clear
-        case .error: return Color(hex: "FF6B6B")
-        case .captcha: return Color(hex: "FF9F43")
-        case .idle, .noResult, .needsSelection: return Color(hex: "6B7280")
+        case .success: return SkeuomorphicColors.ledGreen
+        case .loading: return SkeuomorphicColors.ledAmber
+        case .error: return SkeuomorphicColors.ledRed
+        case .captcha: return SkeuomorphicColors.ledAmber
+        case .idle, .noResult, .needsSelection: return SkeuomorphicColors.ledOff
+        }
+    }
+
+    private var isOn: Bool {
+        switch status {
+        case .success, .error, .captcha: return true
+        case .loading: return true // 会闪烁
+        case .idle, .noResult, .needsSelection: return false
         }
     }
 }
@@ -564,15 +552,15 @@ private struct SourceDetailView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     let source: SourceSearchResult
     let sourceIndex: Int
-    
+
     var body: some View {
         switch source.status {
         case .idle:
-            LoadingView(message: "准备搜索...")
-            
+            StatusView(message: "准备搜索...", ledColor: SkeuomorphicColors.ledOff)
+
         case .loading:
-            LoadingView(message: "正在搜索...")
-            
+            StatusView(message: "正在搜索...", ledColor: SkeuomorphicColors.ledAmber, isBlinking: true)
+
         case .success:
             if let episodes = source.detail?.episodes, !episodes.isEmpty {
                 EpisodeListView(
@@ -591,21 +579,17 @@ private struct SourceDetailView: View {
                     message: t("player.noPlayableEpisodes")
                 )
             }
-            
+
         case .noResult:
             EmptyStateView(
                 icon: "magnifyingglass.circle.fill",
                 title: t("player.noResults"),
                 message: t("player.noSearchResults")
             )
-            
+
         case .error(let message):
-            EmptyStateView(
-                icon: "exclamationmark.triangle.fill",
-                title: t("player.searchFailed"),
-                message: message
-            )
-            
+            StatusView(message: message, ledColor: SkeuomorphicColors.ledRed)
+
         case .needsSelection(let items):
             NeedsSelectionView(
                 items: items,
@@ -615,7 +599,7 @@ private struct SourceDetailView: View {
                     }
                 }
             )
-            
+
         case .captcha:
             CaptchaRequiredView {
                 viewModel.triggerCaptchaVerification(for: source.rule)
@@ -624,13 +608,41 @@ private struct SourceDetailView: View {
     }
 }
 
-// MARK: - 剧集列表视图（重新设计）
+// MARK: - 状态视图
+private struct StatusView: View {
+    let message: String
+    let ledColor: Color
+    var isBlinking: Bool = false
+    @State private var isVisible = true
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            LEDIndicator(color: ledColor, isOn: isVisible, size: 12)
+                .onAppear {
+                    if isBlinking {
+                        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                            isVisible = false
+                        }
+                    }
+                }
+
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
+
+            Spacer()
+        }
+    }
+}
+
+// MARK: - 剧集列表视图
 private struct EpisodeListView: View {
     let episodes: [AnimeDetail.AnimeEpisodeItem]
     let currentEpisode: AnimeDetail.AnimeEpisodeItem?
     let onSelect: (AnimeDetail.AnimeEpisodeItem) -> Void
-    
-    // 每行显示6个按钮
+
     private let columns = [
         GridItem(.flexible(), spacing: 6),
         GridItem(.flexible(), spacing: 6),
@@ -639,7 +651,7 @@ private struct EpisodeListView: View {
         GridItem(.flexible(), spacing: 6),
         GridItem(.flexible(), spacing: 6)
     ]
-    
+
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 6) {
@@ -658,7 +670,7 @@ private struct EpisodeListView: View {
     }
 }
 
-// MARK: - 剧集按钮（优化版 - Liquid Glass效果）
+// MARK: - 剧集按钮（机械按键风格）
 private struct EpisodeButton: View {
     let episode: AnimeDetail.AnimeEpisodeItem
     let isPlaying: Bool
@@ -680,107 +692,101 @@ private struct EpisodeButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(displayText)
-                .font(.system(size: 13, weight: isPlaying ? .bold : .medium, design: .rounded))
-                .foregroundStyle(isPlaying ? .white : LiquidGlassColors.textPrimary)
-                .frame(minHeight: 36)
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .liquidGlassSurface(
-            isPlaying ? .max : (isHovered ? .prominent : .subtle),
-            tint: isPlaying ? LiquidGlassColors.primaryPink.opacity(0.3) : nil,
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    isPlaying 
-                        ? LiquidGlassColors.primaryPink.opacity(0.5)
-                        : LiquidGlassColors.borderSubtle,
-                    lineWidth: isPlaying ? 1.5 : 0.5
-                )
-        )
-        .scaleEffect(isHovered && !isPlaying ? 1.02 : 1.0)
-        .animation(.easeOut(duration: 0.15), value: isHovered)
-        .help(episode.name ?? "第 \(episode.episodeNumber) 集")
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isHovered = hovering
+            HStack(spacing: 4) {
+                if isPlaying {
+                    LEDIndicator(color: SkeuomorphicColors.activeAmber, isOn: true, size: 4)
+                }
+
+                Text(displayText)
+                    .font(.system(size: 12, weight: isPlaying ? .bold : .medium))
             }
+            .foregroundStyle(isPlaying ? SkeuomorphicColors.activeAmber : SkeuomorphicColors.textPrimary)
+            .frame(minHeight: 32)
+            .frame(maxWidth: .infinity)
         }
+        .buttonStyle(MechanicalButtonStyle(isActive: isPlaying, cornerRadius: 4))
+        .help(episode.name ?? "第 \(episode.episodeNumber) 集")
     }
 }
 
-// MARK: - 弹幕设置视图
+// MARK: - 弹幕设置视图（控制面板风格）
 private struct DanmakuSettingsView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
-    
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 16) {
                 // 主开关
-                SettingsToggleRow(
-                    title: t("danmaku.enableDanmaku"),
-                    isOn: binding(for: \.isEnabled)
-                )
-                
-                Divider()
-                    .background(Color.white.opacity(0.06))
-                
-                // 滑块设置
-                VStack(spacing: 12) {
-                    SettingsSliderRow(
-                        title: t("player.opacity"),
-                        value: binding(for: \.opacity),
-                        range: 0.1...1.0,
-                        format: { String(format: "%.0f%%", $0 * 100) }
-                    )
-                    
-                    SettingsSliderRow(
-                        title: t("danmaku.fontSize"),
-                        value: binding(for: \.fontSize),
-                        range: 12...24,
-                        format: { String(format: "%.0f", $0) }
-                    )
-                    
-                    SettingsSliderRow(
-                        title: t("player.scrollSpeed"),
-                        value: binding(for: \.speed),
-                        range: 0.5...2.0,
-                        format: { String(format: "%.1fx", $0) }
-                    )
+                ControlPanelSection(title: t("danmaku.settings")) {
+                    HStack {
+                        Text(t("danmaku.enableDanmaku"))
+                            .font(.system(size: 13))
+                            .foregroundStyle(SkeuomorphicColors.textPrimary)
+
+                        Spacer()
+
+                        ToggleSwitch(isOn: binding(for: \.isEnabled))
+                    }
                 }
-                
-                Divider()
-                    .background(Color.white.opacity(0.06))
-                
+
+                // 外观设置
+                ControlPanelSection(title: t("player.appearance")) {
+                    VStack(spacing: 16) {
+                        SliderRow(
+                            title: t("player.opacity"),
+                            value: binding(for: \.opacity),
+                            range: 0.1...1.0,
+                            format: { "\(Int($0 * 100))%" }
+                        )
+
+                        SliderRow(
+                            title: t("danmaku.fontSize"),
+                            value: binding(for: \.fontSize),
+                            range: 12...24,
+                            format: { "\(Int($0))pt" }
+                        )
+
+                        SliderRow(
+                            title: t("player.scrollSpeed"),
+                            value: binding(for: \.speed),
+                            range: 0.5...2.0,
+                            format: { String(format: "%.1fx", $0) }
+                        )
+                    }
+                }
+
                 // 去重
-                SettingsToggleRow(
-                    title: t("player.enableDeduplication"),
-                    subtitle: t("player.hideDuplicate"),
-                    isOn: binding(for: \.enableDeduplication)
-                )
-                
-                Divider()
-                    .background(Color.white.opacity(0.06))
-                
+                ControlPanelSection {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t("player.enableDeduplication"))
+                                .font(.system(size: 13))
+                                .foregroundStyle(SkeuomorphicColors.textPrimary)
+
+                            Text(t("player.hideDuplicate"))
+                                .font(.system(size: 10))
+                                .foregroundStyle(SkeuomorphicColors.textMuted)
+                        }
+
+                        Spacer()
+
+                        ToggleSwitch(isOn: binding(for: \.enableDeduplication))
+                    }
+                }
+
                 // 弹幕类型
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(t("danmaku.type"))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                    
-                    SettingsToggleRow(title: t("danmaku.top"), isOn: binding(for: \.enableTop))
-                    SettingsToggleRow(title: t("danmaku.bottom"), isOn: binding(for: \.enableBottom))
-                    SettingsToggleRow(title: t("danmaku.scroll"), isOn: binding(for: \.enableScroll))
+                ControlPanelSection(title: t("danmaku.type")) {
+                    VStack(spacing: 12) {
+                        ToggleRow(title: t("danmaku.top"), isOn: binding(for: \.enableTop))
+                        ToggleRow(title: t("danmaku.bottom"), isOn: binding(for: \.enableBottom))
+                        ToggleRow(title: t("danmaku.scroll"), isOn: binding(for: \.enableScroll))
+                    }
                 }
             }
             .padding(12)
         }
     }
-    
+
     private func binding(for keyPath: WritableKeyPath<DanmakuSettings, Bool>) -> Binding<Bool> {
         Binding(
             get: { viewModel.danmakuSettings[keyPath: keyPath] },
@@ -791,7 +797,7 @@ private struct DanmakuSettingsView: View {
             }
         )
     }
-    
+
     private func binding(for keyPath: WritableKeyPath<DanmakuSettings, Double>) -> Binding<Double> {
         Binding(
             get: { viewModel.danmakuSettings[keyPath: keyPath] },
@@ -807,55 +813,29 @@ private struct DanmakuSettingsView: View {
 // MARK: - 增强设置视图
 private struct EnhancementSettingsView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
-    
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: t("player.imageEnhancement"), icon: "wand.and.stars")
-                
-                VStack(spacing: 8) {
-                    SettingsToggleRow(
-                        title: t("player.superResolution"),
-                        subtitle: t("player.aiUpscale"),
-                        isOn: binding(for: \.superResolution)
-                    )
-                    
-                    SettingsToggleRow(
-                        title: t("player.aiDenoise"),
-                        subtitle: t("player.reduceNoise"),
-                        isOn: binding(for: \.aiDenoise)
-                    )
-                    
-                    SettingsToggleRow(
-                        title: t("player.colorEnhance"),
-                        subtitle: t("player.boostSaturation"),
-                        isOn: binding(for: \.colorEnhancement)
-                    )
+            VStack(spacing: 16) {
+                ControlPanelSection(title: t("player.imageEnhancement")) {
+                    VStack(spacing: 12) {
+                        ToggleRow(title: t("player.superResolution"), isOn: binding(for: \.superResolution))
+                        ToggleRow(title: t("player.aiDenoise"), isOn: binding(for: \.aiDenoise))
+                        ToggleRow(title: t("player.colorEnhance"), isOn: binding(for: \.colorEnhancement))
+                    }
                 }
-                
-                Divider()
-                    .background(Color.white.opacity(0.06))
-                
-                SectionHeader(title: t("player.playbackSettings"), icon: "gear")
-                
-                VStack(spacing: 8) {
-                    SettingsToggleRow(
-                        title: t("player.autoPlay"),
-                        subtitle: t("player.autoPlayNext"),
-                        isOn: binding(for: \.autoPlayNext)
-                    )
-                    
-                    SettingsToggleRow(
-                        title: t("player.skipOpEd"),
-                        subtitle: t("player.smartSkip"),
-                        isOn: binding(for: \.skipOpeningEnding)
-                    )
+
+                ControlPanelSection(title: t("player.playbackSettings")) {
+                    VStack(spacing: 12) {
+                        ToggleRow(title: t("player.autoPlay"), isOn: binding(for: \.autoPlayNext))
+                        ToggleRow(title: t("player.skipOpEd"), isOn: binding(for: \.skipOpeningEnding))
+                    }
                 }
             }
             .padding(12)
         }
     }
-    
+
     private func binding(for keyPath: WritableKeyPath<AnimeDetailViewModel.PlayerEnhancementSettings, Bool>) -> Binding<Bool> {
         Binding(
             get: { viewModel.enhancementSettings[keyPath: keyPath] },
@@ -868,136 +848,48 @@ private struct EnhancementSettingsView: View {
     }
 }
 
-// MARK: - Section 标题
-private struct SectionHeader: View {
-    let title: String
-    let icon: String
-    
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
-            Text(title)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white)
-        }
-    }
-}
-
-// MARK: - 设置切换行（液态玻璃版本）
-private struct SettingsToggleRow: View {
-    let title: String
-    var subtitle: String? = nil
-    @Binding var isOn: Bool
-    @State private var isHovered = false
-    
-    var body: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(isOn ? Color(hex: "FF3366") : .white.opacity(0.4))
-                    .contentTransition(.symbolEffect(.replace))
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
-                    if let subtitle = subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.45))
-                    }
-                }
-            }
-            
-            Spacer()
-            
-            // 液态玻璃开关
-            LiquidGlassSwitchInternal(isOn: $isOn)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .liquidGlassSurface(
-            isHovered ? .prominent : .subtle,
-            tint: isOn ? Color(hex: "FF3366").opacity(0.1) : nil,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isHovered = hovering
-            }
-        }
-    }
-}
-
-// MARK: - 液态玻璃开关 (内部组件)
-private struct LiquidGlassSwitchInternal: View {
-    @Binding var isOn: Bool
-    @State private var isPressed = false
-    
-    var body: some View {
-        Button(action: {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                isOn.toggle()
-            }
-        }) {
-            ZStack {
-                // 背景轨道
-                Capsule()
-                    .fill(isOn ? Color(hex: "FF3366").opacity(0.35) : Color.white.opacity(0.12))
-                    .frame(width: 44, height: 24)
-                
-                // 玻璃滑块
-                Circle()
-                    .fill(.white)
-                    .frame(width: 20, height: 20)
-                    .shadow(color: .black.opacity(0.25), radius: 3, x: 0, y: 1)
-                    .offset(x: isOn ? 10 : -10)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.6), lineWidth: 0.5)
-                    )
-            }
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isPressed ? 0.92 : 1.0)
-    }
-}
-
-// MARK: - 设置滑块行
-private struct SettingsSliderRow: View {
+// MARK: - 滑块行
+private struct SliderRow: View {
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
     let format: (Double) -> String
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .font(.system(size: 12))
+                    .foregroundStyle(SkeuomorphicColors.textSecondary)
+
                 Spacer()
+
                 Text(format(value))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(SkeuomorphicColors.activeAmber)
                     .monospacedDigit()
             }
-            
-            Slider(value: $value, in: range)
-                .tint(Color(hex: "FF3366"))
+
+            MetalSlider(value: $value, range: range)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.white.opacity(0.05), lineWidth: 0.5)
-        )
+    }
+}
+
+// MARK: - 切换行
+private struct ToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(SkeuomorphicColors.textPrimary)
+
+            Spacer()
+
+            ToggleSwitch(isOn: $isOn)
+        }
     }
 }
 
@@ -1006,47 +898,26 @@ private struct EmptyStateView: View {
     let icon: String
     let title: String
     let message: String
-    
+
     var body: some View {
         VStack(spacing: 12) {
             Spacer()
-            
+
             Image(systemName: icon)
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.white.opacity(0.2))
-            
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(SkeuomorphicColors.textMuted)
+
             Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-            
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
+
             Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.4))
+                .font(.system(size: 11))
+                .foregroundStyle(SkeuomorphicColors.textMuted)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .padding(.horizontal, 20)
-            
-            Spacer()
-        }
-    }
-}
 
-// MARK: - 加载中视图
-private struct LoadingView: View {
-    let message: String
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            
-            ProgressView()
-                .scaleEffect(0.9)
-                .tint(.white.opacity(0.6))
-            
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.55))
-            
             Spacer()
         }
     }
@@ -1056,14 +927,14 @@ private struct LoadingView: View {
 private struct NeedsSelectionView: View {
     let items: [SourceSearchItem]
     let onSelect: (SourceSearchItem) -> Void
-    
+
     var body: some View {
         VStack(spacing: 10) {
             Text(t("player.selectMatch"))
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
                 .padding(.top, 10)
-            
+
             ScrollView {
                 VStack(spacing: 6) {
                     ForEach(items) { item in
@@ -1072,7 +943,7 @@ private struct NeedsSelectionView: View {
                 }
                 .padding(.horizontal, 12)
             }
-            
+
             Spacer()
         }
     }
@@ -1081,8 +952,7 @@ private struct NeedsSelectionView: View {
 private struct SelectionRow: View {
     let item: SourceSearchItem
     let onSelect: (SourceSearchItem) -> Void
-    @State private var isHovered = false
-    
+
     var body: some View {
         Button {
             onSelect(item)
@@ -1090,129 +960,109 @@ private struct SelectionRow: View {
             HStack(spacing: 10) {
                 Text(item.name)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SkeuomorphicColors.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                
+
                 Spacer()
-                
+
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.3))
+                    .foregroundStyle(SkeuomorphicColors.textMuted)
             }
             .padding(.horizontal, 12)
-            .frame(height: 40)
+            .frame(height: 36)
         }
-        .buttonStyle(.plain)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isHovered ? Color.white.opacity(0.06) : Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-        )
-        .onHover { hovering in
-            isHovered = hovering
-        }
+        .buttonStyle(MechanicalButtonStyle(cornerRadius: 4))
     }
 }
 
 // MARK: - 验证码 Required 视图
 private struct CaptchaRequiredView: View {
     let onTrigger: () -> Void
-    
+
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
-            
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(Color(hex: "FF9F43").opacity(0.8))
-            
+
+            LEDIndicator(color: SkeuomorphicColors.ledAmber, isOn: true, size: 20)
+
             Text(t("player.captchaRequired"))
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-            
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(SkeuomorphicColors.textPrimary)
+
             Text(t("captcha.sourceRequiresContinue"))
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.5))
+                .font(.system(size: 11))
+                .foregroundStyle(SkeuomorphicColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 16)
-            
+
             Button {
                 onTrigger()
             } label: {
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
                     Image(systemName: "lock.open")
                     Text(t("captcha.enterCode"))
                 }
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .frame(height: 32)
             }
-            .buttonStyle(.plain)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(hex: "3B8BFF").opacity(0.8))
-            )
+            .buttonStyle(MechanicalButtonStyle(isActive: true, cornerRadius: 16))
             .padding(.top, 6)
-            
+
             Spacer()
         }
     }
 }
 
-// MARK: - 液态玻璃验证码弹窗
+// MARK: - 验证码弹窗
 private struct LiquidGlassCaptchaSheet: View {
     let session: CaptchaVerificationSession
     let onCancel: () -> Void
     let onVerified: () -> Void
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         ZStack {
             // 背景
-            Color(hex: "0D0D0D")
+            SkeuomorphicColors.metalDark
                 .ignoresSafeArea()
-            
+
             VStack(spacing: 0) {
                 // 标题栏
                 HStack {
-                    Text("\(t("player.verification")) - \(session.rule.name)")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                    
+                    HStack(spacing: 8) {
+                        LEDIndicator(color: SkeuomorphicColors.ledAmber, isOn: true, size: 8)
+
+                        Text("\(t("player.verification")) - \(session.rule.name)")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(SkeuomorphicColors.textPrimary)
+                    }
+
                     Spacer()
-                    
+
                     Button {
                         dismiss()
                         onCancel()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SkeuomorphicColors.textSecondary)
                             .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(.plain)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.08))
-                    )
+                    .buttonStyle(MechanicalButtonStyle(cornerRadius: 14))
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
                 .padding(.bottom, 12)
-                
+
                 // 提示文字
                 Text(t("player.completeVerification"))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .font(.system(size: 11))
+                    .foregroundStyle(SkeuomorphicColors.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 10)
-                
+
                 // WebView
                 CaptchaVerificationWebView(
                     url: session.startURL,
@@ -1220,49 +1070,37 @@ private struct LiquidGlassCaptchaSheet: View {
                 )
                 .frame(minWidth: 860, minHeight: 580)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.black.opacity(0.3))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.black.opacity(0.5))
+                        .innerShadow(color: Color.black.opacity(0.5), radius: 2, x: 0, y: 1)
                 )
                 .padding(.horizontal, 16)
-                
+
                 // 底部按钮
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     Button {
                         dismiss()
                         onCancel()
                     } label: {
                         Text(t("cancel"))
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.8))
-                            .padding(.horizontal, 16)
-                            .frame(height: 34)
+                            .font(.system(size: 12, weight: .medium))
                     }
-                    .buttonStyle(.plain)
-                    .background(
-                        RoundedRectangle(cornerRadius: 17, style: .continuous)
-                            .fill(Color.white.opacity(0.08))
-                    )
-                    
+                    .buttonStyle(MechanicalButtonStyle(cornerRadius: 16))
+                    .frame(width: 80)
+
                     Spacer()
-                    
+
                     Button {
                         dismiss()
                         onVerified()
                     } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "checkmark.circle.fill")
+                        HStack(spacing: 6) {
+                            LEDIndicator(color: SkeuomorphicColors.ledGreen, isOn: true, size: 6)
                             Text(t("player.verificationComplete"))
                         }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
+                        .font(.system(size: 12, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
-                    .background(
-                        RoundedRectangle(cornerRadius: 17, style: .continuous)
-                            .fill(Color(hex: "3B8BFF").opacity(0.85))
-                    )
+                    .buttonStyle(MechanicalButtonStyle(isActive: true, cornerRadius: 16))
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 16)

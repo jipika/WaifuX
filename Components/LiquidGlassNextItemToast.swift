@@ -78,7 +78,7 @@ public class NextItemDataSource: ObservableObject {
     }
 }
 
-// MARK: - 液态玻璃下一张弹窗
+// MARK: - 深色液态玻璃下一张弹窗
 public struct LiquidGlassNextItemToast: View {
     let nextItem: NextItemPreviewable?
     let onTap: () -> Void
@@ -93,7 +93,7 @@ public struct LiquidGlassNextItemToast: View {
     // 配置
     private let appearDelay: TimeInterval = 3.0
     private let toastHeight: CGFloat = 80
-    private let toastWidth: CGFloat = 260
+    private let toastWidth: CGFloat = 280
 
     public init(
         nextItem: NextItemPreviewable?,
@@ -137,21 +137,20 @@ public struct LiquidGlassNextItemToast: View {
         }
     }
 
-    // MARK: - Toast 内容 - Mac 原生液态玻璃材质
+    // MARK: - Toast 内容 - 真正的深色液态玻璃材质
     private func toastContent(item: NextItemPreviewable) -> some View {
         Button(action: {
-            // 点击后隐藏弹窗并触发回调
             withAnimation(.easeOut(duration: 0.2)) {
                 isVisible = false
             }
             onTap()
         }) {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 // 缩略图
                 thumbnailView(item: item)
 
                 // 文字信息
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("下一张")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.5))
@@ -179,32 +178,17 @@ public struct LiquidGlassNextItemToast: View {
                         .foregroundStyle(.white.opacity(0.4))
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
-        // 应用 Mac 原生液态玻璃材质
-        .liquidGlassSurface(
-            .max,
-            tint: nil,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .background(
+            // 真正的深色液态玻璃背景
+            DarkLiquidGlassBackground(
+                cornerRadius: 20,
+                isHovered: isHovered
+            )
         )
-        .overlay(
-            // 边框 - Mac 液态玻璃风格
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(isHovered ? 0.34 : 0.25),
-                            Color.white.opacity(isHovered ? 0.10 : 0.06)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.22), radius: 16, y: 8)
         .scaleEffect(isPressed ? 0.96 : 1.0)
         .animation(.easeInOut(duration: 0.1), value: isPressed)
         .onHover { hovering in
@@ -233,18 +217,38 @@ public struct LiquidGlassNextItemToast: View {
             } else {
                 placeholderView
             }
+
+            // Badge
+            if let badge = item.previewBadge {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Text(badge)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(LiquidGlassColors.primaryPink.opacity(0.9))
+                            )
+                            .padding(4)
+                    }
+                    Spacer()
+                }
+            }
         }
-        .frame(width: 52, height: 52)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: 56, height: 56)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
         )
     }
 
     private var placeholderView: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(Color.white.opacity(0.08))
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(.ultraThinMaterial)
             .overlay(
                 Image(systemName: "photo")
                     .font(.system(size: 18))
@@ -276,6 +280,170 @@ public struct LiquidGlassNextItemToast: View {
             isVisible = false
         }
         startViewTimer()
+    }
+}
+
+// MARK: - 真正的深色液态玻璃背景
+/// 基于 Apple 官方 Liquid Glass 设计规范的深色玻璃效果
+struct DarkLiquidGlassBackground: View {
+    let cornerRadius: CGFloat
+    let isHovered: Bool
+
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                // macOS 26+: 使用原生 Liquid Glass API
+                NativeDarkLiquidGlass(cornerRadius: cornerRadius, isHovered: isHovered)
+            } else {
+                // 旧版本: 使用 Material 模拟深色液态玻璃
+                FallbackDarkLiquidGlass(cornerRadius: cornerRadius, isHovered: isHovered)
+            }
+        }
+    }
+}
+
+// MARK: - macOS 26+ 原生深色液态玻璃
+@available(macOS 26.0, *)
+private struct NativeDarkLiquidGlass: View {
+    let cornerRadius: CGFloat
+    let isHovered: Bool
+
+    var body: some View {
+        ZStack {
+            // 基础玻璃效果 - 使用 thickMaterial 作为深色基底
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.thickMaterial)
+
+            // 深色色调叠加 - 实现深色玻璃效果
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(Color.black.opacity(0.35))
+
+            // 玻璃反光 - 顶部高光
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isHovered ? 0.15 : 0.08),
+                            Color.white.opacity(0.02),
+                            Color.clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            // 底部阴影 - 增强立体感
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.black.opacity(0.15)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+        }
+        .overlay(
+            // 边框 - 液态玻璃风格
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isHovered ? 0.25 : 0.15),
+                            Color.white.opacity(0.05),
+                            Color.white.opacity(0.02)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
+        .shadow(
+            color: Color.black.opacity(isHovered ? 0.4 : 0.25),
+            radius: isHovered ? 24 : 16,
+            x: 0,
+            y: isHovered ? 12 : 8
+        )
+    }
+}
+
+// MARK: - 旧版本深色液态玻璃回退实现
+private struct FallbackDarkLiquidGlass: View {
+    let cornerRadius: CGFloat
+    let isHovered: Bool
+
+    var body: some View {
+        ZStack {
+            // 基础材质层 - 使用 ultraThickMaterial 作为深色基底
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.ultraThickMaterial)
+                .opacity(0.85)
+
+            // 深色色调层 - 模拟深色玻璃
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(hex: "1A1A2E").opacity(0.6),
+                            Color(hex: "12121F").opacity(0.7)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            // 玻璃反光层 - 顶部高光
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isHovered ? 0.12 : 0.06),
+                            Color.white.opacity(0.02),
+                            Color.clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .center
+                    )
+                )
+
+            // 底部渐变 - 增强深度感
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.black.opacity(0.2)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+        }
+        .overlay(
+            // 边框 - 液态玻璃风格
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isHovered ? 0.2 : 0.12),
+                            Color.white.opacity(0.06),
+                            Color.clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
+        .shadow(
+            color: Color.black.opacity(isHovered ? 0.35 : 0.22),
+            radius: isHovered ? 20 : 14,
+            x: 0,
+            y: isHovered ? 10 : 6
+        )
     }
 }
 

@@ -127,6 +127,12 @@ public enum LiquidGlassColors {
     public static let glowPink = Color(hex: "FF3B6B").opacity(0.4)
     public static let glowViolet = Color(hex: "9D6FFF").opacity(0.4)
     public static let glowBlue = Color(hex: "3B8BFF").opacity(0.4)
+
+    // MARK: - 播放器专用颜色（固定颜色，不随主题变化）
+    public static let playerBarBackground = Color(hex: "232A36")
+    public static let playerBarBackgroundLight = Color(hex: "2A313F")
+    public static let playerBarBorder = Color.white.opacity(0.15)
+    public static let playerBarShadow = Color.black.opacity(0.25)
 }
 
 // MARK: - Glass 变体枚举

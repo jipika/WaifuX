@@ -203,10 +203,6 @@ private struct ControlButtons: View {
                 onMusic()
             }
 
-            // 分隔线
-            GlassDivider()
-                .frame(height: 24)
-
             // 上一首
             ControlButton(icon: "backward.fill", tooltip: t("player.previous")) {
                 onPrevious()
@@ -221,10 +217,6 @@ private struct ControlButtons: View {
             ControlButton(icon: "forward.fill", tooltip: t("player.next")) {
                 onNext()
             }
-
-            // 分隔线
-            GlassDivider()
-                .frame(height: 24)
 
             // 倍速按钮
             SpeedButton(
@@ -452,19 +444,18 @@ private struct SpeedButton: View {
     }
 }
 
-// MARK: - 播放器背景（优化版 - 增强Liquid Glass）
+// MARK: - 播放器背景（优化版 - 使用固定颜色）
 private struct PlayerBarBackground: View {
     var body: some View {
         RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .fill(.thickMaterial)
-            .opacity(0.92)
+            .fill(LiquidGlassColors.playerBarBackground)
             .overlay(
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .stroke(
                         LinearGradient(
                             colors: [
-                                LiquidGlassColors.glassBorder,
-                                LiquidGlassColors.glassBorder.opacity(0.3)
+                                LiquidGlassColors.playerBarBorder,
+                                LiquidGlassColors.playerBarBorder.opacity(0.5)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -472,7 +463,7 @@ private struct PlayerBarBackground: View {
                         lineWidth: 1.5
                     )
             )
-            .shadow(color: .black.opacity(0.25), radius: 24, y: 10)
+            .shadow(color: LiquidGlassColors.playerBarShadow, radius: 24, y: 10)
     }
 }
 

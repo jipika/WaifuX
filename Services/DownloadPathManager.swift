@@ -2,14 +2,21 @@ import Foundation
 
 /// 下载路径管理器 - 统一管理壁纸和媒体的下载路径
 /// 支持路径迁移检测，当用户手动移动文件时能够自动找到
+/// 集成安全作用域书签权限管理
 @MainActor
 final class DownloadPathManager {
     static let shared = DownloadPathManager()
+    
+    // 权限管理器
+    private let permissionManager = DownloadPermissionManager.shared
 
     // MARK: - 文件夹结构
-    /// 根目录: ~/Downloads/WallHaven/
+    /// 根目录: ~/Downloads/WallHaven/ 或用户选择的目录
     var rootFolderURL: URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+        if let permittedURL = permissionManager.currentFolderURL {
+            return permittedURL
+        }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("WallHaven", isDirectory: true)
     }
@@ -32,12 +39,35 @@ final class DownloadPathManager {
     }
 
     private init() {
-        // 确保目录结构存在
-        createDirectoryStructure()
+        // 不在初始化时创建目录，等待权限确认后再创建
+    }
+
+    // MARK: - 权限管理
+    /// 确保下载权限有效
+    /// - Returns: 是否有有效权限
+    func ensureDownloadPermission() async -> Bool {
+        // 尝试开始访问安全作用域
+        if permissionManager.startAccessingSecurityScope() {
+            return true
+        }
+        
+        // 请求权限
+        return await permissionManager.ensurePermission()
+    }
+    
+    /// 请求下载文件夹权限
+    /// - Returns: 授权的文件夹URL
+    func requestDownloadFolder() async -> URL? {
+        await permissionManager.getDownloadFolder(requestIfNeeded: true)
+    }
+    
+    /// 检查是否有有效权限
+    var hasValidPermission: Bool {
+        permissionManager.hasValidPermission
     }
 
     // MARK: - 目录创建
-    /// 创建完整的目录结构
+    /// 创建完整的目录结构（需要先确保有权限）
     func createDirectoryStructure() {
         let directories = [rootFolderURL, wallpapersFolderURL, mediaFolderURL]
 
@@ -55,6 +85,19 @@ final class DownloadPathManager {
                 }
             }
         }
+    }
+    
+    /// 确保目录结构存在（异步版本，会先检查权限）
+    func ensureDirectoryStructure() async -> Bool {
+        // 确保有权限
+        guard await ensureDownloadPermission() else {
+            print("[DownloadPathManager] No download permission")
+            return false
+        }
+        
+        // 创建目录
+        createDirectoryStructure()
+        return true
     }
 
     // MARK: - 路径解析

@@ -74,48 +74,70 @@ final class ImageLoader {
         Task {
             await cleanupDiskCacheIfNeeded()
         }
+        
+        // 设置内存警告监听
+        setupMemoryWarningHandler()
+    }
+    
+    private func setupMemoryWarningHandler() {
+        // macOS 没有 didReceiveMemoryWarningNotification
+        // 使用系统内存压力通知作为替代
+        #if os(iOS)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
+        #endif
+    }
+    
+    @objc private func handleMemoryWarning() {
+        print("[ImageLoader] Memory warning received, clearing memory cache")
+        memoryCache.removeAllObjects()
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - 并发控制（使用 AsyncChannel 避免 QoS 优先级反转，支持 Task 取消）
     actor LoadLimiter {
         private var availableSlots: Int
-        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
         init(slots: Int) {
             self.availableSlots = slots
         }
 
-        func acquire() async {
+        func acquire(id: UUID) async {
             if availableSlots > 0 {
                 availableSlots -= 1
                 return
             }
-            // 支持 Task 取消的等待
+            
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    waiters.append(continuation)
+                    waiters[id] = continuation
                 }
             } onCancel: { [weak self] in
                 Task { [weak self] in
-                    await self?.removeWaiterIfPresent()
+                    await self?.removeWaiter(id: id)
                 }
             }
         }
 
         func release() {
-            if let waiter = waiters.first {
-                waiters.removeFirst()
+            if let (id, waiter) = waiters.first {
+                waiters.removeValue(forKey: id)
                 waiter.resume()
             } else {
                 availableSlots += 1
             }
         }
 
-        private func removeWaiterIfPresent() {
-            // 如果当前任务在等待队列中，移除它
-            // 注意：由于无法直接识别哪个 continuation 属于当前任务，
-            // 这里采用简单策略：如果有等待者且没有可用的 slot，我们创建一个虚拟的释放
-            // 实际场景中，取消的任务会在检查点退出
+        private func removeWaiter(id: UUID) {
+            waiters.removeValue(forKey: id)
         }
     }
 
@@ -140,6 +162,7 @@ final class ImageLoader {
 
         // 检查是否已有正在进行的任务
         if let existingTask = activeTasks[key] {
+            defer { activeTasks.removeValue(forKey: key) }
             return try? await existingTask.value.flatMap { NSImage(data: $0) }
         }
 
@@ -265,7 +288,8 @@ final class ImageLoader {
     /// 单次图片加载
     private func loadImageOnce(from url: URL, key: String) async throws -> Data? {
         // 使用 Swift 并发友好的方式控制并发
-        await self.loadLimiter.acquire()
+        let taskId = UUID()
+        await self.loadLimiter.acquire(id: taskId)
         defer { Task { await self.loadLimiter.release() } }
 
         // 再次检查缓存（可能其他任务已加载）
@@ -388,7 +412,7 @@ final class ImageLoader {
         }
         
         diskCacheKeys.removeAll()
-        saveDiskCacheIndex()
+        await saveDiskCacheIndex()
     }
     
     /// 获取缓存大小
@@ -427,11 +451,11 @@ final class ImageLoader {
             return nil
         }
         
-        // 更新 LRU 顺序
+        // 更新 LRU 顺序（异步保存索引）
         if let index = diskCacheKeys.firstIndex(of: key) {
             diskCacheKeys.remove(at: index)
             diskCacheKeys.append(key)
-            saveDiskCacheIndex()
+            scheduleSaveDiskCacheIndex()
         }
         
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
@@ -485,7 +509,7 @@ final class ImageLoader {
             }
         }
         
-        saveDiskCacheIndex()
+        await saveDiskCacheIndex()
         print("[ImageLoader] Cleaned up disk cache, removed \(removedSize / 1024 / 1024)MB")
     }
     
@@ -500,30 +524,25 @@ final class ImageLoader {
         diskCacheKeys = keys
     }
     
-    private func saveDiskCacheIndex() {
+    private func saveDiskCacheIndex() async {
         let indexFile = cacheDirectory.appendingPathComponent("cache_index.json")
-
-        if let data = try? JSONEncoder().encode(diskCacheKeys) {
+        
+        // 在 actor 上下文中安全地读取 keys
+        let keys = diskCacheKeys
+        
+        if let data = try? JSONEncoder().encode(keys) {
             try? data.write(to: indexFile)
         }
-        pendingSaveIndex = false
     }
 
     /// 延迟保存磁盘缓存索引，避免频繁写入
     private func scheduleSaveDiskCacheIndex() {
-        guard !pendingSaveIndex else { return }
-        pendingSaveIndex = true
-
         saveIndexTask?.cancel()
         saveIndexTask = Task {
             // 延迟 5 秒保存，合并多次写入
             try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
             guard !Task.isCancelled else { return }
-            await MainActor.run {
-                if self.pendingSaveIndex {
-                    self.saveDiskCacheIndex()
-                }
-            }
+            await saveDiskCacheIndex()
         }
     }
 

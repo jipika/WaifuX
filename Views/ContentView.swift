@@ -1105,7 +1105,13 @@ private struct DownloadProgressToast: View {
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(tint)
                     .frame(width: 34, height: 34)
-                    .liquidGlassSurface(.max, tint: tint.opacity(0.16), in: Circle())
+                    .background(
+                        // 使用真正的深色液态玻璃
+                        DarkLiquidGlassBackground(
+                            cornerRadius: 17,
+                            isHovered: false
+                        )
+                    )
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(task.title)
@@ -1128,7 +1134,14 @@ private struct DownloadProgressToast: View {
                         .foregroundStyle(tint)
                         .padding(.horizontal, 10)
                         .frame(height: 24)
-                        .liquidGlassSurface(.subtle, tint: tint.opacity(0.16), in: Capsule(style: .continuous))
+                        .background(
+                            // 状态标签使用 subtle 级别的深色玻璃
+                            DarkLiquidGlassBackground(
+                                cornerRadius: 12,
+                                isHovered: false
+                            )
+                            .opacity(0.7)
+                        )
                 }
             }
 
@@ -1157,11 +1170,12 @@ private struct DownloadProgressToast: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
         .frame(maxWidth: 440)
-        .liquidGlassSurface(
-            .max,
-            tint: tint.opacity(0.14),
-            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+        .background(
+            // 主容器使用真正的深色液态玻璃
+            DarkLiquidGlassBackground(
+                cornerRadius: 24,
+                isHovered: false
+            )
         )
-        .shadow(color: .black.opacity(0.28), radius: 24, y: 12)
     }
 }

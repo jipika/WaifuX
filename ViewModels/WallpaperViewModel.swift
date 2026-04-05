@@ -31,8 +31,7 @@ class WallpaperViewModel: ObservableObject {
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
     private var currentRandomSeed: String?
 
-    // MARK: - 图片加载限制（使用 ImageLoader 的 LoadLimiter，避免忙等待）
-    private let imageLoadLimiter = ImageLoader.shared.makeLoadLimiter(slots: 3)
+
 
     // 分类开关
     @Published var categoryGeneral = true
@@ -71,12 +70,54 @@ class WallpaperViewModel: ObservableObject {
     private let networkService = NetworkService.shared
     private let cacheService = CacheService.shared
 
-    // API Key - 本地存储
-    private let apiKeyUserDefaultsKey = "wallhaven_api_key"
+    // API Key - 使用 Keychain 安全存储
+    private let apiKeyService = "com.waifux.wallhaven.apikey"
+    private let apiKeyAccount = "wallhaven_api_key"
+    
     private var apiKey: String {
-        get { UserDefaults.standard.string(forKey: apiKeyUserDefaultsKey) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: apiKeyUserDefaultsKey) }
+        get {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: apiKeyService,
+                kSecAttrAccount as String: apiKeyAccount,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            
+            guard status == errSecSuccess,
+                  let data = result as? Data,
+                  let key = String(data: data, encoding: .utf8) else {
+                return ""
+            }
+            return key
+        }
+        set {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: apiKeyService,
+                kSecAttrAccount as String: apiKeyAccount
+            ]
+            
+            // 先删除已存在的项
+            SecItemDelete(query as CFDictionary)
+            
+            // 添加新值
+            guard !newValue.isEmpty else { return }
+            
+            let attributes: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: apiKeyService,
+                kSecAttrAccount as String: apiKeyAccount,
+                kSecValueData as String: newValue.data(using: .utf8)!
+            ]
+            
+            SecItemAdd(attributes as CFDictionary, nil)
+        }
     }
+    
     private var normalizedAPIKey: String? {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -355,14 +396,10 @@ class WallpaperViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 加载单张图片（带并发限制）
+    // MARK: - 加载单张图片
     func loadImage(for wallpaper: Wallpaper, priority: TaskPriority = .medium) async -> NSImage? {
         guard let thumbURL = wallpaper.thumbURL else { return nil }
-
-        // 使用 ImageLoader 的 LoadLimiter 进行并发控制
-        await imageLoadLimiter.acquire()
-        defer { Task { await imageLoadLimiter.release() } }
-
+        // 移除外层的 limiter，依赖 ImageLoader 内部的限制，避免双重限制导致死锁
         return await ImageLoader.shared.loadImage(from: thumbURL, priority: priority)
     }
 
@@ -464,6 +501,11 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 下载壁纸
     func downloadWallpaper(_ wallpaper: Wallpaper) async throws {
+        // 确保下载权限
+        guard await downloadPathManager.ensureDirectoryStructure() else {
+            throw DownloadError.permissionDenied
+        }
+        
         let task = downloadTaskService.addTask(wallpaper: wallpaper)
 
         do {
@@ -481,9 +523,6 @@ class WallpaperViewModel: ObservableObject {
                 id: wallpaper.id,
                 fileExtension: wallpaper.fileExtension
             )
-
-            // 确保目标目录存在
-            downloadPathManager.createDirectoryStructure()
 
             try imageData.write(to: fileURL)
             wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)

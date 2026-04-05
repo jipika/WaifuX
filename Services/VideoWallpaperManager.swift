@@ -22,6 +22,10 @@ final class VideoWallpaperManager: ObservableObject {
     private let stateKey = "video_wallpaper_state_v1"
 
     private init() {
+        setupNotificationObservers()
+    }
+    
+    private func setupNotificationObservers() {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleScreenParametersChanged),
@@ -56,6 +60,11 @@ final class VideoWallpaperManager: ObservableObject {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func applyVideoWallpaper(from localFileURL: URL, muted: Bool = true) throws {
@@ -222,7 +231,7 @@ final class VideoWallpaperManager: ObservableObject {
 
         windows[screenID] = window
         players[screenID] = queuePlayer
-        loopers[screenID] = looper
+        self.loopers[screenID] = looper
     }
 
     private func teardownAllWindows() {
@@ -272,7 +281,8 @@ final class VideoWallpaperManager: ObservableObject {
             self?.refreshPlaybackState()
         }
         playbackRefreshWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
+        // 增加检测间隔到 500ms，减少 ScreenCaptureKit 调用频率
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
     private func refreshPlaybackState() {
