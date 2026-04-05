@@ -90,11 +90,11 @@ User enters GitHub URL → Automatically sync rules → Start using
 
 ## 🌍 Multi-language Support
 
-| Language | Status |
-|----------|--------|
-| 🇨🇳 Simplified Chinese | ✅ Full Support |
-| 🇺🇸 English | ✅ Full Support |
-| 🇯🇵 Japanese | ✅ Full Support |
+| Language | Status | Link |
+|----------|--------|------|
+| 🇨🇳 Simplified Chinese | ✅ Full Support | [README.md](README.md) |
+| 🇺🇸 English | ✅ Full Support | [README.en.md](README.en.md) |
+| 🇯🇵 Japanese | ✅ Full Support | [README.ja.md](README.ja.md) |
 
 ---
 
