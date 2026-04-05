@@ -45,8 +45,8 @@ final class UpdateChecker: ObservableObject {
 
     // GitHub 仓库配置
     private let owner = "jipika"
-    private let repo = "WallHaven"
-    private let apiURL = "https://api.github.com/repos/jipika/WallHaven/releases/latest"
+    private let repo = "WaifuX"
+    private let apiURL = "https://api.github.com/repos/jipika/WaifuX/releases/latest"
 
     // UserDefaults keys
     private let lastCheckKey = "update_checker_last_check"
