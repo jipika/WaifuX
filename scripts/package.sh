@@ -1,16 +1,16 @@
 #!/bin/bash
-# WallHaven 打包脚本
+# WaifuX 打包脚本
 # 用法: ./scripts/package.sh
 
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-ARCHIVE_NAME="WallHaven.xcarchive"
-DMG_NAME="WallHaven.dmg"
-APP_NAME="WallHaven.app"
+ARCHIVE_NAME="WaifuX.xcarchive"
+DMG_NAME="WaifuX.dmg"
+APP_NAME="WaifuX.app"
 
-echo "📦 WallHaven 打包开始..."
+echo "📦 WaifuX 打包开始..."
 echo "项目目录: $PROJECT_DIR"
 
 # 清理旧构建
@@ -20,7 +20,7 @@ mkdir -p "$BUILD_DIR"
 
 # Archive
 echo "🔨 正在 Archive..."
-xcodebuild -scheme WallHaven -configuration Release clean archive \
+xcodebuild -scheme WaifuX -configuration Release clean archive \
   CODE_SIGN_IDENTITY="-" \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGNING_ALLOWED=NO \
@@ -71,17 +71,17 @@ echo "💿 正在创建 DMG..."
 # 尝试使用 create-dmg（如果可用）
 if command -v create-dmg &> /dev/null; then
     create-dmg \
-      --volname "WallHaven" \
+      --volname "WaifuX" \
       --window-size 540 400 \
       --app-drop-link 400 185 \
-      --hide-extension "WallHaven.app" \
+      --hide-extension "WaifuX.app" \
       --no-internet-enable \
       "$BUILD_DIR/$DMG_NAME" \
       "$BUILD_DIR/$APP_NAME"
 else
     # 使用 hdiutil 作为备选方案
     echo "⚠️ create-dmg 未安装，使用 hdiutil..."
-    hdiutil create -volname "WallHaven" \
+    hdiutil create -volname "WaifuX" \
       -srcfolder "$BUILD_DIR/$APP_NAME" \
       -ov -format UDZO \
       -imagekey zlib-level=9 \

@@ -1,6 +1,6 @@
-name: WallHaven
+name: WaifuX
 options:
-  bundleIdPrefix: com.wallhaven
+  bundleIdPrefix: com.waifux
   deploymentTarget:
     macOS: "26.0"
   xcodeVersion: "16.0"
@@ -20,7 +20,7 @@ settings:
     COMBINE_HIDPI_IMAGES: YES
 
 targets:
-  WallHaven:
+  WaifuX:
     type: application
     platform: macOS
     sources:
@@ -41,8 +41,8 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_NAME: WallHaven
-        PRODUCT_BUNDLE_IDENTIFIER: com.wallhaven.app
+        PRODUCT_NAME: WaifuX
+        PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
         MARKETING_VERSION: 0.0.1
         CURRENT_PROJECT_VERSION: 1
         SWIFT_VERSION: "6.0"
@@ -57,7 +57,7 @@ targets:
       - package: SwiftSoup
       - package: Kanna
     entitlements:
-      path: WallHaven.entitlements
+      path: WaifuX.entitlements
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true

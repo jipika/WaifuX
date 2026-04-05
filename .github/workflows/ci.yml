@@ -56,7 +56,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v5
         with:
-          name: WallHaven-CI-Build
+          name: WaifuX-CI-Build
           path: |
-            build/Build/Products/Release/WallHaven.app
+            build/Build/Products/Release/WaifuX.app
           retention-days: 7
