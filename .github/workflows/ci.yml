@@ -42,8 +42,8 @@ jobs:
       - name: Build
         run: |
           mkdir -p build
-          xcodebuild -project WallHaven.xcodeproj \
-            -scheme WallHaven \
+          xcodebuild -project WaifuX.xcodeproj \
+            -scheme WaifuX \
             -destination 'platform=macOS' \
             -configuration Release \
             -derivedDataPath build \
