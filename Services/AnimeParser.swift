@@ -73,12 +73,16 @@ actor AnimeParser {
 
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
-        // 检测验证码 - 仅在规则启用反爬虫配置时检测（对齐 Kazumi）
+        // 检测验证码（优先使用规则配置，如未配置则使用通用检测）
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
-                print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
+                print("[AnimeParser] ⚠️ 检测到验证码（规则配置），需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
+        } else if detectCommonCaptcha(in: html) {
+            // 即使规则未启用反爬虫，如果检测到明显的验证码标记，也触发验证
+            print("[AnimeParser] ⚠️ 检测到验证码（通用检测），需要使用 WebView 验证")
+            throw AnimeParserError.captchaRequired
         }
 
         // chapterRoads + chapterResult 为 XPath 时应用 Kanna 解析（与 api 字段无关，兼容 Kazumi 官方 api "1" 规则）
@@ -331,12 +335,16 @@ actor AnimeParser {
 
         print("[AnimeParser] HTML 长度: \(html.count) 字符")
 
-        // 检测验证码 - 仅在规则启用反爬虫配置时检测（对齐 Kazumi）
+        // 检测验证码（优先使用规则配置，如未配置则使用通用检测）
         if let antiCrawler = rule.antiCrawlerConfig, antiCrawler.enabled {
             if detectCaptcha(in: html, config: antiCrawler) {
-                print("[AnimeParser] ⚠️ 检测到验证码，需要使用 WebView 验证")
+                print("[AnimeParser] ⚠️ 检测到验证码（规则配置），需要使用 WebView 验证")
                 throw AnimeParserError.captchaRequired
             }
+        } else if detectCommonCaptcha(in: html) {
+            // 即使规则未启用反爬虫，如果检测到明显的验证码标记，也触发验证
+            print("[AnimeParser] ⚠️ 检测到验证码（通用检测），需要使用 WebView 验证")
+            throw AnimeParserError.captchaRequired
         }
 
         // 根据规则字段选择解析方式（勿仅用 api：Kazumi 存在 api=="1" 且仍为 XPath 的规则）
@@ -413,14 +421,58 @@ actor AnimeParser {
         return false
     }
 
-    /// 检测常见验证码关键词
+    /// 检测常见验证码关键词和标记
+    /// 优化：避免误判，要求多个条件同时满足或更强的特征
     private func detectCommonCaptcha(in html: String) -> Bool {
         let lowercased = html.lowercased()
-        let captchaKeywords = [
-            "captcha", "验证码", "验证", "人机验证", "安全验证",
-            "请点击", "请滑动", "请勾选", "i'm not a robot"
+        
+        // 强验证码特征（高置信度）
+        let strongCaptchaIndicators = [
+            "cf-browser-verification",
+            "__cf_chl_jschl_tk__",
+            "turnstile",
+            "challenge-platform",
+            "g-recaptcha",
+            "data-callback",
+            "grecaptcha",
+            "captcha-response"
         ]
-        return captchaKeywords.contains { lowercased.contains($0) }
+        
+        // 检查强特征 - 这些几乎肯定是验证码
+        if strongCaptchaIndicators.contains(where: { lowercased.contains($0) }) {
+            print("[AnimeParser] 检测到强验证码特征")
+            return true
+        }
+        
+        // 检查 403 Forbidden 页面是否包含验证码相关元素
+        if lowercased.contains("<title>403 forbidden</title>") ||
+           lowercased.contains("<title>access denied</title>") {
+            // 如果 403 页面中有验证码相关的 input name
+            if lowercased.contains("captcha") || lowercased.contains("verify") {
+                print("[AnimeParser] 403页面包含验证码元素")
+                return true
+            }
+        }
+        
+        // 弱验证码关键词 - 需要多个同时出现或配合特定上下文
+        // 注意："验证"这个词在中文网站太常见（如"验证邮箱"），单独出现不应触发
+        let weakCaptchaKeywords = [
+            "captcha",
+            "i'm not a robot",
+            "recaptcha",
+            "hcaptcha",
+            "智能验证",
+            "安全验证中",
+            "请完成安全验证"
+        ]
+        
+        // 检查弱特征
+        if weakCaptchaKeywords.contains(where: { lowercased.contains($0) }) {
+            print("[AnimeParser] 检测到验证码关键词")
+            return true
+        }
+        
+        return false
     }
     
     /// 从 HTML 中提取验证码图片 URL（使用规则配置的选择器）
@@ -592,11 +644,35 @@ actor AnimeParser {
         return allResults
     }
 
+    // MARK: - Cookie 管理
+    
+    /// 获取规则相关的 Cookie（从共享存储）
+    private func getCookies(for url: URL, rule: AnimeRule) -> String {
+        let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
+        return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+    
+    /// 清理特定域名的旧 Cookie（在验证码验证后调用以确保新 Cookie 生效）
+    private func clearCookies(for domain: String) {
+        let storage = HTTPCookieStorage.shared
+        if let cookies = storage.cookies {
+            for cookie in cookies where cookie.domain.contains(domain) || domain.contains(cookie.domain) {
+                storage.deleteCookie(cookie)
+                print("[AnimeParser] 清除旧 Cookie: \(cookie.name)")
+            }
+        }
+    }
+
     // MARK: - HTML 获取
 
-    private func fetchHTML(url: String, rule: AnimeRule) async throws -> String {
+    private func fetchHTML(url: String, rule: AnimeRule, clearOldCookies: Bool = false) async throws -> String {
         guard let requestURL = URL(string: url) else {
             throw AnimeParserError.invalidURL(url)
+        }
+
+        // 如果需要，先清除旧 Cookie（用于验证码验证后重试）
+        if clearOldCookies, let host = requestURL.host {
+            clearCookies(for: host)
         }
 
         var request = URLRequest(url: requestURL)
@@ -614,9 +690,17 @@ actor AnimeParser {
             request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         }
 
-        // 设置 Referer（如果未指定）
+        // 设置 Referer（优先使用规则中的 referer，否则使用 baseURL）
         if request.value(forHTTPHeaderField: "Referer") == nil {
-            request.setValue(rule.baseURL, forHTTPHeaderField: "Referer")
+            let refererValue = rule.referer?.isEmpty == false ? rule.referer : rule.baseURL
+            request.setValue(refererValue, forHTTPHeaderField: "Referer")
+        }
+        
+        // 设置 Cookie（从共享存储自动同步）
+        let cookieString = getCookies(for: requestURL, rule: rule)
+        if !cookieString.isEmpty {
+            request.setValue(cookieString, forHTTPHeaderField: "Cookie")
+            print("[AnimeParser] 使用 Cookie: \(cookieString.prefix(50))...")
         }
 
         print("[AnimeParser] HTTP 请求: \(url)")
@@ -700,9 +784,6 @@ actor AnimeParser {
         // 无效 URL 路径
         _ = ["/", "/index.html", "/index.php", "#", ""]
 
-        // 搜索查询关键词（用于匹配度评分）
-        let queryKeywords = searchQuery?.lowercased().components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty } ?? []
-
         for element in elements {
             // 提取标题
             var title: String? = nil
@@ -721,20 +802,8 @@ actor AnimeParser {
                 continue
             }
 
-            // 拉丁语系关键词启发式（CJK 检索跳过，与 Kazumi / HTMLXPathParser 行为一致）
-            if AnimeSearchHeuristics.shouldApplyStrictTitleKeywordFilter(searchQuery: searchQuery),
-               !queryKeywords.isEmpty {
-                let titleKeywords = lowerTitle.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).filter { !$0.isEmpty }
-                let hasMatchingKeyword = queryKeywords.contains { queryWord in
-                    titleKeywords.contains { titleWord in
-                        titleWord.contains(queryWord) || queryWord.contains(titleWord)
-                    }
-                }
-                if !hasMatchingKeyword && finalTitle.count < 10 {
-                    print("[AnimeParser] ⚠️ 跳过低匹配度结果: \(finalTitle)")
-                    continue
-                }
-            }
+            // 注意：与 Kazumi 保持一致，不做关键词匹配过滤
+            // Kazumi 的搜索逻辑仅依赖 XPath，不做标题-关键词启发式过滤
 
             // 提取封面
             var cover: String? = nil

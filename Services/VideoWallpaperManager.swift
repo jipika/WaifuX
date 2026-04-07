@@ -20,6 +20,11 @@ final class VideoWallpaperManager: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
+    
+    // 防止重复重建
+    private var isRebuilding = false
+    private var pendingRebuildWorkItem: DispatchWorkItem?
+    private let rebuildLock = NSLock()
 
     private init() {
         setupNotificationObservers()
@@ -62,9 +67,14 @@ final class VideoWallpaperManager: ObservableObject {
         )
     }
     
+    @MainActor
     deinit {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        pendingRebuildWorkItem?.cancel()
+        pendingRebuildWorkItem = nil
+        playbackRefreshWorkItem?.cancel()
+        playbackRefreshWorkItem = nil
     }
 
     func applyVideoWallpaper(from localFileURL: URL, muted: Bool = true) throws {
@@ -153,11 +163,19 @@ final class VideoWallpaperManager: ObservableObject {
 
     @objc private func handleScreenParametersChanged() {
         guard currentVideoURL != nil else { return }
-        do {
-            try rebuildWindows()
-        } catch {
-            NSLog("[VideoWallpaperManager] Failed to rebuild windows: \(error.localizedDescription)")
+        
+        // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
+        pendingRebuildWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.currentVideoURL != nil else { return }
+            do {
+                try self.rebuildWindows()
+            } catch {
+                NSLog("[VideoWallpaperManager] Failed to rebuild windows: \(error.localizedDescription)")
+            }
         }
+        pendingRebuildWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
     }
 
     @objc private func handleWorkspaceContextChanged() {
@@ -171,17 +189,38 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     @objc private func handleScreensDidWake() {
-        if currentVideoURL != nil, windows.isEmpty {
-            try? rebuildWindows()
+        // 屏幕唤醒时防抖重建
+        pendingRebuildWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if self.currentVideoURL != nil, self.windows.isEmpty {
+                try? self.rebuildWindows()
+            }
+            if !self.isPaused {
+                self.schedulePlaybackStateRefresh()
+            }
         }
-        if !isPaused {
-            schedulePlaybackStateRefresh()
-        }
+        pendingRebuildWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
     private func rebuildWindows() throws {
         guard let currentVideoURL else { return }
+        
+        // 使用锁防止并发重建
+        rebuildLock.lock()
+        defer { rebuildLock.unlock() }
+        
+        // 如果正在重建，跳过此次请求
+        guard !isRebuilding else {
+            NSLog("[VideoWallpaperManager] Rebuild already in progress, skipping...")
+            return
+        }
+        
+        isRebuilding = true
+        defer { isRebuilding = false }
 
+        NSLog("[VideoWallpaperManager] Rebuilding windows for \(NSScreen.screens.count) screen(s)")
         teardownAllWindows()
 
         for screen in NSScreen.screens {
@@ -189,6 +228,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         schedulePlaybackStateRefresh()
+        NSLog("[VideoWallpaperManager] Windows rebuilt successfully")
     }
 
     private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) throws {

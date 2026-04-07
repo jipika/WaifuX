@@ -169,8 +169,6 @@ struct DanmakuView: View {
         let endTime = Date().timeIntervalSince1970 + duration * (1 - progress)
         scrollTracks[trackIndex] = endTime
 
-        // 从池中获取弹幕项
-        let item = getDanmakuItem()
         // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,
@@ -189,8 +187,6 @@ struct DanmakuView: View {
             topTracks[trackIndex] = false
         }
 
-        // 从池中获取弹幕项
-        let item = getDanmakuItem()
         // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,
@@ -210,8 +206,6 @@ struct DanmakuView: View {
             bottomTracks[trackIndex] = false
         }
 
-        // 从池中获取弹幕项
-        let item = getDanmakuItem()
         // 更新弹幕数据
         return DanmakuItem(
             danmaku: danmaku,

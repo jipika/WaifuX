@@ -27,7 +27,7 @@ struct AnimeExploreView: View {
             let gridContentWidth = max(0, geometry.size.width - 56)
 
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 24) {
+                LazyVStack(alignment: .leading, spacing: 24) {
                     heroSection
                     animeSection(gridContentWidth: gridContentWidth)
                 }
@@ -37,7 +37,6 @@ struct AnimeExploreView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -145,6 +144,7 @@ struct AnimeExploreView: View {
                     }
                 }
                 .padding(.horizontal, 16)
+                .frame(maxWidth: 460)
                 .frame(height: 46)
                 .liquidGlassSurface(
                     .prominent,
@@ -167,8 +167,8 @@ struct AnimeExploreView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
             }
-            .frame(maxWidth: 460, alignment: .leading)
 
             // 分类选择器
             ScrollView(.horizontal, showsIndicators: false) {
@@ -239,17 +239,9 @@ struct AnimeExploreView: View {
     private func animeSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .center) {
-                HStack(spacing: 8) {
-                    Text("\(viewModel.animeItems.count) \(t("content.animes"))")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.66))
-
-                    if viewModel.isLoadingMore {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                            .tint(.white.opacity(0.6))
-                    }
-                }
+                Text("\(viewModel.animeItems.count) \(t("content.animes"))")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.66))
 
                 Spacer()
 
@@ -290,39 +282,51 @@ struct AnimeExploreView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
+                // 简单固定布局：根据窗口宽度决定列数
+                let columnCount = gridContentWidth > 1200 ? 5 : (gridContentWidth > 800 ? 4 : 3)
+                let spacing: CGFloat = 20
+                let totalSpacing = spacing * CGFloat(columnCount - 1)
+                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                let cardHeight = cardWidth * 1.4 // 竖版比例
+                
+                // 动态创建固定列
+                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
+                
                 LazyVGrid(
-                    columns: calculateGridColumns(width: gridContentWidth),
-                    spacing: 24
+                    columns: columns,
+                    alignment: .leading,
+                    spacing: spacing
                 ) {
-                    ForEach(viewModel.animeItems) { anime in
-                        AnimePortraitCard(anime: anime) {
+                    ForEach(Array(viewModel.animeItems.enumerated()), id: \.element.id) { index, anime in
+                        AnimePortraitCard(
+                            anime: anime,
+                            cardWidth: cardWidth,
+                            cardHeight: cardHeight
+                        ) {
                             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 selectedAnime = anime
                             }
                         }
+                        .onAppear {
+                            guard index >= viewModel.animeItems.count - 6 else { return }
+                            guard viewModel.hasMorePages,
+                                  !viewModel.isLoading,
+                                  !viewModel.isLoadingMore else { return }
+                            Task { await viewModel.loadMore() }
+                        }
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
 
-                    // 加载更多指示器（同时作为触发器）
-                    if viewModel.hasMorePages && !viewModel.isLoading {
+                // 加载指示器 - 固定占位避免抖动
+                Color.clear
+                    .frame(height: 20)
+                    .overlay(
                         PaginationLoadingView()
-                            .frame(height: 60)
-                            .padding(.top, 20)
-                            .onAppear {
-                                guard !viewModel.isLoadingMore else { return }
-                                Task {
-                                    await viewModel.loadMore()
-                                }
-                            }
-                    }
-                }
-                .id("grid-\(selectedCategory.rawValue)-\(selectedHotTag?.rawValue ?? "all")")
-
-                // 加载更多指示器（非网格内）
-                if viewModel.isLoadingMore {
-                    PaginationLoadingView()
-                        .frame(height: 60)
-                        .padding(.top, 20)
-                }
+                            .opacity(viewModel.isLoadingMore ? 1 : 0)
+                            .animation(.easeInOut(duration: 0.2), value: viewModel.isLoadingMore)
+                    )
 
                 // 没有更多数据提示
                 if !viewModel.hasMorePages && viewModel.animeItems.count > 20 {
@@ -367,26 +371,6 @@ struct AnimeExploreView: View {
         )
     }
 
-    private func calculateGridColumns(width: CGFloat) -> [GridItem] {
-        let spacing: CGFloat = 24
-        // 竖图 2:3 比例，支持 2-6 列
-        let tiers: [(cols: Int, minCell: CGFloat)] = [
-            (6, 140),  // 6列需要每列至少 140pt
-            (5, 145),  // 5列需要每列至少 145pt
-            (4, 150),  // 4列需要每列至少 150pt
-            (3, 160),  // 3列需要每列至少 160pt
-            (2, 180)   // 2列需要每列至少 180pt
-        ]
-
-        for tier in tiers {
-            let cellWidth = (width - CGFloat(tier.cols - 1) * spacing) / CGFloat(tier.cols)
-            if cellWidth >= tier.minCell {
-                return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: tier.cols)
-            }
-        }
-        return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: 2)
-    }
-
     private var greetingText: String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
@@ -423,7 +407,6 @@ private struct AnimeHotTagChip: View {
     let isSelected: Bool
     let action: () -> Void
 
-    @Environment(\.explorePageAtmosphereTint) private var exploreTint
     @State private var isHovered = false
 
     var body: some View {
@@ -433,14 +416,17 @@ private struct AnimeHotTagChip: View {
                 .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
                 .padding(.horizontal, 14)
                 .frame(height: 32)
-                .liquidGlassSurface(
-                    isSelected ? .prominent : .regular,
-                    tint: isSelected ? exploreTint.primary.opacity(0.14) : exploreTint.primary.opacity(0.06),
-                    in: Capsule(style: .continuous)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
@@ -483,14 +469,17 @@ private struct AnimeCategoryChip: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .liquidGlassSurface(
-                isSelected ? .max : .regular,
-                tint: category.accentColors.first.map { Color(hex: $0).opacity(isSelected ? 0.18 : 0.08) },
-                in: Capsule(style: .continuous)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered && !isSelected ? 1.01 : 1.0)
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
@@ -583,7 +572,14 @@ private struct AnimePortraitCardSkeleton: View {
             .background(Color.black.opacity(0.46))
         }
         .frame(maxWidth: .infinity)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        // 添加与实际卡片相同的 overlay 和 shadow，确保尺寸一致
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
         .shimmer()
     }
 }

@@ -95,6 +95,7 @@ struct SearchView: View {
                     .liquidGlassSurface(.max, tint: LiquidGlassColors.tertiaryBlue.opacity(0.18), in: Circle())
             }
             .buttonStyle(.plain)
+            .contentShape(Circle())
 
             Spacer()
 
@@ -165,6 +166,7 @@ struct SearchView: View {
                         .liquidGlassSurface(.max, tint: LiquidGlassColors.primaryPink.opacity(0.35), in: Circle())
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
             }
 
             // 筛选标签

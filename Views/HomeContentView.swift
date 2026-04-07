@@ -38,6 +38,9 @@ struct HomeContentView: View {
     @State private var isCarouselInteracting = false
     @State private var isCarouselAnimating = false
     @State private var carouselDragOffset: CGFloat = 0
+    
+    // 优化：缓存 heroPalette 避免每次访问都重新计算
+    @State private var cachedHeroPalette: HeroDrivenPalette = HeroDrivenPalette(wallpaper: nil)
 
     private let heroHeight: CGFloat = 620
     private let carouselAutoPlayInterval: TimeInterval = 6.0
@@ -46,8 +49,9 @@ struct HomeContentView: View {
     private let contentHorizontalInset: CGFloat = 26
     private let sectionTopSpacing: CGFloat = 8
     
+    /// 使用缓存的调色板，减少重复计算
     private var heroPalette: HeroDrivenPalette {
-        HeroDrivenPalette(wallpaper: currentHeroWallpaper)
+        cachedHeroPalette
     }
 
     var body: some View {
@@ -407,6 +411,19 @@ struct HomeContentView: View {
         let clampedIndex = min(max(currentCarouselIndex, 0), heroWallpapers.count - 1)
         return heroWallpapers[clampedIndex]
     }
+    
+    /// 更新缓存的调色板（只在壁纸变化时调用）
+    private func updateCachedHeroPalette() {
+        let newPalette = HeroDrivenPalette(wallpaper: currentHeroWallpaper)
+        // 只在颜色真正变化时才更新，避免不必要的刷新
+        if newPalette.primary != cachedHeroPalette.primary ||
+           newPalette.secondary != cachedHeroPalette.secondary ||
+           newPalette.tertiary != cachedHeroPalette.tertiary {
+            withAnimation(.easeInOut(duration: 0.75)) {
+                cachedHeroPalette = newPalette
+            }
+        }
+    }
 
     private var recentWallpapers: [Wallpaper] {
         let latest = Array(viewModel.latestWallpapers.prefix(10))
@@ -427,6 +444,8 @@ struct HomeContentView: View {
             isCarouselInteracting = false
             isCarouselAnimating = false
             carouselDragOffset = 0
+            // 更新调色板缓存
+            updateCachedHeroPalette()
             return
         }
 
@@ -452,6 +471,9 @@ struct HomeContentView: View {
             isCarouselAnimating = false
             carouselDragOffset = 0
         }
+        
+        // 更新调色板缓存
+        updateCachedHeroPalette()
     }
 
     private func selectHero(at index: Int, animated: Bool = true) {
@@ -1029,6 +1051,7 @@ private struct HeroActionButton: View {
             )
         }
         .buttonStyle(.plain)
+        .contentShape(Capsule(style: .continuous))
     }
 }
 
@@ -1260,6 +1283,7 @@ private struct HeroEdgeButton: View {
                 .liquidGlassSurface(.regular, tint: LiquidGlassColors.glassTint, in: Circle())
         }
         .buttonStyle(.plain)
+        .contentShape(Circle())
     }
 }
 

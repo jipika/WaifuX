@@ -131,11 +131,13 @@ struct MediaDetailSheet: View {
                 floatingBackButton
                     .padding(.top, topBarTopInset + 18)
                     .padding(.leading, 28)
+                    .zIndex(100)
 
                 floatingInfoOverlay(
                     viewportWidth: viewW,
                     topBarTopInset: topBarTopInset
                 )
+                .zIndex(100)
 
                 // 下一张弹窗
                 LiquidGlassNextItemToast(
@@ -146,7 +148,7 @@ struct MediaDetailSheet: View {
                     onScrollUp: {
                         navigateToNextMedia()
                     },
-                    onScrollDown: {
+                    onScrollDown: { 
                         navigateToPreviousMedia()
                     }
                 )
@@ -292,6 +294,7 @@ struct MediaDetailSheet: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
                 .frame(width: 38, height: 38)
+                .contentShape(Circle())
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
@@ -832,8 +835,10 @@ private struct LoopingVideoBackgroundView: NSViewRepresentable {
                 forName: .AVPlayerItemNewAccessLogEntry,
                 object: item,
                 queue: .main
-            ) { [weak self] _ in
-                self?.onReady?()
+            ) { @Sendable [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.onReady?()
+                }
             }
             
             // 备选：使用短暂延迟确保视频已经开始加载

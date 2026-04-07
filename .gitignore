@@ -39,8 +39,7 @@ Pods/
 LocalConfig.json
 *.local.json
 
-# Images (keep reward.jpg in repo)
-# reward.jpg
+Docs/*.md
 
 # Temp
 *.tmp

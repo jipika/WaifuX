@@ -20,7 +20,7 @@ struct WallpaperExploreContentView: View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 34) {
+                LazyVStack(alignment: .leading, spacing: 34) {
                     heroSection
                     categorySection
                     quickFilterSection
@@ -33,11 +33,11 @@ struct WallpaperExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage
+                    referenceImage: exploreAtmosphere.referenceImage,
+                    lightweightBackdrop: false
                 )
             )
         }
@@ -171,6 +171,7 @@ struct WallpaperExploreContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
             }
             HStack(alignment: .center, spacing: 10) {
                 Text(t("hotWallpaper") + ":")
@@ -356,33 +357,53 @@ struct WallpaperExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
+                // 简单固定布局：根据窗口宽度决定列数
+                let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
+                let spacing: CGFloat = 16
+                let totalSpacing = spacing * CGFloat(columnCount - 1)
+                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                let cardHeight = cardWidth * 0.6
+                
+                // 动态创建固定列
+                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
+                
                 LazyVGrid(
-                    columns: ExploreGridLayout.columns(for: gridContentWidth),
+                    columns: columns,
                     alignment: .leading,
-                    spacing: ExploreGridLayout.spacing
+                    spacing: spacing
                 ) {
                     ForEach(Array(displayedWallpapers.enumerated()), id: \.element.id) { index, wallpaper in
                         SimpleWallpaperCard(
                             wallpaper: wallpaper,
+                            cardWidth: cardWidth,
+                            cardHeight: cardHeight,
                             isFavorite: viewModel.isFavorite(wallpaper),
                             onTap: { selectedWallpaper = wallpaper }
                         )
                         .onAppear {
-                            guard index >= displayedWallpapers.count - 5,
-                                  viewModel.hasMorePages,
+                            guard index >= displayedWallpapers.count - 6 else { return }
+                            guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
                             isLoadingMore = true
-                            Task { await loadMoreUntilVisibleGrowth() }
+                            Task {
+                                await loadMoreUntilVisibleGrowth()
+                                isLoadingMore = false
+                            }
                         }
                     }
                 }
-                // 加载指示器
-                if viewModel.isLoading && !displayedWallpapers.isEmpty {
-                    PaginationLoadingView()
-                        .frame(height: 60)
-                        .padding(.top, 20)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+
+                // 加载指示器 - 固定占位避免抖动
+                Color.clear
+                    .frame(height: 20)
+                    .overlay(
+                        PaginationLoadingView()
+                            .opacity(viewModel.isLoading && !displayedWallpapers.isEmpty ? 1 : 0)
+                            .animation(.easeInOut(duration: 0.2), value: viewModel.isLoading)
+                    )
             }
         }
     }
@@ -701,14 +722,20 @@ struct WallpaperExploreContentView: View {
         let existingIDs = Set(displayedWallpapers.map(\.id))
         // 只追加新数据
         let newWallpapers = tagFilteredWallpapers.filter { !existingIDs.contains($0.id) }
-        if !newWallpapers.isEmpty {
-            // 使用 withAnimation 会导致抖动，所以直接追加
+        guard !newWallpapers.isEmpty else { return }
+        
+        // 使用事务禁用动画，避免抖动
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
             displayedWallpapers.append(contentsOf: newWallpapers)
         }
     }
     private func loadMoreUntilVisibleGrowth(maxAttempts: Int = 6) async {
         let initialVisibleCount = displayedWallpapers.count
         var attempts = 0
+        defer { isLoadingMore = false }
+        
         while attempts < maxAttempts, viewModel.hasMorePages {
             attempts += 1
             await viewModel.loadMore()
@@ -717,7 +744,6 @@ struct WallpaperExploreContentView: View {
                 break
             }
         }
-        isLoadingMore = false
     }
 
     // MARK: - Task 管理
@@ -747,6 +773,8 @@ struct WallpaperExploreContentView: View {
 
 private struct SimpleWallpaperCard: View {
     let wallpaper: Wallpaper
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
     /// 本地收藏：爱心与数字用粉红，否则灰色（Wallhaven 列表数字仍为接口 favorites）
     let isFavorite: Bool
     let onTap: () -> Void
@@ -763,15 +791,15 @@ private struct SimpleWallpaperCard: View {
         }
     }
 
-    private var thumbShape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(
-            topLeadingRadius: 14,
-            bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0,
-            topTrailingRadius: 14,
-            style: .continuous
-        )
-    }
+    // 静态形状缓存，避免每次 body 重新创建
+    private static let thumbShape = UnevenRoundedRectangle(
+        topLeadingRadius: 14,
+        bottomLeadingRadius: 0,
+        bottomTrailingRadius: 0,
+        topTrailingRadius: 14,
+        style: .continuous
+    )
+    private static let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
 
     // 缓存分辨率显示字符串
     private var cachedResolutionDisplay: String {
@@ -801,9 +829,8 @@ private struct SimpleWallpaperCard: View {
                         placeholderGradient
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 152)
-                .clipShape(thumbShape)
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(Self.thumbShape)
                 .overlay(alignment: .topLeading) {
                     // 简化元数据行
                     simplifiedMetadataRow
@@ -826,22 +853,24 @@ private struct SimpleWallpaperCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(purityBorderColor ?? Color.white.opacity(0.06), lineWidth: purityBorderColor != nil ? 2 : 1)
+            .background(
+                Self.cardShape
+                    .fill(Color.clear)
+                    .overlay(
+                        Self.cardShape
+                            .stroke(purityBorderColor ?? Color.white.opacity(0.06), lineWidth: purityBorderColor != nil ? 2 : 1)
+                    )
             )
+            .clipShape(Self.cardShape)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .onHover { hovering in
-            if isHovered != hovering {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isHovered = hovering
-                }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                isHovered = hovering
             }
         }
     }
@@ -902,77 +931,35 @@ private struct SimpleWallpaperCard: View {
         .foregroundStyle(tint)
     }
 
-    // 底部右侧统计信息行
+    // 底部右侧统计信息行 - 简化版：使用 minimumScaleFactor 替代 ViewThatFits
     private var trailingMetadataRow: some View {
-        ViewThatFits(in: .horizontal) {
-            // 完整版本：主色 + 收藏 + 浏览 + 文件大小
-            HStack(spacing: 12) {
-                if let primaryColorHex = wallpaper.primaryColorHex {
-                    footerColorTag(hex: primaryColorHex)
-                }
-                
-                statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
-                )
-                
-                statLabel(
-                    systemImage: "eye.fill",
-                    value: compactNumber(wallpaper.views),
-                    tint: .white.opacity(0.5)
-                )
-                
-                if !wallpaper.fileSizeLabel.isEmpty {
-                    statLabel(
-                        systemImage: "doc.fill",
-                        value: wallpaper.fileSizeLabel,
-                        tint: .white.opacity(0.4)
-                    )
-                }
+        HStack(spacing: 10) {
+            if let primaryColorHex = wallpaper.primaryColorHex {
+                footerColorTag(hex: primaryColorHex)
             }
-            .fixedSize(horizontal: true, vertical: false)
             
-            // 精简版本：收藏 + 浏览 + 文件大小
-            HStack(spacing: 12) {
-                statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
-                )
-                
-                statLabel(
-                    systemImage: "eye.fill",
-                    value: compactNumber(wallpaper.views),
-                    tint: .white.opacity(0.5)
-                )
-                
-                if !wallpaper.fileSizeLabel.isEmpty {
-                    statLabel(
-                        systemImage: "doc.fill",
-                        value: wallpaper.fileSizeLabel,
-                        tint: .white.opacity(0.4)
-                    )
-                }
-            }
-            .fixedSize(horizontal: true, vertical: false)
+            statLabel(
+                systemImage: "heart.fill",
+                value: compactNumber(wallpaper.favorites),
+                tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
+            )
             
-            // 最小版本：仅收藏 + 浏览
-            HStack(spacing: 12) {
+            statLabel(
+                systemImage: "eye.fill",
+                value: compactNumber(wallpaper.views),
+                tint: .white.opacity(0.5)
+            )
+            
+            if !wallpaper.fileSizeLabel.isEmpty {
                 statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
-                )
-                
-                statLabel(
-                    systemImage: "eye.fill",
-                    value: compactNumber(wallpaper.views),
-                    tint: .white.opacity(0.5)
+                    systemImage: "doc.fill",
+                    value: wallpaper.fileSizeLabel,
+                    tint: .white.opacity(0.4)
                 )
             }
-            .fixedSize(horizontal: true, vertical: false)
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
     }
 
     private var placeholderGradient: some View {
@@ -1065,6 +1052,7 @@ private struct QuickFilterChip: View {
     let isSelected: Bool
     let tint: Color
     let action: () -> Void
+    @State private var isHovered = false
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
@@ -1077,23 +1065,32 @@ private struct QuickFilterChip: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .liquidGlassSurface(
-                isSelected ? .max : .prominent,
-                tint: tint.opacity(isSelected ? 0.2 : 0.12),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(tint.opacity(isSelected ? 0.15 : 0.08))
+                }
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(tint.opacity(isSelected ? 0.5 : 0.16), lineWidth: 1)
+                    .stroke(tint.opacity(isSelected ? 0.4 : 0.2), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
+        }
     }
 }
 private struct QuickColorChip: View {
     let preset: WallhavenAPI.ColorPreset
     let isSelected: Bool
     let action: () -> Void
+    @State private var isHovered = false
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -1110,58 +1107,78 @@ private struct QuickColorChip: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .liquidGlassSurface(
-                isSelected ? .max : .regular,
-                tint: Color(hex: preset.displayHex).opacity(isSelected ? 0.22 : 0.08),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color(hex: preset.displayHex).opacity(isSelected ? 0.18 : 0.08))
+                }
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color(hex: preset.displayHex).opacity(isSelected ? 0.45 : 0.16),lineWidth: 1)
+                    .stroke(Color(hex: preset.displayHex).opacity(isSelected ? 0.4 : 0.2), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
+        }
     }
 }
 private struct ActiveFilterChipView: View {
     let chip: ExploreFilterChipData
     let onRemove: () -> Void
+    @State private var isHovered = false
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(Color(hex: "#\(chip.accentHex)"))
-                .frame(width: 8, height: 8)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(chip.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.94))
-                if let subtitle = chip.subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.56))
+        Button(action: onRemove) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color(hex: "#\(chip.accentHex)"))
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(chip.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.94))
+                    if let subtitle = chip.subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.56))
+                    }
                 }
-            }
-            Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.72))
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                ZStack {
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    Capsule(style: .continuous)
+                        .fill(Color(hex: "#\(chip.accentHex)").opacity(0.12))
+                }
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color(hex: "#\(chip.accentHex)").opacity(0.3), lineWidth: 0.5)
+            )
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .liquidGlassSurface(
-            .regular,
-            tint: Color(hex: "#\(chip.accentHex)").opacity(0.12),
-            in: Capsule(style: .continuous)
-        )
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
+        }
     }
 }
 private struct ExploreHotTagChip: View {
     let tag: ExploreHotTag
     let isSelected: Bool
     let action: () -> Void
-    @Environment(\.explorePageAtmosphereTint) private var exploreTint
     @State private var isHovered = false
     var body: some View {
         Button(action: action) {
@@ -1170,18 +1187,20 @@ private struct ExploreHotTagChip: View {
                 .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
                 .padding(.horizontal, 14)
                 .frame(height: 32)
-                .liquidGlassSurface(
-                    isSelected ? .prominent : .regular,
-                    tint: isSelected ? exploreTint.primary.opacity(0.12) : exploreTint.primary.opacity(0.06),
-                    in: Capsule(style: .continuous)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.18)) {
-                isHovered = hovering
-            }
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -1218,18 +1237,30 @@ private struct ExploreCategoryChip: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .liquidGlassSurface(
-                isSelected ? .prominent : .regular,
-                tint: category.accentColors.first.map { Color(hex: $0).opacity(isSelected ? 0.16 :0.08) },
-                in: Capsule(style: .continuous)
+            .background(
+                ZStack {
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    if let accentColor = category.accentColors.first {
+                        Capsule(style: .continuous)
+                            .fill(Color(hex: accentColor).opacity(isSelected ? 0.15 : 0.08))
+                    }
+                }
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        (category.accentColors.first.map { Color(hex: $0) } ?? Color.white)
+                            .opacity(isSelected ? 0.35 : 0.15),
+                        lineWidth: 0.5
+                    )
             )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered && !isSelected ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.18)) {
-                isHovered = hovering
-            }
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }

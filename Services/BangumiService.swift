@@ -12,7 +12,7 @@ enum BangumiAPI {
     static let trending = "/p1/trending/subjects"
     
     /// 条目搜索
-    static func search(limit: Int = 24, offset: Int = 0) -> String {
+    static func search(limit: Int = 12, offset: Int = 0) -> String {
         return "/v0/search/subjects?limit=\(limit)&offset=\(offset)"
     }
     
@@ -158,7 +158,20 @@ struct BangumiRating: Codable {
     let rank: Int?
     let total: Int
     let score: Double
-    let count: [Int]?
+    // count 可能是数组或字典，使用 AnyCodable 处理或忽略
+    // Bangumi API 的 rating.count 有时是 { "1": n, "2": n, ... } 格式
+    
+    enum CodingKeys: String, CodingKey {
+        case rank, total, score
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rank = try container.decodeIfPresent(Int.self, forKey: .rank)
+        total = try container.decode(Int.self, forKey: .total)
+        score = try container.decode(Double.self, forKey: .score)
+        // 忽略 count 字段，因为它格式不固定
+    }
 }
 
 struct BangumiTag: Codable {

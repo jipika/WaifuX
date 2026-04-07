@@ -347,32 +347,24 @@ enum GrainTextureTile {
     }()
 }
 
-// MARK: - 全局颗粒材质覆盖层（支持开关）
+// MARK: - 全局颗粒材质覆盖层（支持开关和轻量模式）
 
 struct GrainTextureOverlay: View {
     @AppStorage("grain_texture_enabled") private var enabled = true
+    @AppStorage("grain_texture_quality") private var quality = "high" // high / low / off
     var lightweight: Bool = false
 
     var body: some View {
-        if enabled {
-            ZStack {
-                Image(nsImage: GrainTextureTile.image)
-                    .resizable(resizingMode: .tile)
-                    .blendMode(.softLight)
-                    .opacity(lightweight ? 0.14 : 0.34)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-
-                if !lightweight {
-                    Image(nsImage: GrainTextureTile.image)
-                        .resizable(resizingMode: .tile)
-                        .scaleEffect(1.35)
-                        .blendMode(.overlay)
-                        .opacity(0.14)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .allowsHitTesting(false)
-                }
-            }
+        if enabled && quality != "off" {
+            // 轻量模式或低质量设置时使用单层
+            let isLightweight = lightweight || quality == "low"
+            
+            Image(nsImage: GrainTextureTile.image)
+                .resizable(resizingMode: .tile)
+                .blendMode(.overlay)
+                .opacity(isLightweight ? 0.15 : 0.35)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -382,11 +374,12 @@ struct GrainTextureOverlay: View {
 struct ExploreDynamicAtmosphereBackground: View {
     let tint: ExploreAtmosphereTint
     let referenceImage: NSImage?
-    /// 快速滚动时减轻模糊图、径向光斑与噪点合成，避免 ScrollView 跟手发涩。
+    /// 快速滚动时减轻效果，避免卡顿
     var lightweightBackdrop: Bool = false
 
     var body: some View {
         ZStack {
+            // 基础氛围背景
             LiquidGlassAtmosphereBackground(
                 primary: tint.primary,
                 secondary: tint.secondary,
@@ -395,44 +388,41 @@ struct ExploreDynamicAtmosphereBackground: View {
                 baseBottom: tint.baseBottom
             )
 
-            // 简化背景效果 - 固定不变，不随滚动切换
-            if let referenceImage {
+            // 参考图片模糊背景（轻量模式时禁用）
+            if !lightweightBackdrop, let referenceImage {
                 Image(nsImage: referenceImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(minWidth: 600, minHeight: 600)
-                    .blur(radius: 60)
-                    .opacity(0.35)
-                    .saturation(1.1)
+                    .frame(minWidth: 200, minHeight: 200) // 进一步降低分辨率
+                    .blur(radius: 60) // 增加模糊减少细节
+                    .opacity(0.2) // 降低不透明度
+                    .saturation(1.05)
                     .allowsHitTesting(false)
             }
 
+            // 简化：合并径向渐变效果
             RadialGradient(
-                colors: [tint.primary.opacity(0.12), Color.clear],
+                colors: [
+                    tint.primary.opacity(lightweightBackdrop ? 0.06 : 0.08),
+                    tint.secondary.opacity(lightweightBackdrop ? 0.03 : 0.04),
+                    Color.clear
+                ],
                 center: .topLeading,
                 startRadius: 20,
-                endRadius: 350
+                endRadius: lightweightBackdrop ? 200 : 300
             )
             .allowsHitTesting(false)
 
-            RadialGradient(
-                colors: [tint.secondary.opacity(0.1), Color.clear],
-                center: .bottomTrailing,
-                startRadius: 40,
-                endRadius: 400
-            )
-            .allowsHitTesting(false)
-
+            // 移除材质层，使用纯色替代
             Rectangle()
-                .fill(.ultraThinMaterial)
-                .opacity(0.2)
+                .fill(tint.baseTop.opacity(0.05))
                 .allowsHitTesting(false)
 
+            // 底部渐变遮罩
             LinearGradient(
                 colors: [
-                    tint.baseTop.opacity(0.28),
                     Color.clear,
-                    tint.baseBottom.opacity(0.45)
+                    tint.baseBottom.opacity(0.3)
                 ],
                 startPoint: .top,
                 endPoint: .bottom

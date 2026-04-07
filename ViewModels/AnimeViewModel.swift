@@ -24,7 +24,7 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 私有状态
     private var currentPage = 1
-    private let pageSize = 24
+    private let pageSize = 10
     private var loadMoreTask: Task<Void, Never>?
     
     // Bangumi 服务
@@ -243,15 +243,22 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 加载更多 (分页)
 
-    func loadMore() async {
-        loadMoreTask?.cancel()
+    private var isLoadMoreInProgress = false
 
-        guard !isLoading, !isLoadingMore, hasMorePages else { return }
+    func loadMore() async {
+        // 防止重复调用
+        guard !isLoading, !isLoadingMore, hasMorePages, !isLoadMoreInProgress else { return }
+
+        isLoadMoreInProgress = true
+        defer { isLoadMoreInProgress = false }
+
+        loadMoreTask?.cancel()
 
         loadMoreTask = Task {
             isLoadingMore = true
             defer { isLoadingMore = false }
 
+            let nextPage = currentPage + 1
             let offset = currentPage * pageSize
             
             do {
@@ -264,8 +271,12 @@ class AnimeViewModel: ObservableObject {
 
                 await MainActor.run {
                     let newResults = items.map { $0.toAnimeSearchResult() }
+                    guard !newResults.isEmpty else {
+                        self.hasMorePages = false
+                        return
+                    }
                     self.animeItems.append(contentsOf: newResults)
-                    currentPage += 1
+                    self.currentPage = nextPage
                     self.hasMorePages = self.animeItems.count < (total ?? 0)
                     print("[AnimeViewModel] Loaded more, total: \(self.animeItems.count)")
                 }
@@ -359,6 +370,7 @@ enum AnimeHotTag: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// 界面显示的中文标签名
     var displayName: String {
         switch self {
         case .daily: return LocalizationService.shared.t("animeTag.daily")
@@ -376,6 +388,27 @@ enum AnimeHotTag: String, CaseIterable, Identifiable {
         case .idol: return LocalizationService.shared.t("animeTag.idol")
         case .healing: return LocalizationService.shared.t("animeTag.healing")
         case .otherWorld: return LocalizationService.shared.t("animeTag.otherWorld")
+        }
+    }
+    
+    /// Bangumi API 使用的英文/日文标签名
+    var apiTagName: String {
+        switch self {
+        case .daily: return "日常"
+        case .original: return "原创"
+        case .school: return "校园"
+        case .comedy: return "喜剧"
+        case .fantasy: return "奇幻"
+        case .yuri: return "百合"
+        case .romance: return "爱情"
+        case .mystery: return "悬疑"
+        case .action: return "动作"
+        case .harem: return "后宫"
+        case .mecha: return "机战"
+        case .lightNovel: return "轻小说改"
+        case .idol: return "偶像"
+        case .healing: return "治愈"
+        case .otherWorld: return "异世界"
         }
     }
 }

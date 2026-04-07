@@ -24,7 +24,7 @@ struct MediaExploreContentView: View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 24) {
+                LazyVStack(alignment: .leading, spacing: 24) {
                     heroSection
                     categorySection
                     mediaSection(gridContentWidth: gridContentWidth)
@@ -35,7 +35,6 @@ struct MediaExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            .scrollClipDisabled()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -161,6 +160,7 @@ struct MediaExploreContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
             }
             .frame(maxWidth: 520)
 
@@ -250,23 +250,34 @@ struct MediaExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else {
+                // 简单固定布局：根据窗口宽度决定列数
+                let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
+                let spacing: CGFloat = 16
+                let totalSpacing = spacing * CGFloat(columnCount - 1)
+                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                let cardHeight = cardWidth * 0.6
+                
+                // 动态创建固定列
+                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
+                
                 LazyVGrid(
-                    columns: ExploreGridLayout.columns(for: gridContentWidth),
+                    columns: columns,
                     alignment: .leading,
-                    spacing: ExploreGridLayout.spacing
+                    spacing: spacing
                 ) {
                     ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
                         SimpleMediaCard(
                             item: item,
+                            cardWidth: cardWidth,
+                            cardHeight: cardHeight,
                             isFavorite: viewModel.isFavorite(item),
                             onTap: { selectedMedia = item }
                         )
                         .onAppear {
-                            guard index >= displayedMediaItems.count - 5,
-                                  viewModel.hasMorePages,
+                            guard index >= displayedMediaItems.count - 6 else { return }
+                            guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
-
                             isLoadingMore = true
                             Task {
                                 await viewModel.loadMore()
@@ -278,13 +289,17 @@ struct MediaExploreContentView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
 
-                // 加载更多指示器
-                if isLoadingMore {
-                    PaginationLoadingView()
-                        .frame(height: 60)
-                        .padding(.top, 20)
-                }
+                // 加载指示器 - 固定占位避免抖动
+                Color.clear
+                    .frame(height: 20)
+                    .overlay(
+                        PaginationLoadingView()
+                            .opacity(isLoadingMore ? 1 : 0)
+                            .animation(.easeInOut(duration: 0.2), value: isLoadingMore)
+                    )
 
                 // 没有更多数据提示
                 if !viewModel.hasMorePages && displayedMediaItems.count > 20 {
@@ -355,7 +370,6 @@ struct MediaExploreContentView: View {
         let newItems = viewModel.items.filter { !existingIDs.contains($0.id) }
         displayedMediaItems.append(contentsOf: newItems)
     }
-
     private func submitSearch(with query: String) {
         selectedCategory = .all
         selectedHotTag = nil
@@ -414,7 +428,6 @@ private struct MediaHotTagChip: View {
     let isSelected: Bool
     let action: () -> Void
 
-    @Environment(\.explorePageAtmosphereTint) private var exploreTint
     @State private var isHovered = false
 
     var body: some View {
@@ -424,18 +437,20 @@ private struct MediaHotTagChip: View {
                 .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
                 .padding(.horizontal, 14)
                 .frame(height: 32)
-                .liquidGlassSurface(
-                    isSelected ? .prominent : .regular,
-                    tint: isSelected ? exploreTint.primary.opacity(0.14) : exploreTint.primary.opacity(0.06),
-                    in: Capsule(style: .continuous)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(AppFluidMotion.hoverEase) {
-                isHovered = hovering
-            }
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -473,18 +488,20 @@ private struct MediaCategoryChip: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .liquidGlassSurface(
-                isSelected ? .max : .regular,
-                tint: category.accentColors.first.map { Color(hex: $0).opacity(isSelected ? 0.18 : 0.08) },
-                in: Capsule(style: .continuous)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered && !isSelected ? 1.01 : 1.0)
-        .onHover { hovering in
-            withAnimation(AppFluidMotion.hoverEase) {
-                isHovered = hovering
-            }
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
 }
@@ -492,20 +509,22 @@ private struct MediaCategoryChip: View {
 // MARK: - 媒体探索网格卡片（简化版，优化滚动性能）
 private struct SimpleMediaCard: View {
     let item: MediaItem
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
     let isFavorite: Bool
     let onTap: () -> Void
 
     @State private var isHovered = false
 
-    private var thumbShape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(
-            topLeadingRadius: 14,
-            bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0,
-            topTrailingRadius: 14,
-            style: .continuous
-        )
-    }
+    // 静态形状缓存
+    private static let thumbShape = UnevenRoundedRectangle(
+        topLeadingRadius: 14,
+        bottomLeadingRadius: 0,
+        bottomTrailingRadius: 0,
+        topTrailingRadius: 14,
+        style: .continuous
+    )
+    private static let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
 
     private var resolutionOverlayText: String {
         item.resolutionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -533,9 +552,8 @@ private struct SimpleMediaCard: View {
                         fallbackArtwork
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 152)
-                .clipShape(thumbShape)
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(Self.thumbShape)
                 .overlay(alignment: .topLeading) {
                     // 简化元数据行
                     simplifiedMetadataRow
@@ -569,22 +587,24 @@ private struct SimpleMediaCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            .background(
+                Self.cardShape
+                    .fill(Color.clear)
+                    .overlay(
+                        Self.cardShape
+                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    )
             )
+            .clipShape(Self.cardShape)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .onHover { hovering in
-            if isHovered != hovering {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isHovered = hovering
-                }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                isHovered = hovering
             }
         }
     }

@@ -137,123 +137,132 @@ public struct LiquidGlassNextItemToast: View {
         }
     }
 
+    // MARK: - Toast 按钮（内部组件，使用 ButtonStyle 处理按压效果）
+    private struct ToastButton: View {
+        let item: NextItemPreviewable
+        @Binding var isHovered: Bool
+        @Binding var isPressed: Bool
+        let onTap: () -> Void
+        
+        var body: some View {
+            Button(action: onTap) {
+                HStack(spacing: 12) {
+                    // 缩略图
+                    ThumbnailView(item: item)
+
+                    // 文字信息
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("下一张")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.5))
+
+                        Text(item.previewTitle)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+
+                        Text(item.previewSubtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    // 向上箭头指示
+                    VStack(spacing: 2) {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(ToastPressableStyle(isPressed: $isPressed))
+            .background(
+                DarkLiquidGlassBackground(
+                    cornerRadius: 20,
+                    isHovered: isHovered
+                )
+            )
+            .scaleEffect(isPressed ? 0.96 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: isPressed)
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isHovered = hovering
+                }
+            }
+        }
+    }
+    
+    // 按钮样式：内部处理按压状态
+    private struct ToastPressableStyle: ButtonStyle {
+        @Binding var isPressed: Bool
+        
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .onChange(of: configuration.isPressed) { _, newValue in
+                    isPressed = newValue
+                }
+        }
+    }
+
     // MARK: - Toast 内容 - 真正的深色液态玻璃材质
     private func toastContent(item: NextItemPreviewable) -> some View {
-        Button(action: {
-            withAnimation(.easeOut(duration: 0.2)) {
-                isVisible = false
-            }
-            onTap()
-        }) {
-            HStack(spacing: 12) {
-                // 缩略图
-                thumbnailView(item: item)
-
-                // 文字信息
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("下一张")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.5))
-
-                    Text(item.previewTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-
-                    Text(item.previewSubtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
+        ToastButton(
+            item: item,
+            isHovered: $isHovered,
+            isPressed: $isPressed,
+            onTap: {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isVisible = false
                 }
-
-                Spacer()
-
-                // 向上箭头指示
-                VStack(spacing: 2) {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.6))
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
+                onTap()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-        }
-        .buttonStyle(.plain)
-        .background(
-            // 真正的深色液态玻璃背景
-            DarkLiquidGlassBackground(
-                cornerRadius: 20,
-                isHovered: isHovered
-            )
         )
-        .scaleEffect(isPressed ? 0.96 : 1.0)
-        .animation(.easeInOut(duration: 0.1), value: isPressed)
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isHovered = hovering
-            }
-        }
-        .pressEvents {
-            isPressed = true
-        } onRelease: {
-            isPressed = false
-        }
     }
 
-    // MARK: - 缩略图视图
-    private func thumbnailView(item: NextItemPreviewable) -> some View {
-        ZStack {
-            if let url = item.previewThumbnailURL {
-                OptimizedAsyncImage(url: url, priority: .low) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    placeholderView
-                }
-            } else {
-                placeholderView
-            }
-
-            // Badge
-            if let badge = item.previewBadge {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Text(badge)
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule()
-                                    .fill(LiquidGlassColors.primaryPink.opacity(0.9))
-                            )
-                            .padding(4)
+    // MARK: - 缩略图视图（结构体版本）
+    private struct ThumbnailView: View {
+        let item: NextItemPreviewable
+        
+        var body: some View {
+            ZStack {
+                if let url = item.previewThumbnailURL {
+                    OptimizedAsyncImage(url: url, priority: .low) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        PlaceholderView()
                     }
-                    Spacer()
+                } else {
+                    PlaceholderView()
                 }
             }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+            )
         }
-        .frame(width: 56, height: 56)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
-        )
     }
 
-    private var placeholderView: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay(
-                Image(systemName: "photo")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.white.opacity(0.3))
-            )
+    private struct PlaceholderView: View {
+        var body: some View {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Image(systemName: "photo")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white.opacity(0.3))
+                )
+        }
     }
 
     // MARK: - 计时器管理

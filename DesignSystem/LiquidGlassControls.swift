@@ -71,14 +71,23 @@ public struct LiquidGlassSwitch: View {
     @Binding var isOn: Bool
     var accentColor: Color = LiquidGlassColors.primaryPink
     
-    @State private var isPressed = false
-    
     public init(isOn: Binding<Bool>, accentColor: Color = LiquidGlassColors.primaryPink) {
         self._isOn = isOn
         self.accentColor = accentColor
     }
     
     public var body: some View {
+        SwitchButton(isOn: $isOn, accentColor: accentColor)
+    }
+}
+
+// 内部实现：使用 ButtonStyle 处理按压效果，避免手势冲突
+private struct SwitchButton: View {
+    @Binding var isOn: Bool
+    var accentColor: Color
+    @State private var isPressed = false
+    
+    var body: some View {
         Button(action: {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                 isOn.toggle()
@@ -101,13 +110,22 @@ public struct LiquidGlassSwitch: View {
                             .stroke(Color.white.opacity(0.5), lineWidth: 0.5)
                     )
             }
+            .scaleEffect(isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: isPressed)
         }
-        .buttonStyle(.plain)
-        .scaleEffect(isPressed ? 0.95 : 1.0)
-        .pressEvents(
-            onPress: { withAnimation(.easeInOut(duration: 0.1)) { isPressed = true } },
-            onRelease: { withAnimation(.easeInOut(duration: 0.1)) { isPressed = false } }
-        )
+        .buttonStyle(PressableButtonStyle(isPressed: $isPressed))
+    }
+}
+
+// 可按压按钮样式：内部处理按压状态，不与按钮点击冲突
+private struct PressableButtonStyle: ButtonStyle {
+    @Binding var isPressed: Bool
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .onChange(of: configuration.isPressed) { _, newValue in
+                isPressed = newValue
+            }
     }
 }
 

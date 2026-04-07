@@ -37,7 +37,7 @@ struct TopNavigationBar: View {
     private let controlHeight: CGFloat = 34
 
     var body: some View {
-        HStack(alignment: .top) {
+        HStack(alignment: .center) {
             CustomWindowControls(
                 onClose: onClose,
                 onMinimize: onMinimize,
@@ -62,7 +62,7 @@ struct TopNavigationBar: View {
             .frame(width: 88, alignment: .trailing)  // 与左侧等宽，保持居中
         }
         .padding(.horizontal, 26)
-        .padding(.top, 8)
+        .padding(.top, 12)
         .padding(.bottom, 10)
     }
 }
@@ -142,6 +142,7 @@ private struct TopBarCircleButton: View {
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
+        .contentShape(Circle())
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.16)) {
                 isHovered = hovering

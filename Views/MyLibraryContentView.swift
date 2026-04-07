@@ -8,10 +8,10 @@ struct MyLibraryContentView: View {
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
-    @State private var selectedWallpaper: Wallpaper?
-    @State private var selectedMedia: MediaItem?
-    @State private var selectedAnime: UniversalContentItem?
-    @State private var animeFavorites: [UniversalContentItem] = []
+    @Binding var selectedWallpaper: Wallpaper?
+    @Binding var selectedMedia: MediaItem?
+    @Binding var selectedAnime: AnimeSearchResult?
+    @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 编辑状态
     @State private var isEditing = false
@@ -71,16 +71,7 @@ struct MyLibraryContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(item: $selectedWallpaper) { wallpaper in
-            WallpaperDetailSheet(wallpaper: wallpaper, viewModel: viewModel) {
-                selectedWallpaper = nil
-            }
-        }
-        .sheet(item: $selectedMedia) { item in
-            MediaDetailSheet(item: item, viewModel: mediaViewModel) {
-                selectedMedia = nil
-            }
-        }
+        // 注意：所有详情页在 ContentView 层级显示，确保能覆盖 TopNavigationBar
         .task {
             await viewModel.initialLoad()
             // mediaViewModel.favoriteItems 和 downloadedItems 是计算属性，自动从 MediaLibraryService 获取
@@ -97,27 +88,21 @@ struct MyLibraryContentView: View {
     private func loadAnimeFavorites() async {
         let favorites = animeFavoriteStore.allFavorites
         animeFavorites = favorites.map { favorite in
-            UniversalContentItem(
+            AnimeSearchResult(
                 id: favorite.id,
-                contentType: .anime,
                 title: favorite.title,
-                thumbnailURL: favorite.coverURL ?? "",
                 coverURL: favorite.coverURL,
-                description: nil,
-                tags: favorite.tags,
-                sourceType: "bangumi",
-                sourceURL: "",
+                detailURL: "",
+                sourceId: "bangumi",
                 sourceName: "Bangumi",
-                metadata: .anime(ContentMetadata.AnimeMetadata(
-                    episodes: [],
-                    currentEpisode: nil,
-                    totalEpisodes: nil,
-                    status: favorite.watchStatus.displayName,
-                    aired: nil,
-                    rating: nil
-                )),
-                createdAt: favorite.addedAt,
-                updatedAt: favorite.updatedAt
+                latestEpisode: nil,
+                rating: nil,
+                summary: nil,
+                rank: nil,
+                airDate: nil,
+                airWeekday: nil,
+                tags: favorite.tags.map { AnimeTag(name: $0, count: nil) },
+                originalName: nil
             )
         }
     }
@@ -361,10 +346,13 @@ struct MyLibraryContentView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
                             ForEach(animeFavorites) { anime in
-                                AnimeLibraryCard(anime: anime)
-                                    .onTapGesture {
-                                        selectedAnime = anime
-                                    }
+                                AnimeLibraryCard(
+                                    anime: anime,
+                                    isEditing: isEditing && editingSection == .favorites,
+                                    isSelected: selectedItems.contains(anime.id)
+                                ) {
+                                    handleAnimeTap(anime)
+                                }
                             }
                         }
                         .padding(.vertical, 2)
@@ -514,6 +502,14 @@ struct MyLibraryContentView: View {
         }
     }
 
+    private func handleAnimeTap(_ anime: AnimeSearchResult) {
+        if isEditing && editingSection == .favorites {
+            toggleSelection(anime.id)
+        } else {
+            selectedAnime = anime
+        }
+    }
+
     private func toggleSelection(_ id: String) {
         if selectedItems.contains(id) {
             selectedItems.remove(id)
@@ -626,49 +622,89 @@ struct ContentTypeButton: View {
 
 // MARK: - Anime Library Card
 struct AnimeLibraryCard: View {
-    let anime: UniversalContentItem
+    let anime: AnimeSearchResult
+    let isEditing: Bool
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ZStack(alignment: .bottomTrailing) {
-                AsyncImage(url: URL(string: anime.thumbnailURL)) { phase in
-                    switch phase {
-                    case .empty:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.white.opacity(0.05))
-                    case .success(let image):
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack(alignment: .bottomTrailing) {
+                    OptimizedAsyncImage(url: URL(string: anime.coverURL ?? ""), priority: .low) { image in
                         image
                             .resizable()
                             .aspectRatio(contentMode: .fill)
-                    case .failure:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.white.opacity(0.05))
-                    @unknown default:
-                        EmptyView()
+                    } placeholder: {
+                        SkeletonCard(
+                            width: LibraryCardMetrics.cardWidth,
+                            height: LibraryCardMetrics.thumbnailHeight + 72,
+                            cornerRadius: 0
+                        )
+                    }
+                    .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
+                    .clipped()
+
+                    // 左上角复选框（编辑模式下显示）
+                    if isEditing {
+                        VStack {
+                            HStack {
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundStyle(isSelected ? LiquidGlassColors.secondaryViolet : .white.opacity(0.8))
+                                    .background(
+                                        Circle()
+                                            .fill(isSelected ? .white : Color.black.opacity(0.4))
+                                            .frame(width: 20, height: 20)
+                                    )
+                                    .padding(12)
+
+                                Spacer()
+                            }
+                            Spacer()
+                        }
+                    }
+
+                    // 选中时的遮罩
+                    if isEditing && isSelected {
+                        Color.black.opacity(0.3)
                     }
                 }
-                .frame(width: 160, height: 220)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                if case .anime(let metadata) = anime.metadata, let total = metadata.totalEpisodes {
-                    Text("\(total)\(t("library.episodes"))")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(Color.black.opacity(0.6))
-                        )
-                        .padding(6)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(anime.title)
+                        .font(.system(size: 14.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineLimit(2)
+
+                    if let tags = anime.tags, !tags.isEmpty {
+                        Text(tags.prefix(3).map { $0.name }.joined(separator: ", "))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.56))
+                            .lineLimit(1)
+                    }
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
             }
-
-            Text(anime.title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(2)
-                .frame(width: 160, height: 36, alignment: .top)
+            .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+            .liquidGlassSurface(
+                isHovered ? .max : .prominent,
+                tint: LiquidGlassColors.secondaryViolet.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .scaleEffect(isHovered ? 1.01 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .animation(.easeOut(duration: 0.16), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            if !isEditing {
+                isHovered = hovering
+            }
         }
     }
 }

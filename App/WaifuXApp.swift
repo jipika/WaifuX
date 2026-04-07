@@ -67,8 +67,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
     private let settingsViewModel = SettingsViewModel()
     private var settingsWindowController: NSWindowController?
-    private var statusBarController: StatusBarController?
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureApplicationIcon()
 
@@ -120,7 +118,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.minSize = NSSize(width: 900, height: 600)
         updateActivationPolicy(showDockIcon: true)
 
-        statusBarController = StatusBarController(
+        // 配置状态栏控制器（单例，全局唯一）
+        StatusBarController.shared.configure(
             showWindow: { [weak self] in self?.showMainWindow() },
             quit: { NSApp.terminate(nil) }
         )

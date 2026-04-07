@@ -3,6 +3,9 @@ import Combine
 
 @MainActor
 final class StatusBarController: NSObject {
+    // MARK: - 单例
+    static let shared = StatusBarController()
+    
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
 
@@ -13,17 +16,29 @@ final class StatusBarController: NSObject {
     private lazy var quitItem = NSMenuItem(title: t("statusbar.quit"), action: #selector(quitApplication), keyEquivalent: "q")
 
     private let videoWallpaperManager = VideoWallpaperManager.shared
-    private let showWindowHandler: () -> Void
-    private let quitHandler: () -> Void
+    private var showWindowHandler: (() -> Void)?
+    private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
+    
+    // 标记是否已配置，防止重复配置
+    private var isConfigured = false
 
-    init(showWindow: @escaping () -> Void, quit: @escaping () -> Void) {
-        self.showWindowHandler = showWindow
-        self.quitHandler = quit
+    private override init() {
         super.init()
         configureStatusItem()
         bindWallpaperState()
         refreshMenuState()
+    }
+
+    /// 配置处理程序（只能调用一次）
+    func configure(showWindow: @escaping () -> Void, quit: @escaping () -> Void) {
+        guard !isConfigured else {
+            print("[StatusBarController] Already configured, skipping...")
+            return
+        }
+        self.showWindowHandler = showWindow
+        self.quitHandler = quit
+        self.isConfigured = true
     }
 
     private func configureStatusItem() {
@@ -79,7 +94,7 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func showMainWindow() {
-        showWindowHandler()
+        showWindowHandler?()
     }
 
     @objc private func togglePlayback() {
@@ -96,7 +111,7 @@ final class StatusBarController: NSObject {
             videoWallpaperManager.stopWallpaper()
         } else {
             // 开启动态壁纸 - 打开主窗口让用户选择
-            showWindowHandler()
+            showWindowHandler?()
         }
     }
 
@@ -105,6 +120,6 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func quitApplication() {
-        quitHandler()
+        quitHandler?()
     }
 }

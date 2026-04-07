@@ -135,7 +135,7 @@ async function handleSearchRequest(url, cache) {
   // 构建 WallHaven API URL
   const query = searchParams.get('q') || '';
   const page = searchParams.get('page') || '1';
-  const perPage = searchParams.get('per_page') || '24';
+  const perPage = searchParams.get('per_page') || '8';
 
   // 保留原始查询参数并添加必要参数
   const params = new URLSearchParams({

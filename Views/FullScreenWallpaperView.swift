@@ -496,7 +496,6 @@ struct GlassToolbarButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
-    @State private var isPressed = false
 
     var body: some View {
         Button(action: action) {
@@ -510,23 +509,22 @@ struct GlassToolbarButton: View {
                     radius: isHovered ? 12 : 8,
                     y: isHovered ? 6 : 4
                 )
-                .scaleEffect(isPressed ? 0.92 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableGlassButtonStyle())
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
         }
-        .pressEvents {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = true
-            }
-        } onRelease: {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = false
-            }
-        }
+    }
+}
+
+// 玻璃态按钮样式：内部处理按压效果，避免手势冲突
+private struct PressableGlassButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 

@@ -347,57 +347,65 @@ public struct LiquidGlassAtmosphereBackground: View {
     let tertiary: Color
     let baseTop: Color
     let baseBottom: Color
+    
+    /// 轻量模式（减少特效层数）
+    var lightweight: Bool = false
 
     public init(
         primary: Color = LiquidGlassColors.secondaryViolet,
         secondary: Color = LiquidGlassColors.primaryPink,
         tertiary: Color = LiquidGlassColors.accentCyan,
         baseTop: Color = LiquidGlassColors.midBackground,
-        baseBottom: Color = LiquidGlassColors.deepBackground
+        baseBottom: Color = LiquidGlassColors.deepBackground,
+        lightweight: Bool = false
     ) {
         self.primary = primary
         self.secondary = secondary
         self.tertiary = tertiary
         self.baseTop = baseTop
         self.baseBottom = baseBottom
+        self.lightweight = lightweight
     }
 
     public var body: some View {
         ZStack {
+            // 基础渐变
             LinearGradient(
-                colors: [
-                    baseTop,
-                    baseBottom
-                ],
+                colors: [baseTop, baseBottom],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
 
+            // 主色调光晕（简化版）
             Circle()
-                .fill(primary.opacity(0.26))
-                .frame(width: 720, height: 720)
-                .blur(radius: 118)
+                .fill(primary.opacity(lightweight ? 0.18 : 0.22))
+                .frame(width: lightweight ? 600 : 720, height: lightweight ? 600 : 720)
+                .blur(radius: lightweight ? 90 : 118)
                 .offset(x: -180, y: -220)
 
-            Circle()
-                .fill(secondary.opacity(0.22))
-                .frame(width: 640, height: 640)
-                .blur(radius: 124)
-                .offset(x: 220, y: -120)
+            // 轻量模式下跳过次要光晕
+            if !lightweight {
+                Circle()
+                    .fill(secondary.opacity(0.18))
+                    .frame(width: 640, height: 640)
+                    .blur(radius: 124)
+                    .offset(x: 220, y: -120)
 
-            Circle()
-                .fill(tertiary.opacity(0.16))
-                .frame(width: 560, height: 560)
-                .blur(radius: 108)
-                .offset(x: 60, y: 220)
+                Circle()
+                    .fill(tertiary.opacity(0.12))
+                    .frame(width: 560, height: 560)
+                    .blur(radius: 108)
+                    .offset(x: 60, y: 220)
+            }
 
+            // 顶部渐变遮罩
             Rectangle()
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.03),
+                            Color.white.opacity(0.02),
                             Color.clear,
-                            Color.black.opacity(0.22)
+                            Color.black.opacity(0.18)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
@@ -661,9 +669,10 @@ public extension View {
     func liquidGlassSurface(
         _ level: LiquidGlassLevel = .regular,
         tint: Color? = nil,
-        in shape: some Shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        in shape: some Shape = RoundedRectangle(cornerRadius: 20, style: .continuous),
+        lightweight: Bool = false
     ) -> some View {
-        modifier(AdaptiveLevelGlassModifier(shape: shape, level: level, tint: tint))
+        modifier(AdaptiveLevelGlassModifier(shape: shape, level: level, tint: tint, lightweight: lightweight))
     }
 
     /// 包装在 GlassEffectContainer 中
@@ -705,6 +714,7 @@ struct AdaptiveLevelGlassModifier<S: Shape>: ViewModifier {
     let shape: S
     let level: LiquidGlassLevel
     let tint: Color?
+    var lightweight: Bool = false
 
     func body(content: Content) -> some View {
         Group {
@@ -721,7 +731,8 @@ struct AdaptiveLevelGlassModifier<S: Shape>: ViewModifier {
                     FallbackGlassModifier(
                         shape: shape,
                         level: level,
-                        tint: tint
+                        tint: tint,
+                        lightweight: lightweight
                     )
                 )
             }
@@ -746,49 +757,64 @@ struct FallbackGlassModifier: ViewModifier {
     let shape: any Shape
     let level: LiquidGlassLevel
     let tint: Color?
+    var lightweight: Bool = false
 
     func body(content: Content) -> some View {
         content
             .background {
-                // 优化：减少视图层级，使用单一的 ZStack
-                ZStack {
-                    // 基础材质
+                // 优化：轻量模式减少层级，避免渲染开销
+                if lightweight {
+                    // 轻量模式：仅基础材质 + 色调
                     AnyShape(shape)
                         .fill(level.material)
                         .opacity(level.fillOpacity)
-
-                    // 色调叠加（仅当有 tint 时）
-                    if let tint {
+                        .overlay {
+                            if let tint {
+                                AnyShape(shape)
+                                    .fill(tint.opacity(level.tintOpacity * 0.8))
+                            }
+                        }
+                } else {
+                    // 完整模式：所有视觉效果
+                    ZStack {
+                        // 基础材质
                         AnyShape(shape)
-                            .fill(tint.opacity(level.tintOpacity))
+                            .fill(level.material)
+                            .opacity(level.fillOpacity)
+
+                        // 色调叠加（仅当有 tint 时）
+                        if let tint {
+                            AnyShape(shape)
+                                .fill(tint.opacity(level.tintOpacity))
+                        }
+
+                        // 高光效果 - 增强视觉效果
+                        AnyShape(shape)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(level.highlightOpacity * 1.2),
+                                        Color.white.opacity(0.03),
+                                        Color.clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+
+                        // 底部渐变 - 增强层次感
+                        AnyShape(shape)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.clear,
+                                        Color.black.opacity(0.05)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
                     }
-
-                    // 高光效果 - 增强视觉效果
-                    AnyShape(shape)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(level.highlightOpacity * 1.2),
-                                    Color.white.opacity(0.03),
-                                    Color.clear
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-
-                    // 底部渐变 - 增强层次感
-                    AnyShape(shape)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.clear,
-                                    Color.black.opacity(0.05)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
                 }
             }
             // 优化：仅在需要时添加边框和阴影
@@ -804,33 +830,95 @@ struct FallbackGlassModifier: ViewModifier {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 1
+                        lineWidth: lightweight ? 0.5 : 1
                     )
             }
-            .shadow(color: .black.opacity(level.shadowOpacity * 1.2), radius: level.shadowRadius, y: level.shadowYOffset)
+            // 优化：轻量模式减少阴影开销
+            .shadow(
+                color: .black.opacity(lightweight ? level.shadowOpacity * 0.5 : level.shadowOpacity * 1.2),
+                radius: lightweight ? min(level.shadowRadius * 0.5, 4) : level.shadowRadius,
+                y: lightweight ? max(level.shadowYOffset * 0.5, 1) : level.shadowYOffset
+            )
     }
 }
 
-// MARK: - 按下事件辅助
+// MARK: - 玻璃态按钮样式（带按压效果）
+/// 使用 ButtonStyle 实现按压效果，避免手势冲突
+public struct LiquidGlassPressableStyle: ButtonStyle {
+    @Binding var isPressed: Bool
+    var scale: CGFloat = 0.96
+    var animationDuration: Double = 0.1
+    
+    public init(isPressed: Binding<Bool>, scale: CGFloat = 0.96, animationDuration: Double = 0.1) {
+        self._isPressed = isPressed
+        self.scale = scale
+        self.animationDuration = animationDuration
+    }
+    
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .onChange(of: configuration.isPressed) { _, newValue in
+                withAnimation(.easeInOut(duration: animationDuration)) {
+                    isPressed = newValue
+                }
+            }
+    }
+}
+
+// MARK: - 按下事件辅助（基于 NSEvent 的可靠实现）
+/// 使用 NSView Representable 来处理鼠标事件，避免与 Button 冲突
+struct PressEventsView: NSViewRepresentable {
+    var onPress: () -> Void
+    var onRelease: () -> Void
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = PressTrackingView()
+        view.onPress = onPress
+        view.onRelease = onRelease
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let view = nsView as? PressTrackingView else { return }
+        view.onPress = onPress
+        view.onRelease = onRelease
+    }
+}
+
+/// 用于跟踪鼠标按下/释放的 NSView
+class PressTrackingView: NSView {
+    var onPress: (() -> Void)?
+    var onRelease: (() -> Void)?
+    
+    override var acceptsFirstResponder: Bool { true }
+    
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        onPress?()
+    }
+    
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        onRelease?()
+    }
+}
+
+/// 通过 overlay 添加按压事件跟踪，不干扰按钮本身的手势
 struct PressEventsModifier: ViewModifier {
     var onPress: () -> Void
     var onRelease: () -> Void
-
+    
     func body(content: Content) -> some View {
         content
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        onPress()
-                    }
-                    .onEnded { _ in
-                        onRelease()
-                    }
+            .overlay(
+                PressEventsView(onPress: onPress, onRelease: onRelease)
+                    .allowsHitTesting(false)  // 允许点击穿透到下面的按钮
             )
     }
 }
 
 public extension View {
+    /// 添加按压事件跟踪（使用 NSView 实现，不与 Button 冲突）
     func pressEvents(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) -> some View {
         modifier(PressEventsModifier(onPress: onPress, onRelease: onRelease))
     }

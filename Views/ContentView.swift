@@ -7,10 +7,12 @@ struct ContentView: View {
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @StateObject private var localization = LocalizationService.shared
     @State private var selectedTab: MainTab = .home
-    @State private var showFilters = false
     @State private var selectedWallpaper: Wallpaper?
     @State private var selectedMedia: MediaItem?
     @State private var selectedAnime: AnimeSearchResult?
+    @State private var librarySelectedAnime: AnimeSearchResult?
+    @State private var librarySelectedWallpaper: Wallpaper?
+    @State private var librarySelectedMedia: MediaItem?
 
     var body: some View {
         ZStack {
@@ -22,24 +24,41 @@ struct ContentView: View {
                 .ignoresSafeArea()
                 .zIndex(0)
 
-            Group {
-                switch selectedTab {
-                case .home:
-                    HomeContentView(
-                        viewModel: viewModel,
-                        mediaViewModel: mediaViewModel,
-                        selectedWallpaper: $selectedWallpaper,
-                        selectedMedia: $selectedMedia
-                    )
-                case .wallpaperExplore:
-                    WallpaperExploreContentView(viewModel: viewModel, selectedWallpaper: $selectedWallpaper)
-                case .animeExplore:
-                    AnimeExploreView(selectedAnime: $selectedAnime)
-                case .mediaExplore:
-                    MediaExploreContentView(viewModel: mediaViewModel, selectedMedia: $selectedMedia)
-                case .myMedia:
-                    MyLibraryContentView()
-                }
+            // Tab 缓存 - 使用 opacity 保持视图存活，避免重新渲染
+            ZStack {
+                // Home Tab
+                HomeContentView(
+                    viewModel: viewModel,
+                    mediaViewModel: mediaViewModel,
+                    selectedWallpaper: $selectedWallpaper,
+                    selectedMedia: $selectedMedia
+                )
+                .opacity(selectedTab == .home ? 1 : 0)
+                .allowsHitTesting(selectedTab == .home)
+                
+                // Wallpaper Explore Tab
+                WallpaperExploreContentView(viewModel: viewModel, selectedWallpaper: $selectedWallpaper)
+                    .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .wallpaperExplore)
+                
+                // Anime Explore Tab
+                AnimeExploreView(selectedAnime: $selectedAnime)
+                    .opacity(selectedTab == .animeExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .animeExplore)
+                
+                // Media Explore Tab
+                MediaExploreContentView(viewModel: mediaViewModel, selectedMedia: $selectedMedia)
+                    .opacity(selectedTab == .mediaExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .mediaExplore)
+                
+                // My Media Tab
+                MyLibraryContentView(
+                    selectedWallpaper: $librarySelectedWallpaper,
+                    selectedMedia: $librarySelectedMedia,
+                    selectedAnime: $librarySelectedAnime
+                )
+                    .opacity(selectedTab == .myMedia ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .myMedia)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .id(localization.currentLanguage)
@@ -84,6 +103,41 @@ struct ContentView: View {
             if let anime = selectedAnime {
                 AnimeDetailSheet(anime: anime, selectedAnime: $selectedAnime)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.18)),
+                        removal: .opacity.animation(.easeIn(duration: 0.12))
+                    ))
+                    .zIndex(500)
+            }
+            
+            // 我的库中的详情页（在 ContentView 层级显示，确保覆盖 TopNavigationBar）
+            if let wallpaper = librarySelectedWallpaper {
+                WallpaperDetailSheet(wallpaper: wallpaper, viewModel: viewModel) {
+                    librarySelectedWallpaper = nil
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.asymmetric(
+                    insertion: .opacity.animation(.easeOut(duration: 0.18)),
+                    removal: .opacity.animation(.easeIn(duration: 0.12))
+                ))
+                .zIndex(300)
+            }
+            
+            if let item = librarySelectedMedia {
+                MediaDetailSheet(item: item, viewModel: mediaViewModel) {
+                    librarySelectedMedia = nil
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.asymmetric(
+                    insertion: .opacity.animation(.easeOut(duration: 0.18)),
+                    removal: .opacity.animation(.easeIn(duration: 0.12))
+                ))
+                .zIndex(300)
+            }
+            
+            if let anime = librarySelectedAnime {
+                AnimeDetailSheet(anime: anime, selectedAnime: $librarySelectedAnime)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.18)),
@@ -97,9 +151,6 @@ struct ContentView: View {
                 .zIndex(400)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(isPresented: $showFilters) {
-            FilterView(viewModel: viewModel)
-        }
         .task {
             await viewModel.initialLoad()
         }
@@ -510,6 +561,7 @@ struct MyMediaContentView: View {
                     )
             }
             .buttonStyle(.plain)
+            .contentShape(Capsule(style: .continuous))
         }
     }
 

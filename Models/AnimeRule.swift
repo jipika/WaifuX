@@ -17,6 +17,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     let baseURL: String
     let headers: [String: String]?
     let userAgent: String?
+    let referer: String?  // Kazumi 规则中的 referer 字段
     let timeout: Int?
 
     // API v1: 简化 CSS Selector 格式
@@ -51,7 +52,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, api, type, name, version, deprecated
-        case baseURL, headers, userAgent, timeout
+        case baseURL, headers, userAgent, referer, timeout
         case searchURL, searchList, searchName, searchCover, searchDetail, searchId
         case detailTitle, detailCover, detailDesc, detailStatus, detailRating
         case episodeList, episodeName, episodeLink, episodeThumb
@@ -71,6 +72,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         baseURL: String,
         headers: [String: String]? = nil,
         userAgent: String? = nil,
+        referer: String? = nil,
         timeout: Int? = 30,
         // API v1 字段
         searchURL: String,
@@ -105,6 +107,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         self.baseURL = baseURL
         self.headers = headers
         self.userAgent = userAgent
+        self.referer = referer
         self.timeout = timeout
         
         self.searchURL = searchURL

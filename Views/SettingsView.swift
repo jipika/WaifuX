@@ -102,7 +102,7 @@ private struct SettingsWindowControlButton: View {
     }
 }
 
-// MARK: - 设置标签栏组件
+// MARK: - 设置标签栏组件 - 液态玻璃风格
 private struct SettingsSegmentedControl: View {
     @Binding var selectedTab: SettingsTab
     let controlHeight: CGFloat
@@ -111,7 +111,7 @@ private struct SettingsSegmentedControl: View {
     @State private var hoveredTab: SettingsTab?
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(SettingsTab.allCases, id: \.self) { tab in
                 Button {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
@@ -119,20 +119,20 @@ private struct SettingsSegmentedControl: View {
                     }
                 } label: {
                     Text(tab.title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(labelColor(for: tab))
                         .frame(width: itemWidth(for: tab), height: controlHeight - 8)
                         .background {
                             if selectedTab == tab {
-                                selectedTabGlass(for: tab)
+                                selectedTabBackground(for: tab)
                             } else if hoveredTab == tab {
-                                Capsule(style: .continuous)
-                                    .fill(Color.white.opacity(0.05))
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.white.opacity(0.1))
                             }
                         }
                 }
                 .buttonStyle(.plain)
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .onHover { hovering in
                     withAnimation(.easeOut(duration: 0.16)) {
                         hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
@@ -140,52 +140,39 @@ private struct SettingsSegmentedControl: View {
                 }
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
-        .glassContainer(spacing: 10)
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .liquidGlassSurface(.subtle, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func itemWidth(for tab: SettingsTab) -> CGFloat {
         switch tab {
-        case .general: return 60
-        case .download: return 72
-        case .scheduler: return 72
-        case .about: return 56
+        case .general: return 56
+        case .download: return 68
+        case .scheduler: return 68
+        case .about: return 52
         }
     }
 
     private func labelColor(for tab: SettingsTab) -> Color {
         if selectedTab == tab {
-            return .white.opacity(0.96)
+            return Color.white.opacity(0.95)
         }
         if hoveredTab == tab {
-            return .white.opacity(0.86)
+            return Color.white.opacity(0.8)
         }
-        return .white.opacity(0.72)
+        return Color.white.opacity(0.5)
     }
 
     @ViewBuilder
-    private func selectedTabGlass(for tab: SettingsTab) -> some View {
-        Capsule(style: .continuous)
-            .liquidGlassSurface(.max, in: Capsule(style: .continuous))
+    private func selectedTabBackground(for tab: SettingsTab) -> some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(Color.white.opacity(0.2))
             .overlay(
-                Capsule(style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.34),
-                                Color.white.opacity(0.08)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                            lineWidth: 0.8
-                    )
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.white.opacity(0.3), lineWidth: 0.5)
             )
-            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-            .matchedGeometryEffect(id: "settingsSelectedTabGlass", in: selectionNamespace)
+            .matchedGeometryEffect(id: "settingsSelectedTab", in: selectionNamespace)
     }
 }
 
@@ -199,6 +186,7 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 顶部工具栏
             HStack(alignment: .top) {
                 SettingsWindowControlButtons()
                     .frame(width: 88, alignment: .leading)
@@ -218,7 +206,9 @@ struct SettingsView: View {
             .padding(.horizontal, 26)
             .padding(.top, 8)
             .padding(.bottom, 10)
+            .background(Color(hex: "0D0D0D"))
 
+            // 内容区域
             Group {
                 switch selectedTab {
                 case .general:
@@ -232,8 +222,10 @@ struct SettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(hex: "1C1C1E"))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(hex: "0D0D0D"))
         .id(localization.currentLanguage)
     }
 }
@@ -243,6 +235,10 @@ private struct GeneralSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showClearCacheAlert = false
     @State private var importProfileURL = ""
+    
+    // 噪点效果设置
+    @AppStorage("grain_texture_enabled") private var grainTextureEnabled = true
+    @AppStorage("grain_texture_quality") private var grainTextureQuality = "high"
 
     private var apiKeyBinding: Binding<String> {
         Binding(
@@ -257,163 +253,189 @@ private struct GeneralSettingsTab: View {
             set: { LocalizationService.shared.setLanguage($0) }
         )
     }
+    
+    private var localization: LocalizationService { LocalizationService.shared }
 
     var body: some View {
-        Form {
-            // 启动设置
-            Section {
-                LiquidGlassToggle(
-                    t("launchAtLogin"),
-                    isOn: Binding(
+        MacSettingsForm {
+            // 外观效果组 - 蓝色图标
+            MacSettingsSection {
+                // 噪点效果开关
+                MacSettingsRow(
+                    icon: "sparkles",
+                    iconColor: Color(hex: "0A84FF"),
+                    title: t("grainTextureEffect"),
+                    subtitle: t("grainTextureSubtitle"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $grainTextureEnabled)
+                }
+                
+                // 自动下载原图
+                MacSettingsRow(
+                    icon: "arrow.down.circle",
+                    iconColor: Color(hex: "0A84FF"),
+                    title: t("autoDownloadOriginal"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
+                }
+            }
+            
+            // 启动和系统设置组 - 绿色图标
+            MacSettingsSection {
+                MacSettingsRow(
+                    icon: "power",
+                    iconColor: Color(hex: "30D158"),
+                    title: t("launchAtLogin"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: Binding(
                         get: { viewModel.launchAtLogin },
                         set: { _ in viewModel.toggleLaunchAtLogin() }
-                    )
-                )
-            } header: {
-                Text(t("startup"))
-            }
-
-            // 语言设置
-            Section {
-                Picker(t("displayLanguage"), selection: languageBinding) {
-                    ForEach(LocalizationService.Language.allCases, id: \.self) { language in
-                        Text(language.displayName)
-                            .tag(language)
-                    }
+                    ))
                 }
-                .pickerStyle(.radioGroup)
-            } header: {
-                Text(t("languageSettings"))
+                
+                MacSettingsRow(
+                    icon: "folder",
+                    iconColor: Color(hex: "30D158"),
+                    title: t("saveToDownloadsFolder"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: $viewModel.saveToDownloads)
+                }
             }
-
-            // API Key 设置
-            Section {
-                LiquidGlassTextField(
-                    t("api.key.placeholder"),
-                    text: apiKeyBinding,
-                    icon: "key.fill",
-                    isSecure: true
-                )
-
-                HStack {
-                    Text(viewModel.apiKey.isEmpty ? t("apiNotConfigured") : t("apiConfigured"))
-                        .foregroundStyle(viewModel.apiKey.isEmpty ? Color.secondary : Color.green)
-
+            
+            // API 和缓存组 - 橙色/红色图标
+            MacSettingsSection {
+                // API Key 行
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "FF9F0A"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(t("apiKey"))
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        
+                        Text(viewModel.apiKey.isEmpty ? t("apiNotConfigured") : t("apiConfigured"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(viewModel.apiKey.isEmpty ? Color.white.opacity(0.4) : Color(hex: "30D158"))
+                    }
+                    
                     Spacer()
-
-                    Link(t("getApiKey"), destination: URL(string: "https://wallhaven.cc/settings/account")!)
-                }
-                .font(.callout)
-            } header: {
-                Text(t("apiKey"))
-            } footer: {
-                Text(t("afterConfig"))
-                    .font(.caption)
-            }
-
-            // 规则仓库
-            Section {
-                HStack(spacing: 12) {
-                    LiquidGlassTextField(
-                        "https://github.com/owner/repo",
-                        text: $viewModel.ruleRepositoryURL,
-                        icon: "globe"
-                    )
-
-                    Button(t("save")) {
-                        Task { await viewModel.saveRuleRepository() }
-                    }
-                    .disabled(viewModel.ruleRepositoryURL.isEmpty)
-                    .buttonStyle(.borderedProminent)
-                    .tint(LiquidGlassColors.primaryPink)
-                }
-
-                if viewModel.isRuleRepositoryConfigured {
-                    Text("\(t("configured")): \(viewModel.currentRuleRepository)")
-                        .font(.callout)
-                        .foregroundStyle(.green)
-                }
-            } header: {
-                Text(t("ruleRepository"))
-            } footer: {
-                Text(t("ruleRepositoryDesc"))
-                    .font(.caption)
-            }
-
-            // 数据来源配置
-            Section {
-                Picker(t("activeProfile"), selection: Binding(
-                    get: { viewModel.activeDataSourceProfileID },
-                    set: { viewModel.selectDataSourceProfile(id: $0) }
-                )) {
-                    ForEach(viewModel.dataSourceProfiles) { profile in
-                        Text(profile.name).tag(profile.id)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                HStack(spacing: 12) {
-                    Button(t("testProfile")) {
-                        Task { await viewModel.runDataSourceDiagnostics() }
-                    }
-
-                    Spacer()
-
-                    Button(t("resetProfile")) {
-                        viewModel.resetDataSourceProfiles()
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    LiquidGlassTextField(
-                        "https://example.com/profile.json",
-                        text: $importProfileURL,
-                        icon: "arrow.down.document"
-                    )
-
-                    Button(t("importFromURL")) {
-                        guard let url = URL(string: importProfileURL) else { return }
-                        Task {
-                            await viewModel.importDataSourceProfiles(fromRemoteURL: url)
-                            importProfileURL = ""
+                    
+                    HStack(spacing: 8) {
+                        SecureField(t("api.key.placeholder"), text: apiKeyBinding)
+                            .font(.system(size: 13))
+                            .textFieldStyle(.plain)
+                            .frame(width: 260)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 7)
+                            .background(Color.white.opacity(0.08))
+                            .cornerRadius(6)
+                            .foregroundStyle(Color.white)
+                        
+                        Link(destination: URL(string: "https://wallhaven.cc/settings/account")!) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color(hex: "0A84FF"))
                         }
                     }
-                    .disabled(importProfileURL.isEmpty)
-                    .buttonStyle(.borderedProminent)
-                    .tint(LiquidGlassColors.tertiaryBlue)
                 }
-            } header: {
-                Text(t("dataSourceProfiles"))
-            } footer: {
-                Text(t("dataSourceProfilesDesc"))
-                    .font(.caption)
-            }
-
-            // 缓存管理
-            Section {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(viewModel.cacheSize)
-                            .font(.body.monospacedDigit())
-                        Text(t("thumbnailsTemp"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                
+                Divider()
+                    .background(Color.white.opacity(0.08))
+                    .padding(.leading, 58)
+                
+                // 缓存管理行
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "FF453A"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "trash")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
                     }
-
+                    
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(t("clearCache"))
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        Text(viewModel.cacheSize)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.4))
+                    }
+                    
                     Spacer()
-
-                    Button(t("clearCache"), role: .destructive) {
+                    
+                    Button(t("clear")) {
                         showClearCacheAlert = true
                     }
+                    .buttonStyle(.bordered)
+                    .tint(Color(hex: "FF453A"))
+                    .controlSize(.regular)
+                    .scaleEffect(1.3)
                 }
-
-                ProgressView(value: viewModel.cacheProgress)
-                    .progressViewStyle(.linear)
-            } header: {
-                Text(t("cacheManagement"))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+            
+            // 语言设置组 - 紫色图标
+            MacSettingsSection {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "BF5AF2"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "globe")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+                    
+                    Text(t("displayLanguage"))
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    
+                    Spacer()
+                    
+                    Menu {
+                        ForEach(LocalizationService.Language.allCases, id: \.self) { language in
+                            Button(language.displayName) {
+                                LocalizationService.shared.setLanguage(language)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(localization.currentLanguage.displayName)
+                                .font(.system(size: 13))
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.white.opacity(0.6))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.1))
+                        .cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
         }
-        .formStyle(.grouped)
         .alert(t("clearCache"), isPresented: $showClearCacheAlert) {
             Button(t("cancel"), role: .cancel) {}
             Button(t("clear"), role: .destructive) {
@@ -421,17 +443,6 @@ private struct GeneralSettingsTab: View {
             }
         } message: {
             Text(t("clearCacheConfirm"))
-        }
-        .alert(
-            t("dataSourceProfiles"),
-            isPresented: Binding(
-                get: { viewModel.dataSourceStatusMessage != nil },
-                set: { if !$0 { viewModel.dataSourceStatusMessage = nil } }
-            )
-        ) {
-            Button(t("ok"), role: .cancel) {}
-        } message: {
-            Text(viewModel.dataSourceStatusMessage ?? "")
         }
     }
 }
@@ -441,20 +452,30 @@ private struct DownloadSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
 
     var body: some View {
-        Form {
-            Section {
-                LiquidGlassToggle(t("autoDownloadOriginal"), isOn: $viewModel.autoDownloadOriginal)
-                    .padding(.vertical, 4)
-                LiquidGlassToggle(t("saveToDownloadsFolder"), isOn: $viewModel.saveToDownloads)
-                    .padding(.vertical, 4)
-            } header: {
-                Text(t("downloadPrefs"))
-            } footer: {
-                Text(t("downloadPrefsDesc"))
-                    .font(.caption)
+        MacSettingsForm {
+            // 下载偏好设置组 - 蓝色图标
+            MacSettingsSection {
+                MacSettingsRow(
+                    icon: "arrow.down.circle",
+                    iconColor: Color(hex: "0A84FF"),
+                    title: t("autoDownloadOriginal"),
+                    subtitle: t("autoDownloadDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
+                }
+                
+                MacSettingsRow(
+                    icon: "folder",
+                    iconColor: Color(hex: "0A84FF"),
+                    title: t("saveToDownloadsFolder"),
+                    subtitle: t("saveToDownloadsDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: $viewModel.saveToDownloads)
+                }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -474,55 +495,138 @@ private struct SchedulerSettingsTab: View {
     }
 
     var body: some View {
-        Form {
-            Section {
-                LiquidGlassToggle(t("enableAutoReplace"), isOn: schedulerEnabledBinding)
-                    .padding(.vertical, 4)
-
-                HStack {
-                    Text(t("status"))
-                    Spacer()
-                    Text(viewModel.schedulerViewModel.isRunning ? t("running") : t("stopped"))
-                        .foregroundStyle(viewModel.schedulerViewModel.isRunning ? .green : .secondary)
+        MacSettingsForm {
+            // 自动替换开关组 - 紫色图标
+            MacSettingsSection {
+                MacSettingsRow(
+                    icon: "clock.arrow.circlepath",
+                    iconColor: Color(hex: "BF5AF2"),
+                    title: t("enableAutoReplace"),
+                    subtitle: viewModel.schedulerViewModel.isRunning ? t("currentlyRunning") : t("currentlyStopped"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: schedulerEnabledBinding)
                 }
-            } header: {
-                Text(t("autoReplace"))
             }
 
-            Section {
-                Picker(t("replaceInterval"), selection: Binding(
-                    get: { viewModel.schedulerViewModel.config.intervalMinutes },
-                    set: { viewModel.schedulerViewModel.updateInterval($0) }
-                )) {
-                    ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
-                        Text(intervalLabel(for: minutes)).tag(minutes)
+            // 替换节奏设置组
+            MacSettingsSection {
+                // 间隔选择
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "0A84FF"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "timer")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
                     }
+                    
+                    Text(t("replaceInterval"))
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    
+                    Spacer()
+                    
+                    Menu {
+                        ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
+                            Button(intervalLabel(for: minutes)) {
+                                viewModel.schedulerViewModel.updateInterval(minutes)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(intervalLabel(for: viewModel.schedulerViewModel.config.intervalMinutes))
+                                .font(.system(size: 13))
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.white.opacity(0.6))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.1))
+                        .cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
                 }
-                .pickerStyle(.menu)
-
-                Picker(t("replaceOrder"), selection: Binding(
-                    get: { viewModel.schedulerViewModel.config.order },
-                    set: { viewModel.schedulerViewModel.updateOrder($0) }
-                )) {
-                    Text(t("sequential")).tag(ScheduleOrder.sequential)
-                    Text(t("random")).tag(ScheduleOrder.random)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                
+                Divider()
+                    .background(Color.white.opacity(0.08))
+                    .padding(.leading, 58)
+                
+                // 顺序选择
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "30D158"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+                    
+                    Text(t("replaceOrder"))
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    
+                    Spacer()
+                    
+                    Picker("", selection: Binding(
+                        get: { viewModel.schedulerViewModel.config.order },
+                        set: { viewModel.schedulerViewModel.updateOrder($0) }
+                    )) {
+                        Text(t("sequential")).tag(ScheduleOrder.sequential)
+                        Text(t("random")).tag(ScheduleOrder.random)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(width: 110, alignment: .trailing)
                 }
-                .pickerStyle(.segmented)
-
-                Picker(t("wallpaperSource"), selection: Binding(
-                    get: { viewModel.schedulerViewModel.config.source },
-                    set: { viewModel.schedulerViewModel.updateSource($0) }
-                )) {
-                    Text(t("online")).tag(WallpaperSource.online)
-                    Text(t("local")).tag(WallpaperSource.local)
-                    Text(t("favorites")).tag(WallpaperSource.favorites)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                
+                Divider()
+                    .background(Color.white.opacity(0.08))
+                    .padding(.leading, 58)
+                
+                // 来源选择
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(hex: "FF9F0A"))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+                    
+                    Text(t("wallpaperSource"))
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    
+                    Spacer()
+                    
+                    Picker("", selection: Binding(
+                        get: { viewModel.schedulerViewModel.config.source },
+                        set: { viewModel.schedulerViewModel.updateSource($0) }
+                    )) {
+                        Text(t("online")).tag(WallpaperSource.online)
+                        Text(t("local")).tag(WallpaperSource.local)
+                        Text(t("favorites")).tag(WallpaperSource.favorites)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(width: 140, alignment: .trailing)
                 }
-                .pickerStyle(.segmented)
-            } header: {
-                Text(t("replaceRhythm"))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
         }
-        .formStyle(.grouped)
     }
 
     private func intervalLabel(for minutes: Int) -> String {
@@ -541,90 +645,170 @@ private struct SchedulerSettingsTab: View {
 // MARK: - 关于设置标签
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
+    
+    private var wallpaperRuleSourceText: String {
+        if viewModel.currentRuleRepository.isEmpty {
+            return "GitHub"
+        }
+        let url = viewModel.currentRuleRepository
+        if let range = url.range(of: "github.com/") {
+            let repo = String(url[range.upperBound...])
+            return repo.replacingOccurrences(of: ".git", with: "")
+        }
+        return "GitHub"
+    }
 
     var body: some View {
-        Form {
-            // 应用信息
-            Section {
+        MacSettingsForm {
+            // 应用信息卡片
+            MacSettingsSection {
                 HStack(spacing: 16) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 64, height: 64)
+                        .frame(width: 56, height: 56)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("WallHaven")
-                            .font(.title2.weight(.semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("WaifuX")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.9))
 
                         Text(viewModel.updateChecker.fullVersionString)
-                            .font(.callout.monospacedDigit())
-                            .foregroundStyle(.secondary)
-
-                        Text(viewModel.updateChecker.formattedLastCheckDate())
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.5))
                     }
 
                     Spacer()
 
-                    VStack(alignment: .trailing, spacing: 8) {
-                        if viewModel.hasUpdate {
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("\(t("newVersionAvailable")): \(viewModel.latestVersion ?? "")")
-                                    .font(.callout)
-                                    .foregroundStyle(.green)
-
-                                Button(t("downloadUpdate")) {
-                                    viewModel.openDownloadPage()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                            }
-                        } else {
-                            Button(t("checkForUpdates")) {
-                                Task { await viewModel.checkForUpdates() }
-                            }
-                            .disabled(viewModel.isCheckingUpdate)
-                            .controlSize(.small)
+                    if viewModel.hasUpdate {
+                        Button(t("downloadUpdate")) {
+                            viewModel.openDownloadPage()
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color(hex: "30D158"))
+                        .controlSize(.regular)
+                        .scaleEffect(1.3)
+                    } else {
+                        Button(t("checkForUpdates")) {
+                            Task { await viewModel.checkForUpdates() }
+                        }
+                        .disabled(viewModel.isCheckingUpdate)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .scaleEffect(1.3)
                     }
+                }
+                .padding(14)
+            }
+
+            // 项目信息组
+            MacSettingsSection {
+                MacSettingsRow(
+                    icon: "person.fill",
+                    iconColor: Color(hex: "BF5AF2"),
+                    title: t("developer"),
+                    showDivider: true
+                ) {
+                    Text("jipika")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+                
+                MacSettingsRow(
+                    icon: "photo.on.rectangle.angled",
+                    iconColor: Color(hex: "0A84FF"),
+                    title: t("wallpaperRuleSource"),
+                    showDivider: true
+                ) {
+                    Text(wallpaperRuleSourceText)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+                
+                MacSettingsRow(
+                    icon: "play.rectangle.fill",
+                    iconColor: Color(hex: "FF9F0A"),
+                    title: t("animeRuleSource"),
+                    showDivider: true
+                ) {
+                    Text("KazumiRules")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+                
+                MacSettingsRow(
+                    icon: "hammer.fill",
+                    iconColor: Color(hex: "30D158"),
+                    title: t("techStack"),
+                    showDivider: false
+                ) {
+                    Text("SwiftUI + AppKit")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.white.opacity(0.5))
                 }
             }
 
-            // 项目信息
-            Section {
-                LabeledContent(t("developer"), value: "jipika")
-                LabeledContent(t("dataSource"), value: "wallhaven.cc / motionbgs.com")
-                LabeledContent(t("animeSource"), value: "Predidit / KazumiRules")
-                LabeledContent(t("techStack"), value: "SwiftUI + AppKit")
-            } header: {
-                Text(t("projectInfo"))
-            }
-
-            // 链接
-            Section {
+            // 外部链接组
+            MacSettingsSection {
                 Link(destination: URL(string: "https://wallhaven.cc")!) {
-                    HStack {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(hex: "0A84FF"))
+                                .frame(width: 32, height: 32)
+                            
+                            Image(systemName: "globe")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.white)
+                        }
+                        
                         Text(t("visitWebsite"))
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        
                         Spacer()
+                        
                         Image(systemName: "arrow.up.right")
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.white.opacity(0.4))
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
+                .buttonStyle(.plain)
+                
+                Divider()
+                    .background(Color.white.opacity(0.08))
+                    .padding(.leading, 58)
 
-                Link(destination: URL(string: "https://github.com/jipika/WallHaven")!) {
-                    HStack {
+                Link(destination: URL(string: "https://github.com/jipika/WaifuX")!) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(hex: "FF453A"))
+                                .frame(width: 32, height: 32)
+                            
+                            Image(systemName: "exclamationmark.bubble")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.white)
+                        }
+                        
                         Text(t("reportProblem"))
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        
                         Spacer()
+                        
                         Image(systemName: "arrow.up.right")
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.white.opacity(0.4))
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
-            } header: {
-                Text(t("externalLinks"))
+                .buttonStyle(.plain)
             }
         }
-        .formStyle(.grouped)
         .alert(t("checkForUpdates"), isPresented: Binding(
             get: { viewModel.updateCheckResult != nil },
             set: { if !$0 { viewModel.updateCheckResult = nil } }

@@ -118,7 +118,11 @@ class AnimeDetailViewModel: ObservableObject {
 
     // MARK: - Bangumi 详情（用于展示信息）
     @Published var bangumiDetail: BangumiDetail?
+    @Published var bangumiEpisodes: [BangumiEpisodeItem] = []
     @Published var isLoadingBangumi: Bool = false
+    
+    // MARK: - 规则加载状态
+    @Published var isLoadingRules: Bool = false
     
     // MARK: - 收藏状态
     @Published var isFavorite: Bool = false
@@ -163,6 +167,9 @@ class AnimeDetailViewModel: ObservableObject {
     // MARK: - 加载规则
     /// 加载规则：先尝试本地，如果失败则从远程加载
     private func loadRules() async {
+        isLoadingRules = true
+        defer { isLoadingRules = false }
+        
         // 首先尝试从本地加载已安装的规则
         var rules = await AnimeRuleStore.shared.loadAllRules()
         print("[AnimeDetailViewModel] 本地规则数量: \(rules.count)")
@@ -210,12 +217,27 @@ class AnimeDetailViewModel: ObservableObject {
         // 尝试从 anime.id 解析 Bangumi ID
         if let bangumiId = Int(anime.id) {
             do {
-                let detail = try await BangumiService.shared.getDetail(id: bangumiId)
+                async let detailTask = BangumiService.shared.getDetail(id: bangumiId)
+                async let episodesTask = BangumiService.shared.getEpisodes(subjectId: bangumiId)
+                
+                let detail = try await detailTask
+                let episodes = try await episodesTask
+                
                 self.bangumiDetail = detail
+                self.bangumiEpisodes = episodes.episodes
             } catch {
                 print("[AnimeDetailViewModel] Failed to load Bangumi detail: \(error)")
             }
         }
+    }
+    
+    /// 获取指定集数的 Bangumi 章节标题
+    func getEpisodeTitle(for episodeNumber: Int) -> String? {
+        // 在 Bangumi 章节中查找匹配的集数
+        if let episode = bangumiEpisodes.first(where: { $0.ep == episodeNumber }) {
+            return episode.displayName
+        }
+        return nil
     }
 
     // MARK: - Kazumi 正确链路：搜索 -> 选择 -> 解析剧集
@@ -232,9 +254,11 @@ class AnimeDetailViewModel: ObservableObject {
 
         // 更新状态为加载中
         await MainActor.run {
-            sourceResults[index].status = .loading
-            sourceResults[index].selectedItem = nil
-            sourceResults[index].detail = nil
+            var updatedResult = sourceResults[index]
+            updatedResult.status = .loading
+            updatedResult.selectedItem = nil
+            updatedResult.detail = nil
+            sourceResults[index] = updatedResult
         }
 
         do {
@@ -255,18 +279,22 @@ class AnimeDetailViewModel: ObservableObject {
             }
 
             await MainActor.run {
+                var updatedResult = sourceResults[index]
                 if items.isEmpty {
-                    sourceResults[index].status = .noResult
+                    updatedResult.status = .noResult
+                    sourceResults[index] = updatedResult
                 } else if items.count == 1 {
                     // 只有一个结果，自动选择但不自动查询剧集
-                    sourceResults[index].selectedItem = items[0]
+                    updatedResult.selectedItem = items[0]
+                    sourceResults[index] = updatedResult
                     // 可选：自动查询剧集
                     Task {
                         await self.queryEpisodes(for: items[0], in: rule)
                     }
                 } else {
                     // 多个结果，需要用户选择
-                    sourceResults[index].status = .needsSelection(items)
+                    updatedResult.status = .needsSelection(items)
+                    sourceResults[index] = updatedResult
                 }
             }
 
@@ -275,58 +303,92 @@ class AnimeDetailViewModel: ObservableObject {
                 switch error {
                 case .captchaRequired:
                     // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
-                    sourceResults[index].status = .captcha
+                    var updatedResult = sourceResults[index]
+                    updatedResult.status = .captcha
+                    sourceResults[index] = updatedResult
                 case .noResult:
-                    sourceResults[index].status = .noResult
+                    var updatedResult = sourceResults[index]
+                    updatedResult.status = .noResult
+                    sourceResults[index] = updatedResult
                 case .networkError(let underlying):
-                    sourceResults[index].status = .error(underlying.localizedDescription)
+                    var updatedResult = sourceResults[index]
+                    updatedResult.status = .error(underlying.localizedDescription)
+                    sourceResults[index] = updatedResult
                 default:
-                    sourceResults[index].status = .error(error.localizedDescription)
+                    var updatedResult = sourceResults[index]
+                    updatedResult.status = .error(error.localizedDescription)
+                    sourceResults[index] = updatedResult
                 }
             }
         } catch {
             let errorString = error.localizedDescription.lowercased()
             await MainActor.run {
+                var updatedResult = sourceResults[index]
+                // 优化：避免误判，只匹配明确的验证码关键词
                 if errorString.contains("captcha") ||
-                   errorString.contains("验证码") ||
-                   errorString.contains("验证") {
+                   errorString.contains("需要验证") ||
+                   errorString.contains("verification required") {
                     // 仅标记为需要验证码，不弹窗
-                    sourceResults[index].status = .captcha
+                    updatedResult.status = .captcha
                 } else {
-                    sourceResults[index].status = .error(error.localizedDescription)
+                    updatedResult.status = .error(error.localizedDescription)
                 }
+                sourceResults[index] = updatedResult
             }
         }
     }
 
     /// 第二步：用选中的结果获取剧集列表
     /// 参考 Kazumi Plugin.querychapterRoads: 用第三方源详情页 URL 解析剧集
-    func queryEpisodes(for item: SourceSearchItem, in rule: AnimeRule) async {
+    func queryEpisodes(for item: SourceSearchItem, in rule: AnimeRule, clearCookies: Bool = false) async {
         let detailURL = item.fullURL(baseURL: rule.baseURL)
 
         print("[AnimeDetailViewModel] ========== 解析剧集 ==========")
         print("[AnimeDetailViewModel] 选中项: '\(item.name)'")
         print("[AnimeDetailViewModel] 详情页 URL: \(detailURL)")
+        if clearCookies {
+            print("[AnimeDetailViewModel] 将清除旧 Cookie 后重试")
+        }
 
         guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
 
         // 更新状态为加载中，同时保存 selectedItem（即使出错也需要保存，用于验证码验证后重试）
         await MainActor.run {
-            sourceResults[index].status = .loading
-            sourceResults[index].selectedItem = item
+            var updatedResult = sourceResults[index]
+            updatedResult.status = .loading
+            updatedResult.selectedItem = item
+            sourceResults[index] = updatedResult
         }
 
         do {
             // 使用 querychapterRoads 解析第三方源详情页
-            let details = try await AnimeParser.shared.querychapterRoads(
-                detailURL: detailURL,
-                rule: rule
-            )
+            // 如果需要清除 Cookie（验证码验证后），传入 clearOldCookies: true
+            let details: [AnimeDetail]
+            if clearCookies {
+                // 临时清除 Cookie 后重试
+                let cookieURL = URL(string: detailURL)!
+                HTTPCookieStorage.shared.cookies?.forEach { cookie in
+                    if cookie.domain.contains(cookieURL.host ?? "") {
+                        HTTPCookieStorage.shared.deleteCookie(cookie)
+                    }
+                }
+                details = try await AnimeParser.shared.querychapterRoads(
+                    detailURL: detailURL,
+                    rule: rule
+                )
+            } else {
+                details = try await AnimeParser.shared.querychapterRoads(
+                    detailURL: detailURL,
+                    rule: rule
+                )
+            }
 
             if details.isEmpty {
                 print("[AnimeDetailViewModel] ⚠️ 未找到播放列表")
                 await MainActor.run {
-                    sourceResults[index].status = .noResult
+                    var updatedResult = sourceResults[index]
+                    updatedResult.status = .noResult
+                    sourceResults[index] = updatedResult
                 }
                 return
             }
@@ -337,28 +399,34 @@ class AnimeDetailViewModel: ObservableObject {
 
             // 更新 sourceResults 中的数据
             await MainActor.run {
-                self.sourceResults[index].selectedItem = item
-                self.sourceResults[index].detail = firstDetail
-                self.sourceResults[index].status = .success
+                var updatedResult = sourceResults[index]
+                updatedResult.selectedItem = item
+                updatedResult.detail = firstDetail
+                updatedResult.status = .success
+                sourceResults[index] = updatedResult
             }
 
         } catch let error as AnimeParserError {
             await MainActor.run {
+                var updatedResult = sourceResults[index]
                 switch error {
                 case .captchaRequired:
                     // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
-                    sourceResults[index].status = .captcha
+                    updatedResult.status = .captcha
                 case .noResult:
-                    sourceResults[index].status = .noResult
+                    updatedResult.status = .noResult
                 case .networkError(let underlying):
-                    sourceResults[index].status = .error(underlying.localizedDescription)
+                    updatedResult.status = .error(underlying.localizedDescription)
                 default:
-                    sourceResults[index].status = .error(error.localizedDescription)
+                    updatedResult.status = .error(error.localizedDescription)
                 }
+                sourceResults[index] = updatedResult
             }
         } catch {
             await MainActor.run {
-                sourceResults[index].status = .error(error.localizedDescription)
+                var updatedResult = sourceResults[index]
+                updatedResult.status = .error(error.localizedDescription)
+                sourceResults[index] = updatedResult
             }
         }
     }
@@ -524,18 +592,32 @@ class AnimeDetailViewModel: ObservableObject {
         let rule = session.rule
         let selectedItem = session.selectedSearchItem
 
+        print("[AnimeDetailViewModel] 验证码验证完成，同步 Cookie...")
+        
+        // 等待一小段时间确保 Cookie 已写入
+        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+        
+        // 同步 WebView Cookie 到共享存储
         await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
+        
+        // 关闭验证码弹窗
         captchaVerificationSession = nil
+        
+        // 再等待一小段时间确保同步完成
+        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3秒
 
         if let ep = replayEp, let idx = replayIdx {
             // 播放阶段的验证码验证完成，重新尝试播放
+            print("[AnimeDetailViewModel] 重新尝试播放...")
             await playEpisode(ep, from: idx)
         } else if let item = selectedItem {
             // 剧集列表阶段的验证码验证完成，重新获取剧集列表
-            print("[AnimeDetailViewModel] 验证码验证完成，重新获取剧集列表...")
-            await queryEpisodes(for: item, in: rule)
+            // 传入 clearCookies: true 确保使用新验证的 Cookie
+            print("[AnimeDetailViewModel] 重新获取剧集列表...")
+            await queryEpisodes(for: item, in: rule, clearCookies: true)
         } else {
             // 搜索阶段的验证码验证完成，重新搜索
+            print("[AnimeDetailViewModel] 重新搜索源...")
             await searchInSource(rule)
         }
     }
@@ -552,6 +634,10 @@ class AnimeDetailViewModel: ObservableObject {
         }
 
         let rule = sourceResults[sourceIndex].rule
+        
+        // 先停止之前的播放（避免 stopPlayback 把 currentEpisode 设为 nil）
+        stopPlayback()
+        
         currentEpisode = episode
         isLoadingVideo = true
         videoError = nil
@@ -589,31 +675,36 @@ class AnimeDetailViewModel: ObservableObject {
     }
 
     /// 设置播放器并恢复进度
+    /// 清理播放器但不重置 currentEpisode（用于切换剧集时）
+    private func cleanupPlayerOnly() {
+        progressObserver?.cancel()
+        progressTracker?.detach()
+        progressTracker = nil
+        PlaybackProgressCache.shared.stopTracking()
+        player?.pause()
+        player = nil
+        isPlaying = false
+        // 注意：不重置 currentEpisode，保留当前播放的剧集信息
+        
+        // 取消弹幕加载
+        danmakuTask?.cancel()
+        danmakuTask = nil
+        danmakuList = []
+    }
+
+    /// 修复：简化 Headers 设置（AVURLAssetHTTPHeaderFieldsKey 对 M3U8 无效），延迟恢复播放进度
     private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
         let rule = sourceResults[sourceIndex].rule
         
-        // 创建播放器项目，设置必要的 headers（如 Referer、User-Agent）
-        let playerItem: AVPlayerItem
+        // 使用 cleanupPlayerOnly 而不是 stopPlayback，避免 currentEpisode 被清空
+        cleanupPlayerOnly()
         
-        // 检查是否需要设置 headers
-        var headers: [String: String] = [:]
-        if let userAgent = rule.userAgent, !userAgent.isEmpty {
-            headers["User-Agent"] = userAgent
-        }
-        // 设置 Referer（某些视频源需要）
-        if let referer = rule.headers?["Referer"], !referer.isEmpty {
-            headers["Referer"] = referer
-        } else {
-            headers["Referer"] = rule.baseURL
-        }
+        // 创建播放器项目
+        // 注意：AVURLAssetHTTPHeaderFieldsKey 对 M3U8 流无效，使用标准 AVPlayerItem
+        let playerItem = AVPlayerItem(url: url)
         
-        if !headers.isEmpty {
-            // 使用 AVURLAsset 设置 headers
-            let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
-            playerItem = AVPlayerItem(asset: asset)
-        } else {
-            playerItem = AVPlayerItem(url: url)
-        }
+        // 设置 HTTP 头信息（通过 AVPlayerItem 的 asset 选项对 M3U8 无效，依赖系统 Cookie 管理）
+        // 大部分视频源会通过 HTTPCookieStorage 自动获得必要的 Cookie
         
         self.player = AVPlayer(playerItem: playerItem)
         self.isPlaying = true
@@ -666,22 +757,78 @@ class AnimeDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // 恢复上次播放进度
-        if let savedProgress = PlaybackProgressCache.shared.getProgress(
-            sourceId: rule.id,
-            episodeId: episode.id
-        ), savedProgress.currentTime > 10 { // 至少10秒才恢复
-            let seekTime = CMTime(seconds: savedProgress.currentTime, preferredTimescale: 600)
-            self.player?.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-            print("[AnimeDetailViewModel] 恢复播放进度: \(savedProgress.formattedProgress)")
-        }
+        // 监听播放器错误和状态
+        playerItem.publisher(for: \.status)
+            .sink { [weak self] status in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    switch status {
+                    case .failed:
+                        let error = self.player?.currentItem?.error
+                        self.videoError = "视频加载失败: \(error?.localizedDescription ?? "无法播放该视频源")"
+                        print("[AnimeDetailViewModel] ❌ 播放器状态: failed - \(error?.localizedDescription ?? "Unknown error")")
+                    case .readyToPlay:
+                        print("[AnimeDetailViewModel] ✅ 播放器状态: readyToPlay")
+                        // 播放器准备好后再恢复进度（避免 seek 失败）
+                        self.restorePlaybackProgress(for: episode, rule: rule)
+                    case .unknown:
+                        print("[AnimeDetailViewModel] ⏳ 播放器状态: unknown")
+                    @unknown default:
+                        break
+                    }
+                }
+            }
+            .store(in: &cancellables)
 
-        // 开始播放
+        // 监听播放失败通知
+        NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: playerItem)
+            .sink { [weak self] notification in
+                Task { @MainActor in
+                    let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                    self?.videoError = "播放失败: \(error?.localizedDescription ?? "未知错误")"
+                    print("[AnimeDetailViewModel] ❌ 播放失败: \(error?.localizedDescription ?? "Unknown")")
+                }
+            }
+            .store(in: &cancellables)
+
+        // 开始播放（不在这里恢复进度，等待 readyToPlay）
         self.player?.play()
         print("[AnimeDetailViewModel] 开始播放: \(url.absoluteString)")
 
         // 加载弹幕
         loadDanmaku(for: episode)
+    }
+    
+    /// 恢复播放进度（在播放器 readyToPlay 后调用）
+    private func restorePlaybackProgress(for episode: AnimeDetail.AnimeEpisodeItem, rule: AnimeRule) {
+        guard let savedProgress = PlaybackProgressCache.shared.getProgress(
+            sourceId: rule.id,
+            episodeId: episode.id
+        ), savedProgress.currentTime > 10 else { // 至少10秒才恢复
+            return
+        }
+        
+        // 检查视频时长是否有效
+        let duration = player?.currentItem?.duration.seconds ?? 0
+        guard duration.isFinite && duration > 0 else {
+            print("[AnimeDetailViewModel] 视频时长无效，跳过进度恢复")
+            return
+        }
+        
+        // 如果保存的进度接近结束（>90%），从头开始播放
+        guard savedProgress.currentTime < duration * 0.9 else {
+            print("[AnimeDetailViewModel] 之前已播放完成，从头开始")
+            return
+        }
+        
+        let seekTime = CMTime(seconds: savedProgress.currentTime, preferredTimescale: 600)
+        player?.seek(to: seekTime, toleranceBefore: CMTime(seconds: 1, preferredTimescale: 1), toleranceAfter: CMTime(seconds: 1, preferredTimescale: 1)) { finished in
+            if finished {
+                print("[AnimeDetailViewModel] 恢复播放进度成功: \(savedProgress.formattedProgress)")
+            } else {
+                print("[AnimeDetailViewModel] 恢复播放进度失败")
+            }
+        }
     }
 
     private var cancellables = Set<AnyCancellable>()

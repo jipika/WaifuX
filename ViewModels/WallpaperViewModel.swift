@@ -70,61 +70,111 @@ class WallpaperViewModel: ObservableObject {
     private let networkService = NetworkService.shared
     private let cacheService = CacheService.shared
 
-    // API Key - 使用 Keychain 安全存储
+    // API Key - 使用 Keychain 安全存储（优化：内存缓存 + 异步访问）
     private let apiKeyService = "com.waifux.wallhaven.apikey"
     private let apiKeyAccount = "wallhaven_api_key"
     
-    private var apiKey: String {
-        get {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: apiKeyService,
-                kSecAttrAccount as String: apiKeyAccount,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
-            
+    // 内存缓存，避免重复 Keychain 访问
+    @Published private var cachedAPIKey: String?
+    private var apiKeyLoaded = false
+    
+    /// 异步加载 API Key（在后台线程执行 Keychain 操作）
+    private func loadAPIKeyAsync() async -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: apiKeyService,
+            kSecAttrAccount as String: apiKeyAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        
+        return await Task.detached(priority: .utility) {
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
             
             guard status == errSecSuccess,
                   let data = result as? Data,
                   let key = String(data: data, encoding: .utf8) else {
-                return ""
+                return nil
             }
-            return key
-        }
-        set {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: apiKeyService,
-                kSecAttrAccount as String: apiKeyAccount
-            ]
-            
+            return key.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.value
+    }
+    
+    /// 异步保存 API Key
+    private func saveAPIKeyAsync(_ value: String) async {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: apiKeyService,
+            kSecAttrAccount as String: apiKeyAccount
+        ]
+        
+        await Task.detached(priority: .utility) {
             // 先删除已存在的项
             SecItemDelete(query as CFDictionary)
             
             // 添加新值
-            guard !newValue.isEmpty else { return }
+            guard !value.isEmpty else { return }
             
             let attributes: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: apiKeyService,
-                kSecAttrAccount as String: apiKeyAccount,
-                kSecValueData as String: newValue.data(using: .utf8)!
+                kSecAttrService as String: self.apiKeyService,
+                kSecAttrAccount as String: self.apiKeyAccount,
+                kSecValueData as String: value.data(using: .utf8)!
             ]
             
             SecItemAdd(attributes as CFDictionary, nil)
+        }.value
+    }
+    
+    /// 获取 API Key（优先从内存缓存读取）
+    var apiKey: String {
+        get {
+            // 如果已经加载过，直接返回缓存值
+            if apiKeyLoaded {
+                return cachedAPIKey ?? ""
+            }
+            // 首次访问时同步返回空字符串，异步加载
+            Task {
+                await loadAPIKeyIfNeeded()
+            }
+            return ""
+        }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            cachedAPIKey = trimmed.isEmpty ? nil : trimmed
+            apiKeyLoaded = true
+            // 异步保存到 Keychain
+            Task {
+                await saveAPIKeyAsync(trimmed)
+            }
         }
     }
     
+    /// 异步加载 API Key 到内存缓存
+    @MainActor
+    private func loadAPIKeyIfNeeded() async {
+        guard !apiKeyLoaded else { return }
+        cachedAPIKey = await loadAPIKeyAsync()
+        apiKeyLoaded = true
+    }
+    
     private var normalizedAPIKey: String? {
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        // 如果缓存未加载，尝试同步快速检查
+        if !apiKeyLoaded {
+            // 不阻塞主线程，返回 nil，让调用方处理
+            return nil
+        }
+        return cachedAPIKey
     }
 
     var apiKeyConfigured: Bool {
-        normalizedAPIKey != nil
+        // 如果未加载，触发异步加载
+        if !apiKeyLoaded {
+            Task { await loadAPIKeyIfNeeded() }
+            return false
+        }
+        return cachedAPIKey != nil
     }
 
     init() {

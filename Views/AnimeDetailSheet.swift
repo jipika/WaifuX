@@ -145,11 +145,13 @@ struct AnimeDetailSheet: View {
                 floatingBackButton
                     .padding(.top, topBarTopInset + 18)
                     .padding(.leading, 28)
+                    .zIndex(100)
                 
                 floatingInfoOverlay(
                     viewportWidth: viewW,
                     topBarTopInset: topBarTopInset
                 )
+                .zIndex(100)
             }
         }
         .ignoresSafeArea()
@@ -365,17 +367,7 @@ struct AnimeDetailSheet: View {
 
                     buttonRowWithDividers
 
-                    // 简介文字（纯文字，居中显示，在按钮下方）
-                    if let summary = anime.summary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.system(size: 15, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineSpacing(6)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 720)
-                            .padding(.horizontal, 32)
-                            .padding(.top, 8)
-                    }
+                    // 简介已移至信息气泡弹窗中显示
                 }
             }
             .frame(maxWidth: 920)
@@ -404,6 +396,7 @@ struct AnimeDetailSheet: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
                 .frame(width: 38, height: 38)
+                .contentShape(Circle())
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
@@ -697,14 +690,11 @@ struct AnimeDetailSheet: View {
             
             dividerLine.opacity(0.7)
             
-            // 简要信息
-            VStack(alignment: .leading, spacing: 10) {
-                if let summary = anime.summary {
-                    Text(summary)
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .lineLimit(4)
-                }
+            // 简要信息 - 优先使用 Bangumi 详情中的简介
+            let summary = viewModel.bangumiDetail?.summary ?? anime.summary
+            if let summary = summary, !summary.isEmpty {
+                // 自适应高度：内容少时不滚动，内容多时才滚动
+                AdaptiveScrollView(content: summary)
             }
         }
     }
@@ -770,5 +760,22 @@ private struct LoadingOverlayView: View {
             }
         }
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - 自适应高度滚动视图
+/// 内容少时不滚动，内容多时才滚动
+private struct AdaptiveScrollView: View {
+    let content: String
+    
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            Text(content)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.white.opacity(0.8))
+                .lineSpacing(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: 320)
     }
 }

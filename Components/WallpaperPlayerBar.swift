@@ -86,7 +86,7 @@ private struct WallpaperInfoView: View {
 }
 
 // MARK: - 缩略图视图（优化版 - 增强玻璃效果）
-private struct ThumbnailView: View {
+struct ThumbnailView: View {
     let wallpaper: Wallpaper?
     @State private var isHovered = false
 

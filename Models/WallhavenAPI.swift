@@ -20,6 +20,7 @@ enum WallhavenAPI {
     struct SearchParameters {
         var query: String = ""
         var page: Int = 1
+        var perPage: Int = 8  // 减少每页数量，提高加载速度
         var categories: String = "111"
         var purity: String = "100"
         var sorting: String = "date_added"
@@ -114,6 +115,7 @@ enum WallhavenAPI {
 
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "page", value: String(max(parameters.page, 1))),
+            URLQueryItem(name: "per_page", value: String(parameters.perPage)),
             URLQueryItem(name: "categories", value: parameters.categories),
             URLQueryItem(name: "purity", value: parameters.purity),
             URLQueryItem(name: "sorting", value: parameters.sorting),

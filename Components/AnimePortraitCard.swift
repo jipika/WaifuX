@@ -4,11 +4,16 @@ import SwiftUI
 
 struct AnimePortraitCard: View {
     let anime: AnimeSearchResult
+    var cardWidth: CGFloat? = nil
+    var cardHeight: CGFloat? = nil
     var onTap: () -> Void = {}
 
     @State private var isHovered = false
 
     private let cornerRadius: CGFloat = 14
+    
+    // 静态形状缓存
+    private static let cardShape = RoundedRectangle(cornerRadius: 14, style: .continuous)
 
     var body: some View {
         Button(action: onTap) {
@@ -55,7 +60,7 @@ struct AnimePortraitCard: View {
                         .padding(.trailing, 8)
                     }
                 }
-                .frame(height: 300)
+                .frame(width: cardWidth, height: cardHeight ?? 300)
                 .clipped()
 
                 // 信息栏 - 深色半透明背景
@@ -78,16 +83,20 @@ struct AnimePortraitCard: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
-            .frame(maxWidth: .infinity)
-            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.white.opacity(isHovered ? 0.15 : 0.06), lineWidth: isHovered ? 1 : 0.5)
+            .frame(width: cardWidth)
+            .contentShape(Self.cardShape)
+            .background(
+                Self.cardShape
+                    .fill(Color.clear)
+                    .overlay(
+                        Self.cardShape
+                            .stroke(Color.white.opacity(isHovered ? 0.15 : 0.06), lineWidth: isHovered ? 1 : 0.5)
+                    )
             )
+            .clipShape(Self.cardShape)
             .shadow(
                 color: isHovered ? Color.black.opacity(0.4) : Color.black.opacity(0.15),
                 radius: isHovered ? 20 : 12,
@@ -97,8 +106,8 @@ struct AnimePortraitCard: View {
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isHovered)
+        .onHover { hovering in
             isHovered = hovering
         }
     }

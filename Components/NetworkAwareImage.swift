@@ -4,7 +4,6 @@ import SwiftUI
 struct NetworkAwareImage<Content: View>: View {
     let url: URL?
     let priority: TaskPriority
-    let retryConfig: RetryConfiguration?
     @ViewBuilder let content: (Image) -> Content
     
     @State private var image: NSImage?
@@ -14,12 +13,10 @@ struct NetworkAwareImage<Content: View>: View {
     init(
         url: URL?,
         priority: TaskPriority = .medium,
-        retryConfig: RetryConfiguration? = nil,
         @ViewBuilder content: @escaping (Image) -> Content
     ) {
         self.url = url
         self.priority = priority
-        self.retryConfig = retryConfig
         self.content = content
     }
     
@@ -66,8 +63,7 @@ struct NetworkAwareImage<Content: View>: View {
             
             if let loadedImage = await loader.loadImage(
                 from: url,
-                priority: priority,
-                retryConfig: retryConfig
+                priority: priority
             ) {
                 await MainActor.run {
                     self.image = loadedImage

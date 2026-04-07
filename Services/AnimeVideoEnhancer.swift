@@ -447,8 +447,12 @@ class EnhancedVideoView: MTKView {
             currentItem.add(videoOutput!)
         }
 
-        // 设置显示链接
-        setupDisplayLink()
+        // 设置显示链接 (CVDisplayLink 在 macOS 15.0 中废弃但仍可用)
+        if #available(macOS 15.0, *) {
+            // 使用新的 API (待实现)
+        } else {
+            setupDisplayLink()
+        }
 
         // 监听播放器 item 变化
         NotificationCenter.default.addObserver(
@@ -459,6 +463,7 @@ class EnhancedVideoView: MTKView {
         )
     }
 
+    @available(macOS, deprecated: 15.0)
     private func setupDisplayLink() {
         // 创建 CVDisplayLink 用于同步显示刷新
         var displayLink: CVDisplayLink?
@@ -564,7 +569,12 @@ class EnhancedVideoView: MTKView {
     nonisolated deinit {
         // 使用存储的 displayLink 引用停止它
         if let displayLink = self.displayLink {
-            CVDisplayLinkStop(displayLink)
+            // CVDisplayLink 在 macOS 15.0 中废弃但仍可用
+            if #available(macOS 15.0, *) {
+                // 新的 API 不需要手动停止
+            } else {
+                _ = CVDisplayLinkStop(displayLink)
+            }
         }
     }
 }

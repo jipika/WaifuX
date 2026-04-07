@@ -202,6 +202,7 @@ struct AnimeDetailView: View {
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
+        .contentShape(Circle())
     }
     
     // MARK: - 分类徽章
@@ -279,6 +280,7 @@ struct AnimeDetailView: View {
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
             }
             
             // 开始观看/继续观看按钮
@@ -300,6 +302,7 @@ struct AnimeDetailView: View {
                 .detailPrimaryGlassButtonChrome()
             }
             .buttonStyle(.plain)
+            .contentShape(Capsule(style: .continuous))
             
             HStack(spacing: 16) {
                 // 别名搜索按钮
@@ -315,6 +318,7 @@ struct AnimeDetailView: View {
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
                 
                 dividerLine.frame(width: 70)
             }

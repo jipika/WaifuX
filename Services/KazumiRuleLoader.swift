@@ -111,6 +111,7 @@ actor KazumiRuleLoader {
         let multiSource: Bool?
         let muliSources: Bool?  // 处理拼写错误：有些规则写的是 muliSources
         let userAgent: String?
+        let referer: String?
         let headers: [String: String]?
         let antiCrawler: Bool?
         let antiCrawlerConfig: KazumiAntiCrawlerConfig?
@@ -121,7 +122,7 @@ actor KazumiRuleLoader {
             case searchList, searchName, searchResult
             case chapterRoads, chapterResult, chapterName
             case useWebview, useNativePlayer, multiSource, muliSources
-            case userAgent, headers, antiCrawler, antiCrawlerConfig, adBlocker
+            case userAgent, referer, headers, antiCrawler, antiCrawlerConfig, adBlocker
         }
 
         /// 获取多源标志（兼容 muliSources 拼写错误）
@@ -222,6 +223,7 @@ actor KazumiRuleLoader {
             baseURL: kazumiRule.baseURL ?? "",
             headers: kazumiRule.headers,
             userAgent: kazumiRule.userAgent,
+            referer: kazumiRule.referer,
             timeout: 30,
             searchURL: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
             searchList: nil,  // 使用 XPath 格式
