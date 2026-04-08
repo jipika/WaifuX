@@ -25,6 +25,19 @@ struct MyLibraryContentView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            // 编辑模式背景遮罩（放在最底层，不阻挡卡片点击）
+            if isEditing {
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation {
+                            isEditing = false
+                            selectedItems.removeAll()
+                        }
+                    }
+                    .allowsHitTesting(true)
+            }
+
             LiquidGlassAtmosphereBackground(
                 primary: LiquidGlassColors.primaryPink,
                 secondary: LiquidGlassColors.secondaryViolet,
@@ -56,8 +69,6 @@ struct MyLibraryContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollClipDisabled()
-            // 编辑模式时禁用 ScrollView 的滚动，防止误触
-            .scrollDisabled(isEditing)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 注意：所有详情页在 ContentView 层级显示，确保能覆盖 TopNavigationBar
