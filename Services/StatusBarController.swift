@@ -13,6 +13,7 @@ final class StatusBarController: NSObject {
     private lazy var toggleWallpaperItem = NSMenuItem(title: t("statusbar.enableWallpaper"), action: #selector(toggleDynamicWallpaper), keyEquivalent: "")
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
     private lazy var muteItem = NSMenuItem(title: t("statusbar.muteWallpaper"), action: #selector(toggleMute), keyEquivalent: "")
+    private lazy var autoPauseFullscreenItem = NSMenuItem(title: t("statusbar.autoPauseFullscreen"), action: #selector(toggleAutoPauseFullscreen), keyEquivalent: "")
     private lazy var quitItem = NSMenuItem(title: t("statusbar.quit"), action: #selector(quitApplication), keyEquivalent: "q")
 
     private let videoWallpaperManager = VideoWallpaperManager.shared
@@ -56,6 +57,7 @@ final class StatusBarController: NSObject {
         toggleWallpaperItem.target = self
         playPauseItem.target = self
         muteItem.target = self
+        autoPauseFullscreenItem.target = self
         quitItem.target = self
 
         menu.addItem(openWindowItem)
@@ -63,6 +65,7 @@ final class StatusBarController: NSObject {
         menu.addItem(toggleWallpaperItem)
         menu.addItem(playPauseItem)
         menu.addItem(muteItem)
+        menu.addItem(autoPauseFullscreenItem)
         menu.addItem(.separator())
         menu.addItem(quitItem)
 
@@ -91,6 +94,10 @@ final class StatusBarController: NSObject {
 
         playPauseItem.title = videoWallpaperManager.isPaused ? t("statusbar.resumeWallpaper") : t("statusbar.pauseWallpaper")
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+        
+        // 全屏自动暂停开关
+        autoPauseFullscreenItem.state = videoWallpaperManager.autoPauseOnFullscreen ? .on : .off
+        autoPauseFullscreenItem.title = t("statusbar.autoPauseFullscreen")
     }
 
     @objc private func showMainWindow() {
@@ -117,6 +124,11 @@ final class StatusBarController: NSObject {
 
     @objc private func toggleMute() {
         videoWallpaperManager.setMuted(!videoWallpaperManager.isMuted)
+    }
+    
+    @objc private func toggleAutoPauseFullscreen() {
+        videoWallpaperManager.autoPauseOnFullscreen.toggle()
+        refreshMenuState()
     }
 
     @objc private func quitApplication() {

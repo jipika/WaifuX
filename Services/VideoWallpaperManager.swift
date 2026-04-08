@@ -23,6 +23,7 @@ final class VideoWallpaperManager: ObservableObject {
     private let stateKey = "video_wallpaper_state_v1"
     private let showPosterOnLockKey = "video_wallpaper_show_poster_on_lock"
     private let originalWallpaperKey = "video_wallpaper_original_desktop"
+    private let autoPauseOnFullscreenKey = "video_wallpaper_auto_pause_on_fullscreen"
     
     /// 是否在锁屏时显示预览图
     var showPosterOnLock: Bool {
@@ -34,6 +35,24 @@ final class VideoWallpaperManager: ObservableObject {
                 for screenID in windows.keys {
                     hidePosterImage(for: screenID)
                 }
+            }
+        }
+    }
+    
+    /// 是否在全屏聚焦时自动暂停
+    var autoPauseOnFullscreen: Bool {
+        get { defaults.object(forKey: autoPauseOnFullscreenKey) as? Bool ?? true }  // 默认开启
+        set { 
+            defaults.set(newValue, forKey: autoPauseOnFullscreenKey)
+            // 如果关闭自动暂停，立即恢复所有暂停的屏幕
+            if !newValue {
+                for (screenID, player) in players {
+                    if pausedScreenIDs.contains(screenID) {
+                        player.play()
+                        hidePosterImage(for: screenID)
+                    }
+                }
+                pausedScreenIDs.removeAll()
             }
         }
     }
@@ -580,14 +599,16 @@ final class VideoWallpaperManager: ObservableObject {
                 )
 
                 await MainActor.run {
-                    if covered {
+                    if covered && self.autoPauseOnFullscreen {
+                        // 只有开启自动暂停时才暂停
                         if !pausedScreenIDs.contains(screenID) {
                             player.pause()
                             pausedScreenIDs.insert(screenID)
                             // 屏幕被覆盖时显示预览图
                             self.showPosterImage(for: screenID)
                         }
-                    } else {
+                    } else if !covered {
+                        // 屏幕不再被覆盖，恢复播放
                         if pausedScreenIDs.contains(screenID) {
                             pausedScreenIDs.remove(screenID)
                         }
@@ -678,12 +699,14 @@ final class VideoWallpaperManager: ObservableObject {
             )
 
             await MainActor.run {
-                if covered {
+                if covered && self.autoPauseOnFullscreen {
+                    // 只有开启自动暂停时才暂停
                     if !pausedScreenIDs.contains(screenID) {
                         player.pause()
                         pausedScreenIDs.insert(screenID)
                     }
-                } else {
+                } else if !covered {
+                    // 屏幕不再被覆盖，恢复播放
                     if pausedScreenIDs.contains(screenID) {
                         pausedScreenIDs.remove(screenID)
                     }
