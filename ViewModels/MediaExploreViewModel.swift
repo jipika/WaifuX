@@ -414,7 +414,7 @@ final class MediaExploreViewModel: ObservableObject {
             preferredOption: preferredWallpaperOption(for: item),
             saveToDownloads: false
         )
-        try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, muted: muted)
+        try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, posterURL: item.posterURL, muted: muted)
     }
 
     private func replaceItem(with updatedItem: MediaItem) {

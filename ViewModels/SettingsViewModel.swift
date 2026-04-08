@@ -8,6 +8,7 @@ class SettingsViewModel: ObservableObject {
     @AppStorage("theme_mode") private var themeModeRawValue = ThemeMode.system.rawValue
     @AppStorage("launch_at_login") var launchAtLogin = false
     @AppStorage("grain_texture_enabled") var grainTextureEnabled = true
+    @AppStorage("video_wallpaper_show_poster_on_lock") var showPosterOnLock = true
 
     @Published var cacheSize: String = "0 MB"
     @Published var cacheProgress: Double = 0.0
@@ -48,6 +49,13 @@ class SettingsViewModel: ObservableObject {
         Task { await updateCacheSize() }
         refreshDataSourceProfiles()
         Task { await loadRuleRepository() }
+        // 同步动态壁纸设置
+        syncVideoWallpaperSettings()
+    }
+    
+    /// 同步动态壁纸设置到 VideoWallpaperManager
+    func syncVideoWallpaperSettings() {
+        VideoWallpaperManager.shared.showPosterOnLock = showPosterOnLock
     }
 
     // MARK: - 更新检测

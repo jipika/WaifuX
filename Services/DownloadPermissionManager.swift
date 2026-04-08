@@ -38,6 +38,8 @@ final class DownloadPermissionManager {
         
         guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else {
             print("[DownloadPermissionManager] No saved bookmark, using default path")
+            // 确保使用默认路径
+            resetToDefaultPath()
             return
         }
 
@@ -47,8 +49,19 @@ final class DownloadPermissionManager {
             self.currentFolderURL = restoredURL
             print("[DownloadPermissionManager] ✅ Successfully restored security scope on launch for: \(restoredURL.path)")
         } else {
-            print("[DownloadPermissionManager] ⚠️ Bookmark restoration failed, will re-prompt user")
+            print("[DownloadPermissionManager] ⚠️ Bookmark restoration failed, resetting to default path")
+            // 书签恢复失败，重置为默认路径，避免后续检查失败触发权限请求
+            resetToDefaultPath()
         }
+    }
+    
+    /// 重置为默认下载路径
+    private func resetToDefaultPath() {
+        self.currentFolderURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("WallHaven", isDirectory: true)
+        self.bookmarkData = nil
+        print("[DownloadPermissionManager] Reset to default path: \(self.currentFolderURL?.path ?? "unknown")")
     }
     
     // MARK: - Public Methods
@@ -153,9 +166,10 @@ final class DownloadPermissionManager {
     /// 清除保存的权限
     func clearPermission() {
         bookmarkData = nil
-        currentFolderURL = nil
         UserDefaults.standard.removeObject(forKey: bookmarkKey)
         UserDefaults.standard.removeObject(forKey: folderPathKey)
+        // 重置为默认路径，而不是 nil，避免后续检查失败
+        resetToDefaultPath()
     }
     
     // MARK: - Private Methods

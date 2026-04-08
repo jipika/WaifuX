@@ -270,6 +270,23 @@ private struct GeneralSettingsTab: View {
                 }
             }
 
+            // 动态壁纸设置组
+            MacSettingsSection(header: t("videoWallpaper")) {
+                MacSettingsRow(
+                    title: t("showPosterOnLock"),
+                    subtitle: t("showPosterOnLockDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: Binding(
+                        get: { viewModel.showPosterOnLock },
+                        set: { newValue in
+                            viewModel.showPosterOnLock = newValue
+                            viewModel.syncVideoWallpaperSettings()
+                        }
+                    ))
+                }
+            }
+
             // 系统设置组
             MacSettingsSection(header: t("system")) {
                 MacSettingsRow(
