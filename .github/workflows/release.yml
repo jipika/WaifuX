@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Select Xcode 26.4
         run: |
@@ -30,6 +32,17 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg || true
 
+      - name: Update Version in project.yml
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          # 提取主版本号（用于 CURRENT_PROJECT_VERSION）
+          MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+          echo "Updating project.yml with version: $VERSION (build: $MAJOR_VERSION)"
+          # 使用 sed 替换版本号
+          sed -i "s/MARKETING_VERSION: .*/MARKETING_VERSION: $VERSION/" project.yml
+          sed -i "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: $MAJOR_VERSION/" project.yml
+          cat project.yml | grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)"
+
       - name: Generate Xcode Project
         run: xcodegen generate
 
@@ -41,6 +54,13 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
           restore-keys: |
             ${{ runner.os }}-spm-
+
+      - name: Read Version
+        id: version
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
 
       - name: Build & Package
         run: |
@@ -74,7 +94,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
-          body: ${{ steps.changelog.outputs.changelog }}
+          name: WaifuX ${{ steps.version.outputs.version }}
+          body: |
+            ## 更新内容
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## 版本信息
+
+            - 版本号: ${{ steps.version.outputs.version }}
+            - Commit: ${{ github.sha }}
           draft: true
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
         env:

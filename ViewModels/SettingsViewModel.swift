@@ -52,12 +52,21 @@ class SettingsViewModel: ObservableObject {
 
     // MARK: - 更新检测
 
+    /// 存储最新的 commit 信息
+    @Published var latestCommit: GitHubCommit?
+
     func checkForUpdates() async {
         isCheckingUpdate = true
         updateCheckError = nil
+        latestCommit = nil
 
         let result = await updateChecker.checkForUpdates()
         updateCheckResult = result
+
+        // 提取 commit 信息
+        if case .updateAvailable(_, _, let commit) = result {
+            latestCommit = commit
+        }
 
         if case .error(let message) = result {
             updateCheckError = message
@@ -67,7 +76,7 @@ class SettingsViewModel: ObservableObject {
     }
 
     func openDownloadPage() {
-        if case .updateAvailable(_, let release) = updateCheckResult {
+        if case .updateAvailable(_, let release, _) = updateCheckResult {
             updateChecker.openDownloadPage(for: release)
         } else {
             updateChecker.openDownloadPage()
@@ -82,7 +91,7 @@ class SettingsViewModel: ObservableObject {
     }
 
     var latestVersion: String? {
-        if case .updateAvailable(_, let release) = updateCheckResult {
+        if case .updateAvailable(_, let release, _) = updateCheckResult {
             return release.version
         }
         return updateChecker.currentRelease?.version

@@ -478,8 +478,10 @@ final class MediaExploreViewModel: ObservableObject {
         // 文件不存在，需要下载
         let fileURL = fileLocation.url
 
-        // 确保目录存在
-        downloadPathManager.createDirectoryStructure()
+        // 确保目录存在（先检查沙盒权限再创建目录）
+        guard await downloadPathManager.ensureDirectoryStructure() else {
+            throw DownloadError.permissionDenied
+        }
 
         let cachedURL: URL
         if let existingCachedURL = await cacheService.cachedFileURL(named: fileURL.lastPathComponent, in: "Media") {
@@ -501,10 +503,15 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         if saveToDownloads {
-            // 复制到下载目录
+            // 复制到下载目录（安全作用域访问已由 ensureDirectoryStructure 确保）
             if !FileManager.default.fileExists(atPath: fileURL.path) {
-                let cachedData = try Data(contentsOf: cachedURL)
-                try cachedData.write(to: fileURL, options: .atomic)
+                do {
+                    let cachedData = try Data(contentsOf: cachedURL)
+                    try cachedData.write(to: fileURL, options: .atomic)
+                } catch {
+                    print("[MediaExploreViewModel] Failed to write file to download directory: \(error)")
+                    throw DownloadError.writeFailed(error)
+                }
             }
 
             if let taskID {

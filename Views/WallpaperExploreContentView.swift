@@ -430,12 +430,35 @@ struct WallpaperExploreContentView: View {
                         }
                     }
 
-                    // 🍎 脉冲色块放在 grid 内部跨整行，占据布局空间
-                    PaginationShimmerOverlay(
-                        isLoading: isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty),
-                        hasMorePages: viewModel.hasMorePages
-                    )
-                    .gridCellColumns(columnCount)
+                    // 分页加载指示器（简化版，不遮挡内容）
+                    if isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty) {
+                        HStack(spacing: 8) {
+                            CustomProgressView(tint: LiquidGlassColors.primaryPink)
+                                .scaleEffect(0.8)
+                            Text(t("loadMore"))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                        .gridCellColumns(columnCount)
+                    } else if !viewModel.hasMorePages && !viewModel.isLoading {
+                        // 全部加载完毕提示
+                        HStack(spacing: 6) {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.15))
+                                .frame(width: 32, height: 1)
+                            Text("— \(t("noMore")) —")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.25))
+                            Rectangle()
+                                .fill(Color.white.opacity(0.15))
+                                .frame(width: 32, height: 1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                        .gridCellColumns(columnCount)
+                    }
                 }
             }
         }

@@ -166,18 +166,31 @@ class DownloadTaskService: ObservableObject {
         }
     }
 
-    /// 检查下载是否被取消
-    func isDownloadCancelled(id: String) -> Bool {
-        // 使用同步方式获取，因为 actor 调用是异步的
-        // 这里使用 Task 包装来同步等待结果
+    /// 检查下载是否被取消（异步版本，避免主线程信号量死锁）
+    func isDownloadCancelled(id: String) async -> Bool {
+        await taskStorage.isCancelled(id: id)
+    }
+    
+    /// 检查下载是否被取消（同步版本，仅用于非主线程场景）
+    /// ⚠️ 不要在 @MainActor 上下文中调用此方法，会导致死锁
+    nonisolated func isDownloadCancelledSync(id: String) -> Bool {
         let semaphore = DispatchSemaphore(value: 0)
-        var result = false
-        Task {
-            result = await taskStorage.isCancelled(id: id)
+        let box = ResultBox<Bool>(value: false)
+        Task { [box] in
+            let result = await self.taskStorage.isCancelled(id: id)
+            box.value = result
             semaphore.signal()
         }
         semaphore.wait()
-        return result
+        return box.value
+    }
+    
+    /// 用于跨并发域传递可变状态的盒子
+    private final class ResultBox<T>: @unchecked Sendable {
+        var value: T
+        init(value: T) {
+            self.value = value
+        }
     }
 
     /// 取消所有活动的下载

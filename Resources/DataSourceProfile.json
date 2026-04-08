@@ -40,7 +40,9 @@
           "detailName": "span",
           "detailLink": "href",
           "tagList": "a[href^='/tag:']",
-          "tagName": ""
+          "tagName": "",
+          "downloadPattern": "href=[\"']?(/dl/\\w+/\\d+)[\"']?[\\s\\S]*?font-bold[^>]*>(\\w+)</span>[\\s\\S]*?\\(([^)]+)\\)[\\s\\S]*?text-xs[^>]*>([^<]+)</div>",
+          "durationPattern": "\"duration\"\\s*:\\s*\"PT([0-9.]+)S\""
         }
       },
       "anime": null

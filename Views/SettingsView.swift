@@ -604,18 +604,7 @@ private struct AboutSettingsTab: View {
                 }
             }
         } message: {
-            if let result = viewModel.updateCheckResult {
-                switch result {
-                case .noUpdate:
-                    Text(t("alreadyLatestVersion"))
-                case .updateAvailable(_, let release):
-                    Text("\(t("newVersionFound")) \(release.version)，\(t("goToDownloadQuestion"))")
-                case .error(let message):
-                    Text(message)
-                }
-            } else {
-                Text("")
-            }
+            updateCheckMessageView(for: viewModel.updateCheckResult)
         }
     }
 
@@ -626,6 +615,23 @@ private struct AboutSettingsTab: View {
             Divider()
                 .background(Color.white.opacity(0.06))
                 .padding(.leading, 16)
+        }
+    }
+    
+    @ViewBuilder
+    private func updateCheckMessageView(for result: UpdateCheckResult?) -> some View {
+        if let result = result {
+            switch result {
+            case .noUpdate:
+                Text(t("alreadyLatestVersion"))
+            case .updateAvailable(_, let release, let commit):
+                let commitText = commit.map { "\n\n📌 \($0.shortMessage)" } ?? ""
+                Text("\(t("newVersionFound")) \(release.version)\(commitText)\n\n\(t("goToDownloadQuestion"))")
+            case .error(let message):
+                Text(message)
+            }
+        } else {
+            Text("")
         }
     }
 }

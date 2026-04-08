@@ -1,22 +1,30 @@
 import SwiftUI
 
-/// 网络感知图片组件 - 自动处理加载中、成功、失败状态
+/// 网络感知图片组件 - 自动处理加载中、成功、失败状态（支持自动重试）
 struct NetworkAwareImage<Content: View>: View {
     let url: URL?
     let priority: TaskPriority
+    let retryConfig: ImageLoader.RetryConfig
+    let showRetryIndicator: Bool
     @ViewBuilder let content: (Image) -> Content
     
     @State private var image: NSImage?
     @State private var state: ImageLoadingState = .loading
     @State private var retryId = UUID()
+    @State private var retryAttempt = 0
+    @State private var currentTask: Task<Void, Never>?
     
     init(
         url: URL?,
         priority: TaskPriority = .medium,
+        retryConfig: ImageLoader.RetryConfig = .default,
+        showRetryIndicator: Bool = true,
         @ViewBuilder content: @escaping (Image) -> Content
     ) {
         self.url = url
         self.priority = priority
+        self.retryConfig = retryConfig
+        self.showRetryIndicator = showRetryIndicator
         self.content = content
     }
     
@@ -24,7 +32,24 @@ struct NetworkAwareImage<Content: View>: View {
         Group {
             switch state {
             case .loading:
-                SkeletonPlaceholder()
+                ZStack {
+                    SkeletonPlaceholder()
+                    
+                    // 重试指示器
+                    if showRetryIndicator && retryAttempt > 0 {
+                        VStack(spacing: 6) {
+                            CustomProgressView(tint: .white)
+                                .scaleEffect(0.7)
+                            
+                            Text("\(t("retrying")) (\(retryAttempt)/\(retryConfig.maxAttempts))")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(8)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
             case .success:
                 if let image = image {
                     content(Image(nsImage: image))
@@ -39,6 +64,9 @@ struct NetworkAwareImage<Content: View>: View {
         .onAppear {
             loadImage()
         }
+        .onDisappear {
+            currentTask?.cancel()
+        }
         .onChange(of: url) { _, _ in
             resetAndLoad()
         }
@@ -52,7 +80,8 @@ struct NetworkAwareImage<Content: View>: View {
         
         guard state == .loading else { return }
         
-        Task {
+        currentTask?.cancel()
+        currentTask = Task {
             let loader = ImageLoader.shared
             
             // 检查 URL 是否之前失败过
@@ -61,17 +90,28 @@ struct NetworkAwareImage<Content: View>: View {
                 loader.resetFailureState(for: url)
             }
             
+            // 重置重试计数
+            await MainActor.run {
+                retryAttempt = 0
+            }
+            
+            // 使用自定义重试配置加载
             if let loadedImage = await loader.loadImage(
                 from: url,
-                priority: priority
+                priority: priority,
+                retryConfig: retryConfig
             ) {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.image = loadedImage
                     self.state = .success
+                    self.retryAttempt = 0
                 }
             } else {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.state = .failure
+                    self.retryAttempt = 0
                 }
             }
         }
@@ -85,7 +125,33 @@ struct NetworkAwareImage<Content: View>: View {
         state = .loading
         image = nil
         retryId = UUID()
+        retryAttempt = 0
         loadImage()
+    }
+}
+
+// MARK: - 自动重试图片组件（简化版）
+/// 带自动重试的简单网络图片组件
+struct AutoRetryImage: View {
+    let url: URL?
+    var cornerRadius: CGFloat = 8
+    var maxRetryAttempts: Int = 3
+    
+    var body: some View {
+        NetworkAwareImage(
+            url: url,
+            retryConfig: ImageLoader.RetryConfig(
+                maxAttempts: maxRetryAttempts,
+                baseDelay: 1.0,
+                maxDelay: 8.0,
+                exponentialBackoff: true,
+                retryableStatusCodes: [408, 429, 500, 502, 503, 504]
+            )
+        ) { image in
+            image
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+        }
     }
 }
 
@@ -104,27 +170,35 @@ struct SimpleNetworkImage: View {
     }
 }
 
-/// 带渐进式加载的图片组件
+/// 带渐进式加载的图片组件（支持自动重试）
 struct ProgressiveNetworkImage<Content: View>: View {
     let thumbURL: URL?
     let fullURL: URL?
     let priority: TaskPriority
+    let retryConfig: ImageLoader.RetryConfig
+    let showRetryIndicator: Bool
     @ViewBuilder let content: (Image, Bool) -> Content // (image, isFullImage)
     
     @State private var thumbImage: NSImage?
     @State private var fullImage: NSImage?
     @State private var state: ImageLoadingState = .loading
     @State private var retryId = UUID()
+    @State private var retryAttempt = 0
+    @State private var currentTask: Task<Void, Never>?
     
     init(
         thumbURL: URL?,
         fullURL: URL?,
         priority: TaskPriority = .medium,
+        retryConfig: ImageLoader.RetryConfig = .default,
+        showRetryIndicator: Bool = true,
         @ViewBuilder content: @escaping (Image, Bool) -> Content
     ) {
         self.thumbURL = thumbURL
         self.fullURL = fullURL
         self.priority = priority
+        self.retryConfig = retryConfig
+        self.showRetryIndicator = showRetryIndicator
         self.content = content
     }
     
@@ -132,7 +206,24 @@ struct ProgressiveNetworkImage<Content: View>: View {
         Group {
             switch state {
             case .loading:
-                SkeletonPlaceholder()
+                ZStack {
+                    SkeletonPlaceholder()
+                    
+                    // 重试指示器
+                    if showRetryIndicator && retryAttempt > 0 {
+                        VStack(spacing: 6) {
+                            CustomProgressView(tint: .white)
+                                .scaleEffect(0.7)
+                            
+                            Text("\(t("retrying")) (\(retryAttempt)/\(retryConfig.maxAttempts))")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(8)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
             case .success:
                 if let full = fullImage {
                     content(Image(nsImage: full), true)
@@ -153,33 +244,57 @@ struct ProgressiveNetworkImage<Content: View>: View {
         .onAppear {
             loadImages()
         }
+        .onDisappear {
+            currentTask?.cancel()
+        }
     }
     
     private func loadImages() {
-        Task {
+        currentTask?.cancel()
+        currentTask = Task {
             let loader = ImageLoader.shared
+            var hasSuccess = false
+            
+            await MainActor.run {
+                retryAttempt = 0
+            }
             
             // 先加载缩略图
             if let thumbURL = thumbURL {
-                if let image = await loader.loadImage(from: thumbURL, priority: priority) {
+                if let image = await loader.loadImage(
+                    from: thumbURL,
+                    priority: priority,
+                    retryConfig: retryConfig
+                ) {
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
                         self.thumbImage = image
                         self.state = .success
+                        hasSuccess = true
                     }
                 }
             }
             
-            // 再加载高清图
+            guard !Task.isCancelled else { return }
+            
+            // 再加载高清图（不重试，低优先级）
             if let fullURL = fullURL, fullURL != thumbURL {
-                if let image = await loader.loadImage(from: fullURL, priority: .low) {
+                if let image = await loader.loadImage(
+                    from: fullURL,
+                    priority: .low,
+                    retryConfig: .none
+                ) {
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
                         self.fullImage = image
                     }
                 }
             }
             
+            guard !Task.isCancelled else { return }
+            
             // 如果都没有加载成功
-            if thumbImage == nil && fullImage == nil {
+            if !hasSuccess && thumbImage == nil && fullImage == nil {
                 await MainActor.run {
                     self.state = .failure
                 }
@@ -192,6 +307,7 @@ struct ProgressiveNetworkImage<Content: View>: View {
         thumbImage = nil
         fullImage = nil
         retryId = UUID()
+        retryAttempt = 0
         loadImages()
     }
 }

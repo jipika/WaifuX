@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - 'VERSION'
   pull_request:
     branches: [main]
 
@@ -19,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Select Xcode 26.4
         run: |
@@ -33,6 +37,17 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg || true
 
+      - name: Update Version in project.yml
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          # 提取主版本号（用于 CURRENT_PROJECT_VERSION）
+          MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+          echo "Updating project.yml with version: $VERSION (build: $MAJOR_VERSION)"
+          # 使用 sed 替换版本号
+          sed -i "s/MARKETING_VERSION: .*/MARKETING_VERSION: $VERSION/" project.yml
+          sed -i "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: $MAJOR_VERSION/" project.yml
+          cat project.yml | grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)"
+
       - name: Generate Xcode Project
         run: xcodegen generate
 
@@ -45,8 +60,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
+      - name: Read Version
+        id: version
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Check if Tag Exists
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.version.outputs.tag }} already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.version.outputs.tag }} does not exist"
+          fi
+
       - name: Build & Package
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         run: |
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
@@ -65,16 +99,45 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             clean build
 
+      - name: Generate Changelog
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        id: changelog
+        run: |
+          # 获取上一个 tag（用于生成变更日志）
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            # 从上一个 tag 到当前提交的 commit messages 生成日志
+            CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
+            echo "Generated changelog from $PREV_TAG to HEAD:"
+            echo "$CHANGELOG"
+          else
+            CHANGELOG="- Initial release"
+            echo "No previous tag found, using default changelog"
+          fi
+
+          # 写入 GITHUB_OUTPUT 供后续 step 使用
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create Release & Upload Asset
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: Build ${{ github.run_number }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: WaifuX ${{ steps.version.outputs.version }}
           body: |
-            Auto-generated CI build
+            ## 更新内容
 
-            Commit: ${{ github.sha }}
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## 版本信息
+
+            - 版本号: ${{ steps.version.outputs.version }}
+            - Commit: ${{ github.sha }}
           files: build/WaifuX.dmg
           draft: false
           prerelease: false

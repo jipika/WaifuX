@@ -10,8 +10,8 @@ import CryptoKit
 // 4. 移除重复的状态追踪
 
 @MainActor
-final class ImageLoader {
-    static let shared = ImageLoader()
+public final class ImageLoader {
+    public static let shared = ImageLoader()
 
     // MARK: - 缓存配置
     private let memoryCache = NSCache<NSString, NSImage>()
@@ -37,6 +37,49 @@ final class ImageLoader {
     // MARK: - 简单失败追踪
     private var failedURLs: Set<String> = []
     private let maxFailedURLs = 100
+    
+    // MARK: - 重试配置
+    public struct RetryConfig: Sendable {
+        public let maxAttempts: Int
+        public let baseDelay: TimeInterval
+        public let maxDelay: TimeInterval
+        public let exponentialBackoff: Bool
+        public let retryableStatusCodes: Set<Int>
+        
+        public init(
+            maxAttempts: Int,
+            baseDelay: TimeInterval,
+            maxDelay: TimeInterval,
+            exponentialBackoff: Bool,
+            retryableStatusCodes: Set<Int>
+        ) {
+            self.maxAttempts = maxAttempts
+            self.baseDelay = baseDelay
+            self.maxDelay = maxDelay
+            self.exponentialBackoff = exponentialBackoff
+            self.retryableStatusCodes = retryableStatusCodes
+        }
+        
+        public static let `default` = RetryConfig(
+            maxAttempts: 3,
+            baseDelay: 1.0,
+            maxDelay: 8.0,
+            exponentialBackoff: true,
+            retryableStatusCodes: [408, 429, 500, 502, 503, 504]
+        )
+        
+        public static let none = RetryConfig(
+            maxAttempts: 1,
+            baseDelay: 0,
+            maxDelay: 0,
+            exponentialBackoff: false,
+            retryableStatusCodes: []
+        )
+    }
+    
+    // MARK: - 重试状态追踪
+    private var retryAttempts: [String: Int] = [:]
+    private let maxRetryAttempts = 3
 
     // MARK: - 初始化
     private init() {
@@ -63,10 +106,11 @@ final class ImageLoader {
 
     // MARK: - 公共方法
 
-    func loadImage(
+    public func loadImage(
         from url: URL,
         priority: TaskPriority = .medium,
-        targetSize: CGSize? = nil
+        targetSize: CGSize? = nil,
+        retryConfig: RetryConfig = .default
     ) async -> NSImage? {
         let key = url.absoluteString
         
@@ -81,49 +125,139 @@ final class ImageLoader {
             return targetSize != nil ? await downsampleAsync(image: diskCached, to: targetSize!) : diskCached
         }
         
-        // 3. 检查是否失败过
+        // 3. 检查是否永久失败（手动标记的）
         guard !failedURLs.contains(key) else { return nil }
         
-        // 4. 等待并发槽位（简单计数器）
+        // 4. 执行带重试的加载
+        return await loadImageWithRetry(
+            from: url,
+            key: key,
+            priority: priority,
+            targetSize: targetSize,
+            retryConfig: retryConfig,
+            attempt: 1
+        )
+    }
+    
+    /// 带重试机制的图片加载
+    private func loadImageWithRetry(
+        from url: URL,
+        key: String,
+        priority: TaskPriority,
+        targetSize: CGSize?,
+        retryConfig: RetryConfig,
+        attempt: Int
+    ) async -> NSImage? {
+        // 等待并发槽位
         await waitForSlot()
         defer { releaseSlot() }
         
-        // 5. 再次检查（可能其他任务已加载）
+        // 再次检查缓存（可能其他任务已加载）
         if let cached = memoryCache.object(forKey: key as NSString) {
+            // 清除重试记录（成功）
+            retryAttempts.removeValue(forKey: key)
             return targetSize != nil ? await downsampleAsync(image: cached, to: targetSize!) : cached
         }
         
-        // 6. 网络加载
         do {
             let (data, response) = try await urlSession.data(from: url)
             
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode),
-                  let image = NSImage(data: data) else {
+            guard let httpResponse = response as? HTTPURLResponse else {
                 recordFailure(key: key)
                 return nil
             }
             
-            // 7. 后台保存到磁盘
+            // 检查是否需要重试
+            if retryConfig.retryableStatusCodes.contains(httpResponse.statusCode) {
+                return await handleRetryableFailure(
+                    from: url, key: key, priority: priority, targetSize: targetSize,
+                    retryConfig: retryConfig, attempt: attempt,
+                    statusCode: httpResponse.statusCode
+                )
+            }
+            
+            // 检查是否成功
+            guard (200...299).contains(httpResponse.statusCode),
+                  let image = NSImage(data: data) else {
+                // 非重试错误，记录失败
+                if attempt >= retryConfig.maxAttempts {
+                    recordFailure(key: key)
+                }
+                return nil
+            }
+            
+            // 成功：清除重试记录
+            retryAttempts.removeValue(forKey: key)
+            
+            // 后台保存到磁盘
             let cacheDir = cacheDirectory
             Task.detached(priority: .utility) {
                 let fileURL = cacheDir.appendingPathComponent(key.md5)
                 try? data.write(to: fileURL)
             }
             
-            // 8. 存入内存缓存
+            // 存入内存缓存
             memoryCache.setObject(image, forKey: key as NSString, cost: data.count)
             
-            // 9. 应用降采样
+            // 应用降采样
             if let targetSize = targetSize {
                 return await downsampleAsync(image: image, to: targetSize)
             }
             return image
             
         } catch {
+            // 网络错误，尝试重试
+            return await handleRetryableFailure(
+                from: url, key: key, priority: priority, targetSize: targetSize,
+                retryConfig: retryConfig, attempt: attempt,
+                statusCode: nil, error: error
+            )
+        }
+    }
+    
+    /// 处理可重试的失败
+    private func handleRetryableFailure(
+        from url: URL,
+        key: String,
+        priority: TaskPriority,
+        targetSize: CGSize?,
+        retryConfig: RetryConfig,
+        attempt: Int,
+        statusCode: Int?,
+        error: Error? = nil
+    ) async -> NSImage? {
+        guard attempt < retryConfig.maxAttempts else {
+            // 达到最大重试次数
             recordFailure(key: key)
+            retryAttempts.removeValue(forKey: key)
             return nil
         }
+        
+        // 计算延迟时间
+        let delay: TimeInterval
+        if retryConfig.exponentialBackoff {
+            delay = min(retryConfig.baseDelay * pow(2.0, Double(attempt - 1)), retryConfig.maxDelay)
+        } else {
+            delay = retryConfig.baseDelay
+        }
+        
+        // 记录重试次数
+        retryAttempts[key] = attempt
+        
+        // 延迟后重试
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        
+        // 检查是否被取消
+        guard !Task.isCancelled else { return nil }
+        
+        return await loadImageWithRetry(
+            from: url,
+            key: key,
+            priority: priority,
+            targetSize: targetSize,
+            retryConfig: retryConfig,
+            attempt: attempt + 1
+        )
     }
     
     // MARK: - 简单并发控制
@@ -265,17 +399,29 @@ final class ImageLoader {
     
     // MARK: - 清理
     
-    func clearCache() {
+    public func clearCache() {
         memoryCache.removeAllObjects()
         let contents = (try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)) ?? []
         for file in contents {
             try? fileManager.removeItem(at: file)
         }
+        retryAttempts.removeAll()
+    }
+    
+    /// 获取URL的重试次数
+    public func getRetryAttempts(for url: URL) -> Int {
+        retryAttempts[url.absoluteString] ?? 0
+    }
+    
+    /// 重置重试状态
+    public func resetRetryState(for url: URL) {
+        retryAttempts.removeValue(forKey: url.absoluteString)
+        failedURLs.remove(url.absoluteString)
     }
     
     // MARK: - 预加载
     
-    nonisolated func prefetchImages(urls: [URL]) {
+    public nonisolated func prefetchImages(urls: [URL]) {
         Task(priority: .low) { [weak self] in
             for url in urls.prefix(10) {
                 _ = await self?.loadImage(from: url, priority: .low)
@@ -291,6 +437,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     let url: URL?
     let priority: TaskPriority
     let targetSize: CGSize?
+    let retryConfig: ImageLoader.RetryConfig
     let onLoad: (() -> Void)?
     @ViewBuilder let content: (Image) -> Content
     @ViewBuilder let placeholder: () -> Placeholder
@@ -304,6 +451,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
         url: URL?,
         priority: TaskPriority = .medium,
         targetSize: CGSize? = nil,
+        retryConfig: ImageLoader.RetryConfig = .default,
         onLoad: (() -> Void)? = nil,
         @ViewBuilder content: @escaping (Image) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
@@ -311,6 +459,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
         self.url = url
         self.priority = priority
         self.targetSize = targetSize
+        self.retryConfig = retryConfig
         self.onLoad = onLoad
         self.content = content
         self.placeholder = placeholder
@@ -349,7 +498,12 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     private func load() async {
         guard let url = url, isVisible else { return }
         
-        if let loadedImage = await loader.loadImage(from: url, priority: priority, targetSize: targetSize) {
+        if let loadedImage = await loader.loadImage(
+            from: url,
+            priority: priority,
+            targetSize: targetSize,
+            retryConfig: retryConfig
+        ) {
             guard isVisible else { return }
             image = loadedImage
             onLoad?()
@@ -388,11 +542,11 @@ extension ImageLoader {
         // 简化实现
     }
     
-    func resetFailureState(for url: URL) {
+    public func resetFailureState(for url: URL) {
         failedURLs.remove(url.absoluteString)
     }
     
-    func hasFailedLoading(for url: URL) -> Bool {
+    public func hasFailedLoading(for url: URL) -> Bool {
         failedURLs.contains(url.absoluteString)
     }
 }

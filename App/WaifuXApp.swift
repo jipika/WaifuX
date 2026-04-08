@@ -208,11 +208,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             print("[AppDelegate] 开始检查更新…")
             let result = await UpdateChecker.shared.checkForUpdates()
             switch result {
-            case .updateAvailable(let current, let latest):
+            case .updateAvailable(let current, let latest, let commit):
                 print("[AppDelegate] 发现新版本：\(latest.version) (当前版本：\(current))")
                 // 在主线程显示更新弹窗
                 await MainActor.run {
-                    showUpdateDialog(latest: latest)
+                    showUpdateDialog(latest: latest, commit: commit)
                 }
             case .noUpdate(let current):
                 print("[AppDelegate] 已是最新版本：\(current)")
@@ -317,10 +317,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// 显示更新弹窗
-    private func showUpdateDialog(latest: GitHubRelease) {
+    private func showUpdateDialog(latest: GitHubRelease, commit: GitHubCommit?) {
         let dialog = NSAlert()
         dialog.messageText = "发现新版本"
-        dialog.informativeText = "WaifuX \(latest.version) 已发布！\n\n\(cleanReleaseBody(latest.body))"
+        
+        // 构建弹窗内容
+        var content = "WaifuX \(latest.version) 已发布！"
+        
+        // 添加 commit 信息
+        if let commit = commit {
+            content += "\n\n📌 最新提交："
+            content += "\n\(commit.shortMessage)"
+        }
+        
+        // 添加 release body（变更日志）
+        if let body = latest.body, !body.isEmpty {
+            let cleanedBody = cleanReleaseBody(body)
+            if cleanedBody != "暂无更新日志" {
+                content += "\n\n📝 变更日志："
+                content += "\n\(cleanedBody)"
+            }
+        }
+        
+        dialog.informativeText = content
         dialog.addButton(withTitle: "立即更新")
         dialog.addButton(withTitle: "取消")
         
