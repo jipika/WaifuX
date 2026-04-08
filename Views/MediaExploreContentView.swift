@@ -1,10 +1,6 @@
 import SwiftUI
 import AppKit
 
-// MARK: - MediaItem RecyclableGridItem 适配
-
-extension MediaItem: RecyclableGridItem {}
-
 // MARK: - MediaExploreContentView - 媒体探索页
 struct MediaExploreContentView: View {
     @ObservedObject var viewModel: MediaExploreViewModel
@@ -14,16 +10,12 @@ struct MediaExploreContentView: View {
     @State private var selectedCategory: MediaExploreCategory = .all
     @State private var selectedHotTag: MediaExploreHotTag?
     @State private var selectedSort: MediaExploreSortOption = .newest
-    @State private var sortAscending = false  // false = 降序, true = 升序
+    @State private var sortAscending = false
     @State private var searchText = ""
     @State private var displayedMediaItems: [MediaItem] = []
     @State private var isLoadingMore = false
-    
-    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
     @State private var isInitialLoading = false
-    
 
-    // Task 管理
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
 
@@ -42,7 +34,6 @@ struct MediaExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            // 命名坐标空间，供视差效果使用
             .coordinateSpace(name: "exploreScroll")
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 let threshold: CGFloat = 300
@@ -67,9 +58,7 @@ struct MediaExploreContentView: View {
                     }
                 }
             }
-            // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
-            // 初始加载时禁止滚动（防止空内容过滚一屏）
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -79,7 +68,6 @@ struct MediaExploreContentView: View {
             )
         }
         .task {
-            // 初始加载时锁定滚动
             if viewModel.items.isEmpty {
                 isInitialLoading = true
             }
@@ -91,7 +79,6 @@ struct MediaExploreContentView: View {
             syncExploreMediaAtmosphere()
             isInitialLoading = false
         }
-        // 合并 onChange 监听，减少重复调用
         .onChange(of: selectedHotTag) { _, _ in
             handleFilterChange()
         }
@@ -105,15 +92,11 @@ struct MediaExploreContentView: View {
             handleFilterChange()
         }
         .onChange(of: viewModel.items) { oldVal, newVal in
-            // 当媒体数据变化时，判断是全量替换还是增量追加
             if newVal.isEmpty || displayedMediaItems.isEmpty {
-                // 筛选变化或初始加载：全量重建
                 rebuildVisibleMediaItems()
             } else if !oldVal.isEmpty, newVal.count > oldVal.count {
-                // loadMore 增量追加：只追加新数据
                 appendNewMediaItems()
             } else {
-                // 搜索/分类切换等数据替换：全量重建
                 rebuildVisibleMediaItems()
             }
         }
@@ -121,7 +104,6 @@ struct MediaExploreContentView: View {
             syncExploreMediaAtmosphere()
         }
         .onDisappear {
-            // 视图消失时取消所有任务
             searchTask?.cancel()
             loadMoreTask?.cancel()
             searchTask = nil
@@ -196,7 +178,6 @@ struct MediaExploreContentView: View {
                     in: Capsule(style: .continuous)
                 )
 
-                // 重置按钮 - 深色液态玻璃风格
                 Button {
                     resetAllFilters()
                 } label: {
@@ -204,7 +185,6 @@ struct MediaExploreContentView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(width: 46, height: 46)
-                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
                         .contentShape(Circle())
                         .liquidGlassSurface(
                             .prominent,
@@ -243,7 +223,6 @@ struct MediaExploreContentView: View {
                         searchText = ""
                     }
 
-                    // 清空显示列表，等 viewModel.items 更新后全量重建
                     displayedMediaItems = []
 
                     Task {
@@ -268,7 +247,6 @@ struct MediaExploreContentView: View {
                 Spacer()
 
                 HStack(spacing: 12) {
-                    // 排序选项菜单
                     Menu {
                         ForEach(MediaExploreSortOption.allCases) { option in
                             Button(option.menuTitle) {
@@ -297,7 +275,6 @@ struct MediaExploreContentView: View {
             }
 
             if viewModel.isLoading && displayedMediaItems.isEmpty {
-                // 骨架屏加载状态
                 MediaGridSkeleton(contentWidth: gridContentWidth)
                     .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
@@ -305,43 +282,49 @@ struct MediaExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else {
-                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
-                let gridConfig = RecyclableGridConfig.mediaConfig(contentWidth: gridContentWidth)
+                mediaGrid(contentWidth: gridContentWidth)
 
-                RecyclableGridView(
-                    items: displayedMediaItems,
-                    config: gridConfig,
-                    cardContent: { item, cardWidth, cardHeight in
-                        SimpleMediaCard(
-                            item: item,
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight,
-                            isFavorite: viewModel.isFavorite(item),
-                            onTap: { selectedMedia = item }
-                        )
-                    },
-                    showNoMore: !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
-                )
-                .frame(height: Self.calculateGridHeight(itemCount: displayedMediaItems.count, config: gridConfig))
-
-                // 分页加载指示器
                 if isLoadingMore || (viewModel.isLoading && !displayedMediaItems.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
-
-
             }
         }
     }
 
-    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
+    // MARK: - Media Grid (LazyVGrid)
+
+    private func mediaGrid(contentWidth: CGFloat) -> some View {
+        let columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
+        let spacing: CGFloat = 16
+        let totalSpacing = CGFloat(columnCount - 1) * spacing
+        let cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
+        let cardHeight = cardWidth * 0.6  // 媒体卡片宽高比 16:10
+        
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount),
+            spacing: spacing
+        ) {
+            ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
+                MediaCard(
+                    item: item,
+                    index: index,
+                    cardWidth: cardWidth,
+                    cardHeight: cardHeight,
+                    isFavorite: viewModel.isFavorite(item),
+                    onTap: { selectedMedia = item }
+                )
+            }
+        }
+    }
+
+    // MARK: - Loading Indicator
+
     private struct LoadingMoreIndicator: View {
         @State private var isAnimating = false
         
         var body: some View {
             HStack(spacing: 8) {
-                // iOS 风格转圈圈
                 Image(systemName: "arrow.2.circlepath")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.7))
@@ -369,7 +352,6 @@ struct MediaExploreContentView: View {
     private var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
-                // 网络错误状态
                 ErrorStateView(
                     type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
                     message: errorMessage,
@@ -378,7 +360,6 @@ struct MediaExploreContentView: View {
                     }
                 )
             } else {
-                // 空数据状态
                 ErrorStateView(
                     type: .empty,
                     title: t("noMediaFilter"),
@@ -406,15 +387,6 @@ struct MediaExploreContentView: View {
         }
     }
 
-    /// 计算 NSCollectionView 网格总高度
-    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(config.columnCount))
-        let cardHeight = config.cardHeight + 44
-        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
-        return CGFloat(totalHeight) + 40
-    }
-
     private var formattedMediaCount: String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -433,30 +405,24 @@ struct MediaExploreContentView: View {
         
         guard !newItems.isEmpty else { return }
         
-        // 记录新数据开始索引
-        let startIndex = displayedMediaItems.count
-        
         displayedMediaItems.append(contentsOf: newItems)
     }
+
     private func submitSearch(with query: String) {
         selectedCategory = .all
         selectedHotTag = nil
-        // 清空显示列表，等 viewModel.items 更新后全量重建
         displayedMediaItems = []
         Task {
             await viewModel.search(query: query)
         }
     }
 
-    // MARK: - 合并的过滤处理
-
-    /// 判断该 HotTag 是否对应网站上的真实标签页面（可发起服务端请求）
     private static let hotTagServerSlugs: [MediaExploreHotTag: String] = [
         .anime: "anime",
         .rain: "rain",
         .cyberpunk: "cyberpunk",
         .nature: "nature",
-        .game: "games",       // 注意：网站 slug 是 games 不是 game
+        .game: "games",
         .dark: "dark",
     ]
 
@@ -465,10 +431,8 @@ struct MediaExploreContentView: View {
     }
 
     private func handleFilterChange() {
-        // 如果选中的是服务端请求型 HotTag，发起真实 API 请求
         if let hotTag = selectedHotTag, isServerSideHotTag(hotTag),
            let slug = Self.hotTagServerSlugs[hotTag] {
-            // 清空显示列表，等 viewModel.items 更新后全量重建
             displayedMediaItems = []
             Task {
                 await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
@@ -476,7 +440,6 @@ struct MediaExploreContentView: View {
             return
         }
 
-        // 否则执行客户端过滤（4K/HD 等）
         rebuildVisibleMediaItems()
     }
 
@@ -484,10 +447,6 @@ struct MediaExploreContentView: View {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
         
-        // 全量重建时清除动画记录，让新数据播放入场动画
-        GridHostingCollectionItem.resetAllAnimatedItems()
-        
-        // 全量重建：从 viewModel.items 重新过滤并替换 displayedMediaItems
         let filtered = viewModel.items.filter { item in
             let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
             let matchesHotTag = selectedHotTag.map { item.matches(hotTag: $0) } ?? true
@@ -517,7 +476,53 @@ struct MediaExploreContentView: View {
         
         syncExploreMediaAtmosphere()
     }
+
+    private func resetAllFilters() {
+        searchText = ""
+        selectedHotTag = nil
+        selectedCategory = .all
+        selectedSort = .newest
+        sortAscending = false
+
+        Task {
+            await viewModel.loadHomeFeed()
+        }
+    }
 }
+
+// MARK: - Media Card with Entrance Animation
+
+private struct MediaCard: View {
+    let item: MediaItem
+    let index: Int
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    let isFavorite: Bool
+    let onTap: () -> Void
+    
+    @State private var isVisible = false
+    
+    var body: some View {
+        SimpleMediaCard(
+            item: item,
+            cardWidth: cardWidth,
+            cardHeight: cardHeight,
+            isFavorite: isFavorite,
+            onTap: onTap
+        )
+        .opacity(isVisible ? 1 : 0)
+        .offset(y: isVisible ? 0 : 30)
+        .scaleEffect(isVisible ? 1 : 0.9)
+        .onAppear {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)
+                .delay(Double(min(index % 8, 4)) * 0.05)) {
+                isVisible = true
+            }
+        }
+    }
+}
+
+// MARK: - Hot Tag Chip
 
 private struct MediaHotTagChip: View {
     let tag: MediaExploreHotTag
@@ -550,6 +555,8 @@ private struct MediaHotTagChip: View {
         }
     }
 }
+
+// MARK: - Category Chip
 
 private struct MediaCategoryChip: View {
     let category: MediaExploreCategory
@@ -602,17 +609,17 @@ private struct MediaCategoryChip: View {
     }
 }
 
-// MARK: - 媒体探索网格卡片（简化版，优化滚动性能）
+// MARK: - Media Card
+
 private struct SimpleMediaCard: View {
     let item: MediaItem
-    let cardWidth: CGFloat
-    let cardHeight: CGFloat
+    var cardWidth: CGFloat
+    var cardHeight: CGFloat
     let isFavorite: Bool
     let onTap: () -> Void
 
     @State private var isHovered = false
 
-    // 静态形状缓存
     private static let thumbShape = UnevenRoundedRectangle(
         topLeadingRadius: 14,
         bottomLeadingRadius: 0,
@@ -635,7 +642,6 @@ private struct SimpleMediaCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 简化结构
                 ZStack {
                     OptimizedAsyncImage(
                         url: item.posterURLValue ?? item.thumbnailURLValue,
@@ -651,12 +657,10 @@ private struct SimpleMediaCard: View {
                 .frame(width: cardWidth, height: cardHeight)
                 .clipShape(Self.thumbShape)
                 .overlay(alignment: .topLeading) {
-                    // 简化元数据行
                     simplifiedMetadataRow
                         .padding(10)
                 }
                 .overlay(alignment: .center) {
-                    // 视频播放图标
                     if item.previewVideoURL != nil {
                         Image(systemName: "play.fill")
                             .font(.system(size: 14, weight: .bold))
@@ -667,7 +671,6 @@ private struct SimpleMediaCard: View {
                     }
                 }
 
-                // 底部信息 - 简化
                 HStack(spacing: 8) {
                     Text(item.title)
                         .font(.system(size: 13, weight: .semibold))
@@ -676,7 +679,6 @@ private struct SimpleMediaCard: View {
                     
                     Spacer()
                     
-                    // 简化的收藏图标
                     Image(systemName: isFavorite ? "heart.fill" : "heart")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.36))
@@ -694,18 +696,17 @@ private struct SimpleMediaCard: View {
                             .stroke(Color.white.opacity(0.06), lineWidth: 1)
                     )
             )
+            .frame(width: cardWidth)
             .clipShape(Self.cardShape)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
-        // iOS 风格悬停：快速弹簧响应 + 自然减速释放
         .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
     }
     
-    // 简化的元数据行
     private var simplifiedMetadataRow: some View {
         HStack(spacing: 6) {
             if let tag = firstListTag {
@@ -745,89 +746,8 @@ private struct SimpleMediaCard: View {
     }
 }
 
-private struct MediaPreviewArtwork: View {
-    let item: MediaItem
+// MARK: - Enums
 
-    var body: some View {
-        ZStack {
-            OptimizedAsyncImage(url: item.posterURLValue ?? item.thumbnailURLValue, priority: .medium) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } placeholder: {
-                fallbackArtwork
-            }
-
-            LinearGradient(
-                colors: [
-                    Color.clear,
-                    Color.black.opacity(0.16),
-                    Color.black.opacity(0.34)
-                ],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-
-            VStack {
-                Spacer()
-
-                HStack {
-                    HStack(spacing: 6) {
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 9, weight: .bold))
-                        Text("LIVE")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    }
-                    .foregroundStyle(.white.opacity(0.72))
-                    .padding(.horizontal, 10)
-                    .frame(height: 24)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color.black.opacity(0.24))
-                    )
-
-                    Spacer()
-
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.16))
-                            .frame(width: 40, height: 40)
-
-                        Circle()
-                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                            .frame(width: 40, height: 40)
-
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .offset(x: 1)
-                    }
-                }
-                .padding(16)
-            }
-        }
-    }
-
-    private var fallbackArtwork: some View {
-        LinearGradient(
-            colors: [
-                Color(hex: "1C2431"),
-                Color(hex: "233B5A"),
-                Color(hex: "14181F")
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .overlay {
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 40, weight: .medium))
-                .foregroundStyle(.white.opacity(0.18))
-        }
-    }
-}
-
-
-// MARK: - MediaExplore 专用枚举
 private enum MediaExploreSortOption: String, CaseIterable, Identifiable {
     case newest
     case title
@@ -983,7 +903,8 @@ private enum MediaExploreCategory: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - MediaItem 扩展（用于 MediaExplore）
+// MARK: - MediaItem Extension
+
 extension MediaItem {
     fileprivate func matches(search query: String) -> Bool {
         let haystack = [
@@ -1002,15 +923,12 @@ extension MediaItem {
     fileprivate func matches(hotTag: MediaExploreHotTag) -> Bool {
         switch hotTag {
         case .fourK:
-            // formatText 可能是 "3840x2160" 或 "4K"，检查两种形式
             let normalized = formatText.uppercased()
                 .replacingOccurrences(of: " ", with: "")
             if normalized.contains("3840X2160") || normalized.contains("4K") { return true }
-            // 也检查 exactResolution（如 "3840 × 2160" 带空格的格式）
             if let er = exactResolution, er.uppercased().contains("3840") { return true }
             return false
         case .hd:
-            // 匹配 HD / 1920x1080 / 1280x720 等
             let normalized = formatText.uppercased()
                 .replacingOccurrences(of: " ", with: "")
             if normalized.contains("HD") || normalized.contains("1920X1080")
@@ -1019,29 +937,9 @@ extension MediaItem {
                er.uppercased().contains("1920") || er.uppercased().contains("1280") { return true }
             return false
         default:
-            // 其他标签由 handleFilterChange 统一走服务端请求，客户端不匹配
             return false
         }
     }
 }
 
-// MARK: - resetAllFilters
-extension MediaExploreContentView {
-    private func resetAllFilters() {
-        // 重置搜索
-        searchText = ""
-        selectedHotTag = nil
 
-        // 重置分类
-        selectedCategory = .all
-
-        // 重置排序
-        selectedSort = .newest
-        sortAscending = false
-
-        // 触发重新加载
-        Task {
-            await viewModel.loadHomeFeed()
-        }
-    }
-}

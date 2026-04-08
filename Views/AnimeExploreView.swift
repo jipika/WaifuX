@@ -1,12 +1,7 @@
 import SwiftUI
 import AppKit
 
-// MARK: - AnimeSearchResult RecyclableGridItem 适配
-
-extension AnimeSearchResult: RecyclableGridItem {}
-
 // MARK: - AnimeExploreView - 动漫探索页
-// 样式1:1复刻 MediaExploreContentView
 
 struct AnimeExploreView: View {
     @StateObject private var viewModel = AnimeViewModel()
@@ -17,19 +12,13 @@ struct AnimeExploreView: View {
     @State private var searchText = ""
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var sortAscending = false
-    /// 排序后的展示数据（与 viewModel.animeItems 分离，支持独立排序）
     @State private var displayedAnimeItems: [AnimeSearchResult] = []
     
-    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
     @State private var isInitialLoading = false
     
-
-    // 详情页导航 - 通过 Binding 暴露给父视图
     @Binding var selectedAnime: AnimeSearchResult?
 
-    // 搜索防抖
     @State private var searchTask: Task<Void, Never>?
-    // 防止标签点击时触发搜索框的自动刷新
     @State private var isTagSearchActive = false
 
     var body: some View {
@@ -47,7 +36,6 @@ struct AnimeExploreView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            // 命名坐标空间，供视差效果使用
             .coordinateSpace(name: "exploreScroll")
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 let threshold: CGFloat = 300
@@ -62,9 +50,7 @@ struct AnimeExploreView: View {
                     Task { await viewModel.loadMore() }
                 }
             }
-            // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
-            // 初始加载时禁止滚动（防止空内容过滚一屏）
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -75,7 +61,6 @@ struct AnimeExploreView: View {
 
         }
         .task {
-            // 初始加载时锁定滚动
             if viewModel.animeItems.isEmpty {
                 isInitialLoading = true
             }
@@ -86,16 +71,13 @@ struct AnimeExploreView: View {
         .onChange(of: searchText) { _, newValue in
             viewModel.searchText = newValue
             
-            // 如果正在进行标签搜索，忽略搜索框的变化
             if isTagSearchActive {
                 isTagSearchActive = false
                 return
             }
             
-            // 防抖搜索
             searchTask?.cancel()
             
-            // 如果清空搜索框，立即刷新
             if newValue.isEmpty {
                 Task {
                     await viewModel.fetchPopular()
@@ -104,7 +86,6 @@ struct AnimeExploreView: View {
             }
             
             searchTask = Task {
-                // 延迟 300ms 再搜索，避免频繁输入时触发过多请求
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 guard !Task.isCancelled else { return }
                 await viewModel.search()
@@ -113,11 +94,9 @@ struct AnimeExploreView: View {
         .onChange(of: viewModel.animeItems.first?.id) { _, _ in
             syncExploreAtmosphere()
         }
-        // 当源数据变化时，重建排序列表
         .onChange(of: viewModel.animeItems.count) { _, _ in
             rebuildDisplayedAnimeItems()
         }
-        // 排序选项变化时重新排序
         .onChange(of: selectedSort) { _, _ in
             rebuildDisplayedAnimeItems()
         }
@@ -166,7 +145,6 @@ struct AnimeExploreView: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.92))
                         .onSubmit {
-                            // 取消防抖任务，立即执行搜索
                             searchTask?.cancel()
                             Task {
                                 await viewModel.search()
@@ -198,7 +176,6 @@ struct AnimeExploreView: View {
                     in: Capsule(style: .continuous)
                 )
 
-                // 重置按钮
                 Button {
                     resetAllFilters()
                 } label: {
@@ -206,7 +183,6 @@ struct AnimeExploreView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(width: 46, height: 46)
-                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
                         .contentShape(Circle())
                         .liquidGlassSurface(
                             .prominent,
@@ -217,7 +193,6 @@ struct AnimeExploreView: View {
                 .buttonStyle(.plain)
             }
 
-            // 分类选择器
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(AnimeCategory.allCases) { category in
@@ -241,7 +216,6 @@ struct AnimeExploreView: View {
                 }
             }
 
-            // 热门标签（横向滚动布局，与 WallpaperExploreContentView 一致）
             VStack(alignment: .leading, spacing: 12) {
                 Text(t("anime.hotTags"))
                     .font(.system(size: 12, weight: .semibold))
@@ -255,13 +229,10 @@ struct AnimeExploreView: View {
                                     let newTag = selectedHotTag == tag ? nil : tag
                                     selectedHotTag = newTag
                                     selectedCategory = .all
-                                    // 标记正在进行标签搜索，防止触发搜索框的自动刷新
                                     isTagSearchActive = true
-                                    // 取消搜索框的防抖任务并清空搜索框
                                     searchTask?.cancel()
                                     searchText = ""
                                     viewModel.searchText = ""
-                                    // 标签搜索不填充搜索栏，使用中文标签名
                                     Task {
                                         if let tagToSearch = newTag {
                                             print("[AnimeExploreView] Tag clicked: \(tagToSearch.displayName)")
@@ -281,7 +252,7 @@ struct AnimeExploreView: View {
         .frame(maxWidth: 700, alignment: .leading)
     }
 
-    // MARK: - 动漫网格区域
+    // MARK: - Anime Grid Section
 
     private func animeSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -292,82 +263,86 @@ struct AnimeExploreView: View {
 
                 Spacer()
 
-                // 排序选项菜单
                 Menu {
-                        ForEach(AnimeSortOption.allCases) { option in
-                            Button(option.menuTitle) {
-                                selectedSort = option
-                            }
+                    ForEach(AnimeSortOption.allCases) { option in
+                        Button(option.menuTitle) {
+                            selectedSort = option
                         }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.up.arrow.down")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(selectedSort.title)
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                        .foregroundStyle(.white.opacity(0.92))
-                        .padding(.horizontal, 16)
-                        .frame(height: 38)
-                        .liquidGlassSurface(
-                            .regular,
-                            tint: exploreAtmosphere.tint.primary.opacity(0.1),
-                            in: Capsule(style: .continuous)
-                        )
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(selectedSort.title)
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(.white.opacity(0.92))
+                    .padding(.horizontal, 16)
+                    .frame(height: 38)
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: exploreAtmosphere.tint.primary.opacity(0.1),
+                        in: Capsule(style: .continuous)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
 
             if viewModel.isLoading && displayedAnimeItems.isEmpty {
-                // 骨架屏加载状态
                 AnimeGridSkeleton(contentWidth: gridContentWidth)
                     .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedAnimeItems.isEmpty {
-                // 空状态/错误状态
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
-                let gridConfig = RecyclableGridConfig.animeConfig(contentWidth: gridContentWidth)
+                animeGrid(contentWidth: gridContentWidth)
 
-                RecyclableGridView(
-                    items: displayedAnimeItems,
-                    config: gridConfig,
-                    cardContent: { anime, cardWidth, cardHeight in
-                        AnimePortraitCard(
-                            anime: anime,
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight
-                        ) {
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                selectedAnime = anime
-                            }
-                        }
-                    },
-                    showNoMore: !viewModel.isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
-                )
-                .frame(height: Self.calculateGridHeight(itemCount: displayedAnimeItems.count, config: gridConfig))
-
-                // 分页加载指示器
                 if viewModel.isLoadingMore || (viewModel.isLoading && !displayedAnimeItems.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
-
-
             }
         }
     }
 
-    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
+    // MARK: - Anime Grid (LazyVGrid)
+
+    private func animeGrid(contentWidth: CGFloat) -> some View {
+        let columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
+        let spacing: CGFloat = 20
+        let totalSpacing = CGFloat(columnCount - 1) * spacing
+        let cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
+        let cardHeight = cardWidth * 1.4  // 动漫卡片宽高比约 1:1.4
+        
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount),
+            spacing: spacing
+        ) {
+            ForEach(Array(displayedAnimeItems.enumerated()), id: \.element.id) { index, anime in
+                AnimeCard(
+                    anime: anime,
+                    index: index,
+                    cardWidth: cardWidth,
+                    cardHeight: cardHeight,
+                    onTap: {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            selectedAnime = anime
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    // MARK: - Loading Indicator
+
     private struct LoadingMoreIndicator: View {
         @State private var isAnimating = false
         
         var body: some View {
             HStack(spacing: 8) {
-                // iOS 风格转圈圈
                 Image(systemName: "arrow.2.circlepath")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.7))
@@ -395,7 +370,6 @@ struct AnimeExploreView: View {
     private var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
-                // 网络错误状态
                 ErrorStateView(
                     type: .network,
                     message: errorMessage,
@@ -404,7 +378,6 @@ struct AnimeExploreView: View {
                     }
                 )
             } else {
-                // 空数据状态
                 ErrorStateView(
                     type: .empty,
                     title: t("anime.noData"),
@@ -432,15 +405,6 @@ struct AnimeExploreView: View {
         }
     }
 
-    /// 计算 NSCollectionView 网格总高度
-    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(config.columnCount))
-        let cardHeight = config.cardHeight + 44
-        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
-        return CGFloat(totalHeight) + 40
-    }
-
     private func syncExploreAtmosphere() {
         if let firstAnime = displayedAnimeItems.first,
            let coverURL = firstAnime.coverURL {
@@ -448,16 +412,9 @@ struct AnimeExploreView: View {
         }
     }
 
-    // MARK: - 排序重建
-
-    /// 根据 selectedSort 对 animeItems 做客户端排序，写入 displayedAnimeItems
     private func rebuildDisplayedAnimeItems() {
-        // 全量重建时清除动画记录，让新数据播放入场动画
-        GridHostingCollectionItem.resetAllAnimatedItems()
-        
         let source = viewModel.animeItems
         
-        // 全量重建：从 viewModel.animeItems 重新排序并替换
         let newItems: [AnimeSearchResult]
         switch selectedSort {
         case .newest:
@@ -496,7 +453,38 @@ struct AnimeExploreView: View {
     }
 }
 
-// MARK: - 热门标签 Chip（与 MediaHotTagChip 样式一致）
+// MARK: - Anime Card with Entrance Animation
+
+private struct AnimeCard: View {
+    let anime: AnimeSearchResult
+    let index: Int
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    let onTap: () -> Void
+    
+    @State private var isVisible = false
+    
+    var body: some View {
+        AnimePortraitCard(
+            anime: anime,
+            cardWidth: cardWidth,
+            cardHeight: cardHeight
+        ) {
+            onTap()
+        }
+        .opacity(isVisible ? 1 : 0)
+        .offset(y: isVisible ? 0 : 30)
+        .scaleEffect(isVisible ? 1 : 0.9)
+        .onAppear {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)
+                .delay(Double(min(index % 8, 4)) * 0.05)) {
+                isVisible = true
+            }
+        }
+    }
+}
+
+// MARK: - Hot Tag Chip
 
 private struct AnimeHotTagChip: View {
     let tag: AnimeHotTag
@@ -530,7 +518,7 @@ private struct AnimeHotTagChip: View {
     }
 }
 
-// MARK: - 分类 Chip（与 MediaCategoryChip 样式一致，带彩色图标）
+// MARK: - Category Chip
 
 private struct AnimeCategoryChip: View {
     let category: AnimeCategory
@@ -583,7 +571,7 @@ private struct AnimeCategoryChip: View {
     }
 }
 
-// MARK: - 排序选项
+// MARK: - Sort Options
 
 private enum AnimeSortOption: String, CaseIterable, Identifiable {
     case newest
@@ -609,28 +597,18 @@ private enum AnimeSortOption: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - 动漫网格骨架屏（与 MediaGridSkeleton 一致）
+// MARK: - Grid Skeleton
 
 private struct AnimeGridSkeleton: View {
     var contentWidth: CGFloat = 800
 
     private var columns: [GridItem] {
-        let spacing: CGFloat = 24
-        let tiers: [(cols: Int, minCell: CGFloat)] = [
-            (6, 140), (5, 145), (4, 150), (3, 160), (2, 180)
-        ]
-
-        for tier in tiers {
-            let cellWidth = (contentWidth - CGFloat(tier.cols - 1) * spacing) / CGFloat(tier.cols)
-            if cellWidth >= tier.minCell {
-                return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: tier.cols)
-            }
-        }
-        return Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: 2)
+        let count = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
+        return Array(repeating: GridItem(.flexible(), spacing: 20), count: count)
     }
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 24) {
+        LazyVGrid(columns: columns, spacing: 20) {
             ForEach(0..<6, id: \.self) { _ in
                 AnimePortraitCardSkeleton()
             }
@@ -638,21 +616,19 @@ private struct AnimeGridSkeleton: View {
     }
 }
 
-// MARK: - 动漫卡片骨架屏
+// MARK: - Card Skeleton
 
 private struct AnimePortraitCardSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 竖版图片区域骨架 - 与实际卡片保持相同的尺寸
             LinearGradient(
                 colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .frame(height: 300)
+            .aspectRatio(10/14, contentMode: .fit)
             .clipped()
 
-            // 信息栏骨架 - 深色半透明背景
             VStack(alignment: .leading, spacing: 4) {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.white.opacity(0.08))
@@ -670,7 +646,6 @@ private struct AnimePortraitCardSkeleton: View {
         .frame(maxWidth: .infinity)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        // 添加与实际卡片相同的 overlay 和 shadow，确保尺寸一致
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 0.5)

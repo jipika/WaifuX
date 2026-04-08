@@ -44,6 +44,8 @@ struct FullScreenWallpaperView: View {
     // MARK: - 下一张弹窗相关
     @StateObject private var nextItemDataSource = NextItemDataSource()
     @State private var currentWallpaperIndex: Int = 0
+    @State private var isLoadingMore = false
+    @State private var preloadTask: Task<Void, Never>?
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
@@ -156,6 +158,12 @@ struct FullScreenWallpaperView: View {
         }
         .onDisappear {
             cleanup()
+        }
+        .onChange(of: viewModel.wallpapers) { _, newWallpapers in
+            // 当列表数据更新时，同步更新数据源
+            nextItemDataSource.setItems(newWallpapers, currentIndex: currentWallpaperIndex)
+            // 检查是否需要预加载
+            triggerPreloadIfNeeded()
         }
     }
 
@@ -333,6 +341,9 @@ struct FullScreenWallpaperView: View {
 
     private func cleanup() {
         controlsTimerManager.invalidate()
+        
+        // 取消预加载任务
+        preloadTask?.cancel()
 
         // 恢复窗口级别 - 使用 keyWindow 或 mainWindow 获取当前活动窗口
         DispatchQueue.main.async {
@@ -406,40 +417,85 @@ struct FullScreenWallpaperView: View {
 
         // 设置数据源
         nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
+        
+        // 初始预加载检查
+        triggerPreloadIfNeeded()
+    }
+
+    /// 当浏览到倒数第3张时触发预加载
+    private func triggerPreloadIfNeeded() {
+        let threshold = 3 // 倒数第3张时开始预加载
+        let remainingItems = viewModel.wallpapers.count - (currentWallpaperIndex + 1)
+        
+        // 如果剩余项目少于阈值，且有更多页面，则触发预加载
+        if remainingItems < threshold && viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
+            preloadTask?.cancel()
+            preloadTask = Task {
+                print("[FullScreenWallpaperView] 触发预加载，当前索引: \(currentWallpaperIndex), 总数: \(viewModel.wallpapers.count)")
+                await viewModel.loadMore()
+                // 加载完成后更新数据源
+                await MainActor.run {
+                    nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
+                }
+            }
+        }
     }
 
     private func navigateToNextWallpaper() {
-        guard nextItemDataSource.hasNext else { return }
-
-        // 获取下一张壁纸
         let nextIndex = currentWallpaperIndex + 1
-        guard nextIndex < viewModel.wallpapers.count else { return }
-
-        let nextWallpaper = viewModel.wallpapers[nextIndex]
-
-        // 更新索引和数据源
-        currentWallpaperIndex = nextIndex
-        nextItemDataSource.moveToNext()
-
-        // 重新加载视图
-        reloadWallpaper(nextWallpaper)
+        
+        // 情况1：下一张已经在当前列表中
+        if nextIndex < viewModel.wallpapers.count {
+            navigateToIndex(nextIndex)
+            // 导航后检查是否需要预加载
+            triggerPreloadIfNeeded()
+            return
+        }
+        
+        // 情况2：到达列表末尾，但有更多页面可加载
+        if viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
+            Task {
+                isLoadingMore = true
+                defer { isLoadingMore = false }
+                
+                print("[FullScreenWallpaperView] 加载更多壁纸...")
+                await viewModel.loadMore()
+                
+                // 加载完成后，尝试导航到下一张
+                if nextIndex < viewModel.wallpapers.count {
+                    navigateToIndex(nextIndex)
+                }
+            }
+            return
+        }
+        
+        // 情况3：没有更多数据了，循环到第一张
+        if !viewModel.wallpapers.isEmpty && nextIndex >= viewModel.wallpapers.count {
+            navigateToIndex(0)
+        }
     }
 
     private func navigateToPreviousWallpaper() {
-        guard nextItemDataSource.hasPrevious else { return }
-
-        // 获取上一张壁纸
         let prevIndex = currentWallpaperIndex - 1
-        guard prevIndex >= 0 else { return }
+        
+        // 情况1：上一张在列表中
+        if prevIndex >= 0 {
+            navigateToIndex(prevIndex)
+            return
+        }
+        
+        // 情况2：已经是第一张，循环到最后一张
+        if !viewModel.wallpapers.isEmpty {
+            navigateToIndex(viewModel.wallpapers.count - 1)
+        }
+    }
 
-        let prevWallpaper = viewModel.wallpapers[prevIndex]
-
-        // 更新索引和数据源
-        currentWallpaperIndex = prevIndex
-        nextItemDataSource.moveToPrevious()
-
-        // 重新加载视图
-        reloadWallpaper(prevWallpaper)
+    private func navigateToIndex(_ index: Int) {
+        guard index >= 0, index < viewModel.wallpapers.count else { return }
+        
+        currentWallpaperIndex = index
+        nextItemDataSource.moveToIndex(index)
+        reloadWallpaper(viewModel.wallpapers[index])
     }
 
     private func reloadWallpaper(_ newWallpaper: Wallpaper) {

@@ -1,40 +1,42 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Wallpaper RecyclableGridItem 适配
-
-extension Wallpaper: RecyclableGridItem {}
-
-// MARK: - WallpaperExploreContentView - 壁纸探索页
+// MARK: - 壁纸探索页（方案C：纯SwiftUI + 流畅动画 + 自适应列数）
 struct WallpaperExploreContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
     @Binding var selectedWallpaper: Wallpaper?
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
+    
+    // MARK: - 状态管理
     @State private var selectedCategory: ExploreCategoryFilter = .all
     @State private var selectedHotTag: ExploreHotTag?
     @State private var searchText = ""
     @State private var displayedWallpapers: [Wallpaper] = []
     @State private var isLoadingMore = false
     @State private var showProtectedPurityAlert = false
-    
-    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
     @State private var isInitialLoading = false
+    @State private var scrollPosition = ScrollPosition(edge: .top)
     
-
-    // Task 管理
+    // MARK: - 动画状态
+    @State private var visibleCardIDs: Set<String> = []
+    @State private var isFirstAppear = true
+    
+    // MARK: - Task 管理
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
         GeometryReader { geometry in
-            let gridContentWidth = max(0, geometry.size.width - 56)
+            let contentWidth = max(0, geometry.size.width - 56)
+            let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
+            
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 34) {
+                LazyVStack(alignment: .leading, spacing: 34, pinnedViews: []) {
                     heroSection
                     categorySection
                     quickFilterSection
                     activeFiltersSection
-                    wallpaperSection(gridContentWidth: gridContentWidth)
+                    wallpaperSection(gridConfig: gridConfig)
                 }
                 .padding(.horizontal, 28)
                 .padding(.top, 80)
@@ -42,30 +44,18 @@ struct WallpaperExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            // 命名坐标空间，供视差效果使用
-            .coordinateSpace(name: "exploreScroll")
+            .scrollPosition($scrollPosition)
+            .scrollTargetBehavior(.viewAligned(limitBehavior: .always))
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                let threshold: CGFloat = 300
+                let threshold: CGFloat = 600
                 let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
                 return bottomOffset >= geometry.contentSize.height - threshold
             } action: { oldValue, newValue in
-                if newValue, !oldValue {
-                    guard viewModel.hasMorePages,
-                          !viewModel.isLoading,
-                          !isLoadingMore else { return }
-                    print("[WallpaperExplore] Scroll geometry triggered load more...")
-                    isLoadingMore = true
-                    Task {
-                        await loadMoreUntilVisibleGrowth()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            isLoadingMore = false
-                        }
-                    }
+                if newValue && !oldValue {
+                    triggerLoadMore()
                 }
             }
-            // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
-            // 初始加载时禁止滚动（防止空内容过滚一屏）
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -81,100 +71,148 @@ struct WallpaperExploreContentView: View {
             Text(t("apiKeyNeeded"))
         }
         .onAppear {
-            if searchText.isEmpty {
-                searchText = viewModel.searchQuery
-            }
-            // 初始加载：如果壁纸数据为空，触发搜索加载
-            // 注意：isLoading卡住时也需要尝试重新加载
-            if viewModel.wallpapers.isEmpty {
-                isInitialLoading = true
-                Task {
-                    await viewModel.search()
-                    // 搜索完成后在主线程重建显示列表
-                    await MainActor.run {
-                        rebuildVisibleWallpapers()
-                        syncExploreAtmosphere()
-                        isInitialLoading = false
-                    }
-                }
-            } else {
-                // 数据已存在，直接重建显示列表
-                rebuildVisibleWallpapers()
-                syncExploreAtmosphere()
-            }
+            handleOnAppear()
         }
-        .onChange(of: selectedCategory) { newCategory, _ in
-            // 将分类映射到 ViewModel 的 API 参数并触发服务端搜索
-            switch newCategory {
-            case .all:
-                viewModel.categoryGeneral = true
-                viewModel.categoryAnime = true
-                viewModel.categoryPeople = true
-            case .general:
-                viewModel.categoryGeneral = true
-                viewModel.categoryAnime = false
-                viewModel.categoryPeople = false
-            case .anime:
-                viewModel.categoryGeneral = false
-                viewModel.categoryAnime = true
-                viewModel.categoryPeople = false
-            case .people:
-                viewModel.categoryGeneral = false
-                viewModel.categoryAnime = false
-                viewModel.categoryPeople = true
-            }
-            // 清空本地缓存列表，触发 API 重新请求
-            displayedWallpapers = []
-            cancelAndSearch()
-        }
-        .onChange(of: selectedHotTag) { _, _ in
-            // 筛选条件变化时清空并重建
-            displayedWallpapers = []
-            rebuildVisibleWallpapers()
-        }
-        .onChange(of: viewModel.sortingOption) { _, _ in
-            displayedWallpapers = []
-            cancelAndSearch()
-        }
-        .onChange(of: viewModel.orderDescending) { _, _ in
-            displayedWallpapers = []
-            cancelAndSearch()
-        }
+        .onChange(of: selectedCategory) { _, _ in handleCategoryChange() }
+        .onChange(of: selectedHotTag) { _, _ in handleHotTagChange() }
+        .onChange(of: viewModel.sortingOption) { _, _ in reloadData() }
+        .onChange(of: viewModel.orderDescending) { _, _ in reloadData() }
         .onChange(of: viewModel.wallpapers) { oldVal, newVal in
-            // 筛选变化时 displayedWallpapers 已清空，走全量重建
-            // loadMore 时 displayedWallpapers 不为空且数据增长，走增量追加
-            if newVal.isEmpty || displayedWallpapers.isEmpty {
-                rebuildVisibleWallpapers()
-            } else if !oldVal.isEmpty, newVal.count > oldVal.count {
-                // 数据追加场景（loadMore）：只追加新数据
-                appendNewWallpapers()
-            } else {
-                // 数据替换场景（搜索/筛选）：全量重建
-                rebuildVisibleWallpapers()
-            }
-        }
-        .onChange(of: displayedWallpapers.first?.id) { _, _ in
-            syncExploreAtmosphere()
+            handleWallpapersChange(oldVal: oldVal, newVal: newVal)
         }
         .onDisappear {
-            // 视图消失时取消所有任务
-            cancelAllTasks()
+            loadMoreTask?.cancel()
         }
     }
-
+    
+    // MARK: - 事件处理
+    
+    private func handleOnAppear() {
+        if searchText.isEmpty {
+            searchText = viewModel.searchQuery
+        }
+        
+        if viewModel.wallpapers.isEmpty {
+            isInitialLoading = true
+            Task {
+                await viewModel.search()
+                await MainActor.run {
+                    rebuildVisibleWallpapers()
+                    syncExploreAtmosphere()
+                    isInitialLoading = false
+                    isFirstAppear = false
+                }
+            }
+        } else {
+            rebuildVisibleWallpapers()
+            syncExploreAtmosphere()
+            isFirstAppear = false
+        }
+    }
+    
+    private func triggerLoadMore() {
+        guard viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !isLoadingMore else { return }
+        
+        loadMoreTask?.cancel()
+        loadMoreTask = Task {
+            isLoadingMore = true
+            defer { isLoadingMore = false }
+            await viewModel.loadMore()
+        }
+    }
+    
+    private func handleCategoryChange() {
+        switch selectedCategory {
+        case .all:
+            viewModel.categoryGeneral = true
+            viewModel.categoryAnime = true
+            viewModel.categoryPeople = true
+        case .general:
+            viewModel.categoryGeneral = true
+            viewModel.categoryAnime = false
+            viewModel.categoryPeople = false
+        case .anime:
+            viewModel.categoryGeneral = false
+            viewModel.categoryAnime = true
+            viewModel.categoryPeople = false
+        case .people:
+            viewModel.categoryGeneral = false
+            viewModel.categoryAnime = false
+            viewModel.categoryPeople = true
+        }
+        reloadData()
+    }
+    
+    private func handleHotTagChange() {
+        displayedWallpapers = []
+        reloadData()
+    }
+    
+    private func handleWallpapersChange(oldVal: [Wallpaper], newVal: [Wallpaper]) {
+        if newVal.isEmpty || displayedWallpapers.isEmpty {
+            rebuildVisibleWallpapers()
+        } else if !oldVal.isEmpty, newVal.count > oldVal.count {
+            appendNewWallpapers()
+        } else {
+            rebuildVisibleWallpapers()
+        }
+    }
+    
+    private func reloadData() {
+        displayedWallpapers = []
+        visibleCardIDs.removeAll()
+        Task {
+            await viewModel.search()
+        }
+    }
+    
     private func syncExploreAtmosphere() {
         exploreAtmosphere.updateFirstWallpaper(displayedWallpapers.first)
     }
+}
 
-    // MARK: - 视图 Section
-    private var heroSection: some View {
+// MARK: - 网格配置（保持原有逻辑）
+struct WallpaperGridConfig {
+    let columnCount: Int
+    let spacing: CGFloat
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    let contentWidth: CGFloat
+    
+    init(contentWidth: CGFloat) {
+        self.contentWidth = contentWidth
+        self.columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
+        self.spacing = 16
+        let totalSpacing = spacing * CGFloat(columnCount - 1)
+        self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+        self.cardHeight = cardWidth * 0.6
+    }
+    
+    var gridItems: [GridItem] {
+        Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
+    }
+    
+    func calculateTotalHeight(itemCount: Int) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(columnCount))
+        let totalCardHeight = cardHeight + 44 // 底部信息栏约 44pt
+        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
+    }
+}
+
+// MARK: - 视图 Sections
+private extension WallpaperExploreContentView {
+    
+    var heroSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Text(greetingText)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.58))
-
+                    
                     Text("Wallhaven")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
@@ -186,133 +224,146 @@ struct WallpaperExploreContentView: View {
                             in: Capsule(style: .continuous)
                         )
                 }
-
+                
                 Text(t("wallpaperLibrary"))
                     .font(.system(size: 32, weight: .bold, design: .serif))
                     .tracking(-0.5)
                     .foregroundStyle(.white.opacity(0.98))
                     .lineLimit(1)
             }
+            
             HStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.54))
-                    TextField(t("search.placeholder"), text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .onSubmit {
-                            submitSearch(with: searchText)
-                        }
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                            selectedHotTag = nil
-                            submitSearch(with: "")
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.38))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .frame(maxWidth: 460)
-                .frame(height: 46)
-                .liquidGlassSurface(
-                    .prominent,
-                    tint: exploreAtmosphere.tint.primary.opacity(0.12),
-                    in: Capsule(style: .continuous)
-                )
-                // 重置按钮 - 在搜索栏外面，深色液态玻璃风格
-                Button {
-                    resetAllFilters()
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .frame(width: 46, height: 46)
-                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
-                        .contentShape(Circle())
-                        .liquidGlassSurface(
-                            .prominent,
-                            tint: exploreAtmosphere.tint.secondary.opacity(0.12),
-                            in: Circle()
-                        )
-                }
-                .buttonStyle(.plain)
+                searchBar
+                resetButton
             }
+            
             HStack(alignment: .center, spacing: 10) {
                 Text(t("hotWallpaper") + ":")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.42))
+                
                 ForEach(ExploreHotTag.allCases) { tag in
                     ExploreHotTagChip(
                         tag: tag,
                         isSelected: selectedHotTag == tag
                     ) {
-                        applyHotTag(tag)
-                    }
-                }
-                // 比例筛选
-                Menu {
-                    Button(t("allRatios")) {
-                        viewModel.selectedRatios = []
-                        cancelAndSearch()
-                    }
-                    Divider()
-                    ForEach(["16x9", "16x10", "21x9", "4x3", "3x2", "1x1", "9x16", "10x16"], id: \.self) { ratio in
-                        let isSelected = viewModel.selectedRatios.contains(ratio)
-                        Button {
-                            if isSelected {
-                                viewModel.selectedRatios.removeAll { $0 == ratio }
-                            } else {
-                                viewModel.selectedRatios = [ratio]
-                            }
-                            cancelAndSearch()
-                        } label: {
-                            HStack {
-                                Text(ratio.replacingOccurrences(of: "x", with: ":"))
-                                if isSelected {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            selectedHotTag = (selectedHotTag == tag) ? nil : tag
                         }
                     }
-                } label: {
-                    let hasRatio = !viewModel.selectedRatios.isEmpty
-                    HStack(spacing: 6) {
-                        Image(systemName: "aspectratio")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(hasRatio ? (viewModel.selectedRatios.first?.replacingOccurrences(of:"x", with: ":") ?? "") : t("ratio"))
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white.opacity(hasRatio ? 0.95 : 0.7))
-                    .padding(.horizontal, 12)
-                    .frame(height: 30)
-                    .liquidGlassSurface(
-                        hasRatio ? .prominent : .subtle,
-                        tint: hasRatio ? exploreAtmosphere.tint.primary.opacity(0.15) : nil,
-                        in: Capsule(style: .continuous)
-                    )
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                
+                ratioMenu
             }
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
-    private var categorySection: some View {
+    
+    var searchBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.54))
+            
+            TextField(t("search.placeholder"), text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white.opacity(0.92))
+                .onSubmit {
+                    submitSearch()
+                }
+            
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                    selectedHotTag = nil
+                    submitSearch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.38))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: 460)
+        .frame(height: 46)
+        .liquidGlassSurface(
+            .prominent,
+            tint: exploreAtmosphere.tint.primary.opacity(0.12),
+            in: Capsule(style: .continuous)
+        )
+    }
+    
+    var resetButton: some View {
+        Button {
+            resetAllFilters()
+        } label: {
+            Image(systemName: "arrow.counterclockwise")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .frame(width: 46, height: 46)
+                .contentShape(Circle())
+                .liquidGlassSurface(
+                    .prominent,
+                    tint: exploreAtmosphere.tint.secondary.opacity(0.12),
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    var ratioMenu: some View {
+        Menu {
+            Button(t("allRatios")) {
+                viewModel.selectedRatios = []
+                reloadData()
+            }
+            Divider()
+            ForEach(["16x9", "16x10", "21x9", "4x3", "3x2", "1x1", "9x16", "10x16"], id: \.self) { ratio in
+                let isSelected = viewModel.selectedRatios.contains(ratio)
+                Button {
+                    viewModel.selectedRatios = isSelected ? [] : [ratio]
+                    reloadData()
+                } label: {
+                    HStack {
+                        Text(ratio.replacingOccurrences(of: "x", with: ":"))
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            let hasRatio = !viewModel.selectedRatios.isEmpty
+            HStack(spacing: 6) {
+                Image(systemName: "aspectratio")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(hasRatio ? (viewModel.selectedRatios.first?.replacingOccurrences(of:"x", with: ":") ?? "") : t("ratio"))
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(hasRatio ? 0.95 : 0.7))
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .liquidGlassSurface(
+                hasRatio ? .prominent : .subtle,
+                tint: hasRatio ? exploreAtmosphere.tint.primary.opacity(0.15) : nil,
+                in: Capsule(style: .continuous)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+    
+    var categorySection: some View {
         FlowLayout(spacing: 12) {
             ForEach(ExploreCategoryFilter.allCases) { category in
                 ExploreCategoryChip(
                     category: category,
                     isSelected: selectedCategory == category
                 ) {
-                        withAnimation(AppFluidMotion.interactiveSpring) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         selectedCategory = category
                     }
                 }
@@ -320,14 +371,15 @@ struct WallpaperExploreContentView: View {
         }
         .padding(.vertical, 2)
     }
-    private var quickFilterSection: some View {
+    
+    var quickFilterSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(t("contentLevel"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.46))
                 FlowLayout(spacing: 10) {
-                    ForEach(ExplorePurityFilter.allCases) { filter in
+                    ForEach(visiblePurityFilters) { filter in
                         QuickFilterChip(
                             title: filter.title,
                             subtitle: filter.subtitle,
@@ -339,6 +391,7 @@ struct WallpaperExploreContentView: View {
                     }
                 }
             }
+            
             VStack(alignment: .leading, spacing: 10) {
                 Text(t("colorFilter"))
                     .font(.system(size: 12, weight: .semibold))
@@ -347,7 +400,7 @@ struct WallpaperExploreContentView: View {
                     ForEach(quickColorPresets) { preset in
                         QuickColorChip(
                             preset: preset,
-                            isSelected: selectedColorPreset?.hex.lowercased() == preset.hex.lowercased()
+                            isSelected: viewModel.selectedColors.first == preset.hex
                         ) {
                             toggleColor(preset)
                         }
@@ -356,8 +409,9 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
+    
     @ViewBuilder
-    private var activeFiltersSection: some View {
+    var activeFiltersSection: some View {
         let chips = currentFilterChips
         if !chips.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
@@ -384,19 +438,22 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    private func wallpaperSection(gridContentWidth: CGFloat) -> some View {
+    
+    func wallpaperSection(gridConfig: WallpaperGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 24) {
+            // 标题栏
             HStack(alignment: .center) {
-                Text("\(formattedWallpaperCount) \(t("wallpaperCount"))")
+                Text("\(displayedWallpapers.count) \(t("wallpaperCount"))")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.66))
+                
                 Spacer()
-                // 排序选择器
+                
                 Menu {
                     ForEach(SortingOption.allCases, id: \.self) { option in
                         Button(sortingOptionDisplayName(option)) {
                             viewModel.sortingOption = option
-                            cancelAndSearch()
+                            reloadData()
                         }
                     }
                 } label: {
@@ -418,60 +475,81 @@ struct WallpaperExploreContentView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
             }
+            
+            // 内容区域
             if viewModel.isLoading && displayedWallpapers.isEmpty {
-                // 骨架屏加载状态 - 初始加载
-                WallpaperGridSkeleton(contentWidth: gridContentWidth)
+                WallpaperGridSkeleton(contentWidth: gridConfig.contentWidth)
                     .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedWallpapers.isEmpty {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
-                let gridConfig = RecyclableGridConfig.wallpaperConfig(contentWidth: gridContentWidth)
-
-                RecyclableGridView(
-                    items: displayedWallpapers,
-                    config: gridConfig,
-                    cardContent: { wallpaper, cardWidth, cardHeight in
-                        SimpleWallpaperCard(
+                // 使用 LazyVGrid，固定卡片尺寸
+                LazyVGrid(columns: gridConfig.gridItems, alignment: .leading, spacing: gridConfig.spacing) {
+                    ForEach(Array(displayedWallpapers.enumerated()), id: \.element.id) { index, wallpaper in
+                        WallpaperCard(
                             wallpaper: wallpaper,
-                            cardWidth: cardWidth,
-                            cardHeight: cardHeight,
                             isFavorite: viewModel.isFavorite(wallpaper),
-                            onTap: { selectedWallpaper = wallpaper }
+                            index: index,
+                            cardWidth: gridConfig.cardWidth,
+                            cardHeight: gridConfig.cardHeight
                         )
-                    },
-                    showNoMore: !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
-                )
-                .frame(height: Self.calculateGridHeight(itemCount: displayedWallpapers.count, config: gridConfig))
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                selectedWallpaper = wallpaper
+                            }
+                        }
+                        .onAppear {
+                            // 标记卡片可见，触发入场动画
+                            let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(Double(min(index % 8, 4)) * 0.05)) {
+                                visibleCardIDs.insert(wallpaper.id)
+                            }
+                            // 预加载附近图片
+                            preloadNearbyImages(for: index)
+                        }
+                        .opacity(visibleCardIDs.contains(wallpaper.id) ? 1 : 0)
+                        .offset(y: visibleCardIDs.contains(wallpaper.id) ? 0 : 30)
+                        .scaleEffect(visibleCardIDs.contains(wallpaper.id) ? 1 : 0.9)
+                        .scrollTransition { content, phase in
+                            content
+                                .scaleEffect(phase.isIdentity ? 1 : 0.95)
+                                .opacity(phase.isIdentity ? 1 : 0.8)
+                        }
+                    }
+                }
+                .frame(height: gridConfig.calculateTotalHeight(itemCount: displayedWallpapers.count))
 
                 // 分页加载指示器
                 if isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 }
-
-
+                
+                // 没有更多提示
+                if !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading && !displayedWallpapers.isEmpty {
+                    NoMoreFooter()
+                        .padding(.vertical, 20)
+                }
             }
         }
     }
-    private var emptyState: some View {
+    
+    var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
-                // 网络错误状态
                 ErrorStateView(
                     type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
                     message: errorMessage,
-                    retryAction: cancelAndSearch
+                    retryAction: reloadData
                 )
             } else {
-                // 空数据状态
                 ErrorStateView(
                     type: .empty,
                     title: t("no.wallpapers"),
                     message: t("tryDifferentFilter"),
-                    retryAction: cancelAndSearch
+                    retryAction: reloadData
                 )
             }
         }
@@ -482,7 +560,69 @@ struct WallpaperExploreContentView: View {
             in: RoundedRectangle(cornerRadius: 30, style: .continuous)
         )
     }
-    private var greetingText: String {
+    
+    // MARK: - 辅助方法
+    
+    func preloadNearbyImages(for index: Int) {
+        let preloadRange = (index + 1)...(index + 6)
+        let urls = preloadRange
+            .filter { $0 < displayedWallpapers.count }
+            .compactMap { displayedWallpapers[$0].thumbURL }
+        
+        ImagePreloader.shared.preloadImages(from: urls)
+    }
+    
+    func submitSearch() {
+        selectedHotTag = nil
+        viewModel.searchQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        reloadData()
+    }
+    
+    func resetAllFilters() {
+        searchText = ""
+        viewModel.searchQuery = ""
+        selectedCategory = .all
+        selectedHotTag = nil
+        viewModel.puritySFW = true
+        viewModel.puritySketchy = false
+        viewModel.purityNSFW = false
+        viewModel.sortingOption = .dateAdded
+        viewModel.orderDescending = true
+        viewModel.selectedColors = []
+        viewModel.selectedRatios = []
+        viewModel.selectedResolutions = []
+        viewModel.atleastResolution = nil
+        
+        Task {
+            await viewModel.search()
+        }
+    }
+    
+    private func rebuildVisibleWallpapers() {
+        let filtered = viewModel.wallpapers.filter { wallpaper in
+            matchesCategory(wallpaper, category: selectedCategory)
+        }
+        displayedWallpapers = filtered
+        syncExploreAtmosphere()
+    }
+    
+    private func appendNewWallpapers() {
+        let existingIDs = Set(displayedWallpapers.map(\.id))
+        let newWallpapers = viewModel.wallpapers.filter { !existingIDs.contains($0.id) }
+        guard !newWallpapers.isEmpty else { return }
+        displayedWallpapers.append(contentsOf: newWallpapers)
+    }
+    
+    private func matchesCategory(_ wallpaper: Wallpaper, category: ExploreCategoryFilter) -> Bool {
+        switch category {
+        case .all: return true
+        case .general: return wallpaper.category.lowercased() == "general"
+        case .anime: return wallpaper.category.lowercased() == "anime"
+        case .people: return wallpaper.category.lowercased() == "people"
+        }
+    }
+    
+    var greetingText: String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
         case 5..<12: return "Good Morning"
@@ -490,527 +630,123 @@ struct WallpaperExploreContentView: View {
         default: return "Good Evening"
         }
     }
-    private var formattedWallpaperCount: String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: displayedWallpapers.count)) ?? "\(displayedWallpapers.count)"
-    }
-
-    /// 计算 NSCollectionView 网格总高度
-    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(config.columnCount))
-        let cardHeight = config.cardHeight + 44 // 底部信息栏约 44pt
-        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
-        // 额外空间给可能的 "no more" footer
-        return CGFloat(totalHeight) + 40
-    }
-    private func submitSearch(with query: String) {
-        selectedHotTag = nil
-        viewModel.searchQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        cancelAndSearch()
-    }
-
-    /// 将热门标签映射为真实 Wallhaven API 参数并触发搜索
-    private func applyHotTag(_ tag: ExploreHotTag) {
-        // 切换选中状态
-        let wasSelected = selectedHotTag == tag
-        withAnimation(AppFluidMotion.interactiveSpring) {
-            selectedHotTag = wasSelected ? nil : tag
-        }
-
-        if wasSelected {
-            // 取消：清除该标签设置的所有参数，重新搜索
-            clearHotTagAPIParams()
-            cancelAndSearch()
-            return
-        }
-
-        // 先清除之前可能残留的其他标签参数
-        clearHotTagAPIParams()
-
-        // 根据标签类型写入对应的 ViewModel 参数
-        if let ratios = tag.apiRatios {
-            viewModel.selectedRatios = ratios
-        }
-        if let atleast = tag.apiAtleast {
-            viewModel.atleastResolution = atleast
-        }
-
-        cancelAndSearch()
-    }
-
-    /// 清除热门标签设置的 API 参数（保留用户手动设置的筛选条件）
-    private func clearHotTagAPIParams() {
-        viewModel.atleastResolution = nil
-        if let currentTag = selectedHotTag {
-            if currentTag.apiRatios != nil {
-                viewModel.selectedRatios = []
-            }
-        }
-    }
-    private var activePurityLabels: [String] {
-        var labels: [String] = []
-        if viewModel.puritySFW { labels.append("SFW") }
-        if viewModel.puritySketchy { labels.append("Sketchy") }
-        if viewModel.purityNSFW { labels.append("NSFW") }
-        return labels.isEmpty ? ["SFW"] : labels
-    }
-    private var selectedColorPreset: WallhavenAPI.ColorPreset? {
-        guard let first = viewModel.selectedColors.first else { return nil }
-        return WallhavenAPI.colorPreset(for: first)
-    }
-    private var quickColorPresets: [WallhavenAPI.ColorPreset] {
-        let preferredHexes = [
-            "990000", "ea4c88", "993399", "0066cc", "0099cc", "66cccc",
-            "669900", "999900", "ffff00", "ff9900", "ff6600", "424153"
-        ]
-        var presets = preferredHexes.compactMap { hex in
-            WallhavenAPI.colorPreset(for: hex)
-        }
-        if let selectedColorPreset, !presets.contains(selectedColorPreset) {
-            presets.insert(selectedColorPreset, at: 0)
-        }
-        return presets
-    }
-    private var currentFilterChips: [ExploreFilterChipData] {
-        var chips: [ExploreFilterChipData] = []
-        if !viewModel.puritySFW || viewModel.puritySketchy || viewModel.purityNSFW {
-            if viewModel.puritySFW {
-                chips.append(.init(kind: .purity(.sfw), title: "SFW", accentHex: "43C463"))
-            }
-            if viewModel.puritySketchy {
-                chips.append(.init(kind: .purity(.sketchy), title: "Sketchy", accentHex: "FFB347"))
-            }
-            if viewModel.purityNSFW {
-                chips.append(.init(kind: .purity(.nsfw), title: "NSFW", accentHex: "FF5A7D"))
-            }
-        }
-        if let colorPreset = selectedColorPreset {
-            chips.append(.init(kind: .color(colorPreset.hex), title: colorPreset.displayName,subtitle: colorPreset.displayHex, accentHex: colorPreset.hex))
-        }
-        for resolution in viewModel.selectedResolutions {
-            chips.append(.init(kind: .resolution(resolution), title: resolution, accentHex:"7A5CFF"))
-        }
-        if let atleast = viewModel.atleastResolution {
-            chips.append(.init(kind: .atleast(atleast), title: "≥\(atleast)", accentHex: "E85D04"))
-        }
-        for ratio in viewModel.selectedRatios {
-            chips.append(.init(kind: .ratio(ratio), title: ratio.replacingOccurrences(of: "x",with: ":"), accentHex: "5A7CFF"))
-        }
-        return chips
-    }
-    private func isPuritySelected(_ filter: ExplorePurityFilter) -> Bool {
-        switch filter {
-        case .sfw:
-            return viewModel.puritySFW
-        case .sketchy:
-            return viewModel.puritySketchy
-        case .nsfw:
-            return viewModel.purityNSFW
-        }
-    }
-    private func togglePurity(_ filter: ExplorePurityFilter) {
-        if filter.requiresAPIKey && !viewModel.apiKeyConfigured {
-            showProtectedPurityAlert = true
-            return
-        }
-        let currentlySelected = isPuritySelected(filter)
-        let activeCount = [viewModel.puritySFW, viewModel.puritySketchy,viewModel.purityNSFW].filter { $0 }.count
-        if currentlySelected && activeCount == 1 {
-            return
-        }
-        switch filter {
-        case .sfw:
-            viewModel.puritySFW.toggle()
-        case .sketchy:
-            viewModel.puritySketchy.toggle()
-        case .nsfw:
-            viewModel.purityNSFW.toggle()
-        }
-        cancelAndSearch()
-    }
-    private func toggleColor(_ preset: WallhavenAPI.ColorPreset) {
-        if selectedColorPreset?.hex.lowercased() == preset.hex.lowercased() {
-            viewModel.selectedColors = []
-        } else {
-            viewModel.selectedColors = [preset.hex]
-        }
-        cancelAndSearch()
-    }
-    private func resetServerFilters() {
-        viewModel.puritySFW = true
-        viewModel.puritySketchy = false
-        viewModel.purityNSFW = false
-        viewModel.selectedColors = []
-        viewModel.selectedRatios = []
-        viewModel.selectedResolutions = []
-        viewModel.atleastResolution = nil
-        cancelAndSearch()
-    }
-    private func removeFilter(_ chip: ExploreFilterChipData) {
-        switch chip.kind {
-        case .purity(let purity):
-            if activePurityLabels.count <= 1 {
-                return
-            }
-            switch purity {
-            case .sfw:
-                viewModel.puritySFW = false
-            case .sketchy:
-                viewModel.puritySketchy = false
-            case .nsfw:
-                viewModel.purityNSFW = false
-            }
-        case .color:
-            viewModel.selectedColors = []
-        case .resolution(let resolution):
-            viewModel.selectedResolutions.removeAll { $0 == resolution }
-        case .ratio(let ratio):
-            viewModel.selectedRatios.removeAll { $0 == ratio }
-            // 如果热门标签设置了该比例，取消选中
-            if let tag = selectedHotTag, let tagRatios = tag.apiRatios, tagRatios.contains(ratio) {
-                selectedHotTag = nil
-            }
-        case .atleast:
-            viewModel.atleastResolution = nil
-            // 取消关联的热门标签选中状态
-            if selectedHotTag?.apiAtleast != nil {
-                selectedHotTag = nil
-            }
-        }
-        cancelAndSearch()
-    }
-    private func filterSummaryPill(title: String, value: String, accent: Color) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white.opacity(0.46))
-            Text(value)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 38)
-        .liquidGlassSurface(
-            .regular,
-            tint: accent.opacity(0.12),
-            in: Capsule(style: .continuous)
-        )
-    }
-    private func matchesCategory(_ wallpaper: Wallpaper, category: ExploreCategoryFilter) -> Bool {
-        switch category {
-        case .all:
-            return true
-        case .general:
-            return wallpaper.category.lowercased() == "general"
-        case .anime:
-            return wallpaper.category.lowercased() == "anime"
-        case .people:
-            return wallpaper.category.lowercased() == "people"
-        }
-    }
-    private func matchesHotTag(_ wallpaper: Wallpaper, tag: ExploreHotTag) -> Bool {
-        // 所有标签都已通过 API 参数筛选（ratios/atleast），无需客户端二次过滤
-        return true
-    }
-    private func rebuildVisibleWallpapers() {
-        print("[WallpaperExplore] Rebuilding visible wallpapers. viewModel.wallpapers.count: \(viewModel.wallpapers.count)")
-        
-        // 全量重建时清除动画记录，让新数据播放入场动画
-        GridHostingCollectionItem.resetAllAnimatedItems()
-        
-        // 全量重建：从 viewModel.wallpapers 重新过滤并替换 displayedWallpapers
-        if viewModel.wallpapers.count < 100 {
-            let filtered = filterWallpapers(
-                viewModel.wallpapers,
-                category: selectedCategory,
-                hotTag: selectedHotTag
-            )
-            displayedWallpapers = filtered
-            syncExploreAtmosphere()
-        } else {
-            // 大数据量时在后台线程执行过滤
-            let wallpapers = viewModel.wallpapers
-            let category = selectedCategory
-            let hotTag = selectedHotTag
-            
-            Task.detached(priority: .userInitiated) {
-                let filtered = Self.filterWallpapersStatic(
-                    wallpapers,
-                    category: category,
-                    hotTag: hotTag
-                )
-                
-                await MainActor.run {
-                    displayedWallpapers = filtered
-                    syncExploreAtmosphere()
-                    print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
-                }
-            }
-        }
-    }
-    
-    /// 实例方法过滤（主线程使用）
-    private func filterWallpapers(
-        _ wallpapers: [Wallpaper],
-        category: ExploreCategoryFilter,
-        hotTag: ExploreHotTag?
-    ) -> [Wallpaper] {
-        let categoryFiltered = wallpapers.filter { matchesCategory($0, category: category) }
-        if let hotTag {
-            return categoryFiltered.filter { matchesHotTag($0, tag: hotTag) }
-        }
-        return categoryFiltered
-    }
-    
-    /// 静态方法过滤（后台线程使用）
-    private nonisolated static func filterWallpapersStatic(
-        _ wallpapers: [Wallpaper],
-        category: ExploreCategoryFilter,
-        hotTag: ExploreHotTag?
-    ) -> [Wallpaper] {
-        let categoryFiltered = wallpapers.filter { wallpaper in
-            switch category {
-            case .all: return true
-            case .general: return wallpaper.category.lowercased() == "general"
-            case .anime: return wallpaper.category.lowercased() == "anime"
-            case .people: return wallpaper.category.lowercased() == "people"
-            }
-        }
-        
-        guard let hotTag else { return categoryFiltered }
-        
-        return categoryFiltered.filter { wallpaper in
-            // 所有热门标签都已通过 API 参数筛选，无需客户端二次过滤
-            return true
-        }
-    }
-    /// 增量追加新壁纸（用于 loadMore 场景）
-    private func appendNewWallpapers() {
-        // 获取当前应该显示的所有壁纸
-        let categoryWallpapers = viewModel.wallpapers.filter { wallpaper in
-            matchesCategory(wallpaper, category: selectedCategory)
-        }
-        let tagFilteredWallpapers: [Wallpaper]
-        if let selectedHotTag {
-            tagFilteredWallpapers = categoryWallpapers.filter { matchesHotTag($0, tag: selectedHotTag) }
-        } else {
-            tagFilteredWallpapers = categoryWallpapers
-        }
-        // 获取当前已显示的ID集合
-        let existingIDs = Set(displayedWallpapers.map(\.id))
-        // 只追加新数据
-        let newWallpapers = tagFilteredWallpapers.filter { !existingIDs.contains($0.id) }
-        guard !newWallpapers.isEmpty else { return }
-        
-        // 记录新数据开始索引
-        let startIndex = displayedWallpapers.count
-        
-        // 直接追加数据，让卡片显示入场动画
-        displayedWallpapers.append(contentsOf: newWallpapers)
-    }
-    private func loadMoreUntilVisibleGrowth(maxAttempts: Int = 6) async {
-        let initialVisibleCount = displayedWallpapers.count
-        var attempts = 0
-        defer { isLoadingMore = false }
-        
-        while attempts < maxAttempts, viewModel.hasMorePages {
-            attempts += 1
-            await viewModel.loadMore()
-            appendNewWallpapers()
-            if displayedWallpapers.count > initialVisibleCount {
-                break
-            }
-        }
-    }
-
-    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
-    private struct LoadingMoreIndicator: View {
-        @State private var isAnimating = false
-        
-        var body: some View {
-            HStack(spacing: 8) {
-                // iOS 风格转圈圈
-                Image(systemName: "arrow.2.circlepath")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
-                    .onAppear {
-                        withAnimation(
-                            .linear(duration: 1.0)
-                            .repeatForever(autoreverses: false)
-                        ) {
-                            isAnimating = true
-                        }
-                    }
-                    .onDisappear {
-                        isAnimating = false
-                    }
-                
-                Text(t("loading.simple"))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-        }
-    }
-
-    // MARK: - Task 管理
-
-    /// 取消并执行新的搜索
-    private func cancelAndSearch() {
-        searchTask?.cancel()
-        // 清空显示列表，等 viewModel.wallpapers 更新后全量重建
-        displayedWallpapers = []
-        searchTask = Task {
-            await viewModel.search()
-            await MainActor.run {
-                rebuildVisibleWallpapers()
-                syncExploreAtmosphere()
-            }
-        }
-    }
-
-    /// 取消所有任务（视图消失时调用）
-    private func cancelAllTasks() {
-        searchTask?.cancel()
-        loadMoreTask?.cancel()
-        searchTask = nil
-        loadMoreTask = nil
-    }
 }
 
-// MARK: - 探索网格壁纸卡片（布局对齐 ContentView.WallpaperEditCard / 已下载壁纸）
 
-private struct SimpleWallpaperCard: View {
+// MARK: - 壁纸卡片（带固定宽高和流畅动画）
+private struct WallpaperCard: View {
     let wallpaper: Wallpaper
+    let isFavorite: Bool
+    let index: Int
     let cardWidth: CGFloat
     let cardHeight: CGFloat
-    /// 本地收藏：爱心与数字用粉红，否则灰色（Wallhaven 列表数字仍为接口 favorites）
-    let isFavorite: Bool
-    let onTap: () -> Void
+    
     @State private var isHovered = false
-
-    // 预计算所有条件属性（避免 body 中 switch/三目运算导致的重复求值）
+    
+    // 预计算属性
     private var purityBorderColor: Color? {
         switch wallpaper.purity.lowercased() {
-        case "nsfw":
-            return Color(hex: "FF3B30")
-        case "sketchy":
-            return Color(hex: "FFB347")
-        default:
-            return nil
+        case "nsfw": return Color(hex: "FF3B30")
+        case "sketchy": return Color(hex: "FFB347")
+        default: return nil
         }
     }
     
-    // 预计算边框样式（避免每帧的条件分支）
     private var borderColor: Color { purityBorderColor ?? Color.white.opacity(0.06) }
     private var borderWidth: CGFloat { purityBorderColor != nil ? 2 : 1 }
-
-    // 静态形状缓存，避免每次 body 重新创建
-    private static let thumbShape = UnevenRoundedRectangle(
-        topLeadingRadius: 14,
-        bottomLeadingRadius: 0,
-        bottomTrailingRadius: 0,
-        topTrailingRadius: 14,
-        style: .continuous
-    )
-    private static let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
-
-    // 缓存分辨率显示字符串
-    private var cachedResolutionDisplay: String {
-        wallpaper.resolution.replacingOccurrences(of: "x", with: "×")
-    }
-    
-    private var cachedFooterLine: String {
-        if let name = wallpaper.uploader?.username.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-            return name
-        }
-        return wallpaper.categoryDisplayName
-    }
     
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 简化结构
-                ZStack {
-                    OptimizedAsyncImage(
-                        url: wallpaper.thumbURL ?? wallpaper.smallThumbURL,
-                        priority: .medium
-                    ) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        placeholderGradient
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            // 图片区域 - 固定宽高
+            ZStack {
+                OptimizedAsyncImage(
+                    url: wallpaper.thumbURL ?? wallpaper.smallThumbURL,
+                    priority: .medium
+                ) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    placeholderGradient
                 }
-                .frame(width: cardWidth, height: cardHeight)
-                .clipShape(Self.thumbShape)
-                .overlay(alignment: .topLeading) {
-                    // 简化元数据行
-                    simplifiedMetadataRow
-                        .padding(10)
-                }
-
-                // 底部信息栏（与 WallpaperEditCard 信息栏一致）
-                HStack(spacing: 12) {
-                    // 上传者名称
-                    Text(cachedFooterLine)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                    
-                    Spacer(minLength: 12)
-                    
-                    // 右侧统计信息（trailingMetadataRow）
-                    trailingMetadataRow
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(width: cardWidth, alignment: .leading)
-                .background(Color.black.opacity(0.46))
             }
-            .background(
-                Self.cardShape
-                    .fill(Color.clear)
-                    .overlay(
-                        Self.cardShape
-                            .stroke(borderColor, lineWidth: borderWidth)
-                    )
-            )
-            .clipShape(Self.cardShape)
+            .frame(width: cardWidth, height: cardHeight)
+            .clipShape(UnevenRoundedRectangle(
+                topLeadingRadius: 14,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 14,
+                style: .continuous
+            ))
+            .overlay(alignment: .topLeading) {
+                metadataRow
+                    .padding(10)
+            }
+            
+            // 底部信息栏
+            HStack(spacing: 12) {
+                Text(wallpaper.uploader?.username ?? wallpaper.categoryDisplayName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                
+                Spacer(minLength: 12)
+                
+                trailingMetadata
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(width: cardWidth, alignment: .leading)
+            .background(Color.black.opacity(0.46))
         }
-        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(borderColor, lineWidth: borderWidth)
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .scaleEffect(isHovered ? 1.02 : 1.0)
-        // iOS 风格悬停：快速弹簧响应 + 自然减速释放
-        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isHovered)
+        .onHover { hovering in
             isHovered = hovering
         }
     }
     
-    // 顶部元数据行
-    private var simplifiedMetadataRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            HStack(spacing: 6) {
-                // 分类标签
-                metaTag(text: wallpaper.categoryDisplayName)
-                // 纯度标签（始终显示）
-                metaTag(text: wallpaper.purityDisplayName)
-            }
-            
+    var metadataRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            metaTag(text: wallpaper.categoryDisplayName)
+            metaTag(text: wallpaper.purityDisplayName)
             Spacer(minLength: 0)
-            
-            // 分辨率
-            metaTag(text: cachedResolutionDisplay)
+            metaTag(text: wallpaper.resolution.replacingOccurrences(of: "x", with: "×"))
         }
     }
-
-    private func metaTag(text: String) -> some View {
+    
+    var trailingMetadata: some View {
+        HStack(spacing: 10) {
+            if let primaryColorHex = wallpaper.primaryColorHex {
+                footerColorTag(hex: primaryColorHex)
+            }
+            
+            statLabel(
+                systemImage: "heart.fill",
+                value: compactNumber(wallpaper.favorites),
+                tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
+            )
+            
+            statLabel(
+                systemImage: "eye.fill",
+                value: compactNumber(wallpaper.views),
+                tint: .white.opacity(0.5)
+            )
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
+    
+    func metaTag(text: String) -> some View {
         Text(text)
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
             .foregroundStyle(.white.opacity(0.85))
@@ -1020,7 +756,7 @@ private struct SimpleWallpaperCard: View {
             .clipShape(Capsule())
     }
     
-    private func footerColorTag(hex: String) -> some View {
+    func footerColorTag(hex: String) -> some View {
         HStack(spacing: 6) {
             Circle()
                 .fill(Color(hex: "#\(hex)"))
@@ -1039,7 +775,7 @@ private struct SimpleWallpaperCard: View {
         .background(Color.black.opacity(0.22), in: Capsule(style: .continuous))
     }
     
-    private func statLabel(systemImage: String, value: String, tint: Color) -> some View {
+    func statLabel(systemImage: String, value: String, tint: Color) -> some View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
                 .font(.system(size: 10, weight: .bold))
@@ -1048,39 +784,8 @@ private struct SimpleWallpaperCard: View {
         }
         .foregroundStyle(tint)
     }
-
-    // 底部右侧统计信息行 - 简化版：使用 minimumScaleFactor 替代 ViewThatFits
-    private var trailingMetadataRow: some View {
-        HStack(spacing: 10) {
-            if let primaryColorHex = wallpaper.primaryColorHex {
-                footerColorTag(hex: primaryColorHex)
-            }
-            
-            statLabel(
-                systemImage: "heart.fill",
-                value: compactNumber(wallpaper.favorites),
-                tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.5)
-            )
-            
-            statLabel(
-                systemImage: "eye.fill",
-                value: compactNumber(wallpaper.views),
-                tint: .white.opacity(0.5)
-            )
-            
-            if !wallpaper.fileSizeLabel.isEmpty {
-                statLabel(
-                    systemImage: "doc.fill",
-                    value: wallpaper.fileSizeLabel,
-                    tint: .white.opacity(0.4)
-                )
-            }
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.75)
-    }
-
-    private var placeholderGradient: some View {
+    
+    var placeholderGradient: some View {
         LinearGradient(
             colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
             startPoint: .topLeading,
@@ -1092,8 +797,8 @@ private struct SimpleWallpaperCard: View {
                 .foregroundStyle(.white.opacity(0.18))
         }
     }
-
-    private func compactNumber(_ value: Int) -> String {
+    
+    func compactNumber(_ value: Int) -> String {
         if value >= 1_000_000 {
             return String(format: "%.1fM", Double(value) / 1_000_000)
         }
@@ -1104,68 +809,141 @@ private struct SimpleWallpaperCard: View {
     }
 }
 
-private enum ExplorePurityFilter: String, CaseIterable, Identifiable {
-    case sfw
-    case sketchy
-    case nsfw
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .sfw: return "SFW"
-        case .sketchy: return "Sketchy"
-        case .nsfw: return "NSFW"
+// MARK: - 加载更多指示器
+private struct LoadingMoreIndicator: View {
+    @State private var isAnimating = false
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.2.circlepath")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .rotationEffect(.degrees(isAnimating ? 360 : 0))
+                .onAppear {
+                    withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                        isAnimating = true
+                    }
+                }
+                .onDisappear {
+                    isAnimating = false
+                }
+            
+            Text(t("loading.simple"))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
         }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .sfw: return t("purity.sfw")
-        case .sketchy: return t("purity.sketchy")
-        case .nsfw: return t("purity.nsfw")
-        }
-    }
-    var tint: Color {
-        switch self {
-        case .sfw: return LiquidGlassColors.onlineGreen
-        case .sketchy: return LiquidGlassColors.warningOrange
-        case .nsfw: return LiquidGlassColors.primaryPink
-        }
-    }
-    var requiresAPIKey: Bool {
-        self != .sfw
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
-private struct ExploreFilterChipData: Identifiable {
-    enum Kind: Hashable {
-        case purity(ExplorePurityFilter)
-        case color(String)
-        case resolution(String)
-        case ratio(String)
-        case atleast(String)
+// MARK: - 没有更多提示
+private struct NoMoreFooter: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Rectangle()
+                .fill(Color.white.opacity(0.15))
+                .frame(height: 1)
+            
+            Text("— \(t("noMore")) —")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.25))
+            
+            Rectangle()
+                .fill(Color.white.opacity(0.15))
+                .frame(height: 1)
+        }
+        .padding(.horizontal, 40)
     }
+}
 
-    // 使用稳定的 ID 基于 kind，避免每次重建都生成新的 UUID 导致 ForEach 全量重建
-    var id: String {
-        switch kind {
+// MARK: - 原有组件定义
+
+private extension WallpaperExploreContentView {
+    var quickColorPresets: [WallhavenAPI.ColorPreset] {
+        let preferredHexes = [
+            "990000", "ea4c88", "993399", "0066cc", "0099cc", "66cccc",
+            "669900", "999900", "ffff00", "ff9900", "ff6600", "424153"
+        ]
+        return preferredHexes.compactMap { WallhavenAPI.colorPreset(for: $0) }
+    }
+    
+    /// 根据 API Key 配置返回可见的内容分级筛选器（无 API Key 时隐藏 NSFW）
+    var visiblePurityFilters: [ExplorePurityFilter] {
+        if viewModel.apiKeyConfigured {
+            return Array(ExplorePurityFilter.allCases)
+        } else {
+            return [.sfw, .sketchy]
+        }
+    }
+    
+    func isPuritySelected(_ filter: ExplorePurityFilter) -> Bool {
+        switch filter {
+        case .sfw: return viewModel.puritySFW
+        case .sketchy: return viewModel.puritySketchy
+        case .nsfw: return viewModel.purityNSFW
+        }
+    }
+    
+    func togglePurity(_ filter: ExplorePurityFilter) {
+        if filter.requiresAPIKey && !viewModel.apiKeyConfigured {
+            showProtectedPurityAlert = true
+            return
+        }
+        switch filter {
+        case .sfw: viewModel.puritySFW.toggle()
+        case .sketchy: viewModel.puritySketchy.toggle()
+        case .nsfw: viewModel.purityNSFW.toggle()
+        }
+        reloadData()
+    }
+    
+    func toggleColor(_ preset: WallhavenAPI.ColorPreset) {
+        viewModel.selectedColors = (viewModel.selectedColors.first == preset.hex) ? [] : [preset.hex]
+        reloadData()
+    }
+    
+    var currentFilterChips: [ExploreFilterChipData] {
+        var chips: [ExploreFilterChipData] = []
+        if viewModel.puritySFW {
+            chips.append(.init(kind: .purity(.sfw), title: "SFW", accentHex: "43C463"))
+        }
+        if viewModel.puritySketchy {
+            chips.append(.init(kind: .purity(.sketchy), title: "Sketchy", accentHex: "FFB347"))
+        }
+        if viewModel.purityNSFW {
+            chips.append(.init(kind: .purity(.nsfw), title: "NSFW", accentHex: "FF5A7D"))
+        }
+        if let hex = viewModel.selectedColors.first,
+           let preset = WallhavenAPI.colorPreset(for: hex) {
+            chips.append(.init(kind: .color(hex), title: preset.displayName, subtitle: preset.displayHex, accentHex: hex))
+        }
+        return chips
+    }
+    
+    func resetServerFilters() {
+        viewModel.puritySFW = true
+        viewModel.puritySketchy = false
+        viewModel.purityNSFW = false
+        viewModel.selectedColors = []
+        reloadData()
+    }
+    
+    func removeFilter(_ chip: ExploreFilterChipData) {
+        switch chip.kind {
         case .purity(let purity):
-            return "purity_\(purity.rawValue)"
-        case .color(let hex):
-            return "color_\(hex)"
-        case .resolution(let resolution):
-            return "resolution_\(resolution)"
-        case .ratio(let ratio):
-            return "ratio_\(ratio)"
-        case .atleast(let value):
-            return "atleast_\(value)"
+            switch purity {
+            case .sfw: viewModel.puritySFW = false
+            case .sketchy: viewModel.puritySketchy = false
+            case .nsfw: viewModel.purityNSFW = false
+            }
+        case .color: viewModel.selectedColors = []
+        default: break
         }
+        reloadData()
     }
-
-    let kind: Kind
-    let title: String
-    var subtitle: String? = nil
-    let accentHex: String
 }
+
+// MARK: - 组件定义
 
 private struct QuickFilterChip: View {
     let title: String
@@ -1174,6 +952,7 @@ private struct QuickFilterChip: View {
     let tint: Color
     let action: () -> Void
     @State private var isHovered = false
+    
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
@@ -1202,16 +981,18 @@ private struct QuickFilterChip: View {
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .onHover { hovering in
             isHovered = hovering
         }
     }
 }
+
 private struct QuickColorChip: View {
     let preset: WallhavenAPI.ColorPreset
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovered = false
+    
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -1244,15 +1025,17 @@ private struct QuickColorChip: View {
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .onHover { hovering in
             isHovered = hovering
         }
     }
 }
+
 private struct ActiveFilterChipView: View {
     let chip: ExploreFilterChipData
     let onRemove: () -> Void
     @State private var isHovered = false
+    
     var body: some View {
         Button(action: onRemove) {
             HStack(spacing: 8) {
@@ -1291,16 +1074,18 @@ private struct ActiveFilterChipView: View {
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .onHover { hovering in
             isHovered = hovering
         }
     }
 }
+
 private struct ExploreHotTagChip: View {
     let tag: ExploreHotTag
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovered = false
+    
     var body: some View {
         Button(action: action) {
             Text(tag.title)
@@ -1321,16 +1106,18 @@ private struct ExploreHotTagChip: View {
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .onHover { hovering in
             isHovered = hovering
         }
     }
 }
+
 private struct ExploreCategoryChip: View {
     let category: ExploreCategoryFilter
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovered = false
+    
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -1381,18 +1168,52 @@ private struct ExploreCategoryChip: View {
         .buttonStyle(.plain)
         .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
+        .onHover { hovering in
             isHovered = hovering
         }
     }
 }
+
+// MARK: - 枚举定义
+
+private enum ExplorePurityFilter: String, CaseIterable, Identifiable {
+    case sfw
+    case sketchy
+    case nsfw
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .sfw: return "SFW"
+        case .sketchy: return "Sketchy"
+        case .nsfw: return "NSFW"
+        }
+    }
+    var subtitle: String {
+        switch self {
+        case .sfw: return t("purity.sfw")
+        case .sketchy: return t("purity.sketchy")
+        case .nsfw: return t("purity.nsfw")
+        }
+    }
+    var tint: Color {
+        switch self {
+        case .sfw: return LiquidGlassColors.onlineGreen
+        case .sketchy: return LiquidGlassColors.warningOrange
+        case .nsfw: return LiquidGlassColors.primaryPink
+        }
+    }
+    var requiresAPIKey: Bool {
+        self != .sfw
+    }
+}
+
 private enum ExploreHotTag: String, CaseIterable, Identifiable {
     case ultraHD
     case ultrawide
     case ratio21x9
     case ratio32x9
     case ratio16x9
-    case portrait  // 竖图（高>宽）
+    case portrait
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -1404,8 +1225,6 @@ private enum ExploreHotTag: String, CaseIterable, Identifiable {
         case .portrait: return t("aspect.portrait")
         }
     }
-
-    /// 映射到 Wallhaven API 参数
     var apiRatios: [String]? {
         switch self {
         case .ultrawide: return ["21x9", "32x9"]
@@ -1416,7 +1235,6 @@ private enum ExploreHotTag: String, CaseIterable, Identifiable {
         default: return nil
         }
     }
-
     var apiAtleast: String? {
         switch self {
         case .ultraHD: return "3840x2160"
@@ -1424,6 +1242,7 @@ private enum ExploreHotTag: String, CaseIterable, Identifiable {
         }
     }
 }
+
 private enum ExploreCategoryFilter: String, CaseIterable, Identifiable {
     case all
     case general
@@ -1455,76 +1274,54 @@ private enum ExploreCategoryFilter: String, CaseIterable, Identifiable {
         }
     }
 }
-private extension Wallpaper {
-    func matchesAnyTag(_ values: [String]) -> Bool {
-        let normalizedValues = values.map { $0.lowercased() }
-        return tags?.contains(where: { tag in
-            let candidates = [tag.name, tag.alias ?? ""].map { $0.lowercased() }
-            return candidates.contains(where: { candidate in
-                normalizedValues.contains(where: { candidate.contains($0) })
-            })
-        }) ?? false
+
+private struct ExploreFilterChipData: Identifiable {
+    enum Kind: Hashable {
+        case purity(ExplorePurityFilter)
+        case color(String)
+        case resolution(String)
+        case ratio(String)
+        case atleast(String)
     }
+    var id: String {
+        switch kind {
+        case .purity(let purity): return "purity_\(purity.rawValue)"
+        case .color(let hex): return "color_\(hex)"
+        case .resolution(let resolution): return "resolution_\(resolution)"
+        case .ratio(let ratio): return "ratio_\(ratio)"
+        case .atleast(let value): return "atleast_\(value)"
+        }
+    }
+    let kind: Kind
+    let title: String
+    var subtitle: String? = nil
+    let accentHex: String
 }
+
 // MARK: - SortingOption 扩展
+
 extension SortingOption: CaseIterable {
     static var allCases: [SortingOption] {
         [.toplist, .dateAdded, .favorites, .views, .random, .relevance]
     }
 }
+
 private func sortingOptionDisplayName(_ option: SortingOption) -> String {
     switch option {
-    case .dateAdded:
-        return t("sort.latest")
-    case .views:
-        return t("sort.views")
-    case .favorites:
-        return t("sort.likes")
-    case .toplist:
-        return t("sort.toplist")
-    case .random:
-        return t("sort.random")
-    case .relevance:
-        return t("sort.relevance")
-    }
-}
-// MARK: - resetAllFilters
-extension WallpaperExploreContentView {
-    private func resetAllFilters() {
-        // 重置搜索
-        searchText = ""
-        viewModel.searchQuery = ""
-        // 重置分类
-        selectedCategory = .all
-        // 重置热门标签
-        selectedHotTag = nil
-        // 重置纯度
-        viewModel.puritySFW = true
-        viewModel.puritySketchy = false
-        viewModel.purityNSFW = false
-        // 重置排序
-        viewModel.sortingOption = .toplist
-        viewModel.orderDescending = true
-        // 重置颜色
-        viewModel.selectedColors = []
-        // 重置分辨率
-        viewModel.selectedResolutions = []
-        // 重置比例
-        viewModel.selectedRatios = []
-        // 重置最小分辨率
-        viewModel.atleastResolution = nil
-        // 触发搜索
-        Task {
-            await viewModel.search()
-        }
+    case .dateAdded: return t("sort.latest")
+    case .views: return t("sort.views")
+    case .favorites: return t("sort.likes")
+    case .toplist: return t("sort.toplist")
+    case .random: return t("sort.random")
+    case .relevance: return t("sort.relevance")
     }
 }
 
-// MARK: - Scroll offset (shared with HomeContentView, WallpaperDetailSheet)
+// MARK: - Scroll offset
+
 struct ScrollOffsetPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }
 }
-
