@@ -106,6 +106,12 @@ public final class ImageLoader {
 
     // MARK: - 公共方法
 
+    /// 同步检查内存缓存（用于 OptimizedAsyncImage 即时显示已缓存的图片，避免异步加载闪烁）
+    public func cachedImage(for url: URL) -> NSImage? {
+        let key = url.absoluteString
+        return memoryCache.object(forKey: key as NSString)
+    }
+
     public func loadImage(
         from url: URL,
         priority: TaskPriority = .medium,
@@ -475,21 +481,35 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
         }
         .onAppear {
             isVisible = true
+            // 先同步检查内存缓存 — 如果命中就直接显示，避免异步加载导致的闪烁
+            if let url = url, image == nil {
+                if let cached = loader.cachedImage(for: url) {
+                    self.image = cached
+                    onLoad?()
+                    return
+                }
+            }
             loadTask?.cancel()
             loadTask = Task { await load() }
         }
         .onDisappear {
             isVisible = false
+            // 只取消进行中的网络请求，不清空已加载的图片
+            // LazyVGrid 回收 cell 后 @State 会被重置，但 ImageLoader 有缓存，
+            // 重新 onAppear 时会同步命中缓存立即显示
             loadTask?.cancel()
             loadTask = nil
-            if let url = url {
-                loader.cancelLoad(for: url)
-            }
         }
         .onChange(of: url) { _, _ in
             image = nil
             loadTask?.cancel()
             if isVisible {
+                // 同步检查缓存
+                if let url = url, let cached = loader.cachedImage(for: url) {
+                    self.image = cached
+                    onLoad?()
+                    return
+                }
                 loadTask = Task { await load() }
             }
         }
@@ -504,7 +524,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
             targetSize: targetSize,
             retryConfig: retryConfig
         ) {
-            guard isVisible else { return }
+            guard !Task.isCancelled else { return }
             image = loadedImage
             onLoad?()
         }

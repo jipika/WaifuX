@@ -3,30 +3,93 @@ import SwiftUI
 // MARK: - 🍎 iOS 丝滑滚动动画系统
 
 /// 卡片入场淡入动画 - 模拟 App Store / Apple Music 列表项入场效果
-/// 从下方 12pt 处淡入 + 缩放从 0.96 → 1.0，交错延迟避免同时触发
+/// 从下方 20pt 处淡入 + 缩放从 0.9 → 1.0，交错延迟避免同时触发
+///
+/// **关键修复**：LazyVGrid 会回收离屏 cell 并重置 @State，
+/// 导致滚动回来时卡片重新从 opacity=0 开始 → 出现大片空白。
+/// 修复：用全局 Set 记录已做过入场动画的 item ID，
+/// 仅对首次出现的卡片播放动画，滚动回来的卡片直接显示。
 struct FadeInOnAppearModifier: ViewModifier {
     let delayIndex: Int      // 用于交错动画的索引
     let baseDelay: Double    // 基础延迟（秒）
     let staggerInterval: Double // 交错间隔（秒）
+    let itemId: String       // 卡片唯一标识，用于追踪是否已做过入场动画
 
     @State private var hasAppeared = false
+    @State private var viewId = UUID() // 用于强制视图刷新
 
-    /// iOS 风格的缓出曲线 - 模拟 UIDynamicAnimation 的自然减速
-    private static let iosEaseOut: Animation = .easeOut(duration: 0.45)
+    /// iOS 风格的弹簧动画 - 更自然的弹性效果
+    private static let iosSpring: Animation = .spring(
+        response: 0.5,
+        dampingFraction: 0.72,
+        blendDuration: 0.15
+    )
+
+    /// 全局记录已做过入场动画的 item，避免 LazyVGrid 回收后重播
+    /// 使用 LRU 策略，最多保留 1000 个 ID
+    private static var animatedItems: Set<String> = []
+    private static var animatedItemsOrder: [String] = [] // 用于 LRU
+    private static let maxAnimatedItems = 1000
+    private static let lock = NSLock()
+
+    private static func markAsAnimated(_ id: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        if animatedItems.contains(id) {
+            // 已存在，移动到末尾（最近使用）
+            if let index = animatedItemsOrder.firstIndex(of: id) {
+                animatedItemsOrder.remove(at: index)
+                animatedItemsOrder.append(id)
+            }
+            return
+        }
+        
+        // 添加新 ID
+        animatedItems.insert(id)
+        animatedItemsOrder.append(id)
+        
+        // 超出限制时移除最早的
+        while animatedItemsOrder.count > maxAnimatedItems {
+            let oldest = animatedItemsOrder.removeFirst()
+            animatedItems.remove(oldest)
+        }
+    }
+    
+    private static func isAnimated(_ id: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return animatedItems.contains(id)
+    }
 
     func body(content: Content) -> some View {
+        let alreadyAnimated = Self.isAnimated(itemId)
+        // 限制最大延迟，避免后面的卡片动画太慢（分页加载时索引可能很大）
+        // 使用较小的最大索引值，确保新加载的数据也能快速开始动画
+        let effectiveIndex = min(delayIndex, 12)
+        let delay = alreadyAnimated ? 0.0 : (baseDelay + Double(effectiveIndex) * staggerInterval)
+
         content
-            .opacity(hasAppeared ? 1 : 0)
-            .offset(y: hasAppeared ? 0 : 12)
-            .scaleEffect(hasAppeared ? 1.0 : 0.96, anchor: .center)
+            .opacity(alreadyAnimated ? 1 : (hasAppeared ? 1 : 0))
+            .offset(y: alreadyAnimated ? 0 : (hasAppeared ? 0 : 20))
+            .scaleEffect(alreadyAnimated ? 1.0 : (hasAppeared ? 1.0 : 0.9), anchor: .center)
             .animation(
-                Self.iosEaseOut.delay(baseDelay + Double(delayIndex) * staggerInterval),
+                alreadyAnimated ? nil : Self.iosSpring.delay(delay),
                 value: hasAppeared
             )
             .onAppear {
-                // 微小延迟确保视图已布局完成再启动动画
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                if alreadyAnimated {
+                    // 已经做过入场动画的卡片，直接显示
                     hasAppeared = true
+                } else {
+                    // 首次出现：播放入场动画
+                    // 使用 task 确保在主线程执行，减少延迟确保动画流畅
+                    Task { @MainActor in
+                        // 极短的延迟确保视图已布局
+                        try? await Task.sleep(nanoseconds: 5_000_000) // 0.005s
+                        hasAppeared = true
+                        Self.markAsAnimated(itemId)
+                    }
                 }
             }
     }
@@ -173,14 +236,16 @@ extension View {
 
     /// iOS 风格卡片入场动画（淡入 + 上移 + 微缩放）
     /// - Parameters:
-    ///   - index: 卡片索引，用于交错延迟
-    ///   - baseDelay: 基础延迟（默认 0.02s）
-    ///   - stagger: 每张卡片的交错间隔（默认 0.03s，约 30fps 一张）
-    func iosFadeInOnAppear(index: Int, baseDelay: Double = 0.02, stagger: Double = 0.03) -> some View {
+    ///   - index: 卡片索引，用于交错延迟（建议使用相对索引，确保分页加载也有流畅动画）
+    ///   - itemId: 卡片唯一标识（如壁纸 ID），用于追踪是否已做过入场动画，避免滚动回来时重播
+    ///   - baseDelay: 基础延迟（默认 0.008s，更快响应）
+    ///   - stagger: 每张卡片的交错间隔（默认 0.022s，紧凑的交错效果）
+    func iosFadeInOnAppear(index: Int, itemId: String, baseDelay: Double = 0.008, stagger: Double = 0.022) -> some View {
         modifier(FadeInOnAppearModifier(
             delayIndex: index,
             baseDelay: baseDelay,
-            staggerInterval: stagger
+            staggerInterval: stagger,
+            itemId: itemId
         ))
     }
 

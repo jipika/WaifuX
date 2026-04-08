@@ -260,6 +260,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.unfavorite": "UNFAVORITE",
         // Loading
         "loading": "LOADING...",
+        "loading.simple": "LOADING",
         "noData": "NO DATA",
         "loadMore": "LOAD MORE",
         // Errors
@@ -1022,6 +1023,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.unfavorite": "取消收藏",
         // Loading
         "loading": "加载中...",
+        "loading.simple": "加载中",
         "noData": "暂无数据",
         "loadMore": "加载更多",
         // Errors
@@ -1785,6 +1787,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.unfavorite": "お気に入り解除",
         // Loading
         "loading": "読み込み中...",
+        "loading.simple": "読み込み中",
         "noData": "データなし",
         "loadMore": "もっと読み込む",
         // Errors

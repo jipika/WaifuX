@@ -412,9 +412,13 @@ struct WallpaperExploreContentView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(displayedWallpapers) { wallpaper in
-                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
-                        let cardIndex = displayedWallpapers.firstIndex(where: { $0.id == wallpaper.id }) ?? 0
+                    // 计算已显示项目的数量，用于新加载项目的相对索引
+                    let displayedCount = displayedWallpapers.count
+                    
+                    ForEach(Array(displayedWallpapers.enumerated()), id: \.element.id) { index, wallpaper in
+                        // 使用相对索引：对于新加载的数据，从0开始计算
+                        // 这样分页加载的项目也能有流畅的交错动画
+                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
 
                         SimpleWallpaperCard(
                             wallpaper: wallpaper,
@@ -423,10 +427,10 @@ struct WallpaperExploreContentView: View {
                             isFavorite: viewModel.isFavorite(wallpaper),
                             onTap: { selectedWallpaper = wallpaper }
                         )
-                        // iOS 风格入场动画：淡入 + 上移 + 微缩放（每张卡片错开 30ms）
-                        .iosFadeInOnAppear(index: cardIndex)
+                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
+                        .iosFadeInOnAppear(index: relativeIndex, itemId: wallpaper.id)
                         .onAppear {
-                            guard cardIndex >= displayedWallpapers.count - 6 else { return }
+                            guard index >= displayedWallpapers.count - 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
@@ -717,37 +721,57 @@ struct WallpaperExploreContentView: View {
     private func rebuildVisibleWallpapers() {
         print("[WallpaperExplore] Rebuilding visible wallpapers. viewModel.wallpapers.count: \(viewModel.wallpapers.count)")
         
-        // 快速路径：如果数据量小，直接在主线程处理
-        if viewModel.wallpapers.count < 100 {
-            let filtered = filterWallpapers(
-                viewModel.wallpapers,
-                category: selectedCategory,
-                hotTag: selectedHotTag
-            )
-            displayedWallpapers = filtered
-            syncExploreAtmosphere()
-            print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
+        // 如果当前显示列表为空，直接赋值（初始加载场景）
+        guard !displayedWallpapers.isEmpty else {
+            if viewModel.wallpapers.count < 100 {
+                let filtered = filterWallpapers(
+                    viewModel.wallpapers,
+                    category: selectedCategory,
+                    hotTag: selectedHotTag
+                )
+                displayedWallpapers = filtered
+            } else {
+                // 大数据量时在后台线程执行过滤
+                let wallpapers = viewModel.wallpapers
+                let category = selectedCategory
+                let hotTag = selectedHotTag
+                
+                Task.detached(priority: .userInitiated) {
+                    let filtered = Self.filterWallpapersStatic(
+                        wallpapers,
+                        category: category,
+                        hotTag: hotTag
+                    )
+                    
+                    await MainActor.run {
+                        displayedWallpapers = filtered
+                        syncExploreAtmosphere()
+                        print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
+                    }
+                }
+            }
             return
         }
         
-        // 大数据量时在后台线程执行过滤
-        let wallpapers = viewModel.wallpapers
-        let category = selectedCategory
-        let hotTag = selectedHotTag
+        // 增量更新：只追加新增的壁纸，避免重置整个列表导致空白
+        let existingIDs = Set(displayedWallpapers.map { $0.id })
+        let newWallpapers = viewModel.wallpapers.filter { !existingIDs.contains($0.id) }
         
-        Task.detached(priority: .userInitiated) {
-            let filtered = Self.filterWallpapersStatic(
-                wallpapers,
-                category: category,
-                hotTag: hotTag
-            )
-            
-            await MainActor.run {
-                displayedWallpapers = filtered
-                syncExploreAtmosphere()
-                print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
-            }
+        guard !newWallpapers.isEmpty else {
+            print("[WallpaperExplore] No new wallpapers to append")
+            return
         }
+        
+        // 过滤新壁纸的分类和标签
+        let filteredNewWallpapers = newWallpapers.filter { matchesCategory($0, category: selectedCategory) }
+        guard !filteredNewWallpapers.isEmpty else {
+            print("[WallpaperExplore] New wallpapers filtered out by category/tag")
+            return
+        }
+        
+        print("[WallpaperExplore] Appending \(filteredNewWallpapers.count) new wallpapers")
+        displayedWallpapers.append(contentsOf: filteredNewWallpapers)
+        syncExploreAtmosphere()
     }
     
     /// 实例方法过滤（主线程使用）
@@ -824,30 +848,34 @@ struct WallpaperExploreContentView: View {
         }
     }
 
-    // MARK: - 底部加载更多指示器（带弹跳动画）
+    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
     private struct LoadingMoreIndicator: View {
-        @State private var arrowOffset: CGFloat = 0
+        @State private var isAnimating = false
         
         var body: some View {
-            HStack(spacing: 10) {
-                // 弹跳箭头
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(LiquidGlassColors.primaryPink)
-                    .offset(y: arrowOffset)
+            HStack(spacing: 8) {
+                // iOS 风格转圈圈
+                Image(systemName: "arrow.2.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
                     .onAppear {
                         withAnimation(
-                            .easeInOut(duration: 0.5)
-                            .repeatForever(autoreverses: true)
+                            .linear(duration: 1.0)
+                            .repeatForever(autoreverses: false)
                         ) {
-                            arrowOffset = 4
+                            isAnimating = true
                         }
                     }
+                    .onDisappear {
+                        isAnimating = false
+                    }
                 
-                Text("加载中，请稍候...")
+                Text(t("loading.simple"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 

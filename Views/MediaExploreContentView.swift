@@ -283,9 +283,13 @@ struct MediaExploreContentView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(displayedMediaItems) { item in
-                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
-                        let cardIndex = displayedMediaItems.firstIndex(where: { $0.id == item.id }) ?? 0
+                    // 计算已显示项目的数量，用于新加载项目的相对索引
+                    let displayedCount = displayedMediaItems.count
+                    
+                    ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
+                        // 使用相对索引：对于新加载的数据，从0开始计算
+                        // 这样分页加载的项目也能有流畅的交错动画
+                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
 
                         SimpleMediaCard(
                             item: item,
@@ -294,10 +298,10 @@ struct MediaExploreContentView: View {
                             isFavorite: viewModel.isFavorite(item),
                             onTap: { selectedMedia = item }
                         )
-                        // iOS 风格入场动画
-                        .iosFadeInOnAppear(index: cardIndex)
+                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
+                        .iosFadeInOnAppear(index: relativeIndex, itemId: item.id)
                         .onAppear {
-                            guard cardIndex >= displayedMediaItems.count - 6 else { return }
+                            guard index >= displayedMediaItems.count - 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
@@ -340,30 +344,34 @@ struct MediaExploreContentView: View {
         }
     }
 
-    // MARK: - 底部加载更多指示器（带弹跳动画）
+    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
     private struct LoadingMoreIndicator: View {
-        @State private var arrowOffset: CGFloat = 0
+        @State private var isAnimating = false
         
         var body: some View {
-            HStack(spacing: 10) {
-                // 弹跳箭头
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(LiquidGlassColors.primaryPink)
-                    .offset(y: arrowOffset)
+            HStack(spacing: 8) {
+                // iOS 风格转圈圈
+                Image(systemName: "arrow.2.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
                     .onAppear {
                         withAnimation(
-                            .easeInOut(duration: 0.5)
-                            .repeatForever(autoreverses: true)
+                            .linear(duration: 1.0)
+                            .repeatForever(autoreverses: false)
                         ) {
-                            arrowOffset = 4
+                            isAnimating = true
                         }
                     }
+                    .onDisappear {
+                        isAnimating = false
+                    }
                 
-                Text("加载中，请稍候...")
+                Text(t("loading.simple"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -471,35 +479,65 @@ struct MediaExploreContentView: View {
     private func rebuildVisibleMediaItems() {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
-
-        let filtered = viewModel.items.filter { item in
+        
+        // 如果当前显示列表为空，直接构建（初始加载场景）
+        guard !displayedMediaItems.isEmpty else {
+            let filtered = viewModel.items.filter { item in
+                let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
+                let matchesHotTag = selectedHotTag.map { item.matches(hotTag: $0) } ?? true
+                return matchesSearch && matchesHotTag
+            }
+            
+            switch selectedSort {
+            case .newest:
+                displayedMediaItems = sortAscending ? Array(filtered.reversed()) : filtered
+            case .title:
+                displayedMediaItems = filtered.sorted { lhs, rhs in
+                    let comparison = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+                    if comparison == .orderedSame {
+                        return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
+                    }
+                    return sortAscending ? comparison == .orderedDescending : comparison == .orderedAscending
+                }
+            case .format:
+                displayedMediaItems = filtered.sorted { lhs, rhs in
+                    let comparison = lhs.formatText.localizedCaseInsensitiveCompare(rhs.formatText)
+                    if comparison == .orderedSame {
+                        return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
+                    }
+                    return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
+                }
+            }
+            
+            let sentinelIndex = max(0, displayedMediaItems.count - 10)
+            loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
+            syncExploreMediaAtmosphere()
+            return
+        }
+        
+        // 增量更新：只追加新增的项目，避免重置整个列表导致空白
+        let existingIDs = Set(displayedMediaItems.map { $0.id })
+        let newItems = viewModel.items.filter { !existingIDs.contains($0.id) }
+        
+        guard !newItems.isEmpty else {
+            // 没有新增数据，更新 sentinel 即可
+            let sentinelIndex = max(0, displayedMediaItems.count - 10)
+            loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
+            return
+        }
+        
+        // 过滤新项目的搜索和标签条件
+        let filteredNewItems = newItems.filter { item in
             let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
             let matchesHotTag = selectedHotTag.map { item.matches(hotTag: $0) } ?? true
             return matchesSearch && matchesHotTag
         }
-
-        switch selectedSort {
-        case .newest:
-            // newest 模式保留服务端返回顺序，确保分页加载的数据稳定追加在末尾。
-            displayedMediaItems = sortAscending ? Array(filtered.reversed()) : filtered
-        case .title:
-            displayedMediaItems = filtered.sorted { lhs, rhs in
-                let comparison = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
-                if comparison == .orderedSame {
-                    return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
-                }
-                return sortAscending ? comparison == .orderedDescending : comparison == .orderedAscending
-            }
-        case .format:
-            displayedMediaItems = filtered.sorted { lhs, rhs in
-                let comparison = lhs.formatText.localizedCaseInsensitiveCompare(rhs.formatText)
-                if comparison == .orderedSame {
-                    return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
-                }
-                return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
-            }
-        }
-
+        
+        guard !filteredNewItems.isEmpty else { return }
+        
+        // 追加到显示列表
+        displayedMediaItems.append(contentsOf: filteredNewItems)
+        
         let sentinelIndex = max(0, displayedMediaItems.count - 10)
         loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
         syncExploreMediaAtmosphere()

@@ -313,9 +313,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showMainWindow() {
         guard let window else { return }
+        
+        let wasAccessory = NSApp.activationPolicy() == .accessory
         updateActivationPolicy(showDockIcon: true)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        
+        // 如果之前是 accessory 模式，需要等待激活策略切换完成
+        if wasAccessory {
+            DispatchQueue.main.async {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func hideMainWindow() {

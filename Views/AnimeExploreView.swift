@@ -328,9 +328,13 @@ struct AnimeExploreView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(displayedAnimeItems) { anime in
-                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
-                        let cardIndex = displayedAnimeItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+                    // 计算已显示项目的数量，用于新加载项目的相对索引
+                    let displayedCount = displayedAnimeItems.count
+                    
+                    ForEach(Array(displayedAnimeItems.enumerated()), id: \.element.id) { index, anime in
+                        // 使用相对索引：对于新加载的数据，从0开始计算
+                        // 这样分页加载的项目也能有流畅的交错动画
+                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
 
                         AnimePortraitCard(
                             anime: anime,
@@ -341,8 +345,8 @@ struct AnimeExploreView: View {
                                 selectedAnime = anime
                             }
                         }
-                        // iOS 风格入场动画
-                        .iosFadeInOnAppear(index: cardIndex)
+                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
+                        .iosFadeInOnAppear(index: relativeIndex, itemId: anime.id)
                         .onAppear {
                             // 分页触发：基于原始数据的位置判断，而非排序后位置
                             guard viewModel.animeItems.count - displayedAnimeItems.count < 6 else { return }
@@ -381,30 +385,34 @@ struct AnimeExploreView: View {
         }
     }
 
-    // MARK: - 底部加载更多指示器（带弹跳动画）
+    // MARK: - 底部加载更多指示器（iOS 风格转圈圈）
     private struct LoadingMoreIndicator: View {
-        @State private var arrowOffset: CGFloat = 0
+        @State private var isAnimating = false
         
         var body: some View {
-            HStack(spacing: 10) {
-                // 弹跳箭头
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(LiquidGlassColors.primaryPink)
-                    .offset(y: arrowOffset)
+            HStack(spacing: 8) {
+                // iOS 风格转圈圈
+                Image(systemName: "arrow.2.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
                     .onAppear {
                         withAnimation(
-                            .easeInOut(duration: 0.5)
-                            .repeatForever(autoreverses: true)
+                            .linear(duration: 1.0)
+                            .repeatForever(autoreverses: false)
                         ) {
-                            arrowOffset = 4
+                            isAnimating = true
                         }
                     }
+                    .onDisappear {
+                        isAnimating = false
+                    }
                 
-                Text("加载中，请稍候...")
+                Text(t("loading.simple"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -458,25 +466,33 @@ struct AnimeExploreView: View {
     // MARK: - 排序重建
 
     /// 根据 selectedSort 对 animeItems 做客户端排序，写入 displayedAnimeItems
+    /// **优化**：使用增量更新避免 LazyVGrid 重置导致的空白问题
     private func rebuildDisplayedAnimeItems() {
         let source = viewModel.animeItems
-        let oldCount = displayedAnimeItems.count
+        let oldItems = displayedAnimeItems
         
+        // 如果旧数组为空，直接赋值（初始加载）
+        guard !oldItems.isEmpty else {
+            displayedAnimeItems = sortAscending ? source.reversed() : source
+            syncExploreAtmosphere()
+            return
+        }
+        
+        // 计算新的排序结果
+        let newItems: [AnimeSearchResult]
         switch selectedSort {
         case .newest:
-            // newest：保留服务端返回原始顺序
-            displayedAnimeItems = sortAscending ? source.reversed() : source
+            newItems = sortAscending ? source.reversed() : source
         case .title:
-            displayedAnimeItems = source.sorted { lhs, rhs in
+            newItems = source.sorted { lhs, rhs in
                 let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
                 if cmp == .orderedSame { return false }
                 return sortAscending ? cmp == .orderedDescending : cmp == .orderedAscending
             }
         case .popular:
-            // popular：按评分（rating 字符串转 Double）降序排列
-            displayedAnimeItems = source.sorted { lhs, rhs in
+            newItems = source.sorted { lhs, rhs in
                 let lhsScore = Double(lhs.rating ?? "0") ?? 0
-                let rhsScore = Double(lhs.rating ?? "0") ?? 0
+                let rhsScore = Double(rhs.rating ?? "0") ?? 0
                 if lhsScore == rhsScore {
                     return lhs.rank ?? Int.max < rhs.rank ?? Int.max
                 }
@@ -484,7 +500,20 @@ struct AnimeExploreView: View {
             }
         }
         
-        // 如果有新增数据，直接显示（不再锁定滚动）
+        // 增量更新：只追加新增的项目，避免重置整个列表
+        let oldIDs = Set(oldItems.map { $0.id })
+        let newIDs = Set(newItems.map { $0.id })
+        
+        // 检查是否有新增数据
+        let addedIDs = newIDs.subtracting(oldIDs)
+        guard !addedIDs.isEmpty else {
+            // 没有新增数据，不需要更新
+            return
+        }
+        
+        // 只追加新增的项目到末尾
+        let addedItems = newItems.filter { addedIDs.contains($0.id) }
+        displayedAnimeItems.append(contentsOf: addedItems)
         syncExploreAtmosphere()
     }
     
