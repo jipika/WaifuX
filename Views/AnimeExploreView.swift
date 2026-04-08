@@ -1,6 +1,10 @@
 import SwiftUI
 import AppKit
 
+// MARK: - AnimeSearchResult RecyclableGridItem 适配
+
+extension AnimeSearchResult: RecyclableGridItem {}
+
 // MARK: - AnimeExploreView - 动漫探索页
 // 样式1:1复刻 MediaExploreContentView
 
@@ -45,6 +49,19 @@ struct AnimeExploreView: View {
             }
             // 命名坐标空间，供视差效果使用
             .coordinateSpace(name: "exploreScroll")
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                let threshold: CGFloat = 300
+                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                return bottomOffset >= geometry.contentSize.height - threshold
+            } action: { oldValue, newValue in
+                if newValue, !oldValue {
+                    guard viewModel.hasMorePages,
+                          !viewModel.isLoading,
+                          !viewModel.isLoadingMore else { return }
+                    print("[AnimeExplore] Scroll geometry triggered load more...")
+                    Task { await viewModel.loadMore() }
+                }
+            }
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
             // 初始加载时禁止滚动（防止空内容过滚一屏）
@@ -312,30 +329,13 @@ struct AnimeExploreView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                // 简单固定布局：根据窗口宽度决定列数
-                let columnCount = gridContentWidth > 1200 ? 5 : (gridContentWidth > 800 ? 4 : 3)
-                let spacing: CGFloat = 20
-                let totalSpacing = spacing * CGFloat(columnCount - 1)
-                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分
-                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
-                let cardHeight = cardWidth * 1.4 // 竖版比例
-                
-                // 动态创建固定列
-                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
-                
-                LazyVGrid(
-                    columns: columns,
-                    alignment: .leading,
-                    spacing: spacing
-                ) {
-                    // 计算已显示项目的数量，用于新加载项目的相对索引
-                    let displayedCount = displayedAnimeItems.count
-                    
-                    ForEach(Array(displayedAnimeItems.enumerated()), id: \.element.id) { index, anime in
-                        // 使用相对索引：对于新加载的数据，从0开始计算
-                        // 这样分页加载的项目也能有流畅的交错动画
-                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
+                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
+                let gridConfig = RecyclableGridConfig.animeConfig(contentWidth: gridContentWidth)
 
+                RecyclableGridView(
+                    items: displayedAnimeItems,
+                    config: gridConfig,
+                    cardContent: { anime, cardWidth, cardHeight in
                         AnimePortraitCard(
                             anime: anime,
                             cardWidth: cardWidth,
@@ -345,42 +345,18 @@ struct AnimeExploreView: View {
                                 selectedAnime = anime
                             }
                         }
-                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
-                        .iosFadeInOnAppear(index: relativeIndex, itemId: anime.id)
-                        .onAppear {
-                            // 分页触发：基于原始数据的位置判断，而非排序后位置
-                            guard viewModel.animeItems.count - displayedAnimeItems.count < 6 else { return }
-                            guard viewModel.hasMorePages,
-                                  !viewModel.isLoading,
-                                  !viewModel.isLoadingMore else { return }
-                            Task { await viewModel.loadMore() }
-                        }
-                    }
+                    },
+                    showNoMore: !viewModel.isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
+                )
+                .frame(height: Self.calculateGridHeight(itemCount: displayedAnimeItems.count, config: gridConfig))
 
-                    // 全部加载完毕提示（网格内跨列显示）
-                    if !viewModel.isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
-                        HStack(spacing: 6) {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                            Text("— \(t("noMore")) —")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.25))
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                        .gridCellColumns(columnCount)
-                    }
-                }
-
-                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
-                if viewModel.isLoadingMore || (viewModel.isLoading && !viewModel.animeItems.isEmpty) {
+                // 分页加载指示器
+                if viewModel.isLoadingMore || (viewModel.isLoading && !displayedAnimeItems.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
+
+
             }
         }
     }
@@ -456,6 +432,15 @@ struct AnimeExploreView: View {
         }
     }
 
+    /// 计算 NSCollectionView 网格总高度
+    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(config.columnCount))
+        let cardHeight = config.cardHeight + 44
+        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
+        return CGFloat(totalHeight) + 40
+    }
+
     private func syncExploreAtmosphere() {
         if let firstAnime = displayedAnimeItems.first,
            let coverURL = firstAnime.coverURL {
@@ -466,19 +451,13 @@ struct AnimeExploreView: View {
     // MARK: - 排序重建
 
     /// 根据 selectedSort 对 animeItems 做客户端排序，写入 displayedAnimeItems
-    /// **优化**：使用增量更新避免 LazyVGrid 重置导致的空白问题
     private func rebuildDisplayedAnimeItems() {
+        // 全量重建时清除动画记录，让新数据播放入场动画
+        GridHostingCollectionItem.resetAllAnimatedItems()
+        
         let source = viewModel.animeItems
-        let oldItems = displayedAnimeItems
         
-        // 如果旧数组为空，直接赋值（初始加载）
-        guard !oldItems.isEmpty else {
-            displayedAnimeItems = sortAscending ? source.reversed() : source
-            syncExploreAtmosphere()
-            return
-        }
-        
-        // 计算新的排序结果
+        // 全量重建：从 viewModel.animeItems 重新排序并替换
         let newItems: [AnimeSearchResult]
         switch selectedSort {
         case .newest:
@@ -500,20 +479,7 @@ struct AnimeExploreView: View {
             }
         }
         
-        // 增量更新：只追加新增的项目，避免重置整个列表
-        let oldIDs = Set(oldItems.map { $0.id })
-        let newIDs = Set(newItems.map { $0.id })
-        
-        // 检查是否有新增数据
-        let addedIDs = newIDs.subtracting(oldIDs)
-        guard !addedIDs.isEmpty else {
-            // 没有新增数据，不需要更新
-            return
-        }
-        
-        // 只追加新增的项目到末尾
-        let addedItems = newItems.filter { addedIDs.contains($0.id) }
-        displayedAnimeItems.append(contentsOf: addedItems)
+        displayedAnimeItems = newItems
         syncExploreAtmosphere()
     }
     

@@ -319,9 +319,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         // 如果之前是 accessory 模式，需要等待激活策略切换完成
         if wasAccessory {
-            DispatchQueue.main.async {
-                window.makeKeyAndOrderFront(nil)
+            // ⚠️ 关键修复：setActivationPolicy(.regular) 在 macOS 上需要
+            // 多个 runloop cycle 才能完全生效（特别是有动态壁纸窗口时）。
+            // 之前的 DispatchQueue.main.async 只等了一个 runloop，
+            // 系统可能还未准备好处理 makeKeyAndOrderFront，导致窗口不显示。
+            // 改为 asyncAfter + 0.15s 给系统足够的稳定时间。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, let window = self.window else { return }
+                
+                // 先确保窗口不在异常状态
+                if !window.isVisible {
+                    window.setFrameUsingName("WallHavenMainWindow")
+                    window.makeKeyAndOrderFront(nil)
+                } else {
+                    window.makeKeyAndOrderFront(nil)
+                }
                 NSApp.activate(ignoringOtherApps: true)
+                
+                // 二次保障：如果窗口仍然不可见或不是 keyWindow，再尝试一次
+                if !window.isVisible || !window.isKeyWindow {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        guard let self, let window = self.window else { return }
+                        window.makeKeyAndOrderFront(nil)
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                }
             }
         } else {
             window.makeKeyAndOrderFront(nil)

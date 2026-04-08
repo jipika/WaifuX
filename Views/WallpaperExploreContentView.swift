@@ -1,5 +1,10 @@
 import SwiftUI
 import AppKit
+
+// MARK: - Wallpaper RecyclableGridItem 适配
+
+extension Wallpaper: RecyclableGridItem {}
+
 // MARK: - WallpaperExploreContentView - 壁纸探索页
 struct WallpaperExploreContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
@@ -39,6 +44,25 @@ struct WallpaperExploreContentView: View {
             }
             // 命名坐标空间，供视差效果使用
             .coordinateSpace(name: "exploreScroll")
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                let threshold: CGFloat = 300
+                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                return bottomOffset >= geometry.contentSize.height - threshold
+            } action: { oldValue, newValue in
+                if newValue, !oldValue {
+                    guard viewModel.hasMorePages,
+                          !viewModel.isLoading,
+                          !isLoadingMore else { return }
+                    print("[WallpaperExplore] Scroll geometry triggered load more...")
+                    isLoadingMore = true
+                    Task {
+                        await loadMoreUntilVisibleGrowth()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            isLoadingMore = false
+                        }
+                    }
+                }
+            }
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
             // 初始加载时禁止滚动（防止空内容过滚一屏）
@@ -104,21 +128,28 @@ struct WallpaperExploreContentView: View {
             cancelAndSearch()
         }
         .onChange(of: selectedHotTag) { _, _ in
-            // 筛选条件变化时完全重建
+            // 筛选条件变化时清空并重建
             displayedWallpapers = []
             rebuildVisibleWallpapers()
         }
-        .onChange(of: viewModel.sortingOption) { _, _ in rebuildVisibleWallpapers() }
-        .onChange(of: viewModel.orderDescending) { _, _ in rebuildVisibleWallpapers() }
+        .onChange(of: viewModel.sortingOption) { _, _ in
+            displayedWallpapers = []
+            cancelAndSearch()
+        }
+        .onChange(of: viewModel.orderDescending) { _, _ in
+            displayedWallpapers = []
+            cancelAndSearch()
+        }
         .onChange(of: viewModel.wallpapers) { oldVal, newVal in
-            // 当壁纸数据变化时，增量追加新数据而非全量重建
-            // 只有当数据源完全替换（如搜索、重置）时才全量重建
+            // 筛选变化时 displayedWallpapers 已清空，走全量重建
+            // loadMore 时 displayedWallpapers 不为空且数据增长，走增量追加
             if newVal.isEmpty || displayedWallpapers.isEmpty {
                 rebuildVisibleWallpapers()
             } else if !oldVal.isEmpty, newVal.count > oldVal.count {
-                // 数据追加场景：只追加新数据，避免 LazyVGrid 全量刷新
+                // 数据追加场景（loadMore）：只追加新数据
                 appendNewWallpapers()
             } else {
+                // 数据替换场景（搜索/筛选）：全量重建
                 rebuildVisibleWallpapers()
             }
         }
@@ -396,30 +427,13 @@ struct WallpaperExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                // 简单固定布局：根据窗口宽度决定列数
-                let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
-                let spacing: CGFloat = 16
-                let totalSpacing = spacing * CGFloat(columnCount - 1)
-                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分，floor 避免亚像素误差
-                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
-                let cardHeight = cardWidth * 0.6
-                
-                // 动态创建固定列
-                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
-                
-                LazyVGrid(
-                    columns: columns,
-                    alignment: .leading,
-                    spacing: spacing
-                ) {
-                    // 计算已显示项目的数量，用于新加载项目的相对索引
-                    let displayedCount = displayedWallpapers.count
-                    
-                    ForEach(Array(displayedWallpapers.enumerated()), id: \.element.id) { index, wallpaper in
-                        // 使用相对索引：对于新加载的数据，从0开始计算
-                        // 这样分页加载的项目也能有流畅的交错动画
-                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
+                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
+                let gridConfig = RecyclableGridConfig.wallpaperConfig(contentWidth: gridContentWidth)
 
+                RecyclableGridView(
+                    items: displayedWallpapers,
+                    config: gridConfig,
+                    cardContent: { wallpaper, cardWidth, cardHeight in
                         SimpleWallpaperCard(
                             wallpaper: wallpaper,
                             cardWidth: cardWidth,
@@ -427,45 +441,18 @@ struct WallpaperExploreContentView: View {
                             isFavorite: viewModel.isFavorite(wallpaper),
                             onTap: { selectedWallpaper = wallpaper }
                         )
-                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
-                        .iosFadeInOnAppear(index: relativeIndex, itemId: wallpaper.id)
-                        .onAppear {
-                            guard index >= displayedWallpapers.count - 6 else { return }
-                            guard viewModel.hasMorePages,
-                                  !viewModel.isLoading,
-                                  !isLoadingMore else { return }
-                            isLoadingMore = true
-                            Task {
-                                await loadMoreUntilVisibleGrowth()
-                                isLoadingMore = false
-                            }
-                        }
-                    }
+                    },
+                    showNoMore: !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
+                )
+                .frame(height: Self.calculateGridHeight(itemCount: displayedWallpapers.count, config: gridConfig))
 
-                    // 全部加载完毕提示（网格内跨列显示）
-                    if !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
-                        HStack(spacing: 6) {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                            Text("— \(t("noMore")) —")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.25))
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                        .gridCellColumns(columnCount)
-                    }
-                }
-                
-                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
+                // 分页加载指示器
                 if isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
+
+
             }
         }
     }
@@ -507,6 +494,16 @@ struct WallpaperExploreContentView: View {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         return formatter.string(from: NSNumber(value: displayedWallpapers.count)) ?? "\(displayedWallpapers.count)"
+    }
+
+    /// 计算 NSCollectionView 网格总高度
+    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(config.columnCount))
+        let cardHeight = config.cardHeight + 44 // 底部信息栏约 44pt
+        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
+        // 额外空间给可能的 "no more" footer
+        return CGFloat(totalHeight) + 40
     }
     private func submitSearch(with query: String) {
         selectedHotTag = nil
@@ -721,57 +718,38 @@ struct WallpaperExploreContentView: View {
     private func rebuildVisibleWallpapers() {
         print("[WallpaperExplore] Rebuilding visible wallpapers. viewModel.wallpapers.count: \(viewModel.wallpapers.count)")
         
-        // 如果当前显示列表为空，直接赋值（初始加载场景）
-        guard !displayedWallpapers.isEmpty else {
-            if viewModel.wallpapers.count < 100 {
-                let filtered = filterWallpapers(
-                    viewModel.wallpapers,
-                    category: selectedCategory,
-                    hotTag: selectedHotTag
+        // 全量重建时清除动画记录，让新数据播放入场动画
+        GridHostingCollectionItem.resetAllAnimatedItems()
+        
+        // 全量重建：从 viewModel.wallpapers 重新过滤并替换 displayedWallpapers
+        if viewModel.wallpapers.count < 100 {
+            let filtered = filterWallpapers(
+                viewModel.wallpapers,
+                category: selectedCategory,
+                hotTag: selectedHotTag
+            )
+            displayedWallpapers = filtered
+            syncExploreAtmosphere()
+        } else {
+            // 大数据量时在后台线程执行过滤
+            let wallpapers = viewModel.wallpapers
+            let category = selectedCategory
+            let hotTag = selectedHotTag
+            
+            Task.detached(priority: .userInitiated) {
+                let filtered = Self.filterWallpapersStatic(
+                    wallpapers,
+                    category: category,
+                    hotTag: hotTag
                 )
-                displayedWallpapers = filtered
-            } else {
-                // 大数据量时在后台线程执行过滤
-                let wallpapers = viewModel.wallpapers
-                let category = selectedCategory
-                let hotTag = selectedHotTag
                 
-                Task.detached(priority: .userInitiated) {
-                    let filtered = Self.filterWallpapersStatic(
-                        wallpapers,
-                        category: category,
-                        hotTag: hotTag
-                    )
-                    
-                    await MainActor.run {
-                        displayedWallpapers = filtered
-                        syncExploreAtmosphere()
-                        print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
-                    }
+                await MainActor.run {
+                    displayedWallpapers = filtered
+                    syncExploreAtmosphere()
+                    print("[WallpaperExplore] Updated displayedWallpapers to \(displayedWallpapers.count)")
                 }
             }
-            return
         }
-        
-        // 增量更新：只追加新增的壁纸，避免重置整个列表导致空白
-        let existingIDs = Set(displayedWallpapers.map { $0.id })
-        let newWallpapers = viewModel.wallpapers.filter { !existingIDs.contains($0.id) }
-        
-        guard !newWallpapers.isEmpty else {
-            print("[WallpaperExplore] No new wallpapers to append")
-            return
-        }
-        
-        // 过滤新壁纸的分类和标签
-        let filteredNewWallpapers = newWallpapers.filter { matchesCategory($0, category: selectedCategory) }
-        guard !filteredNewWallpapers.isEmpty else {
-            print("[WallpaperExplore] New wallpapers filtered out by category/tag")
-            return
-        }
-        
-        print("[WallpaperExplore] Appending \(filteredNewWallpapers.count) new wallpapers")
-        displayedWallpapers.append(contentsOf: filteredNewWallpapers)
-        syncExploreAtmosphere()
     }
     
     /// 实例方法过滤（主线程使用）
@@ -884,6 +862,8 @@ struct WallpaperExploreContentView: View {
     /// 取消并执行新的搜索
     private func cancelAndSearch() {
         searchTask?.cancel()
+        // 清空显示列表，等 viewModel.wallpapers 更新后全量重建
+        displayedWallpapers = []
         searchTask = Task {
             await viewModel.search()
             await MainActor.run {

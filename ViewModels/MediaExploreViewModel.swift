@@ -9,7 +9,7 @@ final class MediaExploreViewModel: ObservableObject {
     @Published var isLoading = false
     @Published private(set) var isLoadingMore = false
     @Published var errorMessage: String?
-    @Published private(set) var hasMorePages = false
+    @Published private(set) var hasMorePages = true
     @Published private(set) var currentQuery = ""
     
     // MARK: - Network State

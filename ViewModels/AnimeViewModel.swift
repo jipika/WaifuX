@@ -16,7 +16,7 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 分页状态
     @Published var isLoading = false
     @Published var isLoadingMore = false
-    @Published var hasMorePages = false
+    @Published var hasMorePages = true
     @Published var errorMessage: String?
     @Published var searchText = ""
     @Published var selectedCategory: AnimeCategory = .all

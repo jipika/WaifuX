@@ -1,6 +1,10 @@
 import SwiftUI
 import AppKit
 
+// MARK: - MediaItem RecyclableGridItem 适配
+
+extension MediaItem: RecyclableGridItem {}
+
 // MARK: - MediaExploreContentView - 媒体探索页
 struct MediaExploreContentView: View {
     @ObservedObject var viewModel: MediaExploreViewModel
@@ -14,7 +18,6 @@ struct MediaExploreContentView: View {
     @State private var searchText = ""
     @State private var displayedMediaItems: [MediaItem] = []
     @State private var isLoadingMore = false
-    @State private var loadMoreSentinelID: String? = nil
     
     // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
     @State private var isInitialLoading = false
@@ -41,6 +44,29 @@ struct MediaExploreContentView: View {
             }
             // 命名坐标空间，供视差效果使用
             .coordinateSpace(name: "exploreScroll")
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                let threshold: CGFloat = 300
+                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                return bottomOffset >= geometry.contentSize.height - threshold
+            } action: { oldValue, newValue in
+                if newValue, !oldValue {
+                    guard viewModel.hasMorePages,
+                          !viewModel.isLoading,
+                          !isLoadingMore,
+                          !viewModel.isLoadingMore else { return }
+                    print("[MediaExplore] Scroll geometry triggered load more...")
+                    isLoadingMore = true
+                    Task {
+                        await viewModel.loadMore()
+                        await MainActor.run {
+                            appendNewMediaItems()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                isLoadingMore = false
+                            }
+                        }
+                    }
+                }
+            }
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
             // 初始加载时禁止滚动（防止空内容过滚一屏）
@@ -78,9 +104,18 @@ struct MediaExploreContentView: View {
         .onChange(of: searchText) { _, _ in
             handleFilterChange()
         }
-        .onChange(of: viewModel.items) { _, _ in
-            // 当媒体数据变化时，重新构建显示的列表
-            rebuildVisibleMediaItems()
+        .onChange(of: viewModel.items) { oldVal, newVal in
+            // 当媒体数据变化时，判断是全量替换还是增量追加
+            if newVal.isEmpty || displayedMediaItems.isEmpty {
+                // 筛选变化或初始加载：全量重建
+                rebuildVisibleMediaItems()
+            } else if !oldVal.isEmpty, newVal.count > oldVal.count {
+                // loadMore 增量追加：只追加新数据
+                appendNewMediaItems()
+            } else {
+                // 搜索/分类切换等数据替换：全量重建
+                rebuildVisibleMediaItems()
+            }
         }
         .onChange(of: displayedMediaItems.first?.id) { _, _ in
             syncExploreMediaAtmosphere()
@@ -208,6 +243,9 @@ struct MediaExploreContentView: View {
                         searchText = ""
                     }
 
+                    // 清空显示列表，等 viewModel.items 更新后全量重建
+                    displayedMediaItems = []
+
                     Task {
                         if category == .all {
                             await viewModel.loadHomeFeed()
@@ -267,30 +305,13 @@ struct MediaExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else {
-                // 简单固定布局：根据窗口宽度决定列数
-                let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
-                let spacing: CGFloat = 16
-                let totalSpacing = spacing * CGFloat(columnCount - 1)
-                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分，floor 避免亚像素误差
-                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
-                let cardHeight = cardWidth * 0.6
-                
-                // 动态创建固定列
-                let columns = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
-                
-                LazyVGrid(
-                    columns: columns,
-                    alignment: .leading,
-                    spacing: spacing
-                ) {
-                    // 计算已显示项目的数量，用于新加载项目的相对索引
-                    let displayedCount = displayedMediaItems.count
-                    
-                    ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
-                        // 使用相对索引：对于新加载的数据，从0开始计算
-                        // 这样分页加载的项目也能有流畅的交错动画
-                        let relativeIndex = index >= displayedCount - 10 ? index - (displayedCount - 10) : index
+                // 高性能 NSCollectionView 网格（替代 LazyVGrid）
+                let gridConfig = RecyclableGridConfig.mediaConfig(contentWidth: gridContentWidth)
 
+                RecyclableGridView(
+                    items: displayedMediaItems,
+                    config: gridConfig,
+                    cardContent: { item, cardWidth, cardHeight in
                         SimpleMediaCard(
                             item: item,
                             cardWidth: cardWidth,
@@ -298,48 +319,18 @@ struct MediaExploreContentView: View {
                             isFavorite: viewModel.isFavorite(item),
                             onTap: { selectedMedia = item }
                         )
-                        // iOS 风格入场动画：使用相对索引确保新数据也有动画
-                        .iosFadeInOnAppear(index: relativeIndex, itemId: item.id)
-                        .onAppear {
-                            guard index >= displayedMediaItems.count - 6 else { return }
-                            guard viewModel.hasMorePages,
-                                  !viewModel.isLoading,
-                                  !isLoadingMore else { return }
-                            isLoadingMore = true
-                            Task {
-                                await viewModel.loadMore()
-                                await MainActor.run {
-                                    appendNewMediaItems()
-                                    isLoadingMore = false
-                                }
-                            }
-                        }
-                    }
+                    },
+                    showNoMore: !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading
+                )
+                .frame(height: Self.calculateGridHeight(itemCount: displayedMediaItems.count, config: gridConfig))
 
-                    // 全部加载完毕提示（网格内跨列显示）
-                    if !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
-                        HStack(spacing: 6) {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                            Text("— \(t("noMore")) —")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.25))
-                            Rectangle()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(width: 32, height: 1)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                        .gridCellColumns(columnCount)
-                    }
-                }
-
-                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
+                // 分页加载指示器
                 if isLoadingMore || (viewModel.isLoading && !displayedMediaItems.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
+
+
             }
         }
     }
@@ -415,6 +406,15 @@ struct MediaExploreContentView: View {
         }
     }
 
+    /// 计算 NSCollectionView 网格总高度
+    private static func calculateGridHeight(itemCount: Int, config: RecyclableGridConfig) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(config.columnCount))
+        let cardHeight = config.cardHeight + 44
+        let totalHeight = rows * Double(cardHeight) + max(0, rows - 1) * Double(config.spacing)
+        return CGFloat(totalHeight) + 40
+    }
+
     private var formattedMediaCount: String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -441,6 +441,8 @@ struct MediaExploreContentView: View {
     private func submitSearch(with query: String) {
         selectedCategory = .all
         selectedHotTag = nil
+        // 清空显示列表，等 viewModel.items 更新后全量重建
+        displayedMediaItems = []
         Task {
             await viewModel.search(query: query)
         }
@@ -466,6 +468,8 @@ struct MediaExploreContentView: View {
         // 如果选中的是服务端请求型 HotTag，发起真实 API 请求
         if let hotTag = selectedHotTag, isServerSideHotTag(hotTag),
            let slug = Self.hotTagServerSlugs[hotTag] {
+            // 清空显示列表，等 viewModel.items 更新后全量重建
+            displayedMediaItems = []
             Task {
                 await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
             }
@@ -480,66 +484,37 @@ struct MediaExploreContentView: View {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
         
-        // 如果当前显示列表为空，直接构建（初始加载场景）
-        guard !displayedMediaItems.isEmpty else {
-            let filtered = viewModel.items.filter { item in
-                let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
-                let matchesHotTag = selectedHotTag.map { item.matches(hotTag: $0) } ?? true
-                return matchesSearch && matchesHotTag
-            }
-            
-            switch selectedSort {
-            case .newest:
-                displayedMediaItems = sortAscending ? Array(filtered.reversed()) : filtered
-            case .title:
-                displayedMediaItems = filtered.sorted { lhs, rhs in
-                    let comparison = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
-                    if comparison == .orderedSame {
-                        return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
-                    }
-                    return sortAscending ? comparison == .orderedDescending : comparison == .orderedAscending
-                }
-            case .format:
-                displayedMediaItems = filtered.sorted { lhs, rhs in
-                    let comparison = lhs.formatText.localizedCaseInsensitiveCompare(rhs.formatText)
-                    if comparison == .orderedSame {
-                        return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
-                    }
-                    return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
-                }
-            }
-            
-            let sentinelIndex = max(0, displayedMediaItems.count - 10)
-            loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
-            syncExploreMediaAtmosphere()
-            return
-        }
+        // 全量重建时清除动画记录，让新数据播放入场动画
+        GridHostingCollectionItem.resetAllAnimatedItems()
         
-        // 增量更新：只追加新增的项目，避免重置整个列表导致空白
-        let existingIDs = Set(displayedMediaItems.map { $0.id })
-        let newItems = viewModel.items.filter { !existingIDs.contains($0.id) }
-        
-        guard !newItems.isEmpty else {
-            // 没有新增数据，更新 sentinel 即可
-            let sentinelIndex = max(0, displayedMediaItems.count - 10)
-            loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
-            return
-        }
-        
-        // 过滤新项目的搜索和标签条件
-        let filteredNewItems = newItems.filter { item in
+        // 全量重建：从 viewModel.items 重新过滤并替换 displayedMediaItems
+        let filtered = viewModel.items.filter { item in
             let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
             let matchesHotTag = selectedHotTag.map { item.matches(hotTag: $0) } ?? true
             return matchesSearch && matchesHotTag
         }
         
-        guard !filteredNewItems.isEmpty else { return }
+        switch selectedSort {
+        case .newest:
+            displayedMediaItems = sortAscending ? Array(filtered.reversed()) : filtered
+        case .title:
+            displayedMediaItems = filtered.sorted { lhs, rhs in
+                let comparison = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+                if comparison == .orderedSame {
+                    return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
+                }
+                return sortAscending ? comparison == .orderedDescending : comparison == .orderedAscending
+            }
+        case .format:
+            displayedMediaItems = filtered.sorted { lhs, rhs in
+                let comparison = lhs.formatText.localizedCaseInsensitiveCompare(rhs.formatText)
+                if comparison == .orderedSame {
+                    return (sourceOrder[lhs.id] ?? 0) < (sourceOrder[rhs.id] ?? 0)
+                }
+                return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
+            }
+        }
         
-        // 追加到显示列表
-        displayedMediaItems.append(contentsOf: filteredNewItems)
-        
-        let sentinelIndex = max(0, displayedMediaItems.count - 10)
-        loadMoreSentinelID = displayedMediaItems.indices.contains(sentinelIndex) ? displayedMediaItems[sentinelIndex].id : nil
         syncExploreMediaAtmosphere()
     }
 }
