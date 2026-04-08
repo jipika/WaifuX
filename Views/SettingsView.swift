@@ -21,15 +21,15 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .general: return "gearshape.fill"
-        case .download: return "arrow.down.circle.fill"
+        case .general: return "gearshape"
+        case .download: return "arrow.down.circle"
         case .scheduler: return "clock.arrow.circlepath"
-        case .about: return "info.circle.fill"
+        case .about: return "info.circle"
         }
     }
 }
 
-// MARK: - 窗口控制按钮
+// MARK: - 窗口控制按钮（保持不变）
 private struct SettingsWindowControlButtons: View {
     var body: some View {
         HStack(spacing: 8) {
@@ -102,7 +102,7 @@ private struct SettingsWindowControlButton: View {
     }
 }
 
-// MARK: - 设置标签栏组件 - 液态玻璃风格
+// MARK: - 设置标签栏 - Apple 风格分段控件
 private struct SettingsSegmentedControl: View {
     @Binding var selectedTab: SettingsTab
     let controlHeight: CGFloat
@@ -111,68 +111,102 @@ private struct SettingsSegmentedControl: View {
     @State private var hoveredTab: SettingsTab?
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             ForEach(SettingsTab.allCases, id: \.self) { tab in
                 Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
                         selectedTab = tab
                     }
                 } label: {
-                    Text(tab.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(labelColor(for: tab))
-                        .frame(width: itemWidth(for: tab), height: controlHeight - 8)
-                        .background {
-                            if selectedTab == tab {
-                                selectedTabBackground(for: tab)
-                            } else if hoveredTab == tab {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(Color.white.opacity(0.1))
+                    HStack(spacing: 5) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 11, weight: .medium))
+
+                        Text(tab.title)
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(labelColor(for: tab))
+                    .frame(minWidth: itemWidth(for: tab), height: controlHeight - 10)
+                    .background {
+                        if selectedTab == tab {
+                            ZStack {
+                                // 主背景
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.white.opacity(0.22),
+                                                Color.white.opacity(0.14)
+                                            ],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
+                                    )
+
+                                // 高光边缘
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.white.opacity(0.4),
+                                                Color.white.opacity(0.15),
+                                                Color.white.opacity(0.05)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 0.5
+                                    )
+
+                                // 内部微弱阴影感
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.black.opacity(0.1), lineWidth: 0.5)
                             }
+                            .matchedGeometryEffect(id: "settingsSelectedTab", in: selectionNamespace)
+                        } else if hoveredTab == tab {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
                         }
+                    }
                 }
                 .buttonStyle(.plain)
-                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.16)) {
+                    withAnimation(.easeOut(duration: 0.18)) {
                         hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
                     }
                 }
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
-        .liquidGlassSurface(.subtle, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 5)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                )
+        )
     }
 
     private func itemWidth(for tab: SettingsTab) -> CGFloat {
         switch tab {
-        case .general: return 56
-        case .download: return 68
-        case .scheduler: return 68
-        case .about: return 52
+        case .general: return 64
+        case .download: return 76
+        case .scheduler: return 76
+        case .about: return 60
         }
     }
 
     private func labelColor(for tab: SettingsTab) -> Color {
         if selectedTab == tab {
-            return Color.white.opacity(0.95)
+            return .white
         }
         if hoveredTab == tab {
-            return Color.white.opacity(0.8)
+            return Color.white.opacity(0.75)
         }
-        return Color.white.opacity(0.5)
-    }
-
-    @ViewBuilder
-    private func selectedTabBackground(for tab: SettingsTab) -> some View {
-        RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(Color.white.opacity(0.2))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(Color.white.opacity(0.3), lineWidth: 0.5)
-            )
-            .matchedGeometryEffect(id: "settingsSelectedTab", in: selectionNamespace)
+        return Color.white.opacity(0.45)
     }
 }
 
@@ -205,8 +239,29 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 26)
             .padding(.top, 8)
-            .padding(.bottom, 10)
-            .background(Color(hex: "0D0D0D"))
+            .padding(.bottom, 12)
+            .background(
+                // 工具栏微妙渐变背景
+                ZStack {
+                    Color(hex: "0D0D0D")
+
+                    // 底部分隔线
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.08),
+                                    Color.white.opacity(0.02),
+                                    Color.clear
+                                ],
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                        .frame(height: 1)
+                        .offset(y: 0.5)
+                }
+            )
 
             // 内容区域
             Group {
@@ -222,29 +277,45 @@ struct SettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(hex: "1C1C1E"))
+            .background(settingsContentBackground)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(hex: "0D0D0D"))
         .id(localization.currentLanguage)
     }
+
+    /// 内容区微妙渐变背景
+    private var settingsContentBackground: some View {
+        ZStack {
+            // 基础深色
+            Color(hex: "111113")
+
+            // 微妙的径向光晕
+            RadialGradient(
+                colors: [
+                    Color.white.opacity(0.015),
+                    Color.clear
+                ],
+                center: .top,
+                startRadius: 50,
+                endRadius: 350
+            )
+        }
+    }
 }
 
-// MARK: - 通用设置标签
+// MARK: - 通用设置标签（Apple 精致风格）
 private struct GeneralSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showClearCacheAlert = false
     @State private var importProfileURL = ""
-    
+
     // 噪点效果设置
     @AppStorage("grain_texture_enabled") private var grainTextureEnabled = true
     @AppStorage("grain_texture_quality") private var grainTextureQuality = "high"
 
     private var apiKeyBinding: Binding<String> {
-        Binding(
-            get: { viewModel.apiKey },
-            set: { viewModel.apiKey = $0 }
-        )
+        Binding(get: { viewModel.apiKey }, set: { viewModel.apiKey = $0 })
     }
 
     private var languageBinding: Binding<LocalizationService.Language> {
@@ -253,14 +324,13 @@ private struct GeneralSettingsTab: View {
             set: { LocalizationService.shared.setLanguage($0) }
         )
     }
-    
+
     private var localization: LocalizationService { LocalizationService.shared }
 
     var body: some View {
         MacSettingsForm {
-            // 外观效果组 - 蓝色图标
-            MacSettingsSection {
-                // 噪点效果开关
+            // === 外观设置组 ===
+            MacSettingsSection(header: t("appearance"), icon: "paintbrush") {
                 MacSettingsRow(
                     icon: "sparkles",
                     iconColor: Color(hex: "0A84FF"),
@@ -270,24 +340,25 @@ private struct GeneralSettingsTab: View {
                 ) {
                     MacToggle(isOn: $grainTextureEnabled)
                 }
-                
-                // 自动下载原图
+
                 MacSettingsRow(
                     icon: "arrow.down.circle",
-                    iconColor: Color(hex: "0A84FF"),
+                    iconColor: Color(hex: "5856D6"),
                     title: t("autoDownloadOriginal"),
+                    subtitle: nil,
                     showDivider: false
                 ) {
                     MacToggle(isOn: $viewModel.autoDownloadOriginal)
                 }
             }
-            
-            // 启动和系统设置组 - 绿色图标
-            MacSettingsSection {
+
+            // === 启动与系统设置组 ===
+            MacSettingsSection(header: t("system"), icon: "desktopcomputer") {
                 MacSettingsRow(
                     icon: "power",
                     iconColor: Color(hex: "30D158"),
                     title: t("launchAtLogin"),
+                    subtitle: nil,
                     showDivider: true
                 ) {
                     MacToggle(isOn: Binding(
@@ -295,122 +366,164 @@ private struct GeneralSettingsTab: View {
                         set: { _ in viewModel.toggleLaunchAtLogin() }
                     ))
                 }
-                
+
                 MacSettingsRow(
-                    icon: "folder",
-                    iconColor: Color(hex: "30D158"),
+                    icon: "folder.badge.plus",
+                    iconColor: Color(hex: "34C759"),
                     title: t("saveToDownloadsFolder"),
+                    subtitle: nil,
                     showDivider: false
                 ) {
                     MacToggle(isOn: $viewModel.saveToDownloads)
                 }
             }
-            
-            // API 和缓存组 - 橙色/红色图标
-            MacSettingsSection {
+
+            // === API 与缓存管理组 ===
+            MacSettingsSection(header: t("dataManagement"), icon: "externaldrive") {
                 // API Key 行
-                HStack(spacing: 12) {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "FF9F0A"))
+                        Circle()
+                            .fill(Color(hex: "FF9F0A").opacity(0.15))
                             .frame(width: 32, height: 32)
-                        
+
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(hex: "FF9F0A").opacity(0.95), Color(hex: "FF8000")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 28, height: 28)
+
                         Image(systemName: "key.fill")
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
                     }
-                    
-                    VStack(alignment: .leading, spacing: 1) {
+
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(t("apiKey"))
-                            .font(.system(size: 15, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                        
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.92))
+
                         Text(viewModel.apiKey.isEmpty ? t("apiNotConfigured") : t("apiConfigured"))
-                            .font(.system(size: 12))
-                            .foregroundStyle(viewModel.apiKey.isEmpty ? Color.white.opacity(0.4) : Color(hex: "30D158"))
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(viewModel.apiKey.isEmpty ? Color.white.opacity(0.38) : Color(hex: "30D158"))
                     }
-                    
+
                     Spacer()
-                    
-                    HStack(spacing: 8) {
+
+                    HStack(spacing: 7) {
                         SecureField(t("api.key.placeholder"), text: apiKeyBinding)
-                            .font(.system(size: 13))
+                            .font(.system(size: 13, weight: .regular))
                             .textFieldStyle(.plain)
-                            .frame(width: 260)
-                            .padding(.horizontal, 13)
+                            .frame(width: 240)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.08))
-                            .cornerRadius(6)
-                            .foregroundStyle(Color.white)
-                        
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.white.opacity(0.07))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                                    )
+                            )
+                            .foregroundStyle(Color.white.opacity(0.9))
+
                         Link(destination: URL(string: "https://wallhaven.cc/settings/account")!) {
                             Image(systemName: "arrow.up.right.square")
-                                .font(.system(size: 14))
+                                .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(Color(hex: "0A84FF"))
                         }
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
+
                 Divider()
-                    .background(Color.white.opacity(0.08))
+                    .background(
+                        LinearGradient(
+                            colors: [Color.clear, Color.white.opacity(0.08), Color.white.opacity(0.04), Color.clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
                     .padding(.leading, 58)
-                
+
                 // 缓存管理行
-                HStack(spacing: 12) {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "FF453A"))
+                        Circle()
+                            .fill(Color(hex: "FF453A").opacity(0.15))
                             .frame(width: 32, height: 32)
-                        
+
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(hex: "FF453A").opacity(0.95), Color(hex: "E63B33")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 28, height: 28)
+
                         Image(systemName: "trash")
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
                     }
-                    
-                    VStack(alignment: .leading, spacing: 1) {
+
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(t("clearCache"))
-                            .font(.system(size: 15, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.9))
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.92))
                         Text(viewModel.cacheSize)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.white.opacity(0.4))
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.38))
                     }
-                    
+
                     Spacer()
-                    
+
                     Button(t("clear")) {
                         showClearCacheAlert = true
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
                     .tint(Color(hex: "FF453A"))
-                    .controlSize(.regular)
-                    .scaleEffect(1.3)
+                    .controlSize(.small)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
             }
-            
-            // 语言设置组 - 紫色图标
-            MacSettingsSection {
-                HStack(spacing: 12) {
+
+            // === 语言与地区设置组 ===
+            MacSettingsSection(header: t("languageRegion"), icon: "globe") {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "BF5AF2"))
+                        Circle()
+                            .fill(Color(hex: "BF5AF2").opacity(0.15))
                             .frame(width: 32, height: 32)
-                        
+
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(hex: "BF5AF2").opacity(0.95), Color(hex: "A048DD")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 28, height: 28)
+
                         Image(systemName: "globe")
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
                     }
-                    
+
                     Text(t("displayLanguage"))
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                    
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.92))
+
                     Spacer()
-                    
+
                     Menu {
                         ForEach(LocalizationService.Language.allCases, id: \.self) { language in
                             Button(language.displayName) {
@@ -418,22 +531,28 @@ private struct GeneralSettingsTab: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 5) {
                             Text(localization.currentLanguage.displayName)
-                                .font(.system(size: 13))
+                                .font(.system(size: 13, weight: .medium))
                             Image(systemName: "chevron.up.chevron.down")
                                 .font(.system(size: 10, weight: .semibold))
                         }
-                        .foregroundStyle(Color.white.opacity(0.6))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.1))
-                        .cornerRadius(6)
+                        .foregroundStyle(Color.white.opacity(0.55))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                                )
+                        )
                     }
                     .menuStyle(.borderlessButton)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
             }
         }
         .alert(t("clearCache"), isPresented: $showClearCacheAlert) {
@@ -453,8 +572,7 @@ private struct DownloadSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
-            // 下载偏好设置组 - 蓝色图标
-            MacSettingsSection {
+            MacSettingsSection(header: t("downloadPreferences"), icon: "arrow.down.circle") {
                 MacSettingsRow(
                     icon: "arrow.down.circle",
                     iconColor: Color(hex: "0A84FF"),
@@ -464,10 +582,10 @@ private struct DownloadSettingsTab: View {
                 ) {
                     MacToggle(isOn: $viewModel.autoDownloadOriginal)
                 }
-                
+
                 MacSettingsRow(
                     icon: "folder",
-                    iconColor: Color(hex: "0A84FF"),
+                    iconColor: Color(hex: "007AFF"),
                     title: t("saveToDownloadsFolder"),
                     subtitle: t("saveToDownloadsDesc"),
                     showDivider: false
@@ -496,8 +614,8 @@ private struct SchedulerSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
-            // 自动替换开关组 - 紫色图标
-            MacSettingsSection {
+            // 开关组
+            MacSettingsSection(header: t("autoReplace"), icon: "clock.arrow.circlepath") {
                 MacSettingsRow(
                     icon: "clock.arrow.circlepath",
                     iconColor: Color(hex: "BF5AF2"),
@@ -509,26 +627,17 @@ private struct SchedulerSettingsTab: View {
                 }
             }
 
-            // 替换节奏设置组
-            MacSettingsSection {
+            // 调度配置组
+            MacSettingsSection(header: t("scheduleConfig"), icon: "slider.horizontal.3") {
                 // 间隔选择
-                HStack(spacing: 12) {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "0A84FF"))
-                            .frame(width: 32, height: 32)
-                        
-                        Image(systemName: "timer")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white)
+                        Circle().fill(Color(hex: "0A84FF").opacity(0.15)).frame(width: 32, height: 32)
+                        Circle().fill(LinearGradient(colors: [Color(hex: "0A84FF").opacity(0.9), Color(hex: "0066CC")], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 28, height: 28)
+                        Image(systemName: "timer").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                     }
-                    
-                    Text(t("replaceInterval"))
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                    
+                    Text(t("replaceInterval")).font(.system(size: 14, weight: .medium)).foregroundStyle(Color.white.opacity(0.92))
                     Spacer()
-                    
                     Menu {
                         ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
                             Button(intervalLabel(for: minutes)) {
@@ -536,97 +645,58 @@ private struct SchedulerSettingsTab: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(intervalLabel(for: viewModel.schedulerViewModel.config.intervalMinutes))
-                                .font(.system(size: 13))
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 10, weight: .semibold))
+                        HStack(spacing: 5) {
+                            Text(intervalLabel(for: viewModel.schedulerViewModel.config.intervalMinutes)).font(.system(size: 13, weight: .medium))
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .semibold))
                         }
-                        .foregroundStyle(Color.white.opacity(0.6))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.1))
-                        .cornerRadius(6)
-                    }
-                    .menuStyle(.borderlessButton)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                
-                Divider()
-                    .background(Color.white.opacity(0.08))
-                    .padding(.leading, 58)
-                
+                        .foregroundStyle(Color.white.opacity(0.55))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)).overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 0.5)))
+                    }.menuStyle(.borderlessButton)
+                }.padding(.horizontal, 15).padding(.vertical, 11)
+
+                dividerLine
+
                 // 顺序选择
-                HStack(spacing: 12) {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "30D158"))
-                            .frame(width: 32, height: 32)
-                        
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white)
+                        Circle().fill(Color(hex: "30D158").opacity(0.15)).frame(width: 32, height: 32)
+                        Circle().fill(LinearGradient(colors: [Color(hex: "30D158").opacity(0.9), Color(hex: "24AA48")], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 28, height: 28)
+                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                     }
-                    
-                    Text(t("replaceOrder"))
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                    
+                    Text(t("replaceOrder")).font(.system(size: 14, weight: .medium)).foregroundStyle(Color.white.opacity(0.92))
                     Spacer()
-                    
-                    Picker("", selection: Binding(
-                        get: { viewModel.schedulerViewModel.config.order },
-                        set: { viewModel.schedulerViewModel.updateOrder($0) }
-                    )) {
+                    Picker("", selection: Binding(get: { viewModel.schedulerViewModel.config.order }, set: { viewModel.schedulerViewModel.updateOrder($0) })) {
                         Text(t("sequential")).tag(ScheduleOrder.sequential)
                         Text(t("random")).tag(ScheduleOrder.random)
-                    }
-                    .pickerStyle(.segmented)
-                    .controlSize(.small)
-                    .frame(width: 110, alignment: .trailing)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                
-                Divider()
-                    .background(Color.white.opacity(0.08))
-                    .padding(.leading, 58)
-                
+                    }.pickerStyle(.segmented).controlSize(.small).frame(width: 110, alignment: .trailing)
+                }.padding(.horizontal, 15).padding(.vertical, 11)
+
+                dividerLine
+
                 // 来源选择
-                HStack(spacing: 12) {
+                HStack(spacing: 13) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(hex: "FF9F0A"))
-                            .frame(width: 32, height: 32)
-                        
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white)
+                        Circle().fill(Color(hex: "FF9F0A").opacity(0.15)).frame(width: 32, height: 32)
+                        Circle().fill(LinearGradient(colors: [Color(hex: "FF9F0A").opacity(0.9), Color(hex: "E68A00")], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 28, height: 28)
+                        Image(systemName: "photo.on.rectangle").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                     }
-                    
-                    Text(t("wallpaperSource"))
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                    
+                    Text(t("wallpaperSource")).font(.system(size: 14, weight: .medium)).foregroundStyle(Color.white.opacity(0.92))
                     Spacer()
-                    
-                    Picker("", selection: Binding(
-                        get: { viewModel.schedulerViewModel.config.source },
-                        set: { viewModel.schedulerViewModel.updateSource($0) }
-                    )) {
+                    Picker("", selection: Binding(get: { viewModel.schedulerViewModel.config.source }, set: { viewModel.schedulerViewModel.updateSource($0) })) {
                         Text(t("online")).tag(WallpaperSource.online)
                         Text(t("local")).tag(WallpaperSource.local)
                         Text(t("favorites")).tag(WallpaperSource.favorites)
-                    }
-                    .pickerStyle(.segmented)
-                    .controlSize(.small)
-                    .frame(width: 140, alignment: .trailing)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                    }.pickerStyle(.segmented).controlSize(.small).frame(width: 140, alignment: .trailing)
+                }.padding(.horizontal, 15).padding(.vertical, 11)
             }
         }
+    }
+
+    private var dividerLine: some View {
+        Divider()
+            .background(LinearGradient(colors: [Color.clear, Color.white.opacity(0.08), Color.white.opacity(0.04), Color.clear], startPoint: .leading, endPoint: .trailing))
+            .padding(.leading, 58)
     }
 
     private func intervalLabel(for minutes: Int) -> String {
@@ -645,7 +715,7 @@ private struct SchedulerSettingsTab: View {
 // MARK: - 关于设置标签
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
-    
+
     private var wallpaperRuleSourceText: String {
         if viewModel.currentRuleRepository.isEmpty {
             return "GitHub"
@@ -663,19 +733,21 @@ private struct AboutSettingsTab: View {
             // 应用信息卡片
             MacSettingsSection {
                 HStack(spacing: 16) {
+                    // 图标带精致阴影
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 56, height: 56)
+                        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
 
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text("WaifuX")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.9))
+                            .font(.system(size: 19, weight: .bold))
+                            .foregroundStyle(Color.white.opacity(0.94))
 
                         Text(viewModel.updateChecker.fullVersionString)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.white.opacity(0.5))
+                            .font(.system(size: 12.5, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.42))
                     }
 
                     Spacer()
@@ -687,7 +759,6 @@ private struct AboutSettingsTab: View {
                         .buttonStyle(.borderedProminent)
                         .tint(Color(hex: "30D158"))
                         .controlSize(.regular)
-                        .scaleEffect(1.3)
                     } else {
                         Button(t("checkForUpdates")) {
                             Task { await viewModel.checkForUpdates() }
@@ -695,116 +766,40 @@ private struct AboutSettingsTab: View {
                         .disabled(viewModel.isCheckingUpdate)
                         .buttonStyle(.bordered)
                         .controlSize(.regular)
-                        .scaleEffect(1.3)
                     }
                 }
-                .padding(14)
+                .padding(16)
             }
 
             // 项目信息组
-            MacSettingsSection {
-                MacSettingsRow(
-                    icon: "person.fill",
-                    iconColor: Color(hex: "BF5AF2"),
-                    title: t("developer"),
-                    showDivider: true
-                ) {
-                    Text("jipika")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                }
-                
-                MacSettingsRow(
-                    icon: "photo.on.rectangle.angled",
-                    iconColor: Color(hex: "0A84FF"),
-                    title: t("wallpaperRuleSource"),
-                    showDivider: true
-                ) {
-                    Text(wallpaperRuleSourceText)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                }
-                
-                MacSettingsRow(
-                    icon: "play.rectangle.fill",
-                    iconColor: Color(hex: "FF9F0A"),
-                    title: t("animeRuleSource"),
-                    showDivider: true
-                ) {
-                    Text("KazumiRules")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                }
-                
-                MacSettingsRow(
-                    icon: "hammer.fill",
-                    iconColor: Color(hex: "30D158"),
-                    title: t("techStack"),
-                    showDivider: false
-                ) {
-                    Text("SwiftUI + AppKit")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                }
+            MacSettingsSection(header: t("projectInfo"), icon: "curlybraces") {
+                infoRow(icon: "person.fill", color: Color(hex: "BF5AF2"), title: t("developer"), value: "jipika", isLast: false)
+                infoRow(icon: "photo.on.rectangle.angled", color: Color(hex: "0A84FF"), title: t("wallpaperRuleSource"), value: wallpaperRuleSourceText, isLast: false)
+                infoRow(icon: "play.rectangle.fill", color: Color(hex: "FF9F0A"), title: t("animeRuleSource"), value: "KazumiRules", isLast: false)
+                infoRow(icon: "hammer.fill", color: Color(hex: "30D158"), title: t("techStack"), value: "SwiftUI + AppKit", isLast: true)
             }
 
             // 外部链接组
-            MacSettingsSection {
+            MacSettingsSection(header: t("links"), icon: "link") {
                 Link(destination: URL(string: "https://wallhaven.cc")!) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(hex: "0A84FF"))
-                                .frame(width: 32, height: 32)
-                            
-                            Image(systemName: "globe")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(.white)
-                        }
-                        
-                        Text(t("visitWebsite"))
-                            .font(.system(size: 15, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                        
-                        Spacer()
-                        
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Color.white.opacity(0.4))
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    externalLinkRow(
+                        icon: "globe",
+                        color: Color(hex: "0A84FF"),
+                        title: t("visitWebsite")
+                    )
                 }
                 .buttonStyle(.plain)
-                
+
                 Divider()
-                    .background(Color.white.opacity(0.08))
+                    .background(LinearGradient(colors: [Color.clear, Color.white.opacity(0.08), Color.white.opacity(0.04), Color.clear], startPoint: .leading, endPoint: .trailing))
                     .padding(.leading, 58)
 
                 Link(destination: URL(string: "https://github.com/jipika/WaifuX")!) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(hex: "FF453A"))
-                                .frame(width: 32, height: 32)
-                            
-                            Image(systemName: "exclamationmark.bubble")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(.white)
-                        }
-                        
-                        Text(t("reportProblem"))
-                            .font(.system(size: 15, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                        
-                        Spacer()
-                        
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Color.white.opacity(0.4))
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    externalLinkRow(
+                        icon: "exclamationmark.bubble",
+                        color: Color(hex: "FF453A"),
+                        title: t("reportProblem")
+                    )
                 }
                 .buttonStyle(.plain)
             }
@@ -834,6 +829,36 @@ private struct AboutSettingsTab: View {
             }
         }
     }
+
+    /// 统一的信息行组件
+    @ViewBuilder
+    private func infoRow(icon: String, color: Color, title: String, value: String, isLast: Bool) -> some View {
+        MacSettingsRow(
+            icon: icon,
+            iconColor: color,
+            title: title,
+            subtitle: nil,
+            showDivider: !isLast
+        ) {
+            Text(value)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.45))
+        }
+    }
+
+    /// 统一的外部链接行组件
+    private func externalLinkRow(icon: String, color: Color, title: String) -> some View {
+        HStack(spacing: 13) {
+            ZStack {
+                Circle().fill(color.opacity(0.15)).frame(width: 32, height: 32)
+                Circle().fill(LinearGradient(colors: [color.opacity(0.9), color.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 28, height: 28)
+                Image(systemName: icon).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+            }
+            Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(Color.white.opacity(0.92))
+            Spacer()
+            Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.white.opacity(0.35))
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 11)
+    }
 }
-
-
