@@ -68,9 +68,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let settingsViewModel = SettingsViewModel()
     private var settingsWindowController: NSWindowController?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // ⚠️ 必须在 launch 后才恢复下载权限书签，不能在单例 init 中做！
-        // 否则会导致 _CFXPreferences 递归栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV）
+        // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
+        // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
+        // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
+        //
+        // 恢复顺序很重要：语言 → 主题 → 下载权限 → 更新缓存
+
+        // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
+        LocalizationService.shared.restoreSavedSettings()
+
+        // 2. 恢复主题设置
+        ThemeManager.shared.restoreSavedSettings()
+
+        // 3. 恢复下载权限书签
         DownloadPermissionManager.shared.restoreSavedPermission()
+
+        // 4. 恢复更新检查缓存
+        UpdateChecker.shared.restoreCachedState()
 
         configureApplicationIcon()
 

@@ -26,15 +26,19 @@ class LocalizationService: ObservableObject {
     }
 
     private init() {
-        // 检测系统语言
-        let systemLanguage = Self.detectSystemLanguage()
-        let saved = UserDefaults.standard.string(forKey: "app_language")
+        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 使用系统检测的默认语言作为占位符
+        self.currentLanguage = Self.detectSystemLanguage()
+    }
 
-        if let saved = saved, let language = Language(rawValue: saved) {
+    /// 延迟恢复用户保存的语言偏好（必须在 applicationDidFinishLaunching 中调用）
+    func restoreSavedSettings() {
+        if let saved = UserDefaults.standard.string(forKey: "app_language"),
+           let language = Language(rawValue: saved) {
             self.currentLanguage = language
         } else {
-            // 使用系统语言或默认英语
-            self.currentLanguage = systemLanguage
+            // 重新检测系统语言（init 时用的就是默认值）
+            self.currentLanguage = Self.detectSystemLanguage()
         }
     }
 

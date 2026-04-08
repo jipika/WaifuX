@@ -53,7 +53,12 @@ final class UpdateChecker: ObservableObject {
     private let cachedReleaseKey = "update_checker_cached_release"
 
     private init() {
-        // 恢复缓存的检查结果
+        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 缓存的检查结果通过 restoreCachedState() 延迟恢复
+    }
+
+    /// 延迟恢复缓存的更新检查状态（必须在 applicationDidFinishLaunching 中调用）
+    func restoreCachedState() {
         if let date = UserDefaults.standard.object(forKey: lastCheckKey) as? Date {
             lastCheckDate = date
         }

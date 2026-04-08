@@ -996,11 +996,9 @@ class ThemeManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     
     private init() {
-        // 加载保存的主题设置
-        if let savedMode = UserDefaults.standard.string(forKey: "themeMode"),
-           let mode = ThemeMode(rawValue: savedMode) {
-            self.themeMode = mode
-        }
+        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 使用默认主题，用户偏好通过 restoreSavedSettings() 延迟恢复
+        self.themeMode = .system
         
         // 监听系统主题变化
         DistributedNotificationCenter.default
@@ -1011,6 +1009,15 @@ class ThemeManager: ObservableObject {
             .store(in: &cancellables)
         
         applyTheme()
+    }
+    
+    /// 延迟恢复保存的主题设置（必须在 applicationDidFinishLaunching 中调用）
+    func restoreSavedSettings() {
+        if let savedMode = UserDefaults.standard.string(forKey: "themeMode"),
+           let mode = ThemeMode(rawValue: savedMode) {
+            self.themeMode = mode
+            applyTheme()
+        }
     }
     
     func applyTheme() {
