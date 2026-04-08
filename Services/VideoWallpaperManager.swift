@@ -19,7 +19,25 @@ final class VideoWallpaperManager: ObservableObject {
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
     private let showPosterOnLockKey = "video_wallpaper_show_poster_on_lock"
-    private let originalWallpaperKey = "video_wallpaper_original_desktop"
+    private let originalWallpaperKey = "video_wallpaper_original_desktop_v2"  // v2: 支持多屏幕配置
+    
+    /// 持久化预览图存储目录（避免被系统清理）
+    /// 注意：放在 WallHaven 目录下，与 Cache 分开，避免被清理缓存误删
+    private var persistedPosterDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("WallHaven", isDirectory: true)
+            .appendingPathComponent("WallpaperPosters", isDirectory: true)
+        // 确保目录存在
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    
+    /// 当前持久化的预览图路径
+    private var persistedPosterURL: URL? {
+        guard let posterURL = currentPosterURL else { return nil }
+        let fileName = "poster_\(posterURL.lastPathComponent)"
+        return persistedPosterDirectory.appendingPathComponent(fileName)
+    }
     
     /// 是否在锁屏时显示预览图
     var showPosterOnLock: Bool {
@@ -201,38 +219,76 @@ final class VideoWallpaperManager: ObservableObject {
     // MARK: - 锁屏壁纸管理
     
     /// 保存用户当前的桌面壁纸（锁屏显示的是桌面壁纸）
+    /// v2: 支持多屏幕配置，保存每个屏幕的壁纸
     private func saveOriginalWallpaper() {
         let workspace = NSWorkspace.shared
-        var originalWallpapers: [String: String] = [:]
+        var screenConfigs: [ScreenWallpaperConfig] = []
         
         for screen in NSScreen.screens {
             if let desktopURL = workspace.desktopImageURL(for: screen) {
-                let screenID = screen.wallpaperScreenIdentifier
-                originalWallpapers[screenID] = desktopURL.absoluteString
+                // 检查是否是我们自己的预览图（如果是，不要保存）
+                if isOurPosterImage(desktopURL) {
+                    print("[VideoWallpaperManager] Skipping our own poster image: \(desktopURL.lastPathComponent)")
+                    continue
+                }
+                
+                let config = ScreenWallpaperConfig(
+                    screenID: screen.wallpaperScreenIdentifier,
+                    screenName: screen.localizedName,
+                    wallpaperURL: desktopURL.absoluteString,
+                    isMainScreen: screen == NSScreen.main
+                )
+                screenConfigs.append(config)
             }
         }
         
-        if !originalWallpapers.isEmpty,
-           let data = try? JSONEncoder().encode(originalWallpapers) {
+        guard !screenConfigs.isEmpty else {
+            print("[VideoWallpaperManager] No valid original wallpaper to save")
+            return
+        }
+        
+        let savedState = SavedOriginalWallpaperState(
+            configs: screenConfigs,
+            savedAt: Date(),
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        )
+        
+        if let data = try? JSONEncoder().encode(savedState) {
             defaults.set(data, forKey: originalWallpaperKey)
-            print("[VideoWallpaperManager] Saved original wallpaper: \(originalWallpapers)")
+            print("[VideoWallpaperManager] Saved original wallpaper for \(screenConfigs.count) screen(s)")
         }
     }
     
+    /// 检查是否是我们自己的预览图
+    private func isOurPosterImage(_ url: URL) -> Bool {
+        // 检查路径是否包含我们的预览图目录
+        let path = url.path
+        return path.contains("WallpaperPosters") && path.contains("poster_")
+    }
+    
     /// 将预览图设为桌面壁纸（锁屏会显示这个）
+    /// 使用持久化存储，避免被系统清理
     private func setPosterAsDesktopWallpaper(_ posterURL: URL) {
         let workspace = NSWorkspace.shared
         
-        // 先下载预览图到本地
         Task {
             do {
+                // 1. 下载预览图
                 let (data, _) = try await URLSession.shared.data(from: posterURL)
-                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("wallpaper_poster_\(posterURL.lastPathComponent)")
-                try data.write(to: tempURL)
                 
-                // 设置为桌面壁纸
+                // 2. 保存到持久化目录（而不是临时目录）
+                let persistentURL = persistedPosterDirectory
+                    .appendingPathComponent("poster_\(posterURL.lastPathComponent)")
+                
+                // 清理旧的预览图文件（保留最近5个）
+                await cleanupOldPosters(keeping: persistentURL)
+                
+                try data.write(to: persistentURL)
+                print("[VideoWallpaperManager] Saved poster to persistent location: \(persistentURL.path)")
+                
+                // 3. 设置为桌面壁纸
                 for screen in NSScreen.screens {
-                    try workspace.setDesktopImageURL(tempURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURL(persistentURL, for: screen, options: [:])
                 }
                 print("[VideoWallpaperManager] Set poster as desktop wallpaper")
             } catch {
@@ -241,37 +297,132 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
     
+    /// 清理旧的预览图文件，只保留最近的几个
+    private func cleanupOldPosters(keeping keepURL: URL) async {
+        do {
+            let files = try FileManager.default.contentsOfDirectory(
+                at: persistedPosterDirectory,
+                includingPropertiesForKeys: [.creationDateKey],
+                options: .skipsHiddenFiles
+            )
+            
+            // 按创建时间排序，保留最新的5个
+            let sortedFiles = files
+                .filter { $0.lastPathComponent.hasPrefix("poster_") }
+                .compactMap { url -> (URL, Date)? in
+                    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                          let date = attrs[.creationDate] as? Date else { return nil }
+                    return (url, date)
+                }
+                .sorted { $0.1 > $1.1 }
+            
+            // 删除旧的（保留5个 + 当前要保存的）
+            let filesToDelete = sortedFiles.dropFirst(5)
+            for (url, _) in filesToDelete {
+                if url != keepURL {
+                    try? FileManager.default.removeItem(at: url)
+                    print("[VideoWallpaperManager] Cleaned up old poster: \(url.lastPathComponent)")
+                }
+            }
+        } catch {
+            print("[VideoWallpaperManager] Failed to cleanup old posters: \(error)")
+        }
+    }
+    
     /// 恢复用户原始桌面壁纸
+    /// v2: 支持屏幕配置变化，优先匹配主屏幕，支持跨屏幕恢复
     private func restoreOriginalWallpaper() {
         guard let data = defaults.data(forKey: originalWallpaperKey),
-              let originalWallpapers = try? JSONDecoder().decode([String: String].self, from: data) else {
+              let savedState = try? JSONDecoder().decode(SavedOriginalWallpaperState.self, from: data) else {
             print("[VideoWallpaperManager] No original wallpaper to restore")
             return
         }
         
-        let workspace = NSWorkspace.shared
+        print("[VideoWallpaperManager] Restoring wallpaper from state saved at \(savedState.savedAt)")
         
-        for screen in NSScreen.screens {
+        let workspace = NSWorkspace.shared
+        let currentScreens = NSScreen.screens
+        
+        // 1. 尝试精确匹配：找到与当前屏幕ID相同的配置
+        var restoredCount = 0
+        var unmatchedScreens: [NSScreen] = []
+        
+        for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
-            guard let originalPath = originalWallpapers[screenID],
-                  let originalURL = URL(string: originalPath) else { continue }
             
-            // 检查文件是否存在
-            guard FileManager.default.fileExists(atPath: originalURL.path) else {
-                print("[VideoWallpaperManager] Original wallpaper not found: \(originalPath)")
-                continue
-            }
-            
-            do {
-                try workspace.setDesktopImageURL(originalURL, for: screen, options: [:])
-                print("[VideoWallpaperManager] Restored wallpaper for screen: \(screenID)")
-            } catch {
-                print("[VideoWallpaperManager] Failed to restore wallpaper: \(error)")
+            if let config = savedState.configs.first(where: { $0.screenID == screenID }),
+               let originalURL = URL(string: config.wallpaperURL),
+               FileManager.default.fileExists(atPath: originalURL.path) {
+                do {
+                    try workspace.setDesktopImageURL(originalURL, for: screen, options: [:])
+                    print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (exact match)")
+                    restoredCount += 1
+                } catch {
+                    print("[VideoWallpaperManager] Failed to restore wallpaper for screen \(screenID): \(error)")
+                    unmatchedScreens.append(screen)
+                }
+            } else {
+                unmatchedScreens.append(screen)
             }
         }
         
-        // 清除保存的原始壁纸
+        // 2. 对于未匹配的屏幕，尝试使用主屏幕的配置（如果主屏幕配置存在且有效）
+        if !unmatchedScreens.isEmpty,
+           let mainConfig = savedState.configs.first(where: { $0.isMainScreen }),
+           let mainURL = URL(string: mainConfig.wallpaperURL),
+           FileManager.default.fileExists(atPath: mainURL.path) {
+            for screen in unmatchedScreens {
+                do {
+                    try workspace.setDesktopImageURL(mainURL, for: screen, options: [:])
+                    print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to main screen)")
+                    restoredCount += 1
+                } catch {
+                    print("[VideoWallpaperManager] Failed to restore wallpaper for screen \(screen.localizedName): \(error)")
+                }
+            }
+        }
+        
+        // 3. 对于仍然未匹配的屏幕，尝试使用任意可用的配置
+        if restoredCount == 0 && !savedState.configs.isEmpty {
+            for config in savedState.configs {
+                if let url = URL(string: config.wallpaperURL),
+                   FileManager.default.fileExists(atPath: url.path) {
+                    for screen in unmatchedScreens {
+                        do {
+                            try workspace.setDesktopImageURL(url, for: screen, options: [:])
+                            print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to any available)")
+                        } catch {
+                            print("[VideoWallpaperManager] Failed to restore wallpaper: \(error)")
+                        }
+                    }
+                    break
+                }
+            }
+        }
+        
+        // 4. 清理：删除持久化的预览图文件
+        cleanupPersistedPosters()
+        
+        // 清除保存的原始壁纸状态
         defaults.removeObject(forKey: originalWallpaperKey)
+        print("[VideoWallpaperManager] Original wallpaper restore completed")
+    }
+    
+    /// 清理所有持久化的预览图文件
+    private func cleanupPersistedPosters() {
+        do {
+            let files = try FileManager.default.contentsOfDirectory(
+                at: persistedPosterDirectory,
+                includingPropertiesForKeys: nil,
+                options: .skipsHiddenFiles
+            )
+            for file in files where file.lastPathComponent.hasPrefix("poster_") {
+                try? FileManager.default.removeItem(at: file)
+                print("[VideoWallpaperManager] Cleaned up persisted poster: \(file.lastPathComponent)")
+            }
+        } catch {
+            print("[VideoWallpaperManager] Failed to cleanup persisted posters: \(error)")
+        }
     }
 
     func restoreIfNeeded() {
@@ -496,6 +647,21 @@ private struct SavedVideoWallpaperState: Codable {
     let posterURL: String?
     let isMuted: Bool
     let isPaused: Bool
+}
+
+/// v2: 单个屏幕的壁纸配置
+private struct ScreenWallpaperConfig: Codable {
+    let screenID: String
+    let screenName: String
+    let wallpaperURL: String
+    let isMainScreen: Bool
+}
+
+/// v2: 保存的原始壁纸状态（支持多屏幕配置）
+private struct SavedOriginalWallpaperState: Codable {
+    let configs: [ScreenWallpaperConfig]
+    let savedAt: Date
+    let appVersion: String
 }
 
 private final class WallpaperVideoWindow: NSWindow {

@@ -344,20 +344,44 @@ final class UpdateManager: ObservableObject {
     // MARK: - 下载更新
     
     func downloadUpdate(version: String) async {
-        guard !state.isDownloading else { return }
+        guard !state.isDownloading else { 
+            print("[UpdateManager] Download already in progress")
+            return 
+        }
         
         state = .downloading(0)
         progress = 0
         
-        // 构建下载链接（使用 GitHub Releases 的直链）
-        let downloadURL = "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX-\(version).dmg"
+        // 尝试多个可能的下载链接格式
+        let possibleURLs = [
+            "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX-\(version).dmg",
+            "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX.dmg",
+            "https://github.com/\(owner)/\(repo)/releases/latest/download/WaifuX.dmg"
+        ]
         
-        guard let url = URL(string: downloadURL) else {
-            state = .error("无效的下载链接")
-            return
+        print("[UpdateManager] Starting download for version: \(version)")
+        
+        for (index, urlString) in possibleURLs.enumerated() {
+            print("[UpdateManager] Trying URL [\(index)]: \(urlString)")
+            
+            guard let url = URL(string: urlString) else {
+                continue
+            }
+            
+            do {
+                try await downloadFromURL(url, version: version)
+                return // 下载成功
+            } catch {
+                print("[UpdateManager] URL [\(index)] failed: \(error)")
+                continue // 尝试下一个链接
+            }
         }
         
-        print("[UpdateManager] Downloading from: \(downloadURL)")
+        state = .error("所有下载链接都失败了")
+    }
+    
+    private func downloadFromURL(_ url: URL, version: String) async throws {
+        print("[UpdateManager] Downloading from: \(url.absoluteString)")
         
         // 创建临时下载路径
         let tempDir = FileManager.default.temporaryDirectory
@@ -368,57 +392,48 @@ final class UpdateManager: ObservableObject {
             try? FileManager.default.removeItem(at: tempFile)
         }
         
+        // 配置 URLSession 以跟随重定向
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 600
+        let session = URLSession(configuration: config)
+        
         // 使用 URLSession 下载
         var request = URLRequest(url: url)
         request.setValue("WallHaven-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
         
-        do {
-            let (downloadURL, response) = try await downloadWithProgress(request: request) { [weak self] p in
-                Task { @MainActor in
-                    self?.progress = p
-                    self?.state = .downloading(p)
-                }
-            }
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                state = .error("无效的服务器响应")
-                return
-            }
-            
-            if httpResponse.statusCode == 404 {
-                // 尝试备用链接格式
-                let altURL = "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX.dmg"
-                print("[UpdateManager] Trying alternate URL: \(altURL)")
-                
-                guard let altDownloadURL = URL(string: altURL) else {
-                    state = .error("下载链接不存在 (404)")
-                    return
-                }
-                
-                let (altFile, altResponse) = try await downloadWithProgress(request: URLRequest(url: altDownloadURL)) { [weak self] p in
-                    Task { @MainActor in
-                        self?.progress = p
-                        self?.state = .downloading(p)
+        let (downloadURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
+            Task { @MainActor in
+                guard let self = self else { return }
+                // 只在真正下载中时才更新进度，避免状态竞争
+                if case .downloading = self.state {
+                    self.progress = p
+                    // 进度只前进不倒退
+                    if p >= self.progress {
+                        self.state = .downloading(p)
                     }
                 }
-                
-                try FileManager.default.moveItem(at: altFile, to: tempFile)
-                state = .downloaded(tempFile)
-                
-            } else if httpResponse.statusCode != 200 {
-                state = .error("下载失败 (HTTP \(httpResponse.statusCode))")
-                return
-            } else {
-                // 移动文件到临时位置
-                try FileManager.default.moveItem(at: downloadURL, to: tempFile)
-                state = .downloaded(tempFile)
-                print("[UpdateManager] Downloaded to: \(tempFile.path)")
             }
-            
-        } catch {
-            print("[UpdateManager] Download error: \(error)")
-            state = .error("下载失败: \(error.localizedDescription)")
         }
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        
+        print("[UpdateManager] HTTP Status: \(httpResponse.statusCode)")
+        
+        guard httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        // 移动文件到临时位置
+        try FileManager.default.moveItem(at: downloadURL, to: tempFile)
+        
+        await MainActor.run {
+            state = .downloaded(tempFile)
+        }
+        
+        print("[UpdateManager] Downloaded to: \(tempFile.path)")
     }
     
     // MARK: - 安装更新
@@ -464,12 +479,17 @@ final class UpdateManager: ObservableObject {
     // MARK: - 私有方法
     
     private func downloadWithProgress(
+        session: URLSession,
         request: URLRequest,
-        progressHandler: @escaping (Double) -> Void
+        progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let session = URLSession(configuration: .default)
+        // 使用 nonisolated 保护进度值，确保只增不减
+        let lastProgress = UnsafeMutablePointer<Double>.allocate(capacity: 1)
+        lastProgress.pointee = 0
+        
+        return try await withCheckedThrowingContinuation { continuation in
             let task = session.downloadTask(with: request) { url, response, error in
+                lastProgress.deallocate()
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -481,9 +501,15 @@ final class UpdateManager: ObservableObject {
                 continuation.resume(returning: (url, response))
             }
             
-            // 监听下载进度
-            let progressObserver = task.progress.observe(\.fractionCompleted, options: [.new]) { progress, _ in
-                progressHandler(progress.fractionCompleted)
+            // 监听下载进度 - 确保只增不减
+            let progressObserver = task.progress.observe(\.fractionCompleted, options: [.new]) { progress, change in
+                let current = progress.fractionCompleted
+                // 原子操作确保只增不减
+                let previous = lastProgress.pointee
+                if current > previous {
+                    lastProgress.pointee = current
+                    progressHandler(current)
+                }
             }
             
             // 保持 observer 存活

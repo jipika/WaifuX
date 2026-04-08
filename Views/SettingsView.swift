@@ -681,7 +681,8 @@ private struct AboutSettingsTab: View {
                     currentVersion: current,
                     latestVersion: release.version,
                     release: release,
-                    commit: commit
+                    commit: commit,
+                    onClose: { showAutoUpdateSheet = false }
                 )
             }
         }
@@ -730,198 +731,6 @@ private struct AboutSettingsTab: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-import SwiftUI
-
-/// 自动更新弹窗
-struct AutoUpdateSheet: View {
-    @ObservedObject var updateChecker = UpdateChecker.shared
-    @ObservedObject var updateManager = UpdateManager.shared
-    @Environment(\.dismiss) private var dismiss
-    
-    let currentVersion: String
-    let latestVersion: String
-    let release: GitHubRelease
-    let commit: GitHubCommit?
-    
-    var body: some View {
-        VStack(spacing: 24) {
-            // 标题图标
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.blue)
-                .symbolEffect(.bounce, options: .repeat(1))
-            
-            // 标题
-            Text("发现新版本")
-                .font(.system(size: 20, weight: .bold))
-            
-            // 版本信息
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("当前版本")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Text(currentVersion)
-                        .font(.system(size: 13, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(4)
-                }
-                
-                HStack(spacing: 8) {
-                    Text("最新版本")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Text(latestVersion)
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Color.blue.opacity(0.15))
-                        .foregroundStyle(.blue)
-                        .cornerRadius(4)
-                }
-            }
-            
-            // 更新内容
-            if let commit = commit {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("更新内容")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    
-                    Text(commit.shortMessage)
-                        .font(.system(size: 14))
-                        .lineLimit(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    
-                    HStack {
-                        Text(commit.shortSHA)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                }
-                .padding(12)
-                .background(Color.secondary.opacity(0.05))
-                .cornerRadius(8)
-            }
-            
-            // 进度条或按钮
-            VStack(spacing: 12) {
-                if updateManager.state.isDownloading || updateManager.state.isInstalling {
-                    // 下载/安装中显示进度条
-                    VStack(spacing: 8) {
-                        ProgressView(value: updateManager.progress)
-                            .progressViewStyle(LinearProgressViewStyle())
-                        
-                        HStack {
-                            Text(statusText)
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(Int(updateManager.progress * 100))%")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                
-                // 按钮行
-                HStack(spacing: 12) {
-                    // 取消/关闭按钮
-                    Button {
-                        if updateManager.state.isDownloading {
-                            // 取消下载
-                            updateManager.reset()
-                        } else {
-                            dismiss()
-                        }
-                    } label: {
-                        Text(buttonText)
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(minWidth: 80)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(updateManager.state.isInstalling)
-                    
-                    // 主操作按钮
-                    if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
-                        Button {
-                            Task {
-                                await updateManager.downloadUpdate(version: latestVersion)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                if updateManager.state.isDownloading {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .scaleEffect(0.8)
-                                }
-                                Text(downloadButtonText)
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            .frame(minWidth: 120)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(updateManager.state.isDownloading)
-                    } else if updateManager.state.isDownloaded {
-                        Button {
-                            updateManager.installUpdate()
-                        } label: {
-                            Text("立即安装")
-                                .font(.system(size: 14, weight: .semibold))
-                                .frame(minWidth: 120)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
-            .frame(width: 280)
-        }
-        .padding(24)
-        .frame(width: 360)
-        .onDisappear {
-            // 如果下载完成但未安装，保留状态
-            if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
-                updateManager.reset()
-            }
-        }
-    }
-    
-    // MARK: - 辅助属性
-    
-    private var statusText: String {
-        switch updateManager.state {
-        case .downloading:
-            return "正在下载..."
-        case .installing:
-            return "正在安装..."
-        default:
-            return ""
-        }
-    }
-    
-    private var buttonText: String {
-        switch updateManager.state {
-        case .downloading:
-            return "取消"
-        case .installing:
-            return "安装中..."
-        default:
-            return "稍后"
-        }
-    }
-    
-    private var downloadButtonText: String {
-        switch updateManager.state {
-        case .downloading:
-            return "下载中..."
-        default:
-            return "立即更新"
-        }
     }
 }
 
@@ -1016,7 +825,8 @@ struct SettingsUpdateSection: View {
                     currentVersion: current,
                     latestVersion: release.version,
                     release: release,
-                    commit: commit
+                    commit: commit,
+                    onClose: { showUpdateSheet = false }
                 )
             }
         }
@@ -1085,7 +895,8 @@ struct SettingsUpdateSection: View {
                     date: "2024-01-01T00:00:00Z"
                 )
             )
-        )
+        ),
+        onClose: {}
     )
     .frame(width: 400, height: 500)
 }

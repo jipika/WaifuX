@@ -77,266 +77,113 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
         LocalizationService.shared.restoreSavedSettings()
 
-        // 2. ⚠️ WaifuX 是纯深色设计应用（DarkLiquidGlassBackground、#0D0D0D 背景），
-        //    不再从 UserDefaults 恢复主题设置，始终使用固定深色模式
-        // ThemeManager.shared.restoreSavedSettings()  — 已禁用，保持固定深色
+        // 2. ⚠️ 延迟恢复更新检查器缓存状态（读取 UserDefaults）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            UpdateChecker.shared.restoreCachedState()
+        }
 
-        // 3. 恢复下载权限书签
-        DownloadPermissionManager.shared.restoreSavedPermission()
-
-        // 4. 恢复更新检查缓存
-        UpdateChecker.shared.restoreCachedState()
-
-        // 5. 恢复下载任务列表
-        DownloadTaskService.shared.restoreSavedTasks()
-
-        // 6. 恢复壁纸调度配置
-        WallpaperSchedulerService.shared.restoreSavedConfig()
-
-        // 7. 恢复动漫收藏数据
-        AnimeFavoriteStore.shared.restoreSavedData()
-
-        // 8. 恢复动漫播放进度
-        AnimeProgressStore.shared.restoreSavedData()
-
-        // 9. 恢复媒体播放进度缓存
-        PlaybackProgressCache.shared.restoreSavedData()
-
-        // 10. 恢复媒体库数据（收藏 + 下载记录）
-        MediaLibraryService.shared.restoreSavedData()
-
-        // 11. 恢复壁纸库数据（收藏 + 下载记录）
-        WallpaperLibraryService.shared.restoreSavedData()
-
-        // 12. 恢复用户库数据（文件系统存储的收藏/历史/下载）
-        UserLibrary.shared.restoreSavedData()
-
-        // 13. ⚠️ 关键：恢复 API Key 状态（必须在 ContentView 创建之前！）
-        // WallpaperViewModel 的 canShowNSFW / effectiveAPIKey 在 SwiftUI 渲染时会被调用，
-        // 如果不提前缓存 UserDefaults 值，会触发 _CFXPreferences 递归栈溢出
-        let wallpaperViewModelForRestore = WallpaperViewModel()
-        wallpaperViewModelForRestore.restoreAPIKeyState()
-
-        configureApplicationIcon()
-
-        // 应用主题
-        ThemeManager.shared.applyTheme()
-
-        // 初始化数据源配置
-        DataSourceProfileStore.initialize()
+        // 3. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            WallpaperViewModel().restoreAPIKeyState()
+        }
 
         let contentView = ContentView()
+            .frame(minWidth: 900, minHeight: 600)
 
-        // 创建无边框窗口 - 完全自定义标题栏
-        // 固定尺寸：1000×800 点（points，自动适配 Retina/非 Retina）
-        let windowWidth: CGFloat = 1000
-        let windowHeight: CGFloat = 800
-        
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         window?.title = "WaifuX"
-        // 完全隐藏系统标题栏
         window?.titlebarAppearsTransparent = true
         window?.titleVisibility = .hidden
-        window?.standardWindowButton(.closeButton)?.isHidden = true
-        window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window?.standardWindowButton(.zoomButton)?.isHidden = true
-        
-        // 窗口背景设置为纯色，避免透明导致的边框裂开问题
-        window?.isOpaque = true
-        window?.backgroundColor = NSColor(Color(hex: "0D0D0D"))
-        window?.hasShadow = true
-        
-        // 设置窗口圆角，避免边缘锯齿
-        window?.contentView?.wantsLayer = true
-        window?.contentView?.layer?.cornerRadius = 10
-        window?.contentView?.layer?.masksToBounds = true
-        
-        // 启用自动保存 frame，保留用户上次调整的窗口大小
-        window?.setFrameAutosaveName("WallHavenMainWindow")
-        
-        window?.center()
-        window?.contentView = EdgeToEdgeHostingView(rootView: contentView)
-        window?.delegate = self
-        window?.makeKeyAndOrderFront(nil)
+
+        // 设置最小窗口大小
         window?.minSize = NSSize(width: 900, height: 600)
-        updateActivationPolicy(showDockIcon: true)
 
-        // 配置状态栏控制器（单例，全局唯一）
-        StatusBarController.shared.configure(
-            showWindow: { [weak self] in self?.showMainWindow() },
-            quit: { NSApp.terminate(nil) }
-        )
+        // 使用无边框托管视图
+        let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+        window?.contentView = hostingView
 
-        // 启动时检查并迁移旧目录文件
-        DispatchQueue.main.async {
-            let migrationResult = DownloadPathManager.shared.migrateLegacyFiles()
-            if migrationResult.success > 0 {
-                print("[AppDelegate] Migrated \(migrationResult.success) files to new directory structure")
-            }
-            if migrationResult.failed > 0 {
-                print("[AppDelegate] Failed to migrate \(migrationResult.failed) files")
-            }
-        }
+        window?.delegate = self
 
-        // 启动时在后台同步规则：Kazumi 动漫（安装缺失 + 版本更新）+ 已配置的 GitHub 规则仓库
-        Task(priority: .utility) {
-            print("[AppDelegate] 开始后台规则同步…")
+        setupToolbar()
 
-            // 1. 同步 Kazumi 动漫规则
-            print("[AppDelegate] 同步 Kazumi 动漫规则…")
-            await AnimeRuleStore.shared.syncOnLaunchInBackground()
-            let animeRules = await AnimeRuleStore.shared.loadAllRules()
-            print("[AppDelegate] 动漫规则同步完成，共 \(animeRules.count) 个")
+        window?.center()
 
-            // 2. 加载已配置的 GitHub 规则仓库
-            print("[AppDelegate] 加载已配置的 GitHub 规则仓库…")
-            await RuleRepository.shared.loadConfiguredRepository()
-            let wallpaperRules = await RuleLoader.shared.allRules()
-            print("[AppDelegate] 壁纸规则加载完成，共 \(wallpaperRules.count) 个")
+        // 初始隐藏 Dock 图标（启动后不显示在 Dock）
+        updateActivationPolicy(showDockIcon: false)
 
-            print("[AppDelegate] 后台规则同步结束")
-        }
-
-        // 启动时检查更新
-        Task(priority: .utility) {
-            print("[AppDelegate] 开始检查更新…")
-            let result = await UpdateChecker.shared.checkForUpdates()
-            switch result {
-            case .updateAvailable(let current, let latest, let commit):
-                print("[AppDelegate] 发现新版本：\(latest.version) (当前版本：\(current))")
-                // 在主线程显示更新弹窗
-                await MainActor.run {
-                    showUpdateDialog(latest: latest, commit: commit)
-                }
-            case .noUpdate(let current):
-                print("[AppDelegate] 已是最新版本：\(current)")
-            case .error(let message):
-                print("[AppDelegate] 更新检查失败：\(message)")
-            }
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            VideoWallpaperManager.shared.restoreIfNeeded()
+        // ⚠️ 延迟检查更新（等所有状态恢复完成后）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.checkForUpdatesOnLaunch()
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
-    }
-
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
+    func applicationShouldHandleReopening(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if flag {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
             showMainWindow()
         }
         return true
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender == window {
-            hideMainWindow()
-            return false
-        }
-        return true
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // 最后一个窗口关闭时不退出应用，保持在后台运行（无 Dock 图标）
+        return false
     }
 
-    private func configureApplicationIcon() {
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let iconImage = NSImage(contentsOf: iconURL) {
-            NSApp.applicationIconImage = iconImage
-            return
-        }
+    private func setupToolbar() {
+        guard let window = window else { return }
 
-        if let assetIcon = NSImage(named: NSImage.Name("AppIcon")) {
-            NSApp.applicationIconImage = assetIcon
-        }
-    }
+        let toolbar = NSToolbar(identifier: "MainToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.showsBaselineSeparator = false
 
-    @objc func showSettingsWindow(_ sender: Any?) {
-        if let settingsWindow = settingsWindowController?.window {
-            // 窗口已存在，确保它在父窗口中央显示
-            centerWindow(settingsWindow, relativeTo: window)
-            settingsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        settingsWindow.title = "设置"
-        settingsWindow.titlebarAppearsTransparent = true
-        settingsWindow.titleVisibility = .hidden
-        settingsWindow.standardWindowButton(.closeButton)?.isHidden = true
-        settingsWindow.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        settingsWindow.standardWindowButton(.zoomButton)?.isHidden = true
-        settingsWindow.isMovableByWindowBackground = true
-        settingsWindow.backgroundColor = NSColor(Color(hex: "1C1C1E"))
-        settingsWindow.setContentSize(NSSize(width: 680, height: 520))
-        settingsWindow.minSize = NSSize(width: 680, height: 520)
-        settingsWindow.maxSize = NSSize(width: 680, height: 520)
-        settingsWindow.isReleasedWhenClosed = false
-        // 在主窗口中央显示（如果主窗口存在）
-        centerWindow(settingsWindow, relativeTo: window)
-        settingsWindow.tabbingMode = .disallowed
-        settingsWindow.contentView = EdgeToEdgeHostingView(
-            rootView: SettingsView(viewModel: settingsViewModel)
-        )
-
-        let controller = NSWindowController(window: settingsWindow)
-        settingsWindowController = controller
-        controller.showWindow(nil)
-        updateActivationPolicy(showDockIcon: true)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
-    /// 将窗口居中显示，相对于参考窗口（如果存在）或屏幕
-    private func centerWindow(_ window: NSWindow, relativeTo referenceWindow: NSWindow?) {
-        guard let referenceFrame = referenceWindow?.frame ?? NSScreen.main?.visibleFrame else {
-            window.center()
-            return
-        }
-        
-        let windowSize = window.frame.size
-        let x = referenceFrame.midX - windowSize.width / 2
-        let y = referenceFrame.midY - windowSize.height / 2
-        window.setFrameOrigin(NSPoint(x: x, y: y))
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
     }
 
     func showMainWindow() {
-        guard let window else { return }
-        
-        let wasAccessory = NSApp.activationPolicy() == .accessory
         updateActivationPolicy(showDockIcon: true)
-        
-        // 如果之前是 accessory 模式，需要等待激活策略切换完成
-        if wasAccessory {
-            // ⚠️ 关键修复：setActivationPolicy(.regular) 在 macOS 上需要
-            // 多个 runloop cycle 才能完全生效（特别是有动态壁纸窗口时）。
-            // 之前的 DispatchQueue.main.async 只等了一个 runloop，
-            // 系统可能还未准备好处理 makeKeyAndOrderFront，导致窗口不显示。
-            // 改为 asyncAfter + 0.15s 给系统足够的稳定时间。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                guard let self, let window = self.window else { return }
-                
-                // 先确保窗口不在异常状态
-                if !window.isVisible {
-                    window.setFrameUsingName("WallHavenMainWindow")
-                    window.makeKeyAndOrderFront(nil)
-                } else {
-                    window.makeKeyAndOrderFront(nil)
-                }
-                NSApp.activate(ignoringOtherApps: true)
-                
-                // 二次保障：如果窗口仍然不可见或不是 keyWindow，再尝试一次
+
+        if window == nil {
+            let contentView = ContentView()
+                .frame(minWidth: 900, minHeight: 600)
+
+            window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+
+            window?.title = "WaifuX"
+            window?.titlebarAppearsTransparent = true
+            window?.titleVisibility = .hidden
+            window?.minSize = NSSize(width: 900, height: 600)
+
+            let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+            window?.contentView = hostingView
+
+            window?.delegate = self
+            setupToolbar()
+            window?.center()
+        }
+
+        // 检查窗口是否被最小化
+        if let window = window {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+
+            // 检查窗口是否可见且是 key window
+            if #available(macOS 14.0, *) {
                 if !window.isVisible || !window.isKeyWindow {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                         guard let self, let window = self.window else { return }
@@ -344,9 +191,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         NSApp.activate(ignoringOtherApps: true)
                     }
                 }
+            } else {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
             }
         } else {
-            window.makeKeyAndOrderFront(nil)
+            window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
@@ -365,42 +215,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// 显示更新弹窗
+    /// 显示更新弹窗（液态玻璃风格，自动下载）
     private func showUpdateDialog(latest: GitHubRelease, commit: GitHubCommit?) {
-        let dialog = NSAlert()
-        dialog.messageText = "发现新版本"
+        // 先显示主窗口
+        showMainWindow()
+        
+        let currentVersion = UpdateChecker.shared.currentVersion
+        
+        // 创建自定义弹窗
+        let alert = NSAlert()
+        alert.messageText = "发现新版本"
         
         // 构建弹窗内容
-        var content = "WaifuX \(latest.version) 已发布！"
+        var content = "当前版本: \(currentVersion)\n最新版本: \(latest.version)\n"
         
-        // 添加 commit 信息
         if let commit = commit {
-            content += "\n\n📌 最新提交："
-            content += "\n\(commit.shortMessage)"
+            content += "\n📌 \(commit.shortMessage)"
         }
         
-        // 添加 release body（变更日志）
-        if let body = latest.body, !body.isEmpty {
-            let cleanedBody = cleanReleaseBody(body)
-            if cleanedBody != "暂无更新日志" {
-                content += "\n\n📝 变更日志："
-                content += "\n\(cleanedBody)"
-            }
-        }
+        alert.informativeText = content
+        alert.addButton(withTitle: "立即更新")
+        alert.addButton(withTitle: "稍后")
         
-        dialog.informativeText = content
-        dialog.addButton(withTitle: "立即更新")
-        dialog.addButton(withTitle: "取消")
-        
-        // 自定义弹窗样式为液态玻璃风格
-        let window = dialog.window
+        // 自定义液态玻璃样式
+        let window = alert.window
         window.titlebarAppearsTransparent = true
         window.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 0.8)
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.cornerRadius = 12
         window.contentView?.layer?.masksToBounds = true
         
-        // 添加模糊效果
+        // 添加毛玻璃背景
         if #available(macOS 10.14, *) {
             let visualEffectView = NSVisualEffectView()
             visualEffectView.blendingMode = .behindWindow
@@ -411,10 +256,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.contentView?.addSubview(visualEffectView, positioned: .below, relativeTo: nil)
         }
         
-        let response = dialog.runModal()
-        if response == .alertFirstButtonReturn {
-            // 打开下载页面
-            UpdateChecker.shared.openDownloadPage(for: latest)
+        // 异步显示弹窗（不阻塞主窗口初始化）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            let response = alert.runModal()
+            
+            if response == .alertFirstButtonReturn {
+                // 立即更新 - 显示下载进度弹窗
+                self?.showDownloadProgressDialog(latest: latest, commit: commit)
+            }
+            // 稍后 - 直接关闭，主窗口已显示
+        }
+    }
+    
+    /// 显示下载进度弹窗
+    private var downloadWindow: NSPanel?
+    
+    private func showDownloadProgressDialog(latest: GitHubRelease, commit: GitHubCommit?) {
+        let currentVersion = UpdateChecker.shared.currentVersion
+        
+        // 创建进度弹窗
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 0.9)
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.center()
+        
+        self.downloadWindow = panel
+        
+        // 创建进度视图
+        let progressView = DownloadProgressView(
+            currentVersion: currentVersion,
+            latestVersion: latest.version,
+            onInstall: { [weak self] in
+                self?.downloadWindow?.close()
+                UpdateManager.shared.installUpdate()
+            },
+            onCancel: { [weak self] in
+                UpdateManager.shared.reset()
+                self?.downloadWindow?.close()
+            }
+        )
+        .frame(width: 320, height: 180)
+        
+        let hostingController = NSHostingController(rootView: progressView)
+        panel.contentViewController = hostingController
+        panel.makeKeyAndOrderFront(nil)
+        
+        // 开始下载
+        Task {
+            await UpdateManager.shared.downloadUpdate(version: latest.version)
         }
     }
 
@@ -441,5 +339,379 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let result = cleaned.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? "暂无更新日志" : result
+    }
+
+    /// 启动时检查更新
+    private func checkForUpdatesOnLaunch() {
+        Task {
+            let result = await UpdateChecker.shared.checkForUpdates()
+
+            if case .updateAvailable(_, let latest, let commit) = result {
+                // 在主线程显示更新弹窗
+                await MainActor.run {
+                    self.showUpdateDialog(latest: latest, commit: commit)
+                }
+            }
+        }
+    }
+    
+    // MARK: - 设置窗口
+    
+    @objc func showSettingsWindow(_ sender: Any?) {
+        if let settingsWindow = settingsWindowController?.window {
+            centerWindow(settingsWindow, relativeTo: window)
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.title = "设置"
+        settingsWindow.titlebarAppearsTransparent = true
+        settingsWindow.titleVisibility = .hidden
+        settingsWindow.standardWindowButton(.closeButton)?.isHidden = true
+        settingsWindow.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        settingsWindow.standardWindowButton(.zoomButton)?.isHidden = true
+        settingsWindow.isMovableByWindowBackground = true
+        settingsWindow.backgroundColor = NSColor(Color(hex: "1C1C1E"))
+        settingsWindow.setContentSize(NSSize(width: 680, height: 520))
+        settingsWindow.minSize = NSSize(width: 680, height: 520)
+        settingsWindow.maxSize = NSSize(width: 680, height: 520)
+        settingsWindow.isReleasedWhenClosed = false
+        centerWindow(settingsWindow, relativeTo: window)
+        settingsWindow.tabbingMode = .disallowed
+        settingsWindow.contentView = EdgeToEdgeHostingView(
+            rootView: SettingsView(viewModel: settingsViewModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
+
+        let windowController = NSWindowController(window: settingsWindow)
+        settingsWindowController = windowController
+        windowController.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    private func centerWindow(_ window: NSWindow, relativeTo parentWindow: NSWindow?) {
+        if let parentWindow = parentWindow, parentWindow.isVisible {
+            // 在主窗口中央显示
+            let parentFrame = parentWindow.frame
+            let windowSize = window.frame.size
+            let x = parentFrame.midX - windowSize.width / 2
+            let y = parentFrame.midY - windowSize.height / 2
+            window.setFrameOrigin(NSPoint(x: x, y: y))
+        } else {
+            // 屏幕中央显示
+            window.center()
+        }
+    }
+}
+
+// MARK: - NSToolbarDelegate
+extension AppDelegate: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return []
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        return []
+    }
+}
+
+// MARK: - NSWindowDelegate
+extension AppDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // 点击关闭按钮时隐藏窗口而不是退出
+        hideMainWindow()
+        return false
+    }
+}
+
+// MARK: - 下载进度视图
+struct DownloadProgressView: View {
+    @ObservedObject var updateManager = UpdateManager.shared
+    
+    let currentVersion: String
+    let latestVersion: String
+    let onInstall: () -> Void
+    let onCancel: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            // 标题
+            Text("正在下载更新...")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+            
+            // 版本信息
+            HStack(spacing: 8) {
+                Text(currentVersion)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text(latestVersion)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.blue)
+            }
+            
+            // 进度条
+            VStack(spacing: 8) {
+                ProgressView(value: updateManager.progress)
+                    .progressViewStyle(LinearProgressViewStyle())
+                    .tint(.blue)
+                
+                HStack {
+                    Text(statusText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int(updateManager.progress * 100))%")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 260)
+            
+            // 按钮
+            HStack(spacing: 12) {
+                if case .downloaded = updateManager.state {
+                    Button("立即安装") {
+                        onInstall()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                } else if case .error(let message) = updateManager.state {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                    
+                    Button("确定") {
+                        onCancel()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Button("取消") {
+                        onCancel()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 320, height: 180)
+        .background(Color.black.opacity(0.8))
+    }
+    
+    private var statusText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "正在下载..."
+        case .downloaded:
+            return "下载完成"
+        case .installing:
+            return "正在安装..."
+        case .error:
+            return "下载失败"
+        default:
+            return "准备下载..."
+        }
+    }
+}
+
+// MARK: - 自动更新弹窗（保留给 SettingsView 使用）
+struct AutoUpdateSheet: View {
+    @ObservedObject var updateChecker = UpdateChecker.shared
+    @ObservedObject var updateManager = UpdateManager.shared
+    
+    let currentVersion: String
+    let latestVersion: String
+    let release: GitHubRelease
+    let commit: GitHubCommit?
+    let onClose: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 24) {
+            // 标题图标
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue)
+                .symbolEffect(.bounce, options: .repeat(1))
+            
+            // 标题
+            Text("发现新版本")
+                .font(.system(size: 20, weight: .bold))
+            
+            // 版本信息
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("当前版本")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Text(currentVersion)
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.1))
+                        .cornerRadius(4)
+                }
+                
+                HStack(spacing: 8) {
+                    Text("最新版本")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Text(latestVersion)
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.blue.opacity(0.15))
+                        .foregroundStyle(.blue)
+                        .cornerRadius(4)
+                }
+            }
+            
+            // 更新内容
+            if let commit = commit {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("更新内容")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    
+                    Text(commit.shortMessage)
+                        .font(.system(size: 14))
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    HStack {
+                        Text(commit.shortSHA)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+                .padding(12)
+                .background(Color.secondary.opacity(0.05))
+                .cornerRadius(8)
+            }
+            
+            // 进度条或按钮
+            VStack(spacing: 12) {
+                if updateManager.state.isDownloading || updateManager.state.isInstalling {
+                    // 下载/安装中显示进度条
+                    VStack(spacing: 8) {
+                        ProgressView(value: updateManager.progress)
+                            .progressViewStyle(LinearProgressViewStyle())
+                        
+                        HStack {
+                            Text(statusText)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int(updateManager.progress * 100))%")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                
+                // 按钮行
+                HStack(spacing: 12) {
+                    // 取消/关闭按钮
+                    Button {
+                        if updateManager.state.isDownloading {
+                            // 取消下载
+                            updateManager.reset()
+                        }
+                        // 关闭窗口
+                        onClose()
+                    } label: {
+                        Text(buttonText)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(minWidth: 80)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(updateManager.state.isInstalling)
+                    
+                    // 主操作按钮
+                    if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
+                        Button {
+                            print("[AutoUpdateSheet] 按钮被点击")
+                            print("[AutoUpdateSheet] 当前状态: \(updateManager.state)")
+                            print("[AutoUpdateSheet] 开始下载版本: \(latestVersion)")
+                            Task {
+                                await updateManager.downloadUpdate(version: latestVersion)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if updateManager.state.isDownloading {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .scaleEffect(0.8)
+                                }
+                                Text(downloadButtonText)
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .frame(minWidth: 120)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(updateManager.state.isDownloading)
+                    } else if updateManager.state.isDownloaded {
+                        Button {
+                            updateManager.installUpdate()
+                        } label: {
+                            Text("立即安装")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(minWidth: 120)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .frame(width: 280)
+        }
+        .padding(24)
+        .frame(width: 360, height: 420)
+        .background(Color.black.opacity(0.8))
+    }
+    
+    // MARK: - 辅助属性
+    
+    private var statusText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "正在下载..."
+        case .installing:
+            return "正在安装..."
+        default:
+            return ""
+        }
+    }
+    
+    private var buttonText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "取消"
+        case .installing:
+            return "安装中..."
+        default:
+            return "稍后"
+        }
+    }
+    
+    private var downloadButtonText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "下载中..."
+        default:
+            return "立即更新"
+        }
     }
 }
