@@ -9,6 +9,9 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-26
@@ -62,29 +65,18 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             clean build
 
-      - name: Create Release
+      - name: Create Release & Upload Asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
-          release_name: Build ${{ github.run_number }}
+          name: Build ${{ github.run_number }}
           body: |
             Auto-generated CI build
-            
+
             Commit: ${{ github.sha }}
+          files: build/WaifuX.dmg
           draft: false
           prerelease: false
-
-      - name: Upload Release Asset
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build/WaifuX.dmg
-          asset_name: WaifuX.dmg
-          asset_content_type: application/x-apple-diskimage
