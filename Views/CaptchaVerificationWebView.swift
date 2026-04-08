@@ -56,67 +56,6 @@ struct CaptchaVerificationWebView: NSViewRepresentable {
     }
 }
 
-// MARK: - WebView Cookie 同步工具
-// 参考 Kazumi PluginCookieManager 逻辑
-
-enum WebViewCookieSync {
-    /// 将 WKWebView 的 Cookie 同步到共享的 HTTPCookieStorage
-    /// 在验证码验证完成后调用，确保后续 HTTP 请求能携带验证后的 Cookie
-    static func syncWKWebsiteDataStoreToSharedHTTPCookieStorage() async {
-        let dataStore = WKWebsiteDataStore.default()
-        let cookieStore = dataStore.httpCookieStore
-        
-        // 获取所有 Cookie
-        let cookies = await withCheckedContinuation { continuation in
-            cookieStore.getAllCookies { cookies in
-                continuation.resume(returning: cookies)
-            }
-        }
-        
-        // 同步到共享存储
-        let sharedStorage = HTTPCookieStorage.shared
-        for cookie in cookies {
-            sharedStorage.setCookie(cookie)
-            print("[WebViewCookieSync] 同步 Cookie: \(cookie.name)=\(cookie.value.prefix(20))... domain:\(cookie.domain)")
-        }
-        
-        print("[WebViewCookieSync] 同步完成，共 \(cookies.count) 个 Cookie")
-    }
-    
-    /// 清除所有 WebView Cookie（用于调试或重置验证状态）
-    static func clearAllCookies() async {
-        let dataStore = await WKWebsiteDataStore.default()
-        
-        // 清除 WKWebView 的 Cookie
-        let cookieStore = dataStore.httpCookieStore
-        let cookies = await withCheckedContinuation { continuation in
-            cookieStore.getAllCookies { cookies in
-                continuation.resume(returning: cookies)
-            }
-        }
-        
-        for cookie in cookies {
-            await cookieStore.delete(cookie)
-        }
-        
-        // 清除共享存储的 Cookie
-        let sharedStorage = HTTPCookieStorage.shared
-        if let sharedCookies = sharedStorage.cookies {
-            for cookie in sharedCookies {
-                sharedStorage.deleteCookie(cookie)
-            }
-        }
-        
-        print("[WebViewCookieSync] 已清除所有 Cookie")
-    }
-    
-    /// 为指定规则获取 Cookie 字符串（用于 HTTP 请求头）
-    static func getCookieString(forURL url: URL) -> String {
-        let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
-        return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-    }
-}
-
 // MARK: - 预览
 #Preview {
     CaptchaVerificationWebView(
