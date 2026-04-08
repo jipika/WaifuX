@@ -56,19 +56,8 @@ struct MyLibraryContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollClipDisabled()
-
-            // 编辑模式遮罩
-            if isEditing {
-                Color.black.opacity(0.3)
-                    .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation {
-                            isEditing = false
-                            selectedItems.removeAll()
-                        }
-                    }
-                    .zIndex(50)
-            }
+            // 编辑模式时禁用 ScrollView 的滚动，防止误触
+            .scrollDisabled(isEditing)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 注意：所有详情页在 ContentView 层级显示，确保能覆盖 TopNavigationBar
