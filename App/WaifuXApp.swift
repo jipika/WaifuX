@@ -110,6 +110,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 12. 恢复用户库数据（文件系统存储的收藏/历史/下载）
         UserLibrary.shared.restoreSavedData()
 
+        // 13. ⚠️ 关键：恢复 API Key 状态（必须在 ContentView 创建之前！）
+        // WallpaperViewModel 的 canShowNSFW / effectiveAPIKey 在 SwiftUI 渲染时会被调用，
+        // 如果不提前缓存 UserDefaults 值，会触发 _CFXPreferences 递归栈溢出
+        let wallpaperViewModelForRestore = WallpaperViewModel()
+        wallpaperViewModelForRestore.restoreAPIKeyState()
+
         configureApplicationIcon()
 
         // 应用主题

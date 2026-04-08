@@ -78,6 +78,10 @@ class WallpaperViewModel: ObservableObject {
     @Published private var cachedAPIKey: String?
     private var apiKeyLoaded = false
     
+    /// ⚠️ 启动时缓存的 effectiveAPIKey（从 UserDefaults 延迟读取，避免 _CFXPreferences 栈溢出）
+    /// 使用 static 保证所有实例共享（必须在 AppDelegate 中调用 restoreAPIKeyState() 初始化）
+    private static var _launchCachedEffectiveKey: String? = nil
+    
     /// 异步加载 API Key（在后台线程执行 Keychain 操作）
     private func loadAPIKeyAsync() async -> String? {
         let query: [String: Any] = [
@@ -203,25 +207,38 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 是否可以显示 NSFW 内容
     var canShowNSFW: Bool {
-        // 优先检查 UserDefaults（设置页写入的位置），其次检查 Keychain
-        let settingsKey = UserDefaults.standard.string(forKey: "wallhaven_api_key") ?? ""
-        let keychainKey = apiKeyConfigured ? (cachedAPIKey ?? "") : ""
-        let effectiveKey = settingsKey.isEmpty ? keychainKey : settingsKey
-        return !effectiveKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // ⚠️ 绝对不能直接读 UserDefaults.standard！macOS 26+ 会触发 _CFXPreferences 递归栈溢出
+        // 使用启动时缓存的值（由 AppDelegate.restoreAPIKeyState() 初始化）
+        if let cached = Self._launchCachedEffectiveKey {
+            return !cached.isEmpty
+        }
+        // 启动恢复之前：回退到 Keychain 缓存（不触发 UserDefaults）
+        return !(cachedAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     /// 获取有效的 API Key（统一从 UserDefaults 优先，兼容 Keychain）
     /// 设置页通过 UserDefaults 写入，业务逻辑从这里读取，保证一致性
     var effectiveAPIKey: String? {
-        // 1. 优先取 UserDefaults（设置页 SecureField 写入的位置）
-        if let udKey = UserDefaults.standard.string(forKey: "wallhaven_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines), !udKey.isEmpty {
-            return udKey
+        // ⚠️ 绝对不能直接读 UserDefaults.standard！使用启动缓存
+        if let cached = Self._launchCachedEffectiveKey, !cached.isEmpty {
+            return cached
         }
-
-        // 2. 其次取 Keychain（旧版兼容 / WallpaperViewModel 自身 setter 写入的）
+        // 启动恢复之前：回退到 Keychain 缓存
         if apiKeyLoaded, let cached = cachedAPIKey, !cached.isEmpty { return cached }
-
         return nil
+    }
+    
+    /// ⚠️ 延迟恢复 API Key 状态（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
+    /// 从 UserDefaults 安全地读取 API Key 并缓存到内存中（static，所有实例共享）
+    func restoreAPIKeyState() {
+        let settingsKey = UserDefaults.standard.string(forKey: "wallhaven_api_key")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        Self._launchCachedEffectiveKey = settingsKey.isEmpty ? nil : settingsKey
+        
+        // 同步加载 Keychain 到内存缓存
+        Task {
+            await loadAPIKeyIfNeeded()
+        }
     }
 
     // MARK: - 收藏相关
