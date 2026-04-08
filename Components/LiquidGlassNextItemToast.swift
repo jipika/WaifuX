@@ -78,7 +78,7 @@ public class NextItemDataSource: ObservableObject {
     }
 }
 
-// MARK: - 深色液态玻璃下一张弹窗
+// MARK: - 深色液态玻璃下一张弹窗 - iOS 丝滑动画风格
 public struct LiquidGlassNextItemToast: View {
     let nextItem: NextItemPreviewable?
     let onTap: () -> Void
@@ -89,11 +89,25 @@ public struct LiquidGlassNextItemToast: View {
     @State private var viewTimer: Timer?
     @State private var isHovered = false
     @State private var isPressed = false
+    @State private var contentOpacity: Double = 0
+    @State private var contentScale: Double = 0.85
+    @State private var contentOffset: CGFloat = 20
+    @State private var isDismissing: Bool = false
 
     // 配置
     private let appearDelay: TimeInterval = 3.0
     private let toastHeight: CGFloat = 80
     private let toastWidth: CGFloat = 280
+
+    /// iOS 丝滑弹簧动画 - 用于入场
+    private var iOSSpringAnimation: Animation {
+        .spring(response: 0.42, dampingFraction: 0.78, blendDuration: 0)
+    }
+
+    /// iOS 丝滑弹簧动画 - 用于退场（稍快）
+    private var iOSDismissAnimation: Animation {
+        .spring(response: 0.28, dampingFraction: 0.88, blendDuration: 0)
+    }
 
     public init(
         nextItem: NextItemPreviewable?,
@@ -111,18 +125,32 @@ public struct LiquidGlassNextItemToast: View {
         GeometryReader { geometry in
             ZStack {
                 if isVisible, let item = nextItem {
+                    // iOS 风格：背景遮罩层（极轻微暗化，不拦截点击）
+                    Color.black.opacity(0.08)
+                        .ignoresSafeArea()
+                        .opacity(contentOpacity * 0.6)
+                        .allowsHitTesting(false)
+
                     toastContent(item: item)
                         .frame(width: toastWidth, height: toastHeight)
                         .position(
                             x: geometry.size.width - toastWidth / 2 - 20,
                             y: geometry.size.height - toastHeight / 2 - 20
                         )
+                        // 确保 toast 整个区域可点击
+                        .contentShape(Rectangle())
+                        .opacity(contentOpacity)
+                        // 入场：从右边缘滑入 + 缩放
+                        .scaleEffect(contentScale, anchor: .trailing)
+                        .offset(x: (1 - contentOpacity) * 60, y: contentOffset)
                         .transition(
                             .asymmetric(
                                 insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .trailing).combined(with: .opacity)
+                                removal: .opacity
                             )
                         )
+                        // 放大散开消失效果：完成时模糊扩散
+                        .blur(radius: isDismissing ? 8 : (1 - contentScale) * 3)
                 }
             }
             .onAppear {
@@ -169,12 +197,12 @@ public struct LiquidGlassNextItemToast: View {
 
                     Spacer()
 
-                    // 向上箭头指示
+                    // 向下箭头指示（弹窗在底部）
                     VStack(spacing: 2) {
-                        Image(systemName: "chevron.up")
+                        Image(systemName: "chevron.down")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Image(systemName: "chevron.up")
+                        Image(systemName: "chevron.down")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.white.opacity(0.4))
                     }
@@ -189,13 +217,19 @@ public struct LiquidGlassNextItemToast: View {
                     isHovered: isHovered
                 )
             )
+            // iOS 风格按压反馈：轻微缩放 + 暗色叠加
             .scaleEffect(isPressed ? 0.96 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: isPressed)
+            .animation(iOSSmoothEase(duration: 0.18), value: isPressed)
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(iOSSmoothEase(duration: 0.25)) {
                     isHovered = hovering
                 }
             }
+        }
+        
+        /// iOS 平滑缓动曲线
+        private func iOSSmoothEase(duration: TimeInterval) -> Animation {
+            .easeInOut(duration: duration)
         }
     }
     
@@ -218,10 +252,9 @@ public struct LiquidGlassNextItemToast: View {
             isHovered: $isHovered,
             isPressed: $isPressed,
             onTap: {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    isVisible = false
+                dismissWithAnimation {
+                    onTap()
                 }
-                onTap()
             }
         )
     }
@@ -265,15 +298,54 @@ public struct LiquidGlassNextItemToast: View {
         }
     }
 
-    // MARK: - 计时器管理
+    // MARK: - 计时器管理 & iOS 丝滑动画控制
+
+    /// iOS 风格入场动画：右侧滑入 + 缩放（类似 iOS 卡片插入效果）
+    private func performIOSShowAnimation() {
+        // 重置初始状态
+        isDismissing = false
+        contentOpacity = 0
+        contentScale = 0.85
+        contentOffset = 8
+
+        withAnimation(iOSSpringAnimation) {
+            contentOpacity = 1
+            contentScale = 1.0
+            contentOffset = 0
+        }
+    }
+
+    /// iOS 风格退场动画：放大 + 模糊散开消失（类似粒子扩散）
+    private func dismissWithAnimation(completion: @escaping () -> Void) {
+        isDismissing = true
+
+        // 先快速放大到超过原始尺寸
+        withAnimation(.easeOut(duration: 0.15)) {
+            contentOpacity = 1
+            contentScale = 1.08
+        }
+
+        // 然后模糊散开 + 淡出
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [self] in
+            withAnimation(.easeOut(duration: 0.22)) {
+                contentOpacity = 0
+                contentScale = 1.20
+                contentOffset = -4
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+                completion()
+            }
+        }
+    }
+
     private func startViewTimer() {
         stopViewTimer()
         Task { @MainActor in
             viewTimer = Timer.scheduledTimer(withTimeInterval: appearDelay, repeats: false) { _ in
                 Task { @MainActor in
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                        isVisible = true
-                    }
+                    isVisible = true
+                    performIOSShowAnimation()
                 }
             }
         }
@@ -285,7 +357,7 @@ public struct LiquidGlassNextItemToast: View {
     }
 
     private func resetViewTimer() {
-        withAnimation(.easeOut(duration: 0.2)) {
+        dismissWithAnimation { [self] in
             isVisible = false
         }
         startViewTimer()
@@ -479,7 +551,7 @@ public struct DetailPageWithNextItemToast<Content: View>: View {
         ZStack {
             content
 
-            // 下一张弹窗
+            // 下一张弹窗（容器本身不拦截点击，只有 toast 按钮接收点击）
             LiquidGlassNextItemToast(
                 nextItem: dataSource.nextItem,
                 onTap: {
@@ -493,7 +565,6 @@ public struct DetailPageWithNextItemToast<Content: View>: View {
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .allowsHitTesting(dataSource.nextItem != nil)
         }
     }
 }

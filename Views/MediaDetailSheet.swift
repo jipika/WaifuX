@@ -17,6 +17,7 @@ struct MediaDetailSheet: View {
     @State private var isMuted = true
     @State private var isVisible = false
     @State private var isMediaLoaded = false
+    @State private var isSourcesReady = false // 来源是否排序/加载完毕
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
@@ -122,7 +123,8 @@ struct MediaDetailSheet: View {
                         .ignoresSafeArea()
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            // iOS 丝滑关闭：弹簧动画
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                                 showInfoBubble = false
                             }
                         }
@@ -306,7 +308,7 @@ struct MediaDetailSheet: View {
         return VStack(alignment: .trailing, spacing: 14) {
             HStack(spacing: 10) {
                 Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                         showInfoBubble.toggle()
                     }
                 } label: {
@@ -319,7 +321,7 @@ struct MediaDetailSheet: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                         isHeroContentHidden.toggle()
                     }
                 } label: {
@@ -336,8 +338,8 @@ struct MediaDetailSheet: View {
                 detailInfoBubble(width: bubbleWidth)
                     .transition(
                         .asymmetric(
-                            insertion: .scale(scale: 0.92, anchor: .topTrailing).combined(with: .opacity),
-                            removal: .opacity
+                            insertion: .scale(scale: 0.88, anchor: .topTrailing).combined(with: .opacity),
+                            removal: .scale(scale: 0.94, anchor: .topTrailing).combined(with: .opacity)
                         )
                     )
             }
@@ -557,32 +559,39 @@ struct MediaDetailSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     sectionTitle(t("downloadSources"))
 
-                    ForEach(resolvedItem.downloadOptions.prefix(3)) { option in
-                        HStack(spacing: 10) {
-                            Text(option.label)
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.92))
-                                .frame(width: 44, alignment: .leading)
+                    if isSourcesReady {
+                        ForEach(resolvedItem.downloadOptions.prefix(3)) { option in
+                            HStack(spacing: 10) {
+                                Text(option.label)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.92))
+                                    .frame(width: 44, alignment: .leading)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.resolutionText)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.82))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.resolutionText)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.82))
 
-                                Text(option.fileSizeLabel)
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.46))
+                                    Text(option.fileSizeLabel)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.46))
+                                }
+
+                                Spacer(minLength: 0)
+
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.42))
                             }
-
-                            Spacer(minLength: 0)
-
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.42))
+                            .padding(.horizontal, 12)
+                            .frame(height: 46)
+                            .detailGlassRoundedRectChrome(cornerRadius: 14, level: .prominent)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
-                        .padding(.horizontal, 12)
-                        .frame(height: 46)
-                        .detailGlassRoundedRectChrome(cornerRadius: 14, level: .prominent)
+                    } else {
+                        // 来源加载中的占位动画
+                        SourceLoadingPlaceholder()
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
                     }
                 }
             }
@@ -647,6 +656,10 @@ struct MediaDetailSheet: View {
         let detail = await viewModel.ensureDetail(for: initialItem)
         resolvedItem = detail
         viewModel.recordViewed(detail)
+        // 来源数据已加载并排序完成
+        withAnimation(.easeInOut(duration: 0.3)) {
+            isSourcesReady = true
+        }
     }
 
     // MARK: - 下一张弹窗相关方法
@@ -698,12 +711,14 @@ struct MediaDetailSheet: View {
     }
 
     private func reloadMedia(_ newItem: MediaItem) {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        // iOS 丝滑切换：交叉淡入淡出 + 微位移
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.82, blendDuration: 0)) {
             // 更新当前媒体项
             resolvedItem = newItem
 
             // 重置状态
             isMediaLoaded = false
+            isSourcesReady = false
             showInfoBubble = false
         }
 
@@ -717,6 +732,10 @@ struct MediaDetailSheet: View {
         let detail = await viewModel.ensureDetail(for: item)
         resolvedItem = detail
         viewModel.recordViewed(detail)
+        // 来源数据已加载并排序完成
+        withAnimation(.easeInOut(duration: 0.3)) {
+            isSourcesReady = true
+        }
     }
 
     private func downloadMedia() {
@@ -943,5 +962,79 @@ private struct LoadingOverlayView: View {
             }
         }
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - 来源加载占位动画
+private struct SourceLoadingPlaceholder: View {
+    @State private var rotationAngle: Double = 0
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // 模拟 3 个来源行的骨架
+            ForEach(0..<3, id: \.self) { _ in
+                HStack(spacing: 10) {
+                    // label 骨架
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.white.opacity(0.08))
+                        .frame(width: 36, height: 12)
+
+                    // 分辨率 + 文件大小骨架
+                    VStack(alignment: .leading, spacing: 4) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.white.opacity(0.08))
+                            .frame(width: 64, height: 10)
+
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.white.opacity(0.05))
+                            .frame(width: 44, height: 8)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    // 图标骨架
+                    Circle()
+                        .fill(Color.white.opacity(0.06))
+                        .frame(width: 14, height: 14)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 46)
+                .detailGlassRoundedRectChrome(cornerRadius: 14, level: .prominent)
+                .overlay(alignment: .center) {
+                    // 微妙的脉冲动画暗示正在加载
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(
+                            RadialGradient(
+                                colors: [.white.opacity(0.03), .clear],
+                                center: .center,
+                                startRadius: 10,
+                                endRadius: 40
+                            )
+                        )
+                        .pulseAnimation()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 脉冲动画修饰器
+private struct PulseModifier: ViewModifier {
+    @State private var isPulsing = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isPulsing ? 1 : 0.5)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                    isPulsing = true
+                }
+            }
+    }
+}
+
+extension View {
+    func pulseAnimation() -> some View {
+        modifier(PulseModifier())
     }
 }

@@ -123,6 +123,12 @@ class AnimeDetailViewModel: ObservableObject {
     
     // MARK: - 规则加载状态
     @Published var isLoadingRules: Bool = false
+
+    // MARK: - 初始排序冻结机制
+    /// 首次全部源完成搜索（含集数解析）后，排序即固定，不再因用户操作而变化
+    @Published var isInitialLoadComplete: Bool = false
+    /// 初始排序完成时锁定的源 ID 顺序（后续不再改变）
+    @Published var frozenSourceOrder: [String] = []
     
     // MARK: - 收藏状态
     @Published var isFavorite: Bool = false
@@ -336,6 +342,10 @@ class AnimeDetailViewModel: ObservableObject {
                 sourceResults[index] = updatedResult
             }
         }
+
+        // 检查是否所有源都完成初始搜索（仅对不自动查询剧集的终端状态）
+        // queryEpisodes 成功后会自行调用 checkAndFreezeInitialOrder
+        checkAndFreezeInitialOrder()
     }
 
     /// 第二步：用选中的结果获取剧集列表
@@ -390,6 +400,8 @@ class AnimeDetailViewModel: ObservableObject {
                     updatedResult.status = .noResult
                     sourceResults[index] = updatedResult
                 }
+                // noResult 也是终端状态，检查是否需要冻结排序
+                checkAndFreezeInitialOrder()
                 return
             }
 
@@ -405,6 +417,9 @@ class AnimeDetailViewModel: ObservableObject {
                 updatedResult.status = .success
                 sourceResults[index] = updatedResult
             }
+
+            // 检查是否所有源都完成初始搜索，如果是则冻结排序
+            checkAndFreezeInitialOrder()
 
         } catch let error as AnimeParserError {
             await MainActor.run {
@@ -422,18 +437,82 @@ class AnimeDetailViewModel: ObservableObject {
                 }
                 sourceResults[index] = updatedResult
             }
+            // captcha/error 也是终端状态，检查是否需要冻结排序
+            checkAndFreezeInitialOrder()
         } catch {
             await MainActor.run {
                 var updatedResult = sourceResults[index]
                 updatedResult.status = .error(error.localizedDescription)
                 sourceResults[index] = updatedResult
             }
+            // captcha/error 也是终端状态，检查是否需要冻结排序
+            checkAndFreezeInitialOrder()
         }
     }
 
     /// 用户选择搜索结果后调用 (Kazumi 风格)
     func selectSearchItem(_ item: SourceSearchItem, for rule: AnimeRule) async {
         await queryEpisodes(for: item, in: rule)
+    }
+
+    // MARK: - 初始排序冻结机制
+
+    /// 渐进式展示阈值：当完成比例达到此值时即冻结排序（0.8 = 80%）
+    private let initialLoadThreshold: Double = 0.8
+
+    /// 最少等待完成的源数量（避免源太少时过早触发）
+    private let minimumSourcesToWait: Int = 3
+
+    /// 检查是否足够多的非 deprecated 源已完成初始搜索
+    /// 条件：已完成数 >= 总数 * threshold 且已完成数 >= minimumSourcesToWait
+    /// 或者：所有活跃源都已完成（100% 场景）
+    func checkAndFreezeInitialOrder() {
+        guard !isInitialLoadComplete else { return }
+
+        let activeSources = sourceResults.filter { !$0.rule.deprecated }
+        guard !activeSources.isEmpty else { return }
+
+        // 统计已完成的源（terminal 状态）
+        let completedCount = activeSources.filter { status in
+            switch status.status {
+            case .idle, .loading:
+                return false  // 还在进行中
+            case .success, .needsSelection, .noResult, .error, .captcha:
+                return true   // 已有最终状态
+            }
+        }.count
+
+        let totalCount = activeSources.count
+        let ratio = Double(completedCount) / Double(totalCount)
+
+        // 判断是否可以冻结：
+        // 1. 全部完成（兜底），或
+        // 2. 达到阈值比例 且 达到最少等待数量
+        let shouldFreeze = (completedCount == totalCount) ||
+            (ratio >= initialLoadThreshold && completedCount >= minimumSourcesToWait)
+
+        if shouldFreeze {
+            // 仅对已完成的源排序冻结（未完成的排在后面保持原位）
+            let sorted = activeSources.sorted { a, b in
+                priorityForFreezing(a.status) < priorityForFreezing(b.status)
+            }
+            self.frozenSourceOrder = sorted.map { $0.id }
+            self.isInitialLoadComplete = true
+            print("[AnimeDetailViewModel] ✅ 初始排序已完成并冻结，\(completedCount)/\(totalCount) 个源完成 (比例: \(String(format: "%.0f", ratio * 100))%)")
+        }
+    }
+
+    /// 排序优先级（仅用于初始冻结排序）
+    private func priorityForFreezing(_ status: SourceQueryStatus) -> Int {
+        switch status {
+        case .success: return 0
+        case .needsSelection: return 1
+        case .captcha: return 2
+        case .error: return 3
+        case .noResult: return 4
+        case .loading: return 5
+        case .idle: return 6
+        }
     }
     
     /// 触发 WebView 验证码验证（直接使用 WebView 完成验证）

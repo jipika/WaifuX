@@ -116,7 +116,8 @@ struct WallpaperDetailSheet: View {
                         .ignoresSafeArea()
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            // iOS 丝滑关闭：弹簧动画
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                                 showInfoBubble = false
                             }
                         }
@@ -156,7 +157,8 @@ struct WallpaperDetailSheet: View {
         }
         .navigationBarBackButtonHidden(true)
         .onAppear {
-            withAnimation(.easeOut(duration: 0.15).delay(0.05)) {
+            // iOS 丝滑入场：分阶段渐显，模拟原生页面转场
+            withAnimation(.easeOut(duration: 0.12).delay(0.02)) {
                 isVisible = true
             }
             setupNextItemDataSource()
@@ -325,7 +327,7 @@ struct WallpaperDetailSheet: View {
         return VStack(alignment: .trailing, spacing: 14) {
             HStack(spacing: 10) {
                 Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                         showInfoBubble.toggle()
                     }
                 } label: {
@@ -338,7 +340,7 @@ struct WallpaperDetailSheet: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
                         isHeroContentHidden.toggle()
                     }
                 } label: {
@@ -355,8 +357,8 @@ struct WallpaperDetailSheet: View {
                 detailInfoBubble(width: bubbleWidth)
                     .transition(
                         .asymmetric(
-                            insertion: .scale(scale: 0.92, anchor: .topTrailing).combined(with: .opacity),
-                            removal: .opacity
+                            insertion: .scale(scale: 0.88, anchor: .topTrailing).combined(with: .opacity),
+                            removal: .scale(scale: 0.94, anchor: .topTrailing).combined(with: .opacity)
                         )
                     )
             }
@@ -935,7 +937,8 @@ struct WallpaperDetailSheet: View {
     }
 
     private func reloadWallpaper(_ newWallpaper: Wallpaper) {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        // iOS 丝滑切换：交叉淡入淡出 + 微位移
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.82, blendDuration: 0)) {
             // 更新当前壁纸
             resolvedWallpaper = newWallpaper
 

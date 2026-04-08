@@ -356,11 +356,21 @@ private struct RightPanel: View {
 
     var activeSources: [SourceSearchResult] {
         let sources = viewModel.sourceResults.filter { !$0.rule.deprecated }
-        // 排序: 绿色(成功) > 橙色(需要选择) > 蓝色(验证码) > 其他
-        return sources.sorted { a, b in
-            let priorityA = sortPriority(for: a.status)
-            let priorityB = sortPriority(for: b.status)
-            return priorityA < priorityB
+        
+        // 如果初始排序已冻结，按冻结顺序排列；否则实时排序
+        if viewModel.isInitialLoadComplete, !viewModel.frozenSourceOrder.isEmpty {
+            return sources.sorted { a, b in
+                let idxA = viewModel.frozenSourceOrder.firstIndex(of: a.id) ?? Int.max
+                let idxB = viewModel.frozenSourceOrder.firstIndex(of: b.id) ?? Int.max
+                return idxA < idxB
+            }
+        } else {
+            // 尚未冻结：实时排序（绿色 > 橙色 > 蓝色 > 其他）
+            return sources.sorted { a, b in
+                let priorityA = sortPriority(for: a.status)
+                let priorityB = sortPriority(for: b.status)
+                return priorityA < priorityB
+            }
         }
     }
     
@@ -629,6 +639,9 @@ private struct SourcesContentView: View {
             // 规则加载中显示加载动画，避免用户看到突然变化
             if viewModel.isLoadingRules {
                 LoadingStateView(message: "正在加载源...")
+            } else if !viewModel.isInitialLoadComplete {
+                // 初始排序尚未冻结：所有源还在搜索或解析集数中，显示统一加载状态
+                LoadingStateView(message: "正在分析来源...")
             } else if sources.isEmpty {
                 EmptyStateView(
                     icon: "exclamationmark.triangle.fill",

@@ -426,16 +426,12 @@ actor AnimeParser {
     private func detectCommonCaptcha(in html: String) -> Bool {
         let lowercased = html.lowercased()
         
-        // 强验证码特征（高置信度）
+        // 强验证码特征（高置信度）- 这些几乎 100% 确定是验证码页面
         let strongCaptchaIndicators = [
-            "cf-browser-verification",
-            "__cf_chl_jschl_tk__",
-            "turnstile",
-            "challenge-platform",
-            "g-recaptcha",
-            "data-callback",
-            "grecaptcha",
-            "captcha-response"
+            "cf-browser-verification",     // Cloudflare 浏览器验证页面
+            "__cf_chl_jschl_tk__",      // Cloudflare JS Challenge Token
+            "turnstile/v",               // Cloudflare Turnstile widget（精确匹配）
+            "challenge-platform",        // Cloudflare Challenge 平台
         ]
         
         // 检查强特征 - 这些几乎肯定是验证码
@@ -454,24 +450,70 @@ actor AnimeParser {
             }
         }
         
-        // 弱验证码关键词 - 需要多个同时出现或配合特定上下文
-        // 注意："验证"这个词在中文网站太常见（如"验证邮箱"），单独出现不应触发
-        let weakCaptchaKeywords = [
-            "captcha",
-            "i'm not a robot",
-            "recaptcha",
-            "hcaptcha",
+        // === 以下为需要上下文校验的弱/中特征 ===
+
+        // reCAPTCHA / hCaptcha - 只有在真正嵌入验证组件时才算
+        let captchaWidgetPatterns = [
+            ("g-recaptcha", "class=\"g-recaptcha\""),
+            ("h-captcha", "class=\"h-captcha\""),
+            ("grecaptcha-display", "grecaptcha-display"),
+            ("hcaptcha-widget", "data-hcaptcha-widget"),
+        ]
+
+        for (keyword, contextPattern) in captchaWidgetPatterns {
+            guard lowercased.contains(keyword) else { continue }
+            if lowercased.contains(contextPattern) {
+                print("[AnimeParser] 检测到验证码组件: \(contextPattern)")
+                return true
+            }
+        }
+
+        // data-callback 仅在 reCAPTCHA 表单上下文中
+        if lowercased.contains("data-callback") {
+            if lowercased.contains("sitekey") || lowercased.contains("g-recaptcha") {
+                print("[AnimeParser] 检测到 data-callback + sitekey (reCAPTCHA 表单)")
+                return true
+            }
+        }
+
+        // 中文验证码关键词 - 需要表单/图片上下文
+        let chineseCaptchaKeywords = [
             "智能验证",
             "安全验证中",
-            "请完成安全验证"
+            "请完成安全验证",
+            "请输入验证码",
+            "点击完成验证",
+            "滑动验证"
         ]
-        
-        // 检查弱特征
-        if weakCaptchaKeywords.contains(where: { lowercased.contains($0) }) {
-            print("[AnimeParser] 检测到验证码关键词")
-            return true
+
+        for keyword in chineseCaptchaKeywords {
+            guard lowercased.contains(keyword) else { continue }
+            if lowercased.contains("captcha") || lowercased.contains("验证码") ||
+               lowercased.contains("<img") || lowercased.contains("<input") ||
+               lowercased.contains("<form") {
+                print("[AnimeParser] 检测到中文验证码上下文: \(keyword)")
+                return true
+            }
         }
-        
+
+        // 英文验证码关键词 - 同样需要上下文
+        let englishCaptchaKeywords = [
+            "i'm not a robot",
+            "i am not a robot",
+            "not a robot",
+            "human verification",
+            "please verify"
+        ]
+
+        for keyword in englishCaptchaKeywords {
+            guard lowercased.contains(keyword) else { continue }
+            if lowercased.contains("recaptcha") || lowercased.contains("hcaptcha") ||
+               lowercased.contains("captcha-image") || lowercased.contains("captcha-img") {
+                print("[AnimeParser] 检测到英文验证码上下文: \(keyword)")
+                return true
+            }
+        }
+
         return false
     }
     

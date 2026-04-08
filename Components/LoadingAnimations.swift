@@ -435,6 +435,270 @@ struct PaginationLoadingView: View {
     }
 }
 
+// MARK: - 🍎 分页骨架脉冲行（滚动到底部时的占位动画）
+
+/// 通用分页加载骨架脉冲占位符
+/// 在 LazyVGrid 底部追加一行与真实卡片同尺寸的骨架卡片，
+/// 配合 shimmer 脉冲效果，让用户感知到"正在加载更多内容"
+struct PaginationSkeletonRow: View {
+    /// 卡片数量（通常一行的列数）
+    let cardCount: Int
+    /// 单张卡片的宽度
+    let cardWidth: CGFloat
+    /// 单张卡片的高度
+    let cardHeight: CGFloat
+    /// 列间距
+    let spacing: CGFloat
+    /// 卡片圆角
+    let cornerRadius: CGFloat
+    /// 骨架类型
+    let style: SkeletonRowStyle
+
+    enum SkeletonRowStyle {
+        case wallpaper   // 壁纸卡片：顶部图片 + 底部文字栏
+        case media       // 媒体卡片：同壁纸但可能有播放按钮
+        case anime       // 动漫卡片：竖版比例 + 标题+集数
+    }
+
+    init(
+        cardCount: Int,
+        cardWidth: CGFloat,
+        cardHeight: CGFloat,
+        spacing: CGFloat = 16,
+        cornerRadius: CGFloat = 16,
+        style: SkeletonRowStyle = .wallpaper
+    ) {
+        self.cardCount = cardCount
+        self.cardWidth = cardWidth
+        self.cardHeight = cardHeight
+        self.spacing = spacing
+        self.cornerRadius = cornerRadius
+        self.style = style
+    }
+
+    var body: some View {
+        // 使用固定布局的 HStack 确保尺寸精确匹配真实卡片
+        HStack(spacing: spacing) {
+            ForEach(0..<cardCount, id: \.self) { _ in
+                skeletonCard
+                    .frame(width: cardWidth, height: cardHeight)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var skeletonCard: some View {
+        switch style {
+        case .wallpaper, .media:
+            WallpaperPaginationSkeleton(cornerRadius: cornerRadius)
+        case .anime:
+            AnimePaginationSkeleton()
+        }
+    }
+}
+
+// MARK: - 壁纸/媒体分页骨架卡片
+
+struct WallpaperPaginationSkeleton: View {
+    let cornerRadius: CGFloat
+
+    private static let thumbShape = UnevenRoundedRectangle(
+        topLeadingRadius: 14,
+        bottomLeadingRadius: 0,
+        bottomTrailingRadius: 0,
+        topTrailingRadius: 14,
+        style: .continuous
+    )
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 图片区域骨架 - 渐变底色 + shimmer
+            LinearGradient(
+                colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .shimmer()
+
+            // 底部信息栏骨架
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white.opacity(0.07))
+                    .frame(width: 90, height: 12)
+
+                Spacer(minLength: 12)
+
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(width: 50, height: 12)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(Color.black.opacity(0.46))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - 动漫分页骨架卡片
+
+struct AnimePaginationSkeleton: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 竖版图片骨架
+            LinearGradient(
+                colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .shimmer()
+
+            // 信息栏骨架
+            VStack(alignment: .leading, spacing: 4) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 100, height: 13)
+
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(width: 50, height: 10)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.46))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.05), lineWidth: 0.5)
+        )
+    }
+}
+
+// MARK: - 脉冲式分页加载容器
+
+/// 智能分页加载底部：显示骨架脉冲行 + 加载指示器
+/// 替代原来的简单 PaginationLoadingView
+struct PaginationSkeletonFooter: View {
+    let isLoading: Bool
+    let hasMorePages: Bool
+    let skeletonRow: PaginationSkeletonRow?
+
+    init(isLoading: Bool, hasMorePages: Bool = true, skeletonRow: PaginationSkeletonRow? = nil) {
+        self.isLoading = isLoading
+        self.hasMorePages = hasMorePages
+        self.skeletonRow = skeletonRow
+    }
+
+    var body: some View {
+        if isLoading && hasMorePages {
+            // 加载中：显示骨架脉冲行 + spinner
+            VStack(spacing: 8) {
+                if let row = skeletonRow {
+                    row
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+
+                PaginationLoadingView()
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            .animation(.easeOut(duration: 0.25), value: isLoading)
+        } else if !hasMorePages && !isLoading {
+            // 全部加载完毕：简洁提示
+            HStack(spacing: 6) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 32, height: 1)
+
+                Text("— \(t("noMore")) —")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.25))
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 32, height: 1)
+            }
+            .padding(.vertical, 24)
+            .transition(.opacity)
+        } else {
+            Color.clear.frame(height: 20)
+        }
+    }
+}
+
+// MARK: - 分页加载底部脉冲色块
+
+/// 轻量级分页加载占位：一个带 shimmer 脉冲的半透明渐变色块，
+/// 放在 LazyVGrid 内部 ForEach 末尾，跨整行显示（.gridCellColumns）。
+/// 占据 grid 布局空间 → scroll view 正确计算内容高度 → 新数据不需要额外滚动。
+/// 数据加载完成后被新卡片推走，或切换为"到底了"提示。
+struct PaginationShimmerOverlay: View {
+    let isLoading: Bool
+    let hasMorePages: Bool
+
+    init(isLoading: Bool, hasMorePages: Bool = true) {
+        self.isLoading = isLoading
+        self.hasMorePages = hasMorePages
+    }
+
+    var body: some View {
+        if isLoading && hasMorePages {
+            shimmerBlock
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .animation(.easeOut(duration: 0.3), value: isLoading)
+        } else if !hasMorePages && !isLoading {
+            HStack(spacing: 6) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 32, height: 1)
+
+                Text("— \(t("noMore")) —")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.25))
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 32, height: 1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 24)
+            .transition(.opacity)
+        } else {
+            Color.clear.frame(height: 20)
+        }
+    }
+
+    /// 核心脉冲色块：静态渐变 + 极轻量呼吸，零持续重绘开销
+    private var shimmerBlock: some View {
+        // 渐变底色：透明 → 暗色，暗示"下方还有内容在加载"
+        LinearGradient(
+            colors: [
+                Color.clear,
+                Color.black.opacity(0.20),
+                Color.black.opacity(0.35)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        // 用已有 ShimmerModifier（overlay+mask 方案，GPU 层面扫光）
+        // ShimmerModifier 内部是 .repeatForever 但通过 GeometryReader mask 实现，
+        // SwiftUI 不会每帧重建 body，性能远优于 @State offset 动画
+        .shimmer()
+        .frame(height: 260)
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 20,
+                topTrailingRadius: 20,
+                style: .continuous
+            )
+        )
+    }
+}
+
 // MARK: - 空状态动画视图
 struct AnimatedEmptyState: View {
     let icon: String

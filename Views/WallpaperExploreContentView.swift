@@ -33,6 +33,10 @@ struct WallpaperExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
+            // 命名坐标空间，供视差效果使用
+            .coordinateSpace(name: "exploreScroll")
+            // iOS 风格弹性滚动：惯性减速 + 弹性边界
+            .iosSmoothScroll()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -79,9 +83,17 @@ struct WallpaperExploreContentView: View {
         }
         .onChange(of: viewModel.sortingOption) { _, _ in rebuildVisibleWallpapers() }
         .onChange(of: viewModel.orderDescending) { _, _ in rebuildVisibleWallpapers() }
-        .onChange(of: viewModel.wallpapers) { _, _ in
-            // 当壁纸数据变化时，重新构建显示的列表
-            rebuildVisibleWallpapers()
+        .onChange(of: viewModel.wallpapers) { oldVal, newVal in
+            // 当壁纸数据变化时，增量追加新数据而非全量重建
+            // 只有当数据源完全替换（如搜索、重置）时才全量重建
+            if newVal.isEmpty || displayedWallpapers.isEmpty {
+                rebuildVisibleWallpapers()
+            } else if !oldVal.isEmpty, newVal.count > oldVal.count {
+                // 数据追加场景：只追加新数据，避免 LazyVGrid 全量刷新
+                appendNewWallpapers()
+            } else {
+                rebuildVisibleWallpapers()
+            }
         }
         .onChange(of: displayedWallpapers.first?.id) { _, _ in
             syncExploreAtmosphere()
@@ -361,7 +373,8 @@ struct WallpaperExploreContentView: View {
                 let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
                 let spacing: CGFloat = 16
                 let totalSpacing = spacing * CGFloat(columnCount - 1)
-                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分，floor 避免亚像素误差
+                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
                 let cardHeight = cardWidth * 0.6
                 
                 // 动态创建固定列
@@ -372,7 +385,10 @@ struct WallpaperExploreContentView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(Array(displayedWallpapers.enumerated()), id: \.element.id) { index, wallpaper in
+                    ForEach(displayedWallpapers) { wallpaper in
+                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
+                        let cardIndex = displayedWallpapers.firstIndex(where: { $0.id == wallpaper.id }) ?? 0
+
                         SimpleWallpaperCard(
                             wallpaper: wallpaper,
                             cardWidth: cardWidth,
@@ -380,8 +396,10 @@ struct WallpaperExploreContentView: View {
                             isFavorite: viewModel.isFavorite(wallpaper),
                             onTap: { selectedWallpaper = wallpaper }
                         )
+                        // iOS 风格入场动画：淡入 + 上移 + 微缩放（每张卡片错开 30ms）
+                        .iosFadeInOnAppear(index: cardIndex)
                         .onAppear {
-                            guard index >= displayedWallpapers.count - 6 else { return }
+                            guard cardIndex >= displayedWallpapers.count - 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
@@ -392,18 +410,14 @@ struct WallpaperExploreContentView: View {
                             }
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
 
-                // 加载指示器 - 固定占位避免抖动
-                Color.clear
-                    .frame(height: 20)
-                    .overlay(
-                        PaginationLoadingView()
-                            .opacity(viewModel.isLoading && !displayedWallpapers.isEmpty ? 1 : 0)
-                            .animation(.easeInOut(duration: 0.2), value: viewModel.isLoading)
+                    // 🍎 脉冲色块放在 grid 内部跨整行，占据布局空间
+                    PaginationShimmerOverlay(
+                        isLoading: isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty),
+                        hasMorePages: viewModel.hasMorePages
                     )
+                    .gridCellColumns(columnCount)
+                }
             }
         }
     }
@@ -780,6 +794,7 @@ private struct SimpleWallpaperCard: View {
     let onTap: () -> Void
     @State private var isHovered = false
 
+    // 预计算所有条件属性（避免 body 中 switch/三目运算导致的重复求值）
     private var purityBorderColor: Color? {
         switch wallpaper.purity.lowercased() {
         case "nsfw":
@@ -790,6 +805,10 @@ private struct SimpleWallpaperCard: View {
             return nil
         }
     }
+    
+    // 预计算边框样式（避免每帧的条件分支）
+    private var borderColor: Color { purityBorderColor ?? Color.white.opacity(0.06) }
+    private var borderWidth: CGFloat { purityBorderColor != nil ? 2 : 1 }
 
     // 静态形状缓存，避免每次 body 重新创建
     private static let thumbShape = UnevenRoundedRectangle(
@@ -861,17 +880,17 @@ private struct SimpleWallpaperCard: View {
                     .fill(Color.clear)
                     .overlay(
                         Self.cardShape
-                            .stroke(purityBorderColor ?? Color.white.opacity(0.06), lineWidth: purityBorderColor != nil ? 2 : 1)
+                            .stroke(borderColor, lineWidth: borderWidth)
                     )
             )
             .clipShape(Self.cardShape)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                isHovered = hovering
-            }
+        // iOS 风格悬停：快速弹簧响应 + 自然减速释放
+        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
     

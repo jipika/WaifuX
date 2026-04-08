@@ -377,18 +377,24 @@ struct ExploreDynamicAtmosphereBackground: View {
     /// 快速滚动时减轻效果，避免卡顿
     var lightweightBackdrop: Bool = false
 
+    // 预计算颜色值（避免 body 中重复创建 Color 结构体）
+    private var primaryColor: Color { tint.primary }
+    private var secondaryColor: Color { tint.secondary }
+    private var tertiaryColor: Color { tint.tertiary }
+    private var baseTopColor: Color { tint.baseTop }
+
     var body: some View {
         ZStack {
             // 基础氛围背景
             LiquidGlassAtmosphereBackground(
-                primary: tint.primary,
-                secondary: tint.secondary,
-                tertiary: tint.tertiary,
-                baseTop: tint.baseTop,
+                primary: primaryColor,
+                secondary: secondaryColor,
+                tertiary: tertiaryColor,
+                baseTop: baseTopColor,
                 baseBottom: tint.baseBottom
             )
 
-            // 参考图片模糊背景（轻量模式时禁用）
+            // 参考图片模糊背景（轻量模式时完全禁用）
             if !lightweightBackdrop, let referenceImage {
                 Image(nsImage: referenceImage)
                     .resizable()
@@ -403,8 +409,8 @@ struct ExploreDynamicAtmosphereBackground: View {
             // 简化：合并径向渐变效果
             RadialGradient(
                 colors: [
-                    tint.primary.opacity(lightweightBackdrop ? 0.06 : 0.08),
-                    tint.secondary.opacity(lightweightBackdrop ? 0.03 : 0.04),
+                    primaryColor.opacity(lightweightBackdrop ? 0.06 : 0.08),
+                    secondaryColor.opacity(lightweightBackdrop ? 0.03 : 0.04),
                     Color.clear
                 ],
                 center: .topLeading,
@@ -415,7 +421,7 @@ struct ExploreDynamicAtmosphereBackground: View {
 
             // 移除材质层，使用纯色替代
             Rectangle()
-                .fill(tint.baseTop.opacity(0.05))
+                .fill(baseTopColor.opacity(0.05))
                 .allowsHitTesting(false)
 
             // 底部渐变遮罩
@@ -431,5 +437,7 @@ struct ExploreDynamicAtmosphereBackground: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
+        // 使用 drawingGroup 将整个背景合并为离屏渲染层，减少合成开销
+        .drawingGroup()
     }
 }

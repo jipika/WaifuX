@@ -1004,14 +1004,30 @@ private struct MyMediaVideoCard: View {
     }
 }
 
+// MARK: - iOS 丝滑风格下载进度弹窗宿主
 private struct DownloadProgressToastHost: View {
     @ObservedObject var viewModel: DownloadTaskViewModel
 
     @State private var displayedTaskID: String?
     @State private var hideWorkItem: DispatchWorkItem?
 
+    // iOS 丝滑动画状态
+    @State private var toastOpacity: Double = 0
+    @State private var toastScale: Double = 0.92
+    @State private var toastOffset: CGFloat = 10
+
     private var displayedTask: DownloadTask? {
         viewModel.tasks.first(where: { $0.id == displayedTaskID })
+    }
+
+    /// 入场动画：轻快弹簧，类似系统通知弹出
+    private var iOSShowAnimation: Animation {
+        .spring(response: 0.35, dampingFraction: 0.82, blendDuration: 0)
+    }
+
+    /// 退场动画：快速利落
+    private var iOSDismissAnimation: Animation {
+        .easeOut(duration: 0.20)
     }
 
     var body: some View {
@@ -1024,7 +1040,15 @@ private struct DownloadProgressToastHost: View {
                     activeTaskCount: viewModel.tasks.filter(\.isRunning).count
                 )
                 .padding(.bottom, 26)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .opacity(toastOpacity)
+                .scaleEffect(toastScale, anchor: .bottom)
+                .offset(y: toastOffset)
+                .transition(
+                    .asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .bottom)),
+                        removal: .opacity
+                    )
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -1037,6 +1061,34 @@ private struct DownloadProgressToastHost: View {
         }
     }
 
+    // MARK: - 动画控制
+
+    /// 入场：底部轻弹 + 缩放
+    private func performShow() {
+        toastOpacity = 0
+        toastScale = 0.92
+        toastOffset = 8
+
+        withAnimation(iOSShowAnimation) {
+            toastOpacity = 1
+            toastScale = 1.0
+            toastOffset = 0
+        }
+    }
+
+    /// 退场：向下缩小淡出（精简不卡顿）
+    private func performHide(completion: @escaping () -> Void) {
+        withAnimation(iOSDismissAnimation) {
+            toastOpacity = 0
+            toastScale = 0.96
+            toastOffset = 6
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            completion()
+        }
+    }
+
     private func reconcileDisplayedTask(with tasks: [DownloadTask]) {
         hideWorkItem?.cancel()
 
@@ -1044,8 +1096,14 @@ private struct DownloadProgressToastHost: View {
             .filter(\.isRunning)
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt })
         {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            // 如果是新任务或当前无显示任务，重新执行入场动画
+            if displayedTaskID != activeTask.id {
                 displayedTaskID = activeTask.id
+                performShow()
+            } else {
+                withAnimation(iOSShowAnimation) {
+                    displayedTaskID = activeTask.id
+                }
             }
             return
         }
@@ -1058,12 +1116,13 @@ private struct DownloadProgressToastHost: View {
             })
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt })
         {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            if displayedTaskID != recentTerminalTask.id {
                 displayedTaskID = recentTerminalTask.id
+                performShow()
             }
 
-            let workItem = DispatchWorkItem {
-                withAnimation(.easeOut(duration: 0.2)) {
+            let workItem = DispatchWorkItem { [self] in
+                performHide {
                     if displayedTaskID == recentTerminalTask.id {
                         displayedTaskID = nil
                     }
@@ -1074,30 +1133,30 @@ private struct DownloadProgressToastHost: View {
             return
         }
 
-        withAnimation(.easeOut(duration: 0.18)) {
+        performHide {
             displayedTaskID = nil
         }
     }
 }
 
+// MARK: - iOS 丝滑风格下载进度 Toast
 private struct DownloadProgressToast: View {
     let task: DownloadTask
     let activeTaskCount: Int
+
+    @State private var animatedProgress: Double = 0
 
     private var tint: Color {
         switch task.status {
         case .pending:
             return Color.white.opacity(0.7)
         case .downloading:
-            // 深色液态玻璃风格 - 使用白色/灰色作为主色调
             return Color.white.opacity(0.85)
         case .paused:
             return Color.white.opacity(0.6)
         case .completed:
-            // 完成时用绿色
             return LiquidGlassColors.onlineGreen
         case .failed:
-            // 失败时也用灰色，不使用红色
             return Color.white.opacity(0.7)
         case .cancelled:
             return Color.white.opacity(0.5)
@@ -1115,55 +1174,47 @@ private struct DownloadProgressToast: View {
 
     private var statusText: String {
         switch task.status {
-        case .pending:
-            return t("status.pending")
-        case .downloading:
-            return t("status.downloading")
-        case .paused:
-            return t("status.paused")
-        case .completed:
-            return t("status.completed")
-        case .failed:
-            return t("status.failed")
-        case .cancelled:
-            return t("status.cancelled")
+        case .pending:   return t("status.pending")
+        case .downloading: return t("status.downloading")
+        case .paused:     return t("status.paused")
+        case .completed:   return t("status.completed")
+        case .failed:      return t("status.failed")
+        case .cancelled:   return t("status.cancelled")
         }
     }
 
     private var subtitle: String {
         if activeTaskCount > 1 && task.isRunning {
-            if task.subtitle.isEmpty {
-                return "\(activeTaskCount) \(t("items"))"
-            }
-            return "\(task.subtitle) · \(activeTaskCount) \(t("items"))"
+            let base = task.subtitle.isEmpty ? "\(activeTaskCount) \(t("items"))" : "\(task.subtitle) · \(activeTaskCount) \(t("items"))"
+            return base
         }
-        if task.subtitle.isEmpty {
-            return task.badgeText
-        }
-        if task.badgeText.isEmpty {
-            return task.subtitle
-        }
+        if task.subtitle.isEmpty { return task.badgeText }
+        if task.badgeText.isEmpty { return task.subtitle }
         return "\(task.subtitle) · \(task.badgeText)"
     }
 
-    private var isCompleted: Bool {
-        task.status == .completed
+    private var isCompleted: Bool { task.status == .completed }
+
+    /// 进度条动画：平滑跟随
+    private var progressAnimation: Animation {
+        .spring(response: 0.30, dampingFraction: 0.88, blendDuration: 0)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                Image(systemName: iconName)
+                // 图标：完成时变绿色 + 微弹性
+                Image(systemName: isCompleted ? "checkmark" : iconName)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(tint)
                     .frame(width: 34, height: 34)
                     .background(
-                        // 使用真正的深色液态玻璃
                         DarkLiquidGlassBackground(
                             cornerRadius: 17,
                             isHovered: false
                         )
                     )
+                    .scaleEffect(isCompleted ? 1.08 : 1.0)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(task.title)
@@ -1179,28 +1230,26 @@ private struct DownloadProgressToast: View {
 
                 Spacer(minLength: 12)
 
-                // 未完成时显示状态标签
-                if !isCompleted {
-                    Text(statusText)
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundStyle(tint)
-                        .padding(.horizontal, 10)
-                        .frame(height: 24)
-                        .background(
-                            // 状态标签使用 subtle 级别的深色玻璃
-                            DarkLiquidGlassBackground(
-                                cornerRadius: 12,
-                                isHovered: false
-                            )
-                            .opacity(0.7)
+                // 状态标签（统一样式，只变色）
+                Text(statusText)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .background(
+                        DarkLiquidGlassBackground(
+                            cornerRadius: 12,
+                            isHovered: false
                         )
-                }
+                        .opacity(0.7)
+                    )
             }
 
-            // 未完成时显示进度条
+            // 进度区域
             if !isCompleted {
+                // 进度条
                 LiquidGlassLinearProgressBar(
-                    progress: task.progress,
+                    progress: animatedProgress,
                     height: 6,
                     tintColor: tint,
                     trackOpacity: 0.15
@@ -1213,9 +1262,21 @@ private struct DownloadProgressToast: View {
 
                     Spacer()
 
-                    Text("\(Int((max(0, min(task.progress, 1)) * 100).rounded()))%")
+                    Text("\(Int((max(0, min(animatedProgress, 1)) * 100).rounded()))%")
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.86))
+                        .contentTransition(.numericText())
+                }
+            } else {
+                // 完成行：简洁显示
+                HStack(spacing: 6) {
+                    Spacer()
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(LiquidGlassColors.onlineGreen)
+                    Text(t("status.completed"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(LiquidGlassColors.onlineGreen)
+                    Spacer()
                 }
             }
         }
@@ -1223,11 +1284,20 @@ private struct DownloadProgressToast: View {
         .padding(.vertical, 16)
         .frame(maxWidth: 440)
         .background(
-            // 主容器使用真正的深色液态玻璃
             DarkLiquidGlassBackground(
                 cornerRadius: 24,
                 isHovered: false
             )
         )
+        // 精简动画：只用颜色过渡，避免复杂的 layout transition 导致卡顿
+        .animation(.easeInOut(duration: 0.20), value: isCompleted)
+        .onChange(of: task.progress) { _, newProgress in
+            withAnimation(progressAnimation) {
+                animatedProgress = newProgress
+            }
+        }
+        .onAppear {
+            animatedProgress = task.progress
+        }
     }
 }

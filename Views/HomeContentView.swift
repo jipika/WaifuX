@@ -374,6 +374,8 @@ struct HomeContentView: View {
                     )
                 )
         }
+        // 使用 drawingGroup 将多个模糊层合并为单一离屏渲染通道，大幅减少 GPU 合成开销
+        .drawingGroup()
     }
 
     private var heroWallpapers: [Wallpaper] {

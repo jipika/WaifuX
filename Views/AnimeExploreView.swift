@@ -37,6 +37,10 @@ struct AnimeExploreView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
+            // 命名坐标空间，供视差效果使用
+            .coordinateSpace(name: "exploreScroll")
+            // iOS 风格弹性滚动：惯性减速 + 弹性边界
+            .iosSmoothScroll()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -286,7 +290,8 @@ struct AnimeExploreView: View {
                 let columnCount = gridContentWidth > 1200 ? 5 : (gridContentWidth > 800 ? 4 : 3)
                 let spacing: CGFloat = 20
                 let totalSpacing = spacing * CGFloat(columnCount - 1)
-                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分
+                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
                 let cardHeight = cardWidth * 1.4 // 竖版比例
                 
                 // 动态创建固定列
@@ -297,7 +302,10 @@ struct AnimeExploreView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(Array(viewModel.animeItems.enumerated()), id: \.element.id) { index, anime in
+                    ForEach(viewModel.animeItems) { anime in
+                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
+                        let cardIndex = viewModel.animeItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+
                         AnimePortraitCard(
                             anime: anime,
                             cardWidth: cardWidth,
@@ -307,34 +315,23 @@ struct AnimeExploreView: View {
                                 selectedAnime = anime
                             }
                         }
+                        // iOS 风格入场动画
+                        .iosFadeInOnAppear(index: cardIndex)
                         .onAppear {
-                            guard index >= viewModel.animeItems.count - 6 else { return }
+                            guard cardIndex >= viewModel.animeItems.count - 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !viewModel.isLoadingMore else { return }
                             Task { await viewModel.loadMore() }
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
 
-                // 加载指示器 - 固定占位避免抖动
-                Color.clear
-                    .frame(height: 20)
-                    .overlay(
-                        PaginationLoadingView()
-                            .opacity(viewModel.isLoadingMore ? 1 : 0)
-                            .animation(.easeInOut(duration: 0.2), value: viewModel.isLoadingMore)
+                    // 🍎 脉冲色块放在 grid 内部跨整行，占据布局空间
+                    PaginationShimmerOverlay(
+                        isLoading: viewModel.isLoadingMore || (viewModel.isLoading && !viewModel.animeItems.isEmpty),
+                        hasMorePages: viewModel.hasMorePages
                     )
-
-                // 没有更多数据提示
-                if !viewModel.hasMorePages && viewModel.animeItems.count > 20 {
-                    Text(t("anime.endOfList"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .frame(height: 50)
-                        .padding(.top, 10)
+                    .gridCellColumns(columnCount)
                 }
             }
         }

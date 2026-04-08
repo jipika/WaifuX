@@ -32,8 +32,9 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     private var isVideoFound = false
     private var currentRule: AnimeRule?
     
-    // 使用独立的 WebsiteDataStore 避免 Cookie 污染
-    private let dataStore = WKWebsiteDataStore.nonPersistent()
+    // 使用共享的 WebsiteDataStore，确保验证码 WebView 中设置的 Cookie 能同步到后续 URLSession 请求
+    // 注意：不再使用 nonPersistent()，因为那会导致 Cookie 隔离
+    private let dataStore = WKWebsiteDataStore.default()
     
     private override init() {
         super.init()
@@ -50,6 +51,14 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     ) async -> VideoExtractionResult {
         // 取消之前的解析
         await cancelAndCleanup()
+        
+        // MARK: - 快速路径：检测视频文件直链
+        // 某些源返回的 episodeURL 本身就是 .mp4/.m3u8 等视频文件直链，
+        // 无需 WebView 解析（WebView 加载非 HTML 内容时 JS 脚本可能无法正常执行）
+        if let directSource = detectDirectVideoURL(episodeURL) {
+            addLog("🚀 检测到视频直链，跳过 WebView 解析")
+            return .success([directSource])
+        }
         
         resolveId += 1
         let currentResolveId = resolveId
@@ -743,10 +752,13 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
     
     private func handleVideoURL(_ urlString: String) {
         // 避免重复
-        guard !detectedSources.contains(urlString) else { return }
+        guard !detectedSources.contains(urlString) else {
+            addLog("⚠️ 重复视频 URL，跳过: \(urlString.prefix(50))")
+            return
+        }
         detectedSources.insert(urlString)
         
-        addLog("✅ 发现视频源: \(urlString.prefix(60))...")
+        addLog("📥 收到 VideoBridge 消息: \(urlString.prefix(80))...")
         
         // 忽略 blob URL
         guard !urlString.lowercased().hasPrefix("blob:") else {
@@ -765,7 +777,19 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         let isMPD = lowercased.contains(".mpd")
         let isHLS = lowercased.contains("/hls/") || lowercased.contains("format=m3u8") || lowercased.contains("type=m3u8")
         
-        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || isMKV || isMPD || isHLS || lowercased.contains("video") else {
+        // CDN 直链检测：某些 CDN（字节火山引擎、阿里 OSS、腾讯 COS 等）的签名链接
+        // 路径不含扩展名，通过域名特征 + 签名参数识别
+        let isCDNDirectLink = lowercased.contains("tos-cn-") ||          // 字节跳动 CDN
+                               lowercased.contains("imcloud-file-sign") ||  // 字节火山引擎
+                               lowercased.contains("bytedos.com") ||
+                               lowercased.contains(".aliyuncs.com") ||     // 阿里云 OSS
+                               lowercased.contains(".cos.") ||              // 腾讯云 COS
+                               lowercased.contains("myqcloud.com") ||      // 腾讯云
+                               lowercased.contains("x-expires=") ||         // CDN 过期签名
+                               lowercased.contains("x-oss-expires=") ||    // 阿里 OSS 签名
+                               (lowercased.contains("sign=") && (lowercased.contains("cdn") || lowercased.contains("object")))
+        
+        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || isMKV || isMPD || isHLS || lowercased.contains("video") || isCDNDirectLink else {
             addLog("⚠️ URL 格式不符合视频特征，继续等待")
             return
         }
@@ -908,26 +932,6 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
             }
         }
     }
-    
-    // 处理验证码检测 (WKNavigationResponse 版本)
-    // 注意：此方法与 WKNavigationAction 版本同名，Swift 会发出 nearly matches 警告，这是已知行为
-    func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationResponse: WKNavigationResponse,
-        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
-    ) {
-        // 同步检查 URL 是否包含验证码相关关键词
-        if let url = navigationResponse.response.url?.absoluteString {
-            let captchaIndicators = ["captcha", "verify", "challenge", "recaptcha", "hcaptcha"]
-            if captchaIndicators.contains(where: { url.lowercased().contains($0) }) {
-                decisionHandler(.cancel)
-                self.addLog("⚠️ 检测到验证码页面")
-                self.finish(with: .captcha, resolveId: self.resolveId)
-                return
-            }
-        }
-        decisionHandler(.allow)
-    }
 }
 
 // MARK: - Post-Load Scripts
@@ -978,6 +982,88 @@ private extension AnimeVideoExtractor {
         let logMessage = "[\(timestamp)] \(message)"
         logMessages.append(logMessage)
         print("🎬 [VideoExtractor] \(message)")
+    }
+    
+    // MARK: - 直链检测
+    
+    /// 检测 URL 是否是视频文件直链（.mp4, .m3u8, .ts 等）
+    /// 如果是，直接返回 VideoSource；否则返回 nil 走 WebView 解析
+    private func detectDirectVideoURL(_ urlString: String) -> VideoSource? {
+        guard let url = URL(string: urlString) else { return nil }
+        
+        let lowerPath = url.path.lowercased()
+        
+        // 通过文件扩展名判断
+        let videoExtensions: [(ext: String, type: String)] = [
+            (".mp4", "mp4"),
+            (".m3u8", "m3u8"),
+            (".ts", "ts"),
+            (".flv", "flv"),
+            (".webm", "webm"),
+            (".mkv", "mkv"),
+            (".mpd", "mpd"),
+        ]
+        
+        for item in videoExtensions where lowerPath.hasSuffix(item.ext) {
+            let quality = inferQuality(from: urlString, type: item.ext)
+            addLog("🎯 直链检测命中: \(item.ext) → \(quality)")
+            return VideoSource(
+                quality: quality,
+                url: urlString,
+                type: item.type,
+                label: nil
+            )
+        }
+        
+        // 通过 URL 路径特征判断（如包含 /video/, /playback/, /hls/ 等）
+        let lowerURL = urlString.lowercased()
+        if lowerURL.contains("/hls/") || lowerURL.contains("format=m3u8") || lowerURL.contains("type=m3u8") {
+            addLog("🎯 直链检测命中: HLS 特征路径")
+            return VideoSource(
+                quality: "Auto",
+                url: urlString,
+                type: "m3u8",
+                label: nil
+            )
+        }
+        
+        // CDN 签名直链检测：无扩展名但通过域名/参数特征识别为视频文件
+        let isCDNVideoLink: Bool = {
+            lowerURL.contains("tos-cn-") ||          // 字节跳动 CDN
+            lowerURL.contains("imcloud-file-sign") ||  // 字节火山引擎
+            lowerURL.contains("bytedos.com") ||
+            lowerURL.contains(".aliyuncs.com") ||     // 阿里云 OSS
+            lowerURL.contains(".cos.") ||              // 腾讯云 COS
+            lowerURL.contains("myqcloud.com") ||      // 腾讯云
+            lowerURL.contains("x-expires=")             // CDN 过期签名参数
+        }()
+        
+        if isCDNVideoLink {
+            addLog("🎯 直链检测命中: CDN 签名视频链接")
+            return VideoSource(
+                quality: "MP4",
+                url: urlString,
+                type: "mp4",
+                label: nil
+            )
+        }
+        
+        return nil
+    }
+    
+    /// 根据推断质量标签
+    private func inferQuality(from urlString: String, type: String) -> String {
+        let lower = urlString.lowercased()
+        
+        if type == "m3u8" { return "Auto" }
+        if type == "mpd" { return "Auto" }
+        if type == "mp4" {
+            if lower.contains("1080") || lower.contains("fhd") { return "1080P" }
+            if lower.contains("720") || lower.contains("hd") { return "720P" }
+            if lower.contains("480") || lower.contains("sd") { return "480P" }
+            return "MP4"
+        }
+        return type.uppercased()
     }
     
     func handleTimeout(resolveId: Int) async {

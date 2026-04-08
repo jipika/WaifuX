@@ -35,6 +35,10 @@ struct MediaExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .leading)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
+            // 命名坐标空间，供视差效果使用
+            .coordinateSpace(name: "exploreScroll")
+            // iOS 风格弹性滚动：惯性减速 + 弹性边界
+            .iosSmoothScroll()
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -254,7 +258,8 @@ struct MediaExploreContentView: View {
                 let columnCount = gridContentWidth > 1200 ? 4 : (gridContentWidth > 800 ? 3 : 2)
                 let spacing: CGFloat = 16
                 let totalSpacing = spacing * CGFloat(columnCount - 1)
-                let cardWidth = (gridContentWidth - 48 - totalSpacing) / CGFloat(columnCount)
+                // gridContentWidth 已是可用内容宽度（已扣除 padding），直接均分，floor 避免亚像素误差
+                let cardWidth = floor((gridContentWidth - totalSpacing) / CGFloat(columnCount))
                 let cardHeight = cardWidth * 0.6
                 
                 // 动态创建固定列
@@ -265,7 +270,10 @@ struct MediaExploreContentView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
+                    ForEach(displayedMediaItems) { item in
+                        // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
+                        let cardIndex = displayedMediaItems.firstIndex(where: { $0.id == item.id }) ?? 0
+
                         SimpleMediaCard(
                             item: item,
                             cardWidth: cardWidth,
@@ -273,8 +281,10 @@ struct MediaExploreContentView: View {
                             isFavorite: viewModel.isFavorite(item),
                             onTap: { selectedMedia = item }
                         )
+                        // iOS 风格入场动画
+                        .iosFadeInOnAppear(index: cardIndex)
                         .onAppear {
-                            guard index >= displayedMediaItems.count - 6 else { return }
+                            guard cardIndex >= displayedMediaItems.count - 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !isLoadingMore else { return }
@@ -288,26 +298,13 @@ struct MediaExploreContentView: View {
                             }
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
 
-                // 加载指示器 - 固定占位避免抖动
-                Color.clear
-                    .frame(height: 20)
-                    .overlay(
-                        PaginationLoadingView()
-                            .opacity(isLoadingMore ? 1 : 0)
-                            .animation(.easeInOut(duration: 0.2), value: isLoadingMore)
+                    // 🍎 脉冲色块放在 grid 内部跨整行，占据布局空间
+                    PaginationShimmerOverlay(
+                        isLoading: isLoadingMore || (viewModel.isLoading && !displayedMediaItems.isEmpty),
+                        hasMorePages: viewModel.hasMorePages
                     )
-
-                // 没有更多数据提示
-                if !viewModel.hasMorePages && displayedMediaItems.count > 20 {
-                    Text(t("noMoreData"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .frame(height: 50)
-                        .padding(.top, 10)
+                    .gridCellColumns(columnCount)
                 }
             }
         }
@@ -602,10 +599,10 @@ private struct SimpleMediaCard: View {
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.02 : 1.0)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                isHovered = hovering
-            }
+        // iOS 风格悬停：快速弹簧响应 + 自然减速释放
+        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
         }
     }
     

@@ -32,6 +32,7 @@ Pods/
 .1code/
 .claude/
 .vscode/
+.workbuddy/
 *.swp
 *~
 

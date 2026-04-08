@@ -216,7 +216,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -228,10 +228,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.standardWindowButton(.miniaturizeButton)?.isHidden = true
         settingsWindow.standardWindowButton(.zoomButton)?.isHidden = true
         settingsWindow.isMovableByWindowBackground = true
-        settingsWindow.backgroundColor = NSColor(Color(hex: "0D0D0D"))
-        settingsWindow.setContentSize(NSSize(width: 800, height: 620))
-        settingsWindow.minSize = NSSize(width: 800, height: 620)
-        settingsWindow.maxSize = NSSize(width: 800, height: 620)
+        settingsWindow.backgroundColor = NSColor(Color(hex: "1C1C1E"))
+        settingsWindow.setContentSize(NSSize(width: 680, height: 520))
+        settingsWindow.minSize = NSSize(width: 680, height: 520)
+        settingsWindow.maxSize = NSSize(width: 680, height: 520)
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.center()
         settingsWindow.tabbingMode = .disallowed
