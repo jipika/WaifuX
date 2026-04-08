@@ -1,8 +1,14 @@
-import Beams from "./components/Beams/Beams"
-import { Download, Search, Sparkles, Film, RefreshCw, Settings, Mountain, Play, Tv, Heart } from "lucide-react"
+import { useState, useEffect } from 'react';
+import LineWaves from "./components/LineWaves/LineWaves"
+import ScrollReveal from "./components/ScrollReveal/ScrollReveal"
+import { Download, Search, Sparkles, Film, RefreshCw, Settings, Play, Tv, Heart, Star, ArrowRight, ExternalLink, ChevronRight, Command, Zap, Layers } from "lucide-react"
 import { useLanguage } from "./contexts/LanguageContext"
 import { LanguageSwitcher } from "./components/LanguageSwitcher"
 import "./App.css"
+
+/* ── Nothing Design System: WaifuX Landing ──
+    Monochrome · Typographic · Industrial
+*/
 
 const GithubIcon = ({ className }: { className?: string }) => (
     <svg className={className} viewBox="0 0 24 24" fill="currentColor">
@@ -10,307 +16,382 @@ const GithubIcon = ({ className }: { className?: string }) => (
     </svg>
 )
 
-function App() {
+/* ── Stats Bar ── */
+function StatsBar() {
+    const { t } = useLanguage()
+    const stats = t.stats.items
+    
+    return (
+        <div className="nt-stats">
+            {stats.map((stat: { number: string; label: string }, i: number) => (
+                <div key={i} className="nt-stat-item">
+                    <span className="nt-stat-number">{stat.number}</span>
+                    <span className="nt-stat-label">{stat.label}</span>
+                </div>
+            ))}
+        </div>
+    )
+}
+
+/* ── Feature Cards (Nothing-style monochrome) ── */
+function FeatureGrid() {
+    const { t } = useLanguage()
+    const cards = t.bentoCards
+    
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cardList: any[] = [
+        { title: cards.search.title, desc: cards.search.desc, iconBg: cards.search.iconBg, icon: Search },
+        { title: cards.dynamic.title, desc: cards.dynamic.desc, iconBg: cards.dynamic.iconBg, icon: Film },
+        { title: cards.anime.title, desc: cards.anime.desc, iconBg: cards.anime.iconBg, icon: Sparkles },
+        { title: cards.sync.title, desc: cards.sync.desc, iconBg: cards.sync.iconBg, icon: RefreshCw },
+        { title: cards.download.title, desc: cards.download.desc, iconBg: cards.download.iconBg, icon: Download },
+        { title: cards.custom.title, desc: cards.custom.desc, iconBg: cards.custom.iconBg, icon: Settings, tags: cards.custom.tags },
+    ]
+
+    return (
+        <div className="nt-feature-grid">
+            {cardList.map((card, i) => (
+                <ScrollReveal key={i} delay={i * 80} direction="up">
+                    <div className={`nt-feature-card ${i === 0 ? 'nt-fc-hero' : ''} ${[2,3].includes(i) ? 'nt-fc-highlight' : ''}`}>
+                        <div className={`nt-fc-icon`}>
+                            <card.icon className="w-5 h-5" strokeWidth={1.5} />
+                        </div>
+                        <h3>{card.title}</h3>
+                        <p>{card.desc}</p>
+                        {card.tags && (
+                            <div className="nt-fc-tags">
+                                {card.tags.map((tag: string, j: number) => (
+                                    <span key={j} className="nt-tag">{tag}</span>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </ScrollReveal>
+            ))}
+        </div>
+    )
+}
+
+/* ── Source Cards (Nothing industrial style) ── */
+function SourceSection() {
     const { t } = useLanguage()
 
     return (
-        <div className="app">
-            <Beams
-                beamWidth={3}
-                beamHeight={25}
-                beamNumber={20}
-                lightColor="#ffffff"
-                speed={1.5}
-                noiseIntensity={2}
-                scale={0.12}
-            />
+        <div className="nt-sources">
+            <ScrollReveal>
+                <div className="nt-source-card nt-source-main">
+                    <div className="nt-source-header">
+                        <Play className="w-8 h-8" strokeWidth={1.5} />
+                        <span className="nt-source-badge">POPULAR</span>
+                    </div>
+                    <h3>{t.sources.motionbgs.name}</h3>
+                    <p>{t.sources.motionbgs.desc}</p>
+                    <div className="nt-source-tags">
+                        {t.sources.motionbgs.tags.map((tag: string, i: number) => (
+                            <span key={i} className="nt-tag">{tag}</span>
+                        ))}
+                    </div>
+                </div>
+            </ScrollReveal>
 
-            <div className="relative w-full min-h-screen">
-                <nav className="top-[2em] left-0 z-10 absolute flex items-center glass-nav mx-auto my-0 px-6 py-4 border border-white/20 rounded-[50px] w-[90%] md:w-[70%] max-w-4xl">
-                    <div className="flex items-center gap-3">
-                        <span className="text-white font-bold text-base tracking-[0.2em]">WaifuX</span>
+            <div className="nt-source-row">
+                <ScrollReveal delay={120}>
+                    <div className="nt-source-card nt-source-mini">
+                        <Layers className="w-6 h-6 mb-4" strokeWidth={1.5} />
+                        <h3>{t.sources.wallhaven.name}</h3>
+                        <p>{t.sources.wallhaven.desc}</p>
+                        <div className="nt-tags-sm">
+                            {t.sources.wallhaven.tags.map((tag: string, i: number) => (
+                                <span key={i} className="nt-tag-sm">{tag}</span>
+                            ))}
+                        </div>
+                    </div>
+                </ScrollReveal>
+
+                <ScrollReveal delay={200}>
+                    <div className="nt-source-card nt-source-mini">
+                        <Tv className="w-6 h-6 mb-4" strokeWidth={1.5} />
+                        <h3>{t.sources.anime.name}</h3>
+                        <p>{t.sources.anime.desc}</p>
+                        <div className="nt-tags-sm">
+                            {t.sources.anime.tags.map((tag: string, i: number) => (
+                                <span key={i} className="nt-tag-sm">{tag}</span>
+                            ))}
+                        </div>
+                    </div>
+                </ScrollReveal>
+            </div>
+        </div>
+    )
+}
+
+/* ── Main App ── */
+function App() {
+    const { t } = useLanguage()
+    const [scrolled, setScrolled] = useState(false)
+
+    useEffect(() => {
+        let ticking = false
+        const handleScroll = () => {
+            if (!ticking) {
+                requestAnimationFrame(() => {
+                    setScrolled(window.scrollY > 40)
+                    ticking = false
+                })
+                ticking = true
+            }
+        }
+        window.addEventListener('scroll', handleScroll, { passive: true })
+        return () => window.removeEventListener('scroll', handleScroll)
+    }, [])
+
+    return (
+        <div className="nt-app">
+            {/* Line Waves Background */}
+            <LineWaves />
+
+            {/* Subtle dot grid overlay */}
+            <div className="nt-dot-grid" aria-hidden="true" />
+
+            {/* ═══ NAVBAR ═══ */}
+            <nav className={`nt-nav ${scrolled ? 'nt-nav-scrolled' : ''}`}>
+                <div className="nt-nav-inner">
+                    <a href="#" className="nt-brand">
+                        <Command className="w-4 h-4" strokeWidth={2} />
+                        <span>WaifuX</span>
+                    </a>
+
+                    <div className="nt-nav-links">
+                        <a href="#features" className="nt-nav-link">{t.nav.features}</a>
+                        <a href="#sources" className="nt-nav-link">{t.nav.sources}</a>
+                        <a href="#download" className="nt-nav-link">{t.nav.download}</a>
                     </div>
 
-                    <div className="hidden md:flex items-center gap-6 font-semibold ml-auto">
-                        <a href="#features" className="nav-link text-[14px] text-white/80 hover:text-white transition">
-                            {t.nav.features}
-                        </a>
-                        <a href="#sources" className="nav-link text-[14px] text-white/80 hover:text-white transition">
-                            {t.nav.sources}
-                        </a>
-                        <a href="#download" className="nav-link text-[14px] text-white/80 hover:text-white transition">
-                            {t.nav.download}
-                        </a>
-                    </div>
-
-                    <div className="flex items-center gap-4 ml-6">
+                    <div className="nt-nav-actions">
                         <LanguageSwitcher />
+                        <a 
+                            href="https://github.com/jipika/WaifuX" 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            className="nt-btn-icon"
+                            aria-label="GitHub"
+                        >
+                            <GithubIcon className="w-4 h-4" />
+                        </a>
                         <a
-                            href="https://github.com/jipika/WaifuX"
+                            href="https://github.com/jipika/WaifuX/releases/latest"
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="hidden sm:flex items-center justify-center w-9 h-9 rounded-full bg-white/5 hover:bg-white/10 transition">
-                            <GithubIcon className="w-[18px] h-[18px] text-white/80" />
+                            className="nt-btn-primary"
+                        >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>{t.hero.downloadBtn}</span>
                         </a>
                     </div>
-                </nav>
+                </div>
+            </nav>
 
-                <section className="hero-section">
-                    <div className="hero-content">
-                        <div className="flex justify-center items-center glass-tag px-4 border border-white/20 rounded-full w-auto h-[34px] font-medium text-white text-[12px] md:text-[14px] animate-fade-in">
-                            <Sparkles className="w-3 h-3 mr-2" />
+            {/* ═══ HERO SECTION ═══ */}
+            <section className="nt-hero">
+                <div className="nt-container">
+                    <div className="nt-hero-inner">
+                        {/* Badge — static text, no animation */}
+                        <div className="nt-badge">
+                            <Zap className="w-3 h-3" />
                             <span>{t.hero.badge}</span>
+                            <ChevronRight className="w-3 h-3 opacity-50" />
                         </div>
 
-                        <h1 className="hero-title">
-                            {t.hero.title.split("\n").map((line, i) => (
-                                <span key={i}>
-                                    {line}
-                                    {i < t.hero.title.split("\n").length - 1 && <br />}
-                                </span>
-                            ))}
+                        {/* Static Big Title */}
+                        <h1 className="nt-hero-title">
+                            {t.hero.titleLine1}
+                            <br />
+                            <span className="nt-title-accent">{t.hero.titleLine2}</span>
                         </h1>
 
-                        <p className="hero-subtitle">macOS 壁纸应用 · 支持 WallHaven、MotionBGs 和动漫视频</p>
+                        {/* Description — concise */}
+                        <p className="nt-hero-desc">{t.hero.description}</p>
 
-                        <div className="hero-buttons">
+                        {/* CTA Buttons */}
+                        <div className="nt-hero-actions">
                             <a
                                 href="https://github.com/jipika/WaifuX/releases/latest"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="btn-primary">
-                                <Download className="w-5 h-5" />
-                                {t.hero.downloadBtn}
+                                className="nt-btn-hero"
+                            >
+                                <Download className="w-[18px] h-[18px]" />
+                                <span>{t.hero.downloadBtn}</span>
+                                <ArrowRight className="w-4 h-4 ml-auto opacity-60 group-hover:translate-x-0.5 transition-transform" />
                             </a>
                             <a
                                 href="https://github.com/jipika/WaifuX"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="btn-secondary">
-                                <GithubIcon className="w-5 h-5" />
-                                {t.hero.sourceBtn}
+                                className="nt-btn-ghost"
+                            >
+                                <GithubIcon className="w-[18px] h-[18px]" />
+                                <span>{t.hero.sourceBtn}</span>
+                                <ExternalLink className="w-3 h-3 opacity-40" />
                             </a>
                         </div>
-                    </div>
-                </section>
-            </div>
 
-            {/* Features Section */}
-            <section id="features" className="section">
-                <div className="container mx-auto px-6">
-                    <div className="section-header">
-                        <div className="section-badge">
-                            <div className="section-number">{t.features.sectionNumber}</div>
-                            <span className="section-label">{t.features.sectionTitle}</span>
-                        </div>
-                        <h2 className="section-title">
-                            {t.features.mainTitle.split("\n").map((line, i) => (
-                                <span key={i}>
-                                    {line}
-                                    {i < t.features.mainTitle.split("\n").length - 1 && <br />}
-                                </span>
-                            ))}
-                        </h2>
-                        <p className="section-subtitle">{t.features.subtitle}</p>
-                    </div>
+                        {/* Stats */}
+                        <StatsBar />
 
-                    <div className="features-grid">
-                        <div className="feature-card">
-                            <div className="feature-icon bg-indigo-500/20">
-                                <Search className="w-7 h-7 text-indigo-400" />
+                        {/* Device Preview Frame */}
+                        <div className="nt-device-frame">
+                            <div className="nt-device-header">
+                                <div className="nt-device-dots">
+                                    <span className="nt-dot nt-dot-red" />
+                                    <span className="nt-dot nt-dot-yellow" />
+                                    <span className="nt-dot nt-dot-green" />
+                                </div>
+                                <span className="nt-device-title">WaifuX</span>
+                                <div className="nt-device-controls">
+                                    <span className="nt-control-line" />
+                                </div>
                             </div>
-                            <h3 className="feature-title">{t.features.cards.search.title}</h3>
-                            <p className="feature-desc">{t.features.cards.search.desc}</p>
-                        </div>
-
-                        <div className="feature-card">
-                            <div className="feature-icon bg-cyan-500/20">
-                                <Sparkles className="w-7 h-7 text-cyan-400" />
-                            </div>
-                            <h3 className="feature-title">{t.features.cards.dynamic.title}</h3>
-                            <p className="feature-desc">{t.features.cards.dynamic.desc}</p>
-                        </div>
-
-                        <div className="feature-card">
-                            <div className="feature-icon bg-pink-500/20">
-                                <Film className="w-7 h-7 text-pink-400" />
-                            </div>
-                            <h3 className="feature-title">{t.features.cards.anime.title}</h3>
-                            <p className="feature-desc">{t.features.cards.anime.desc}</p>
-                        </div>
-
-                        <div className="feature-card">
-                            <div className="feature-icon bg-emerald-500/20">
-                                <RefreshCw className="w-7 h-7 text-emerald-400" />
-                            </div>
-                            <h3 className="feature-title">{t.features.cards.sync.title}</h3>
-                            <p className="feature-desc">{t.features.cards.sync.desc}</p>
-                        </div>
-
-                        <div className="feature-card">
-                            <div className="feature-icon bg-amber-500/20">
-                                <Download className="w-7 h-7 text-amber-400" />
-                            </div>
-                            <h3 className="feature-title">{t.features.cards.download.title}</h3>
-                            <p className="feature-desc">{t.features.cards.download.desc}</p>
-                        </div>
-
-                        <div className="feature-card">
-                            <div className="feature-icon bg-violet-500/20">
-                                <Settings className="w-7 h-7 text-violet-400" />
-                            </div>
-                            <h3 className="feature-title">{t.features.cards.custom.title}</h3>
-                            <p className="feature-desc">{t.features.cards.custom.desc}</p>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            {/* Sources Section */}
-            <section id="sources" className="section">
-                <div className="container mx-auto px-6">
-                    <div className="section-header-center">
-                        <div className="section-badge-center">
-                            <span className="section-label">{t.sources.sectionTitle}</span>
-                        </div>
-                        <h2 className="section-title">{t.sources.mainTitle}</h2>
-                        <p className="section-subtitle">{t.sources.subtitle}</p>
-                    </div>
-
-                    <div className="sources-grid">
-                        <div className="source-card">
-                            <div className="source-icon">
-                                <Mountain className="w-8 h-8 text-indigo-400" />
-                            </div>
-                            <h3 className="source-name">{t.sources.wallhaven.name}</h3>
-                            <p className="source-desc">{t.sources.wallhaven.desc}</p>
-                            <div className="source-tags">
-                                {t.sources.wallhaven.tags.map((tag, i) => (
-                                    <span key={i} className="tag">
-                                        {tag}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="source-card featured">
-                            <div className="source-badge">HOT</div>
-                            <div className="source-icon">
-                                <Play className="w-8 h-8 text-cyan-400" />
-                            </div>
-                            <h3 className="source-name">{t.sources.motionbgs.name}</h3>
-                            <p className="source-desc">{t.sources.motionbgs.desc}</p>
-                            <div className="source-tags">
-                                {t.sources.motionbgs.tags.map((tag, i) => (
-                                    <span key={i} className="tag">
-                                        {tag}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="source-card">
-                            <div className="source-icon">
-                                <Tv className="w-8 h-8 text-pink-400" />
-                            </div>
-                            <h3 className="source-name">{t.sources.anime.name}</h3>
-                            <p className="source-desc">{t.sources.anime.desc}</p>
-                            <div className="source-tags">
-                                {t.sources.anime.tags.map((tag, i) => (
-                                    <span key={i} className="tag">
-                                        {tag}
-                                    </span>
-                                ))}
+                            <div className="nt-device-body">
+                                <div className="nt-dev-sidebar">
+                                    {[...Array(5)].map((_, i) => (
+                                        <div key={i} className={`nt-dev-side-item ${i === 0 ? 'active' : ''} ${i === 3 ? 'short' : ''}`} />
+                                    ))}
+                                </div>
+                                <div className="nt-dev-main">
+                                    <div className="nt-dev-search" />
+                                    <div className="nt-dev-grid">
+                                        {['#6366f1','#06b6d4','#ec4899','#8b5cf6','#f59e0b','#10b981'].map((color, i) => (
+                                            <div 
+                                                key={i} 
+                                                className="nt-dev-card" 
+                                                style={{ background: `linear-gradient(135deg, ${color}25, ${color}10)` }}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </section>
 
-            {/* CTA Section */}
-            <section id="download" className="cta-section">
-                <div className="cta-glow" />
-                <div className="container mx-auto px-6 relative z-10">
-                    <div className="cta-content">
-                        <h2 className="cta-title">{t.cta.title}</h2>
-                        <p className="cta-subtitle">{t.cta.subtitle}</p>
-
-                        <div className="cta-buttons">
-                            <a
-                                href="https://github.com/jipika/WaifuX/releases"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="btn-primary btn-large">
-                                <Download className="w-6 h-6" />
-                                {t.cta.downloadBtn}
-                            </a>
-                            <a
-                                href="https://github.com/jipika/WaifuX"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="btn-secondary btn-large">
-                                <GithubIcon className="w-6 h-6" />
-                                {t.cta.githubBtn}
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            {/* Footer */}
-            <footer className="footer">
-                <div className="container mx-auto px-6">
-                    <div className="footer-grid">
-                        <div className="footer-brand">
-                            <div className="footer-logo">
-                                <span className="footer-logo-text">WaifuX</span>
+            {/* ═══ FEATURES SECTION ═══ */}
+            <section id="features" className="nt-section">
+                <div className="nt-container">
+                    <ScrollReveal>
+                        <div className="nt-section-head">
+                            <div className="nt-section-label">
+                                <span className="nt-label-dot" />
+                                <span>{t.features.sectionTitle}</span>
                             </div>
-                            <p className="footer-desc">
-                                {t.footer.description.split("\n").map((line, i) => (
+                            <h2 className="nt-section-title">
+                                {t.features.mainTitle.split('\n').map((line: string, i: number) => (
                                     <span key={i}>
-                                        {line}
-                                        {i < t.footer.description.split("\n").length - 1 && <br />}
+                                        {i > 0 && <br />}{line}
                                     </span>
                                 ))}
-                            </p>
+                            </h2>
+                            <p className="nt-section-desc">{t.features.subtitle}</p>
                         </div>
+                    </ScrollReveal>
 
-                        <div className="footer-links">
-                            <h4 className="footer-heading">{t.footer.links}</h4>
-                            <div className="footer-link-list">
+                    <FeatureGrid />
+                </div>
+            </section>
+
+            {/* ═══ SOURCES SECTION ═══ */}
+            <section id="sources" className="nt-section nt-section-alt">
+                <div className="nt-container">
+                    <ScrollReveal>
+                        <div className="nt-section-head center">
+                            <div className="nt-section-label">
+                                <Layers className="w-3.5 h-3.5" />
+                                <span>{t.sources.sectionTitle}</span>
+                            </div>
+                            <h2 className="nt-section-title">{t.sources.mainTitle}</h2>
+                            <p className="nt-section-desc">{t.sources.subtitle}</p>
+                        </div>
+                    </ScrollReveal>
+
+                    <SourceSection />
+                </div>
+            </section>
+
+            {/* ═══ CTA SECTION ═══ */}
+            <section id="download" className="nt-cta">
+                <div className="nt-cta-glow" />
+                <div className="nt-container">
+                    <ScrollReveal>
+                        <div className="nt-cta-inner">
+                            <div className="nt-cta-icon">
+                                <Download className="w-7 h-7" strokeWidth={1.5} />
+                            </div>
+                            <h2 className="nt-cta-title">{t.cta.title}</h2>
+                            <p className="nt-cta-desc">{t.cta.subtitle}</p>
+                            
+                            <div className="nt-cta-actions">
+                                <a
+                                    href="https://github.com/jipika/WaifuX/releases/latest"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="nt-btn-hero large"
+                                >
+                                    <Download className="w-5 h-5" />
+                                    <span>{t.cta.downloadBtn}</span>
+                                    <ArrowRight className="w-4 h-4" />
+                                </a>
                                 <a
                                     href="https://github.com/jipika/WaifuX"
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="footer-link">
-                                    {t.footer.github}
-                                </a>
-                                <a
-                                    href="https://github.com/jipika/WaifuX-Profiles"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="footer-link">
-                                    {t.footer.rules}
+                                    className="nt-btn-ghost large"
+                                >
+                                    <Star className="w-5 h-5" />
+                                    <span>{t.cta.githubBtn}</span>
                                 </a>
                             </div>
-                        </div>
 
-                        <div className="footer-info">
-                            <h4 className="footer-heading">{t.footer.info}</h4>
-                            <p className="footer-copyright">
-                                {t.footer.copyright.split("\n").map((line, i) => (
-                                    <span key={i}>
-                                        {line}
-                                        {i < t.footer.copyright.split("\n").length - 1 && <br />}
-                                    </span>
-                                ))}
-                            </p>
+                            <p className="nt-cta-meta">{t.cta.note}</p>
+                        </div>
+                    </ScrollReveal>
+                </div>
+            </section>
+
+            {/* ═══ FOOTER ═══ */}
+            <footer className="nt-footer">
+                <div className="nt-footer-border" aria-hidden="true" />
+                <div className="nt-container">
+                    <div className="nt-footer-top">
+                        <div className="nt-footer-brand">
+                            <div className="nt-footer-logo">
+                                <Command className="w-5 h-5" strokeWidth={2} />
+                                <span>WaifuX</span>
+                            </div>
+                            <p className="nt-footer-about">{t.footer.description.split('\n')[0]}</p>
+                        </div>
+                        
+                        <div className="nt-footer-links">
+                            <div className="nt-footer-col">
+                                <h4>{t.footer.links}</h4>
+                                <a href="https://github.com/jipika/WaifuX" target="_blank" rel="noopener noreferrer">
+                                    <GithubIcon className="w-3.5 h-3.5" />{t.footer.github}
+                                </a>
+                                <a href="https://github.com/jipika/WaifuX-Profiles" target="_blank" rel="noopener noreferrer">
+                                    <ExternalLink className="w-3 h-3" />{t.footer.rules}
+                                </a>
+                            </div>
+                            <div className="nt-footer-col">
+                                <h4>{t.footer.info}</h4>
+                                <p className="nt-footer-copy">{t.footer.copyright.split('\n')[0]}</p>
+                                <p className="nt-footer-license">MIT License</p>
+                            </div>
                         </div>
                     </div>
-
-                    <div className="footer-bottom">
-                        <p className="footer-made-with">
-                            Made with <Heart className="w-4 h-4 text-red-500 inline" fill="currentColor" /> by jipika
+                    
+                    <div className="nt-footer-bottom">
+                        <p>
+                            Made with <Heart className="w-3 h-3 inline mx-0.5 align-middle" fill="currentColor" /> by jipika
                         </p>
                     </div>
                 </div>

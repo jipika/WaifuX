@@ -191,21 +191,32 @@ final class DownloadPermissionManager {
         }
     }
     
-    /// 加载保存的书签
+    /// 加载保存的书签并立即恢复权限
     private func loadSavedBookmark() {
         guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else {
             // 如果没有书签，使用默认的 Downloads/WallHaven 目录
             let defaultURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
                 .first?
                 .appendingPathComponent("WallHaven", isDirectory: true)
-            
+
             self.currentFolderURL = defaultURL
             return
         }
-        
+
         self.bookmarkData = bookmark
-        
-        // 尝试恢复权限（延迟到需要时）
-        // 不在这里调用 restoreFromBookmark()，因为可能不需要立即访问
+
+        // 立即尝试从书签恢复安全作用域权限
+        // 这解决了每次启动都需要重新请求权限的问题
+        if let restoredURL = restoreFromBookmark() {
+            self.currentFolderURL = restoredURL
+            print("[DownloadPermissionManager] ✅ Successfully restored security scope on launch for: \(restoredURL.path)")
+        } else {
+            // 书签恢复失败时，使用默认路径（下次操作时会重新请求用户选择）
+            print("[DownloadPermissionManager] ⚠️ Bookmark restoration failed, will re-prompt user")
+            let defaultURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+                .first?
+                .appendingPathComponent("WallHaven", isDirectory: true)
+            self.currentFolderURL = defaultURL
+        }
     }
 }

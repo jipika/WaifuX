@@ -32,7 +32,7 @@ class SettingsViewModel: ObservableObject {
     @Published var schedulerViewModel = WallpaperSchedulerViewModel()
     @Published var downloadTaskViewModel = DownloadTaskViewModel()
 
-    // API Key - 本地存储
+    // API Key - 本地存储（UserDefaults 为主，与 WallpaperViewModel 保持同步）
     private let apiKeyUserDefaultsKey = "wallhaven_api_key"
     var apiKey: String {
         get { UserDefaults.standard.string(forKey: apiKeyUserDefaultsKey) ?? "" }

@@ -160,21 +160,13 @@ class WallpaperViewModel: ObservableObject {
     }
     
     private var normalizedAPIKey: String? {
-        // 如果缓存未加载，尝试同步快速检查
-        if !apiKeyLoaded {
-            // 不阻塞主线程，返回 nil，让调用方处理
-            return nil
-        }
-        return cachedAPIKey
+        // 使用统一的有效 API Key 检查逻辑
+        effectiveAPIKey
     }
 
     var apiKeyConfigured: Bool {
-        // 如果未加载，触发异步加载
-        if !apiKeyLoaded {
-            Task { await loadAPIKeyIfNeeded() }
-            return false
-        }
-        return cachedAPIKey != nil
+        // 使用统一的检查逻辑：优先 UserDefaults，其次 Keychain
+        canShowNSFW
     }
 
     init() {
@@ -211,7 +203,25 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 是否可以显示 NSFW 内容
     var canShowNSFW: Bool {
-        apiKeyConfigured  // 只有配置了 API Key 才能查看 NSFW 内容
+        // 优先检查 UserDefaults（设置页写入的位置），其次检查 Keychain
+        let settingsKey = UserDefaults.standard.string(forKey: "wallhaven_api_key") ?? ""
+        let keychainKey = apiKeyConfigured ? (cachedAPIKey ?? "") : ""
+        let effectiveKey = settingsKey.isEmpty ? keychainKey : settingsKey
+        return !effectiveKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 获取有效的 API Key（统一从 UserDefaults 优先，兼容 Keychain）
+    /// 设置页通过 UserDefaults 写入，业务逻辑从这里读取，保证一致性
+    var effectiveAPIKey: String? {
+        // 1. 优先取 UserDefaults（设置页 SecureField 写入的位置）
+        if let udKey = UserDefaults.standard.string(forKey: "wallhaven_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines), !udKey.isEmpty {
+            return udKey
+        }
+
+        // 2. 其次取 Keychain（旧版兼容 / WallpaperViewModel 自身 setter 写入的）
+        if apiKeyLoaded, let cached = cachedAPIKey, !cached.isEmpty { return cached }
+
+        return nil
     }
 
     // MARK: - 收藏相关

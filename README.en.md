@@ -6,9 +6,9 @@
 
 <p align="center">
   <samp>
-    <b>✨ Make your macOS desktop no longer monotonous</b><br>
-    <b>🎨 Static wallpapers + Dynamic backgrounds + Anime videos</b><br>
-    <b>🚀 One-click switching, automatic sync</b>
+    <b>Open Source All-in-One ACG App for macOS</b><br>
+    <b>Static Wallpapers · Dynamic Wallpapers · Anime Videos</b><br>
+    <b>Multi-source Aggregation, Full-scenario Coverage</b>
   </samp>
 </p>
 
@@ -26,104 +26,112 @@
 
 ---
 
-## 🎯 What is this?
+## Overview
 
-**WaifuX** is a wallpaper app for macOS—but not just any ordinary wallpaper tool.
+**WaifuX** is an open-source **all-in-one ACG application** for macOS that integrates static wallpapers, dynamic wallpapers, and anime video playback — browse, search, and set desktop content from multiple sources, all in one place.
 
-Imagine: In the morning, your desktop has a 4K landscape from Wallhaven; in the afternoon, you switch to a dynamic water flow from MotionBGs; in the evening, you change to an anime wallpaper before watching your favorite shows... Yes, we want it all!
-
-> "Your desktop deserves better clothes 👔"
-
----
-
-## ✨ Key Features
+### Key Features
 
 | Feature | Description |
-|---------|-------------|
-| 📚 **Dual Library Support** | Wallhaven (static) + MotionBGs (dynamic), one app for two experiences |
-| 🎬 **Anime Parsing** | Built-in multi-source anime video parsing, anime fans' desktops should also be二次元 |
-| 🔍 **Smart Search** | Keywords, tags, categories, quickly find your favorite wallpapers |
-| ⭐ **Collection Management** | One-click collection of favorite wallpapers, create your exclusive gallery |
-| ⚡️ **One-click Setting** | See something you like? Click once, and your desktop is changed |
-| 🔄 **Automatic Sync** | GitHub rules automatically update, we automatically adapt when source sites change |
-| 🖼 **Full Resolution** | 4K, 8K, ultrawide? We've got you covered |
-| 🌙 **Dark Interface** | Eye-protection mode, no glare when changing wallpapers at night |
+|----------|-------------|
+| 🖼 **Static Wallpapers** | Access to high-quality sources like Wallhaven with full 4K/8K resolution coverage |
+| 🎬 **Dynamic Wallpapers** | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
+| 📺 **Anime Videos** | Built-in multi-source parsing engine for streaming and watching anime |
+| 🔍 **Smart Search & Filter** | Keywords, tags, categories, color, resolution — find exactly what you want |
+| ⭐ **Collections** | Save favorite wallpapers and videos to build your personal ACG library |
+| ⚡️ **One-click Apply** | Set as desktop wallpaper or dynamic desktop directly while browsing |
+| 🔄 **Auto-updating Rules** | Rule configurations loaded remotely via GitHub — quick adaptation when source sites change |
+| 🌙 **Native UI** | Dark/Light mode support, follows macOS design guidelines |
 
 ---
 
-## 📥 Download & Installation
+## 📥 Installation
 
 ### Method 1: Official Website (Recommended)
+
 👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
 
 ### Method 2: GitHub Releases
-👉 **[https://github.com/jipika/WaifuX/releases](https://github.com/jipika/WaifuX/releases)**
 
-> ⚠️ **Note**: First-time opening may require allowing execution in "System Settings → Privacy & Security"
+👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
+
+> ⚠️ On first launch, you may need to allow execution in "System Settings → Privacy & Security".
+
+---
+
+## 🌐 Network Requirements
+
+> ⚠️ **Note for users in mainland China**
+
+WaifuX's primary data source, [Wallhaven](https://wallhaven.cc), is hosted on overseas servers. **Direct access from mainland China may be affected by network restrictions.** If you experience issues loading content, please ensure your network can access international websites.
 
 ---
 
 ## 🛠 System Requirements
 
-- **macOS 14.0+** (Sonoma or higher)
-- Both **Apple Silicon** and **Intel** Macs are supported
+- **macOS 14.0+** (Sonoma or later)
+- Supports both **Apple Silicon (M-series)** and **Intel** Macs
 
 ---
 
-## 🔧 Rule Configuration
+## 🔧 Rule Engine
 
-WaifuX's rules are **dynamically loaded**—which means even if source sites are redesigned, we can quickly adapt.
+WaifuX uses a dynamic rule system with scraping logic decoupled from the client:
 
-Rules are hosted in a separate repository: **[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
-
-- Automatically syncs the latest rules on app startup
-- Supports manual import of custom rules
-- Simple rule format, you can write your own
+- Rules are hosted in a separate repository: **[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
+- Latest rules are automatically synced on app startup
+- Supports custom user-imported rules
+- When source site layouts change, only rules need updating — no app release required
 
 ```
-User enters GitHub URL → Automatically sync rules → Start using
-         ↑___________________________________|
-              (Rule updates, automatically obtained)
+App Launch → Check for Updates → Load Latest Rules → Ready to Use
+                    ↑________________________|
+                     (Auto-sync when remote repo updates)
 ```
 
 ---
 
 ## 🌍 Multi-language Support
 
-| Language | Status | Link |
-|----------|--------|------|
-| 🇨🇳 Simplified Chinese | ✅ Full Support | [README.md](README.md) |
-| 🇺🇸 English | ✅ Full Support | [README.en.md](README.en.md) |
-| 🇯🇵 Japanese | ✅ Full Support | [README.ja.md](README.ja.md) |
+| Language | Status |
+|----------|--------|
+| 🇨🇳 简体中文 | ✅ Full Support |
+| 🇺🇸 English | ✅ Full Support |
+| 🇯🇵 日本語 | ✅ Full Support |
 
 ---
 
-## ☕️ Support the Author
+## ☕ Support Open Source
 
-If WaifuX has made your desktop look better, you can buy the author a coffee:
+WaifuX is a **completely free and open-source** personal project. Developing and maintaining a native macOS application requires significant time and effort — from UI design and feature implementation to bug fixes and rule adaptations, every version is built on continuous personal dedication.
+
+If you find WaifuX helpful, please consider supporting its continued development:
 
 <p align="center">
-  <img src="reward.jpg" width="280" />
+  <img src="reward.jpg" width="280" alt="Sponsor QR Code" />
 </p>
 
-Or, **give a Star ⭐️** is also a great support!
+Of course, **giving a Star ⭐️** is also greatly appreciated!
+
+Every bit of support motivates me to keep maintaining and improving this app. Thank you for using WaifuX 💜
 
 ---
 
-## 📄 Open Source License
+## 📄 License
 
-[MIT License](LICENSE) - Free to use, contributions welcome!
+This project is open-sourced under the [MIT License](LICENSE). Free to use and distribute.
 
 ---
 
 ## ⚠️ Disclaimer
 
-WaifuX is just a **wallpaper aggregation tool** and does not store any wallpaper content itself:
+WaifuX does **not store any content** itself — it acts only as an aggregation tool:
 
-- [Wallhaven](https://wallhaven.cc) wallpapers are obtained through the official API
+- [Wallhaven](https://wallhaven.cc) wallpapers are fetched via their public API
 - [MotionBGs](https://motionbgs.com) content is configured by users themselves
-- All wallpaper copyrights belong to the original websites and authors
-- Please comply with the terms of service of each website, for personal use only
+- Anime video sources are provided by users
+- All content copyrights belong to the original websites and authors
+- Please comply with each platform's terms of service; for personal use only
 
 ---
 
