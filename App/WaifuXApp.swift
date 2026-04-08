@@ -77,8 +77,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
         LocalizationService.shared.restoreSavedSettings()
 
-        // 2. 恢复主题设置
-        ThemeManager.shared.restoreSavedSettings()
+        // 2. ⚠️ WaifuX 是纯深色设计应用（DarkLiquidGlassBackground、#0D0D0D 背景），
+        //    不再从 UserDefaults 恢复主题设置，始终使用固定深色模式
+        // ThemeManager.shared.restoreSavedSettings()  — 已禁用，保持固定深色
 
         // 3. 恢复下载权限书签
         DownloadPermissionManager.shared.restoreSavedPermission()

@@ -122,46 +122,32 @@ public struct LiquidGlassNextItemToast: View {
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                if isVisible, let item = nextItem {
-                    // iOS 风格：背景遮罩层（极轻微暗化，不拦截点击）
-                    Color.black.opacity(0.08)
-                        .ignoresSafeArea()
-                        .opacity(contentOpacity * 0.6)
-                        .allowsHitTesting(false)
-
-                    toastContent(item: item)
-                        .frame(width: toastWidth, height: toastHeight)
-                        .position(
-                            x: geometry.size.width - toastWidth / 2 - 20,
-                            y: geometry.size.height - toastHeight / 2 - 20
+        Group {
+            if isVisible, let item = nextItem {
+                toastContent(item: item)
+                    .frame(width: toastWidth, height: toastHeight)
+                    .opacity(contentOpacity)
+                    // 入场：从右边缘滑入 + 缩放
+                    .scaleEffect(contentScale, anchor: .trailing)
+                    .offset(x: (1 - contentOpacity) * 60, y: contentOffset)
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity
                         )
-                        // 确保 toast 整个区域可点击
-                        .contentShape(Rectangle())
-                        .opacity(contentOpacity)
-                        // 入场：从右边缘滑入 + 缩放
-                        .scaleEffect(contentScale, anchor: .trailing)
-                        .offset(x: (1 - contentOpacity) * 60, y: contentOffset)
-                        .transition(
-                            .asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .opacity
-                            )
-                        )
-                        // 放大散开消失效果：完成时模糊扩散
-                        .blur(radius: isDismissing ? 8 : (1 - contentScale) * 3)
-                }
+                    )
+                    // 放大散开消失效果：完成时模糊扩散
+                    .blur(radius: isDismissing ? 8 : (1 - contentScale) * 3)
             }
-            .onAppear {
-                startViewTimer()
-            }
-            .onDisappear {
-                stopViewTimer()
-            }
-            .onChange(of: nextItem?.previewId) { _, _ in
-                resetViewTimer()
-            }
+        }
+        .onAppear {
+            startViewTimer()
+        }
+        .onDisappear {
+            stopViewTimer()
+        }
+        .onChange(of: nextItem?.previewId) { _, _ in
+            resetViewTimer()
         }
     }
 
@@ -548,24 +534,23 @@ public struct DetailPageWithNextItemToast<Content: View>: View {
     }
 
     public var body: some View {
-        ZStack {
-            content
-
-            // 下一张弹窗（容器本身不拦截点击，只有 toast 按钮接收点击）
-            LiquidGlassNextItemToast(
-                nextItem: dataSource.nextItem,
-                onTap: {
-                    onNavigateToNext()
-                },
-                onScrollUp: {
-                    onNavigateToNext()
-                },
-                onScrollDown: {
-                    onNavigateToPrevious()
-                }
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        // 用 overlay 而不是 ZStack，toast 只占自身尺寸不遮挡 content
+        content
+            .overlay(alignment: .bottomTrailing) {
+                LiquidGlassNextItemToast(
+                    nextItem: dataSource.nextItem,
+                    onTap: {
+                        onNavigateToNext()
+                    },
+                    onScrollUp: {
+                        onNavigateToNext()
+                    },
+                    onScrollDown: {
+                        onNavigateToPrevious()
+                    }
+                )
+                .padding(20)
+            }
     }
 }
 
