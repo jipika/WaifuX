@@ -568,17 +568,12 @@ final class VideoWallpaperManager: ObservableObject {
                 NSLog("[VideoWallpaperManager] ScreenCaptureKit failed \(consecutiveScreenCaptureFailures) times, entering cooldown")
             }
             
-            // 如果 ScreenCaptureKit 失败，回退到基于可见性的简单逻辑
-            // 在 macOS 14 以下版本使用 CGWindowListCopyWindowInfo（仍然可用）
+            // 错误时不暂停播放，保持动态壁纸持续播放
+            // 只在全屏覆盖时暂停（回退方案）
             if #available(macOS 15.0, *) {
-                // macOS 15+ 上已废弃，但 ScreenCaptureKit 应该已经工作
-                // 如果失败，暂停所有播放器并显示预览图
-                await MainActor.run {
-                    for (screenID, player) in self.players {
-                        player.pause()
-                        self.showPosterImage(for: screenID)
-                    }
-                }
+                // macOS 15+ 上 ScreenCaptureKit 应该工作，失败时不做特殊处理
+                // 保持播放状态，不显示预览图
+                print("[VideoWallpaperManager] ScreenCaptureKit failed, keeping wallpaper playing")
             } else {
                 await fallbackScreenCoverageCheck()
             }
