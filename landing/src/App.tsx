@@ -179,9 +179,7 @@ function App() {
                             <GithubIcon className="w-4 h-4" />
                         </a>
                         <a
-                            href="https://github.com/jipika/WaifuX/releases/latest"
-                            target="_blank"
-                            rel="noopener noreferrer"
+                            href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
                             className="nt-btn-primary"
                         >
                             <Download className="w-3.5 h-3.5" />
@@ -215,9 +213,7 @@ function App() {
                         {/* CTA Buttons */}
                         <div className="nt-hero-actions">
                             <a
-                                href="https://github.com/jipika/WaifuX/releases/latest"
-                                target="_blank"
-                                rel="noopener noreferrer"
+                                href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
                                 className="nt-btn-hero"
                             >
                                 <Download className="w-[18px] h-[18px]" />
@@ -332,9 +328,7 @@ function App() {
                             
                             <div className="nt-cta-actions">
                                 <a
-                                    href="https://github.com/jipika/WaifuX/releases/latest"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                                    href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
                                     className="nt-btn-hero large"
                                 >
                                     <Download className="w-5 h-5" />
