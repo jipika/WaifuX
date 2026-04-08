@@ -85,7 +85,7 @@ enum WebViewCookieSync {
     
     /// 清除所有 WebView Cookie（用于调试或重置验证状态）
     static func clearAllCookies() async {
-        let dataStore = WKWebsiteDataStore.default()
+        let dataStore = await WKWebsiteDataStore.default()
         
         // 清除 WKWebView 的 Cookie
         let cookieStore = dataStore.httpCookieStore
@@ -96,7 +96,7 @@ enum WebViewCookieSync {
         }
         
         for cookie in cookies {
-            cookieStore.delete(cookie)
+            await cookieStore.delete(cookie)
         }
         
         // 清除共享存储的 Cookie

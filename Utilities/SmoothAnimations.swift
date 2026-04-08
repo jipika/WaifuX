@@ -134,7 +134,7 @@ extension View {
 
 // MARK: - 几何坐标追踪
 struct GlobalFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
+    nonisolated(unsafe) static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
     }
