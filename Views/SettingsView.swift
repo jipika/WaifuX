@@ -531,6 +531,7 @@ private struct SchedulerSettingsTab: View {
 // MARK: - 关于设置标签
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @State private var showAutoUpdateSheet = false
 
     private var wallpaperRuleSourceText: String {
         if viewModel.currentRuleRepository.isEmpty {
@@ -546,46 +547,8 @@ private struct AboutSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
-            // 应用信息卡片
-            MacSettingsSection {
-                HStack(spacing: 14) {
-                    Image(nsImage: NSApplication.shared.applicationIconImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("WaifuX")
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.92))
-
-                        Text(viewModel.updateChecker.fullVersionString)
-                            .font(.system(size: 11.5, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.4))
-                    }
-
-                    Spacer()
-
-                    if viewModel.hasUpdate {
-                        Button(t("downloadUpdate")) {
-                            viewModel.openDownloadPage()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.accentColor)
-                        .controlSize(.regular)
-                    } else {
-                        Button(t("checkForUpdates")) {
-                            Task { await viewModel.checkForUpdates() }
-                        }
-                        .disabled(viewModel.isCheckingUpdate)
-                        .buttonStyle(.borderedProminent)
-                        .tint(.accentColor.opacity(0.7))
-                        .controlSize(.regular)
-                    }
-                }
-                .padding(14)
-            }
+            // 自动更新区域
+            autoUpdateSection
 
             // 项目信息组
             MacSettingsSection(header: t("projectInfo")) {
@@ -610,19 +573,6 @@ private struct AboutSettingsTab: View {
                 .buttonStyle(.plain)
             }
         }
-        .alert(t("checkForUpdates"), isPresented: Binding(
-            get: { viewModel.updateCheckResult != nil },
-            set: { if !$0 { viewModel.updateCheckResult = nil } }
-        )) {
-            Button(t("ok"), role: .cancel) {}
-            if viewModel.hasUpdate {
-                Button(t("goToDownload")) {
-                    viewModel.openDownloadPage()
-                }
-            }
-        } message: {
-            updateCheckMessageView(for: viewModel.updateCheckResult)
-        }
     }
 
     @ViewBuilder
@@ -635,20 +585,507 @@ private struct AboutSettingsTab: View {
         }
     }
     
+    // MARK: - 自动更新区域
+    
     @ViewBuilder
-    private func updateCheckMessageView(for result: UpdateCheckResult?) -> some View {
-        if let result = result {
-            switch result {
-            case .noUpdate:
-                Text(t("alreadyLatestVersion"))
-            case .updateAvailable(_, let release, let commit):
-                let commitText = commit.map { "\n\n📌 \($0.shortMessage)" } ?? ""
-                Text("\(t("newVersionFound")) \(release.version)\(commitText)\n\n\(t("goToDownloadQuestion"))")
-            case .error(let message):
-                Text(message)
+    private var autoUpdateSection: some View {
+        MacSettingsSection {
+            VStack(alignment: .leading, spacing: 16) {
+                // 应用信息头部
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                        .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("WaifuX")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(Color.white.opacity(0.92))
+
+                        Text(viewModel.updateChecker.fullVersionString)
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.4))
+                    }
+
+                    Spacer()
+
+                    // 更新状态指示
+                    updateStatusIndicator
+                }
+                
+                // 更新操作区域
+                HStack(spacing: 12) {
+                    Button {
+                        Task {
+                            await viewModel.checkForUpdates()
+                            // 如果有更新，显示弹窗
+                            if case .updateAvailable = viewModel.updateCheckResult {
+                                showAutoUpdateSheet = true
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.8)
+                            }
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12))
+                            Text(viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking ? "检查中..." : "检查更新")
+                                .font(.system(size: 13))
+                        }
+                        .frame(height: 28)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking)
+                    
+                    if let lastCheck = viewModel.updateChecker.lastCheckDate {
+                        Text("上次检查: \(formatRelativeDate(lastCheck))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                }
+                
+                // 已下载但未安装的提示
+                if case .downloaded = UpdateManager.shared.state {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("更新已下载")
+                            .font(.system(size: 13))
+                        Spacer()
+                        Button {
+                            UpdateManager.shared.installUpdate()
+                        } label: {
+                            Text("立即安装")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(10)
+                    .background(Color.green.opacity(0.1))
+                    .cornerRadius(8)
+                }
             }
-        } else {
-            Text("")
+            .padding(14)
+        }
+        .sheet(isPresented: $showAutoUpdateSheet) {
+            if case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
+                AutoUpdateSheet(
+                    currentVersion: current,
+                    latestVersion: release.version,
+                    release: release,
+                    commit: commit
+                )
+            }
         }
     }
+    
+    @ViewBuilder
+    private var updateStatusIndicator: some View {
+        switch viewModel.updateCheckResult {
+        case .updateAvailable(_, let release, _):
+            Button {
+                showAutoUpdateSheet = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .foregroundStyle(.blue)
+                    Text("v\(release.version) 可用")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.blue)
+                }
+            }
+            .buttonStyle(.plain)
+            
+        case .noUpdate:
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("已是最新")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+        case .error(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        default:
+            EmptyView()
+        }
+    }
+    
+    private func formatRelativeDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+import SwiftUI
+
+/// 自动更新弹窗
+struct AutoUpdateSheet: View {
+    @ObservedObject var updateChecker = UpdateChecker.shared
+    @ObservedObject var updateManager = UpdateManager.shared
+    @Environment(\.dismiss) private var dismiss
+    
+    let currentVersion: String
+    let latestVersion: String
+    let release: GitHubRelease
+    let commit: GitHubCommit?
+    
+    var body: some View {
+        VStack(spacing: 24) {
+            // 标题图标
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue)
+                .symbolEffect(.bounce, options: .repeat(1))
+            
+            // 标题
+            Text("发现新版本")
+                .font(.system(size: 20, weight: .bold))
+            
+            // 版本信息
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("当前版本")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Text(currentVersion)
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.1))
+                        .cornerRadius(4)
+                }
+                
+                HStack(spacing: 8) {
+                    Text("最新版本")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Text(latestVersion)
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.blue.opacity(0.15))
+                        .foregroundStyle(.blue)
+                        .cornerRadius(4)
+                }
+            }
+            
+            // 更新内容
+            if let commit = commit {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("更新内容")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    
+                    Text(commit.shortMessage)
+                        .font(.system(size: 14))
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    HStack {
+                        Text(commit.shortSHA)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+                .padding(12)
+                .background(Color.secondary.opacity(0.05))
+                .cornerRadius(8)
+            }
+            
+            // 进度条或按钮
+            VStack(spacing: 12) {
+                if updateManager.state.isDownloading || updateManager.state.isInstalling {
+                    // 下载/安装中显示进度条
+                    VStack(spacing: 8) {
+                        ProgressView(value: updateManager.progress)
+                            .progressViewStyle(LinearProgressViewStyle())
+                        
+                        HStack {
+                            Text(statusText)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int(updateManager.progress * 100))%")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                
+                // 按钮行
+                HStack(spacing: 12) {
+                    // 取消/关闭按钮
+                    Button {
+                        if updateManager.state.isDownloading {
+                            // 取消下载
+                            updateManager.reset()
+                        } else {
+                            dismiss()
+                        }
+                    } label: {
+                        Text(buttonText)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(minWidth: 80)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(updateManager.state.isInstalling)
+                    
+                    // 主操作按钮
+                    if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
+                        Button {
+                            Task {
+                                await updateManager.downloadUpdate(version: latestVersion)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if updateManager.state.isDownloading {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .scaleEffect(0.8)
+                                }
+                                Text(downloadButtonText)
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .frame(minWidth: 120)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(updateManager.state.isDownloading)
+                    } else if updateManager.state.isDownloaded {
+                        Button {
+                            updateManager.installUpdate()
+                        } label: {
+                            Text("立即安装")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(minWidth: 120)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .frame(width: 280)
+        }
+        .padding(24)
+        .frame(width: 360)
+        .onDisappear {
+            // 如果下载完成但未安装，保留状态
+            if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
+                updateManager.reset()
+            }
+        }
+    }
+    
+    // MARK: - 辅助属性
+    
+    private var statusText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "正在下载..."
+        case .installing:
+            return "正在安装..."
+        default:
+            return ""
+        }
+    }
+    
+    private var buttonText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "取消"
+        case .installing:
+            return "安装中..."
+        default:
+            return "稍后"
+        }
+    }
+    
+    private var downloadButtonText: String {
+        switch updateManager.state {
+        case .downloading:
+            return "下载中..."
+        default:
+            return "立即更新"
+        }
+    }
+}
+
+// MARK: - 设置页更新检查视图
+
+struct SettingsUpdateSection: View {
+    @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject var updateChecker = UpdateChecker.shared
+    @ObservedObject var updateManager = UpdateManager.shared
+    @State private var showUpdateSheet = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // 版本信息
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("当前版本")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Text(viewModel.appVersion)
+                        .font(.system(size: 14, weight: .medium))
+                }
+                
+                Spacer()
+                
+                // 更新状态指示
+                updateStatusView
+            }
+            
+            // 检查更新按钮
+            HStack(spacing: 12) {
+                Button {
+                    Task {
+                        await viewModel.checkForUpdates()
+                        // 如果有更新，自动显示弹窗
+                        if case .updateAvailable = viewModel.updateCheckResult {
+                            showUpdateSheet = true
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if viewModel.isCheckingUpdate || updateChecker.isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        }
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12))
+                        Text(viewModel.isCheckingUpdate || updateChecker.isChecking ? "检查中..." : "检查更新")
+                            .font(.system(size: 13))
+                    }
+                    .frame(height: 28)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isCheckingUpdate || updateChecker.isChecking)
+                
+                if let lastCheck = updateChecker.lastCheckDate {
+                    Text("上次检查: \(formatRelativeDate(lastCheck))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            
+            // 已下载但未安装的提示
+            if case .downloaded(let path) = updateManager.state {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("更新已下载")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Button {
+                        updateManager.installUpdate()
+                    } label: {
+                        Text("立即安装")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(10)
+                .background(Color.green.opacity(0.1))
+                .cornerRadius(8)
+            }
+        }
+        .padding(16)
+        .background(Color.secondary.opacity(0.05))
+        .cornerRadius(12)
+        .sheet(isPresented: $showUpdateSheet) {
+            if case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
+                AutoUpdateSheet(
+                    currentVersion: current,
+                    latestVersion: release.version,
+                    release: release,
+                    commit: commit
+                )
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var updateStatusView: some View {
+        switch viewModel.updateCheckResult {
+        case .updateAvailable(_, let release, _):
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundStyle(.blue)
+                Text("v\(release.version) 可用")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.blue)
+            }
+        case .noUpdate:
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("已是最新版本")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+        case .error(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        default:
+            EmptyView()
+        }
+    }
+    
+    private func formatRelativeDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+#Preview {
+    AutoUpdateSheet(
+        currentVersion: "38.0.22",
+        latestVersion: "38.0.25",
+        release: GitHubRelease(
+            tagName: "v38.0.25",
+            name: "WaifuX 38.0.25",
+            body: "修复了一些问题",
+            htmlUrl: "https://github.com/jipika/WaifuX/releases/tag/v38.0.25",
+            publishedAt: "2024-01-01T00:00:00Z",
+            prerelease: false,
+            draft: false,
+            targetCommitish: "abc1234"
+        ),
+        commit: GitHubCommit(
+            sha: "abc1234567890",
+            commit: GitHubCommit.CommitDetails(
+                message: "修复了内存泄漏问题\n\n优化了图片加载性能",
+                author: GitHubCommit.CommitDetails.AuthorInfo(
+                    name: "Developer",
+                    date: "2024-01-01T00:00:00Z"
+                )
+            )
+        )
+    )
+    .frame(width: 400, height: 500)
 }

@@ -285,3 +285,287 @@ final class UpdateChecker: ObservableObject {
         return isVersion(release.version, newerThan: localVersion)
     }
 }
+import Foundation
+import AppKit
+
+/// 自动更新管理器 - 处理下载和安装（参考 AltTab 实现）
+@MainActor
+final class UpdateManager: ObservableObject {
+    static let shared = UpdateManager()
+    
+    // MARK: - 发布的状态
+    @Published var state: UpdateState = .idle
+    @Published var progress: Double = 0
+    
+    enum UpdateState: Equatable {
+        case idle
+        case checking
+        case downloading(Double)
+        case downloaded(URL)
+        case installing
+        case completed
+        case error(String)
+        
+        var isIdle: Bool {
+            if case .idle = self { return true }
+            return false
+        }
+        
+        var isDownloading: Bool {
+            if case .downloading = self { return true }
+            return false
+        }
+        
+        var isDownloaded: Bool {
+            if case .downloaded = self { return true }
+            return false
+        }
+        
+        var isInstalling: Bool {
+            if case .installing = self { return true }
+            return false
+        }
+        
+        var progressValue: Double {
+            switch self {
+            case .downloading(let p): return p
+            case .downloaded: return 1.0
+            default: return 0
+            }
+        }
+    }
+    
+    // MARK: - 配置
+    private let owner = "jipika"
+    private let repo = "WaifuX"
+    
+    private init() {}
+    
+    // MARK: - 下载更新
+    
+    func downloadUpdate(version: String) async {
+        guard !state.isDownloading else { return }
+        
+        state = .downloading(0)
+        progress = 0
+        
+        // 构建下载链接（使用 GitHub Releases 的直链）
+        let downloadURL = "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX-\(version).dmg"
+        
+        guard let url = URL(string: downloadURL) else {
+            state = .error("无效的下载链接")
+            return
+        }
+        
+        print("[UpdateManager] Downloading from: \(downloadURL)")
+        
+        // 创建临时下载路径
+        let tempDir = FileManager.default.temporaryDirectory
+        let tempFile = tempDir.appendingPathComponent("WaifuX_\(version)_update.dmg")
+        
+        // 清理已存在的临时文件
+        if FileManager.default.fileExists(atPath: tempFile.path) {
+            try? FileManager.default.removeItem(at: tempFile)
+        }
+        
+        // 使用 URLSession 下载
+        var request = URLRequest(url: url)
+        request.setValue("WallHaven-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
+        
+        do {
+            let (downloadURL, response) = try await downloadWithProgress(request: request) { [weak self] p in
+                Task { @MainActor in
+                    self?.progress = p
+                    self?.state = .downloading(p)
+                }
+            }
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                state = .error("无效的服务器响应")
+                return
+            }
+            
+            if httpResponse.statusCode == 404 {
+                // 尝试备用链接格式
+                let altURL = "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX.dmg"
+                print("[UpdateManager] Trying alternate URL: \(altURL)")
+                
+                guard let altDownloadURL = URL(string: altURL) else {
+                    state = .error("下载链接不存在 (404)")
+                    return
+                }
+                
+                let (altFile, altResponse) = try await downloadWithProgress(request: URLRequest(url: altDownloadURL)) { [weak self] p in
+                    Task { @MainActor in
+                        self?.progress = p
+                        self?.state = .downloading(p)
+                    }
+                }
+                
+                try FileManager.default.moveItem(at: altFile, to: tempFile)
+                state = .downloaded(tempFile)
+                
+            } else if httpResponse.statusCode != 200 {
+                state = .error("下载失败 (HTTP \(httpResponse.statusCode))")
+                return
+            } else {
+                // 移动文件到临时位置
+                try FileManager.default.moveItem(at: downloadURL, to: tempFile)
+                state = .downloaded(tempFile)
+                print("[UpdateManager] Downloaded to: \(tempFile.path)")
+            }
+            
+        } catch {
+            print("[UpdateManager] Download error: \(error)")
+            state = .error("下载失败: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - 安装更新
+    
+    func installUpdate() {
+        guard case .downloaded(let dmgPath) = state else {
+            print("[UpdateManager] No downloaded file to install")
+            return
+        }
+        
+        state = .installing
+        
+        // 创建 AppleScript 安装脚本（参考 AltTab 方式）
+        let script = createAppleScript(dmgPath: dmgPath.path)
+        
+        var errorInfo: NSDictionary?
+        guard let appleScript = NSAppleScript(source: script) else {
+            state = .error("无法创建安装脚本")
+            return
+        }
+        
+        // 执行安装脚本
+        appleScript.executeAndReturnError(&errorInfo)
+        
+        if let error = errorInfo {
+            print("[UpdateManager] Install script error: \(error)")
+            // 错误可能是正常的，因为脚本会杀掉当前进程
+        }
+        
+        // 延迟后退出
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+    
+    // MARK: - 辅助方法
+    
+    func reset() {
+        state = .idle
+        progress = 0
+    }
+    
+    // MARK: - 私有方法
+    
+    private func downloadWithProgress(
+        request: URLRequest,
+        progressHandler: @escaping (Double) -> Void
+    ) async throws -> (URL, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            let session = URLSession(configuration: .default)
+            let task = session.downloadTask(with: request) { url, response, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let url = url, let response = response else {
+                    continuation.resume(throwing: URLError(.badServerResponse))
+                    return
+                }
+                continuation.resume(returning: (url, response))
+            }
+            
+            // 监听下载进度
+            let progressObserver = task.progress.observe(\.fractionCompleted, options: [.new]) { progress, _ in
+                progressHandler(progress.fractionCompleted)
+            }
+            
+            // 保持 observer 存活
+            objc_setAssociatedObject(task, "observer", progressObserver, .OBJC_ASSOCIATION_RETAIN)
+            
+            task.resume()
+        }
+    }
+    
+    private func createAppleScript(dmgPath: String) -> String {
+        let appName = "WaifuX"
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.waifux.app"
+        
+        // 创建 bash 脚本文件并执行（参考 AltTab 实现）
+        let scriptContent = """
+#!/bin/bash
+set -e
+
+DMG_PATH="\(dmgPath)"
+APP_NAME="\(appName)"
+
+# 等待原应用退出
+sleep 1
+
+# 强制退出应用
+pkill -9 -x "$APP_NAME" 2>/dev/null || true
+osascript -e 'quit app "$APP_NAME"' 2>/dev/null || true
+sleep 2
+
+# 创建临时挂载点
+MOUNT_POINT="/tmp/WaifuX_Update_$$"
+mkdir -p "$MOUNT_POINT"
+
+# 挂载 DMG
+hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -quiet
+
+# 查找应用
+APP_PATH=$(find "$MOUNT_POINT" -name "*.app" -maxdepth 1 | head -n 1)
+
+if [ -z "$APP_PATH" ]; then
+    echo "Error: No app found in DMG"
+    hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+    exit 1
+fi
+
+# 复制到 Applications
+DEST_PATH="/Applications/$APP_NAME.app"
+
+if [ -d "$DEST_PATH" ]; then
+    rm -rf "$DEST_PATH"
+fi
+
+cp -R "$APP_PATH" "$DEST_PATH"
+
+# 卸载 DMG
+hdiutil detach "$MOUNT_POINT" -quiet
+rmdir "$MOUNT_POINT" 2>/dev/null || true
+
+# 移除隔离属性
+xattr -rd com.apple.quarantine "$DEST_PATH" 2>/dev/null || true
+
+# 启动新版本
+open "$DEST_PATH"
+
+# 清理下载文件
+rm -f "$DMG_PATH"
+"""
+        
+        // 写入临时脚本文件
+        let tempDir = FileManager.default.temporaryDirectory
+        let scriptPath = tempDir.appendingPathComponent("waifux_update_\(UUID().uuidString).sh")
+        
+        do {
+            try scriptContent.write(toFile: scriptPath.path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+        } catch {
+            print("[UpdateManager] Failed to create install script: \(error)")
+        }
+        
+        // 使用 AppleScript 执行脚本（请求管理员权限）
+        return """
+        do shell script "bash '\(scriptPath.path)'" with administrator privileges
+        """
+    }
+}
