@@ -473,6 +473,7 @@ public struct LiquidGlassButton<Content: View>: View {
             content
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
+                .contentShape(Capsule())
                 .liquidGlassSurface(
                     variant.defaultLevel,
                     tint: variant.tintColor,
@@ -595,6 +596,7 @@ public struct LiquidGlassPillButton: View {
             .foregroundStyle(isSelected ? .white : LiquidGlassColors.textSecondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
+            .contentShape(Capsule())
             .liquidGlassSurface(
                 isSelected ? .max : .regular,
                 tint: isSelected ? color : nil,
@@ -640,6 +642,7 @@ public struct LiquidGlassFloatingButton: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isHovered ? color : LiquidGlassColors.textPrimary)
                 .frame(width: size, height: size)
+                .contentShape(Circle())
                 .liquidGlassSurface(.max, tint: color, in: Circle())
                 .shadow(
                     color: isHovered ? color.opacity(0.5) : Color.black.opacity(0.15),

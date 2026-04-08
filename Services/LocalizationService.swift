@@ -505,6 +505,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "aspect.dynamic": "DYNAMIC",
         "aspect.loop": "LOOP",
         "aspect.aesthetic": "AESTHETIC",
+        "aspect.portrait": "PORTRAIT",
         // Media type
         "media.count": "MEDIA",
         "media.loaded": "LOADED",
@@ -1261,6 +1262,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "aspect.dynamic": "动态",
         "aspect.loop": "循环",
         "aspect.aesthetic": "美学",
+        "aspect.portrait": "竖图",
         // Media type
         "media.count": "段媒体",
         "media.loaded": "已加载",
@@ -2017,6 +2019,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "aspect.dynamic": "動的",
         "aspect.loop": "ループ",
         "aspect.aesthetic": "エステティック",
+        "aspect.portrait": "縦長",
         // Media type
         "media.count": "件のメディア",
         "media.loaded": "読み込み済み",

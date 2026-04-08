@@ -137,6 +137,7 @@ struct MediaExploreContentView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.36))
+                                .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -157,6 +158,8 @@ struct MediaExploreContentView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(width: 46, height: 46)
+                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
+                        .contentShape(Circle())
                         .liquidGlassSurface(
                             .prominent,
                             tint: exploreAtmosphere.tint.secondary.opacity(0.12),
@@ -164,7 +167,6 @@ struct MediaExploreContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .contentShape(Circle())
             }
             .frame(maxWidth: 520)
 
@@ -377,8 +379,31 @@ struct MediaExploreContentView: View {
 
     // MARK: - 合并的过滤处理
 
+    /// 判断该 HotTag 是否对应网站上的真实标签页面（可发起服务端请求）
+    private static let hotTagServerSlugs: [MediaExploreHotTag: String] = [
+        .anime: "anime",
+        .rain: "rain",
+        .cyberpunk: "cyberpunk",
+        .nature: "nature",
+        .game: "games",       // 注意：网站 slug 是 games 不是 game
+        .dark: "dark",
+    ]
+
+    private func isServerSideHotTag(_ tag: MediaExploreHotTag) -> Bool {
+        Self.hotTagServerSlugs[tag] != nil
+    }
+
     private func handleFilterChange() {
-        // 一次性处理所有过滤条件的变化
+        // 如果选中的是服务端请求型 HotTag，发起真实 API 请求
+        if let hotTag = selectedHotTag, isServerSideHotTag(hotTag),
+           let slug = Self.hotTagServerSlugs[hotTag] {
+            Task {
+                await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
+            }
+            return
+        }
+
+        // 否则执行客户端过滤（4K/HD 等）
         rebuildVisibleMediaItems()
     }
 
@@ -901,27 +926,27 @@ extension MediaItem {
     }
 
     fileprivate func matches(hotTag: MediaExploreHotTag) -> Bool {
-        let tagNames = tags.map { $0.lowercased() }
-        let searchable = [title.lowercased(), categoryName?.lowercased() ?? "", tagNames.joined(separator: " ")]
-            .joined(separator: " ")
-
         switch hotTag {
         case .fourK:
-            return formatText.uppercased().contains("4K")
+            // formatText 可能是 "3840x2160" 或 "4K"，检查两种形式
+            let normalized = formatText.uppercased()
+                .replacingOccurrences(of: " ", with: "")
+            if normalized.contains("3840X2160") || normalized.contains("4K") { return true }
+            // 也检查 exactResolution（如 "3840 × 2160" 带空格的格式）
+            if let er = exactResolution, er.uppercased().contains("3840") { return true }
+            return false
         case .hd:
-            return formatText.uppercased().contains("HD")
-        case .anime:
-            return searchable.contains("anime") || searchable.contains("jujutsu") || searchable.contains("naruto")
-        case .rain:
-            return searchable.contains("rain")
-        case .cyberpunk:
-            return searchable.contains("cyberpunk")
-        case .nature:
-            return searchable.contains("nature") || searchable.contains("forest") || searchable.contains("water")
-        case .game:
-            return searchable.contains("game") || searchable.contains("wuthering") || searchable.contains("resident evil")
-        case .dark:
-            return searchable.contains("dark") || searchable.contains("night")
+            // 匹配 HD / 1920x1080 / 1280x720 等
+            let normalized = formatText.uppercased()
+                .replacingOccurrences(of: " ", with: "")
+            if normalized.contains("HD") || normalized.contains("1920X1080")
+               || normalized.contains("1280X720") { return true }
+            if let er = exactResolution,
+               er.uppercased().contains("1920") || er.uppercased().contains("1280") { return true }
+            return false
+        default:
+            // 其他标签由 handleFilterChange 统一走服务端请求，客户端不匹配
+            return false
         }
     }
 }

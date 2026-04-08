@@ -243,6 +243,7 @@ private struct PlayerIconButton: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
                 .frame(width: 40, height: 40)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .liquidGlassSurface(
@@ -277,6 +278,7 @@ private struct LikeButton: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(isLiked ? LiquidGlassColors.primaryPink : (isHovered ? .white : LiquidGlassColors.textSecondary))
                 .frame(width: 40, height: 40)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .liquidGlassSurface(
@@ -320,6 +322,7 @@ private struct ControlButton: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isHovered ? .white : LiquidGlassColors.textPrimary)
                 .frame(width: 40, height: 40)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .liquidGlassSurface(
@@ -355,6 +358,8 @@ private struct PlayPauseButton: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 52, height: 52)
+                // 确保整个圆形区域可点击，而不仅仅是图标
+                .contentShape(Circle())
                 .background(
                     Circle()
                         .fill(
@@ -421,6 +426,7 @@ private struct SpeedButton: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(isHovered ? .white : LiquidGlassColors.textSecondary)
                 .frame(width: 40, height: 28)
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .liquidGlassSurface(
@@ -498,6 +504,8 @@ struct MiniPlayerBar: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            // 确保整个迷你播放器条区域可点击
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .background(
                 MiniPlayerBackground(isHovered: isHovered)
             )

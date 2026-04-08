@@ -71,10 +71,29 @@ struct WallpaperExploreContentView: View {
                 syncExploreAtmosphere()
             }
         }
-        .onChange(of: selectedCategory) { _, _ in
-            // 筛选条件变化时完全重建
+        .onChange(of: selectedCategory) { newCategory, _ in
+            // 将分类映射到 ViewModel 的 API 参数并触发服务端搜索
+            switch newCategory {
+            case .all:
+                viewModel.categoryGeneral = true
+                viewModel.categoryAnime = true
+                viewModel.categoryPeople = true
+            case .general:
+                viewModel.categoryGeneral = true
+                viewModel.categoryAnime = false
+                viewModel.categoryPeople = false
+            case .anime:
+                viewModel.categoryGeneral = false
+                viewModel.categoryAnime = true
+                viewModel.categoryPeople = false
+            case .people:
+                viewModel.categoryGeneral = false
+                viewModel.categoryAnime = false
+                viewModel.categoryPeople = true
+            }
+            // 清空本地缓存列表，触发 API 重新请求
             displayedWallpapers = []
-            rebuildVisibleWallpapers()
+            cancelAndSearch()
         }
         .onChange(of: selectedHotTag) { _, _ in
             // 筛选条件变化时完全重建
@@ -156,6 +175,7 @@ struct WallpaperExploreContentView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.38))
+                                .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -176,6 +196,8 @@ struct WallpaperExploreContentView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(width: 46, height: 46)
+                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
+                        .contentShape(Circle())
                         .liquidGlassSurface(
                             .prominent,
                             tint: exploreAtmosphere.tint.secondary.opacity(0.12),
@@ -183,7 +205,6 @@ struct WallpaperExploreContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .contentShape(Circle())
             }
             HStack(alignment: .center, spacing: 10) {
                 Text(t("hotWallpaper") + ":")
@@ -194,9 +215,7 @@ struct WallpaperExploreContentView: View {
                         tag: tag,
                         isSelected: selectedHotTag == tag
                     ) {
-                        withAnimation(AppFluidMotion.interactiveSpring) {
-                            selectedHotTag = selectedHotTag == tag ? nil : tag
-                        }
+                        applyHotTag(tag)
                     }
                 }
                 // 比例筛选
@@ -465,6 +484,45 @@ struct WallpaperExploreContentView: View {
         viewModel.searchQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         cancelAndSearch()
     }
+
+    /// 将热门标签映射为真实 Wallhaven API 参数并触发搜索
+    private func applyHotTag(_ tag: ExploreHotTag) {
+        // 切换选中状态
+        let wasSelected = selectedHotTag == tag
+        withAnimation(AppFluidMotion.interactiveSpring) {
+            selectedHotTag = wasSelected ? nil : tag
+        }
+
+        if wasSelected {
+            // 取消：清除该标签设置的所有参数，重新搜索
+            clearHotTagAPIParams()
+            cancelAndSearch()
+            return
+        }
+
+        // 先清除之前可能残留的其他标签参数
+        clearHotTagAPIParams()
+
+        // 根据标签类型写入对应的 ViewModel 参数
+        if let ratios = tag.apiRatios {
+            viewModel.selectedRatios = ratios
+        }
+        if let atleast = tag.apiAtleast {
+            viewModel.atleastResolution = atleast
+        }
+
+        cancelAndSearch()
+    }
+
+    /// 清除热门标签设置的 API 参数（保留用户手动设置的筛选条件）
+    private func clearHotTagAPIParams() {
+        viewModel.atleastResolution = nil
+        if let currentTag = selectedHotTag {
+            if currentTag.apiRatios != nil {
+                viewModel.selectedRatios = []
+            }
+        }
+    }
     private var activePurityLabels: [String] {
         var labels: [String] = []
         if viewModel.puritySFW { labels.append("SFW") }
@@ -507,6 +565,9 @@ struct WallpaperExploreContentView: View {
         }
         for resolution in viewModel.selectedResolutions {
             chips.append(.init(kind: .resolution(resolution), title: resolution, accentHex:"7A5CFF"))
+        }
+        if let atleast = viewModel.atleastResolution {
+            chips.append(.init(kind: .atleast(atleast), title: "≥\(atleast)", accentHex: "E85D04"))
         }
         for ratio in viewModel.selectedRatios {
             chips.append(.init(kind: .ratio(ratio), title: ratio.replacingOccurrences(of: "x",with: ":"), accentHex: "5A7CFF"))
@@ -558,6 +619,7 @@ struct WallpaperExploreContentView: View {
         viewModel.selectedColors = []
         viewModel.selectedRatios = []
         viewModel.selectedResolutions = []
+        viewModel.atleastResolution = nil
         cancelAndSearch()
     }
     private func removeFilter(_ chip: ExploreFilterChipData) {
@@ -580,6 +642,16 @@ struct WallpaperExploreContentView: View {
             viewModel.selectedResolutions.removeAll { $0 == resolution }
         case .ratio(let ratio):
             viewModel.selectedRatios.removeAll { $0 == ratio }
+            // 如果热门标签设置了该比例，取消选中
+            if let tag = selectedHotTag, let tagRatios = tag.apiRatios, tagRatios.contains(ratio) {
+                selectedHotTag = nil
+            }
+        case .atleast:
+            viewModel.atleastResolution = nil
+            // 取消关联的热门标签选中状态
+            if selectedHotTag?.apiAtleast != nil {
+                selectedHotTag = nil
+            }
         }
         cancelAndSearch()
     }
@@ -614,24 +686,8 @@ struct WallpaperExploreContentView: View {
         }
     }
     private func matchesHotTag(_ wallpaper: Wallpaper, tag: ExploreHotTag) -> Bool {
-        switch tag {
-        case .ultraHD:
-            return wallpaper.dimensionX >= 3840 || wallpaper.dimensionY >= 2160
-        case .ultrawide:
-            return wallpaper.matchesAspectRatio("21x9") || wallpaper.matchesAspectRatio("32x9")
-        case .ratio21x9:
-            return wallpaper.matchesAspectRatio("21x9")
-        case .ratio32x9:
-            return wallpaper.matchesAspectRatio("32x9")
-        case .ratio16x9:
-            return wallpaper.matchesAspectRatio("16x9")
-        case .desktopHut:
-            return wallpaper.matchesAnyTag(["desktophut", "video", "motion", "live"])
-        case .loop:
-            return wallpaper.matchesAnyTag(["loop", "seamless", "cinemagraph"])
-        case .aesthetic:
-            return wallpaper.matchesAnyTag(["aesthetic", "vaporwave", "neon", "dreamy"])
-        }
+        // 所有标签都已通过 API 参数筛选（ratios/atleast），无需客户端二次过滤
+        return true
     }
     private func rebuildVisibleWallpapers() {
         print("[WallpaperExplore] Rebuilding visible wallpapers. viewModel.wallpapers.count: \(viewModel.wallpapers.count)")
@@ -700,24 +756,8 @@ struct WallpaperExploreContentView: View {
         guard let hotTag else { return categoryFiltered }
         
         return categoryFiltered.filter { wallpaper in
-            switch hotTag {
-            case .ultraHD:
-                return wallpaper.dimensionX >= 3840 || wallpaper.dimensionY >= 2160
-            case .ultrawide:
-                return wallpaper.matchesAspectRatio("21x9") || wallpaper.matchesAspectRatio("32x9")
-            case .ratio21x9:
-                return wallpaper.matchesAspectRatio("21x9")
-            case .ratio32x9:
-                return wallpaper.matchesAspectRatio("32x9")
-            case .ratio16x9:
-                return wallpaper.matchesAspectRatio("16x9")
-            case .desktopHut:
-                return wallpaper.matchesAnyTag(["desktophut", "video", "motion", "live"])
-            case .loop:
-                return wallpaper.matchesAnyTag(["loop", "seamless", "cinemagraph"])
-            case .aesthetic:
-                return wallpaper.matchesAnyTag(["aesthetic", "vaporwave", "neon", "dreamy"])
-            }
+            // 所有热门标签都已通过 API 参数筛选，无需客户端二次过滤
+            return true
         }
     }
     /// 增量追加新壁纸（用于 loadMore 场景）
@@ -1043,6 +1083,7 @@ private struct ExploreFilterChipData: Identifiable {
         case color(String)
         case resolution(String)
         case ratio(String)
+        case atleast(String)
     }
 
     // 使用稳定的 ID 基于 kind，避免每次重建都生成新的 UUID 导致 ForEach 全量重建
@@ -1056,6 +1097,8 @@ private struct ExploreFilterChipData: Identifiable {
             return "resolution_\(resolution)"
         case .ratio(let ratio):
             return "ratio_\(ratio)"
+        case .atleast(let value):
+            return "atleast_\(value)"
         }
     }
 
@@ -1204,8 +1247,9 @@ private struct ExploreHotTagChip: View {
             Text(tag.title)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
-                .padding(.horizontal, 14)
-                .frame(height: 32)
+                .fixedSize()
+                .padding(.horizontal, 12)
+                .frame(height: 32, alignment: .center)
                 .background(
                     Capsule(style: .continuous)
                         .fill(.ultraThinMaterial)
@@ -1289,9 +1333,7 @@ private enum ExploreHotTag: String, CaseIterable, Identifiable {
     case ratio21x9
     case ratio32x9
     case ratio16x9
-    case desktopHut
-    case loop
-    case aesthetic
+    case portrait  // 竖图（高>宽）
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -1300,9 +1342,26 @@ private enum ExploreHotTag: String, CaseIterable, Identifiable {
         case .ratio21x9: return "21:9"
         case .ratio32x9: return "32:9"
         case .ratio16x9: return "16:9"
-        case .desktopHut: return t("aspect.dynamic")
-        case .loop: return t("aspect.loop")
-        case .aesthetic: return t("aspect.aesthetic")
+        case .portrait: return t("aspect.portrait")
+        }
+    }
+
+    /// 映射到 Wallhaven API 参数
+    var apiRatios: [String]? {
+        switch self {
+        case .ultrawide: return ["21x9", "32x9"]
+        case .ratio21x9: return ["21x9"]
+        case .ratio32x9: return ["32x9"]
+        case .ratio16x9: return ["16x9"]
+        case .portrait: return ["9x16", "10x16", "2x3", "3x4", "4x5"]
+        default: return nil
+        }
+    }
+
+    var apiAtleast: String? {
+        switch self {
+        case .ultraHD: return "3840x2160"
+        default: return nil
         }
     }
 }
@@ -1393,6 +1452,8 @@ extension WallpaperExploreContentView {
         viewModel.selectedResolutions = []
         // 重置比例
         viewModel.selectedRatios = []
+        // 重置最小分辨率
+        viewModel.atleastResolution = nil
         // 触发搜索
         Task {
             await viewModel.search()

@@ -68,6 +68,8 @@ struct LiquidGlassWallpaperCard: View {
                 tint: LiquidGlassColors.primaryPink.opacity(0.08),
                 in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             )
+            // 确保整个卡片区域可点击，而不仅仅是图片/文字
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .shadow(
                 color: isHovered ? LiquidGlassColors.primaryPink.opacity(0.3) : .black.opacity(0.25),
                 radius: isHovered ? 25 : 12,
@@ -160,6 +162,8 @@ struct LiquidGlassCarouselCard: View {
                 }
                 .padding(16)
             }
+            // 确保整个轮播卡片区域可点击
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .detailGlassCarouselChrome(
                 cornerRadius: cornerRadius,
                 tint: LiquidGlassColors.primaryPink.opacity(0.06),
@@ -231,6 +235,8 @@ struct LiquidGlassFeaturedCard: View {
                 }
                 .padding(12)
             }
+            // 确保整个精选卡片区域可点击
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .shadow(
                 color: isHovered ? LiquidGlassColors.primaryPink.opacity(0.3) : .black.opacity(0.3),
                 radius: isHovered ? 25 : 15,
@@ -281,6 +287,8 @@ struct LiquidGlassCompactWallpaperCard: View {
                     )
                     .padding(6)
             }
+            // 确保整个紧凑卡片区域可点击
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(

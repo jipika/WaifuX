@@ -127,17 +127,10 @@ public struct LiquidGlassNextItemToast: View {
                 toastContent(item: item)
                     .frame(width: toastWidth, height: toastHeight)
                     .opacity(contentOpacity)
-                    // 入场：从右边缘滑入 + 缩放
                     .scaleEffect(contentScale, anchor: .trailing)
                     .offset(x: (1 - contentOpacity) * 60, y: contentOffset)
-                    .transition(
-                        .asymmetric(
-                            insertion: .move(edge: .trailing).combined(with: .opacity),
-                            removal: .opacity
-                        )
-                    )
-                    // 放大散开消失效果：完成时模糊扩散
                     .blur(radius: isDismissing ? 8 : (1 - contentScale) * 3)
+                    .allowsHitTesting(!isDismissing)
             }
         }
         .onAppear {
@@ -146,8 +139,12 @@ public struct LiquidGlassNextItemToast: View {
         .onDisappear {
             stopViewTimer()
         }
-        .onChange(of: nextItem?.previewId) { _, _ in
-            resetViewTimer()
+        .onChange(of: nextItem?.previewId) { oldValue, newValue in
+            // 只在真正切换到下一张/上一张时重置（previewId 变化）
+            // 而不是在点击当前弹窗时重置
+            if oldValue != newValue {
+                resetForNewItem()
+            }
         }
     }
 
@@ -195,6 +192,8 @@ public struct LiquidGlassNextItemToast: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
+                // 确保整个按钮区域可点击，而不仅仅是文字/图标
+                .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
             .buttonStyle(ToastPressableStyle(isPressed: $isPressed))
             .background(
@@ -238,9 +237,8 @@ public struct LiquidGlassNextItemToast: View {
             isHovered: $isHovered,
             isPressed: $isPressed,
             onTap: {
-                dismissWithAnimation {
-                    onTap()
-                }
+                hideOnTap()
+                onTap()
             }
         )
     }
@@ -312,11 +310,11 @@ public struct LiquidGlassNextItemToast: View {
         }
 
         // 然后模糊散开 + 淡出
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             withAnimation(.easeOut(duration: 0.22)) {
-                contentOpacity = 0
-                contentScale = 1.20
-                contentOffset = -4
+                self.contentOpacity = 0
+                self.contentScale = 1.20
+                self.contentOffset = -4
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
@@ -342,11 +340,30 @@ public struct LiquidGlassNextItemToast: View {
         viewTimer = nil
     }
 
-    private func resetViewTimer() {
-        dismissWithAnimation { [self] in
+    /// 切换到新项目时重置状态并重新开始计时
+    private func resetForNewItem() {
+        // 停止当前计时器
+        stopViewTimer()
+        
+        // 如果正在显示，先隐藏
+        if isVisible {
+            dismissWithAnimation {
+                isVisible = false
+                // 隐藏后开始新的计时
+                startViewTimer()
+            }
+        } else {
+            // 直接开始新的计时
+            startViewTimer()
+        }
+    }
+    
+    /// 用户点击弹窗时隐藏，不重新开始计时
+    private func hideOnTap() {
+        stopViewTimer()
+        dismissWithAnimation {
             isVisible = false
         }
-        startViewTimer()
     }
 }
 
@@ -534,23 +551,23 @@ public struct DetailPageWithNextItemToast<Content: View>: View {
     }
 
     public var body: some View {
-        // 用 overlay 而不是 ZStack，toast 只占自身尺寸不遮挡 content
-        content
-            .overlay(alignment: .bottomTrailing) {
-                LiquidGlassNextItemToast(
-                    nextItem: dataSource.nextItem,
-                    onTap: {
-                        onNavigateToNext()
-                    },
-                    onScrollUp: {
-                        onNavigateToNext()
-                    },
-                    onScrollDown: {
-                        onNavigateToPrevious()
-                    }
-                )
-                .padding(20)
-            }
+        ZStack(alignment: .bottomTrailing) {
+            content
+
+            LiquidGlassNextItemToast(
+                nextItem: dataSource.nextItem,
+                onTap: {
+                    onNavigateToNext()
+                },
+                onScrollUp: {
+                    onNavigateToNext()
+                },
+                onScrollDown: {
+                    onNavigateToPrevious()
+                }
+            )
+            .padding(20)
+        }
     }
 }
 

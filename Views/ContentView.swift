@@ -146,9 +146,14 @@ struct ContentView: View {
                     .zIndex(500)
             }
 
-            DownloadProgressToastHost(viewModel: downloadTaskViewModel)
-                .padding(.horizontal, 24)
-                .zIndex(400)
+            // 下载进度弹窗 - 固定在底部
+            VStack {
+                Spacer()
+                DownloadProgressToastHost(viewModel: downloadTaskViewModel)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+            }
+            .zIndex(400)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
@@ -1031,14 +1036,13 @@ private struct DownloadProgressToastHost: View {
     }
 
     var body: some View {
-        VStack {
-            Spacer()
-
+        Group {
             if let task = displayedTask {
                 DownloadProgressToast(
                     task: task,
                     activeTaskCount: viewModel.tasks.filter(\.isRunning).count
                 )
+                .frame(maxWidth: 440)
                 .padding(.bottom, 26)
                 .opacity(toastOpacity)
                 .scaleEffect(toastScale, anchor: .bottom)
@@ -1051,8 +1055,6 @@ private struct DownloadProgressToastHost: View {
                 )
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .allowsHitTesting(false)
         .onAppear {
             reconcileDisplayedTask(with: viewModel.tasks)
         }

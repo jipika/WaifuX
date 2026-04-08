@@ -503,6 +503,7 @@ struct GlassToolbarButton: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(color)
                 .frame(width: 44, height: 44)
+                .contentShape(Circle())
                 .liquidGlassSurface(.max, tint: color.opacity(isHovered ? 0.22 : 0.12), in: Circle())
                 .shadow(
                     color: isHovered ? Color.black.opacity(0.3) : Color.black.opacity(0.15),

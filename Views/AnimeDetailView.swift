@@ -387,6 +387,7 @@ private struct AliasSearchSheet: View {
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 10)
+                                    .contentShape(Capsule())
                             }
                             .detailGlassCapsuleChrome(level: .regular)
                         }
@@ -418,6 +419,7 @@ private struct AliasSearchSheet: View {
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
                         .padding(.vertical, 12)
+                        .contentShape(Capsule())
                 }
                 .detailGlassCapsuleChrome(level: .regular)
                 
@@ -440,6 +442,7 @@ private struct AliasSearchSheet: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 12)
+                    .contentShape(Capsule())
                 }
                 .detailPrimaryGlassButtonChrome()
             }
@@ -518,6 +521,7 @@ struct CaptchaInputSheet: View {
                         .font(.system(size: 14))
                         .foregroundStyle(.white.opacity(0.8))
                         .frame(width: 44, height: 44)
+                        .contentShape(Circle())
                 }
                 .detailGlassCircleChrome()
             }
@@ -531,6 +535,7 @@ struct CaptchaInputSheet: View {
                         .foregroundStyle(.white.opacity(0.8))
                         .padding(.horizontal, 28)
                         .padding(.vertical, 12)
+                        .contentShape(Capsule())
                 }
                 .detailGlassCapsuleChrome(level: .regular)
                 
@@ -547,6 +552,7 @@ struct CaptchaInputSheet: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 12)
+                    .contentShape(Capsule())
                 }
                 .detailPrimaryGlassButtonChrome()
                 .disabled(captchaCode.isEmpty || isLoading)

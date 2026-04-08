@@ -417,6 +417,7 @@ struct AnimeDetailSheet: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
                         .frame(width: 40, height: 40)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -430,6 +431,7 @@ struct AnimeDetailSheet: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
                         .frame(width: 40, height: 40)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -522,6 +524,7 @@ struct AnimeDetailSheet: View {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(viewModel.isFavorite ? Color(hex: "FF5A7D") : .white)
                         .frame(width: 42, height: 42)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -541,6 +544,7 @@ struct AnimeDetailSheet: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 28)
                 .frame(height: 46)
+                .contentShape(Capsule())
                 .detailPrimaryGlassButtonChrome()
             }
             .buttonStyle(.plain)
@@ -553,6 +557,7 @@ struct AnimeDetailSheet: View {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)

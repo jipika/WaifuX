@@ -54,6 +54,7 @@ class WallpaperViewModel: ObservableObject {
     @Published var selectedResolutions: [String] = []
     @Published var selectedRatios: [String] = []
     @Published var selectedColors: [String] = []
+    @Published var atleastResolution: String? = nil  // 最小分辨率，如 "3840x2160"
 
     // MARK: - 本地收藏与下载记录
     private let wallpaperLibrary = WallpaperLibraryService.shared
@@ -392,6 +393,7 @@ class WallpaperViewModel: ObservableObject {
             sorting: SortingOption.relevance.rawValue,
             order: "desc",
             topRange: nil,
+            atleast: atleastResolution,
             resolutions: normalizedResolutions(),
             ratios: normalizedRatios(),
             colors: normalizedColors()
@@ -502,6 +504,7 @@ class WallpaperViewModel: ObservableObject {
             sorting: sortingOption.rawValue,
             order: orderDescending ? "desc" : "asc",
             topRange: sortingOption == .toplist ? topRange.rawValue : nil,
+            atleast: atleastResolution,
             resolutions: normalizedResolutions(),
             ratios: normalizedRatios(),
             colors: normalizedColors(),
@@ -520,6 +523,7 @@ class WallpaperViewModel: ObservableObject {
         print("  - resolutions: \(parameters.resolutions)")
         print("  - ratios: \(parameters.ratios)")
         print("  - colors: \(parameters.colors)")
+        print("  - atleast: \(parameters.atleast ?? "nil")")
 
         return try await fetchWallpapers(parameters: parameters)
     }

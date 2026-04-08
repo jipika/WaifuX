@@ -116,6 +116,7 @@ struct LiquidGlassNavButton: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(

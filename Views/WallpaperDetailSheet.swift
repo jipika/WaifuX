@@ -132,21 +132,27 @@ struct WallpaperDetailSheet: View {
                     topBarTopInset: topBarTopInset
                 )
 
-                // 下一张弹窗
-                LiquidGlassNextItemToast(
-                    nextItem: nextItemDataSource.nextItem,
-                    onTap: {
-                        navigateToNextWallpaper()
-                    },
-                    onScrollUp: {
-                        navigateToNextWallpaper()
-                    },
-                    onScrollDown: {
-                        navigateToPreviousWallpaper()
+                // 下一张弹窗 - 固定在右下角，不覆盖全屏
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        LiquidGlassNextItemToast(
+                            nextItem: nextItemDataSource.nextItem,
+                            onTap: {
+                                navigateToNextWallpaper()
+                            },
+                            onScrollUp: {
+                                navigateToNextWallpaper()
+                            },
+                            onScrollDown: {
+                                navigateToPreviousWallpaper()
+                            }
+                        )
+                        .padding(.trailing, 28)
+                        .padding(.bottom, 28)
                     }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .allowsHitTesting(nextItemDataSource.nextItem != nil)
+                }
             }
         }
         .ignoresSafeArea()
@@ -316,6 +322,7 @@ struct WallpaperDetailSheet: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.95))
                 .frame(width: 38, height: 38)
+                .contentShape(Circle())
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
@@ -335,6 +342,7 @@ struct WallpaperDetailSheet: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
                         .frame(width: 40, height: 40)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -348,6 +356,7 @@ struct WallpaperDetailSheet: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
                         .frame(width: 40, height: 40)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -445,6 +454,7 @@ struct WallpaperDetailSheet: View {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(viewModel.isFavorite(wallpaper) ? Color(hex: "FF5A7D") : .white)
                         .frame(width: 42, height: 42)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -470,6 +480,7 @@ struct WallpaperDetailSheet: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 28)
                 .frame(height: 46)
+                .contentShape(Capsule())
                 .detailPrimaryGlassButtonChrome()
             }
             .buttonStyle(.plain)
@@ -484,6 +495,7 @@ struct WallpaperDetailSheet: View {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
+                        .contentShape(Circle())
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)

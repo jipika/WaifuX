@@ -189,7 +189,7 @@ struct MyLibraryContentView: View {
                             ForEach(viewModel.favorites) { wallpaper in
                                 WallpaperEditCard(
                                     wallpaper: wallpaper,
-                                    isEditing: isEditing && editingSection == .favorites,
+                                    isEditing: isEditing,
                                     isSelected: selectedItems.contains(wallpaper.id)
                                 ) {
                                     handleWallpaperTap(wallpaper)
@@ -226,7 +226,7 @@ struct MyLibraryContentView: View {
                             ForEach(viewModel.downloadedWallpapers) { record in
                                 WallpaperEditCard(
                                     wallpaper: record.wallpaper,
-                                    isEditing: isEditing && editingSection == .downloads,
+                                    isEditing: isEditing,
                                     isSelected: selectedItems.contains(record.wallpaper.id),
                                     downloadDate: record.downloadedAt
                                 ) {
@@ -269,7 +269,7 @@ struct MyLibraryContentView: View {
                             ForEach(mediaViewModel.favoriteItems) { item in
                                 MediaVideoCard(
                                     item: item,
-                                    isEditing: isEditing && editingSection == .favorites,
+                                    isEditing: isEditing,
                                     isSelected: selectedItems.contains(item.id)
                                 ) {
                                     handleMediaTap(item)
@@ -306,7 +306,7 @@ struct MyLibraryContentView: View {
                             ForEach(mediaViewModel.downloadedItems) { record in
                                 MediaVideoCard(
                                     item: record.item,
-                                    isEditing: isEditing && editingSection == .downloads,
+                                    isEditing: isEditing,
                                     isSelected: selectedItems.contains(record.item.id)
                                 ) {
                                     handleMediaTap(record.item)
@@ -348,7 +348,7 @@ struct MyLibraryContentView: View {
                             ForEach(animeFavorites) { anime in
                                 AnimeLibraryCard(
                                     anime: anime,
-                                    isEditing: isEditing && editingSection == .favorites,
+                                    isEditing: isEditing,
                                     isSelected: selectedItems.contains(anime.id)
                                 ) {
                                     handleAnimeTap(anime)
@@ -487,7 +487,7 @@ struct MyLibraryContentView: View {
 
     // MARK: - Actions
     private func handleWallpaperTap(_ wallpaper: Wallpaper) {
-        if isEditing && editingSection == .favorites {
+        if isEditing {
             toggleSelection(wallpaper.id)
         } else {
             selectedWallpaper = wallpaper
@@ -495,7 +495,7 @@ struct MyLibraryContentView: View {
     }
 
     private func handleMediaTap(_ item: MediaItem) {
-        if isEditing && editingSection == .favorites {
+        if isEditing {
             toggleSelection(item.id)
         } else {
             selectedMedia = item
@@ -503,7 +503,7 @@ struct MyLibraryContentView: View {
     }
 
     private func handleAnimeTap(_ anime: AnimeSearchResult) {
-        if isEditing && editingSection == .favorites {
+        if isEditing {
             toggleSelection(anime.id)
         } else {
             selectedAnime = anime
@@ -545,16 +545,24 @@ struct MyLibraryContentView: View {
     private func deleteSelectedItems(for section: EditingSection) {
         switch selectedContentType {
         case .wallpaper:
-            if section == .favorites {
-                viewModel.removeWallpaperFavorites(withIDs: selectedItems)
-            } else {
-                viewModel.removeWallpaperDownloads(withIDs: selectedItems)
+            // 分别处理收藏和下载的删除
+            let favoriteIDs = selectedItems.intersection(viewModel.favorites.map(\.id))
+            let downloadIDs = selectedItems.intersection(viewModel.downloadedWallpapers.map(\.wallpaper.id))
+            if !favoriteIDs.isEmpty {
+                viewModel.removeWallpaperFavorites(withIDs: favoriteIDs)
+            }
+            if !downloadIDs.isEmpty {
+                viewModel.removeWallpaperDownloads(withIDs: downloadIDs)
             }
         case .video:
-            if section == .favorites {
-                // mediaViewModel.removeFavorites(withIDs: selectedItems)
-            } else {
-                // mediaViewModel.removeDownloads(withIDs: selectedItems)
+            // 分别处理收藏和下载的删除
+            let favoriteIDs = selectedItems.intersection(mediaViewModel.favoriteItems.map(\.id))
+            let downloadIDs = selectedItems.intersection(mediaViewModel.downloadedItems.map(\.item.id))
+            if !favoriteIDs.isEmpty {
+                // mediaViewModel.removeFavorites(withIDs: favoriteIDs)
+            }
+            if !downloadIDs.isEmpty {
+                // mediaViewModel.removeDownloads(withIDs: downloadIDs)
             }
         case .anime:
             for id in selectedItems {

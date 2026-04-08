@@ -13,6 +13,8 @@ struct AnimeExploreView: View {
     @State private var searchText = ""
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var sortAscending = false
+    /// 排序后的展示数据（与 viewModel.animeItems 分离，支持独立排序）
+    @State private var displayedAnimeItems: [AnimeSearchResult] = []
 
     // 详情页导航 - 通过 Binding 暴露给父视图
     @Binding var selectedAnime: AnimeSearchResult?
@@ -83,6 +85,17 @@ struct AnimeExploreView: View {
         .onChange(of: viewModel.animeItems.first?.id) { _, _ in
             syncExploreAtmosphere()
         }
+        // 当源数据变化时，重建排序列表
+        .onChange(of: viewModel.animeItems.count) { _, _ in
+            rebuildDisplayedAnimeItems()
+        }
+        // 排序选项变化时重新排序
+        .onChange(of: selectedSort) { _, _ in
+            rebuildDisplayedAnimeItems()
+        }
+        .onChange(of: sortAscending) { _, _ in
+            rebuildDisplayedAnimeItems()
+        }
     }
 
     // MARK: - Hero Section
@@ -143,6 +156,7 @@ struct AnimeExploreView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.36))
+                                .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -164,6 +178,8 @@ struct AnimeExploreView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(width: 46, height: 46)
+                        // contentShape 必须在 liquidGlassSurface 之前，确保整个圆形区域可点击
+                        .contentShape(Circle())
                         .liquidGlassSurface(
                             .prominent,
                             tint: exploreAtmosphere.tint.secondary.opacity(0.12),
@@ -171,7 +187,6 @@ struct AnimeExploreView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .contentShape(Circle())
             }
 
             // 分类选择器
@@ -243,7 +258,7 @@ struct AnimeExploreView: View {
     private func animeSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .center) {
-                Text("\(viewModel.animeItems.count) \(t("content.animes"))")
+                Text("\(displayedAnimeItems.count) \(t("content.animes"))")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.66))
 
@@ -276,12 +291,12 @@ struct AnimeExploreView: View {
                     .fixedSize()
             }
 
-            if viewModel.isLoading && viewModel.animeItems.isEmpty {
+            if viewModel.isLoading && displayedAnimeItems.isEmpty {
                 // 骨架屏加载状态
                 AnimeGridSkeleton(contentWidth: gridContentWidth)
                     .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
-            } else if viewModel.animeItems.isEmpty {
+            } else if displayedAnimeItems.isEmpty {
                 // 空状态/错误状态
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
@@ -302,9 +317,9 @@ struct AnimeExploreView: View {
                     alignment: .leading,
                     spacing: spacing
                 ) {
-                    ForEach(viewModel.animeItems) { anime in
+                    ForEach(displayedAnimeItems) { anime in
                         // 预计算索引（用于入场动画交错延迟 + 分页加载定位）
-                        let cardIndex = viewModel.animeItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+                        let cardIndex = displayedAnimeItems.firstIndex(where: { $0.id == anime.id }) ?? 0
 
                         AnimePortraitCard(
                             anime: anime,
@@ -318,7 +333,8 @@ struct AnimeExploreView: View {
                         // iOS 风格入场动画
                         .iosFadeInOnAppear(index: cardIndex)
                         .onAppear {
-                            guard cardIndex >= viewModel.animeItems.count - 6 else { return }
+                            // 分页触发：基于原始数据的位置判断，而非排序后位置
+                            guard viewModel.animeItems.count - displayedAnimeItems.count < 6 else { return }
                             guard viewModel.hasMorePages,
                                   !viewModel.isLoading,
                                   !viewModel.isLoadingMore else { return }
@@ -378,10 +394,41 @@ struct AnimeExploreView: View {
     }
 
     private func syncExploreAtmosphere() {
-        if let firstAnime = viewModel.animeItems.first,
+        if let firstAnime = displayedAnimeItems.first,
            let coverURL = firstAnime.coverURL {
             exploreAtmosphere.updateFirstAnime(coverURL: coverURL)
         }
+    }
+
+    // MARK: - 排序重建
+
+    /// 根据 selectedSort 对 animeItems 做客户端排序，写入 displayedAnimeItems
+    private func rebuildDisplayedAnimeItems() {
+        let source = viewModel.animeItems
+
+        switch selectedSort {
+        case .newest:
+            // newest：保留服务端返回原始顺序
+            displayedAnimeItems = sortAscending ? source.reversed() : source
+        case .title:
+            displayedAnimeItems = source.sorted { lhs, rhs in
+                let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+                if cmp == .orderedSame { return false }
+                return sortAscending ? cmp == .orderedDescending : cmp == .orderedAscending
+            }
+        case .popular:
+            // popular：按评分（rating 字符串转 Double）降序排列
+            displayedAnimeItems = source.sorted { lhs, rhs in
+                let lhsScore = Double(lhs.rating ?? "0") ?? 0
+                let rhsScore = Double(rhs.rating ?? "0") ?? 0
+                if lhsScore == rhsScore {
+                    return lhs.rank ?? Int.max < rhs.rank ?? Int.max
+                }
+                return sortAscending ? lhsScore < rhsScore : lhsScore > rhsScore
+            }
+        }
+
+        syncExploreAtmosphere()
     }
 
     private func resetAllFilters() {
