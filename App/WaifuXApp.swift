@@ -92,6 +92,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 6. 恢复壁纸调度配置
         WallpaperSchedulerService.shared.restoreSavedConfig()
 
+        // 7. 恢复动漫收藏数据
+        AnimeFavoriteStore.shared.restoreSavedData()
+
+        // 8. 恢复动漫播放进度
+        AnimeProgressStore.shared.restoreSavedData()
+
+        // 9. 恢复媒体播放进度缓存
+        PlaybackProgressCache.shared.restoreSavedData()
+
+        // 10. 恢复媒体库数据（收藏 + 下载记录）
+        MediaLibraryService.shared.restoreSavedData()
+
+        // 11. 恢复壁纸库数据（收藏 + 下载记录）
+        WallpaperLibraryService.shared.restoreSavedData()
+
+        // 12. 恢复用户库数据（文件系统存储的收藏/历史/下载）
+        UserLibrary.shared.restoreSavedData()
+
         configureApplicationIcon()
 
         // 应用主题

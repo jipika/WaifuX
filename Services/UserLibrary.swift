@@ -24,8 +24,8 @@ actor UserLibrary {
     private var downloads: [DownloadRecord] = []
 
     init() {
+        // ⚠️ 不在 init 中做任何 I/O（FileManager/UserDefaults），避免 _CFXPreferences 递归栈溢出
         guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            // 使用临时目录作为回退
             self.libraryDirectory = fileManager.temporaryDirectory
                 .appendingPathComponent("WallHaven", isDirectory: true)
                 .appendingPathComponent("Library", isDirectory: true)
@@ -34,11 +34,11 @@ actor UserLibrary {
         self.libraryDirectory = supportDir
             .appendingPathComponent("WallHaven", isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)
-
-        // 创建目录
+    }
+    
+    /// 延迟初始化：创建目录并加载数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
+    func restoreSavedData() {
         try? fileManager.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
-
-        // 加载数据
         Task {
             await loadAllData()
         }
