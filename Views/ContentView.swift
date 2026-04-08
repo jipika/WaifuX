@@ -13,6 +13,11 @@ struct ContentView: View {
     @State private var librarySelectedAnime: AnimeSearchResult?
     @State private var librarySelectedWallpaper: Wallpaper?
     @State private var librarySelectedMedia: MediaItem?
+    
+    // 更新弹窗状态
+    @State private var showUpdateSheet = false
+    @State private var updateRelease: GitHubRelease?
+    @State private var updateCommit: GitHubCommit?
 
     var body: some View {
         ZStack {
@@ -146,6 +151,20 @@ struct ContentView: View {
                     .zIndex(500)
             }
 
+            // 更新弹窗 - ZStack overlay，不创建新窗口避免双层红绿灯
+            if showUpdateSheet, let release = updateRelease {
+                AutoUpdateSheet(
+                    currentVersion: UpdateChecker.shared.currentVersion,
+                    latestVersion: release.version,
+                    release: release,
+                    commit: updateCommit,
+                    onClose: { showUpdateSheet = false }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity.animation(.easeOut(duration: 0.25)))
+                .zIndex(600)
+            }
+
             // 下载进度弹窗 - 固定在底部
             VStack {
                 Spacer()
@@ -158,6 +177,16 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             await viewModel.initialLoad()
+            
+            // 延迟2秒后检查更新
+            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+            let checker = UpdateChecker.shared
+            let result = await checker.checkForUpdates()
+            if case .updateAvailable(current: _, latest: let release, commit: let commit) = result {
+                updateRelease = release
+                updateCommit = commit
+                showUpdateSheet = true
+            }
         }
         .ignoresSafeArea()
         .applyTheme()

@@ -349,8 +349,9 @@ final class UpdateManager: ObservableObject {
             return 
         }
         
-        state = .downloading(0)
+        // 强制重置状态，防止进度条跳变
         progress = 0
+        state = .downloading(0)
         
         // 尝试多个可能的下载链接格式
         let possibleURLs = [
@@ -383,7 +384,7 @@ final class UpdateManager: ObservableObject {
     private func downloadFromURL(_ url: URL, version: String) async throws {
         print("[UpdateManager] Downloading from: \(url.absoluteString)")
         
-        // 创建临时下载路径
+        // 创建最终下载路径
         let tempDir = FileManager.default.temporaryDirectory
         let tempFile = tempDir.appendingPathComponent("WaifuX_\(version)_update.dmg")
         
@@ -392,27 +393,22 @@ final class UpdateManager: ObservableObject {
             try? FileManager.default.removeItem(at: tempFile)
         }
         
-        // 配置 URLSession 以跟随重定向
+        // 配置 URLSession
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 600
         let session = URLSession(configuration: config)
         
-        // 使用 URLSession 下载
         var request = URLRequest(url: url)
         request.setValue("WallHaven-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
         
-        let (downloadURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
-            Task { @MainActor in
+        let (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                // 只在真正下载中时才更新进度，避免状态竞争
-                if case .downloading = self.state {
-                    self.progress = p
-                    // 进度只前进不倒退
-                    if p >= self.progress {
-                        self.state = .downloading(p)
-                    }
-                }
+                guard case .downloading = self.state else { return }
+                guard p > self.progress else { return }
+                self.progress = p
+                self.state = .downloading(p)
             }
         }
         
@@ -426,10 +422,17 @@ final class UpdateManager: ObservableObject {
             throw URLError(.badServerResponse)
         }
         
-        // 移动文件到临时位置
-        try FileManager.default.moveItem(at: downloadURL, to: tempFile)
+        // 移动到最终路径（如果路径不同）
+        if downloadedFileURL != tempFile {
+            // 如果目标已存在，先删除
+            if FileManager.default.fileExists(atPath: tempFile.path) {
+                try? FileManager.default.removeItem(at: tempFile)
+            }
+            try FileManager.default.moveItem(at: downloadedFileURL, to: tempFile)
+        }
         
         await MainActor.run {
+            progress = 1.0
             state = .downloaded(tempFile)
         }
         
@@ -478,45 +481,84 @@ final class UpdateManager: ObservableObject {
     
     // MARK: - 私有方法
     
+    /// 使用 URLSession bytes API 精确跟踪下载进度
+    /// 解决 downloadTask + KVO 在 GitHub 重定向时进度跳变的问题
     private func downloadWithProgress(
         session: URLSession,
         request: URLRequest,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws -> (URL, URLResponse) {
-        // 使用 nonisolated 保护进度值，确保只增不减
-        let lastProgress = UnsafeMutablePointer<Double>.allocate(capacity: 1)
-        lastProgress.pointee = 0
+        let (asyncBytes, response) = try await session.bytes(for: request)
         
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = session.downloadTask(with: request) { url, response, error in
-                lastProgress.deallocate()
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard let url = url, let response = response else {
-                    continuation.resume(throwing: URLError(.badServerResponse))
-                    return
-                }
-                continuation.resume(returning: (url, response))
-            }
-            
-            // 监听下载进度 - 确保只增不减
-            let progressObserver = task.progress.observe(\.fractionCompleted, options: [.new]) { progress, change in
-                let current = progress.fractionCompleted
-                // 原子操作确保只增不减
-                let previous = lastProgress.pointee
-                if current > previous {
-                    lastProgress.pointee = current
-                    progressHandler(current)
-                }
-            }
-            
-            // 保持 observer 存活
-            objc_setAssociatedObject(task, "observer", progressObserver, .OBJC_ASSOCIATION_RETAIN)
-            
-            task.resume()
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
         }
+        
+        // 获取文件总大小
+        let expectedLength = response.expectedContentLength
+        guard expectedLength > 0 else {
+            // 无法获取大小，直接下载不报告进度
+            let tempDir = FileManager.default.temporaryDirectory
+            let tempFile = tempDir.appendingPathComponent("WaifuX_update_\(UUID().uuidString).dmg")
+            var data = Data()
+            for try await byte in asyncBytes {
+                data.append(byte)
+            }
+            try data.write(to: tempFile)
+            return (tempFile, response)
+        }
+        
+        // 流式下载 + 精确进度报告
+        let tempDir = FileManager.default.temporaryDirectory
+        let tempFile = tempDir.appendingPathComponent("WaifuX_update_\(UUID().uuidString).dmg")
+        
+        // 确保临时文件不存在
+        if FileManager.default.fileExists(atPath: tempFile.path) {
+            try? FileManager.default.removeItem(at: tempFile)
+        }
+        
+        // 创建输出文件句柄
+        FileManager.default.createFile(atPath: tempFile.path, contents: nil)
+        let fileHandle = try FileHandle(forWritingTo: tempFile)
+        
+        defer {
+            try? fileHandle.close()
+        }
+        
+        var receivedBytes: Int64 = 0
+        var lastReportedProgress: Double = 0
+        let bufferSize = 64 * 1024 // 64KB 缓冲区
+        
+        var buffer = Data(capacity: bufferSize)
+        
+        for try await byte in asyncBytes {
+            buffer.append(byte)
+            receivedBytes += 1
+            
+            // 缓冲区满了才写入磁盘
+            if buffer.count >= bufferSize {
+                fileHandle.write(buffer)
+                buffer.removeAll(keepingCapacity: true)
+            }
+            
+            // 每 1% 更新一次进度，减少 UI 更新频率
+            let currentProgress = Double(receivedBytes) / Double(expectedLength)
+            if currentProgress - lastReportedProgress >= 0.01 || receivedBytes == expectedLength {
+                lastReportedProgress = currentProgress
+                progressHandler(min(currentProgress, 1.0))
+            }
+        }
+        
+        // 写入剩余数据
+        if !buffer.isEmpty {
+            fileHandle.write(buffer)
+        }
+        
+        // 最终进度
+        progressHandler(1.0)
+        
+        return (tempFile, response)
     }
     
     private func createAppleScript(dmgPath: String) -> String {
