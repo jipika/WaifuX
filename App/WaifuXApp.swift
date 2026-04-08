@@ -320,7 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showUpdateDialog(latest: GitHubRelease) {
         let dialog = NSAlert()
         dialog.messageText = "发现新版本"
-        dialog.informativeText = "WaifuX \(latest.version) 已发布！\n\n\(latest.body ?? "")"
+        dialog.informativeText = "WaifuX \(latest.version) 已发布！\n\n\(cleanReleaseBody(latest.body))"
         dialog.addButton(withTitle: "立即更新")
         dialog.addButton(withTitle: "取消")
         
@@ -348,5 +348,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 打开下载页面
             UpdateChecker.shared.openDownloadPage(for: latest)
         }
+    }
+
+    /// 清洗 Release body 内容，过滤掉 commit hash 等无意义行
+    private func cleanReleaseBody(_ body: String?) -> String {
+        guard let body = body, !body.isEmpty else {
+            return "暂无更新日志"
+        }
+
+        let lines = body.components(separatedBy: "\n")
+        let cleaned = lines.filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { return false }
+            // 过滤纯 commit hash 行（如 a1b2c3d）
+            if trimmed.range(of: "^[a-f0-9]{7,40}$", options: .regularExpression) != nil { return false }
+            // 过滤 "Commit: xxxxx" / "SHA: xxxxx" 等 hash 前缀行（CI 自动生成常见格式）
+            if trimmed.range(of: "(?i)^(commit|sha|hash|revision)[:\\s]+[a-f0-9]{7,40}", options: .regularExpression) != nil { return false }
+            // 过滤 Merge / merge commit 行（通常没有有价值的信息）
+            if trimmed.hasPrefix("Merge ") || trimmed.hasPrefix("merge ") || trimmed.hasPrefix("Merged ") { return false }
+            // 过滤 CI 自动生成的无意义描述
+            if trimmed == "Auto-generated CI build" || trimmed == "Auto-generated release" { return false }
+            return true
+        }
+
+        let result = cleaned.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? "暂无更新日志" : result
     }
 }

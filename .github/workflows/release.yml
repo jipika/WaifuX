@@ -47,10 +47,34 @@ jobs:
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
 
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # 获取上一个 tag（用于生成变更日志）
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            # 从上一个 tag 到当前提交的 commit messages 生成日志
+            CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
+            echo "Generated changelog from $PREV_TAG to $GITHUB_REF_NAME:"
+            echo "$CHANGELOG"
+          else
+            CHANGELOG="- Initial release"
+            echo "No previous tag found, using default changelog"
+          fi
+
+          # 写入 GITHUB_OUTPUT 供后续 step 使用
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
+          body: ${{ steps.changelog.outputs.changelog }}
           draft: true
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
         env:
