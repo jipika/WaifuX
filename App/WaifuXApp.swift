@@ -86,6 +86,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 4. 恢复更新检查缓存
         UpdateChecker.shared.restoreCachedState()
 
+        // 5. 恢复下载任务列表
+        DownloadTaskService.shared.restoreSavedTasks()
+
+        // 6. 恢复壁纸调度配置
+        WallpaperSchedulerService.shared.restoreSavedConfig()
+
         configureApplicationIcon()
 
         // 应用主题

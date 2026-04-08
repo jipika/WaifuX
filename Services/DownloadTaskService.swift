@@ -55,6 +55,12 @@ class DownloadTaskService: ObservableObject {
     private let taskStorage = DownloadTaskStorage()
 
     private init() {
+        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 任务列表通过 restoreSavedTasks() 延迟恢复
+    }
+
+    /// 延迟恢复保存的下载任务（必须在 applicationDidFinishLaunching 中调用）
+    func restoreSavedTasks() {
         loadTasks()
     }
 

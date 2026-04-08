@@ -14,6 +14,12 @@ class WallpaperSchedulerService: ObservableObject {
     private let userDefaultsKey = "wallpaper_scheduler_config"
 
     private init() {
+        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 调度配置通过 restoreSavedConfig() 延迟恢复
+    }
+
+    /// 延迟恢复保存的调度配置（必须在 applicationDidFinishLaunching 中调用）
+    func restoreSavedConfig() {
         loadConfig()
     }
 
