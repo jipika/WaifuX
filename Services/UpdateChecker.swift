@@ -25,6 +25,12 @@ struct GitHubRelease: Codable {
     var version: String {
         tagName.replacingOccurrences(of: "v", with: "", options: .anchored)
     }
+    
+    /// 主版本号（用于与本地 MARKETING_VERSION 比较）
+    /// GitHub Release tag 格式为 v38, v39...，对应本地版本号 38.0.x 的主版本号
+    var majorVersion: Int? {
+        Int(version.split(separator: ".").first ?? "")
+    }
 }
 
 /// 更新检查结果
@@ -124,7 +130,9 @@ final class UpdateChecker: ObservableObject {
             cacheResult(release: release)
 
             // 比较版本号
-            if isVersion(release.version, newerThan: currentVersion) {
+            // GitHub Release tag 格式为纯数字（v38, v39...），本地版本格式为 38.0.x
+            // 用主版本号比较，避免 "48" > "38.0.10" 的误判
+            if isReleaseNewer(release, than: currentVersion) {
                 return .updateAvailable(current: currentVersion, latest: release)
             } else {
                 return .noUpdate(current: currentVersion)
@@ -198,5 +206,28 @@ final class UpdateChecker: ObservableObject {
         }
 
         return false // 版本相同
+    }
+    
+    /// 判断 GitHub Release 是否比本地版本新
+    /// GitHub Release tag 格式为纯数字（v38, v39, v48...），本地版本格式为 38.0.x
+    /// 比较主版本号：Release tag 的数字 vs 本地版本号的第一位
+    private func isReleaseNewer(_ release: GitHubRelease, than localVersion: String) -> Bool {
+        guard let remoteMajor = release.majorVersion else {
+            // Release tag 无法解析为数字，回退到语义化版本比较
+            return isVersion(release.version, newerThan: localVersion)
+        }
+        
+        let localComponents = localVersion.split(separator: ".").compactMap { Int($0) }
+        let localMajor = localComponents.first ?? 0
+        
+        if remoteMajor > localMajor {
+            return true
+        } else if remoteMajor < localMajor {
+            return false
+        }
+        
+        // 主版本号相同，比较补丁版本（本地 38.0.10 vs Release v38）
+        // Release tag 只有主版本号，说明是同一版本线，不算更新
+        return false
     }
 }

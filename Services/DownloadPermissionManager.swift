@@ -184,6 +184,8 @@ final class DownloadPermissionManager {
     }
     
     /// 从书签恢复
+    /// stale bookmark 仍然可以用来恢复安全作用域访问，不应直接清除。
+    /// 成功恢复后，创建一个新鲜的 bookmark 替换旧的，避免下次仍标记为 stale。
     private func restoreFromBookmark() -> URL? {
         guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else {
             return nil
@@ -198,26 +200,32 @@ final class DownloadPermissionManager {
                 bookmarkDataIsStale: &isStale
             )
             
-            if isStale {
-                print("[DownloadPermissionManager] Bookmark is stale, need to re-request")
-                clearPermission()
-                return nil
-            }
-            
-            // 开始访问安全作用域
+            // 开始访问安全作用域（stale bookmark 仍然有效，先尝试恢复）
             let didStartAccess = url.startAccessingSecurityScopedResource()
             
             if didStartAccess {
-                self.bookmarkData = bookmark
                 self.currentFolderURL = url
-                print("[DownloadPermissionManager] Restored access to: \(url.path)")
+                
+                if isStale {
+                    // stale bookmark 仍可访问，但应创建新 bookmark 以便下次不再 stale
+                    print("[DownloadPermissionManager] Bookmark is stale but access restored, refreshing bookmark...")
+                    saveBookmark(for: url)
+                } else {
+                    self.bookmarkData = bookmark
+                }
+                
+                print("[DownloadPermissionManager] ✅ Restored access to: \(url.path)\(isStale ? " (refreshed stale bookmark)" : "")")
                 return url
             } else {
-                print("[DownloadPermissionManager] Failed to start accessing security scope")
+                // startAccessingSecurityScopedResource 失败才真正需要重新授权
+                print("[DownloadPermissionManager] Failed to start accessing security scope, clearing bookmark")
+                clearPermission()
                 return nil
             }
         } catch {
-            print("[DownloadPermissionManager] Failed to resolve bookmark: \(error)")
+            // bookmark 数据损坏等无法解析的情况，才清除
+            print("[DownloadPermissionManager] Failed to resolve bookmark: \(error), clearing")
+            clearPermission()
             return nil
         }
     }
