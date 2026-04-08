@@ -89,12 +89,28 @@ final class VideoWallpaperManager: ObservableObject {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+        
+        // 监听锁屏/解锁通知
+        DistributedNotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScreenLocked),
+            name: Notification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+        
+        DistributedNotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScreenUnlocked),
+            name: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
     }
     
     @MainActor
     deinit {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default.removeObserver(self)
         pendingRebuildWorkItem?.cancel()
         pendingRebuildWorkItem = nil
         playbackRefreshWorkItem?.cancel()
@@ -166,6 +182,32 @@ final class VideoWallpaperManager: ObservableObject {
         isPaused = false
         schedulePlaybackStateRefresh()
         persistState()
+    }
+    
+    // MARK: - 锁屏处理
+    
+    private var isScreenLocked = false
+    
+    @objc private func handleScreenLocked() {
+        print("[VideoWallpaperManager] Screen locked, pausing wallpaper")
+        isScreenLocked = true
+        // 锁屏时暂停视频，显示预览图（预览图已设为桌面壁纸）
+        for (screenID, player) in players {
+            player.pause()
+            showPosterImage(for: screenID)
+        }
+    }
+    
+    @objc private func handleScreenUnlocked() {
+        print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
+        isScreenLocked = false
+        // 解锁时恢复播放（如果不是手动暂停）
+        guard !isPaused else { return }
+        for (screenID, player) in players {
+            player.play()
+            hidePosterImage(for: screenID)
+        }
+        schedulePlaybackStateRefresh()
     }
 
     func stopWallpaper() {
