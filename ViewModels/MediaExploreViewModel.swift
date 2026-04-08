@@ -442,7 +442,12 @@ final class MediaExploreViewModel: ObservableObject {
         if let taskID {
             downloadTaskService.updateMediaItem(resolvedItem, id: taskID)
         }
-        guard let downloadOption = preferredOption ?? resolvedItem.downloadOptions.first else {
+        guard let downloadOption = preferredOption ?? resolvedItem.downloadOptions.max(by: {
+            if $0.qualityRank == $1.qualityRank {
+                return $0.fileSizeMegabytes < $1.fileSizeMegabytes
+            }
+            return $0.qualityRank < $1.qualityRank
+        }) else {
             throw NetworkError.invalidResponse
         }
 

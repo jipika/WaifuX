@@ -68,6 +68,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let settingsViewModel = SettingsViewModel()
     private var settingsWindowController: NSWindowController?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // ⚠️ 必须在 launch 后才恢复下载权限书签，不能在单例 init 中做！
+        // 否则会导致 _CFXPreferences 递归栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV）
+        DownloadPermissionManager.shared.restoreSavedPermission()
+
         configureApplicationIcon()
 
         // 应用主题

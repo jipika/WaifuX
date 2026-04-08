@@ -743,7 +743,13 @@ struct MediaDetailSheet: View {
         errorMessage = ""
         Task {
             do {
-                let targetOption = resolvedItem.downloadOptions.first ?? resolvedItem.downloadOptions.first
+                // 默认选择最高画质（与设为壁纸逻辑一致）
+                let targetOption = resolvedItem.downloadOptions.max { lhs, rhs in
+                    if lhs.qualityRank == rhs.qualityRank {
+                        return lhs.fileSizeMegabytes < rhs.fileSizeMegabytes
+                    }
+                    return lhs.qualityRank < rhs.qualityRank
+                }
                 if let targetOption {
                     _ = try await viewModel.downloadMedia(resolvedItem, option: targetOption)
                 } else {
