@@ -28,6 +28,11 @@ final class MediaExploreViewModel: ObservableObject {
     private var nextPagePath: String?
     private var detailTasks: [String: Task<MediaItem, Error>] = [:]
     private var cancellables = Set<AnyCancellable>()
+    
+    // MARK: - 预加载支持
+    private var preloadTask: Task<Void, Never>?
+    private var preloadedItems: [MediaItem] = []
+    private var preloadedNextPath: String?
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -192,10 +197,29 @@ final class MediaExploreViewModel: ObservableObject {
         guard !isLoading, !isLoadingMore, let nextPagePath else { return }
         isLoadingMore = true
 
-        defer { isLoadingMore = false }
+        defer { 
+            isLoadingMore = false
+            // 加载完成后触发预加载
+            if hasMorePages {
+                triggerPreloadNextPage()
+            }
+        }
 
         do {
-            let page = try await mediaService.fetchPage(source: currentSource, pagePath: nextPagePath)
+            let page: MediaListPage
+            
+            // 检查是否有预加载的数据
+            if preloadedNextPath == nextPagePath && !preloadedItems.isEmpty {
+                print("[MediaExploreViewModel] Using preloaded page")
+                page = MediaListPage(items: preloadedItems, nextPagePath: preloadedNextPath, sectionTitle: currentTitle)
+                // 清空预加载数据
+                preloadedItems = []
+                preloadedNextPath = nil
+            } else {
+                // 正常加载
+                page = try await mediaService.fetchPage(source: currentSource, pagePath: nextPagePath)
+            }
+            
             let existingIDs = Set(items.map(\.id))
             let appended = page.items.filter { !existingIDs.contains($0.id) }
             page.items.forEach { mediaLibrary.upsert($0) }
@@ -204,6 +228,35 @@ final class MediaExploreViewModel: ObservableObject {
             hasMorePages = page.nextPagePath != nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+    
+    // MARK: - 预加载下一页
+    private func triggerPreloadNextPage() {
+        preloadTask?.cancel()
+        
+        guard let nextPath = nextPagePath else { return }
+        let source = currentSource
+        
+        preloadTask = Task(priority: .low) {
+            // 延迟一下再开始预加载
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+            
+            guard !Task.isCancelled else { return }
+            
+            do {
+                print("[MediaExploreViewModel] Preloading next page...")
+                let page = try await mediaService.fetchPage(source: source, pagePath: nextPath)
+                
+                guard !Task.isCancelled else { return }
+                
+                // 存储预加载的数据
+                preloadedItems = page.items
+                preloadedNextPath = page.nextPagePath
+                print("[MediaExploreViewModel] Preloaded \(page.items.count) items")
+            } catch {
+                print("[MediaExploreViewModel] Preload failed: \(error)")
+            }
         }
     }
 

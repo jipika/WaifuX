@@ -2,7 +2,7 @@ import Foundation
 
 /// 下载路径管理器 - 统一管理壁纸和媒体的下载路径
 /// 支持路径迁移检测，当用户手动移动文件时能够自动找到
-/// 集成安全作用域书签权限管理
+/// 集成下载权限管理
 @MainActor
 final class DownloadPathManager {
     static let shared = DownloadPathManager()

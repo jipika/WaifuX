@@ -259,6 +259,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func showSettingsWindow(_ sender: Any?) {
         if let settingsWindow = settingsWindowController?.window {
+            // 窗口已存在，确保它在父窗口中央显示
+            centerWindow(settingsWindow, relativeTo: window)
             settingsWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -282,7 +284,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.minSize = NSSize(width: 680, height: 520)
         settingsWindow.maxSize = NSSize(width: 680, height: 520)
         settingsWindow.isReleasedWhenClosed = false
-        settingsWindow.center()
+        // 在主窗口中央显示（如果主窗口存在）
+        centerWindow(settingsWindow, relativeTo: window)
         settingsWindow.tabbingMode = .disallowed
         settingsWindow.contentView = EdgeToEdgeHostingView(
             rootView: SettingsView(viewModel: settingsViewModel)
@@ -293,6 +296,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controller.showWindow(nil)
         updateActivationPolicy(showDockIcon: true)
         NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    /// 将窗口居中显示，相对于参考窗口（如果存在）或屏幕
+    private func centerWindow(_ window: NSWindow, relativeTo referenceWindow: NSWindow?) {
+        guard let referenceFrame = referenceWindow?.frame ?? NSScreen.main?.visibleFrame else {
+            window.center()
+            return
+        }
+        
+        let windowSize = window.frame.size
+        let x = referenceFrame.midX - windowSize.width / 2
+        let y = referenceFrame.midY - windowSize.height / 2
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     func showMainWindow() {

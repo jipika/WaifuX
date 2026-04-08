@@ -15,6 +15,10 @@ struct AnimeExploreView: View {
     @State private var sortAscending = false
     /// 排序后的展示数据（与 viewModel.animeItems 分离，支持独立排序）
     @State private var displayedAnimeItems: [AnimeSearchResult] = []
+    
+    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
+    @State private var isInitialLoading = false
+    
 
     // 详情页导航 - 通过 Binding 暴露给父视图
     @Binding var selectedAnime: AnimeSearchResult?
@@ -43,6 +47,8 @@ struct AnimeExploreView: View {
             .coordinateSpace(name: "exploreScroll")
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
+            // 初始加载时禁止滚动（防止空内容过滚一屏）
+            .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -52,8 +58,13 @@ struct AnimeExploreView: View {
 
         }
         .task {
+            // 初始加载时锁定滚动
+            if viewModel.animeItems.isEmpty {
+                isInitialLoading = true
+            }
             await viewModel.loadInitialData()
             syncExploreAtmosphere()
+            isInitialLoading = false
         }
         .onChange(of: searchText) { _, newValue in
             viewModel.searchText = newValue
@@ -342,20 +353,8 @@ struct AnimeExploreView: View {
                         }
                     }
 
-                    // 分页加载指示器（简化版，不遮挡内容）
-                    if viewModel.isLoadingMore || (viewModel.isLoading && !viewModel.animeItems.isEmpty) {
-                        HStack(spacing: 8) {
-                            CustomProgressView(tint: LiquidGlassColors.primaryPink)
-                                .scaleEffect(0.8)
-                            Text(t("loadMore"))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .gridCellColumns(columnCount)
-                    } else if !viewModel.hasMorePages && !viewModel.isLoading {
-                        // 全部加载完毕提示
+                    // 全部加载完毕提示（网格内跨列显示）
+                    if !viewModel.isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
                         HStack(spacing: 6) {
                             Rectangle()
                                 .fill(Color.white.opacity(0.15))
@@ -372,6 +371,39 @@ struct AnimeExploreView: View {
                         .gridCellColumns(columnCount)
                     }
                 }
+
+                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
+                if viewModel.isLoadingMore || (viewModel.isLoading && !viewModel.animeItems.isEmpty) {
+                    LoadingMoreIndicator()
+                        .padding(.vertical, 20)
+                }
+            }
+        }
+    }
+
+    // MARK: - 底部加载更多指示器（带弹跳动画）
+    private struct LoadingMoreIndicator: View {
+        @State private var arrowOffset: CGFloat = 0
+        
+        var body: some View {
+            HStack(spacing: 10) {
+                // 弹跳箭头
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(LiquidGlassColors.primaryPink)
+                    .offset(y: arrowOffset)
+                    .onAppear {
+                        withAnimation(
+                            .easeInOut(duration: 0.5)
+                            .repeatForever(autoreverses: true)
+                        ) {
+                            arrowOffset = 4
+                        }
+                    }
+                
+                Text("加载中，请稍候...")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
             }
         }
     }
@@ -428,7 +460,8 @@ struct AnimeExploreView: View {
     /// 根据 selectedSort 对 animeItems 做客户端排序，写入 displayedAnimeItems
     private func rebuildDisplayedAnimeItems() {
         let source = viewModel.animeItems
-
+        let oldCount = displayedAnimeItems.count
+        
         switch selectedSort {
         case .newest:
             // newest：保留服务端返回原始顺序
@@ -443,17 +476,18 @@ struct AnimeExploreView: View {
             // popular：按评分（rating 字符串转 Double）降序排列
             displayedAnimeItems = source.sorted { lhs, rhs in
                 let lhsScore = Double(lhs.rating ?? "0") ?? 0
-                let rhsScore = Double(rhs.rating ?? "0") ?? 0
+                let rhsScore = Double(lhs.rating ?? "0") ?? 0
                 if lhsScore == rhsScore {
                     return lhs.rank ?? Int.max < rhs.rank ?? Int.max
                 }
                 return sortAscending ? lhsScore < rhsScore : lhsScore > rhsScore
             }
         }
-
+        
+        // 如果有新增数据，直接显示（不再锁定滚动）
         syncExploreAtmosphere()
     }
-
+    
     private func resetAllFilters() {
         searchText = ""
         selectedHotTag = nil

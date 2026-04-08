@@ -2,7 +2,6 @@ import Foundation
 import AppKit
 import AVFoundation
 import CoreGraphics
-import ScreenCaptureKit
 
 @MainActor
 final class VideoWallpaperManager: ObservableObject {
@@ -16,14 +15,11 @@ final class VideoWallpaperManager: ObservableObject {
     private var windows: [String: WallpaperVideoWindow] = [:]
     private var players: [String: AVQueuePlayer] = [:]
     private var loopers: [String: AVPlayerLooper] = [:]
-    private var pausedScreenIDs: Set<String> = []
-    private var playbackRefreshWorkItem: DispatchWorkItem?
 
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
     private let showPosterOnLockKey = "video_wallpaper_show_poster_on_lock"
     private let originalWallpaperKey = "video_wallpaper_original_desktop"
-    private let autoPauseOnFullscreenKey = "video_wallpaper_auto_pause_on_fullscreen"
     
     /// 是否在锁屏时显示预览图
     var showPosterOnLock: Bool {
@@ -39,35 +35,10 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
     
-    /// 是否在全屏聚焦时自动暂停
-    var autoPauseOnFullscreen: Bool {
-        get { defaults.object(forKey: autoPauseOnFullscreenKey) as? Bool ?? true }  // 默认开启
-        set { 
-            defaults.set(newValue, forKey: autoPauseOnFullscreenKey)
-            // 如果关闭自动暂停，立即恢复所有暂停的屏幕
-            if !newValue {
-                for (screenID, player) in players {
-                    if pausedScreenIDs.contains(screenID) {
-                        player.play()
-                        hidePosterImage(for: screenID)
-                    }
-                }
-                pausedScreenIDs.removeAll()
-            }
-        }
-    }
-    
     // 防止重复重建
     private var isRebuilding = false
     private var pendingRebuildWorkItem: DispatchWorkItem?
     private let rebuildLock = NSLock()
-    
-    // 权限检查失败后的冷却期管理
-    private var screenCapturePermissionFailed = false
-    private var lastScreenCaptureFailureTime: Date?
-    private let screenCaptureCooldownInterval: TimeInterval = 300 // 5分钟冷却期
-    private var consecutiveScreenCaptureFailures = 0
-    private let maxScreenCaptureFailures = 3
 
     private init() {
         setupNotificationObservers()
@@ -94,20 +65,6 @@ final class VideoWallpaperManager: ObservableObject {
             name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
-
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(handleWorkspaceContextChanged),
-            name: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil
-        )
-
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(handleWorkspaceContextChanged),
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: nil
-        )
         
         // 监听锁屏/解锁通知
         DistributedNotificationCenter.default.addObserver(
@@ -132,8 +89,6 @@ final class VideoWallpaperManager: ObservableObject {
         DistributedNotificationCenter.default.removeObserver(self)
         pendingRebuildWorkItem?.cancel()
         pendingRebuildWorkItem = nil
-        playbackRefreshWorkItem?.cancel()
-        playbackRefreshWorkItem = nil
     }
 
     func applyVideoWallpaper(from localFileURL: URL, posterURL: URL? = nil, muted: Bool = true) throws {
@@ -151,12 +106,12 @@ final class VideoWallpaperManager: ObservableObject {
         if currentVideoURL == localFileURL, expectedScreenIDs == activeScreenIDs, !windows.isEmpty {
             currentVideoURL = localFileURL
             setMuted(muted)
+            isPaused = false
             for player in players.values {
                 if player.rate == 0 {
                     player.play()
                 }
             }
-            schedulePlaybackStateRefresh()
             return
         }
 
@@ -199,7 +154,11 @@ final class VideoWallpaperManager: ObservableObject {
     func resumeWallpaper() {
         guard currentVideoURL != nil else { return }
         isPaused = false
-        schedulePlaybackStateRefresh()
+        // 直接恢复播放，不走延迟检测路径
+        for (screenID, player) in players {
+            player.play()
+            hidePosterImage(for: screenID)
+        }
         persistState()
     }
     
@@ -226,7 +185,6 @@ final class VideoWallpaperManager: ObservableObject {
             player.play()
             hidePosterImage(for: screenID)
         }
-        schedulePlaybackStateRefresh()
     }
 
     func stopWallpaper() {
@@ -234,7 +192,7 @@ final class VideoWallpaperManager: ObservableObject {
         currentVideoURL = nil
         currentPosterURL = nil
         isPaused = false
-        defaults.removeObject(forKey: stateKey)
+        // 不删除保存的状态，以便下次可以恢复
         
         // 恢复用户原始桌面壁纸
         restoreOriginalWallpaper()
@@ -357,10 +315,6 @@ final class VideoWallpaperManager: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
     }
 
-    @objc private func handleWorkspaceContextChanged() {
-        schedulePlaybackStateRefresh()
-    }
-
     @objc private func handleScreensDidSleep() {
         for player in players.values {
             player.pause()
@@ -375,8 +329,12 @@ final class VideoWallpaperManager: ObservableObject {
             if self.currentVideoURL != nil, self.windows.isEmpty {
                 try? self.rebuildWindows()
             }
+            // 只有非手动暂停时才恢复播放
             if !self.isPaused {
-                self.schedulePlaybackStateRefresh()
+                for (screenID, player) in self.players {
+                    player.play()
+                    self.hidePosterImage(for: screenID)
+                }
             }
         }
         pendingRebuildWorkItem = workItem
@@ -406,7 +364,6 @@ final class VideoWallpaperManager: ObservableObject {
             try createWindow(for: screen, videoURL: currentVideoURL, muted: isMuted)
         }
 
-        schedulePlaybackStateRefresh()
         NSLog("[VideoWallpaperManager] Windows rebuilt successfully")
     }
 
@@ -454,10 +411,6 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows() {
-        playbackRefreshWorkItem?.cancel()
-        playbackRefreshWorkItem = nil
-        pausedScreenIDs.removeAll()
-
         for looper in loopers.values {
             looper.disableLooping()
         }
@@ -535,236 +488,6 @@ final class VideoWallpaperManager: ObservableObject {
             print("[VideoWallpaperManager] Failed to load poster image: \(error)")
             return nil
         }
-    }
-
-    private func schedulePlaybackStateRefresh() {
-        playbackRefreshWorkItem?.cancel()
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.refreshPlaybackState()
-        }
-        playbackRefreshWorkItem = workItem
-        // 增加检测间隔到 500ms，减少 ScreenCaptureKit 调用频率
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
-    }
-
-    private func refreshPlaybackState() {
-        guard !players.isEmpty else { return }
-
-        if isPaused {
-            for player in players.values {
-                player.pause()
-            }
-            return
-        }
-
-        // 使用 ScreenCaptureKit 替代废弃的 CGWindowListCopyWindowInfo
-        Task {
-            await checkScreenCoverageWithScreenCaptureKit()
-        }
-    }
-
-    @available(macOS 14.0, *)
-    private func checkScreenCoverageWithScreenCaptureKit() async {
-        // 检查是否在冷却期内
-        if screenCapturePermissionFailed {
-            if let lastFailure = lastScreenCaptureFailureTime,
-               Date().timeIntervalSince(lastFailure) < screenCaptureCooldownInterval {
-                // 在冷却期内，使用回退方案
-                await fallbackScreenCoverageCheck()
-                return
-            } else {
-                // 冷却期已过，重置状态
-                screenCapturePermissionFailed = false
-                consecutiveScreenCaptureFailures = 0
-            }
-        }
-        
-        do {
-            // 使用 ScreenCaptureKit 获取窗口信息
-            let content = try await SCShareableContent.current
-            let currentPID = ProcessInfo.processInfo.processIdentifier
-            
-            // 成功获取内容，重置失败计数
-            consecutiveScreenCaptureFailures = 0
-
-            for screen in NSScreen.screens {
-                let screenID = screen.wallpaperScreenIdentifier
-                guard let player = players[screenID] else { continue }
-
-                let covered = await isScreenMostlyCoveredWithSCContent(
-                    screenFrame: screen.frame,
-                    windows: content.windows,
-                    excludingPID: currentPID
-                )
-
-                await MainActor.run {
-                    if covered && self.autoPauseOnFullscreen {
-                        // 只有开启自动暂停时才暂停
-                        if !pausedScreenIDs.contains(screenID) {
-                            player.pause()
-                            pausedScreenIDs.insert(screenID)
-                            // 屏幕被覆盖时显示预览图
-                            self.showPosterImage(for: screenID)
-                        }
-                    } else if !covered {
-                        // 屏幕不再被覆盖，恢复播放
-                        if pausedScreenIDs.contains(screenID) {
-                            pausedScreenIDs.remove(screenID)
-                        }
-                        if player.rate == 0 {
-                            player.play()
-                        }
-                        // 屏幕恢复时隐藏预览图
-                        self.hidePosterImage(for: screenID)
-                    }
-                }
-            }
-        } catch {
-            // 记录失败
-            consecutiveScreenCaptureFailures += 1
-            
-            // 如果连续失败超过阈值，进入冷却期
-            if consecutiveScreenCaptureFailures >= maxScreenCaptureFailures {
-                screenCapturePermissionFailed = true
-                lastScreenCaptureFailureTime = Date()
-                NSLog("[VideoWallpaperManager] ScreenCaptureKit failed \(consecutiveScreenCaptureFailures) times, entering cooldown")
-            }
-            
-            // 错误时不暂停播放，保持动态壁纸持续播放
-            // 只在全屏覆盖时暂停（回退方案）
-            if #available(macOS 15.0, *) {
-                // macOS 15+ 上 ScreenCaptureKit 应该工作，失败时不做特殊处理
-                // 保持播放状态，不显示预览图
-                print("[VideoWallpaperManager] ScreenCaptureKit failed, keeping wallpaper playing")
-            } else {
-                await fallbackScreenCoverageCheck()
-            }
-        }
-    }
-
-    @available(macOS 14.0, *)
-    private func isScreenMostlyCoveredWithSCContent(
-        screenFrame: CGRect,
-        windows: [SCWindow],
-        excludingPID: Int32
-    ) async -> Bool {
-        var largeCoverCount = 0
-        var totalCoveredRatio: CGFloat = 0
-
-        for window in windows {
-            // 跳过当前应用的窗口
-            guard window.owningApplication?.processID != excludingPID else { continue }
-
-            // 只考虑正常层级的窗口（layer 0 等效）
-            guard window.windowLayer == 0 else { continue }
-
-            let bounds = window.frame
-            guard !bounds.isEmpty else { continue }
-
-            let intersection = screenFrame.intersection(bounds)
-            guard !intersection.isNull, !intersection.isEmpty else { continue }
-
-            let ratio = (intersection.width * intersection.height) / max(screenFrame.width * screenFrame.height, 1)
-            if ratio >= 0.88 {
-                return true
-            }
-            if ratio >= 0.42 {
-                largeCoverCount += 1
-            }
-            totalCoveredRatio += ratio
-        }
-
-        if largeCoverCount >= 2 {
-            return true
-        }
-
-        return totalCoveredRatio >= 0.96
-    }
-
-    /// 回退方案：使用 CGWindowListCopyWindowInfo（在 macOS 15+ 被标记为废弃但仍可用）
-    @available(macOS, deprecated: 15.0, message: "Use ScreenCaptureKit instead")
-    private func fallbackScreenCoverageCheck() async {
-        let windowInfo = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-
-        for screen in NSScreen.screens {
-            let screenID = screen.wallpaperScreenIdentifier
-            guard let player = players[screenID] else { continue }
-
-            let covered = isScreenMostlyCoveredLegacy(
-                screenFrame: screen.frame,
-                windows: windowInfo,
-                excludingPID: currentPID
-            )
-
-            await MainActor.run {
-                if covered && self.autoPauseOnFullscreen {
-                    // 只有开启自动暂停时才暂停
-                    if !pausedScreenIDs.contains(screenID) {
-                        player.pause()
-                        pausedScreenIDs.insert(screenID)
-                    }
-                } else if !covered {
-                    // 屏幕不再被覆盖，恢复播放
-                    if pausedScreenIDs.contains(screenID) {
-                        pausedScreenIDs.remove(screenID)
-                    }
-                    if player.rate == 0 {
-                        player.play()
-                    }
-                }
-            }
-        }
-    }
-
-    @available(macOS, deprecated: 15.0)
-    private func isScreenMostlyCoveredLegacy(
-        screenFrame: CGRect,
-        windows: [[String: Any]],
-        excludingPID: Int32
-    ) -> Bool {
-        var largeCoverCount = 0
-        var totalCoveredRatio: CGFloat = 0
-
-        for window in windows {
-            guard
-                let ownerPID = window[kCGWindowOwnerPID as String] as? Int32,
-                ownerPID != excludingPID,
-                let layer = window[kCGWindowLayer as String] as? Int,
-                layer == 0,
-                let alpha = window[kCGWindowAlpha as String] as? Double,
-                alpha > 0.01,
-                let boundsValue = window[kCGWindowBounds as String]
-            else {
-                continue
-            }
-
-            guard
-                let boundsDictionary = boundsValue as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
-            else {
-                continue
-            }
-
-            let intersection = screenFrame.intersection(bounds)
-            guard !intersection.isNull, !intersection.isEmpty else { continue }
-
-            let ratio = (intersection.width * intersection.height) / max(screenFrame.width * screenFrame.height, 1)
-            if ratio >= 0.88 {
-                return true
-            }
-            if ratio >= 0.42 {
-                largeCoverCount += 1
-            }
-            totalCoveredRatio += ratio
-        }
-
-        if largeCoverCount >= 2 {
-            return true
-        }
-
-        return totalCoveredRatio >= 0.96
     }
 }
 

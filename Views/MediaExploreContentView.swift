@@ -15,6 +15,10 @@ struct MediaExploreContentView: View {
     @State private var displayedMediaItems: [MediaItem] = []
     @State private var isLoadingMore = false
     @State private var loadMoreSentinelID: String? = nil
+    
+    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
+    @State private var isInitialLoading = false
+    
 
     // Task 管理
     @State private var searchTask: Task<Void, Never>?
@@ -39,6 +43,8 @@ struct MediaExploreContentView: View {
             .coordinateSpace(name: "exploreScroll")
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
+            // 初始加载时禁止滚动（防止空内容过滚一屏）
+            .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -47,12 +53,17 @@ struct MediaExploreContentView: View {
             )
         }
         .task {
+            // 初始加载时锁定滚动
+            if viewModel.items.isEmpty {
+                isInitialLoading = true
+            }
             await viewModel.initialLoadIfNeeded()
             if searchText.isEmpty {
                 searchText = viewModel.currentQuery
             }
             rebuildVisibleMediaItems()
             syncExploreMediaAtmosphere()
+            isInitialLoading = false
         }
         // 合并 onChange 监听，减少重复调用
         .onChange(of: selectedHotTag) { _, _ in
@@ -301,20 +312,8 @@ struct MediaExploreContentView: View {
                         }
                     }
 
-                    // 分页加载指示器（简化版，不遮挡内容）
-                    if isLoadingMore || (viewModel.isLoading && !displayedMediaItems.isEmpty) {
-                        HStack(spacing: 8) {
-                            CustomProgressView(tint: LiquidGlassColors.primaryPink)
-                                .scaleEffect(0.8)
-                            Text(t("loadMore"))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .gridCellColumns(columnCount)
-                    } else if !viewModel.hasMorePages && !viewModel.isLoading {
-                        // 全部加载完毕提示
+                    // 全部加载完毕提示（网格内跨列显示）
+                    if !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
                         HStack(spacing: 6) {
                             Rectangle()
                                 .fill(Color.white.opacity(0.15))
@@ -331,6 +330,39 @@ struct MediaExploreContentView: View {
                         .gridCellColumns(columnCount)
                     }
                 }
+
+                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
+                if isLoadingMore || (viewModel.isLoading && !displayedMediaItems.isEmpty) {
+                    LoadingMoreIndicator()
+                        .padding(.vertical, 20)
+                }
+            }
+        }
+    }
+
+    // MARK: - 底部加载更多指示器（带弹跳动画）
+    private struct LoadingMoreIndicator: View {
+        @State private var arrowOffset: CGFloat = 0
+        
+        var body: some View {
+            HStack(spacing: 10) {
+                // 弹跳箭头
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(LiquidGlassColors.primaryPink)
+                    .offset(y: arrowOffset)
+                    .onAppear {
+                        withAnimation(
+                            .easeInOut(duration: 0.5)
+                            .repeatForever(autoreverses: true)
+                        ) {
+                            arrowOffset = 4
+                        }
+                    }
+                
+                Text("加载中，请稍候...")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
             }
         }
     }
@@ -390,6 +422,12 @@ struct MediaExploreContentView: View {
     private func appendNewMediaItems() {
         let existingIDs = Set(displayedMediaItems.map { $0.id })
         let newItems = viewModel.items.filter { !existingIDs.contains($0.id) }
+        
+        guard !newItems.isEmpty else { return }
+        
+        // 记录新数据开始索引
+        let startIndex = displayedMediaItems.count
+        
         displayedMediaItems.append(contentsOf: newItems)
     }
     private func submitSearch(with query: String) {

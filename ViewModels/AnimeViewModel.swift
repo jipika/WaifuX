@@ -27,6 +27,12 @@ class AnimeViewModel: ObservableObject {
     private let pageSize = 10
     private var loadMoreTask: Task<Void, Never>?
     
+    // MARK: - 预加载支持
+    private var preloadTask: Task<Void, Never>?
+    private var preloadedItems: [BangumiSubject] = []
+    private var preloadedTotal: Int = 0
+    private var isPreloaded = false
+    
     // Bangumi 服务
     private let bangumiService = BangumiService.shared
 
@@ -250,7 +256,13 @@ class AnimeViewModel: ObservableObject {
         guard !isLoading, !isLoadingMore, hasMorePages, !isLoadMoreInProgress else { return }
 
         isLoadMoreInProgress = true
-        defer { isLoadMoreInProgress = false }
+        defer { 
+            isLoadMoreInProgress = false
+            // 加载完成后触发预加载
+            if hasMorePages {
+                triggerPreloadNextPage()
+            }
+        }
 
         loadMoreTask?.cancel()
 
@@ -259,13 +271,27 @@ class AnimeViewModel: ObservableObject {
             defer { isLoadingMore = false }
 
             let nextPage = currentPage + 1
-            let offset = currentPage * pageSize
             
             do {
-                let (items, total) = try await bangumiService.getTrendingList(
-                    limit: pageSize,
-                    offset: offset
-                )
+                let items: [BangumiSubject]
+                let total: Int?
+                
+                // 检查是否有预加载的数据
+                if isPreloaded && !preloadedItems.isEmpty {
+                    print("[AnimeViewModel] Using preloaded page \(nextPage)")
+                    items = preloadedItems
+                    total = preloadedTotal
+                    // 清空预加载数据
+                    preloadedItems = []
+                    isPreloaded = false
+                } else {
+                    // 正常加载
+                    let offset = currentPage * pageSize
+                    (items, total) = try await bangumiService.getTrendingList(
+                        limit: pageSize,
+                        offset: offset
+                    )
+                }
                 
                 guard !Task.isCancelled else { return }
 
@@ -286,6 +312,39 @@ class AnimeViewModel: ObservableObject {
         }
 
         await loadMoreTask?.value
+    }
+    
+    // MARK: - 预加载下一页
+    private func triggerPreloadNextPage() {
+        preloadTask?.cancel()
+        
+        let nextPage = currentPage + 1
+        let offset = currentPage * pageSize
+        
+        preloadTask = Task(priority: .low) {
+            // 延迟一下再开始预加载
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+            
+            guard !Task.isCancelled else { return }
+            
+            do {
+                print("[AnimeViewModel] Preloading page \(nextPage)...")
+                let (items, total) = try await bangumiService.getTrendingList(
+                    limit: pageSize,
+                    offset: offset
+                )
+                
+                guard !Task.isCancelled else { return }
+                
+                // 存储预加载的数据
+                preloadedItems = items
+                preloadedTotal = total ?? 0
+                isPreloaded = true
+                print("[AnimeViewModel] Preloaded page \(nextPage) with \(items.count) items")
+            } catch {
+                print("[AnimeViewModel] Preload failed: \(error)")
+            }
+        }
     }
 
     // MARK: - 获取详情 (使用规则源)

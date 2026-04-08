@@ -26,6 +26,11 @@ class WallpaperViewModel: ObservableObject {
     private var loadMoreTask: Task<Void, Never>?
     private var imageLoadTasks: [String: Task<Void, Never>] = [:]
     
+    // MARK: - 预加载支持
+    private var preloadTask: Task<Void, Never>?
+    private var preloadedWallpapers: [Wallpaper] = []
+    private var preloadedPage: Int = 0
+    
     // MARK: - 防抖搜索
     private var debounceTask: Task<Void, Never>?
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
@@ -404,7 +409,7 @@ class WallpaperViewModel: ObservableObject {
         return Array(response.data.prefix(limit))
     }
 
-    // MARK: - 加载更多（支持 Task Cancellation）
+    // MARK: - 加载更多（支持 Task Cancellation + 预加载）
     func loadMore() async {
         // 取消之前的加载任务
         loadMoreTask?.cancel()
@@ -415,8 +420,30 @@ class WallpaperViewModel: ObservableObject {
         loadMoreTask = Task {
             do {
                 try Task.checkCancellation()
-
-                let results = try await fetchWallpapers(query: searchQuery, page: currentPage + 1)
+                
+                let nextPage = currentPage + 1
+                let results: WallpaperSearchResponse
+                
+                // 检查是否有预加载的数据
+                if preloadedPage == nextPage && !preloadedWallpapers.isEmpty {
+                    print("[WallpaperViewModel] Using preloaded page \(nextPage)")
+                    results = WallpaperSearchResponse(
+                        meta: .init(
+                            query: searchQuery,
+                            currentPage: nextPage,
+                            perPage: .int(24),
+                            total: preloadedWallpapers.count,
+                            lastPage: preloadedWallpapers.count >= 24 ? nextPage + 10 : nextPage,
+                            seed: currentRandomSeed
+                        ),
+                        data: preloadedWallpapers
+                    )
+                    // 清空预加载数据
+                    preloadedWallpapers = []
+                } else {
+                    // 正常加载
+                    results = try await fetchWallpapers(query: searchQuery, page: nextPage)
+                }
 
                 try Task.checkCancellation()
 
@@ -426,11 +453,16 @@ class WallpaperViewModel: ObservableObject {
                 var existingIDs = Set(wallpapers.map(\.id))
                 let appended = results.data.filter { existingIDs.insert($0.id).inserted }
                 wallpapers.append(contentsOf: appended)
-                currentPage += 1
+                currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
                 // 预加载新加载的图片
                 preloadImages(for: Array(appended.prefix(4)))
+                
+                // 预加载下一页数据
+                if hasMorePages {
+                    triggerPreloadNextPage()
+                }
             } catch is CancellationError {
                 print("ℹ️ Load more was cancelled")
                 return
@@ -447,6 +479,36 @@ class WallpaperViewModel: ObservableObject {
         }
 
         await loadMoreTask?.value
+    }
+    
+    // MARK: - 预加载下一页
+    private func triggerPreloadNextPage() {
+        preloadTask?.cancel()
+        
+        let nextPageToPreload = currentPage + 1
+        let currentQuery = searchQuery
+        let currentSeed = currentRandomSeed
+        
+        preloadTask = Task(priority: .low) {
+            // 延迟一下再开始预加载，避免影响当前页的图片加载
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+            
+            guard !Task.isCancelled else { return }
+            
+            do {
+                print("[WallpaperViewModel] Preloading page \(nextPageToPreload)...")
+                let results = try await fetchWallpapers(query: currentQuery, page: nextPageToPreload)
+                
+                guard !Task.isCancelled else { return }
+                
+                // 存储预加载的数据
+                preloadedPage = nextPageToPreload
+                preloadedWallpapers = results.data
+                print("[WallpaperViewModel] Preloaded page \(nextPageToPreload) with \(results.data.count) wallpapers")
+            } catch {
+                print("[WallpaperViewModel] Preload failed: \(error)")
+            }
+        }
     }
 
     // MARK: - 取消所有任务

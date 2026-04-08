@@ -226,13 +226,6 @@ class SettingsViewModel: ObservableObject {
     }
 
     func importDataSourceProfiles(from url: URL) {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer {
-            if accessing {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
         do {
             let data = try Data(contentsOf: url)
             _ = try DataSourceProfileStore.importProfiles(from: data)

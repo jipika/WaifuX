@@ -11,6 +11,10 @@ struct WallpaperExploreContentView: View {
     @State private var displayedWallpapers: [Wallpaper] = []
     @State private var isLoadingMore = false
     @State private var showProtectedPurityAlert = false
+    
+    // MARK: - 初始加载防过滚（仅数据为空且正在加载时锁定）
+    @State private var isInitialLoading = false
+    
 
     // Task 管理
     @State private var searchTask: Task<Void, Never>?
@@ -37,6 +41,8 @@ struct WallpaperExploreContentView: View {
             .coordinateSpace(name: "exploreScroll")
             // iOS 风格弹性滚动：惯性减速 + 弹性边界
             .iosSmoothScroll()
+            // 初始加载时禁止滚动（防止空内容过滚一屏）
+            .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -57,12 +63,14 @@ struct WallpaperExploreContentView: View {
             // 初始加载：如果壁纸数据为空，触发搜索加载
             // 注意：isLoading卡住时也需要尝试重新加载
             if viewModel.wallpapers.isEmpty {
+                isInitialLoading = true
                 Task {
                     await viewModel.search()
                     // 搜索完成后在主线程重建显示列表
                     await MainActor.run {
                         rebuildVisibleWallpapers()
                         syncExploreAtmosphere()
+                        isInitialLoading = false
                     }
                 }
             } else {
@@ -430,20 +438,8 @@ struct WallpaperExploreContentView: View {
                         }
                     }
 
-                    // 分页加载指示器（简化版，不遮挡内容）
-                    if isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty) {
-                        HStack(spacing: 8) {
-                            CustomProgressView(tint: LiquidGlassColors.primaryPink)
-                                .scaleEffect(0.8)
-                            Text(t("loadMore"))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .gridCellColumns(columnCount)
-                    } else if !viewModel.hasMorePages && !viewModel.isLoading {
-                        // 全部加载完毕提示
+                    // 全部加载完毕提示（网格内跨列显示）
+                    if !isLoadingMore && !viewModel.hasMorePages && !viewModel.isLoading {
                         HStack(spacing: 6) {
                             Rectangle()
                                 .fill(Color.white.opacity(0.15))
@@ -459,6 +455,12 @@ struct WallpaperExploreContentView: View {
                         .padding(.vertical, 24)
                         .gridCellColumns(columnCount)
                     }
+                }
+                
+                // 分页加载指示器（移到 Grid 外部，实现真正的水平居中）
+                if isLoadingMore || (viewModel.isLoading && !displayedWallpapers.isEmpty) {
+                    LoadingMoreIndicator()
+                        .padding(.vertical, 20)
                 }
             }
         }
@@ -801,12 +803,11 @@ struct WallpaperExploreContentView: View {
         let newWallpapers = tagFilteredWallpapers.filter { !existingIDs.contains($0.id) }
         guard !newWallpapers.isEmpty else { return }
         
-        // 使用事务禁用动画，避免抖动
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            displayedWallpapers.append(contentsOf: newWallpapers)
-        }
+        // 记录新数据开始索引
+        let startIndex = displayedWallpapers.count
+        
+        // 直接追加数据，让卡片显示入场动画
+        displayedWallpapers.append(contentsOf: newWallpapers)
     }
     private func loadMoreUntilVisibleGrowth(maxAttempts: Int = 6) async {
         let initialVisibleCount = displayedWallpapers.count
@@ -819,6 +820,33 @@ struct WallpaperExploreContentView: View {
             appendNewWallpapers()
             if displayedWallpapers.count > initialVisibleCount {
                 break
+            }
+        }
+    }
+
+    // MARK: - 底部加载更多指示器（带弹跳动画）
+    private struct LoadingMoreIndicator: View {
+        @State private var arrowOffset: CGFloat = 0
+        
+        var body: some View {
+            HStack(spacing: 10) {
+                // 弹跳箭头
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(LiquidGlassColors.primaryPink)
+                    .offset(y: arrowOffset)
+                    .onAppear {
+                        withAnimation(
+                            .easeInOut(duration: 0.5)
+                            .repeatForever(autoreverses: true)
+                        ) {
+                            arrowOffset = 4
+                        }
+                    }
+                
+                Text("加载中，请稍候...")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
             }
         }
     }
