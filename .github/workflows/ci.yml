@@ -43,9 +43,9 @@ jobs:
           # 提取主版本号（用于 CURRENT_PROJECT_VERSION）
           MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
           echo "Updating project.yml with version: $VERSION (build: $MAJOR_VERSION)"
-          # 使用 sed 替换版本号
-          sed -i "s/MARKETING_VERSION: .*/MARKETING_VERSION: $VERSION/" project.yml
-          sed -i "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: $MAJOR_VERSION/" project.yml
+          # 使用 sed 替换版本号（macOS 需要 -i '' 指定空备份扩展名）
+          sed -i '' "s/MARKETING_VERSION: .*/MARKETING_VERSION: $VERSION/" project.yml
+          sed -i '' "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: $MAJOR_VERSION/" project.yml
           cat project.yml | grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)"
 
       - name: Generate Xcode Project
