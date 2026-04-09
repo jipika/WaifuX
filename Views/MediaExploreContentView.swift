@@ -33,6 +33,15 @@ struct MediaExploreContentView: View {
                 .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
+                .background(
+                    // macOS 14 滚动追踪：通过 GeometryReader + PreferenceKey 上报滚动位置
+                    GeometryReader { scrollProxy in
+                        Color.clear.preference(
+                            key: ExploreScrollOffsetKey.self,
+                            value: -scrollProxy.frame(in: .named("exploreScroll")).minY
+                        )
+                    }
+                )
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
             .coordinateSpace(name: "exploreScroll")
@@ -299,6 +308,15 @@ struct MediaExploreContentView: View {
                 )
             }
         }
+        .frame(height: calculateTotalHeight(itemCount: displayedMediaItems.count, cardHeight: cardHeight, columnCount: columnCount, spacing: spacing))
+    }
+
+    /// 计算 LazyVGrid 总高度（确保 ScrollView contentSize 正确）
+    private func calculateTotalHeight(itemCount: Int, cardHeight: CGFloat, columnCount: Int, spacing: CGFloat) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(columnCount))
+        let totalCardHeight = cardHeight + 44 // 卡片高度 + 底部信息栏约 44pt
+        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
     }
 
     // MARK: - Loading Indicator
@@ -415,11 +433,17 @@ struct MediaExploreContentView: View {
     private func checkLoadMore(offset: CGFloat) {
         let threshold: CGFloat = 300 // 向上滚动超过 300pt 触发加载
         guard offset > threshold,
-              viewModel.hasMorePages,
-              !viewModel.isLoading,
-              !isLoadingMore,
-              !viewModel.isLoadingMore else { return }
+              viewModel.hasMorePages else { return }
 
+        // 防死锁：如果 isLoading/isLoadingMore 卡住，检查是否有活跃任务
+        if viewModel.isLoading || isLoadingMore || viewModel.isLoadingMore {
+            if let loadMoreTask, !loadMoreTask.isCancelled {
+                return // 已有进行中的加载任务，不重复触发
+            }
+            // 任务已完成但状态未重置（异常情况），强制继续
+        }
+
+        loadMoreTask?.cancel()
         isLoadingMore = true
         Task {
             await viewModel.loadMore()
@@ -969,12 +993,12 @@ extension MediaItem {
 // MARK: - Scroll Load More Modifier
 
 /// 跨版本兼容的滚动加载更多修饰符
-/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 GeometryReader + onChange
+/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 PreferenceKey 滚动追踪
 private struct ScrollLoadMoreModifier: ViewModifier {
     @Binding var scrollOffset: CGFloat
     let onLoadMore: () -> Void
     let checkLoadMore: (CGFloat) -> Void
-    
+
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content
@@ -989,18 +1013,21 @@ private struct ScrollLoadMoreModifier: ViewModifier {
                 }
         } else {
             content
-                .overlay(
-                    GeometryReader { scrollProxy in
-                        Color.clear
-                            .onChange(of: scrollProxy.frame(in: .named("exploreScroll")).minY) { _, minY in
-                                scrollOffset = -minY
-                            }
-                    }
-                )
+                .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
+                    scrollOffset = value
+                }
                 .onChange(of: scrollOffset) { _, offset in
                     checkLoadMore(offset)
                 }
         }
+    }
+}
+
+// macOS 14 用 PreferenceKey 追踪滚动偏移量（比 GeometryReader overlay 更可靠）
+private struct ExploreScrollOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

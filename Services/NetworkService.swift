@@ -102,13 +102,52 @@ actor NetworkService {
         from url: URL,
         headers: [String: String] = [:],
         attempt: Int = 1,
+        progressHandler: (@Sendable (Double) -> Void)? = nil,
+        useHosts: Bool = true  // 是否使用 hosts 加速
+    ) async throws -> Data {
+        
+        // 构建请求
+        func buildRequest(for targetURL: URL, withHost host: String?) -> URLRequest {
+            var request = URLRequest(url: targetURL)
+            if let host = host {
+                request.setValue(host, forHTTPHeaderField: "Host")
+            }
+            for (key, value) in headers {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+            return request
+        }
+        
+        // 尝试使用 hosts 加速
+        if useHosts && GitHubHosts.isEnabled && GitHubHosts.isGitHubURL(url.absoluteString) {
+            let (requestURL, hostHeader) = Self.resolveGitHubURL(url)
+            
+            // 只有当 hosts 解析成功时才尝试
+            if hostHeader != nil {
+                let request = buildRequest(for: requestURL, withHost: hostHeader)
+                
+                do {
+                    let data = try await performRequest(request: request, progressHandler: progressHandler)
+                    print("[NetworkService] ✅ GitHub Hosts 加速成功: \(url.host ?? "")")
+                    return data
+                } catch {
+                    print("[NetworkService] ⚠️ GitHub Hosts 失败，回退到原始域名: \(error.localizedDescription)")
+                    // 失败时回退到原始域名
+                }
+            }
+        }
+        
+        // 使用原始域名请求
+        let request = buildRequest(for: url, withHost: nil)
+        return try await performRequest(request: request, progressHandler: progressHandler)
+    }
+    
+    /// 执行网络请求
+    private func performRequest(
+        request: URLRequest,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> Data {
-        var request = URLRequest(url: url)
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
+        
         if let progressHandler {
             let (bytes, response) = try await session.bytes(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {

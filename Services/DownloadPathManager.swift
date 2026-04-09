@@ -43,16 +43,12 @@ final class DownloadPathManager {
     }
 
     // MARK: - 权限管理
-    /// 确保下载权限有效
-    /// - Returns: 是否有有效权限
+    /// 确保下载权限有效（无沙箱版本：直接创建目录并返回）
+    /// - Returns: 是否有有效权限（无沙箱下始终返回 true）
     func ensureDownloadPermission() async -> Bool {
-        // 尝试开始访问安全作用域
-        if permissionManager.startAccessingSecurityScope() {
-            return true
-        }
-        
-        // 请求权限
-        return await permissionManager.ensurePermission()
+        // 无沙箱模式：直接创建目录结构，不需要权限弹窗
+        createDirectoryStructure()
+        return true
     }
     
     /// 请求下载文件夹权限

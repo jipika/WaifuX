@@ -68,16 +68,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let settingsViewModel = SettingsViewModel()
     private var settingsWindowController: NSWindowController?
     
+    // MARK: - 窗口尺寸（唯一真实来源，全局统一）
+    /// 最小允许的窗口大小
+    private static let minimumWindowSize = NSSize(width: 1150, height: 720)
+
+    /// 默认窗口大小：根据屏幕尺寸动态计算（首次启动或无保存状态时使用）
+    private static var defaultWindowSize: NSSize {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let screen else {
+            return NSSize(width: 1400, height: 880) // 兜底值
+        }
+        let available = screen.visibleFrame
+        // 取屏幕可用区域的 ~78% 宽度，~92% 高度，给首页轮播和内容区留足空间
+        let width = max(minimumWindowSize.width, floor(available.width * 0.78))
+        let height = max(minimumWindowSize.height, floor(available.height * 0.92))
+        return NSSize(width: width, height: height)
+    }
+
     // MARK: - 窗口自动保存名称
     private enum WindowAutosaveName {
         static let mainWindow = "WaifuXMainWindow"
     }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
         // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
         //
         // 恢复顺序很重要：语言 → 主题 → 下载权限 → 更新缓存
+
+        // 0. 🚀 预加载 GitHub Hosts（异步解析 IP）
+        Task {
+            await GitHubHosts.refreshHosts()
+        }
 
         // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
         LocalizationService.shared.restoreSavedSettings()
@@ -106,11 +129,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
 
         let contentView = ContentView()
-            .frame(minWidth: 900, minHeight: 600)
+            .frame(
+                minWidth: Self.minimumWindowSize.width,
+                minHeight: Self.minimumWindowSize.height
+            )
 
-        // 使用 defer: true 延迟窗口显示，避免先创建默认大小再恢复保存大小产生的缩放动画
+        // 使用 defer: true 延迟窗口显示
+        // 注意：setFrameAutosaveName 在 setContentView 之前调用，
+        // 这样 SwiftUI 首次渲染时 GeometryReader 就能拿到正确的窗口宽度
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: true
@@ -126,23 +154,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.standardWindowButton(.zoomButton)?.isHidden = true
 
         // 设置最小窗口大小
-        window?.minSize = NSSize(width: 900, height: 600)
+        window?.minSize = Self.minimumWindowSize
+
+        // ⚠️ 关键顺序：先恢复保存的窗口尺寸，再设置 contentView
+        // 这样 SwiftUI 的 GeometryReader 首次渲染时就能拿到正确的最终宽度，
+        // 避免"加载前放大 → 加载后缩小"的布局抖动问题
+        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
 
         // 使用无边框托管视图
         let hostingView = EdgeToEdgeHostingView(rootView: contentView)
         window?.contentView = hostingView
 
         window?.delegate = self
-
-        // 设置窗口自动保存名称 - macOS 会自动恢复保存的窗口大小和位置
-        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
         
         // 首次启动时居中显示（没有保存的窗口状态时）
         if !hasSavedWindowFrame() {
             window?.center()
         }
 
-        // 现在显示窗口 - 此时大小已经被 setFrameAutosaveName 恢复好了
+        // 显示窗口 - 此时大小已经是最终值（默认 or 恢复的保存值）
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
@@ -165,11 +195,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if window == nil {
             let contentView = ContentView()
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(
+                    minWidth: Self.minimumWindowSize.width,
+                    minHeight: Self.minimumWindowSize.height
+                )
 
-            // 使用 defer: true 延迟窗口显示，避免缩放动画
+            // 使用 defer: true 延迟窗口显示
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+                contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: true
@@ -178,7 +211,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.title = "WaifuX"
             window?.titlebarAppearsTransparent = true
             window?.titleVisibility = .hidden
-            window?.minSize = NSSize(width: 900, height: 600)
+            window?.minSize = Self.minimumWindowSize
 
             // 隐藏系统红绿灯（使用自定义 CustomWindowControls）
             window?.standardWindowButton(.closeButton)?.isHidden = true
@@ -190,7 +223,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             window?.delegate = self
             
-            // 设置窗口自动保存名称 - macOS 会自动恢复保存的窗口大小和位置
+            // 先恢复保存的窗口尺寸，再显示
             window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
             
             // 首次启动时居中显示

@@ -24,7 +24,7 @@ final class VideoWallpaperManager: ObservableObject {
     /// 持久化预览图存储目录（避免被系统清理）
     /// 注意：放在 WallHaven 目录下，与 Cache 分开，避免被清理缓存误删
     private var persistedPosterDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "/tmp")
         let dir = appSupport.appendingPathComponent("WallHaven", isDirectory: true)
             .appendingPathComponent("WallpaperPosters", isDirectory: true)
         // 确保目录存在
@@ -53,10 +53,9 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
     
-    // 防止重复重建
+    // 防止重复重建（@MainActor 保证串行访问，无需 NSLock）
     private var isRebuilding = false
     private var pendingRebuildWorkItem: DispatchWorkItem?
-    private let rebuildLock = NSLock()
 
     private init() {
         setupNotificationObservers()
@@ -219,27 +218,35 @@ final class VideoWallpaperManager: ObservableObject {
     private var isScreenLocked = false
     
     @objc private func handleScreenLocked() {
-        print("[VideoWallpaperManager] Screen locked, pausing wallpaper")
-        isScreenLocked = true
-        // 锁屏时暂停视频，显示预览图（预览图已设为桌面壁纸）
-        for player in players.values {
-            player.pause()
-            player.rate = 0
-        }
-        // 所有屏幕显示预览图
-        for screenID in windows.keys {
-            showPosterImage(for: screenID)
+        // ⚠️ DistributedNotificationCenter 回调不在主线程！必须 dispatch 到主线程
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            print("[VideoWallpaperManager] Screen locked, pausing wallpaper")
+            self.isScreenLocked = true
+            // 锁屏时暂停视频，显示预览图（预览图已设为桌面壁纸）
+            for player in self.players.values {
+                player.pause()
+                player.rate = 0
+            }
+            // 所有屏幕显示预览图
+            for screenID in self.windows.keys {
+                self.showPosterImage(for: screenID)
+            }
         }
     }
     
     @objc private func handleScreenUnlocked() {
-        print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
-        isScreenLocked = false
-        // 解锁时恢复播放（如果不是手动暂停）
-        guard !isPaused else { return }
-        for (screenID, player) in players {
-            player.play()
-            hidePosterImage(for: screenID)
+        // ⚠️ DistributedNotificationCenter 回调不在主线程！必须 dispatch 到主线程
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
+            self.isScreenLocked = false
+            // 解锁时恢复播放（如果不是手动暂停）
+            guard !self.isPaused else { return }
+            for (screenID, player) in self.players {
+                player.play()
+                self.hidePosterImage(for: screenID)
+            }
         }
     }
 
@@ -309,7 +316,7 @@ final class VideoWallpaperManager: ObservableObject {
     private func setPosterAsDesktopWallpaper(_ posterURL: URL, targetScreen: NSScreen? = nil) {
         let workspace = NSWorkspace.shared
         
-        Task {
+        Task { @MainActor in
             do {
                 // 1. 下载预览图
                 let (data, _) = try await URLSession.shared.data(from: posterURL)
@@ -495,57 +502,66 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     @objc private func handleScreenParametersChanged() {
-        guard currentVideoURL != nil else { return }
-        
-        // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
-        pendingRebuildWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self, self.currentVideoURL != nil else { return }
-            do {
-                try self.rebuildWindows()
-            } catch {
-                NSLog("[VideoWallpaperManager] Failed to rebuild windows: \(error.localizedDescription)")
+        // ⚠️ NSNotification 回调可能不在主线程，dispatch 到主线程
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.currentVideoURL != nil else { return }
+            
+            // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
+            self.pendingRebuildWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self, self.currentVideoURL != nil else { return }
+                do {
+                    try self.rebuildWindows()
+                } catch {
+                    NSLog("[VideoWallpaperManager] Failed to rebuild windows: \(error.localizedDescription)")
+                }
             }
+            self.pendingRebuildWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
         }
-        pendingRebuildWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
     }
 
     @objc private func handleScreensDidSleep() {
-        for player in players.values {
-            player.pause()
-            player.rate = 0
+        // ⚠️ NSWorkspace 通知可能不在主线程，dispatch 到主线程
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            for player in self.players.values {
+                player.pause()
+                player.rate = 0
+            }
         }
     }
 
     @objc private func handleScreensDidWake() {
-        // 屏幕唤醒时防抖重建
-        pendingRebuildWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
+        // ⚠️ NSWorkspace 通知可能不在主线程，dispatch 到主线程
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if self.currentVideoURL != nil, self.windows.isEmpty {
-                try? self.rebuildWindows()
-            }
-            // 只有非手动暂停时才恢复播放
-            if !self.isPaused {
-                for (screenID, player) in self.players {
-                    player.play()
-                    self.hidePosterImage(for: screenID)
+            // 屏幕唤醒时防抖重建
+            self.pendingRebuildWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                if self.currentVideoURL != nil, self.windows.isEmpty {
+                    try? self.rebuildWindows()
+                }
+                // 只有非手动暂停时才恢复播放
+                if !self.isPaused {
+                    for (screenID, player) in self.players {
+                        player.play()
+                        self.hidePosterImage(for: screenID)
+                    }
                 }
             }
+            self.pendingRebuildWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
         }
-        pendingRebuildWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
     private func rebuildWindows(targetScreen: NSScreen? = nil) throws {
         guard let currentVideoURL else { return }
         
-        // 使用锁防止并发重建
-        rebuildLock.lock()
-        defer { rebuildLock.unlock() }
-        
         // 如果正在重建，跳过此次请求
+        // 注意：@MainActor 保证串行执行，无需额外加锁
         guard !isRebuilding else {
             NSLog("[VideoWallpaperManager] Rebuild already in progress, skipping...")
             return
@@ -577,7 +593,8 @@ final class VideoWallpaperManager: ObservableObject {
             teardownAllWindows()
         } else {
             // 只移除目标屏幕的窗口
-            let targetScreenID = targetScreen!.wallpaperScreenIdentifier
+            guard let targetScreen = targetScreen else { return }
+            let targetScreenID = targetScreen.wallpaperScreenIdentifier
             if let window = windows[targetScreenID] {
                 window.close()
                 windows.removeValue(forKey: targetScreenID)

@@ -911,15 +911,11 @@ struct WallpaperDetailSheet: View {
         let screens = NSScreen.screens
         if screens.count > 1 {
             // 多显示器环境下显示选择弹窗
+            // selectedScreen == nil 表示"所有显示器"，非 nil 表示特定显示器
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")
             ) { [self] selectedScreen in
-                // 用户取消选择
-                guard selectedScreen != nil || screens.count > 0 else {
-                    return
-                }
-                
                 isSettingWallpaper = true
                 errorMessage = ""
                 Task {
@@ -928,6 +924,7 @@ struct WallpaperDetailSheet: View {
                         VideoWallpaperManager.shared.stopWallpaper()
 
                         let imageURL = try await getWallpaperImageURL()
+                        // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
                         try await viewModel.setWallpaper(from: imageURL, option: .desktop, for: selectedScreen)
                     } catch {
                         await MainActor.run {

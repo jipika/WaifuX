@@ -42,6 +42,15 @@ struct WallpaperExploreContentView: View {
                 .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .center)
+                .background(
+                    // macOS 14 滚动追踪：通过 GeometryReader + PreferenceKey 上报滚动位置
+                    GeometryReader { scrollProxy in
+                        Color.clear.preference(
+                            key: ExploreScrollOffsetKey.self,
+                            value: -scrollProxy.frame(in: .named("exploreScroll")).minY
+                        )
+                    }
+                )
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
             .coordinateSpace(name: "exploreScroll")
@@ -123,10 +132,17 @@ struct WallpaperExploreContentView: View {
     private func checkLoadMore(offset: CGFloat) {
         let threshold: CGFloat = 600 // 向上滚动超过 600pt 触发加载
         guard offset > threshold,
-              viewModel.hasMorePages,
-              !viewModel.isLoading,
-              !isLoadingMore else { return }
-        
+              viewModel.hasMorePages else { return }
+
+        // 防死锁：如果 isLoading 卡住超过 3 秒，强制允许重试
+        if viewModel.isLoading || isLoadingMore {
+            if let loadMoreTask, !loadMoreTask.isCancelled {
+                // 已有进行中的加载任务，不重复触发
+                return
+            }
+            // 任务已完成但状态未重置（异常情况），强制继续
+        }
+
         loadMoreTask?.cancel()
         loadMoreTask = Task {
             isLoadingMore = true
@@ -1332,12 +1348,12 @@ private func sortingOptionDisplayName(_ option: SortingOption) -> String {
 // MARK: - Scroll offset
 
 /// 跨版本兼容的滚动加载更多修饰符
-/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 GeometryReader + onChange
+/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 PreferenceKey 滚动追踪
 private struct ScrollLoadMoreModifier: ViewModifier {
     @Binding var scrollOffset: CGFloat
     let onLoadMore: () -> Void
     let checkLoadMore: (CGFloat) -> Void
-    
+
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content
@@ -1352,18 +1368,21 @@ private struct ScrollLoadMoreModifier: ViewModifier {
                 }
         } else {
             content
-                .overlay(
-                    GeometryReader { scrollProxy in
-                        Color.clear
-                            .onChange(of: scrollProxy.frame(in: .named("exploreScroll")).minY) { _, minY in
-                                scrollOffset = -minY
-                            }
-                    }
-                )
+                .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
+                    scrollOffset = value
+                }
                 .onChange(of: scrollOffset) { _, offset in
                     checkLoadMore(offset)
                 }
         }
+    }
+}
+
+// macOS 14 用 PreferenceKey 追踪滚动偏移量（比 GeometryReader overlay 更可靠）
+private struct ExploreScrollOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

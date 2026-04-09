@@ -114,8 +114,13 @@ final class MediaExploreViewModel: ObservableObject {
         }
         
         // 添加扫描到的本地文件（排除已在下载记录中的）
-        let downloadedIds = Set(downloadedItems.map { $0.item.id })
-        for item in localMediaItems where !downloadedIds.contains(item.id) {
+        // ⚠️ 必须用文件路径去重，不能用 ID：
+        //   - 下载记录的 id = 原始 MediaItem.slug（如 "cool-animation"）
+        //   - 本地扫描的 id = "local_文件名_扩展名"（如 "local_motionbgs-cool-animation-4k_mp4"）
+        //   两者永远不匹配！同一文件会以两个身份同时出现导致重复
+        let downloadedPaths = Set(downloadedItems.compactMap { URL(string: $0.localFilePath)?.path })
+            .map { ($0 as NSString).standardizingPath as String }
+        for item in localMediaItems where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
             result.append(UnifiedLocalMedia(
                 id: item.id,
                 mediaItem: item.toMediaItem(),

@@ -74,7 +74,7 @@ class WallpaperSchedulerService: ObservableObject {
             guard let screen = NSScreen.main else { return }
 
             // 下载图片到临时文件再设置为壁纸
-            Task {
+            Task { @MainActor in
                 do {
                     let tempURL = try await downloadImage(from: url)
                     try workspace.setDesktopImageURL(tempURL, for: screen, options: [:])

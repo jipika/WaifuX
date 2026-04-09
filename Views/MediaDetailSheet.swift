@@ -568,7 +568,7 @@ struct MediaDetailSheet: View {
                 compactFact(label: t("duration"), value: resolvedItem.durationLabel ?? t("unknown"))
                 compactFact(
                     label: t("format2"),
-                    value: previewVideoURL?.pathExtension.uppercased().isEmpty == false ? previewVideoURL!.pathExtension.uppercased() : "MP4"
+                    value: previewVideoURL?.pathExtension.uppercased() ?? "MP4"
                 )
                 compactFact(label: t("audio2"), value: isMuted ? t("muted") : t("audioOn"))
                 compactFact(
@@ -797,19 +797,16 @@ struct MediaDetailSheet: View {
         let screens = NSScreen.screens
         if screens.count > 1 {
             // 多显示器环境下显示选择弹窗
+            // selectedScreen == nil 表示"所有显示器"，非 nil 表示特定显示器
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")
             ) { [self] selectedScreen in
-                // 用户取消选择
-                guard selectedScreen != nil || screens.count > 0 else {
-                    return
-                }
-                
                 isSettingWallpaper = true
                 errorMessage = ""
                 Task {
                     do {
+                        // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
                         try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted, targetScreen: selectedScreen)
                     } catch {
                         await MainActor.run {

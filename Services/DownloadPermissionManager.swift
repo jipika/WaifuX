@@ -202,46 +202,27 @@ final class DownloadPermissionManager {
         return selectedURL
     }
     
-    /// 获取下载文件夹URL
-    /// - Parameter requestIfNeeded: 如果没有权限是否请求
-    /// - Returns: 下载文件夹URL
+    /// 获取下载文件夹URL（无沙箱版本：不弹窗）
+    /// - Parameter requestIfNeeded: 如果没有路径是否请求（无沙箱下忽略，直接创建默认目录）
+    /// - Returns: 下载文件夹URL（始终返回有效值）
     func getDownloadFolder(requestIfNeeded: Bool = true) async -> URL? {
-        // 如果已经有有效的权限，直接返回
-        if let url = currentFolderURL, hasValidPermission {
-            return url
+        guard let url = currentFolderURL else { return nil }
+
+        // 确保目录存在
+        if !FileManager.default.fileExists(atPath: url.path) {
+            ensureDirectoryExists(at: url)
         }
-        
-        // 尝试确保目录存在后再次检查
-        if let url = currentFolderURL, ensureDirectoryExists(at: url) {
-            return url
-        }
-        
-        // 如果需要请求权限
-        if requestIfNeeded {
-            return await requestDownloadPermission()
-        }
-        
-        return nil
+        return url
     }
     
-    /// 确保有下载权限
-    /// - Returns: 是否有有效权限
+    /// 确保有下载权限（无沙箱版本：直接创建目录并返回）
+    /// - Returns: 是否有有效权限（无沙箱下始终返回 true）
     func ensurePermission() async -> Bool {
-        if hasValidPermission {
-            return true
+        // 无沙箱模式：不需要权限弹窗，确保目录存在即可
+        if let url = currentFolderURL {
+            ensureDirectoryExists(at: url)
         }
-        
-        // 尝试创建目录
-        if let url = currentFolderURL, ensureDirectoryExists(at: url) {
-            return true
-        }
-        
-        // 请求新权限
-        if let _ = await requestDownloadPermission() {
-            return hasValidPermission
-        }
-        
-        return false
+        return true
     }
     
     /// 开始访问安全作用域资源（无沙箱版本：空操作，始终成功）

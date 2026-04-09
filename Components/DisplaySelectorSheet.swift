@@ -225,6 +225,8 @@ class DisplaySelectorManager: ObservableObject {
     static let shared = DisplaySelectorManager()
     
     @Published var isShowingSelector = false
+    @Published private(set) var selectorTitle: String = ""
+    @Published private(set) var selectorMessage: String = ""
     
     private var completionHandler: ((NSScreen?) -> Void)?
     
@@ -237,6 +239,8 @@ class DisplaySelectorManager: ObservableObject {
     ///   - completion: 选择完成回调，参数为选中的屏幕，nil 表示所有屏幕
     func showSelector(title: String, message: String, completion: @escaping (NSScreen?) -> Void) {
         self.completionHandler = completion
+        self.selectorTitle = title
+        self.selectorMessage = message
         self.isShowingSelector = true
     }
     
@@ -270,8 +274,8 @@ public struct DisplaySelectorOverlay: View {
         Group {
             if manager.isShowingSelector {
                 DisplaySelectorSheet(
-                    title: t("selectDisplay"),
-                    message: t("selectDisplayMessage"),
+                    title: manager.selectorTitle.isEmpty ? t("selectDisplay") : manager.selectorTitle,
+                    message: manager.selectorMessage.isEmpty ? t("selectDisplayMessage") : manager.selectorMessage,
                     onSelect: { screen in
                         manager.handleSelection(screen)
                     },
@@ -280,6 +284,8 @@ public struct DisplaySelectorOverlay: View {
                     }
                 )
                 .transition(.opacity)
+                // 每次弹出时用 id 强制重建 View，确保 selectedScreen 重置为默认值（nil = 所有显示器）
+                .id(manager.selectorTitle + manager.selectorMessage)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: manager.isShowingSelector)

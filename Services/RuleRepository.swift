@@ -32,15 +32,21 @@ actor RuleRepository {
         self.currentRepoURL = "https://github.com/\(owner)/\(repo)"
         self.cachedIndex = nil
 
-        // 保存到 UserDefaults
-        UserDefaults.standard.set("https://github.com/\(owner)/\(repo)", forKey: "rule_repository_url")
+        // 保存到 UserDefaults（必须在 MainActor 上执行，避免 Hang Risk）
+        await MainActor.run {
+            UserDefaults.standard.set("https://github.com/\(owner)/\(repo)", forKey: "rule_repository_url")
+        }
 
         print("[RuleRepository] Configured repository: \(owner)/\(repo)")
     }
 
     /// 从保存的配置加载仓库
     func loadConfiguredRepository() async {
-        guard let savedURL = UserDefaults.standard.string(forKey: "rule_repository_url") else {
+        // 读取 UserDefaults（必须在 MainActor 上执行，避免 Hang Risk）
+        let savedURL = await MainActor.run {
+            UserDefaults.standard.string(forKey: "rule_repository_url")
+        }
+        guard let savedURL else {
             print("[RuleRepository] 未配置规则仓库 URL，请在设置中配置")
             return
         }
@@ -154,8 +160,10 @@ actor RuleRepository {
                     let url = item.url ?? "https://raw.githubusercontent.com/\(owner)/\(repo)/main/\(item.name).json"
                     do {
                         let data = try await fetchData(from: url)
-                        // 保存到 UserDefaults
-                        UserDefaults.standard.set(data, forKey: "data_source_profiles_v1")
+                        // 保存到 UserDefaults（必须在 MainActor 上执行）
+                        await MainActor.run {
+                            UserDefaults.standard.set(data, forKey: "data_source_profiles_v1")
+                        }
                         print("[RuleRepository] Installed media profile: \(item.name)")
                     } catch {
                         print("[RuleRepository] Failed to install media profile \(item.name): \(error)")
@@ -167,7 +175,9 @@ actor RuleRepository {
             let url = "https://raw.githubusercontent.com/\(owner)/\(repo)/main/DataSourceProfile.json"
             do {
                 let data = try await fetchData(from: url)
-                UserDefaults.standard.set(data, forKey: "data_source_profiles_v1")
+                await MainActor.run {
+                    UserDefaults.standard.set(data, forKey: "data_source_profiles_v1")
+                }
                 print("[RuleRepository] Installed DataSourceProfile.json")
             } catch {
                 print("[RuleRepository] Failed to install DataSourceProfile.json: \(error)")

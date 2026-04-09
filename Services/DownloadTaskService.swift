@@ -256,7 +256,7 @@ class DownloadTaskService: ObservableObject {
 
     private func schedulePersistTasks() {
         saveTask?.cancel()
-        saveTask = Task {
+        saveTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
             guard !Task.isCancelled else { return }
             persistTasks()
@@ -264,7 +264,7 @@ class DownloadTaskService: ObservableObject {
     }
 
     private func scheduleVisibilityRefresh() {
-        Task {
+        Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_900_000_000) // 1.9s
             objectWillChange.send()
         }
