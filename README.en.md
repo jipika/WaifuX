@@ -1,6 +1,10 @@
 # WaifuX
 
 <p align="center">
+  <a href="README.md">🇨🇳 简体中文</a> | <a href="README.en.md">🇺🇸 English</a> | <a href="README.ja.md">🇯🇵 日本語</a>
+</p>
+
+<p align="center">
   <img src="Design/Logo/AppIcon_Glass.png" width="120" height="120" />
 </p>
 
@@ -19,6 +23,15 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-06b6d4?style=flat-square" alt="License">
   </a>
+  <a href="https://github.com/jipika/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  </a>
+  <a href="https://github.com/jipika/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  </a>
+  <a href="https://github.com/jipika/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  </a>
   <a href="https://jipika.github.io/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
@@ -26,22 +39,39 @@
 
 ---
 
-## Overview
+## 📸 Preview
 
-**WaifuX** is an open-source **all-in-one ACG application** for macOS that integrates static wallpapers, dynamic wallpapers, and anime video playback — browse, search, and set desktop content from multiple sources, all in one place.
+<table>
+  <tr>
+    <td><img src="screenshots/home.png" width="100%" /><br><p align="center">Home - Featured</p></td>
+    <td><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">Wallpapers - Smart Filter</p></td>
+    <td><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">Wallpaper Detail - One-click Set</p></td>
+    <td><img src="screenshots/settings.png" width="100%" /><br><p align="center">Settings - Personalization</p></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">Live Wallpapers - MotionBG</p></td>
+    <td><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">Anime Detail - Multi-source</p></td>
+    <td><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">Video Player - Episode Select</p></td>
+    <td></td>
+  </tr>
+</table>
 
-### Key Features
+---
 
-| Feature | Description |
-|----------|-------------|
-| 🖼 **Static Wallpapers** | Access to high-quality sources like Wallhaven with full 4K/8K resolution coverage |
-| 🎬 **Dynamic Wallpapers** | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
-| 📺 **Anime Videos** | Built-in multi-source parsing engine for streaming and watching anime |
-| 🔍 **Smart Search & Filter** | Keywords, tags, categories, color, resolution — find exactly what you want |
-| ⭐ **Collections** | Save favorite wallpapers and videos to build your personal ACG library |
-| ⚡️ **One-click Apply** | Set as desktop wallpaper or dynamic desktop directly while browsing |
-| 🔄 **Auto-updating Rules** | Rule configurations loaded remotely via GitHub — quick adaptation when source sites change |
-| 🌙 **Native UI** | Dark/Light mode support, follows macOS design guidelines |
+## ✨ Features
+
+| Feature | Status | Description |
+|---------|:------:|-------------|
+| 🖼 **Static Wallpapers** | ✅ | Access to high-quality sources like Wallhaven with full 4K/8K resolution coverage |
+| 🎬 **Dynamic Wallpapers** | ✅ | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
+| 📺 **Anime Videos** | ✅ | Built-in multi-source parsing engine for streaming and watching anime |
+| 🔍 **Smart Search & Filter** | ✅ | Keywords, tags, categories, color, resolution — find exactly what you want |
+| ⭐ **Collections** | ✅ | Save favorite wallpapers and videos to build your personal ACG library |
+| ⚡️ **One-click Apply** | ✅ | Set as desktop wallpaper or dynamic desktop directly while browsing |
+| 🖥️ **Multi-display Support** | ✅ | Set different wallpapers for each display — perfect for multi-monitor setups |
+| 📥 **Local Data Import** | ✅ | Import local wallpaper folders for unified management of personal collections |
+| 🔄 **Auto-updating Rules** | ✅ | Rule configurations loaded remotely via GitHub — quick adaptation when source sites change |
+| ☁️ **Cross-device Sync** | 🚧 | Cloud sync for favorites (in development) |
 
 ---
 
@@ -94,7 +124,7 @@ App Launch → Check for Updates → Load Latest Rules → Ready to Use
 ## 🌍 Multi-language Support
 
 | Language | Status |
-|----------|--------|
+|----------|:------:|
 | 🇨🇳 简体中文 | ✅ Full Support |
 | 🇺🇸 English | ✅ Full Support |
 | 🇯🇵 日本語 | ✅ Full Support |
@@ -132,6 +162,14 @@ WaifuX does **not store any content** itself — it acts only as an aggregation 
 - Anime video sources are provided by users
 - All content copyrights belong to the original websites and authors
 - Please comply with each platform's terms of service; for personal use only
+
+---
+
+## 🌟 Star History
+
+<p align="center">
+  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+</p>
 
 ---
 

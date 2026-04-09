@@ -1,6 +1,10 @@
 # WaifuX
 
 <p align="center">
+  <a href="README.md">🇨🇳 简体中文</a> | <a href="README.en.md">🇺🇸 English</a> | <a href="README.ja.md">🇯🇵 日本語</a>
+</p>
+
+<p align="center">
   <img src="Design/Logo/AppIcon_Glass.png" width="120" height="120" />
 </p>
 
@@ -19,6 +23,15 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-06b6d4?style=flat-square" alt="License">
   </a>
+  <a href="https://github.com/jipika/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  </a>
+  <a href="https://github.com/jipika/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  </a>
+  <a href="https://github.com/jipika/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  </a>
   <a href="https://jipika.github.io/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
@@ -26,22 +39,39 @@
 
 ---
 
-## 简介
+## 📸 界面预览
 
-**WaifuX** 是一款面向 macOS 的开源 **ACG 一站式应用**，集静态壁纸、动态壁纸和动漫视频于一体，支持从多个来源浏览、搜索和设置桌面内容。
+<table>
+  <tr>
+    <td><img src="screenshots/home.png" width="100%" /><br><p align="center">首页 - 精选推荐</p></td>
+    <td><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">壁纸浏览 - 智能筛选</p></td>
+    <td><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">壁纸详情 - 一键设置</p></td>
+    <td><img src="screenshots/settings.png" width="100%" /><br><p align="center">设置 - 个性化配置</p></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">动态壁纸 - MotionBG</p></td>
+    <td><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">动漫详情 - 多源解析</p></td>
+    <td><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
+    <td></td>
+  </tr>
+</table>
 
-### 核心功能
+---
 
-| 功能 | 说明 |
-|------|------|
-| 🖼 **静态壁纸** | 接入 Wallhaven 等高质量壁纸源，4K/8K 全分辨率覆盖 |
-| 🎬 **动态壁纸** | 支持 MotionBGs 等动态背景源，让桌面"活"起来 |
-| 📺 **动漫视频** | 内置多源解析引擎，追番观影一站式完成 |
-| 🔍 **智能搜索与筛选** | 关键词、标签、分类、颜色、分辨率等多维度筛选，快速找到想要的内容 |
-| ⭐ **收藏系统** | 收藏喜欢的壁纸、视频，建立个人 ACG 资源库 |
-| ⚡️ **一键设为桌面** | 浏览中即可快速设置为桌面壁纸或动态桌面 |
-| 🔄 **规则自动更新** | 通过 GitHub 远程加载规则配置，源站改版可快速适配 |
-| 🌙 **原生界面** | 深色/浅色模式适配，符合 macOS 设计规范 |
+## ✨ 功能一览
+
+| 功能 | 状态 | 说明 |
+|------|:----:|------|
+| 🖼 **静态壁纸** | ✅ | 接入 Wallhaven 等高质量壁纸源，4K/8K 全分辨率覆盖 |
+| 🎬 **动态壁纸** | ✅ | 支持 MotionBGs 等动态背景源，让桌面"活"起来 |
+| 📺 **动漫视频** | ✅ | 内置多源解析引擎，追番观影一站式完成 |
+| 🔍 **智能搜索与筛选** | ✅ | 关键词、标签、分类、颜色、分辨率等多维度筛选 |
+| ⭐ **收藏系统** | ✅ | 收藏喜欢的壁纸、视频，建立个人 ACG 资源库 |
+| ⚡️ **一键设为桌面** | ✅ | 浏览中即可快速设置为桌面壁纸或动态桌面 |
+| 🖥️ **多显示器支持** | ✅ | 支持为每个显示器分别设置不同壁纸，多屏用户福音 |
+| 📥 **本地数据导入** | ✅ | 支持导入本地壁纸文件夹，统一管理个人壁纸收藏 |
+| 🔄 **规则自动更新** | ✅ | 通过 GitHub 远程加载规则配置，源站改版可快速适配 |
+| 📱 **跨设备同步** | 🚧 | 收藏夹云端同步（开发中）|
 
 ---
 
@@ -94,7 +124,7 @@ WaifuX 采用动态规则机制，爬取逻辑与客户端分离：
 ## 🌍 多语言支持
 
 | 语言 | 状态 |
-|------|------|
+|------|:----:|
 | 🇨🇳 简体中文 | ✅ 完整支持 |
 | 🇺🇸 English | ✅ Full Support |
 | 🇯🇵 日本語 | ✅ 完全対応 |
@@ -106,6 +136,10 @@ WaifuX 采用动态规则机制，爬取逻辑与客户端分离：
 WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个 macOS 原生应用需要投入大量时间和精力——从界面设计到功能实现，从 Bug 修复到规则适配，每一个版本背后都是业余时间的持续投入。
 
 如果你觉得 WaifuX 对你有帮助，欢迎通过以下方式支持项目的持续发展：
+
+### 💬 加入 QQ 群
+
+- **WaifuX 用户交流群**: [971414910](https://qm.qq.com/q/7d4KGTx) 👈 点击加入
 
 <p align="center">
   <img src="reward.jpg" width="280" alt="赞助二维码" />
@@ -132,6 +166,14 @@ WaifuX 本身**不存储任何内容**，仅作为聚合工具使用：
 - 动漫视频由用户自行提供解析源
 - 所有内容的版权归原网站及原作者所有
 - 请遵守各平台服务条款，仅供个人学习研究使用
+
+---
+
+## 🌟 Star 历史
+
+<p align="center">
+  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+</p>
 
 ---
 
