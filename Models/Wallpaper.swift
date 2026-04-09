@@ -55,6 +55,11 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     }
 
     var fullImageURL: URL? {
+        // 本地文件：path 是 file:// URL
+        if id.hasPrefix("local_"), let pathURL = URL(string: path) {
+            return pathURL
+        }
+        // 网络文件：path 是 http(s) URL
         if let pathURL = URL(string: path), path.hasPrefix("http") {
             return pathURL
         }

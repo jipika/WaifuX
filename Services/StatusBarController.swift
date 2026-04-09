@@ -42,15 +42,35 @@ final class StatusBarController: NSObject {
     }
 
     private func configureStatusItem() {
-        if let button = statusItem.button {
-            if let image = NSImage(systemSymbolName: "sparkles.tv", accessibilityDescription: "WallHaven") {
-                image.isTemplate = true
-                button.image = image
-            } else {
-                button.title = "WH"
-            }
-            button.toolTip = "WallHaven"
+        // 确保状态栏项的按钮存在
+        guard let button = statusItem.button else {
+            print("[StatusBarController] Failed to get status item button")
+            return
         }
+        
+        // 尝试使用系统图标，如果不存在则使用备用图标
+        let systemImageNames = ["sparkles.tv", "photo.fill", "tv.fill", "desktopcomputer"]
+        var image: NSImage?
+        
+        for name in systemImageNames {
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: "WallHaven") {
+                image = img
+                break
+            }
+        }
+        
+        if let image = image {
+            image.isTemplate = true
+            // 在 macOS 14 上需要设置合适的图标大小
+            image.size = NSSize(width: 18, height: 18)
+            button.image = image
+        } else {
+            // 最后的备选方案：使用文字
+            button.title = "WH"
+            button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        }
+        
+        button.toolTip = "WallHaven"
 
         openWindowItem.target = self
         toggleWallpaperItem.target = self
@@ -98,10 +118,29 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func togglePlayback() {
-        if videoWallpaperManager.isPaused {
-            videoWallpaperManager.resumeWallpaper()
+        // 检测多显示器
+        let screens = NSScreen.screens
+        if screens.count > 1 && videoWallpaperManager.currentVideoURL != nil {
+            // 多显示器环境下显示选择弹窗
+            DisplaySelectorManager.shared.showSelector(
+                title: videoWallpaperManager.isPaused ? t("resumeWallpaper") : t("pauseWallpaper"),
+                message: t("selectDisplayToControl")
+            ) { [weak self] selectedScreen in
+                guard let self = self else { return }
+                
+                if self.videoWallpaperManager.isPaused {
+                    self.videoWallpaperManager.resumeWallpaper(for: selectedScreen)
+                } else {
+                    self.videoWallpaperManager.pauseWallpaper(for: selectedScreen)
+                }
+            }
         } else {
-            videoWallpaperManager.pauseWallpaper()
+            // 单显示器环境下直接操作
+            if videoWallpaperManager.isPaused {
+                videoWallpaperManager.resumeWallpaper()
+            } else {
+                videoWallpaperManager.pauseWallpaper()
+            }
         }
     }
 

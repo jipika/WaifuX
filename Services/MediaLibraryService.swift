@@ -60,7 +60,15 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ item: MediaItem) -> Bool {
-        downloadRecords.contains { $0.item.id == item.id && $0.isActive }
+        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+            return false
+        }
+        // 验证文件实际存在
+        let fileExists = FileManager.default.fileExists(atPath: record.localFilePath)
+        if !fileExists {
+            print("[MediaLibraryService] File not found for downloaded item: \(item.id) at \(record.localFilePath)")
+        }
+        return fileExists
     }
 
     func recordDownload(item: MediaItem, localFileURL: URL) {
@@ -150,6 +158,30 @@ final class MediaLibraryService: ObservableObject {
     func removeRecentItems(withIDs ids: Set<String>) {
         recentItems.removeAll { ids.contains($0.id) }
         persistRecents()
+    }
+
+    /// 清理无效下载记录（文件不存在的记录）
+    /// - Returns: 清理的记录数量
+    @discardableResult
+    func cleanupInvalidDownloadRecords() -> Int {
+        var cleanedCount = 0
+        
+        for (index, record) in downloadRecords.enumerated() {
+            // 检查文件是否存在（如果是活跃记录）
+            if record.isActive && !FileManager.default.fileExists(atPath: record.localFilePath) {
+                print("[MediaLibraryService] Cleaning up invalid record: \(record.item.id), file not found at \(record.localFilePath)")
+                downloadRecords[index].metadata.markLocalMutation(deleted: true)
+                cleanedCount += 1
+            }
+        }
+        
+        if cleanedCount > 0 {
+            persistDownloads()
+            downloadRecords = downloadRecords
+            print("[MediaLibraryService] Cleaned up \(cleanedCount) invalid download records")
+        }
+        
+        return cleanedCount
     }
 
     private func loadPersistedState() {
@@ -272,7 +304,15 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
-        downloadRecords.contains { $0.wallpaper.id == wallpaper.id && $0.isActive }
+        guard let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+            return false
+        }
+        // 验证文件实际存在
+        let fileExists = FileManager.default.fileExists(atPath: record.localFilePath)
+        if !fileExists {
+            print("[WallpaperLibraryService] File not found for downloaded wallpaper: \(wallpaper.id) at \(record.localFilePath)")
+        }
+        return fileExists
     }
 
     func recordDownload(_ wallpaper: Wallpaper, fileURL: URL) {
@@ -344,6 +384,30 @@ final class WallpaperLibraryService: ObservableObject {
         }
         persistDownloads()
         downloadRecords = downloadRecords
+    }
+
+    /// 清理无效下载记录（文件不存在的记录）
+    /// - Returns: 清理的记录数量
+    @discardableResult
+    func cleanupInvalidDownloadRecords() -> Int {
+        var cleanedCount = 0
+        
+        for (index, record) in downloadRecords.enumerated() {
+            // 检查文件是否存在（如果是活跃记录）
+            if record.isActive && !FileManager.default.fileExists(atPath: record.localFilePath) {
+                print("[WallpaperLibraryService] Cleaning up invalid record: \(record.wallpaper.id), file not found at \(record.localFilePath)")
+                downloadRecords[index].metadata.markLocalMutation(deleted: true)
+                cleanedCount += 1
+            }
+        }
+        
+        if cleanedCount > 0 {
+            persistDownloads()
+            downloadRecords = downloadRecords
+            print("[WallpaperLibraryService] Cleaned up \(cleanedCount) invalid download records")
+        }
+        
+        return cleanedCount
     }
 
     private func loadPersistedState() {

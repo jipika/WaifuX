@@ -15,6 +15,7 @@ struct MediaExploreContentView: View {
     @State private var displayedMediaItems: [MediaItem] = []
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
+    @State private var scrollOffset: CGFloat = 0
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -35,30 +36,12 @@ struct MediaExploreContentView: View {
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
             .coordinateSpace(name: "exploreScroll")
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                let threshold: CGFloat = 300
-                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return bottomOffset >= geometry.contentSize.height - threshold
-            } action: { oldValue, newValue in
-                if newValue, !oldValue {
-                    guard viewModel.hasMorePages,
-                          !viewModel.isLoading,
-                          !isLoadingMore,
-                          !viewModel.isLoadingMore else { return }
-                    print("[MediaExplore] Scroll geometry triggered load more...")
-                    isLoadingMore = true
-                    Task {
-                        await viewModel.loadMore()
-                        await MainActor.run {
-                            appendNewMediaItems()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                isLoadingMore = false
-                            }
-                        }
-                    }
-                }
-            }
             .iosSmoothScroll()
+            .modifier(ScrollLoadMoreModifier(
+                scrollOffset: $scrollOffset,
+                onLoadMore: triggerLoadMore,
+                checkLoadMore: checkLoadMore
+            ))
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -406,6 +389,47 @@ struct MediaExploreContentView: View {
         guard !newItems.isEmpty else { return }
         
         displayedMediaItems.append(contentsOf: newItems)
+    }
+
+    /// macOS 15+ 使用：触发加载更多
+    private func triggerLoadMore() {
+        guard viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !isLoadingMore,
+              !viewModel.isLoadingMore else { return }
+
+        isLoadingMore = true
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                appendNewMediaItems()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    isLoadingMore = false
+                }
+            }
+        }
+    }
+    
+    /// macOS 14 使用：通过 scrollOffset 检测是否滚动到底部触发加载更多
+    /// - Parameter offset: 滚动偏移量（已取反，正值表示向上滚动的距离）
+    private func checkLoadMore(offset: CGFloat) {
+        let threshold: CGFloat = 300 // 向上滚动超过 300pt 触发加载
+        guard offset > threshold,
+              viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !isLoadingMore,
+              !viewModel.isLoadingMore else { return }
+
+        isLoadingMore = true
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                appendNewMediaItems()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    isLoadingMore = false
+                }
+            }
+        }
     }
 
     private func submitSearch(with query: String) {
@@ -938,6 +962,44 @@ extension MediaItem {
             return false
         default:
             return false
+        }
+    }
+}
+
+// MARK: - Scroll Load More Modifier
+
+/// 跨版本兼容的滚动加载更多修饰符
+/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 GeometryReader + onChange
+private struct ScrollLoadMoreModifier: ViewModifier {
+    @Binding var scrollOffset: CGFloat
+    let onLoadMore: () -> Void
+    let checkLoadMore: (CGFloat) -> Void
+    
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    let threshold: CGFloat = 300
+                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                    return bottomOffset >= geometry.contentSize.height - threshold
+                } action: { oldValue, newValue in
+                    if newValue && !oldValue {
+                        onLoadMore()
+                    }
+                }
+        } else {
+            content
+                .overlay(
+                    GeometryReader { scrollProxy in
+                        Color.clear
+                            .onChange(of: scrollProxy.frame(in: .named("exploreScroll")).minY) { _, minY in
+                                scrollOffset = -minY
+                            }
+                    }
+                )
+                .onChange(of: scrollOffset) { _, offset in
+                    checkLoadMore(offset)
+                }
         }
     }
 }

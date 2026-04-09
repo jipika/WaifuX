@@ -15,7 +15,7 @@ struct WallpaperExploreContentView: View {
     @State private var isLoadingMore = false
     @State private var showProtectedPurityAlert = false
     @State private var isInitialLoading = false
-    @State private var scrollPosition = ScrollPosition(edge: .top)
+    @State private var scrollOffset: CGFloat = 0
     
     // MARK: - 动画状态
     @State private var visibleCardIDs: Set<String> = []
@@ -44,18 +44,13 @@ struct WallpaperExploreContentView: View {
                 .frame(width: geometry.size.width, alignment: .center)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
-            .scrollPosition($scrollPosition)
-            .scrollTargetBehavior(.viewAligned(limitBehavior: .always))
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                let threshold: CGFloat = 600
-                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return bottomOffset >= geometry.contentSize.height - threshold
-            } action: { oldValue, newValue in
-                if newValue && !oldValue {
-                    triggerLoadMore()
-                }
-            }
+            .coordinateSpace(name: "exploreScroll")
             .iosSmoothScroll()
+            .modifier(ScrollLoadMoreModifier(
+                scrollOffset: $scrollOffset,
+                onLoadMore: triggerLoadMore,
+                checkLoadMore: checkLoadMore
+            ))
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -112,6 +107,23 @@ struct WallpaperExploreContentView: View {
     
     private func triggerLoadMore() {
         guard viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !isLoadingMore else { return }
+        
+        loadMoreTask?.cancel()
+        loadMoreTask = Task {
+            isLoadingMore = true
+            defer { isLoadingMore = false }
+            await viewModel.loadMore()
+        }
+    }
+
+    /// 通过 scrollOffset 检测是否滚动到底部触发加载更多
+    /// - Parameter offset: 滚动偏移量（已取反，正值表示向上滚动的距离）
+    private func checkLoadMore(offset: CGFloat) {
+        let threshold: CGFloat = 600 // 向上滚动超过 600pt 触发加载
+        guard offset > threshold,
+              viewModel.hasMorePages,
               !viewModel.isLoading,
               !isLoadingMore else { return }
         
@@ -1318,6 +1330,42 @@ private func sortingOptionDisplayName(_ option: SortingOption) -> String {
 }
 
 // MARK: - Scroll offset
+
+/// 跨版本兼容的滚动加载更多修饰符
+/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 GeometryReader + onChange
+private struct ScrollLoadMoreModifier: ViewModifier {
+    @Binding var scrollOffset: CGFloat
+    let onLoadMore: () -> Void
+    let checkLoadMore: (CGFloat) -> Void
+    
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    let threshold: CGFloat = 600
+                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                    return bottomOffset >= geometry.contentSize.height - threshold
+                } action: { oldValue, newValue in
+                    if newValue && !oldValue {
+                        onLoadMore()
+                    }
+                }
+        } else {
+            content
+                .overlay(
+                    GeometryReader { scrollProxy in
+                        Color.clear
+                            .onChange(of: scrollProxy.frame(in: .named("exploreScroll")).minY) { _, minY in
+                                scrollOffset = -minY
+                            }
+                    }
+                )
+                .onChange(of: scrollOffset) { _, offset in
+                    checkLoadMore(offset)
+                }
+        }
+    }
+}
 
 struct ScrollOffsetPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0

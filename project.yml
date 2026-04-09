@@ -2,7 +2,7 @@ name: WaifuX
 options:
   bundleIdPrefix: com.waifux
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "14.0"
   xcodeVersion: "26.4"
 
 packages:
@@ -43,10 +43,10 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.26
+        MARKETING_VERSION: 38.0.27
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
-        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES

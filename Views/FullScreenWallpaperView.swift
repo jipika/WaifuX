@@ -49,6 +49,16 @@ struct FullScreenWallpaperView: View {
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
+    
+    // MARK: - 本地文件检测
+    private var isLocalFile: Bool {
+        wallpaper.id.hasPrefix("local_")
+    }
+    
+    /// 是否已下载（包括网络下载和本地文件）
+    private var isAlreadyDownloaded: Bool {
+        isLocalFile || viewModel.isDownloaded(wallpaper)
+    }
 
     init(wallpaper: Wallpaper, viewModel: WallpaperViewModel) {
         self.initialWallpaper = wallpaper
@@ -230,11 +240,14 @@ struct FullScreenWallpaperView: View {
 
                     // 下载按钮
                     GlassToolbarButton(
-                        icon: viewModel.isDownloaded(wallpaper) ? "checkmark.circle.fill" : "arrow.down.circle",
-                        color: viewModel.isDownloaded(wallpaper) ? LiquidGlassColors.onlineGreen : .white
+                        icon: isAlreadyDownloaded ? "checkmark.circle.fill" : "arrow.down.circle",
+                        color: isAlreadyDownloaded ? LiquidGlassColors.onlineGreen : .white
                     ) {
-                        downloadWallpaper()
+                        if !isLocalFile {
+                            downloadWallpaper()
+                        }
                     }
+                    .disabled(isLocalFile)
 
                     // 设为壁纸按钮
                     GlassToolbarButton(
@@ -512,6 +525,11 @@ struct FullScreenWallpaperView: View {
     }
 
     private func downloadWallpaper() {
+        // 本地文件无需下载
+        if isLocalFile {
+            return
+        }
+        
         Task {
             do {
                 try await viewModel.downloadWallpaper(wallpaper)

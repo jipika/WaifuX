@@ -15,6 +15,7 @@ struct AnimeExploreView: View {
     @State private var displayedAnimeItems: [AnimeSearchResult] = []
     
     @State private var isInitialLoading = false
+    @State private var scrollOffset: CGFloat = 0
     
     @Binding var selectedAnime: AnimeSearchResult?
 
@@ -37,20 +38,12 @@ struct AnimeExploreView: View {
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
             .coordinateSpace(name: "exploreScroll")
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                let threshold: CGFloat = 300
-                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return bottomOffset >= geometry.contentSize.height - threshold
-            } action: { oldValue, newValue in
-                if newValue, !oldValue {
-                    guard viewModel.hasMorePages,
-                          !viewModel.isLoading,
-                          !viewModel.isLoadingMore else { return }
-                    print("[AnimeExplore] Scroll geometry triggered load more...")
-                    Task { await viewModel.loadMore() }
-                }
-            }
             .iosSmoothScroll()
+            .modifier(ScrollLoadMoreModifier(
+                scrollOffset: $scrollOffset,
+                onLoadMore: triggerLoadMore,
+                checkLoadMore: checkLoadMore
+            ))
             .disabled(isInitialLoading)
             .background(
                 ExploreDynamicAtmosphereBackground(
@@ -412,6 +405,27 @@ struct AnimeExploreView: View {
         }
     }
 
+    /// macOS 15+ 使用：触发加载更多
+    private func triggerLoadMore() {
+        guard viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !viewModel.isLoadingMore else { return }
+        
+        Task { await viewModel.loadMore() }
+    }
+    
+    /// macOS 14 使用：通过 scrollOffset 检测是否滚动到底部触发加载更多
+    /// - Parameter offset: 滚动偏移量（已取反，正值表示向上滚动的距离）
+    private func checkLoadMore(offset: CGFloat) {
+        let threshold: CGFloat = 300 // 向上滚动超过 300pt 触发加载
+        guard offset > threshold,
+              viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !viewModel.isLoadingMore else { return }
+        
+        Task { await viewModel.loadMore() }
+    }
+
     private func rebuildDisplayedAnimeItems() {
         let source = viewModel.animeItems
         
@@ -652,5 +666,43 @@ private struct AnimePortraitCardSkeleton: View {
         )
         .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
         .shimmer()
+    }
+}
+
+// MARK: - Scroll Load More Modifier
+
+/// 跨版本兼容的滚动加载更多修饰符
+/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 GeometryReader + onChange
+private struct ScrollLoadMoreModifier: ViewModifier {
+    @Binding var scrollOffset: CGFloat
+    let onLoadMore: () -> Void
+    let checkLoadMore: (CGFloat) -> Void
+    
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    let threshold: CGFloat = 300
+                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                    return bottomOffset >= geometry.contentSize.height - threshold
+                } action: { oldValue, newValue in
+                    if newValue && !oldValue {
+                        onLoadMore()
+                    }
+                }
+        } else {
+            content
+                .overlay(
+                    GeometryReader { scrollProxy in
+                        Color.clear
+                            .onChange(of: scrollProxy.frame(in: .named("exploreScroll")).minY) { _, minY in
+                                scrollOffset = -minY
+                            }
+                    }
+                )
+                .onChange(of: scrollOffset) { _, offset in
+                    checkLoadMore(offset)
+                }
+        }
     }
 }

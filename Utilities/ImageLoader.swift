@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import CryptoKit
+import AVFoundation
 
 // MARK: - 轻量级图片加载器
 // 优化策略：
@@ -134,7 +135,12 @@ public final class ImageLoader {
         // 3. 检查是否永久失败（手动标记的）
         guard !failedURLs.contains(key) else { return nil }
         
-        // 4. 执行带重试的加载
+        // 4. 本地文件直接读取（不经过网络）
+        if url.isFileURL {
+            return await loadLocalImage(from: url, key: key, targetSize: targetSize)
+        }
+        
+        // 5. 网络图片执行带重试的加载
         return await loadImageWithRetry(
             from: url,
             key: key,
@@ -143,6 +149,68 @@ public final class ImageLoader {
             retryConfig: retryConfig,
             attempt: 1
         )
+    }
+    
+    /// 加载本地文件图片
+    private func loadLocalImage(from url: URL, key: String, targetSize: CGSize?) async -> NSImage? {
+        await waitForSlot()
+        defer { releaseSlot() }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            
+            // 如果是视频文件，生成缩略图
+            if isVideoFile(url) {
+                if let thumbnail = await generateVideoThumbnail(from: url) {
+                    memoryCache.setObject(thumbnail, forKey: key as NSString, cost: Int(thumbnail.size.width * thumbnail.size.height * 4))
+                    return targetSize != nil ? await downsampleAsync(image: thumbnail, to: targetSize!) : thumbnail
+                }
+                return nil
+            }
+            
+            // 图片文件直接加载
+            guard let image = NSImage(data: data) else {
+                print("[ImageLoader] Failed to create NSImage from local file: \(url.path)")
+                return nil
+            }
+            
+            // 存入内存缓存
+            memoryCache.setObject(image, forKey: key as NSString, cost: data.count)
+            
+            print("[ImageLoader] Loaded local image: \(url.lastPathComponent) (\(Int(image.size.width))x\(Int(image.size.height)))")
+            
+            return targetSize != nil ? await downsampleAsync(image: image, to: targetSize!) : image
+            
+        } catch {
+            print("[ImageLoader] Failed to load local file: \(url.path), error: \(error)")
+            return nil
+        }
+    }
+    
+    /// 检查是否是视频文件
+    private func isVideoFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"].contains(ext)
+    }
+    
+    /// 生成视频缩略图
+    private func generateVideoThumbnail(from url: URL) async -> NSImage? {
+        await Task.detached(priority: .utility) {
+            let asset = AVAsset(url: url)
+            let imageGenerator = AVAssetImageGenerator(asset: asset)
+            imageGenerator.appliesPreferredTrackTransform = true
+            imageGenerator.maximumSize = CGSize(width: 800, height: 800)
+            
+            do {
+                let cgImage = try imageGenerator.copyCGImage(at: CMTime(seconds: 0, preferredTimescale: 1), actualTime: nil)
+                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                print("[ImageLoader] Generated video thumbnail: \(url.lastPathComponent) (\(cgImage.width)x\(cgImage.height))")
+                return image
+            } catch {
+                print("[ImageLoader] Failed to generate video thumbnail for \(url.lastPathComponent): \(error)")
+                return nil
+            }
+        }.value
     }
     
     /// 带重试机制的图片加载

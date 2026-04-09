@@ -23,6 +23,7 @@ final class MediaExploreViewModel: ObservableObject {
     private let videoWallpaperManager = VideoWallpaperManager.shared
     private let downloadTaskService = DownloadTaskService.shared
     private let downloadPathManager = DownloadPathManager.shared
+    private let localScanner = LocalWallpaperScanner.shared
 
     private var currentSource: MediaRouteSource = .home
     private var nextPagePath: String?
@@ -85,7 +86,52 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     var downloadedItems: [MediaDownloadRecord] {
-        mediaLibrary.downloadedItems
+        // 每次访问时清理无效记录
+        mediaLibrary.cleanupInvalidDownloadRecords()
+        return mediaLibrary.downloadedItems
+    }
+    
+    /// 本地扫描的媒体（用户手动复制到目录的文件）
+    var localMediaItems: [LocalMediaItem] {
+        localScanner.getLocalMedia()
+    }
+    
+    /// 所有可显示的本地媒体（下载记录 + 扫描到的本地文件）
+    /// 用于库页面显示
+    var allLocalMedia: [UnifiedLocalMedia] {
+        var result: [UnifiedLocalMedia] = []
+        
+        // 添加下载记录
+        for record in downloadedItems {
+            result.append(UnifiedLocalMedia(
+                id: record.item.id,
+                mediaItem: record.item,
+                localItem: nil,
+                downloadRecord: record,
+                fileURL: record.localFileURL,
+                isLocalFile: false
+            ))
+        }
+        
+        // 添加扫描到的本地文件（排除已在下载记录中的）
+        let downloadedIds = Set(downloadedItems.map { $0.item.id })
+        for item in localMediaItems where !downloadedIds.contains(item.id) {
+            result.append(UnifiedLocalMedia(
+                id: item.id,
+                mediaItem: item.toMediaItem(),
+                localItem: item,
+                downloadRecord: nil,
+                fileURL: item.fileURL,
+                isLocalFile: true
+            ))
+        }
+        
+        // 按下载/创建时间排序
+        return result.sorted { a, b in
+            let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
+            let dateB = b.downloadRecord?.downloadedAt ?? b.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
+            return dateA > dateB
+        }
     }
 
     var downloadSyncRecords: [MediaDownloadRecord] {
@@ -461,13 +507,24 @@ final class MediaExploreViewModel: ObservableObject {
         }
     }
 
-    func applyDynamicWallpaper(_ item: MediaItem, muted: Bool) async throws {
+    func applyDynamicWallpaper(_ item: MediaItem, muted: Bool, targetScreen: NSScreen? = nil) async throws {
+        // 本地媒体文件：直接使用本地文件路径
+        if item.id.hasPrefix("local_") {
+            let localURL = item.previewVideoURL ?? item.pageURL
+            if localURL.isFileURL && FileManager.default.fileExists(atPath: localURL.path) {
+                print("[MediaExploreViewModel] Using local media file: \(localURL.path)")
+                try videoWallpaperManager.applyVideoWallpaper(from: localURL, posterURL: item.posterURL, muted: muted, targetScreen: targetScreen)
+                return
+            }
+        }
+        
+        // 网络媒体文件：下载后使用
         let localVideoURL = try await ensureLocalVideoFile(
             for: item,
             preferredOption: preferredWallpaperOption(for: item),
             saveToDownloads: false
         )
-        try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, posterURL: item.posterURL, muted: muted)
+        try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, posterURL: item.posterURL, muted: muted, targetScreen: targetScreen)
     }
 
     private func replaceItem(with updatedItem: MediaItem) {
@@ -559,10 +616,25 @@ final class MediaExploreViewModel: ObservableObject {
             // 复制到下载目录（安全作用域访问已由 ensureDirectoryStructure 确保）
             if !FileManager.default.fileExists(atPath: fileURL.path) {
                 do {
+                    // 确保目标目录存在
+                    let directory = fileURL.deletingLastPathComponent()
+                    if !FileManager.default.fileExists(atPath: directory.path) {
+                        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                        print("[MediaExploreViewModel] Created directory: \(directory.path)")
+                    }
+                    
                     let cachedData = try Data(contentsOf: cachedURL)
                     try cachedData.write(to: fileURL, options: .atomic)
+                    
+                    // 验证文件是否成功写入
+                    if FileManager.default.fileExists(atPath: fileURL.path) {
+                        print("[MediaExploreViewModel] ✅ File saved successfully: \(fileURL.path)")
+                    } else {
+                        print("[MediaExploreViewModel] ❌ File write appeared to succeed but file not found: \(fileURL.path)")
+                        throw DownloadError.writeFailed(NSError(domain: "WallHaven", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
+                    }
                 } catch {
-                    print("[MediaExploreViewModel] Failed to write file to download directory: \(error)")
+                    print("[MediaExploreViewModel] ❌ Failed to write file to download directory: \(error)")
                     throw DownloadError.writeFailed(error)
                 }
             }
@@ -594,4 +666,68 @@ final class MediaExploreViewModel: ObservableObject {
     func removeRecentItems(withIDs ids: Set<String>) {
         mediaLibrary.removeRecentItems(withIDs: ids)
     }
+}
+
+// MARK: - 统一的本地媒体表示
+
+/// 统一的本地媒体表示
+/// 用于混合显示下载记录和用户手动复制到目录的本地文件
+struct UnifiedLocalMedia: Identifiable {
+    let id: String
+    let mediaItem: MediaItem
+    let localItem: LocalMediaItem?
+    let downloadRecord: MediaDownloadRecord?
+    let fileURL: URL
+    let isLocalFile: Bool
+    
+    /// 标题
+    var title: String {
+        localItem?.title ?? mediaItem.title
+    }
+    
+    /// 分辨率
+    var resolution: String? {
+        localItem?.resolution ?? mediaItem.exactResolution
+    }
+    
+    /// 文件大小标签
+    var fileSizeLabel: String? {
+        localItem?.fileSizeLabel ?? downloadRecord.flatMap { _ in
+            // 从文件获取大小
+            (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int).flatMap { size in
+                let mb = Double(size) / 1024 / 1024
+                return String(format: "%.1f MB", mb)
+            }
+        }
+    }
+    
+    /// 时长标签
+    var durationLabel: String? {
+        localItem?.durationLabel ?? mediaItem.durationLabel
+    }
+    
+    /// 创建/下载时间
+    var dateLabel: String? {
+        if let record = downloadRecord {
+            return formatMediaDate(record.downloadedAt)
+        }
+        if let localItem = localItem, let createdAt = localItem.createdAt {
+            return formatMediaDate(parseISO8601Media(createdAt))
+        }
+        return nil
+    }
+}
+
+// MARK: - 辅助函数
+
+private func parseISO8601Media(_ string: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    return formatter.date(from: string)
+}
+
+private func formatMediaDate(_ date: Date?) -> String? {
+    guard let date = date else { return nil }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: date, relativeTo: Date())
 }

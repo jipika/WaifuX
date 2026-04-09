@@ -39,6 +39,16 @@ struct MediaDetailSheet: View {
         self.onClose = onClose
         _resolvedItem = State(initialValue: item)
     }
+    
+    // MARK: - 本地文件检测
+    private var isLocalFile: Bool {
+        resolvedItem.id.hasPrefix("local_") || resolvedItem.sourceName == t("local")
+    }
+    
+    /// 是否已下载（包括网络下载和本地文件）
+    private var isAlreadyDownloaded: Bool {
+        isLocalFile || viewModel.isDownloaded(resolvedItem)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -477,9 +487,11 @@ struct MediaDetailSheet: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    downloadMedia()
+                    if !isAlreadyDownloaded {
+                        downloadMedia()
+                    }
                 } label: {
-                    Image(systemName: viewModel.isDownloaded(resolvedItem) ? "checkmark" : "arrow.down")
+                    Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
@@ -487,7 +499,7 @@ struct MediaDetailSheet: View {
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
-                .disabled(isDownloading)
+                .disabled(isDownloading || isAlreadyDownloaded)
 
                 dividerLine
                     .frame(width: 70)
@@ -655,7 +667,7 @@ struct MediaDetailSheet: View {
         if isDownloading {
             return t("downloadingMedia")
         }
-        if viewModel.isDownloaded(resolvedItem) {
+        if isAlreadyDownloaded {
             return t("savedToDownloads")
         }
         if previewVideoURL != nil {
@@ -751,6 +763,11 @@ struct MediaDetailSheet: View {
     }
 
     private func downloadMedia() {
+        // 本地文件无需下载
+        if isLocalFile {
+            return
+        }
+        
         isDownloading = true
         errorMessage = ""
         Task {
@@ -776,16 +793,49 @@ struct MediaDetailSheet: View {
     }
 
     private func setAsDesktopWallpaper() {
-        isSettingWallpaper = true
-        errorMessage = ""
-        Task {
-            do {
-                try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
-            } catch {
-                errorMessage = error.localizedDescription
-                showError = true
+        // 检测多显示器
+        let screens = NSScreen.screens
+        if screens.count > 1 {
+            // 多显示器环境下显示选择弹窗
+            DisplaySelectorManager.shared.showSelector(
+                title: t("setWallpaper"),
+                message: t("multiDisplayDetected")
+            ) { [self] selectedScreen in
+                // 用户取消选择
+                guard selectedScreen != nil || screens.count > 0 else {
+                    return
+                }
+                
+                isSettingWallpaper = true
+                errorMessage = ""
+                Task {
+                    do {
+                        try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted, targetScreen: selectedScreen)
+                    } catch {
+                        await MainActor.run {
+                            errorMessage = error.localizedDescription
+                            showError = true
+                            isSettingWallpaper = false
+                        }
+                    }
+                    await MainActor.run {
+                        isSettingWallpaper = false
+                    }
+                }
             }
-            isSettingWallpaper = false
+        } else {
+            // 单显示器环境下直接设置
+            isSettingWallpaper = true
+            errorMessage = ""
+            Task {
+                do {
+                    try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
+                } catch {
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
+                isSettingWallpaper = false
+            }
         }
     }
 }

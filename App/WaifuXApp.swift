@@ -82,15 +82,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
         LocalizationService.shared.restoreSavedSettings()
 
-        // 2. ⚠️ 延迟恢复更新检查器缓存状态（读取 UserDefaults）
+        // 2. 恢复下载权限和路径设置
+        DownloadPermissionManager.shared.restoreSavedPermission()
+
+        // 3. ⚠️ 延迟恢复更新检查器缓存状态（读取 UserDefaults）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             UpdateChecker.shared.restoreCachedState()
         }
 
-        // 3. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
+        // 4. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             WallpaperViewModel().restoreAPIKeyState()
         }
+
+        // 4. 初始化状态栏控制器（必须在显示窗口之前）
+        StatusBarController.shared.configure(
+            showWindow: { [weak self] in
+                self?.showMainWindow()
+            },
+            quit: { [weak self] in
+                self?.quitApplication()
+            }
+        )
 
         let contentView = ContentView()
             .frame(minWidth: 900, minHeight: 600)
@@ -136,12 +149,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 注：更新检查已移到 ContentView 中处理
     }
 
-    @MainActor func applicationShouldHandleReopening(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if flag {
-            window?.makeKeyAndOrderFront(nil)
-        } else {
-            showMainWindow()
-        }
+    @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // 当用户点击 Dock 图标时显示主窗口
+        showMainWindow()
         return true
     }
 
@@ -189,28 +199,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // 检查窗口是否被最小化
+        // 确保窗口显示在最前面
         if let window = window {
             if window.isMiniaturized {
                 window.deminiaturize(nil)
             }
-
-            // 检查窗口是否可见且是 key window
+            
+            // macOS 14+ 需要延迟一点时间来确保窗口正确显示
             if #available(macOS 14.0, *) {
-                if !window.isVisible || !window.isKeyWindow {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        guard let self, let window = self.window else { return }
-                        window.makeKeyAndOrderFront(nil)
-                        NSApp.activate(ignoringOtherApps: true)
-                    }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    guard let self, let window = self.window else { return }
+                    window.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
                 }
             } else {
                 window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
             }
-        } else {
-            window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -219,6 +224,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !(settingsWindowController?.window?.isVisible ?? false) {
             updateActivationPolicy(showDockIcon: false)
         }
+    }
+
+    func quitApplication() {
+        NSApp.terminate(nil)
     }
 
     private func updateActivationPolicy(showDockIcon: Bool) {
@@ -325,10 +334,10 @@ struct AutoUpdateSheet: View {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(LiquidGlassColors.accentCyan)
-                        .symbolEffect(.bounce, options: .repeat(1))
+                        .modifier(BounceSymbolModifier())
                     
                     // 标题
-                    Text("发现新版本")
+                    Text(t("newVersionFound"))
                         .font(.system(size: 20, weight: .bold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.96))
                     
@@ -336,7 +345,7 @@ struct AutoUpdateSheet: View {
                     HStack(spacing: 16) {
                         // 当前版本
                         VStack(spacing: 4) {
-                            Text("当前版本")
+                            Text(t("currentVersion"))
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.5))
                             Text(currentVersion)
@@ -357,7 +366,7 @@ struct AutoUpdateSheet: View {
                         
                         // 最新版本
                         VStack(spacing: 4) {
-                            Text("最新版本")
+                            Text(t("latestVersion"))
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.5))
                             Text(latestVersion)
@@ -375,7 +384,7 @@ struct AutoUpdateSheet: View {
                     // 更新内容
                     if let commit = commit {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("更新内容")
+                            Text(t("updateContent"))
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.45))
                             
@@ -474,7 +483,7 @@ struct AutoUpdateSheet: View {
                             Button {
                                 updateManager.installUpdate()
                             } label: {
-                                Text("立即安装")
+                                Text(t("installNow"))
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(.white.opacity(0.95))
                                     .frame(maxWidth: .infinity)
@@ -505,9 +514,9 @@ struct AutoUpdateSheet: View {
     private var statusText: String {
         switch updateManager.state {
         case .downloading:
-            return "正在下载..."
+            return t("downloading")
         case .installing:
-            return "正在安装..."
+            return t("installing")
         default:
             return ""
         }
@@ -516,20 +525,20 @@ struct AutoUpdateSheet: View {
     private var buttonText: String {
         switch updateManager.state {
         case .downloading:
-            return "取消"
+            return t("cancel")
         case .installing:
-            return "安装中..."
+            return t("installing")
         default:
-            return "稍后"
+            return t("later")
         }
     }
     
     private var downloadButtonText: String {
         switch updateManager.state {
         case .downloading:
-            return "下载中..."
+            return t("downloading")
         default:
-            return "立即更新"
+            return t("updateNow")
         }
     }
 }

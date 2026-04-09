@@ -173,6 +173,10 @@ struct ContentView: View {
                     .padding(.bottom, 20)
             }
             .zIndex(400)
+            
+            // 显示器选择弹窗覆盖层
+            DisplaySelectorOverlay()
+                .zIndex(700)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {

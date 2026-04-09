@@ -440,6 +440,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "links": "LINKS",
         "online": "ONLINE",
         "local": "LOCAL",
+        "local.files": "LOCAL FILES",
+        "local.imported.video": "Locally imported video file",
         "versionInfo": "VERSION",
         "elegantApp": "Elegant macOS Wallpaper Browser",
         "projectInfo": "PROJECT INFO",
@@ -565,6 +567,13 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "alreadyLatestVersion": "You are using the latest version.",
         "newVersionFound": "New version found:",
         "goToDownloadQuestion": "Would you like to go to download?",
+        "updateContent": "WHAT'S NEW",
+        "installing": "Installing...",
+        "installNow": "Install Now",
+        "updateNow": "Update Now",
+        "later": "Later",
+        "currentVersion": "CURRENT",
+        "latestVersion": "LATEST",
         "networkProxy": "NETWORK PROXY",
         "networkProxyDesc": "Chinese users can access WallHaven via self-hosted Cloudflare Worker.",
         "customWorkerUrl": "CUSTOM WORKER URL",
@@ -841,7 +850,18 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Other
         "noMoreData": "No More Data",
         "video": "Video",
-        "watch_history.json": "Watch History"
+        "watch_history.json": "Watch History",
+        // Display Selector
+        "selectDisplay": "Select Display",
+        "selectDisplayMessage": "Multiple displays detected. Please select which display to set wallpaper on",
+        "allDisplays": "All Displays",
+        "screensCount": "screens",
+        "display": "Display",
+        "multiDisplayDetected": "Multiple displays detected. Please select which display to set wallpaper on",
+        "confirm": "Confirm",
+        "selectDisplayToControl": "Please select which display to control",
+        "resumeWallpaper": "Resume Wallpaper",
+        "pauseWallpaper": "Pause Wallpaper"
     ],
     .chinese: [
         // Launch at Login
@@ -1102,10 +1122,10 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Content Types
         "content.wallpaper": "壁纸",
         "content.anime": "动漫",
-        "content.video": "视频",
+        "content.video": "媒体",
         "content.wallpapers": "壁纸",
         "content.animes": "动漫",
-        "content.videos": "视频",
+        "content.videos": "媒体",
         "tab.wallpaper": "壁纸",
         "tab.anime": "动漫",
         "tab.video": "视频",
@@ -1203,6 +1223,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "links": "链接",
         "online": "在线",
         "local": "本地",
+        "local.files": "本地文件",
+        "local.imported.video": "本地导入的视频文件",
         "versionInfo": "版本",
         "elegantApp": "优雅的 macOS 壁纸浏览器",
         "projectInfo": "项目信息",
@@ -1409,6 +1431,13 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "alreadyLatestVersion": "当前已是最新版本",
         "newVersionFound": "发现新版本",
         "goToDownloadQuestion": "是否前往下载？",
+        "updateContent": "更新内容",
+        "installing": "正在安装...",
+        "installNow": "立即安装",
+        "updateNow": "立即更新",
+        "later": "稍后",
+        "currentVersion": "当前版本",
+        "latestVersion": "最新版本",
         // Anime
         "anime.all": "全部",
         "anime.trending": "热门",
@@ -1604,7 +1633,18 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Other
         "noMoreData": "没有更多数据",
         "video": "视频",
-        "watch_history.json": "观看历史"
+        "watch_history.json": "观看历史",
+        // Display Selector
+        "selectDisplay": "选择显示器",
+        "selectDisplayMessage": "检测到多个显示器，请选择要设置的显示器",
+        "allDisplays": "所有显示器",
+        "screensCount": "个屏幕",
+        "display": "显示器",
+        "multiDisplayDetected": "检测到多个显示器，请选择要设置的显示器",
+        "confirm": "确认",
+        "selectDisplayToControl": "请选择要控制的显示器",
+        "resumeWallpaper": "继续动态壁纸",
+        "pauseWallpaper": "暂停动态壁纸"
     ],
     .japanese: [
         // Launch at Login
@@ -1966,6 +2006,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "links": "リンク",
         "online": "オンライン",
         "local": "ローカル",
+        "local.files": "ローカルファイル",
+        "local.imported.video": "ローカルからインポートした動画",
         "versionInfo": "バージョン",
         "elegantApp": "洗練されたmacOS壁纸ブラウザ",
         "projectInfo": "プロジェクト情報",
@@ -2172,6 +2214,13 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "alreadyLatestVersion": "最新バージョンを使用中です",
         "newVersionFound": "新しいバージョンが見つかりました:",
         "goToDownloadQuestion": "ダウンロードページに移動しますか？",
+        "updateContent": "アップデート内容",
+        "installing": "インストール中...",
+        "installNow": "今すぐインストール",
+        "updateNow": "今すぐアップデート",
+        "later": "後で",
+        "currentVersion": "現在のバージョン",
+        "latestVersion": "最新バージョン",
         // Anime
         "anime.all": "すべて",
         "anime.trending": "トレンド",
@@ -2367,7 +2416,18 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Other
         "noMoreData": "これ以上データがありません",
         "video": "動画",
-        "watch_history.json": "視聴履歴"
+        "watch_history.json": "視聴履歴",
+        // Display Selector
+        "selectDisplay": "ディスプレイを選択",
+        "selectDisplayMessage": "複数のディスプレイが検出されました。設定するディスプレイを選択してください",
+        "allDisplays": "すべてのディスプレイ",
+        "screensCount": "画面",
+        "display": "ディスプレイ",
+        "multiDisplayDetected": "複数のディスプレイが検出されました。設定するディスプレイを選択してください",
+        "confirm": "確認",
+        "selectDisplayToControl": "制御するディスプレイを選択してください",
+        "resumeWallpaper": "動的壁纸を再開",
+        "pauseWallpaper": "動的壁纸を一時停止"
     ]
 ]
 

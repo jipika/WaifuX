@@ -141,9 +141,10 @@ private struct TopBarCircleButton: View {
                 .foregroundStyle(.white.opacity(0.88))
                 .frame(width: size, height: size)
                 .detailGlassCircleChrome()
+                .padding(4) // 扩大点击热区，修复边缘无法点击的问题
         }
         .buttonStyle(.plain)
-        .contentShape(Circle())
+        .contentShape(Circle()) // 基于 padding 后的更大区域计算点击范围
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.16)) {
                 isHovered = hovering

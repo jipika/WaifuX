@@ -76,6 +76,8 @@ struct MyLibraryContentView: View {
             await viewModel.initialLoad()
             // mediaViewModel.favoriteItems 和 downloadedItems 是计算属性，自动从 MediaLibraryService 获取
             await loadAnimeFavorites()
+            // 扫描本地文件（用户手动复制到目录的文件）
+            await LocalWallpaperScanner.shared.forceRescan()
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
@@ -201,17 +203,17 @@ struct MyLibraryContentView: View {
                 }
             }
 
-            // 壁纸下载
+            // 壁纸下载（包含下载记录和本地扫描的文件）
             VStack(alignment: .leading, spacing: 16) {
                 sectionHeaderWithEdit(
                     title: t("wallpaper.downloads"),
                     systemImage: "arrow.down.circle.fill",
                     color: LiquidGlassColors.accentCyan,
-                    countText: "\(viewModel.downloadedWallpapers.count) \(t("items"))",
+                    countText: "\(viewModel.allLocalWallpapers.count) \(t("items"))",
                     section: .downloads
                 )
 
-                if viewModel.downloadedWallpapers.isEmpty {
+                if viewModel.allLocalWallpapers.isEmpty {
                     emptyMediaSurface(
                         title: t("no.wallpaper.downloads"),
                         subtitle: t("no.wallpaper.downloads.hint"),
@@ -219,18 +221,18 @@ struct MyLibraryContentView: View {
                         accent: LiquidGlassColors.accentCyan
                     )
                 } else {
-                    batchDeleteToolbar(section: .downloads, count: viewModel.downloadedWallpapers.count)
+                    batchDeleteToolbar(section: .downloads, count: viewModel.allLocalWallpapers.count)
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
-                            ForEach(viewModel.downloadedWallpapers) { record in
+                            ForEach(viewModel.allLocalWallpapers) { item in
                                 WallpaperEditCard(
-                                    wallpaper: record.wallpaper,
+                                    wallpaper: item.wallpaper,
                                     isEditing: isEditing,
-                                    isSelected: selectedItems.contains(record.wallpaper.id),
-                                    downloadDate: record.downloadedAt
+                                    isSelected: selectedItems.contains(item.id),
+                                    downloadDate: item.downloadRecord?.downloadedAt
                                 ) {
-                                    handleWallpaperTap(record.wallpaper)
+                                    handleWallpaperTap(item.wallpaper)
                                 }
                             }
                         }
@@ -281,17 +283,17 @@ struct MyLibraryContentView: View {
                 }
             }
 
-            // 媒体下载
+            // 媒体下载（包含下载记录和本地扫描的文件）
             VStack(alignment: .leading, spacing: 16) {
                 sectionHeaderWithEdit(
                     title: t("media.downloads"),
                     systemImage: "arrow.down.circle.fill",
                     color: LiquidGlassColors.accentCyan,
-                    countText: "\(mediaViewModel.downloadedItems.count) \(t("items"))",
+                    countText: "\(mediaViewModel.allLocalMedia.count) \(t("items"))",
                     section: .downloads
                 )
 
-                if mediaViewModel.downloadedItems.isEmpty {
+                if mediaViewModel.allLocalMedia.isEmpty {
                     emptyMediaSurface(
                         title: t("no.media.downloads"),
                         subtitle: t("no.media.downloads.hint"),
@@ -299,17 +301,17 @@ struct MyLibraryContentView: View {
                         accent: LiquidGlassColors.accentCyan
                     )
                 } else {
-                    batchDeleteToolbar(section: .downloads, count: mediaViewModel.downloadedItems.count)
+                    batchDeleteToolbar(section: .downloads, count: mediaViewModel.allLocalMedia.count)
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
-                            ForEach(mediaViewModel.downloadedItems) { record in
+                            ForEach(mediaViewModel.allLocalMedia) { item in
                                 MediaVideoCard(
-                                    item: record.item,
+                                    item: item.mediaItem,
                                     isEditing: isEditing,
-                                    isSelected: selectedItems.contains(record.item.id)
+                                    isSelected: selectedItems.contains(item.id)
                                 ) {
-                                    handleMediaTap(record.item)
+                                    handleMediaTap(item.mediaItem)
                                 }
                             }
                         }
@@ -525,7 +527,8 @@ struct MyLibraryContentView: View {
                 let allIDs = Set(viewModel.favorites.map(\.id))
                 selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
             } else {
-                let allIDs = Set(viewModel.downloadedWallpapers.map(\.wallpaper.id))
+                // 使用 allLocalWallpapers 包含下载记录和本地文件
+                let allIDs = Set(viewModel.allLocalWallpapers.map(\.id))
                 selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
             }
         case .video:
@@ -533,7 +536,8 @@ struct MyLibraryContentView: View {
                 let allIDs = Set(mediaViewModel.favoriteItems.map(\.id))
                 selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
             } else {
-                let allIDs = Set(mediaViewModel.downloadedItems.map(\.item.id))
+                // 使用 allLocalMedia 包含下载记录和本地文件
+                let allIDs = Set(mediaViewModel.allLocalMedia.map(\.id))
                 selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
             }
         case .anime:
@@ -547,17 +551,23 @@ struct MyLibraryContentView: View {
         case .wallpaper:
             // 分别处理收藏和下载的删除
             let favoriteIDs = selectedItems.intersection(viewModel.favorites.map(\.id))
-            let downloadIDs = selectedItems.intersection(viewModel.downloadedWallpapers.map(\.wallpaper.id))
+            // 只删除有下载记录的项目（本地文件仅支持从列表移除，实际删除文件需要额外确认）
+            let downloadIDs = selectedItems.intersection(
+                viewModel.allLocalWallpapers.compactMap { $0.downloadRecord?.wallpaper.id }
+            )
             if !favoriteIDs.isEmpty {
                 viewModel.removeWallpaperFavorites(withIDs: favoriteIDs)
             }
             if !downloadIDs.isEmpty {
                 viewModel.removeWallpaperDownloads(withIDs: downloadIDs)
             }
+            // 注意：本地文件（无下载记录的）不会被删除，只是从选择中移除
         case .video:
             // 分别处理收藏和下载的删除
             let favoriteIDs = selectedItems.intersection(mediaViewModel.favoriteItems.map(\.id))
-            let downloadIDs = selectedItems.intersection(mediaViewModel.downloadedItems.map(\.item.id))
+            let downloadIDs = selectedItems.intersection(
+                mediaViewModel.allLocalMedia.compactMap { $0.downloadRecord?.item.id }
+            )
             if !favoriteIDs.isEmpty {
                 // mediaViewModel.removeFavorites(withIDs: favoriteIDs)
             }

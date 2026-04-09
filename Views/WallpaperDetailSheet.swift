@@ -27,6 +27,16 @@ struct WallpaperDetailSheet: View {
     @State private var currentWallpaperIndex: Int = 0
     @State private var isLoadingMore = false
     @State private var preloadTask: Task<Void, Never>?
+    
+    // MARK: - 本地文件检测
+    private var isLocalFile: Bool {
+        wallpaper.id.hasPrefix("local_")
+    }
+    
+    /// 是否已下载（包括网络下载和本地文件）
+    private var isAlreadyDownloaded: Bool {
+        isLocalFile || viewModel.isDownloaded(wallpaper)
+    }
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { resolvedWallpaper }
@@ -501,9 +511,11 @@ struct WallpaperDetailSheet: View {
             // 下载按钮 + 右侧横线
             HStack(spacing: 16) {
                 Button {
-                    downloadWallpaper()
+                    if !isAlreadyDownloaded {
+                        downloadWallpaper()
+                    }
                 } label: {
-                    Image(systemName: viewModel.isDownloaded(wallpaper) ? "checkmark" : "arrow.down")
+                    Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
@@ -511,7 +523,7 @@ struct WallpaperDetailSheet: View {
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
-                .disabled(isDownloading)
+                .disabled(isDownloading || isAlreadyDownloaded)
 
                 dividerLine
                     .frame(width: 80)
@@ -826,7 +838,7 @@ struct WallpaperDetailSheet: View {
         if isDownloading {
             return t("downloadingWallpaper")
         }
-        if viewModel.isDownloaded(wallpaper) {
+        if isAlreadyDownloaded {
             return t("savedToDownloads")
         }
         return ""
@@ -875,6 +887,11 @@ struct WallpaperDetailSheet: View {
 
     // MARK: - 操作方法
     private func downloadWallpaper() {
+        // 本地文件无需下载
+        if isLocalFile {
+            return
+        }
+        
         isDownloading = true
         errorMessage = ""
         Task {
@@ -890,24 +907,78 @@ struct WallpaperDetailSheet: View {
     }
 
     private func setAsDesktopWallpaper() {
-        isSettingWallpaper = true
-        errorMessage = ""
-        Task {
-            do {
-                // 先停止动态壁纸播放器
-                VideoWallpaperManager.shared.stopWallpaper()
+        // 检测多显示器
+        let screens = NSScreen.screens
+        if screens.count > 1 {
+            // 多显示器环境下显示选择弹窗
+            DisplaySelectorManager.shared.showSelector(
+                title: t("setWallpaper"),
+                message: t("multiDisplayDetected")
+            ) { [self] selectedScreen in
+                // 用户取消选择
+                guard selectedScreen != nil || screens.count > 0 else {
+                    return
+                }
+                
+                isSettingWallpaper = true
+                errorMessage = ""
+                Task {
+                    do {
+                        // 先停止动态壁纸播放器
+                        VideoWallpaperManager.shared.stopWallpaper()
 
-                let imageData = try await viewModel.downloadWallpaperData(wallpaper)
-                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(wallpaper.id).jpg")
-                try imageData.write(to: tempURL)
-                try await viewModel.setWallpaper(from: tempURL, option: .desktop)
-            } catch {
-                errorMessage = "\(t("error")): \(error.localizedDescription)"
-                showError = true
-                print("Set wallpaper error: \(error)")
+                        let imageURL = try await getWallpaperImageURL()
+                        try await viewModel.setWallpaper(from: imageURL, option: .desktop, for: selectedScreen)
+                    } catch {
+                        await MainActor.run {
+                            errorMessage = "\(t("error")): \(error.localizedDescription)"
+                            showError = true
+                            print("Set wallpaper error: \(error)")
+                            isSettingWallpaper = false
+                        }
+                    }
+                    await MainActor.run {
+                        isSettingWallpaper = false
+                    }
+                }
             }
-            isSettingWallpaper = false
+        } else {
+            // 单显示器环境下直接设置
+            isSettingWallpaper = true
+            errorMessage = ""
+            Task {
+                do {
+                    // 先停止动态壁纸播放器
+                    VideoWallpaperManager.shared.stopWallpaper()
+
+                    let imageURL = try await getWallpaperImageURL()
+                    try await viewModel.setWallpaper(from: imageURL, option: .desktop)
+                } catch {
+                    errorMessage = "\(t("error")): \(error.localizedDescription)"
+                    showError = true
+                    print("Set wallpaper error: \(error)")
+                }
+                isSettingWallpaper = false
+            }
         }
+    }
+    
+    /// 获取壁纸图片 URL（本地文件直接返回，网络壁纸下载到临时目录）
+    private func getWallpaperImageURL() async throws -> URL {
+        // 本地壁纸：直接使用本地文件路径
+        if wallpaper.id.hasPrefix("local_"),
+           let localURL = wallpaper.fullImageURL,
+           localURL.isFileURL,
+           FileManager.default.fileExists(atPath: localURL.path) {
+            print("[WallpaperDetailSheet] Using local wallpaper file: \(localURL.path)")
+            return localURL
+        }
+        
+        // 网络壁纸：下载到临时目录
+        let imageData = try await viewModel.downloadWallpaperData(wallpaper)
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(wallpaper.id).jpg")
+        try imageData.write(to: tempURL)
+        return tempURL
     }
 
     private func shareWallpaper() {

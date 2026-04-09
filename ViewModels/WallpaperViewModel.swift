@@ -65,6 +65,7 @@ class WallpaperViewModel: ObservableObject {
     private let wallpaperLibrary = WallpaperLibraryService.shared
     private let downloadTaskService = DownloadTaskService.shared
     private let downloadPathManager = DownloadPathManager.shared
+    private let localScanner = LocalWallpaperScanner.shared
     private var cancellables = Set<AnyCancellable>()
 
     /// 收藏/下载库变更时递增。探索页等仅依赖 `isFavorite`/`isDownloaded` 时，单靠转发 `objectWillChange` 在部分 SwiftUI 路径下不刷新。
@@ -253,7 +254,52 @@ class WallpaperViewModel: ObservableObject {
     }
 
     var downloadedWallpapers: [WallpaperDownloadRecord] {
-        wallpaperLibrary.downloadedWallpapers
+        // 每次访问时清理无效记录
+        wallpaperLibrary.cleanupInvalidDownloadRecords()
+        return wallpaperLibrary.downloadedWallpapers
+    }
+    
+    /// 本地扫描的壁纸（用户手动复制到目录的文件）
+    var localWallpapers: [LocalWallpaperItem] {
+        localScanner.getLocalWallpapers()
+    }
+    
+    /// 所有可显示的本地壁纸（下载记录 + 扫描到的本地文件）
+    /// 用于库页面显示
+    var allLocalWallpapers: [UnifiedLocalWallpaper] {
+        var result: [UnifiedLocalWallpaper] = []
+        
+        // 添加下载记录
+        for record in downloadedWallpapers {
+            result.append(UnifiedLocalWallpaper(
+                id: record.wallpaper.id,
+                wallpaper: record.wallpaper,
+                localItem: nil,
+                downloadRecord: record,
+                fileURL: record.localFileURL,
+                isLocalFile: false
+            ))
+        }
+        
+        // 添加扫描到的本地文件（排除已在下载记录中的）
+        let downloadedIds = Set(downloadedWallpapers.map { $0.wallpaper.id })
+        for item in localWallpapers where !downloadedIds.contains(item.id) {
+            result.append(UnifiedLocalWallpaper(
+                id: item.id,
+                wallpaper: item.toWallpaper(),
+                localItem: item,
+                downloadRecord: nil,
+                fileURL: item.fileURL,
+                isLocalFile: true
+            ))
+        }
+        
+        // 按下载/创建时间排序
+        return result.sorted { a, b in
+            let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601($0) } ?? Date.distantPast
+            let dateB = b.downloadRecord?.downloadedAt ?? b.localItem?.createdAt.flatMap { parseISO8601($0) } ?? Date.distantPast
+            return dateA > dateB
+        }
     }
 
     var favoriteSyncRecords: [WallpaperFavoriteRecord] {
@@ -487,7 +533,6 @@ class WallpaperViewModel: ObservableObject {
         
         let nextPageToPreload = currentPage + 1
         let currentQuery = searchQuery
-        let currentSeed = currentRandomSeed
         
         preloadTask = Task(priority: .low) {
             // 延迟一下再开始预加载，避免影响当前页的图片加载
@@ -646,6 +691,7 @@ class WallpaperViewModel: ObservableObject {
     func downloadWallpaper(_ wallpaper: Wallpaper) async throws {
         // 确保下载权限
         guard await downloadPathManager.ensureDirectoryStructure() else {
+            print("[WallpaperViewModel] Download failed: permission denied or directory creation failed")
             throw DownloadError.permissionDenied
         }
         
@@ -667,12 +713,27 @@ class WallpaperViewModel: ObservableObject {
                 fileExtension: wallpaper.fileExtension
             )
 
-            try imageData.write(to: fileURL)
-            wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
-            downloadTaskService.markCompleted(id: task.id)
+            // 确保目标目录存在
+            let directory = fileURL.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                print("[WallpaperViewModel] Created directory: \(directory.path)")
+            }
 
-            print("Saved to: \(fileURL)")
+            // 写入文件
+            try imageData.write(to: fileURL)
+            
+            // 验证文件是否成功写入
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                print("[WallpaperViewModel] ✅ File saved successfully: \(fileURL.path)")
+                wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
+                downloadTaskService.markCompleted(id: task.id)
+            } else {
+                print("[WallpaperViewModel] ❌ File write appeared to succeed but file not found: \(fileURL.path)")
+                throw DownloadError.writeFailed(NSError(domain: "WallHaven", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
+            }
         } catch {
+            print("[WallpaperViewModel] ❌ Download failed: \(error)")
             downloadTaskService.markFailed(id: task.id)
             throw error
         }
@@ -681,6 +742,15 @@ class WallpaperViewModel: ObservableObject {
     func downloadWallpaperData(_ wallpaper: Wallpaper, taskID: String? = nil) async throws -> Data {
         guard let downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL else {
             throw NetworkError.invalidResponse
+        }
+        
+        // 本地文件：直接读取数据
+        if downloadURL.isFileURL {
+            print("[WallpaperViewModel] Reading local file: \(downloadURL.path)")
+            guard FileManager.default.fileExists(atPath: downloadURL.path) else {
+                throw DownloadError.fileNotFound
+            }
+            return try Data(contentsOf: downloadURL)
         }
 
         print("Downloading from: \(downloadURL)")
@@ -714,6 +784,27 @@ class WallpaperViewModel: ObservableObject {
                 try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
                 try setLockScreenWallpaper(imageURL)
             }
+        }
+    }
+    
+    // MARK: - 设置壁纸到指定屏幕
+    func setWallpaper(from imageURL: URL, option: WallpaperOption, for targetScreen: NSScreen?) async throws {
+        let workspace = NSWorkspace.shared
+        
+        // 如果指定了特定屏幕，只设置到该屏幕
+        if let targetScreen = targetScreen {
+            switch option {
+            case .desktop:
+                try workspace.setDesktopImageURL(imageURL, for: targetScreen, options: [:])
+            case .lockScreen:
+                try setLockScreenWallpaper(imageURL)
+            case .both:
+                try workspace.setDesktopImageURL(imageURL, for: targetScreen, options: [:])
+                try setLockScreenWallpaper(imageURL)
+            }
+        } else {
+            // 未指定屏幕，设置到所有屏幕
+            try await setWallpaper(from: imageURL, option: option)
         }
     }
 
@@ -906,4 +997,61 @@ enum TopRange: String {
     case threeMonths = "3M"
     case sixMonths = "6M"
     case oneYear = "1y"
+}
+
+// MARK: - 统一的本地壁纸表示
+
+/// 统一的本地壁纸表示
+/// 用于混合显示下载记录和用户手动复制到目录的本地文件
+struct UnifiedLocalWallpaper: Identifiable {
+    let id: String
+    let wallpaper: Wallpaper
+    let localItem: LocalWallpaperItem?
+    let downloadRecord: WallpaperDownloadRecord?
+    let fileURL: URL
+    let isLocalFile: Bool
+    
+    /// 标题
+    var title: String {
+        localItem?.title ?? "Wallpaper"
+    }
+    
+    /// 分辨率
+    var resolution: String {
+        wallpaper.resolution
+    }
+    
+    /// 文件大小标签
+    var fileSizeLabel: String {
+        if let localItem = localItem, let size = localItem.fileSize {
+            let mb = Double(size) / 1024 / 1024
+            return String(format: "%.1f MB", mb)
+        }
+        return wallpaper.fileSizeLabel
+    }
+    
+    /// 创建/下载时间
+    var dateLabel: String? {
+        if let record = downloadRecord {
+            return formatDate(record.downloadedAt)
+        }
+        if let localItem = localItem, let createdAt = localItem.createdAt {
+            return formatDate(parseISO8601(createdAt))
+        }
+        return nil
+    }
+}
+
+// MARK: - 辅助函数
+
+private func parseISO8601(_ string: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    return formatter.date(from: string)
+}
+
+private func formatDate(_ date: Date?) -> String? {
+    guard let date = date else { return nil }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: date, relativeTo: Date())
 }

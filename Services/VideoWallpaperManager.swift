@@ -109,7 +109,7 @@ final class VideoWallpaperManager: ObservableObject {
         pendingRebuildWorkItem = nil
     }
 
-    func applyVideoWallpaper(from localFileURL: URL, posterURL: URL? = nil, muted: Bool = true) throws {
+    func applyVideoWallpaper(from localFileURL: URL, posterURL: URL? = nil, muted: Bool = true, targetScreen: NSScreen? = nil) throws {
         guard localFileURL.isFileURL else {
             throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: "动态壁纸必须使用本地视频文件。"])
         }
@@ -140,7 +140,7 @@ final class VideoWallpaperManager: ObservableObject {
         
         // 如果有预览图，设置为桌面壁纸（锁屏会显示这个）
         if let posterURL = posterURL {
-            setPosterAsDesktopWallpaper(posterURL)
+            setPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
         }
         
         currentVideoURL = localFileURL
@@ -148,7 +148,7 @@ final class VideoWallpaperManager: ObservableObject {
         isMuted = muted
         isPaused = false
 
-        try rebuildWindows()
+        try rebuildWindows(targetScreen: targetScreen)
         persistState()
     }
 
@@ -161,23 +161,57 @@ final class VideoWallpaperManager: ObservableObject {
         persistState()
     }
 
-    func pauseWallpaper() {
-        isPaused = true
-        for player in players.values {
-            player.pause()
+    func pauseWallpaper(for targetScreen: NSScreen? = nil) {
+        if let targetScreen = targetScreen {
+            // 暂停特定屏幕的壁纸
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            players[screenID]?.pause()
+            // 将 rate 设为 0 确保完全停止渲染，但保持 player 连接
+            players[screenID]?.rate = 0
+            showPosterImage(for: screenID)
+        } else {
+            // 暂停所有屏幕的壁纸
+            isPaused = true
+            for player in players.values {
+                player.pause()
+                // 将 rate 设为 0 确保完全停止渲染
+                player.rate = 0
+            }
         }
         persistState()
     }
 
-    func resumeWallpaper() {
+    func resumeWallpaper(for targetScreen: NSScreen? = nil) {
         guard currentVideoURL != nil else { return }
-        isPaused = false
-        // 直接恢复播放，不走延迟检测路径
-        for (screenID, player) in players {
-            player.play()
+        
+        if let targetScreen = targetScreen {
+            // 恢复特定屏幕的壁纸
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            players[screenID]?.play()
             hidePosterImage(for: screenID)
+        } else {
+            // 恢复所有屏幕的壁纸
+            isPaused = false
+            for (screenID, player) in players {
+                player.play()
+                hidePosterImage(for: screenID)
+            }
         }
         persistState()
+    }
+    
+    /// 获取当前正在播放动态壁纸的显示器
+    var activeScreens: [NSScreen] {
+        let activeScreenIDs = Set(players.keys)
+        return NSScreen.screens.filter { screen in
+            activeScreenIDs.contains(screen.wallpaperScreenIdentifier)
+        }
+    }
+    
+    /// 检测指定屏幕是否有正在播放的动态壁纸
+    func hasActiveWallpaper(on screen: NSScreen) -> Bool {
+        let screenID = screen.wallpaperScreenIdentifier
+        return players[screenID] != nil
     }
     
     // MARK: - 锁屏处理
@@ -188,8 +222,12 @@ final class VideoWallpaperManager: ObservableObject {
         print("[VideoWallpaperManager] Screen locked, pausing wallpaper")
         isScreenLocked = true
         // 锁屏时暂停视频，显示预览图（预览图已设为桌面壁纸）
-        for (screenID, player) in players {
+        for player in players.values {
             player.pause()
+            player.rate = 0
+        }
+        // 所有屏幕显示预览图
+        for screenID in windows.keys {
             showPosterImage(for: screenID)
         }
     }
@@ -268,7 +306,7 @@ final class VideoWallpaperManager: ObservableObject {
     
     /// 将预览图设为桌面壁纸（锁屏会显示这个）
     /// 使用持久化存储，避免被系统清理
-    private func setPosterAsDesktopWallpaper(_ posterURL: URL) {
+    private func setPosterAsDesktopWallpaper(_ posterURL: URL, targetScreen: NSScreen? = nil) {
         let workspace = NSWorkspace.shared
         
         Task {
@@ -287,10 +325,17 @@ final class VideoWallpaperManager: ObservableObject {
                 print("[VideoWallpaperManager] Saved poster to persistent location: \(persistentURL.path)")
                 
                 // 3. 设置为桌面壁纸
-                for screen in NSScreen.screens {
+                let screensToSet: [NSScreen]
+                if let targetScreen = targetScreen {
+                    screensToSet = [targetScreen]
+                } else {
+                    screensToSet = NSScreen.screens
+                }
+                
+                for screen in screensToSet {
                     try workspace.setDesktopImageURL(persistentURL, for: screen, options: [:])
                 }
-                print("[VideoWallpaperManager] Set poster as desktop wallpaper")
+                print("[VideoWallpaperManager] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
             } catch {
                 print("[VideoWallpaperManager] Failed to set poster: \(error)")
             }
@@ -469,6 +514,7 @@ final class VideoWallpaperManager: ObservableObject {
     @objc private func handleScreensDidSleep() {
         for player in players.values {
             player.pause()
+            player.rate = 0
         }
     }
 
@@ -492,7 +538,7 @@ final class VideoWallpaperManager: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
-    private func rebuildWindows() throws {
+    private func rebuildWindows(targetScreen: NSScreen? = nil) throws {
         guard let currentVideoURL else { return }
         
         // 使用锁防止并发重建
@@ -508,10 +554,46 @@ final class VideoWallpaperManager: ObservableObject {
         isRebuilding = true
         defer { isRebuilding = false }
 
-        NSLog("[VideoWallpaperManager] Rebuilding windows for \(NSScreen.screens.count) screen(s)")
-        teardownAllWindows()
+        // 如果指定了目标屏幕，只重建该屏幕的窗口
+        let screensToRebuild: [NSScreen]
+        if let targetScreen = targetScreen {
+            screensToRebuild = [targetScreen]
+            // 保留其他屏幕的窗口
+            let targetScreenID = targetScreen.wallpaperScreenIdentifier
+            for (screenID, _) in windows {
+                if screenID != targetScreenID {
+                    // 保留非目标窗口，稍后重新添加
+                    // 注意：这里我们简单地保留所有窗口，只更新目标屏幕
+                }
+            }
+        } else {
+            screensToRebuild = NSScreen.screens
+        }
 
-        for screen in NSScreen.screens {
+        NSLog("[VideoWallpaperManager] Rebuilding windows for \(screensToRebuild.count) screen(s)")
+        
+        // 如果只更新特定屏幕，不要 teardown 所有窗口
+        if targetScreen == nil {
+            teardownAllWindows()
+        } else {
+            // 只移除目标屏幕的窗口
+            let targetScreenID = targetScreen!.wallpaperScreenIdentifier
+            if let window = windows[targetScreenID] {
+                window.close()
+                windows.removeValue(forKey: targetScreenID)
+            }
+            if let player = players[targetScreenID] {
+                player.pause()
+                player.removeAllItems()
+                players.removeValue(forKey: targetScreenID)
+            }
+            if let looper = loopers[targetScreenID] {
+                looper.disableLooping()
+                loopers.removeValue(forKey: targetScreenID)
+            }
+        }
+
+        for screen in screensToRebuild {
             try createWindow(for: screen, videoURL: currentVideoURL, muted: isMuted)
         }
 

@@ -72,7 +72,9 @@ class NonScrollingScrollView: NSScrollView {
                 let oldOpacity: Double = change.oldValue.map { Double($0) } ?? 1.0
 
                 if oldOpacity == 0.0 && newOpacity > 0.0 {
-                    self.refreshAfterOpacityRestore()
+                    Task { @MainActor in
+                        self.refreshAfterOpacityRestore()
+                    }
                 }
             }
         }
@@ -82,6 +84,7 @@ class NonScrollingScrollView: NSScrollView {
     }
 
     /// 从 opacity=0 恢复后强制刷新 NSCollectionView
+    @MainActor
     private func refreshAfterOpacityRestore() {
         guard let collectionView = documentView as? NSCollectionView else { return }
 
@@ -292,28 +295,36 @@ struct RecyclableGridView<Item: RecyclableGridItem, CardContent: View>: NSViewRe
         func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
             // "no more" footer
             if indexPath.item == currentItems.count && showNoMore {
-                let item = collectionView.makeItem(
+                guard let item = collectionView.makeItem(
                     withIdentifier: NSUserInterfaceItemIdentifier("NoMoreFooter"),
                     for: indexPath
-                ) as! NoMoreFooterItem
+                ) as? NoMoreFooterItem else {
+                    return NSCollectionViewItem()
+                }
                 return item
             }
 
             guard indexPath.item < currentItems.count else {
-                return collectionView.makeItem(
+                // 返回一个空的 GridHostingCollectionItem 作为后备
+                let fallbackItem = collectionView.makeItem(
                     withIdentifier: NSUserInterfaceItemIdentifier("GridCell"),
                     for: indexPath
-                )
+                ) as! GridHostingCollectionItem
+                fallbackItem.hostingView?.rootView = AnyView(EmptyView())
+                return fallbackItem
             }
 
-            let item = collectionView.makeItem(
+            guard let item = collectionView.makeItem(
                 withIdentifier: NSUserInterfaceItemIdentifier("GridCell"),
                 for: indexPath
-            ) as! GridHostingCollectionItem
+            ) as? GridHostingCollectionItem else {
+                // 如果创建失败，返回一个默认的 NSCollectionViewItem
+                return NSCollectionViewItem()
+            }
 
             let dataItem = currentItems[indexPath.item]
             let card = cardContent(dataItem, config.cardWidth, config.cardHeight)
-            item.hostingView.rootView = AnyView(card)
+            item.hostingView?.rootView = AnyView(card)
             item.itemId = dataItem.id
             item.itemIndex = indexPath.item
 
@@ -455,7 +466,10 @@ class GridHostingCollectionItem: NSCollectionViewItem {
         view.layer?.removeAllAnimations()
         view.layer?.opacity = 1.0
         view.layer?.transform = CATransform3DIdentity
-        hostingView.rootView = AnyView(EmptyView())
+        // 安全地重置 hostingView
+        if let hostingView = hostingView {
+            hostingView.rootView = AnyView(EmptyView())
+        }
     }
 }
 
