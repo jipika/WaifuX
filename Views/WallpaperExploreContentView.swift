@@ -9,6 +9,8 @@ struct WallpaperExploreContentView: View {
     
     // MARK: - 状态管理
     @State private var selectedCategory: ExploreCategoryFilter = .all
+    @State private var selected4KCategory: FourKCategory? = nil
+    @State private var selected4KSorting: FourKSortingOption = .latest
     @State private var selectedHotTag: ExploreHotTag?
     @State private var searchText = ""
     @State private var displayedWallpapers: [Wallpaper] = []
@@ -27,11 +29,14 @@ struct WallpaperExploreContentView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let contentWidth = max(0, geometry.size.width - 56)
+            // 方案 D：NSWindow fallback — 首次布局时 GeometryReader 可能读到 provisional bounds，
+            // 用 NSWindow contentView 的实际 frame 作为兜底，消除启动时宽度不一致
+            let windowFallback = (NSApp.mainWindow?.contentView?.frame.width ?? 1200) - 56
+            let contentWidth = max(0, max(geometry.size.width, windowFallback) - 56)
             let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
             
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 34, pinnedViews: []) {
+                LazyVStack(alignment: .leading, spacing: 20, pinnedViews: []) {
                     heroSection
                     categorySection
                     quickFilterSection
@@ -77,7 +82,15 @@ struct WallpaperExploreContentView: View {
         .onAppear {
             handleOnAppear()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
+            resetPurityIfNeeded()
+            // 切换数据源时重置分类选择
+            selected4KCategory = nil
+            selectedCategory = .all
+            reloadData()
+        }
         .onChange(of: selectedCategory) { _, _ in handleCategoryChange() }
+        .onChange(of: selected4KCategory) { _, _ in handle4KCategoryChange() }
         .onChange(of: selectedHotTag) { _, _ in handleHotTagChange() }
         .onChange(of: viewModel.sortingOption) { _, _ in reloadData() }
         .onChange(of: viewModel.orderDescending) { _, _ in reloadData() }
@@ -172,6 +185,29 @@ struct WallpaperExploreContentView: View {
         }
         reloadData()
     }
+
+    /// 4K 分类变更处理
+    private func handle4KCategoryChange() {
+        // 4K 分类选择后直接触发重新搜索
+        // 分类参数会通过 viewModel 传到 fetchFromFallbackSource
+        viewModel.selected4KCategorySlug = selected4KCategory?.id
+        reloadData()
+    }
+
+    /// 4K 排序变更处理
+    private func handle4KSortingChange() {
+        viewModel.selected4KSorting = selected4KSorting
+        reloadData()
+    }
+    
+    /// 切换数据源时，如果新源不支持 NSFW/Sketchy，自动重置纯度筛选
+    private func resetPurityIfNeeded() {
+        if !viewModel.currentSourceSupportsNSFW {
+            viewModel.puritySFW = true
+            viewModel.puritySketchy = false
+            viewModel.purityNSFW = false
+        }
+    }
     
     private func handleHotTagChange() {
         displayedWallpapers = []
@@ -241,7 +277,7 @@ private extension WallpaperExploreContentView {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.58))
                     
-                    Text("Wallhaven")
+                    Text(WallpaperSourceManager.shared.activeSource.displayName)
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.72))
                         .padding(.horizontal, 8)
@@ -265,23 +301,26 @@ private extension WallpaperExploreContentView {
                 resetButton
             }
             
-            HStack(alignment: .center, spacing: 10) {
-                Text(t("hotWallpaper") + ":")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.42))
-                
-                ForEach(ExploreHotTag.allCases) { tag in
-                    ExploreHotTagChip(
-                        tag: tag,
-                        isSelected: selectedHotTag == tag
-                    ) {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            selectedHotTag = (selectedHotTag == tag) ? nil : tag
+            // 热门标签：4K 源不支持比例筛选，整个区域隐藏
+            if viewModel.currentSourceSupportsRatioFilter {
+                HStack(alignment: .center, spacing: 10) {
+                    Text(t("hotWallpaper") + ":")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.42))
+                    
+                    ForEach(ExploreHotTag.allCases) { tag in
+                        ExploreHotTagChip(
+                            tag: tag,
+                            isSelected: selectedHotTag == tag
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                selectedHotTag = (selectedHotTag == tag) ? nil : tag
+                            }
                         }
                     }
+                    
+                    ratioMenu
                 }
-                
-                ratioMenu
             }
         }
         .frame(maxWidth: 700, alignment: .leading)
@@ -386,13 +425,41 @@ private extension WallpaperExploreContentView {
     
     var categorySection: some View {
         FlowLayout(spacing: 12) {
-            ForEach(ExploreCategoryFilter.allCases) { category in
-                ExploreCategoryChip(
-                    category: category,
-                    isSelected: selectedCategory == category
+            if viewModel.currentSourceSupportsWallhavenCategories {
+                // WallHaven 源：显示 general/anime/people 三分类
+                ForEach(ExploreCategoryFilter.allCases) { category in
+                    ExploreCategoryChip(
+                        category: category,
+                        isSelected: selectedCategory == category
+                    ) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            selectedCategory = category
+                        }
+                    }
+                }
+            } else {
+                // 4K 源：显示 4K 自有的 30 个分类
+                FourKCategoryChip(
+                    category: nil,
+                    name: t("tab.all"),
+                    isSelected: selected4KCategory == nil
                 ) {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        selectedCategory = category
+                        selected4KCategory = nil
+                    }
+                    handle4KCategoryChange()
+                }
+
+                ForEach(FourKWallpapersParser.categories) { category in
+                    FourKCategoryChip(
+                        category: category,
+                        name: t("4k.category.\(category.id)"),
+                        isSelected: selected4KCategory?.id == category.id
+                    ) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            selected4KCategory = category
+                        }
+                        handle4KCategoryChange()
                     }
                 }
             }
@@ -400,37 +467,49 @@ private extension WallpaperExploreContentView {
         .padding(.vertical, 2)
     }
     
+    @ViewBuilder
     var quickFilterSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(t("contentLevel"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.46))
-                FlowLayout(spacing: 10) {
-                    ForEach(visiblePurityFilters) { filter in
-                        QuickFilterChip(
-                            title: filter.title,
-                            subtitle: filter.subtitle,
-                            isSelected: isPuritySelected(filter),
-                            tint: filter.tint
-                        ) {
-                            togglePurity(filter)
+        let hasNSFW = viewModel.currentSourceSupportsNSFW
+        let hasColorFilter = viewModel.currentSourceSupportsColorFilter
+        
+        if hasNSFW || hasColorFilter {
+            VStack(alignment: .leading, spacing: 16) {
+                // 内容级别：4K 源只有 SFW 一个不可切换选项，整个区域隐藏
+                if hasNSFW {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(t("contentLevel"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                        FlowLayout(spacing: 10) {
+                            ForEach(visiblePurityFilters) { filter in
+                                QuickFilterChip(
+                                    title: filter.title,
+                                    subtitle: filter.subtitle,
+                                    isSelected: isPuritySelected(filter),
+                                    tint: filter.tint
+                                ) {
+                                    togglePurity(filter)
+                                }
+                            }
                         }
                     }
                 }
-            }
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Text(t("colorFilter"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.46))
-                FlowLayout(spacing: 10) {
-                    ForEach(quickColorPresets) { preset in
-                        QuickColorChip(
-                            preset: preset,
-                            isSelected: viewModel.selectedColors.first == preset.hex
-                        ) {
-                            toggleColor(preset)
+
+                // 4K 源不支持颜色筛选，隐藏颜色区域
+                if hasColorFilter {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(t("colorFilter"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                        FlowLayout(spacing: 10) {
+                            ForEach(quickColorPresets) { preset in
+                                QuickColorChip(
+                                    preset: preset,
+                                    isSelected: viewModel.selectedColors.first == preset.hex
+                                ) {
+                                    toggleColor(preset)
+                                }
+                            }
                         }
                     }
                 }
@@ -468,7 +547,7 @@ private extension WallpaperExploreContentView {
     }
     
     func wallpaperSection(gridConfig: WallpaperGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 14) {
             // 标题栏
             HStack(alignment: .center) {
                 Text("\(displayedWallpapers.count) \(t("wallpaperCount"))")
@@ -476,38 +555,68 @@ private extension WallpaperExploreContentView {
                     .foregroundStyle(.white.opacity(0.66))
                 
                 Spacer()
-                
-                Menu {
-                    ForEach(SortingOption.allCases, id: \.self) { option in
-                        Button(sortingOptionDisplayName(option)) {
-                            viewModel.sortingOption = option
-                            reloadData()
+
+                if viewModel.currentSourceSupportsWallhavenSorting {
+                    // WallHaven 源：完整排序选项
+                    Menu {
+                        ForEach(SortingOption.allCases, id: \.self) { option in
+                            Button(sortingOptionDisplayName(option)) {
+                                viewModel.sortingOption = option
+                                reloadData()
+                            }
                         }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(sortingOptionDisplayName(viewModel.sortingOption))
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.horizontal, 16)
+                        .frame(height: 38)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.1),
+                            in: Capsule(style: .continuous)
+                        )
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(sortingOptionDisplayName(viewModel.sortingOption))
-                            .font(.system(size: 14, weight: .semibold))
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                } else {
+                    // 4K 源：只有 Latest / Popular
+                    Menu {
+                        ForEach(FourKSortingOption.allCases) { option in
+                            Button(option.displayName) {
+                                selected4KSorting = option
+                                handle4KSortingChange()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(selected4KSorting.displayName)
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.92))
+                        .padding(.horizontal, 16)
+                        .frame(height: 38)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.1),
+                            in: Capsule(style: .continuous)
+                        )
                     }
-                    .foregroundStyle(.white.opacity(0.92))
-                    .padding(.horizontal, 16)
-                    .frame(height: 38)
-                    .liquidGlassSurface(
-                        .regular,
-                        tint: exploreAtmosphere.tint.primary.opacity(0.1),
-                        in: Capsule(style: .continuous)
-                    )
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
             
             // 内容区域
             if viewModel.isLoading && displayedWallpapers.isEmpty {
                 WallpaperGridSkeleton(contentWidth: gridConfig.contentWidth)
-                    .padding(.top, 20)
+                    .padding(.top, 8)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedWallpapers.isEmpty {
                 emptyState
@@ -610,6 +719,8 @@ private extension WallpaperExploreContentView {
         searchText = ""
         viewModel.searchQuery = ""
         selectedCategory = .all
+        selected4KCategory = nil
+        viewModel.selected4KCategorySlug = nil
         selectedHotTag = nil
         viewModel.puritySFW = true
         viewModel.puritySketchy = false
@@ -627,10 +738,16 @@ private extension WallpaperExploreContentView {
     }
     
     private func rebuildVisibleWallpapers() {
-        let filtered = viewModel.wallpapers.filter { wallpaper in
-            matchesCategory(wallpaper, category: selectedCategory)
+        if viewModel.currentSourceSupportsWallhavenCategories {
+            // WallHaven 源：按 general/anime/people 客户端过滤
+            let filtered = viewModel.wallpapers.filter { wallpaper in
+                matchesCategory(wallpaper, category: selectedCategory)
+            }
+            displayedWallpapers = filtered
+        } else {
+            // 4K 源：分类由后端筛选，直接使用全部结果
+            displayedWallpapers = viewModel.wallpapers
         }
-        displayedWallpapers = filtered
         syncExploreAtmosphere()
     }
     
@@ -895,8 +1012,13 @@ private extension WallpaperExploreContentView {
         return preferredHexes.compactMap { WallhavenAPI.colorPreset(for: $0) }
     }
     
-    /// 根据 API Key 配置返回可见的内容分级筛选器（无 API Key 时隐藏 NSFW）
+    /// 根据 API Key 配置和数据源返回可见的内容分级筛选器
+    /// - WallHaven：根据 API Key 显示 SFW/Sketchy/NSFW
+    /// - 4KWallpapers：只显示 SFW（4K 源不支持 NSFW）
     var visiblePurityFilters: [ExplorePurityFilter] {
+        if !viewModel.currentSourceSupportsNSFW {
+            return [.sfw]
+        }
         if viewModel.apiKeyConfigured {
             return Array(ExplorePurityFilter.allCases)
         } else {
@@ -932,14 +1054,17 @@ private extension WallpaperExploreContentView {
     
     var currentFilterChips: [ExploreFilterChipData] {
         var chips: [ExploreFilterChipData] = []
-        if viewModel.puritySFW {
-            chips.append(.init(kind: .purity(.sfw), title: "SFW", accentHex: "43C463"))
-        }
-        if viewModel.puritySketchy {
-            chips.append(.init(kind: .purity(.sketchy), title: "Sketchy", accentHex: "FFB347"))
-        }
-        if viewModel.purityNSFW {
-            chips.append(.init(kind: .purity(.nsfw), title: "NSFW", accentHex: "FF5A7D"))
+        // 4K 源不支持 NSFW 筛选，SFW 是唯一状态，不作为活跃筛选展示
+        if viewModel.currentSourceSupportsNSFW {
+            if viewModel.puritySFW {
+                chips.append(.init(kind: .purity(.sfw), title: "SFW", accentHex: "43C463"))
+            }
+            if viewModel.puritySketchy {
+                chips.append(.init(kind: .purity(.sketchy), title: "Sketchy", accentHex: "FFB347"))
+            }
+            if viewModel.purityNSFW {
+                chips.append(.init(kind: .purity(.nsfw), title: "NSFW", accentHex: "FF5A7D"))
+            }
         }
         if let hex = viewModel.selectedColors.first,
            let preset = WallhavenAPI.colorPreset(for: hex) {
@@ -1202,6 +1327,83 @@ private struct ExploreCategoryChip: View {
     }
 }
 
+// MARK: - 4K 分类 Chip 组件
+
+private struct FourKCategoryChip: View {
+    let category: FourKCategory?
+    let name: String
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    /// 图标：All 用 sparkles，其他用分类的 icon
+    private var iconName: String {
+        category?.icon ?? "sparkles"
+    }
+
+    /// 渐变色：All 用默认橙色，其他用分类的 accentColors
+    private var gradientColors: [String] {
+        category?.accentColors ?? ["FF9B58", "F54E42"]
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: gradientColors.map(Color.init(hex:)),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 22, height: 22)
+
+                    Image(systemName: iconName)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(isSelected ? .white : .black.opacity(0.78))
+                }
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(isSelected ? 0.18 : 0.08), lineWidth: 1)
+                )
+
+                Text(name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.84))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                ZStack {
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    if let accentColor = gradientColors.first {
+                        Capsule(style: .continuous)
+                            .fill(Color(hex: accentColor).opacity(isSelected ? 0.15 : 0.08))
+                    }
+                }
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        (gradientColors.first.map { Color(hex: $0) } ?? Color(hex: "FF9B58"))
+                            .opacity(isSelected ? 0.35 : 0.15),
+                        lineWidth: 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
 // MARK: - 枚举定义
 
 private enum ExplorePurityFilter: String, CaseIterable, Identifiable {
@@ -1331,6 +1533,21 @@ private struct ExploreFilterChipData: Identifiable {
 extension SortingOption: CaseIterable {
     static var allCases: [SortingOption] {
         [.toplist, .dateAdded, .favorites, .views, .random, .relevance]
+    }
+}
+
+/// 4K 源的排序选项
+enum FourKSortingOption: String, CaseIterable, Identifiable {
+    case latest
+    case popular
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .latest: return t("sort.latest")
+        case .popular: return t("sort.popular")
+        }
     }
 }
 

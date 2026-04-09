@@ -118,6 +118,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             WallpaperViewModel().restoreAPIKeyState()
         }
 
+        // 5. 恢复壁纸源管理器状态（⚠️ 必须延迟，不能在 init 中读 UserDefaults）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            WallpaperSourceManager.shared.restoreState()
+        }
+
         // 4. 初始化状态栏控制器（必须在显示窗口之前）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in

@@ -22,6 +22,16 @@ class AnimeViewModel: ObservableObject {
     @Published var selectedCategory: AnimeCategory = .all
     @Published var selectedHotTag: AnimeHotTag?
 
+    // MARK: - 查询模式追踪
+    enum QueryMode: Equatable {
+        case trending
+        case search(keyword: String)
+        case tag(tagName: String)
+        case topRated
+        case newArrivals(year: String)
+    }
+    private var currentQueryMode: QueryMode = .trending
+
     // MARK: - 私有状态
     private var currentPage = 1
     private let pageSize = 10
@@ -45,6 +55,8 @@ class AnimeViewModel: ObservableObject {
         // 重置分页状态
         currentPage = 1
         hasMorePages = true
+        currentQueryMode = .trending
+        invalidatePreload()
         
         // 先读本地缓存；若无则全量从 Kazumi 拉取并覆盖落盘（与启动后台同步策略一致）
         var rules = await AnimeRuleStore.shared.loadAllRules()
@@ -72,6 +84,8 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         currentPage = 1
+        currentQueryMode = .search(keyword: searchText)
+        invalidatePreload()
         
         do {
             // 使用关键词搜索而不是标签搜索
@@ -107,6 +121,8 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         currentPage = 1
+        currentQueryMode = .tag(tagName: tagName)
+        invalidatePreload()
 
         do {
             // 直接使用中文标签名进行搜索
@@ -143,6 +159,8 @@ class AnimeViewModel: ObservableObject {
 
         currentPage = 1
         hasMorePages = true
+        currentQueryMode = .trending
+        invalidatePreload()
 
         do {
             let (items, total) = try await bangumiService.getTrendingList(
@@ -188,6 +206,8 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         currentPage = 1
+        currentQueryMode = .topRated
+        invalidatePreload()
 
         do {
             // 使用 trending 接口获取数据，然后按评分排序
@@ -223,11 +243,13 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         currentPage = 1
+        let calendar = Calendar.current
+        let currentYear = calendar.component(.year, from: Date())
+        currentQueryMode = .newArrivals(year: String(currentYear))
+        invalidatePreload()
 
         do {
             // 获取当前年份的动漫作为新番
-            let calendar = Calendar.current
-            let currentYear = calendar.component(.year, from: Date())
             let (items, total) = try await bangumiService.searchByKeyword(
                 keyword: String(currentYear),
                 limit: pageSize,
@@ -276,21 +298,17 @@ class AnimeViewModel: ObservableObject {
                 let items: [BangumiSubject]
                 let total: Int?
                 
-                // 检查是否有预加载的数据
-                if isPreloaded && !preloadedItems.isEmpty {
+                // 检查是否有预加载的数据（仅 trending 模式支持预加载）
+                if currentQueryMode == .trending, isPreloaded, !preloadedItems.isEmpty {
                     print("[AnimeViewModel] Using preloaded page \(nextPage)")
                     items = preloadedItems
                     total = preloadedTotal
-                    // 清空预加载数据
                     preloadedItems = []
                     isPreloaded = false
                 } else {
-                    // 正常加载
+                    // 根据当前查询模式调用不同 API
                     let offset = currentPage * pageSize
-                    (items, total) = try await bangumiService.getTrendingList(
-                        limit: pageSize,
-                        offset: offset
-                    )
+                    (items, total) = try await fetchPageData(offset: offset)
                 }
                 
                 guard !Task.isCancelled else { return }
@@ -304,7 +322,7 @@ class AnimeViewModel: ObservableObject {
                     self.animeItems.append(contentsOf: newResults)
                     self.currentPage = nextPage
                     self.hasMorePages = self.animeItems.count < (total ?? 0)
-                    print("[AnimeViewModel] Loaded more, total: \(self.animeItems.count)")
+                    print("[AnimeViewModel] Loaded more (mode: \(currentQueryMode)), total: \(self.animeItems.count)")
                 }
             } catch {
                 print("[AnimeViewModel] Load more failed: \(error)")
@@ -313,6 +331,31 @@ class AnimeViewModel: ObservableObject {
 
         await loadMoreTask?.value
     }
+
+    // MARK: - 根据查询模式获取分页数据
+
+    private func fetchPageData(offset: Int) async throws -> (items: [BangumiSubject], total: Int?) {
+        switch currentQueryMode {
+        case .trending:
+            return try await bangumiService.getTrendingList(limit: pageSize, offset: offset)
+        case .search(let keyword):
+            return try await bangumiService.searchByKeyword(keyword: keyword, limit: pageSize, offset: offset)
+        case .tag(let tagName):
+            return try await bangumiService.searchByTag(tag: tagName, limit: pageSize, offset: offset)
+        case .topRated:
+            return try await bangumiService.getTrendingList(limit: pageSize, offset: offset)
+        case .newArrivals(let year):
+            return try await bangumiService.searchByKeyword(keyword: year, limit: pageSize, offset: offset)
+        }
+    }
+
+    /// 清空预加载数据（切换查询模式时调用）
+    private func invalidatePreload() {
+        preloadTask?.cancel()
+        preloadedItems = []
+        preloadedTotal = 0
+        isPreloaded = false
+    }
     
     // MARK: - 预加载下一页
     private func triggerPreloadNextPage() {
@@ -320,6 +363,7 @@ class AnimeViewModel: ObservableObject {
         
         let nextPage = currentPage + 1
         let offset = currentPage * pageSize
+        let mode = currentQueryMode
         
         preloadTask = Task(priority: .low) {
             // 延迟一下再开始预加载
@@ -328,11 +372,8 @@ class AnimeViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             
             do {
-                print("[AnimeViewModel] Preloading page \(nextPage)...")
-                let (items, total) = try await bangumiService.getTrendingList(
-                    limit: pageSize,
-                    offset: offset
-                )
+                print("[AnimeViewModel] Preloading page \(nextPage) (mode: \(mode))...")
+                let (items, total) = try await fetchPageData(offset: offset)
                 
                 guard !Task.isCancelled else { return }
                 

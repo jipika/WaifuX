@@ -311,6 +311,11 @@ private struct GeneralSettingsTab: View {
 
             // 数据管理组
             MacSettingsSection(header: t("dataManagement")) {
+                // 壁纸数据源切换
+                wallpaperSourceSwitchView
+
+                Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
+
                 // API Key
                 HStack(spacing: 12) {
                     Text(t("apiKey"))
@@ -376,6 +381,79 @@ private struct GeneralSettingsTab: View {
         } message: {
             Text(t("clearCacheConfirm"))
         }
+    }
+
+    // MARK: - 壁纸数据源切换
+    @ViewBuilder
+    private var wallpaperSourceSwitchView: some View {
+        WallpaperSourcePicker()
+    }
+}
+
+// MARK: - 壁纸源选择器组件（胶囊分段控件风格）
+private struct WallpaperSourcePicker: View {
+    @ObservedObject private var sourceManager = WallpaperSourceManager.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Text("壁纸数据源")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer()
+
+                // 胶囊分段控件
+                HStack(spacing: 0) {
+                    SourceCapsule(
+                        title: "WallHaven",
+                        isActive: sourceManager.activeSource == .wallhaven,
+                        activeColor: Color(hex: "0A84FF")
+                    ) {
+                        sourceManager.switchTo(.wallhaven)
+                        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+                    }
+
+                    SourceCapsule(
+                        title: "4K Wall",
+                        isActive: sourceManager.activeSource == .fourKWallpapers,
+                        activeColor: Color(hex: "FF9F0A")
+                    ) {
+                        sourceManager.switchTo(.fourKWallpapers)
+                        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+
+
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+/// 单个胶囊按钮（激活态实心填充，非激活态透明）
+private struct SourceCapsule: View {
+    let title: String
+    let isActive: Bool
+    let activeColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? .white : Color.white.opacity(0.5))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(isActive ? activeColor : Color.clear)
+                )
+                .animation(.easeInOut(duration: 0.2), value: isActive)
+        }
+        .buttonStyle(.plain)
     }
 }
 

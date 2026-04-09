@@ -169,6 +169,7 @@ struct ContentView: View {
             VStack {
                 Spacer()
                 DownloadProgressToastHost(viewModel: downloadTaskViewModel)
+                WallpaperSourceSwitchToast()
                     .padding(.horizontal, 24)
                     .padding(.bottom, 20)
             }
@@ -1334,5 +1335,71 @@ private struct DownloadProgressToast: View {
         .onAppear {
             animatedProgress = task.progress
         }
+    }
+}
+
+// MARK: - 壁纸数据源切换 Toast（自动降级 / 手动切换提示）
+private struct WallpaperSourceSwitchToast: View {
+    @ObservedObject private var sourceManager = WallpaperSourceManager.shared
+    @State private var isShowing: Bool = false
+    @State private var hideWorkItem: DispatchWorkItem?
+
+    var body: some View {
+        VStack {
+            if let message = sourceManager.lastSwitchMessage, isShowing {
+                VStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color(hex: "FFD60A"))
+                    Text(message)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                    Text("可在「设置 → 壁纸数据源」中手动切回")
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                        )
+                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
+                )
+                .frame(maxWidth: 360)
+            }
+        }
+        .padding(.bottom, 40)
+        .opacity(isShowing ? 1 : 0)
+        .offset(y: isShowing ? 0 : 20)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .onChange(of: sourceManager.lastSwitchMessage) { _, _ in
+            checkForNewMessage()
+        }
+    }
+
+    // MARK: - 监听消息变化
+
+    /// 当 lastSwitchMessage 变化时触发显示
+    private func checkForNewMessage() {
+        guard sourceManager.lastSwitchMessage != nil else { return }
+        
+        hideWorkItem?.cancel()
+        isShowing = true
+        
+        let workItem = DispatchWorkItem { [weak sourceManager] in
+            withAnimation(.easeOut(duration: 0.25)) {
+                isShowing = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                sourceManager?.lastSwitchMessage = nil
+            }
+        }
+        self.hideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
 }

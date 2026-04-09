@@ -107,7 +107,17 @@ struct WallpaperCardSkeleton: View {
 }
 
 // MARK: - Hero 区域骨架屏
+/// 方案 B：骨架屏布局压力对齐真实 HeroCaptionPanel，消除 API 返回后的布局跳变。
+/// 接受 width 参数以复用与 HeroCaptionPanel 完全一致的 frame 约束。
 struct HeroSkeletonView: View {
+    var width: CGFloat = 1200
+    /// 必须与 HomeContentView.heroHeight（620）一致，确保骨架屏高度与真实 hero 区域完全对齐，
+    /// 消除 API 数据返回后的纵向跳变。
+    var height: CGFloat = 620
+
+    private var heroCaptionLeadingInset: CGFloat { max(112, width * 0.1) }
+    private var heroCaptionTrailingInset: CGFloat { max(96, width * 0.08) }
+
     var body: some View {
         ZStack {
             // 主图骨架 - 使用渐变色避免纯黑
@@ -121,45 +131,53 @@ struct HeroSkeletonView: View {
                 endPoint: .bottom
             )
             .shimmer()
-            
-            // 底部信息面板骨架
-            VStack {
-                Spacer()
-                
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        // 标题骨架
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.white.opacity(0.1))
-                            .frame(width: 200, height: 16)
+
+            // 底部信息面板骨架 — 与 HeroCaptionPanel 完全一致的布局结构
+            // 注意：不加 Spacer()，与真实 HeroCaptionPanel 的 VStack 保持一致对齐方式
+            VStack(alignment: .leading, spacing: 18) {
+
+                // eyebrow 骨架（对应 HeroCaptionPanel 的 heroEyebrow）
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 80, height: 13)
+                    .shimmer()
+
+                // 大标题骨架（对应 HeroCaptionPanel 的 heroTitle — font size 46 bold serif）
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.white.opacity(0.11))
+                    .frame(width: min(width * 0.36, 420), height: 46)
+                    .shimmer()
+
+                // 元数据行骨架（对应 HeroMetaLine）
+                HStack(spacing: 8) {
+                    ForEach(0..<4, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.white.opacity(0.07))
+                            .frame(width: i == 3 ? 50 : 70, height: 14)
                             .shimmer()
-                        
-                        // 大标题骨架
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white.opacity(0.12))
-                            .frame(width: 280, height: 40)
-                            .shimmer()
-                        
-                        // 按钮骨架
-                        HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 22)
-                                .fill(Color.white.opacity(0.1))
-                                .frame(width: 120, height: 44)
-                                .shimmer()
-                            
-                            RoundedRectangle(cornerRadius: 22)
-                                .fill(Color.white.opacity(0.08))
-                                .frame(width: 80, height: 44)
-                                .shimmer()
-                        }
                     }
-                    
-                    Spacer()
                 }
-                .padding(.horizontal, 50)
-                .padding(.bottom, 80)
+
+                // 按钮行骨架（对应两个 HeroActionButton）
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: 22)
+                        .fill(Color.white.opacity(0.09))
+                        .frame(width: 130, height: 44)
+                        .shimmer()
+
+                    RoundedRectangle(cornerRadius: 22)
+                        .fill(Color.white.opacity(0.07))
+                        .frame(width: 80, height: 44)
+                        .shimmer()
+                }
             }
+            // ★ 核心：与 HomeContentView.swift 中 HeroCaptionPanel 完全一致的 frame + padding
+            .frame(maxWidth: min(width * 0.42, 520), alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .padding(.leading, heroCaptionLeadingInset)
+            .padding(.trailing, heroCaptionTrailingInset)
         }
+        .frame(width: width, height: height)
     }
 }
 

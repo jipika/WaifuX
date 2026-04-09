@@ -60,6 +60,8 @@ class WallpaperViewModel: ObservableObject {
     @Published var selectedRatios: [String] = []
     @Published var selectedColors: [String] = []
     @Published var atleastResolution: String? = nil  // 最小分辨率，如 "3840x2160"
+    @Published var selected4KCategorySlug: String? = nil  // 4K 源的分类 slug（如 "anime", "nature"）
+    @Published var selected4KSorting: FourKSortingOption = .latest  // 4K 源的排序方式
 
     // MARK: - 本地收藏与下载记录
     private let wallpaperLibrary = WallpaperLibraryService.shared
@@ -76,6 +78,12 @@ class WallpaperViewModel: ObservableObject {
 
     private let networkService = NetworkService.shared
     private let cacheService = CacheService.shared
+    private let sourceManager = WallpaperSourceManager.shared
+
+    /// 壁纸源切换消息（供 UI 层显示 Toast）
+    var sourceSwitchMessage: String? {
+        sourceManager.lastSwitchMessage
+    }
 
     // API Key - 使用 Keychain 安全存储（优化：内存缓存 + 异步访问）
     private let apiKeyService = "com.waifux.wallhaven.apikey"
@@ -641,15 +649,138 @@ class WallpaperViewModel: ObservableObject {
     }
 
     private func fetchWallpapers(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
+        // MARK: - 数据源路由：WallHaven → 4KWallpapers 两级降级
+        let sourceManager = WallpaperSourceManager.shared
+
+        // 检查是否需要用回退源
+        if let fallbackSource = sourceManager.shouldUseFallback() {
+            print("[WallpaperViewModel] 🔄 Using \(fallbackSource.displayName) fallback source")
+            return try await fetchFromFallbackSource(fallbackSource, parameters: parameters)
+        }
+
+        // 正常走 Wallhaven（⚠️ 5秒超时，失败立即降级）
         guard let url = WallhavenAPI.url(for: .search(parameters)) else {
             throw NetworkError.invalidResponse
         }
 
-        return try await networkService.fetch(
-            WallpaperSearchResponse.self,
-            from: url,
-            headers: WallhavenAPI.authenticationHeaders(apiKey: normalizedAPIKey)
-        )
+        do {
+            // 带短超时的 WallHaven 请求：5 秒内没返回就视为失败，立即切换到降级源
+            let result = try await withWallhavenTimeout(seconds: 5) {
+                try await self.networkService.fetch(
+                    WallpaperSearchResponse.self,
+                    from: url,
+                    headers: WallhavenAPI.authenticationHeaders(apiKey: self.normalizedAPIKey)
+                )
+            }
+            sourceManager.recordSuccess()
+            return result
+        } catch {
+            sourceManager.recordFailure(error: error)
+            print("[WallpaperViewModel] ⚠️ Wallhaven failed (\(error.localizedDescription)), switching to fallback...")
+
+            // 立即尝试降级（不再等待重试）
+            sourceManager.performAutoSwitch()
+
+            // 从当前降级源获取数据
+            return try await fetchFromFallbackSource(sourceManager.activeSource, parameters: parameters)
+        }
+    }
+
+    /// 从指定的回退源获取数据
+    private func fetchFromFallbackSource(_ source: WallpaperSourceManager.SourceType, parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
+        switch source {
+        case .fourKWallpapers:
+            do {
+                // 4K 分类映射：优先使用用户在探索页选择的 4K 分类，否则尝试从 WallHaven 分类推断
+                let categorySlug: String?
+                if let selected4K = selected4KCategorySlug {
+                    categorySlug = selected4K
+                } else if !parameters.categories.isEmpty && parameters.categories != "111" {
+                    // 从 WallHaven 分类掩码推断
+                    // "100" = general, "010" = anime, "001" = people
+                    if parameters.categories == "010" {
+                        categorySlug = "anime"
+                    } else if parameters.categories == "001" {
+                        categorySlug = "people"
+                    } else {
+                        categorySlug = nil
+                    }
+                } else {
+                    categorySlug = nil
+                }
+                
+                // 决定使用 Popular 还是 Latest URL
+                let usePopular: Bool
+                switch selected4KSorting {
+                case .popular:
+                    usePopular = true
+                case .latest:
+                    usePopular = false
+                }
+
+                return try await FourKWallpapersService.shared.search(
+                    query: parameters.query,
+                    page: parameters.page,
+                    perPage: parameters.perPage,
+                    category: categorySlug,
+                    purity: "sfw",
+                    usePopular: usePopular
+                )
+            } catch {
+                print("[WallpaperViewModel] ❌ 4KWallpapers also failed: \(error.localizedDescription)")
+                // 已是最后一级，无法再降级
+                _ = WallpaperSourceManager.shared.recordCurrentSourceFailedAndDowngrade()
+                throw error
+            }
+
+        case .wallhaven:
+            // 不应该走到这里，但以防万一
+            fatalError("fetchFromFallbackSource called with wallhaven source")
+        }
+    }
+
+    /// 给 WallHaven 请求加上短超时保护，超时后立即取消并抛错以便触发降级
+    private func withWallhavenTimeout<T: Sendable>(seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+
+            guard let result = try await group.next() else {
+                throw URLError(.timedOut)
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// 当前数据源是否支持 NSFW 筛选
+    var currentSourceSupportsNSFW: Bool {
+        sourceManager.currentSourceSupportsNSFW
+    }
+
+    /// 当前数据源是否支持 WallHaven 风格排序
+    var currentSourceSupportsWallhavenSorting: Bool {
+        sourceManager.currentSourceSupportsWallhavenSorting
+    }
+
+    /// 当前数据源是否支持比例筛选
+    var currentSourceSupportsRatioFilter: Bool {
+        sourceManager.currentSourceSupportsRatioFilter
+    }
+
+    /// 当前数据源是否支持颜色筛选
+    var currentSourceSupportsColorFilter: Bool {
+        sourceManager.currentSourceSupportsColorFilter
+    }
+
+    /// 当前数据源是否使用 WallHaven 风格分类（general/anime/people）
+    var currentSourceSupportsWallhavenCategories: Bool {
+        sourceManager.currentSourceSupportsWallhavenCategories
     }
 
     private func normalizedCategoryMask() -> String {
@@ -745,7 +876,24 @@ class WallpaperViewModel: ObservableObject {
     }
 
     func downloadWallpaperData(_ wallpaper: Wallpaper, taskID: String? = nil) async throws -> Data {
-        guard let downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL else {
+        var downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL
+
+        // 4K 源壁纸兜底：如果 fullImageURL 不是图片链接（推断失败时可能存的是详情页链接），从详情页解析原图
+        if wallpaper.source == "4kwallpapers",
+           let currentURL = downloadURL,
+           !currentURL.pathExtension.isEmpty,
+           !["jpg", "jpeg", "png", "webp", "gif"].contains(currentURL.pathExtension.lowercased()) {
+            let originalURL = await FourKWallpapersService.shared.fetchOriginalImageURL(for: wallpaper)
+            if let originalURLString = originalURL, let url = URL(string: originalURLString) {
+                downloadURL = url
+                print("[WallpaperViewModel] 4K wallpaper: fallback to detail page parsed URL: \(originalURLString)")
+            } else {
+                downloadURL = wallpaper.thumbURL  // 最终兜底用缩略图
+                print("[WallpaperViewModel] 4K wallpaper: all fallbacks failed, using thumbnail")
+            }
+        }
+
+        guard let downloadURL else {
             throw NetworkError.invalidResponse
         }
         
@@ -865,6 +1013,28 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 获取精选壁纸（用于轮播）- 日榜，仅横版
     func fetchFeaturedWallpapers() async throws -> [Wallpaper] {
+        let sourceManager = WallpaperSourceManager.shared
+        if let fallbackSource = sourceManager.shouldUseFallback() {
+            print("[WallpaperViewModel] Featured: Using \(fallbackSource.displayName) fallback")
+            do {
+                return try await fetchFeaturedFromSource(fallbackSource)
+            } catch {
+                return try await featuredFromMainSource()
+            }
+        }
+        return try await featuredFromMainSource()
+    }
+
+    private func fetchFeaturedFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
+        switch source {
+        case .fourKWallpapers:
+            return try await FourKWallpapersService.shared.fetchFeatured(limit: 24)
+        case .wallhaven:
+            return try await featuredFromMainSource()
+        }
+    }
+
+    private func featuredFromMainSource() async throws -> [Wallpaper] {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,
@@ -881,6 +1051,28 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 获取 Top 列表
     func fetchTopWallpapers() async throws -> [Wallpaper] {
+        let sourceManager = WallpaperSourceManager.shared
+        if let fallbackSource = sourceManager.shouldUseFallback() {
+            print("[WallpaperViewModel] Top: Using \(fallbackSource.displayName) fallback")
+            do {
+                return try await fetchTopFromSource(fallbackSource)
+            } catch {
+                return try await topFromMainSource()
+            }
+        }
+        return try await topFromMainSource()
+    }
+
+    private func fetchTopFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
+        switch source {
+        case .fourKWallpapers:
+            return try await FourKWallpapersService.shared.fetchTop(limit: 8)
+        case .wallhaven:
+            return try await topFromMainSource()
+        }
+    }
+
+    private func topFromMainSource() async throws -> [Wallpaper] {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,
@@ -896,6 +1088,28 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 获取 Latest 列表
     func fetchLatestWallpapers() async throws -> [Wallpaper] {
+        let sourceManager = WallpaperSourceManager.shared
+        if let fallbackSource = sourceManager.shouldUseFallback() {
+            print("[WallpaperViewModel] Latest: Using \(fallbackSource.displayName) fallback")
+            do {
+                return try await fetchLatestFromSource(fallbackSource)
+            } catch {
+                return try await latestFromMainSource()
+            }
+        }
+        return try await latestFromMainSource()
+    }
+
+    private func fetchLatestFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
+        switch source {
+        case .fourKWallpapers:
+            return try await FourKWallpapersService.shared.fetchLatest(limit: 8)
+        case .wallhaven:
+            return try await latestFromMainSource()
+        }
+    }
+
+    private func latestFromMainSource() async throws -> [Wallpaper] {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,

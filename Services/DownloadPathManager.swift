@@ -322,4 +322,5 @@ final class DownloadPathManager {
 // MARK: - Notification Names
 extension Notification.Name {
     static let downloadPathChanged = Notification.Name("downloadPathChanged")
+    static let wallpaperDataSourceChanged = Notification.Name("wallpaperDataSourceChanged")
 }

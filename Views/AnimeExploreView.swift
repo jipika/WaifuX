@@ -13,6 +13,7 @@ struct AnimeExploreView: View {
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var sortAscending = false
     @State private var displayedAnimeItems: [AnimeSearchResult] = []
+    @State private var visibleCardIDs: Set<String> = []
     
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
@@ -27,7 +28,7 @@ struct AnimeExploreView: View {
             let gridContentWidth = max(0, geometry.size.width - 56)
 
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 24) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     heroSection
                     animeSection(gridContentWidth: gridContentWidth)
                 }
@@ -95,6 +96,8 @@ struct AnimeExploreView: View {
         }
         .onChange(of: viewModel.animeItems.first?.id) { _, _ in
             syncExploreAtmosphere()
+            // 数据源变更（新搜索/新分类），重置入场动画
+            visibleCardIDs.removeAll()
         }
         .onChange(of: viewModel.animeItems.count) { _, _ in
             rebuildDisplayedAnimeItems()
@@ -257,7 +260,7 @@ struct AnimeExploreView: View {
     // MARK: - Anime Grid Section
 
     private func animeSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center) {
                 Text("\(displayedAnimeItems.count) \(t("content.animes"))")
                     .font(.system(size: 16, weight: .semibold))
@@ -323,17 +326,28 @@ struct AnimeExploreView: View {
             spacing: spacing
         ) {
             ForEach(Array(displayedAnimeItems.enumerated()), id: \.element.id) { index, anime in
-                AnimeCard(
+                AnimePortraitCard(
                     anime: anime,
-                    index: index,
                     cardWidth: cardWidth,
-                    cardHeight: cardHeight,
-                    onTap: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            selectedAnime = anime
-                        }
+                    cardHeight: cardHeight
+                ) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        selectedAnime = anime
                     }
-                )
+                }
+                .onAppear {
+                    let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(Double(min(index % 8, 4)) * 0.05)) {
+                        visibleCardIDs.insert(anime.id)
+                    }
+                }
+                .opacity(visibleCardIDs.contains(anime.id) ? 1 : 0)
+                .offset(y: visibleCardIDs.contains(anime.id) ? 0 : 30)
+                .scaleEffect(visibleCardIDs.contains(anime.id) ? 1 : 0.9)
+                .scrollTransition { content, phase in
+                    content
+                        .scaleEffect(phase.isIdentity ? 1 : 0.95)
+                        .opacity(phase.isIdentity ? 1 : 0.8)
+                }
             }
         }
         .frame(height: calculateTotalHeight(itemCount: displayedAnimeItems.count, cardHeight: cardHeight, columnCount: columnCount, spacing: spacing))
@@ -451,29 +465,32 @@ struct AnimeExploreView: View {
     private func rebuildDisplayedAnimeItems() {
         let source = viewModel.animeItems
         
-        let newItems: [AnimeSearchResult]
-        switch selectedSort {
-        case .newest:
-            newItems = sortAscending ? source.reversed() : source
-        case .title:
-            newItems = source.sorted { lhs, rhs in
-                let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
-                if cmp == .orderedSame { return false }
-                return sortAscending ? cmp == .orderedDescending : cmp == .orderedAscending
-            }
-        case .popular:
-            newItems = source.sorted { lhs, rhs in
-                let lhsScore = Double(lhs.rating ?? "0") ?? 0
-                let rhsScore = Double(rhs.rating ?? "0") ?? 0
-                if lhsScore == rhsScore {
-                    return lhs.rank ?? Int.max < rhs.rank ?? Int.max
+        // 默认 newest 排序 + 正序 = 无需排序，直接使用源数据
+        if selectedSort == .newest && !sortAscending {
+            displayedAnimeItems = source
+        } else {
+            let newItems: [AnimeSearchResult]
+            switch selectedSort {
+            case .newest:
+                newItems = source.reversed()
+            case .title:
+                newItems = source.sorted { lhs, rhs in
+                    let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+                    if cmp == .orderedSame { return false }
+                    return sortAscending ? cmp == .orderedDescending : cmp == .orderedAscending
                 }
-                return sortAscending ? lhsScore < rhsScore : lhsScore > rhsScore
+            case .popular:
+                newItems = source.sorted { lhs, rhs in
+                    let lhsScore = Double(lhs.rating ?? "0") ?? 0
+                    let rhsScore = Double(rhs.rating ?? "0") ?? 0
+                    if lhsScore == rhsScore {
+                        return lhs.rank ?? Int.max < rhs.rank ?? Int.max
+                    }
+                    return sortAscending ? lhsScore < rhsScore : lhsScore > rhsScore
+                }
             }
+            displayedAnimeItems = newItems
         }
-        
-        displayedAnimeItems = newItems
-        syncExploreAtmosphere()
     }
     
     private func resetAllFilters() {
@@ -482,40 +499,10 @@ struct AnimeExploreView: View {
         selectedCategory = .all
         selectedSort = .newest
         sortAscending = false
+        visibleCardIDs.removeAll()
 
         Task {
             await viewModel.loadInitialData()
-        }
-    }
-}
-
-// MARK: - Anime Card with Entrance Animation
-
-private struct AnimeCard: View {
-    let anime: AnimeSearchResult
-    let index: Int
-    let cardWidth: CGFloat
-    let cardHeight: CGFloat
-    let onTap: () -> Void
-    
-    @State private var isVisible = false
-    
-    var body: some View {
-        AnimePortraitCard(
-            anime: anime,
-            cardWidth: cardWidth,
-            cardHeight: cardHeight
-        ) {
-            onTap()
-        }
-        .opacity(isVisible ? 1 : 0)
-        .offset(y: isVisible ? 0 : 30)
-        .scaleEffect(isVisible ? 1 : 0.9)
-        .onAppear {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)
-                .delay(Double(min(index % 8, 4)) * 0.05)) {
-                isVisible = true
-            }
         }
     }
 }

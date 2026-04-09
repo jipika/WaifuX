@@ -94,6 +94,11 @@ struct HomeContentView: View {
                 await mediaViewModel.initialLoadIfNeeded()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
+            Task { @MainActor in
+                await viewModel.refresh()
+            }
+        }
         .onDisappear {
             stopCarouselAutoPlay()
             cancelCarouselLoopReset()
@@ -114,13 +119,16 @@ struct HomeContentView: View {
     private var heroSection: some View {
         GeometryReader { geometry in
             let wallpapers = heroWallpapers
-            let width = geometry.size.width
+            // 方案 D：NSWindow fallback — 首次布局时 GeometryReader 可能读到 provisional bounds，
+            // 用 NSWindow contentView 的实际 frame 作为兜底，消除启动时宽度不一致
+            let windowFallback = NSApp.mainWindow?.contentView?.frame.width ?? 1200
+            let width = max(geometry.size.width, windowFallback)
             let heroCaptionLeadingInset = max(112, width * 0.1)
             let heroCaptionTrailingInset = max(96, width * 0.08)
 
             ZStack {
                 if wallpapers.isEmpty {
-                    HeroSkeletonView()
+                    HeroSkeletonView(width: width, height: heroHeight)
                 } else {
                     heroCarousel(width: width, wallpapers: wallpapers)
 
@@ -1283,6 +1291,7 @@ private struct HeroEdgeButton: View {
                 .foregroundStyle(.white.opacity(0.92))
                 .frame(width: 46, height: 46)
                 .liquidGlassSurface(.regular, tint: LiquidGlassColors.glassTint, in: Circle())
+                .padding(10) // 扩大点击热区，修复按钮边缘及旁边区域无法点击的问题
         }
         .buttonStyle(.plain)
         .contentShape(Circle())

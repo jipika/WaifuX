@@ -16,6 +16,7 @@ struct MediaExploreContentView: View {
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var visibleCardIDs: Set<String> = []
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -24,7 +25,7 @@ struct MediaExploreContentView: View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 24) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     heroSection
                     categorySection
                     mediaSection(gridContentWidth: gridContentWidth)
@@ -216,6 +217,7 @@ struct MediaExploreContentView: View {
                     }
 
                     displayedMediaItems = []
+                    visibleCardIDs.removeAll()
 
                     Task {
                         if category == .all {
@@ -230,7 +232,7 @@ struct MediaExploreContentView: View {
     }
 
     private func mediaSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center) {
                 Text("\(formattedMediaCount) \(t("media.count")) · \(t("media.loaded")) \(formattedLoadedCount)")
                     .font(.system(size: 15, weight: .semibold))
@@ -298,14 +300,26 @@ struct MediaExploreContentView: View {
             spacing: spacing
         ) {
             ForEach(Array(displayedMediaItems.enumerated()), id: \.element.id) { index, item in
-                MediaCard(
+                SimpleMediaCard(
                     item: item,
-                    index: index,
                     cardWidth: cardWidth,
                     cardHeight: cardHeight,
                     isFavorite: viewModel.isFavorite(item),
                     onTap: { selectedMedia = item }
                 )
+                .onAppear {
+                    let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(Double(min(index % 8, 4)) * 0.05)) {
+                        visibleCardIDs.insert(item.id)
+                    }
+                }
+                .opacity(visibleCardIDs.contains(item.id) ? 1 : 0)
+                .offset(y: visibleCardIDs.contains(item.id) ? 0 : 30)
+                .scaleEffect(visibleCardIDs.contains(item.id) ? 1 : 0.9)
+                .scrollTransition { content, phase in
+                    content
+                        .scaleEffect(phase.isIdentity ? 1 : 0.95)
+                        .opacity(phase.isIdentity ? 1 : 0.8)
+                }
             }
         }
         .frame(height: calculateTotalHeight(itemCount: displayedMediaItems.count, cardHeight: cardHeight, columnCount: columnCount, spacing: spacing))
@@ -460,6 +474,7 @@ struct MediaExploreContentView: View {
         selectedCategory = .all
         selectedHotTag = nil
         displayedMediaItems = []
+        visibleCardIDs.removeAll()
         Task {
             await viewModel.search(query: query)
         }
@@ -482,6 +497,7 @@ struct MediaExploreContentView: View {
         if let hotTag = selectedHotTag, isServerSideHotTag(hotTag),
            let slug = Self.hotTagServerSlugs[hotTag] {
             displayedMediaItems = []
+            visibleCardIDs.removeAll()
             Task {
                 await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
             }
@@ -534,38 +550,6 @@ struct MediaExploreContentView: View {
 
         Task {
             await viewModel.loadHomeFeed()
-        }
-    }
-}
-
-// MARK: - Media Card with Entrance Animation
-
-private struct MediaCard: View {
-    let item: MediaItem
-    let index: Int
-    let cardWidth: CGFloat
-    let cardHeight: CGFloat
-    let isFavorite: Bool
-    let onTap: () -> Void
-    
-    @State private var isVisible = false
-    
-    var body: some View {
-        SimpleMediaCard(
-            item: item,
-            cardWidth: cardWidth,
-            cardHeight: cardHeight,
-            isFavorite: isFavorite,
-            onTap: onTap
-        )
-        .opacity(isVisible ? 1 : 0)
-        .offset(y: isVisible ? 0 : 30)
-        .scaleEffect(isVisible ? 1 : 0.9)
-        .onAppear {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)
-                .delay(Double(min(index % 8, 4)) * 0.05)) {
-                isVisible = true
-            }
         }
     }
 }
