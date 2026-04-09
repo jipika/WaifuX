@@ -41,18 +41,22 @@
 
 ## 📸 界面预览
 
-<table>
+<table width="100%">
   <tr>
-    <td><img src="screenshots/home.png" width="100%" /><br><p align="center">首页 - 精选推荐</p></td>
-    <td><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">壁纸浏览 - 智能筛选</p></td>
-    <td><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">壁纸详情 - 一键设置</p></td>
-    <td><img src="screenshots/settings.png" width="100%" /><br><p align="center">设置 - 个性化配置</p></td>
+    <td width="50%"><img src="screenshots/home.png" width="100%" /><br><p align="center">首页 - 精选推荐</p></td>
+    <td width="50%"><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">壁纸浏览 - 智能筛选</p></td>
   </tr>
   <tr>
-    <td><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">动态壁纸 - MotionBG</p></td>
-    <td><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">动漫详情 - 多源解析</p></td>
-    <td><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
-    <td></td>
+    <td width="50%"><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">壁纸详情 - 一键设置</p></td>
+    <td width="50%"><img src="screenshots/settings.png" width="100%" /><br><p align="center">设置 - 个性化配置</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">动态壁纸 - MotionBG</p></td>
+    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">动漫详情 - 多源解析</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
+    <td width="50%"></td>
   </tr>
 </table>
 

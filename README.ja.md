@@ -41,18 +41,22 @@
 
 ## 📸 スクリーンショット
 
-<table>
+<table width="100%">
   <tr>
-    <td><img src="screenshots/home.png" width="100%" /><br><p align="center">ホーム - おすすめ</p></td>
-    <td><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">壁紙ブラウズ - スマート検索</p></td>
-    <td><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">壁紙詳細 - ワンクリック設定</p></td>
-    <td><img src="screenshots/settings.png" width="100%" /><br><p align="center">設定 - パーソナライズ</p></td>
+    <td width="50%"><img src="screenshots/home.png" width="100%" /><br><p align="center">ホーム - おすすめ</p></td>
+    <td width="50%"><img src="screenshots/wallpaper.png" width="100%" /><br><p align="center">壁紙ブラウズ - スマート検索</p></td>
   </tr>
   <tr>
-    <td><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">動的壁紙 - MotionBG</p></td>
-    <td><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">アニメ詳細 - マルチソース</p></td>
-    <td><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">ビデオ再生 - エピソード選択</p></td>
-    <td></td>
+    <td width="50%"><img src="screenshots/wallpaper_detail.png" width="100%" /><br><p align="center">壁紙詳細 - ワンクリック設定</p></td>
+    <td width="50%"><img src="screenshots/settings.png" width="100%" /><br><p align="center">設定 - パーソナライズ</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">動的壁紙 - MotionBG</p></td>
+    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">アニメ詳細 - マルチソース</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">ビデオ再生 - エピソード選択</p></td>
+    <td width="50%"></td>
   </tr>
 </table>
 
