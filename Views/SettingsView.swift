@@ -546,31 +546,47 @@ private struct AboutSettingsTab: View {
     }
 
     var body: some View {
-        MacSettingsForm {
-            // 自动更新区域
-            autoUpdateSection
+        ZStack {
+            MacSettingsForm {
+                // 自动更新区域
+                autoUpdateSection
 
-            // 项目信息组
-            MacSettingsSection(header: t("projectInfo")) {
-                infoRow(title: t("developer"), value: "jipika", isLast: false)
-                infoRow(title: t("wallpaperRuleSource"), value: wallpaperRuleSourceText, isLast: false)
-                infoRow(title: t("animeRuleSource"), value: "KazumiRules", isLast: false)
-                infoRow(title: t("techStack"), value: "SwiftUI + AppKit", isLast: true)
+                // 项目信息组
+                MacSettingsSection(header: t("projectInfo")) {
+                    infoRow(title: t("developer"), value: "jipika", isLast: false)
+                    infoRow(title: t("wallpaperRuleSource"), value: wallpaperRuleSourceText, isLast: false)
+                    infoRow(title: t("animeRuleSource"), value: "KazumiRules", isLast: false)
+                    infoRow(title: t("techStack"), value: "SwiftUI + AppKit", isLast: true)
+                }
+
+                // 链接组
+                MacSettingsSection(header: t("links")) {
+                    Link(destination: URL(string: "https://wallhaven.cc")!) {
+                        MacLinkRow(title: t("visitWebsite"), action: nil)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
+
+                    Link(destination: URL(string: "https://github.com/jipika/WaifuX")!) {
+                        MacLinkRow(title: t("reportProblem"), action: nil)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-
-            // 链接组
-            MacSettingsSection(header: t("links")) {
-                Link(destination: URL(string: "https://wallhaven.cc")!) {
-                    MacLinkRow(title: t("visitWebsite"), action: nil)
-                }
-                .buttonStyle(.plain)
-
-                Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
-
-                Link(destination: URL(string: "https://github.com/jipika/WaifuX")!) {
-                    MacLinkRow(title: t("reportProblem"), action: nil)
-                }
-                .buttonStyle(.plain)
+            
+            // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
+            if showAutoUpdateSheet, 
+               case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
+                AutoUpdateSheet(
+                    currentVersion: current,
+                    latestVersion: release.version,
+                    release: release,
+                    commit: commit,
+                    onClose: { showAutoUpdateSheet = false }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity.animation(.easeOut(duration: 0.25)))
             }
         }
     }
@@ -675,17 +691,6 @@ private struct AboutSettingsTab: View {
             }
             .padding(14)
         }
-        .sheet(isPresented: $showAutoUpdateSheet) {
-            if case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
-                AutoUpdateSheet(
-                    currentVersion: current,
-                    latestVersion: release.version,
-                    release: release,
-                    commit: commit,
-                    onClose: { showAutoUpdateSheet = false }
-                )
-            }
-        }
     }
     
     @ViewBuilder
@@ -743,84 +748,87 @@ struct SettingsUpdateSection: View {
     @State private var showUpdateSheet = false
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // 版本信息
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("当前版本")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    Text(viewModel.appVersion)
-                        .font(.system(size: 14, weight: .medium))
-                }
-                
-                Spacer()
-                
-                // 更新状态指示
-                updateStatusView
-            }
-            
-            // 检查更新按钮
-            HStack(spacing: 12) {
-                Button {
-                    Task {
-                        await viewModel.checkForUpdates()
-                        // 如果有更新，自动显示弹窗
-                        if case .updateAvailable = viewModel.updateCheckResult {
-                            showUpdateSheet = true
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        if viewModel.isCheckingUpdate || updateChecker.isChecking {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        }
-                        Image(systemName: "arrow.clockwise")
+        ZStack {
+            VStack(alignment: .leading, spacing: 16) {
+                // 版本信息
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("当前版本")
                             .font(.system(size: 12))
-                        Text(viewModel.isCheckingUpdate || updateChecker.isChecking ? "检查中..." : "检查更新")
-                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Text(viewModel.appVersion)
+                            .font(.system(size: 14, weight: .medium))
                     }
-                    .frame(height: 28)
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isCheckingUpdate || updateChecker.isChecking)
-                
-                if let lastCheck = updateChecker.lastCheckDate {
-                    Text("上次检查: \(formatRelativeDate(lastCheck))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            
-            // 已下载但未安装的提示
-            if case .downloaded(let path) = updateManager.state {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("更新已下载")
-                        .font(.system(size: 13))
+                    
                     Spacer()
-                    Button {
-                        updateManager.installUpdate()
-                    } label: {
-                        Text("立即安装")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+                    
+                    // 更新状态指示
+                    updateStatusView
                 }
-                .padding(10)
-                .background(Color.green.opacity(0.1))
-                .cornerRadius(8)
+                
+                // 检查更新按钮
+                HStack(spacing: 12) {
+                    Button {
+                        Task {
+                            await viewModel.checkForUpdates()
+                            // 如果有更新，自动显示弹窗
+                            if case .updateAvailable = viewModel.updateCheckResult {
+                                showUpdateSheet = true
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if viewModel.isCheckingUpdate || updateChecker.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.8)
+                            }
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12))
+                            Text(viewModel.isCheckingUpdate || updateChecker.isChecking ? "检查中..." : "检查更新")
+                                .font(.system(size: 13))
+                        }
+                        .frame(height: 28)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isCheckingUpdate || updateChecker.isChecking)
+                    
+                    if let lastCheck = updateChecker.lastCheckDate {
+                        Text("上次检查: \(formatRelativeDate(lastCheck))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                // 已下载但未安装的提示
+                if case .downloaded(_) = updateManager.state {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("更新已下载")
+                            .font(.system(size: 13))
+                        Spacer()
+                        Button {
+                            updateManager.installUpdate()
+                        } label: {
+                            Text("立即安装")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(10)
+                    .background(Color.green.opacity(0.1))
+                    .cornerRadius(8)
+                }
             }
-        }
-        .padding(16)
-        .background(Color.secondary.opacity(0.05))
-        .cornerRadius(12)
-        .sheet(isPresented: $showUpdateSheet) {
-            if case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
+            .padding(16)
+            .background(Color.secondary.opacity(0.05))
+            .cornerRadius(12)
+            
+            // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
+            if showUpdateSheet, 
+               case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
                 AutoUpdateSheet(
                     currentVersion: current,
                     latestVersion: release.version,
@@ -828,6 +836,8 @@ struct SettingsUpdateSection: View {
                     commit: commit,
                     onClose: { showUpdateSheet = false }
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity.animation(.easeOut(duration: 0.25)))
             }
         }
     }

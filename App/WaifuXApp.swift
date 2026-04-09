@@ -67,6 +67,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
     private let settingsViewModel = SettingsViewModel()
     private var settingsWindowController: NSWindowController?
+    
+    // MARK: - 窗口自动保存名称
+    private enum WindowAutosaveName {
+        static let mainWindow = "WaifuXMainWindow"
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
         // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
@@ -90,11 +95,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let contentView = ContentView()
             .frame(minWidth: 900, minHeight: 600)
 
+        // 使用 defer: true 延迟窗口显示，避免先创建默认大小再恢复保存大小产生的缩放动画
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
-            defer: false
+            defer: true
         )
 
         window?.title = "WaifuX"
@@ -115,18 +121,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         window?.delegate = self
 
-        window?.center()
-
-        // 延迟显示窗口，避免布局未完成时的视觉闪烁
-        DispatchQueue.main.async {
-            self.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        // 设置窗口自动保存名称 - macOS 会自动恢复保存的窗口大小和位置
+        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
+        
+        // 首次启动时居中显示（没有保存的窗口状态时）
+        if !hasSavedWindowFrame() {
+            window?.center()
         }
+
+        // 现在显示窗口 - 此时大小已经被 setFrameAutosaveName 恢复好了
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         
         // 注：更新检查已移到 ContentView 中处理
     }
 
-    func applicationShouldHandleReopening(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    @MainActor func applicationShouldHandleReopening(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if flag {
             window?.makeKeyAndOrderFront(nil)
         } else {
@@ -147,11 +157,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let contentView = ContentView()
                 .frame(minWidth: 900, minHeight: 600)
 
+            // 使用 defer: true 延迟窗口显示，避免缩放动画
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
-                defer: false
+                defer: true
             )
 
             window?.title = "WaifuX"
@@ -168,7 +179,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.contentView = hostingView
 
             window?.delegate = self
-            window?.center()
+            
+            // 设置窗口自动保存名称 - macOS 会自动恢复保存的窗口大小和位置
+            window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
+            
+            // 首次启动时居中显示
+            if !hasSavedWindowFrame() {
+                window?.center()
+            }
         }
 
         // 检查窗口是否被最小化
@@ -272,6 +290,16 @@ extension AppDelegate {
         // 点击关闭按钮时隐藏窗口而不是退出
         hideMainWindow()
         return false
+    }
+}
+
+// MARK: - 窗口状态检测
+extension AppDelegate {
+    /// 检查是否有保存的窗口状态
+    private func hasSavedWindowFrame() -> Bool {
+        // macOS 使用 NSWindow Frame <name> 作为键保存窗口状态
+        let key = "NSWindow Frame \(WindowAutosaveName.mainWindow)"
+        return UserDefaults.standard.object(forKey: key) != nil
     }
 }
 

@@ -60,6 +60,7 @@ struct TopNavigationBar: View {
                 }
             }
             .frame(width: 88, alignment: .trailing)  // 与左侧等宽，保持居中
+            .contentShape(Rectangle())  // 确保整个区域都可点击
         }
         .padding(.horizontal, 26)
         .padding(.top, 12)
