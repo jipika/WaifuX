@@ -51,3 +51,6 @@ Docs/assets/
 Docs/index.html
 landing/dist/
 landing/node_modules/
+
+# Trae
+.trae/
