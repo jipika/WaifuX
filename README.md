@@ -143,7 +143,7 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 
 ### 💬 加入 QQ 群
 
-- **WaifuX 用户交流群**: [971414910](https://qm.qq.com/q/7d4KGTx) 👈 点击加入
+- **WaifuX 用户交流群**: [点击加入](https://qm.qq.com/q/SRCj8msygq) 👈 971414910
 
 <p align="center">
   <img src="reward.jpg" width="280" alt="赞助二维码" />
