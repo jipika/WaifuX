@@ -193,17 +193,18 @@ struct AnimeExploreView: View {
                 Button {
                     resetAllFilters()
                 } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .frame(width: 46, height: 46)
-                        .contentShape(Circle())
-                        .liquidGlassSurface(
-                            .prominent,
-                            tint: exploreAtmosphere.tint.secondary.opacity(0.12),
-                            in: Circle()
-                        )
+                    ZStack {
+                        // 背景
+                        Circle()
+                            .fill(.white.opacity(0.08))
+                        
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                    .frame(width: 46, height: 46)
                 }
+                .buttonStyle(.plain)
             }
 
         }
@@ -525,12 +526,21 @@ struct AnimeExploreView: View {
         searchText = ""
         selectedHotTag = nil
         selectedCategory = .all
+        // ⚠️ 先清空 displayedAnimeItems 避免旧数据显示
+        displayedAnimeItems = []
+        // ⚠️ 延迟修改排序相关状态，避免触发 rebuildDisplayedAnimeItems 的抖动
         selectedSort = .newest
         sortAscending = false
-        visibleCardIDs.removeAll()
 
         Task {
             await viewModel.loadInitialData()
+            // 数据加载完成后，重建列表并填充 visibleCardIDs
+            await MainActor.run {
+                rebuildDisplayedAnimeItems()
+                for anime in viewModel.animeItems {
+                    visibleCardIDs.insert(anime.id)
+                }
+            }
         }
     }
 }

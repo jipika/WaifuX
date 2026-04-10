@@ -174,16 +174,16 @@ struct MediaExploreContentView: View {
                 Button {
                     resetAllFilters()
                 } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .frame(width: 46, height: 46)
-                        .contentShape(Circle())
-                        .liquidGlassSurface(
-                            .prominent,
-                            tint: exploreAtmosphere.tint.secondary.opacity(0.12),
-                            in: Circle()
-                        )
+                    ZStack {
+                        // 背景
+                        Circle()
+                            .fill(.white.opacity(0.08))
+                        
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                    .frame(width: 46, height: 46)
                 }
                 .buttonStyle(.plain)
             }
@@ -473,9 +473,14 @@ struct MediaExploreContentView: View {
         selectedCategory = .all
         selectedHotTag = nil
         displayedMediaItems = []
-        visibleCardIDs.removeAll()
         Task {
             await viewModel.search(query: query)
+            // 搜索完成后，重新填充 visibleCardIDs
+            await MainActor.run {
+                for item in viewModel.items {
+                    visibleCardIDs.insert(item.id)
+                }
+            }
         }
     }
 
@@ -496,9 +501,14 @@ struct MediaExploreContentView: View {
         if let hotTag = selectedHotTag, isServerSideHotTag(hotTag),
            let slug = Self.hotTagServerSlugs[hotTag] {
             displayedMediaItems = []
-            visibleCardIDs.removeAll()
             Task {
                 await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
+                // 数据加载完成后，重新填充 visibleCardIDs
+                await MainActor.run {
+                    for item in viewModel.items {
+                        visibleCardIDs.insert(item.id)
+                    }
+                }
             }
             return
         }
@@ -549,6 +559,12 @@ struct MediaExploreContentView: View {
 
         Task {
             await viewModel.loadHomeFeed()
+            // 数据加载完成后，重新填充 visibleCardIDs 以显示卡片
+            await MainActor.run {
+                for item in viewModel.items {
+                    visibleCardIDs.insert(item.id)
+                }
+            }
         }
     }
 }

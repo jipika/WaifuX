@@ -37,32 +37,34 @@ struct TopNavigationBar: View {
     private let controlHeight: CGFloat = 34
 
     var body: some View {
-        HStack(alignment: .center) {
+        HStack(alignment: .center, spacing: 0) {
+            // 左侧红绿灯 - 固定宽高，内容居中
             CustomWindowControls(
                 onClose: onClose,
                 onMinimize: onMinimize,
                 onMaximize: onMaximize
             )
-            .frame(width: 88, alignment: .leading)
+            .frame(width: 80, height: controlHeight, alignment: .center)
 
             Spacer()
 
+            // 中间 Tabs - 固定高度，垂直居中
             TopBarSegmentedControl(
                 selectedTab: $selectedTab,
                 controlHeight: controlHeight
             )
+            .frame(height: controlHeight, alignment: .center)
 
             Spacer()
 
-            HStack(spacing: 8) {
-                TopBarCircleButton(icon: "gearshape", size: controlHeight) {
-                    onOpenSettings()
-                }
+            // 右侧设置按钮 - 固定宽高，内容居中
+            TopBarCircleButton(icon: "gearshape", size: controlHeight) {
+                onOpenSettings()
             }
-            .frame(width: 88, alignment: .trailing)  // 与左侧等宽，保持居中
-            .contentShape(Rectangle())  // 确保整个区域都可点击
+            .frame(width: 48, height: controlHeight, alignment: .center)
         }
-        .padding(.horizontal, 26)
+        .padding(.leading, 12)
+        .padding(.trailing, 12)
         .padding(.top, 12)
         .padding(.bottom, 10)
     }
@@ -91,7 +93,6 @@ struct CustomWindowControls: View {
                 action: onMaximize
             )
         }
-        .frame(height: 34, alignment: .center)
     }
 }
 
@@ -141,7 +142,6 @@ private struct TopBarCircleButton: View {
                 .foregroundStyle(.white.opacity(0.88))
                 .frame(width: size, height: size)
                 .detailGlassCircleChrome()
-                .padding(10) // 扩大点击热区，修复按钮边缘及旁边区域无法点击的问题
         }
         .buttonStyle(.plain)
         .contentShape(Circle())
@@ -191,9 +191,8 @@ private struct TopBarSegmentedControl: View {
             }
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
-        .glassContainer(spacing: 10)
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
     }
 
@@ -226,7 +225,7 @@ private struct TopBarSegmentedControl: View {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                            lineWidth: 0.8
+                        lineWidth: 0.8
                     )
             )
             .shadow(color: .black.opacity(0.12), radius: 8, y: 4)

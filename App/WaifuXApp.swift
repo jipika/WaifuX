@@ -98,66 +98,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
         // macOS 26.5 beta 上这个问题更加严格，即使 @AppStorage 属性包装器 init 也会触发
         //
-        // 恢复顺序很重要：语言 → 主题 → 下载权限 → 更新缓存 → 媒体库 → 动漫 → 调度器
+        // ⚡ 优化：先显示窗口，再异步恢复数据，避免启动卡顿
 
-        // 0. 🚀 预加载 GitHub Hosts（异步解析 IP）
-        Task {
-            await GitHubHosts.refreshHosts()
-        }
-
-        // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
-        LocalizationService.shared.restoreSavedSettings()
-
-        // 2. 恢复主题设置（必须在 UI 渲染之前）
-        ThemeManager.shared.restoreSavedSettings()
-
-        // 3. 恢复下载权限和路径设置
-        DownloadPermissionManager.shared.restoreSavedPermission()
-
-        // 4. 恢复壁纸收藏/下载数据
-        WallpaperLibraryService.shared.restoreSavedData()
-
-        // 5. 恢复媒体收藏/下载数据
-        MediaLibraryService.shared.restoreSavedData()
-
-        // 6. 恢复动漫收藏数据
-        AnimeFavoriteStore.shared.restoreSavedData()
-
-        // 7. 恢复动漫进度数据
-        AnimeProgressStore.shared.restoreSavedData()
-
-        // 8. 恢复弹幕播放进度缓存
-        PlaybackProgressCache.shared.restoreSavedData()
-
-        // 9. 恢复下载任务列表
-        DownloadTaskService.shared.restoreSavedTasks()
-
-        // 10. 恢复壁纸调度器配置
-        WallpaperSchedulerService.shared.restoreSavedConfig()
-
-        // 11. 延迟恢复更新检查器缓存状态（读取 UserDefaults）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            UpdateChecker.shared.restoreCachedState()
-        }
-
-        // 12. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            WallpaperViewModel().restoreAPIKeyState()
-        }
-
-        // 13. 恢复壁纸源管理器状态
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            WallpaperSourceManager.shared.restoreState()
-        }
-
-        // 14. 延迟创建并恢复 SettingsViewModel（包含 @Published 属性的 UserDefaults 读取）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            let vm = SettingsViewModel()
-            vm.restoreSavedSettings()
-            self.settingsViewModel = vm
-        }
-
-        // 15. 初始化状态栏控制器（必须在显示窗口之前）
+        // 1. 初始化状态栏控制器（必须在显示窗口之前）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
                 self?.showMainWindow()
@@ -167,20 +110,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         )
 
+        // 2. 立即创建并显示窗口（只恢复 UI 必需的最少数据）
+        // 语言和主题必须在窗口显示前恢复
+        LocalizationService.shared.restoreSavedSettings()
+        ThemeManager.shared.restoreSavedSettings()
+        
+        // 3. 异步恢复其他数据（不阻塞窗口显示）
+        Task {
+            // 0. 预加载 GitHub Hosts
+            await GitHubHosts.refreshHosts()
+            
+            // 恢复各项数据（这些操作很快，直接在主线程执行）
+            await MainActor.run {
+                DownloadPermissionManager.shared.restoreSavedPermission()
+                WallpaperLibraryService.shared.restoreSavedData()
+                MediaLibraryService.shared.restoreSavedData()
+                AnimeFavoriteStore.shared.restoreSavedData()
+                AnimeProgressStore.shared.restoreSavedData()
+                PlaybackProgressCache.shared.restoreSavedData()
+                DownloadTaskService.shared.restoreSavedTasks()
+                WallpaperSchedulerService.shared.restoreSavedConfig()
+            }
+            
+            // 延迟恢复其他状态
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
+            await MainActor.run {
+                UpdateChecker.shared.restoreCachedState()
+            }
+            
+            try? await Task.sleep(nanoseconds: 50_000_000) // 0.25s total
+            await MainActor.run {
+                WallpaperViewModel().restoreAPIKeyState()
+                WallpaperSourceManager.shared.restoreState()
+            }
+            
+            try? await Task.sleep(nanoseconds: 50_000_000) // 0.3s total
+            await MainActor.run { [weak self] in
+                let vm = SettingsViewModel()
+                vm.restoreSavedSettings()
+                self?.settingsViewModel = vm
+            }
+        }
+
+        // 计算初始窗口大小：优先使用保存的大小，避免缩放动画
+        let initialSize = Self.savedWindowFrame() ?? Self.defaultWindowSize
+        let initialOrigin = Self.savedWindowFrame() != nil ? 
+            NSPoint(x: 0, y: 0) : // 有保存的frame时会由setFrameAutosaveName恢复位置和大小
+            NSPoint(x: (NSScreen.main?.visibleFrame.midX ?? 400) - initialSize.width / 2,
+                   y: (NSScreen.main?.visibleFrame.midY ?? 300) - initialSize.height / 2)
+
         let contentView = ContentView()
             .frame(
                 minWidth: Self.minimumWindowSize.width,
                 minHeight: Self.minimumWindowSize.height
             )
 
-        // 使用 defer: true 延迟窗口显示
-        // 注意：setFrameAutosaveName 在 setContentView 之前调用，
-        // 这样 SwiftUI 首次渲染时 GeometryReader 就能拿到正确的窗口宽度
+        // ⚠️ 关键：直接使用最终大小创建窗口，避免 resize 动画
+        // 不使用 defer: true，直接显示最终状态
         window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
+            contentRect: NSRect(origin: initialOrigin, size: initialSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
-            defer: true
+            defer: false
         )
 
         window?.title = "WaifuX"
@@ -195,9 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 设置最小窗口大小
         window?.minSize = Self.minimumWindowSize
 
-        // ⚠️ 关键顺序：先恢复保存的窗口尺寸，再设置 contentView
-        // 这样 SwiftUI 的 GeometryReader 首次渲染时就能拿到正确的最终宽度，
-        // 避免"加载前放大 → 加载后缩小"的布局抖动问题
+        // 恢复保存的窗口位置（如果有）
         window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
 
         // 使用无边框托管视图
@@ -205,13 +194,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.contentView = hostingView
 
         window?.delegate = self
-        
-        // 首次启动时居中显示（没有保存的窗口状态时）
-        if !hasSavedWindowFrame() {
-            window?.center()
-        }
 
-        // 显示窗口 - 此时大小已经是最终值（默认 or 恢复的保存值）
+        // 显示窗口
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
@@ -233,18 +217,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateActivationPolicy(showDockIcon: true)
 
         if window == nil {
+            // 计算初始窗口大小：优先使用保存的大小，避免缩放动画
+            let initialSize = Self.savedWindowFrame() ?? Self.defaultWindowSize
+            let initialOrigin: NSPoint
+            if Self.savedWindowFrame() != nil {
+                // 有保存的frame时会由setFrameAutosaveName恢复位置和大小
+                initialOrigin = NSPoint(x: 0, y: 0)
+            } else {
+                let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+                initialOrigin = NSPoint(
+                    x: screenFrame.midX - initialSize.width / 2,
+                    y: screenFrame.midY - initialSize.height / 2
+                )
+            }
+            
             let contentView = ContentView()
                 .frame(
                     minWidth: Self.minimumWindowSize.width,
                     minHeight: Self.minimumWindowSize.height
                 )
 
-            // 使用 defer: true 延迟窗口显示
+            // ⚠️ 关键：直接使用最终大小创建窗口，避免 resize 动画
             window = NSWindow(
-                contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
+                contentRect: NSRect(origin: initialOrigin, size: initialSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
-                defer: true
+                defer: false
             )
 
             window?.title = "WaifuX"
@@ -262,13 +260,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             window?.delegate = self
             
-            // 先恢复保存的窗口尺寸，再显示
+            // 恢复保存的窗口位置（如果有）
             window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
-            
-            // 首次启动时居中显示
-            if !hasSavedWindowFrame() {
-                window?.center()
-            }
         }
 
         // 确保窗口显示在最前面
@@ -384,9 +377,23 @@ extension AppDelegate {
 extension AppDelegate {
     /// 检查是否有保存的窗口状态
     private func hasSavedWindowFrame() -> Bool {
-        // macOS 使用 NSWindow Frame <name> 作为键保存窗口状态
+        return Self.savedWindowFrame() != nil
+    }
+    
+    /// 获取保存的窗口大小（如果有）
+    private static func savedWindowFrame() -> NSSize? {
         let key = "NSWindow Frame \(WindowAutosaveName.mainWindow)"
-        return UserDefaults.standard.object(forKey: key) != nil
+        guard let frameString = UserDefaults.standard.string(forKey: key) else {
+            return nil
+        }
+        // macOS 保存格式: "x y width height"
+        let components = frameString.split(separator: " ")
+        guard components.count >= 4,
+              let width = Double(components[2]),
+              let height = Double(components[3]) else {
+            return nil
+        }
+        return NSSize(width: width, height: height)
     }
 }
 
