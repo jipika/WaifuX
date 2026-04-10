@@ -66,7 +66,7 @@
 
 | Feature | Status | Description |
 |---------|:------:|-------------|
-| 🖼 **Static Wallpapers** | ✅ | Access to high-quality sources like Wallhaven with full 4K/8K resolution coverage |
+| 🖼 **Static Wallpapers** | ✅ | Dual source switching: Wallhaven + 4K Wall, full 4K/8K resolution coverage |
 | 🎬 **Dynamic Wallpapers** | ✅ | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
 | 📺 **Anime Videos** | ✅ | Built-in multi-source parsing engine for streaming and watching anime |
 | 🔍 **Smart Search & Filter** | ✅ | Keywords, tags, categories, color, resolution — find exactly what you want |

@@ -78,24 +78,9 @@ function SourceSection() {
 
     return (
         <div className="nt-sources">
-            <ScrollReveal>
-                <div className="nt-source-card nt-source-main">
-                    <div className="nt-source-header">
-                        <Play className="w-8 h-8" strokeWidth={1.5} />
-                        <span className="nt-source-badge">POPULAR</span>
-                    </div>
-                    <h3>{t.sources.motionbgs.name}</h3>
-                    <p>{t.sources.motionbgs.desc}</p>
-                    <div className="nt-source-tags">
-                        {t.sources.motionbgs.tags.map((tag: string, i: number) => (
-                            <span key={i} className="nt-tag">{tag}</span>
-                        ))}
-                    </div>
-                </div>
-            </ScrollReveal>
-
+            {/* Static Wallpapers Row */}
             <div className="nt-source-row">
-                <ScrollReveal delay={120}>
+                <ScrollReveal delay={80}>
                     <div className="nt-source-card nt-source-mini">
                         <Layers className="w-6 h-6 mb-4" strokeWidth={1.5} />
                         <h3>{t.sources.wallhaven.name}</h3>
@@ -108,7 +93,42 @@ function SourceSection() {
                     </div>
                 </ScrollReveal>
 
-                <ScrollReveal delay={200}>
+                <ScrollReveal delay={160}>
+                    <div className="nt-source-card nt-source-mini nt-source-highlight">
+                        <div className="nt-source-header-sm">
+                            <Layers className="w-6 h-6" strokeWidth={1.5} />
+                            <span className="nt-source-badge-sm">{t.sources['4kwall'].badge}</span>
+                        </div>
+                        <h3>{t.sources['4kwall'].name}</h3>
+                        <p>{t.sources['4kwall'].desc}</p>
+                        <div className="nt-tags-sm">
+                            {t.sources['4kwall'].tags.map((tag: string, i: number) => (
+                                <span key={i} className="nt-tag-sm">{tag}</span>
+                            ))}
+                        </div>
+                    </div>
+                </ScrollReveal>
+            </div>
+
+            {/* Dynamic & Anime Row */}
+            <div className="nt-source-row">
+                <ScrollReveal delay={240}>
+                    <div className="nt-source-card nt-source-mini">
+                        <div className="nt-source-header-sm">
+                            <Play className="w-6 h-6" strokeWidth={1.5} />
+                            <span className="nt-source-badge-sm popular">{t.sources.motionbgs.badge}</span>
+                        </div>
+                        <h3>{t.sources.motionbgs.name}</h3>
+                        <p>{t.sources.motionbgs.desc}</p>
+                        <div className="nt-tags-sm">
+                            {t.sources.motionbgs.tags.map((tag: string, i: number) => (
+                                <span key={i} className="nt-tag-sm">{tag}</span>
+                            ))}
+                        </div>
+                    </div>
+                </ScrollReveal>
+
+                <ScrollReveal delay={320}>
                     <div className="nt-source-card nt-source-mini">
                         <Tv className="w-6 h-6 mb-4" strokeWidth={1.5} />
                         <h3>{t.sources.anime.name}</h3>

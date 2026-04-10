@@ -705,6 +705,13 @@ body {
     margin-bottom: 18px;
 }
 
+.nt-source-header-sm {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+}
+
 .nt-source-badge {
     padding: 4px 12px;
     background: var(--nt-accent);
@@ -714,6 +721,31 @@ body {
     font-weight: 700;
     letter-spacing: 0.1em;
     border-radius: 6px;
+}
+
+.nt-source-badge-sm {
+    padding: 3px 10px;
+    background: rgba(249, 115, 22, 0.9);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    border-radius: 5px;
+}
+
+.nt-source-badge-sm.popular {
+    background: var(--nt-accent);
+    color: #000;
+}
+
+.nt-source-highlight {
+    border-color: rgba(249, 115, 22, 0.3);
+    background: rgba(249, 115, 22, 0.05);
+}
+
+.nt-source-highlight:hover {
+    border-color: rgba(249, 115, 22, 0.5);
 }
 
 .nt-source-card h3 {
