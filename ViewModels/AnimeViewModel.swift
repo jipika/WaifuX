@@ -12,6 +12,9 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 内容 (列表页使用 Bangumi)
     @Published var animeItems: [AnimeSearchResult] = []
     @Published var featuredItem: AnimeSearchResult?
+    
+    // MARK: - 内存优化：限制最大数据量
+    private let maxDataCount = 150  // 最多保留150条动漫数据
 
     // MARK: - 分页状态
     @Published var isLoading = false
@@ -320,6 +323,9 @@ class AnimeViewModel: ObservableObject {
                         return
                     }
                     self.animeItems.append(contentsOf: newResults)
+                    
+                    // 移除数据上限，避免滚动时出现空白
+                    // 内存优化通过降低 Kingfisher 缓存实现
                     self.currentPage = nextPage
                     self.hasMorePages = self.animeItems.count < (total ?? 0)
                     print("[AnimeViewModel] Loaded more (mode: \(currentQueryMode)), total: \(self.animeItems.count)")

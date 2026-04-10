@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Kingfisher
 
 // MARK: - AnimeDetailView - 与 MediaDetailSheet 风格一致
 
@@ -87,16 +88,13 @@ struct AnimeDetailView: View {
     private func fixedAnimeBackground(width: CGFloat, height viewH: CGFloat) -> some View {
         ZStack {
             // 封面图
-            OptimizedAsyncImage(
-                url: URL(string: anime.coverURL ?? ""),
-                priority: .high
-            ) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color(hex: "1A1A1E")
-            }
+            KFImage(URL(string: anime.coverURL ?? ""))
+                .fade(duration: 0.3)
+                .placeholder { _ in
+                    Color(hex: "1A1A1E")
+                }
+                .resizable()
+                .aspectRatio(contentMode: .fill)
             
             // 渐变遮罩
             LinearGradient(

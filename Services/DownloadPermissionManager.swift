@@ -255,6 +255,7 @@ final class DownloadPermissionManager {
     
     /// 确保目录存在，不存在则创建
     /// - Returns: 目录是否可用（已存在或创建成功）
+    @discardableResult
     private func ensureDirectoryExists(at url: URL) -> Bool {
         let fm = FileManager.default
         if !fm.fileExists(atPath: url.path) {

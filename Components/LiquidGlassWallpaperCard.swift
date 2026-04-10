@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 // MARK: - 液态玻璃壁纸卡片 (macOS 26 超写实玻璃风格)
 struct LiquidGlassWallpaperCard: View {
@@ -7,7 +8,6 @@ struct LiquidGlassWallpaperCard: View {
     let onTap: () -> Void
 
     @State private var isHovered = false
-    @State private var imageRetryId = UUID()
 
     private let cornerRadius: CGFloat = 20
 
@@ -16,20 +16,19 @@ struct LiquidGlassWallpaperCard: View {
             VStack(spacing: 0) {
                 // 图片区域 - 液态玻璃边框
                 ZStack {
-                    OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .medium) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        ZStack {
-                            Rectangle()
-                                .fill(LiquidGlassColors.glassWhiteSubtle)
-                            CustomProgressView(tint: LiquidGlassColors.primaryPink)
+                    KFImage(wallpaper.smallThumbURL)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            ZStack {
+                                Rectangle()
+                                    .fill(LiquidGlassColors.glassWhiteSubtle)
+                                CustomProgressView(tint: LiquidGlassColors.primaryPink)
+                            }
                         }
-                    }
-                    .id(imageRetryId)
-                    .frame(maxWidth: .infinity, minHeight: 160, idealHeight: 160, maxHeight: 160)
-                    .clipped()
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, minHeight: 160, idealHeight: 160, maxHeight: 160)
+                        .clipped()
                 }
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .overlay(
@@ -83,27 +82,9 @@ struct LiquidGlassWallpaperCard: View {
             isHovered = hovering
         }
         .help(wallpaper.resolution)
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
-    // MARK: - 加载失败占位图
-    private var failurePlaceholder: some View {
-        ZStack {
-            Rectangle()
-                .fill(LiquidGlassColors.glassWhiteSubtle)
-            VStack(spacing: 8) {
-                Image(systemName: "photo")
-                    .font(.system(size: 24, weight: .light))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
-                Text("TAP TO RETRY")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            imageRetryId = UUID()
-        }
-    }
 }
 
 // MARK: - 液态玻璃精选轮播卡片 (macOS 26 风格)
@@ -119,20 +100,20 @@ struct LiquidGlassCarouselCard: View {
         Button(action: onTap) {
             ZStack(alignment: .bottomLeading) {
                 // 图片
-                OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    Rectangle()
-                        .fill(LiquidGlassColors.glassWhiteSubtle)
-                        .overlay {
-                            Image(systemName: "photo")
-                                .font(.system(size: 32, weight: .light))
-                                .foregroundStyle(LiquidGlassColors.textTertiary)
-                        }
-                }
-                .frame(width: 340, height: 210)
+                KFImage(wallpaper.thumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Rectangle()
+                            .fill(LiquidGlassColors.glassWhiteSubtle)
+                            .overlay {
+                                Image(systemName: "photo")
+                                    .font(.system(size: 32, weight: .light))
+                                    .foregroundStyle(LiquidGlassColors.textTertiary)
+                            }
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 340, height: 210)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .scaleEffect(isHovered ? 1.04 : 1.0)
@@ -175,6 +156,7 @@ struct LiquidGlassCarouselCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -191,15 +173,15 @@ struct LiquidGlassFeaturedCard: View {
         Button(action: onTap) {
             ZStack(alignment: .bottomLeading) {
                 // 图片
-                OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    Rectangle()
-                        .fill(LiquidGlassColors.glassWhiteSubtle)
-                }
-                .frame(width: 320, height: 200)
+                KFImage(wallpaper.thumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Rectangle()
+                            .fill(LiquidGlassColors.glassWhiteSubtle)
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 320, height: 200)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .scaleEffect(isHovered ? 1.03 : 1.0)
@@ -248,6 +230,7 @@ struct LiquidGlassFeaturedCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -263,15 +246,15 @@ struct LiquidGlassCompactWallpaperCard: View {
     var body: some View {
         Button(action: onTap) {
             ZStack(alignment: .topTrailing) {
-                OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .low) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    Rectangle()
-                        .fill(LiquidGlassColors.glassWhiteSubtle)
-                }
-                .frame(maxWidth: .infinity, minHeight: 120, idealHeight: 120, maxHeight: 120)
+                KFImage(wallpaper.smallThumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Rectangle()
+                            .fill(LiquidGlassColors.glassWhiteSubtle)
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, minHeight: 120, idealHeight: 120, maxHeight: 120)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
 
@@ -315,5 +298,6 @@ struct LiquidGlassCompactWallpaperCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }

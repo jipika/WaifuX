@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
@@ -188,13 +189,19 @@ struct MyLibraryContentView: View {
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
-                            ForEach(viewModel.favorites) { wallpaper in
+                            ForEach(Array(viewModel.favorites.enumerated()), id: \.element.id) { index, wallpaper in
                                 WallpaperEditCard(
                                     wallpaper: wallpaper,
                                     isEditing: isEditing,
                                     isSelected: selectedItems.contains(wallpaper.id)
                                 ) {
                                     handleWallpaperTap(wallpaper)
+                                }
+                                .onAppear {
+                                    let urls = (index + 1..<(index + 4))
+                                        .filter { $0 < viewModel.favorites.count }
+                                        .compactMap { viewModel.favorites[$0].thumbURL }
+                                    ImagePrefetcher(urls: urls).start()
                                 }
                             }
                         }
@@ -268,13 +275,19 @@ struct MyLibraryContentView: View {
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
-                            ForEach(mediaViewModel.favoriteItems) { item in
+                            ForEach(Array(mediaViewModel.favoriteItems.enumerated()), id: \.element.id) { index, item in
                                 MediaVideoCard(
                                     item: item,
                                     isEditing: isEditing,
                                     isSelected: selectedItems.contains(item.id)
                                 ) {
                                     handleMediaTap(item)
+                                }
+                                .onAppear {
+                                    let urls = (index + 1..<(index + 4))
+                                        .filter { $0 < mediaViewModel.favoriteItems.count }
+                                        .map { mediaViewModel.favoriteItems[$0].thumbnailURL }
+                                    ImagePrefetcher(urls: urls).start()
                                 }
                             }
                         }
@@ -347,13 +360,19 @@ struct MyLibraryContentView: View {
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 18) {
-                            ForEach(animeFavorites) { anime in
+                            ForEach(Array(animeFavorites.enumerated()), id: \.element.id) { index, anime in
                                 AnimeLibraryCard(
                                     anime: anime,
                                     isEditing: isEditing,
                                     isSelected: selectedItems.contains(anime.id)
                                 ) {
                                     handleAnimeTap(anime)
+                                }
+                                .onAppear {
+                                    let urls = (index + 1..<(index + 4))
+                                        .filter { $0 < animeFavorites.count }
+                                        .compactMap { URL(string: animeFavorites[$0].coverURL ?? "") }
+                                    ImagePrefetcher(urls: urls).start()
                                 }
                             }
                         }
@@ -715,17 +734,17 @@ struct AnimeLibraryCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack(alignment: .bottomTrailing) {
-                    OptimizedAsyncImage(url: URL(string: anime.coverURL ?? ""), priority: .low) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        SkeletonCard(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight + 72,
-                            cornerRadius: 0
-                        )
-                    }
+                    KFImage(URL(string: anime.coverURL ?? ""))
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(
+                                width: LibraryCardMetrics.cardWidth,
+                                height: LibraryCardMetrics.thumbnailHeight + 72,
+                                cornerRadius: 0
+                            )
+                        }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
                     .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
                     .clipped()
 
@@ -788,6 +807,7 @@ struct AnimeLibraryCard: View {
                 isHovered = hovering
             }
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 

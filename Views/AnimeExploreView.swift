@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - AnimeExploreView - 动漫探索页
 
@@ -13,11 +14,12 @@ struct AnimeExploreView: View {
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var displayedItems: [AnimeSearchResult] = []
     @State private var visibleCardIDs: Set<String> = []
-    
+
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
-    
+
     @Binding var selectedAnime: AnimeSearchResult?
+    var isVisible: Bool = true
     @State private var searchTask: Task<Void, Never>?
     @State private var isTagSearchActive = false
 
@@ -25,37 +27,43 @@ struct AnimeExploreView: View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
 
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    heroSection
-                    categorySection
-                    contentSection(gridContentWidth: gridContentWidth)
+            ZStack {
+                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
+                if isVisible {
+                    ExploreDynamicAtmosphereBackground(
+                        tint: exploreAtmosphere.tint,
+                        referenceImage: exploreAtmosphere.referenceImage
+                    )
+                    .ignoresSafeArea()
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 80)
-                .padding(.bottom, 48)
-                .frame(width: geometry.size.width, alignment: .leading)
-                .background(scrollTrackingOverlay)
-                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        heroSection
+                        categorySection
+                        contentSection(gridContentWidth: gridContentWidth)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 80)
+                    .padding(.bottom, 48)
+                    .frame(width: geometry.size.width, alignment: .leading)
+                    .background(scrollTrackingOverlay)
+                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                }
+                .coordinateSpace(name: "exploreScroll")
+                .iosSmoothScroll()
+                .modifier(ScrollLoadMoreModifier(
+                    scrollOffset: $scrollOffset,
+                    threshold: 1500,  // 提前两屏预加载
+                    onLoadMore: triggerLoadMore,
+                    checkLoadMore: checkLoadMore
+                ))
+                .disabled(isInitialLoading)
             }
-            .coordinateSpace(name: "exploreScroll")
-            .iosSmoothScroll()
-            .modifier(ScrollLoadMoreModifier(
-                scrollOffset: $scrollOffset,
-                onLoadMore: triggerLoadMore,
-                checkLoadMore: checkLoadMore
-            ))
-            .disabled(isInitialLoading)
-            .background(
-                ExploreDynamicAtmosphereBackground(
-                    tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage
-                )
-            )
         }
         .task { await handleInitialLoad() }
-        .onChange(of: searchText) { handleSearchChange($1) }
-        .onChange(of: viewModel.animeItems.first?.id) { _ in handleDataSourceChange() }
+        .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
+        .onChange(of: viewModel.animeItems.first?.id) { _, _ in handleDataSourceChange() }
         .onChange(of: viewModel.animeItems.count) { _, _ in rebuildDisplayedItems() }
         .onChange(of: selectedSort) { _, _ in rebuildDisplayedItems() }
     }
@@ -205,27 +213,48 @@ struct AnimeExploreView: View {
             alignment: .leading,
             spacing: config.spacing
         ) {
-            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, anime in
+            // 使用 id: \.id 确保稳定 ID，优化 SwiftUI 渲染循环
+            ForEach(displayedItems) { anime in
+                let index = displayedItems.firstIndex(where: { $0.id == anime.id }) ?? 0
                 AnimePortraitCard(
                     anime: anime,
-                    cardWidth: config.cardWidth,
-                    cardHeight: config.cardHeight
+                    cardWidth: config.cardWidth
+                    // 移除 cardHeight，让卡片自动计算
                 ) {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         selectedAnime = anime
                     }
                 }
                 .onAppear {
-                    animateCardAppearance(id: anime.id, index: index)
+                    // 移除动画触发，直接显示
+                    visibleCardIDs.insert(anime.id)
+                    preloadNearbyImages(for: index, config: config)
                 }
-                .cardEntrance(
-                    isVisible: visibleCardIDs.contains(anime.id),
-                    delay: Double(min(index % 8, 4)) * 0.05
-                )
-                .scrollTransitionEffect()
+                // 移除入场动画和滚动效果
+                // .cardEntrance(...)
+                // .scrollTransitionEffect()
             }
         }
-        .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 44))
+        // 移除强制高度
+        // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 44))
+    }
+    
+    /// 智能预加载附近图片（前后各 10 张，与卡片降采样尺寸一致）
+    private func preloadNearbyImages(for index: Int, config: GridConfig) {
+        // 使用固定比例计算高度 (10:14)
+        let imageHeight = config.cardWidth * 1.4
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+
+        let urls = range
+            .filter { $0 != index }
+            .compactMap { displayedItems[$0].coverURL.flatMap { URL(string: $0) } }
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
     }
 
     // MARK: - UI Components
@@ -283,6 +312,33 @@ struct AnimeExploreView: View {
             ])
         syncAtmosphere()
         isInitialLoading = false
+        // 如果内容不足两屏，继续加载更多
+        checkAndLoadMoreIfNeeded()
+    }
+    
+    /// 检查内容高度，如果不足两屏则继续加载
+    private func checkAndLoadMoreIfNeeded(attemptCount: Int = 0) {
+        // 安全边界：最多尝试3次，避免无限递归
+        guard attemptCount < 3,
+              viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !viewModel.isLoadingMore else { return }
+        
+        let currentCount = displayedItems.count
+        // 简单判断：如果数据少于60条（约两屏，动漫卡片更小），继续加载
+        guard currentCount < 60 else { return }
+        
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                let newCount = displayedItems.count
+                // 如果没有加载到新数据，停止递归
+                guard newCount > currentCount else { return }
+                rebuildDisplayedItems()
+                // 递归检查，尝试次数+1
+                checkAndLoadMoreIfNeeded(attemptCount: attemptCount + 1)
+            }
+        }
     }
 
     private func selectCategory(_ category: AnimeCategory) {
@@ -355,9 +411,8 @@ struct AnimeExploreView: View {
     }
 
     private func animateCardAppearance(id: String, index: Int) {
-        let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-            visibleCardIDs.insert(id)
-        }
+        // 直接插入，不使用动画
+        visibleCardIDs.insert(id)
     }
 
     private func triggerLoadMore() {
@@ -370,7 +425,8 @@ struct AnimeExploreView: View {
     }
     
     private func checkLoadMore(offset: CGFloat) {
-        let threshold: CGFloat = 300
+        // 提前两屏预加载，避免触底顿挫感
+        let threshold: CGFloat = 1500
         guard offset > threshold, viewModel.hasMorePages else { return }
         guard !viewModel.isLoading, !viewModel.isLoadingMore else { return }
         Task { await viewModel.loadMore() }
@@ -416,7 +472,6 @@ private struct GridConfig {
     let columnCount: Int
     let spacing: CGFloat
     let cardWidth: CGFloat
-    let cardHeight: CGFloat
     let columns: [GridItem]
     
     init(contentWidth: CGFloat, baseRatio: CGFloat, spacing: CGFloat = 20) {
@@ -424,16 +479,11 @@ private struct GridConfig {
         self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
         let totalSpacing = CGFloat(columnCount - 1) * spacing
         self.cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
-        self.cardHeight = cardWidth * baseRatio
+        // 移除 cardHeight 计算，让卡片自动计算高度
         self.columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
     
-    func calculateHeight(itemCount: Int, extraHeight: CGFloat = 0) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(columnCount))
-        let totalCardHeight = cardHeight + extraHeight
-        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
-    }
+    // 移除强制高度计算方法
 }
 
 // MARK: - Sort Options

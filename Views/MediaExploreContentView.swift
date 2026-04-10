@@ -1,11 +1,13 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - MediaExploreContentView - 媒体探索页
 
 struct MediaExploreContentView: View {
     @ObservedObject var viewModel: MediaExploreViewModel
     @Binding var selectedMedia: MediaItem?
+    var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
 
     @State private var selectedCategory: MediaCategory = .all
@@ -24,33 +26,40 @@ struct MediaExploreContentView: View {
     var body: some View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    heroSection
-                    categorySection
-                    contentSection(gridContentWidth: gridContentWidth)
+
+            ZStack {
+                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
+                if isVisible {
+                    ExploreDynamicAtmosphereBackground(
+                        tint: exploreAtmosphere.tint,
+                        referenceImage: exploreAtmosphere.referenceImage
+                    )
+                    .ignoresSafeArea()
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 80)
-                .padding(.bottom, 48)
-                .frame(width: geometry.size.width, alignment: .leading)
-                .background(scrollTrackingOverlay)
-                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        heroSection
+                        categorySection
+                        contentSection(gridContentWidth: gridContentWidth)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 80)
+                    .padding(.bottom, 48)
+                    .frame(width: geometry.size.width, alignment: .leading)
+                    .background(scrollTrackingOverlay)
+                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                }
+                .coordinateSpace(name: "exploreScroll")
+                .iosSmoothScroll()
+                .modifier(ScrollLoadMoreModifier(
+                    scrollOffset: $scrollOffset,
+                    threshold: 1500,  // 提前两屏预加载
+                    onLoadMore: triggerLoadMore,
+                    checkLoadMore: checkLoadMore
+                ))
+                .disabled(isInitialLoading)
             }
-            .coordinateSpace(name: "exploreScroll")
-            .iosSmoothScroll()
-            .modifier(ScrollLoadMoreModifier(
-                scrollOffset: $scrollOffset,
-                onLoadMore: triggerLoadMore,
-                checkLoadMore: checkLoadMore
-            ))
-            .disabled(isInitialLoading)
-            .background(
-                ExploreDynamicAtmosphereBackground(
-                    tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage
-                )
-            )
         }
         .task { await handleInitialLoad() }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
@@ -188,25 +197,44 @@ struct MediaExploreContentView: View {
         let config = GridConfig(contentWidth: contentWidth, columns: contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2), baseRatio: 0.6)
         
         return LazyVGrid(columns: config.columns, alignment: .leading, spacing: config.spacing) {
-            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, item in
+            // 使用 id: \.id 确保稳定 ID
+            ForEach(displayedItems) { item in
+                let index = displayedItems.firstIndex(where: { $0.id == item.id }) ?? 0
                 SimpleMediaCard(
                     item: item,
                     cardWidth: config.cardWidth,
-                    cardHeight: config.cardHeight,
                     isFavorite: viewModel.isFavorite(item),
                     onTap: { selectedMedia = item }
                 )
                 .onAppear {
-                    animateCardAppearance(id: item.id, index: index)
+                    // 移除动画触发，直接显示
+                    visibleCardIDs.insert(item.id)
+                    preloadNearbyImages(for: index, config: config)
                 }
-                .cardEntrance(
-                    isVisible: visibleCardIDs.contains(item.id),
-                    delay: Double(min(index % 8, 4)) * 0.05
-                )
-                .scrollTransitionEffect()
+                // 移除入场动画和滚动效果，解决卡顿和空白问题
+                // .cardEntrance(...)
+                // .scrollTransitionEffect()
             }
         }
-        .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 40))
+        // 移除强制高度，让 LazyVGrid 自然布局，解决空白问题
+        // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 40))
+    }
+    
+    /// 智能预加载附近图片（前后各 10 张）
+    private func preloadNearbyImages(for index: Int, config: GridConfig) {
+        // 使用固定比例计算高度 (16:10)
+        let imageHeight = config.cardWidth * 0.625
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+        let urls = range
+            .filter { $0 != index }
+            .compactMap { displayedItems[$0].posterURLValue ?? displayedItems[$0].thumbnailURLValue }
+
+        let prefetcher = ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
     }
 
     // MARK: - UI Components
@@ -258,6 +286,33 @@ struct MediaExploreContentView: View {
         rebuildVisibleItems()
         syncAtmosphere()
         isInitialLoading = false
+        // 如果内容不足两屏，继续加载更多
+        checkAndLoadMoreIfNeeded()
+    }
+    
+    /// 检查内容高度，如果不足两屏则继续加载
+    private func checkAndLoadMoreIfNeeded(attemptCount: Int = 0) {
+        // 安全边界：最多尝试3次，避免无限递归
+        guard attemptCount < 3,
+              viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !viewModel.isLoadingMore else { return }
+        
+        let currentCount = displayedItems.count
+        // 简单判断：如果数据少于48条（约两屏），继续加载
+        guard currentCount < 48 else { return }
+        
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                let newCount = displayedItems.count
+                // 如果没有加载到新数据，停止递归
+                guard newCount > currentCount else { return }
+                appendNewItems()
+                // 递归检查，尝试次数+1
+                checkAndLoadMoreIfNeeded(attemptCount: attemptCount + 1)
+            }
+        }
     }
 
     private func selectCategory(_ category: MediaCategory) {
@@ -343,7 +398,8 @@ struct MediaExploreContentView: View {
     }
     
     private func checkLoadMore(offset: CGFloat) {
-        let threshold: CGFloat = 300
+        // 提前两屏预加载，避免触底顿挫感
+        let threshold: CGFloat = 1500
         guard offset > threshold, viewModel.hasMorePages else { return }
         
         if viewModel.isLoading || isLoadingMore || viewModel.isLoadingMore {
@@ -407,9 +463,8 @@ struct MediaExploreContentView: View {
     }
     
     private func animateCardAppearance(id: String, index: Int) {
-        let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-            visibleCardIDs.insert(id)
-        }
+        // 直接插入，不使用动画，避免 CPU 占用
+        visibleCardIDs.insert(id)
     }
     
     private func formattedCount(_ count: Int) -> String {
@@ -423,7 +478,6 @@ private struct GridConfig {
     let columnCount: Int
     let spacing: CGFloat
     let cardWidth: CGFloat
-    let cardHeight: CGFloat
     let columns: [GridItem]
     
     init(contentWidth: CGFloat, columns columnCount: Int, baseRatio: CGFloat, spacing: CGFloat = 16) {
@@ -431,16 +485,11 @@ private struct GridConfig {
         self.spacing = spacing
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-        self.cardHeight = cardWidth * baseRatio
+        // 移除 cardHeight 计算，让卡片自动计算高度
         self.columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
     
-    func calculateHeight(itemCount: Int, extraHeight: CGFloat = 0) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(columnCount))
-        let totalCardHeight = cardHeight + extraHeight
-        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
-    }
+    // 移除强制高度计算方法
 }
 
 // MARK: - Models & Enums
@@ -642,12 +691,11 @@ private extension MediaItem {
 
 
 
-// MARK: - SimpleMediaCard
+// MARK: - SimpleMediaCard (Kingfisher 高性能版)
 
 private struct SimpleMediaCard: View {
     let item: MediaItem
     var cardWidth: CGFloat
-    var cardHeight: CGFloat
     let isFavorite: Bool
     let onTap: () -> Void
 
@@ -661,6 +709,19 @@ private struct SimpleMediaCard: View {
         style: .continuous
     )
     private static let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+    
+    // 固定图片比例 16:10，高度自动计算
+    private var imageHeight: CGFloat {
+        cardWidth * 0.625  // 16:10 比例
+    }
+    
+    // 文字区域高度
+    private var textAreaHeight: CGFloat { 44 }
+
+    // 降采样目标尺寸（Retina 2x）
+    private var targetImageSize: CGSize {
+        CGSize(width: cardWidth * 2, height: imageHeight * 2)
+    }
 
     private var resolutionOverlayText: String {
         item.resolutionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -676,18 +737,19 @@ private struct SimpleMediaCard: View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    OptimizedAsyncImage(
-                        url: item.posterURLValue ?? item.thumbnailURLValue,
-                        priority: .medium
-                    ) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        fallbackArtwork
-                    }
+                    // Kingfisher 高性能图片加载 - 移除 cancelOnDisappear 避免重复加载问题
+                    KFImage(item.posterURLValue ?? item.thumbnailURLValue)
+                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                        .cacheMemoryOnly(false)
+                        // 移除 fade 动画避免闪烁问题
+                        .placeholder { _ in
+                            fallbackArtwork
+                        }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
                 }
-                .frame(width: cardWidth, height: cardHeight)
+                // 使用固定比例而非固定高度
+                .frame(width: cardWidth, height: imageHeight)
                 .clipShape(Self.thumbShape)
                 .overlay(alignment: .topLeading) {
                     simplifiedMetadataRow
@@ -718,7 +780,7 @@ private struct SimpleMediaCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(width: cardWidth, alignment: .leading)
+                .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
             .background(
@@ -729,7 +791,7 @@ private struct SimpleMediaCard: View {
                             .stroke(Color.white.opacity(0.06), lineWidth: 1)
                     )
             )
-            .frame(width: cardWidth)
+            // 移除强制宽度，让 VStack 自然布局
             .clipShape(Self.cardShape)
         }
         .buttonStyle(.plain)

@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Kingfisher
+import Combine
 
 // MARK: - 探索页氛围色（背景光斑 + 液态玻璃主题色）
 
@@ -163,14 +165,33 @@ final class ExploreAtmosphereController: ObservableObject {
     private let wallpaperMode: Bool
     /// 避免列表刷新但首张未变时重复拉缩略图、重复采样
     private var activeFirstItemKey: String?
+    private var cancellables = Set<AnyCancellable>()
 
     init(wallpaperMode: Bool) {
         self.wallpaperMode = wallpaperMode
         self.tint = wallpaperMode ? .wallpaperFallback : .mediaFallback
+        
+        // 监听应用隐藏窗口通知，清理大内存占用
+        NotificationCenter.default.publisher(for: .appDidHideWindow)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.clearMemory()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
         loadTask?.cancel()
+        // cancellables 会自动释放，无需手动清理
+    }
+    
+    /// 清理大内存占用，但保留颜色主题
+    func clearMemory() {
+        loadTask?.cancel()
+        loadTask = nil
+        referenceImage = nil
+        // 不重置 activeFirstItemKey，这样重新打开窗口时不会重复加载同一张图
     }
 
     func resetToFallback() {
@@ -202,10 +223,9 @@ final class ExploreAtmosphereController: ObservableObject {
         guard let url = wallpaper.thumbURL ?? wallpaper.smallThumbURL else { return }
 
         loadTask = Task {
-            let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
-            guard !Task.isCancelled, let image else { return }
+            let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+            guard !Task.isCancelled, let image = result?.image else { return }
 
-            // 在后台线程进行颜色采样（耗时操作）
             let sampledColors = await Task.detached(priority: .userInitiated) {
                 ExploreImageColorSampler.triplet(from: image)
             }.value
@@ -213,9 +233,9 @@ final class ExploreAtmosphereController: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                referenceImage = image
+                self.referenceImage = image
                 if let (c1, c2, c3) = sampledColors {
-                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                    self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
         }
@@ -241,10 +261,9 @@ final class ExploreAtmosphereController: ObservableObject {
         let url = item.posterURLValue ?? item.thumbnailURLValue
 
         loadTask = Task {
-            let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
-            guard !Task.isCancelled, let image else { return }
+            let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+            guard !Task.isCancelled, let image = result?.image else { return }
 
-            // 在后台线程进行颜色采样
             let sampledColors = await Task.detached(priority: .userInitiated) {
                 ExploreImageColorSampler.triplet(from: image)
             }.value
@@ -252,9 +271,9 @@ final class ExploreAtmosphereController: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                referenceImage = image
+                self.referenceImage = image
                 if let (c1, c2, c3) = sampledColors {
-                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                    self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
         }
@@ -275,16 +294,14 @@ final class ExploreAtmosphereController: ObservableObject {
         loadTask = nil
         referenceImage = nil
 
-        // 动漫使用媒体回退色调
         tint = .mediaFallback
 
         guard let url = URL(string: coverURL) else { return }
 
         loadTask = Task {
-            let image = await ImageLoader.shared.loadImage(from: url, priority: .low)
-            guard !Task.isCancelled, let image else { return }
+            let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+            guard !Task.isCancelled, let image = result?.image else { return }
 
-            // 在后台线程进行颜色采样
             let sampledColors = await Task.detached(priority: .userInitiated) {
                 ExploreImageColorSampler.triplet(from: image)
             }.value
@@ -292,9 +309,9 @@ final class ExploreAtmosphereController: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                referenceImage = image
+                self.referenceImage = image
                 if let (c1, c2, c3) = sampledColors {
-                    tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                    self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
         }
@@ -350,22 +367,32 @@ enum GrainTextureTile {
 // MARK: - 全局颗粒材质覆盖层（支持开关和轻量模式）
 
 struct GrainTextureOverlay: View {
-    @AppStorage("grain_texture_enabled") private var enabled = true
-    @AppStorage("grain_texture_quality") private var quality = "high" // high / low / off
+    @State private var enabled = true
+    @State private var quality = "high"
     var lightweight: Bool = false
 
     var body: some View {
-        if enabled && quality != "off" {
-            // 轻量模式或低质量设置时使用单层
-            let isLightweight = lightweight || quality == "low"
-            
-            Image(nsImage: GrainTextureTile.image)
-                .resizable(resizingMode: .tile)
-                .blendMode(.overlay)
-                .opacity(isLightweight ? 0.15 : 0.35)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .allowsHitTesting(false)
+        Group {
+            if enabled && quality != "off" {
+                let isLightweight = lightweight || quality == "low"
+
+                Image(nsImage: GrainTextureTile.image)
+                    .resizable(resizingMode: .tile)
+                    .blendMode(.overlay)
+                    .opacity(isLightweight ? 0.15 : 0.35)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
         }
+        .onAppear(perform: readSettings)
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            readSettings()
+        }
+    }
+
+    private func readSettings() {
+        enabled = UserDefaults.standard.object(forKey: "grain_texture_enabled") as? Bool ?? true
+        quality = UserDefaults.standard.string(forKey: "grain_texture_quality") ?? "high"
     }
 }
 
@@ -437,7 +464,5 @@ struct ExploreDynamicAtmosphereBackground: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
-        // 使用 drawingGroup 将整个背景合并为离屏渲染层，减少合成开销
-        .drawingGroup()
     }
 }

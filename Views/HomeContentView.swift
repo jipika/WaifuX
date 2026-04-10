@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 // MARK: - CarouselTimerManager（管理轮播定时器的引用类型）
 @MainActor
@@ -708,12 +709,14 @@ private struct HeroWallpaperImageSlide: View {
         GeometryReader { geometry in
             let size = geometry.size
 
-            OptimizedAsyncImage(url: imageURL, priority: .high) { image in
-                heroLoadedContent(image: image, size: size)
-            } placeholder: {
-                heroPlaceholder(size: size, showsProgress: true)
-            }
-            .scaleEffect(isCurrent ? 1.0 : 1.015)
+            KFImage(imageURL)
+                .fade(duration: 0.3)
+                .placeholder { _ in
+                    heroPlaceholder(size: size, showsProgress: true)
+                }
+                .resizable()
+                .scaledToFill()
+                .scaleEffect(isCurrent ? 1.0 : 1.015)
         }
         .clipped()
     }
@@ -1116,11 +1119,17 @@ private struct HomeShelfSection: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
-                        ForEach(wallpapers) { wallpaper in
+                        ForEach(Array(wallpapers.enumerated()), id: \.element.id) { index, wallpaper in
                             HomeShelfCard(
                                 wallpaper: wallpaper,
                                 onTap: { onSelect(wallpaper) }
                             )
+                            .onAppear {
+                                let urls = (index + 1..<(index + 4))
+                                    .filter { $0 < wallpapers.count }
+                                    .compactMap { wallpapers[$0].thumbURL }
+                                ImagePrefetcher(urls: urls).start()
+                            }
                         }
                     }
                     .padding(.vertical, 2)
@@ -1141,13 +1150,13 @@ struct HomeShelfCard: View {
     var body: some View {
         Button(action: onTap) {
             ZStack(alignment: .topLeading) {
-                OptimizedAsyncImage(url: wallpaper.thumbURL, priority: .medium) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
-                }
+                KFImage(wallpaper.thumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
                 .frame(width: cardSize.width, height: cardSize.height)
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1214,6 +1223,7 @@ struct HomeShelfCard: View {
                 isHovered = hovering
             }
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
     private func tagChip(text: String) -> some View {
@@ -1383,11 +1393,17 @@ private struct HomeMediaSection: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
-                        ForEach(mediaItems) { item in
+                        ForEach(Array(mediaItems.enumerated()), id: \.element.id) { index, item in
                             HomeMediaCard(
                                 item: item,
                                 onTap: { onSelect(item) }
                             )
+                            .onAppear {
+                                let urls = (index + 1..<(index + 4))
+                                    .filter { $0 < mediaItems.count }
+                                    .map { mediaItems[$0].thumbnailURL }
+                                ImagePrefetcher(urls: urls).start()
+                            }
                         }
                     }
                     .padding(.vertical, 2)
@@ -1409,13 +1425,13 @@ private struct HomeMediaCard: View {
         Button(action: onTap) {
             ZStack {
                 // 背景图
-                OptimizedAsyncImage(url: item.thumbnailURL, priority: .medium) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
-                }
+                KFImage(item.thumbnailURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
 
                 // 渐变遮罩
                 LinearGradient(
@@ -1473,6 +1489,7 @@ private struct HomeMediaCard: View {
                 isHovered = hovering
             }
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 

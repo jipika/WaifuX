@@ -1,16 +1,19 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - WallpaperExploreContentView - 壁纸探索页
 
 struct WallpaperExploreContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
     @Binding var selectedWallpaper: Wallpaper?
+    var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
-    
-    init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>) {
+
+    init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedWallpaper = selectedWallpaper
+        self.isVisible = isVisible
     }
 
     // MARK: State
@@ -24,7 +27,6 @@ struct WallpaperExploreContentView: View {
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
     @State private var visibleCardIDs: Set<String> = []
-    @State private var showAPIKeyAlert = false
     
     private var loadMoreTask: Task<Void, Never>?
 
@@ -32,44 +34,45 @@ struct WallpaperExploreContentView: View {
         GeometryReader { geometry in
             let contentWidth = calculateContentWidth(geometry: geometry)
             let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
-            
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    heroSection
-                    categorySection
-                    filterSection
-                    activeFiltersSection
-                    contentSection(config: gridConfig)
+
+            ZStack {
+                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
+                if isVisible {
+                    ExploreDynamicAtmosphereBackground(
+                        tint: exploreAtmosphere.tint,
+                        referenceImage: exploreAtmosphere.referenceImage,
+                        lightweightBackdrop: false
+                    )
+                    .ignoresSafeArea()
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 80)
-                .padding(.bottom, 48)
-                .frame(width: geometry.size.width, alignment: .center)
-                .background(scrollTrackingOverlay)
-                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        heroSection
+                        categorySection
+                        filterSection
+                        activeFiltersSection
+                        contentSection(config: gridConfig)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 80)
+                    .padding(.bottom, 48)
+                    .frame(width: geometry.size.width, alignment: .center)
+                    .background(scrollTrackingOverlay)
+                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                }
+                .coordinateSpace(name: "exploreScroll")
+                .iosSmoothScroll()
+                .modifier(ScrollLoadMoreModifier(
+                    scrollOffset: $scrollOffset,
+                    threshold: 1500,  // 提前两屏预加载
+                    onLoadMore: triggerLoadMore,
+                    checkLoadMore: checkLoadMore
+                ))
+                .disabled(isInitialLoading)
             }
-            .coordinateSpace(name: "exploreScroll")
-            .iosSmoothScroll()
-            .modifier(ScrollLoadMoreModifier(
-                scrollOffset: $scrollOffset,
-                threshold: 600,
-                onLoadMore: triggerLoadMore,
-                checkLoadMore: checkLoadMore
-            ))
-            .disabled(isInitialLoading)
-            .background(
-                ExploreDynamicAtmosphereBackground(
-                    tint: exploreAtmosphere.tint,
-                    referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: false
-                )
-            )
         }
-        .alert(t("apiKeyRequired"), isPresented: $showAPIKeyAlert) {
-            Button(t("ok"), role: .cancel) {}
-        } message: {
-            Text(t("apiKeyNeeded"))
-        }
+        // 移除 API Key 弹窗提示
         .onAppear { handleAppear() }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
@@ -320,13 +323,15 @@ struct WallpaperExploreContentView: View {
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
         LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, wallpaper in
+            // 使用稳定 ID 优化 SwiftUI 渲染循环
+            ForEach(displayedItems) { wallpaper in
+                let index = displayedItems.firstIndex(where: { $0.id == wallpaper.id }) ?? 0
                 WallpaperCard(
                     wallpaper: wallpaper,
                     isFavorite: viewModel.isFavorite(wallpaper),
                     index: index,
-                    cardWidth: config.cardWidth,
-                    cardHeight: config.cardHeight
+                    cardWidth: config.cardWidth
+                    // 移除 cardHeight，让卡片自动计算
                 )
                 .onTapGesture {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -334,17 +339,34 @@ struct WallpaperExploreContentView: View {
                     }
                 }
                 .onAppear {
-                    animateCardAppearance(id: wallpaper.id, index: index)
-                    preloadNearbyImages(for: index)
+                    // 移除动画触发，直接显示
+                    visibleCardIDs.insert(wallpaper.id)
+                    preloadNearbyImages(for: index, config: config)
                 }
-                .cardEntrance(
-                    isVisible: visibleCardIDs.contains(wallpaper.id),
-                    delay: Double(min(index % 8, 4)) * 0.05
-                )
-                .scrollTransitionEffect()
+                // 移除入场动画和滚动效果
+                // .cardEntrance(...)
+                // .scrollTransitionEffect()
             }
         }
-        .frame(height: config.calculateTotalHeight(itemCount: displayedItems.count))
+        // 移除强制高度，解决空白问题
+        // .frame(height: config.calculateTotalHeight(itemCount: displayedItems.count))
+    }
+    
+    /// 智能预加载附近图片（前后各 10 张）
+    private func preloadNearbyImages(for index: Int, config: WallpaperGridConfig) {
+        // 使用固定比例计算高度 (10:6)
+        let imageHeight = config.cardWidth * 0.6
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+        let urls = range
+            .filter { $0 != index }
+            .compactMap { displayedItems[$0].thumbURL }
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
     }
 
     // MARK: - UI Components
@@ -442,11 +464,37 @@ struct WallpaperExploreContentView: View {
                     rebuildVisibleItems()
                     syncAtmosphere()
                     isInitialLoading = false
+                    // 如果内容不足两屏，继续加载更多
+                    checkAndLoadMoreIfNeeded()
                 }
             }
         } else {
             rebuildVisibleItems()
             syncAtmosphere()
+        }
+    }
+    
+    /// 检查内容高度，如果不足两屏则继续加载
+    private func checkAndLoadMoreIfNeeded(attemptCount: Int = 0) {
+        // 安全边界：最多尝试3次，避免无限递归
+        guard attemptCount < 3,
+              viewModel.hasMorePages,
+              !viewModel.isLoading else { return }
+        
+        let currentCount = displayedItems.count
+        // 简单判断：如果数据少于48条（约两屏），继续加载
+        guard currentCount < 48 else { return }
+        
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                let newCount = displayedItems.count
+                // 如果没有加载到新数据，停止递归
+                guard newCount > currentCount else { return }
+                appendNewItems()
+                // 递归检查，尝试次数+1
+                checkAndLoadMoreIfNeeded(attemptCount: attemptCount + 1)
+            }
         }
     }
 
@@ -526,7 +574,8 @@ struct WallpaperExploreContentView: View {
     }
 
     private func checkLoadMore(offset: CGFloat) {
-        let threshold: CGFloat = 600
+        // 提前两屏预加载，避免触底顿挫感
+        let threshold: CGFloat = 1500
         guard offset > threshold, viewModel.hasMorePages else { return }
         
         if viewModel.isLoading || isLoadingMore {
@@ -593,21 +642,14 @@ struct WallpaperExploreContentView: View {
     }
 
     private func animateCardAppearance(id: String, index: Int) {
-        let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-            visibleCardIDs.insert(id)
-        }
+        // 直接插入，不使用动画
+        visibleCardIDs.insert(id)
     }
 
-    private func preloadNearbyImages(for index: Int) {
-        let urls = (index + 1..<(index + 7))
-            .filter { $0 < displayedItems.count }
-            .compactMap { displayedItems[$0].thumbURL }
-        ImagePreloader.shared.preloadImages(from: urls)
-    }
+
 
     private func calculateContentWidth(geometry: GeometryProxy) -> CGFloat {
-        let windowFallback = (NSApp.mainWindow?.contentView?.frame.width ?? 1200) - 56
-        return max(0, max(geometry.size.width, windowFallback) - 56)
+        max(0, geometry.size.width - 56)
     }
 
     private func matchesCategory(_ wallpaper: Wallpaper, category: CategoryFilter) -> Bool {
@@ -626,7 +668,6 @@ private struct WallpaperGridConfig {
     let columnCount: Int
     let spacing: CGFloat
     let cardWidth: CGFloat
-    let cardHeight: CGFloat
     let contentWidth: CGFloat
     let gridItems: [GridItem]
     
@@ -636,16 +677,12 @@ private struct WallpaperGridConfig {
         self.spacing = 16
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-        self.cardHeight = cardWidth * 0.6
-        self.gridItems = Array(repeating: GridItem(.fixed(cardWidth), spacing: spacing), count: columnCount)
+        // 移除 cardHeight 计算，让卡片自动计算高度
+        // 使用 flexible 而非 fixed，让卡片自然布局
+        self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
     
-    func calculateTotalHeight(itemCount: Int) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(columnCount))
-        let totalCardHeight = cardHeight + 44
-        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
-    }
+    // 移除强制高度计算方法
 }
 
 // MARK: - Enums
@@ -772,8 +809,8 @@ private extension WallpaperExploreContentView {
     }
     
     func togglePurity(_ filter: PurityFilter) {
+        // 移除 API Key 弹窗提示，直接忽略需要 API Key 的操作
         if filter.requiresAPIKey && !viewModel.apiKeyConfigured {
-            showAPIKeyAlert = true
             return
         }
         switch filter {
@@ -806,7 +843,6 @@ private extension WallpaperExploreContentView {
             case .nsfw: viewModel.purityNSFW = false
             }
         case .color: viewModel.selectedColors = []
-        default: break
         }
         reloadData()
     }
@@ -987,16 +1023,29 @@ private struct FourKCategoryChip: View {
     }
 }
 
-// MARK: - WallpaperCard
+// MARK: - WallpaperCard (Kingfisher 高性能版)
 
 private struct WallpaperCard: View {
     let wallpaper: Wallpaper
     let isFavorite: Bool
     let index: Int
     let cardWidth: CGFloat
-    let cardHeight: CGFloat
+    // 移除 cardHeight 参数，使用固定比例
     
     @State private var isHovered = false
+    
+    // 固定图片比例 10:6 (5:3)
+    private var imageHeight: CGFloat {
+        cardWidth * 0.6
+    }
+    
+    // 文字区域高度
+    private var textAreaHeight: CGFloat { 44 }
+
+    // 降采样目标尺寸（Retina 2x）
+    private var targetImageSize: CGSize {
+        CGSize(width: cardWidth * 2, height: imageHeight * 2)
+    }
     
     private var purityBorderColor: Color? {
         switch wallpaper.purity.lowercased() {
@@ -1012,16 +1061,19 @@ private struct WallpaperCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack {
-                OptimizedAsyncImage(
-                    url: wallpaper.thumbURL ?? wallpaper.smallThumbURL,
-                    priority: .medium
-                ) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    placeholderGradient
-                }
+                // Kingfisher 高性能图片加载 - 移除问题配置
+                KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
+                    .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                    .cacheMemoryOnly(false)
+                    // 移除 cancelOnDisappear(false) 和 fade 避免闪烁和加载问题
+                    .placeholder { _ in
+                        placeholderGradient
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
             }
-            .frame(width: cardWidth, height: cardHeight)
+            // 使用固定比例而非传入的高度
+            .frame(width: cardWidth, height: imageHeight)
             .clipShape(UnevenRoundedRectangle(
                 topLeadingRadius: 14, bottomLeadingRadius: 0,
                 bottomTrailingRadius: 0, topTrailingRadius: 14,
@@ -1041,7 +1093,7 @@ private struct WallpaperCard: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .frame(width: cardWidth, alignment: .leading)
+            .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
             .background(Color.black.opacity(0.46))
         }
         .background(

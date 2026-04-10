@@ -101,21 +101,13 @@ actor FourKWallpapersService {
         // 4K 壁纸的 url 字段存的是详情页链接
         let detailURLString = wallpaper.url
         guard !detailURLString.isEmpty else {
-            print("[FourKWallpapersService] No detail URL for wallpaper: \(wallpaper.id)")
             return nil
         }
 
         do {
             let html = try await fetchHTML(from: detailURLString)
-            let originalURL = parser.parseOriginalImageURL(from: html)
-            if let url = originalURL {
-                print("[FourKWallpapersService] Found original image URL: \(url)")
-            } else {
-                print("[FourKWallpapersService] Failed to parse original image URL from detail page")
-            }
-            return originalURL
+            return parser.parseOriginalImageURL(from: html)
         } catch {
-            print("[FourKWallpapersService] Error fetching detail page: \(error)")
             return nil
         }
     }
@@ -126,8 +118,6 @@ actor FourKWallpapersService {
         guard let url = URL(string: urlString) else {
             throw NetworkError.invalidResponse
         }
-
-        print("[FourKWallpapersService] Requesting: \(urlString)")
 
         // 4KWallpapers 是 HTML 页面，需要指定 UA 避免被拦截
         // 使用 NetworkService 已有的 fetchString 方法
@@ -151,7 +141,7 @@ actor FourKWallpapersService {
         // 判断 originalURL 是否是真正的原图 URL（以 /images/wallpapers/ 开头且包含分辨率）
         let isOriginalImage = w.originalURL.contains("/images/wallpapers/") && w.originalURL.contains("x")
         let thumbs = Wallpaper.Thumbs(
-            large: w.hdThumbnailURL,                                    // 详情页/轮播图高清预览（~1280px）
+            large: w.hdThumbnailURL,                                    // 详情页/轮播图高清预览（~800px）
             original: isOriginalImage ? w.originalURL : w.hdThumbnailURL,  // 原图 URL（用于下载）
             small: w.thumbnailURL                                       // 列表小缩略图（~400px）
         )

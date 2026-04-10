@@ -169,7 +169,7 @@ final class AppLogger {
                     let keepRange = currentData.count / 2  // 保留后半段
                     let truncatedData = currentData.subdata(in: keepRange..<currentData.count)
                     let headerStr = "--- LOG TRUNCATED at \(ISO8601DateFormatter().string(from: Date())) ---\n"
-                    var headerData = (headerStr.data(using: .utf8) ?? Data()) + truncatedData
+                    let headerData = (headerStr.data(using: .utf8) ?? Data()) + truncatedData
                     try headerData.write(to: url, options: .atomic)
                 } catch {
                     // 截断失败则直接清空重建

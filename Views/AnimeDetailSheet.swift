@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - 动漫详情页 - 与 MediaDetailSheet 风格一致
 // 液态玻璃材质，沉浸式全屏设计，支持横屏背景
@@ -173,9 +174,6 @@ struct AnimeDetailSheet: View {
     private func loadBackdrop() {
         isLoadingBackdrop = true
         Task {
-            print("[AnimeDetailSheet] Loading backdrop for: \(anime.displayTitle)")
-            
-            // 尝试获取 TMDB 背景图 URL
             let url = await TMDBService.shared.fetchBackdropURL(
                 for: anime.displayTitle,
                 originalName: anime.originalName ?? anime.title
@@ -185,13 +183,7 @@ struct AnimeDetailSheet: View {
                 self.backdropURL = url
                 self.isLoadingBackdrop = false
                 
-                if let url = url {
-                    print("[AnimeDetailSheet] Got backdrop URL: \(url)")
-                } else {
-                    print("[AnimeDetailSheet] No backdrop found, will use cover image")
-                }
-                
-                // 图片加载状态会在 AsyncImage 的 onLoad 中设置
+                // 图片加载状态会在 KFImage 的 onSuccess 中设置
                 withAnimation(.easeInOut(duration: 0.3)) {
                     self.isImageLoaded = true
                 }
@@ -246,21 +238,22 @@ struct AnimeDetailSheet: View {
     
     /// 横图背景：铺满整屏
     private func landscapeBackground(width: CGFloat, height: CGFloat) -> some View {
-        OptimizedAsyncImage(url: backdropURL.flatMap { URL(string: $0) }, priority: .high, onLoad: {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                isImageLoaded = true
+        KFImage(backdropURL.flatMap { URL(string: $0) })
+            .onSuccess { _ in
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    isImageLoaded = true
+                }
             }
-        }) { image in
-            image
-                .resizable()
-                .scaledToFill()
-                .frame(width: width, height: height)
-                .clipped()
-        } placeholder: {
-            Color(hex: "0A0A0C")
-                .frame(width: width, height: height)
-        }
-        .frame(width: width, height: height)
+            .fade(duration: 0.3)
+            .placeholder { _ in
+                Color(hex: "0A0A0C")
+                    .frame(width: width, height: height)
+            }
+            .resizable()
+            .scaledToFill()
+            .frame(width: width, height: height)
+            .clipped()
+            .frame(width: width, height: height)
     }
     
     /// 竖图背景：完整缩放+两侧模糊延伸（参考 WallpaperDetailSheet）
@@ -270,54 +263,56 @@ struct AnimeDetailSheet: View {
             
             // 左右延伸层：基于居中图做横向拉伸和模糊
             if let coverURL = coverImageURL {
-                OptimizedAsyncImage(url: coverURL, priority: .medium, onLoad: {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
+                KFImage(coverURL)
+                    .onSuccess { _ in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isImageLoaded = true
+                        }
                     }
-                }) { image in
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: width, height: height)
-                        .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                        .blur(radius: 84)
-                        .saturation(1.12)
-                        .brightness(-0.08)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .white, location: 0.0),
-                                    .init(color: .white, location: 0.22),
-                                    .init(color: .clear, location: 0.38),
-                                    .init(color: .clear, location: 0.62),
-                                    .init(color: .white, location: 0.78),
-                                    .init(color: .white, location: 1.0)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Color.clear
+                    }
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                    .blur(radius: 84)
+                    .saturation(1.12)
+                    .brightness(-0.08)
+                    .mask(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .white, location: 0.0),
+                                .init(color: .white, location: 0.22),
+                                .init(color: .clear, location: 0.38),
+                                .init(color: .clear, location: 0.62),
+                                .init(color: .white, location: 0.78),
+                                .init(color: .white, location: 1.0)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
                         )
-                } placeholder: {
-                    Color.clear
-                }
+                    )
             }
             
             // 主图：完整缩放展示
             if let coverURL = coverImageURL {
-                OptimizedAsyncImage(url: coverURL, priority: .high, onLoad: {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
+                KFImage(coverURL)
+                    .onSuccess { _ in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isImageLoaded = true
+                        }
                     }
-                }) { image in
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: width, height: height)
-                        .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
-                } placeholder: {
-                    Color.clear
-                        .frame(width: width, height: height)
-                }
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Color.clear
+                            .frame(width: width, height: height)
+                    }
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
             }
             
             // 左右暗角遮罩

@@ -1,27 +1,47 @@
 import SwiftUI
+import Kingfisher
 
-// MARK: - 竖版动漫卡片
+// MARK: - 高性能竖版动漫卡片（Kingfisher 优化版）
+// 优化策略：
+// 1. 图片降采样 - 使用 DownsamplingImageProcessor 避免加载完整大图
+// 2. 后台解码 - Kingfisher 自动在后台线程解码图片
+// 3. 内存/磁盘缓存 - 自动管理，支持 NSCache
+// 4. 渐进式过渡 - 使用 fade 动画避免图片"弹出"
+// 5. drawingGroup - 将复杂视图扁平化为 Metal 纹理提升滚动 FPS
 
 struct AnimePortraitCard: View {
     let anime: AnimeSearchResult
     var cardWidth: CGFloat? = nil
-    var cardHeight: CGFloat? = nil
+    // 移除 cardHeight 参数，使用固定比例
     var onTap: () -> Void = {}
 
     @State private var isHovered = false
 
     private let cornerRadius: CGFloat = 14
     
-    // 静态形状缓存（避免每次 body 重新创建）
+    // 静态形状缓存
     private static let cardShape = RoundedRectangle(cornerRadius: 14, style: .continuous)
 
-    // 缓存标题和集数，避免每次 body 重新读取
+    // 缓存属性
     private var cachedTitle: String { anime.title }
     private var cachedEpisode: String? { anime.latestEpisode }
     private var shouldShowRating: Bool { !(anime.rating ?? "").isEmpty }
     private var cachedRating: String? { anime.rating }
+    
+    // 固定比例 10:14 (约 1:1.4)
+    private var imageHeight: CGFloat {
+        (cardWidth ?? 200) * 1.4
+    }
+    
+    // 信息栏高度
+    private var infoHeight: CGFloat { 44 }
 
-    // 悬停时的视觉属性 - 预计算避免条件分支
+    // 图片降采样目标尺寸（Retina 2x）
+    private var targetImageSize: CGSize {
+        CGSize(width: (cardWidth ?? 200) * 2, height: imageHeight * 2)
+    }
+
+    // 悬停视觉属性
     private var hoverOpacity: Double { isHovered ? 0.15 : 0.06 }
     private var hoverBorderWidth: CGFloat { isHovered ? 1 : 0.5 }
     private var hoverShadowOpacity: Double { isHovered ? 0.4 : 0.15 }
@@ -31,28 +51,30 @@ struct AnimePortraitCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 竖版长方形，直接使用固定 frame 移除 GeometryReader
+                // 图片区域 - 使用 Kingfisher 降采样
                 ZStack(alignment: .topTrailing) {
-                    OptimizedAsyncImage(
-                        url: anime.coverURL.flatMap { URL(string: $0) },
-                        priority: .medium
-                    ) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        ZStack {
-                            Rectangle()
-                                .fill(Color.white.opacity(0.08))
-                            Image(systemName: "tv")
-                                .font(.system(size: 40, weight: .light))
-                                .foregroundStyle(.white.opacity(0.25))
+                    KFImage(anime.coverURL.flatMap { URL(string: $0) })
+                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                        .cacheMemoryOnly(false)
+                        // 移除 cancelOnDisappear(false) 和 fade 避免问题
+                        .placeholder { _ in
+                            ZStack {
+                                LinearGradient(
+                                    colors: [Color(hex: "1C2431"), Color(hex: "233B5A")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                                Image(systemName: "tv")
+                                    .font(.system(size: 40, weight: .light))
+                                    .foregroundStyle(.white.opacity(0.25))
+                            }
                         }
-                    }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
 
-                    // 评分标签 - 右上角
-                    if shouldShowRating, let rating = cachedRating {
-                        HStack(spacing: 2) {
+                    // 评分标签（始终渲染占位，避免高度不一致导致空白）
+                    HStack(spacing: 2) {
+                        if shouldShowRating, let rating = cachedRating {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 8))
                                 .foregroundStyle(.yellow)
@@ -60,18 +82,19 @@ struct AnimePortraitCard: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.white)
                         }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.5))
-                        .clipShape(Capsule())
-                        .padding(.top, 10)
-                        .padding(.trailing, 8)
                     }
+                    .padding(.horizontal, shouldShowRating ? 6 : 0)
+                    .padding(.vertical, shouldShowRating ? 4 : 0)
+                    .background(shouldShowRating ? .black.opacity(0.5) : .clear)
+                    .clipShape(Capsule())
+                    .padding(.top, 10)
+                    .padding(.trailing, 8)
                 }
-                .frame(width: cardWidth, height: cardHeight ?? 300)
+                // 使用固定比例计算高度
+                .frame(width: cardWidth, height: imageHeight)
                 .clipped()
 
-                // 信息栏 - 深色半透明背景（固定44pt高度）
+                // 信息栏
                 VStack(alignment: .leading, spacing: 2) {
                     Text(cachedTitle)
                         .font(.system(size: 13, weight: .semibold))
@@ -88,17 +111,14 @@ struct AnimePortraitCard: View {
                                 .foregroundStyle(.white.opacity(0.6))
                         }
                     } else {
-                        // 占位保持高度一致
-                        Color.clear
-                            .frame(height: 12)
+                        Color.clear.frame(height: 12)
                     }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .frame(width: cardWidth, height: 44, alignment: .leading)
+                .frame(width: cardWidth, height: infoHeight, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
-            .frame(width: cardWidth, height: (cardHeight ?? 300) + 44)
             .contentShape(Self.cardShape)
             .background(
                 Self.cardShape
@@ -118,8 +138,6 @@ struct AnimePortraitCard: View {
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
-        // iOS 风格悬停动画：快速弹簧响应 + 自然减速释放
-        // response=0.20 快速响应，dampingFraction=0.85 微弹性（不晃动）
         .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering

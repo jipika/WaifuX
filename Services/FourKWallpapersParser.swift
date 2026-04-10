@@ -69,7 +69,7 @@ struct FourKCategory: Identifiable, Codable, Equatable {
         case "celebrations": return "gift.fill"
         case "cute": return "heart.fill"
         case "fantasy": return "wand.and.stars"
-        case "flowers": return "flower.fill"
+        case "flowers": return "camera.macro"
         case "food": return "takeoutbag.and.cup.and.straw.fill"
         case "games": return "gamecontroller.fill"
         case "gradients": return "paintpalette.fill"

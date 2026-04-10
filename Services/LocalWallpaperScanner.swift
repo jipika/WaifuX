@@ -462,7 +462,7 @@ struct LocalMediaItem: Identifiable, Hashable {
     func toMediaItem() -> MediaItem {
         let resolutionLabel = resolution ?? "HD"
         
-        // 获取缩略图 URL（如果有缓存则使用缓存，否则使用视频 URL 让 ImageLoader 生成）
+        // 获取缩略图 URL（如果有缓存则使用缓存，否则使用视频 URL 让 Kingfisher 生成）
         let thumbnailURL = VideoThumbnailCache.shared.thumbnailURL(for: fileURL)
         
         return MediaItem(

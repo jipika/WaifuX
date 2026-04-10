@@ -167,11 +167,6 @@ enum WallhavenAPI {
 
         components?.queryItems = queryItems
 
-        // 打印完整的请求 URL 用于调试
-        if let finalURL = components?.url {
-            print("[WallhavenAPI] Request URL: \(finalURL.absoluteString)")
-        }
-
         return components?.url
     }
 

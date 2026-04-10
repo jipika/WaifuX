@@ -557,6 +557,9 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "versions": "VERSIONS",
         // Settings additional
         "clearCacheConfirm": "Are you sure you want to clear all cache? This will delete downloaded thumbnails and temp files.",
+        "resetAllData": "RESET ALL DATA",
+        "resetAllDataConfirm": "This will clear all caches, downloaded files, and restore default settings. The app needs to restart.",
+        "reset": "Reset",
         // Settings - Update Check
         "apiKey": "API KEY",
         "ruleRepository": "RULE REPOSITORY",
@@ -1375,6 +1378,9 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "versions": "个版本",
         // Settings additional
         "clearCacheConfirm": "确定要清除所有缓存吗？这将删除已下载的缩略图和临时文件。",
+        "resetAllData": "重置所有数据",
+        "resetAllDataConfirm": "这将清除所有缓存、下载文件并恢复默认设置。应用需要重新启动。",
+        "reset": "重置",
         "networkProxy": "网络代理",
         "networkProxyDesc": "国内用户可通过自建 Cloudflare Worker 访问 WallHaven。",
         "customWorkerUrl": "自定义 Worker URL",
@@ -2193,6 +2199,9 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "versions": "バージョン",
         // Settings additional
         "clearCacheConfirm": "すべてのキャッシュをクリアしてもよろしいですか？これによりダウンロードされたサムネイルと一時ファイルが削除されます。",
+        "resetAllData": "すべてのデータをリセット",
+        "resetAllDataConfirm": "すべてのキャッシュとダウンロードファイルを削除し、設定をデフォルトに戻します。アプリの再起動が必要です。",
+        "reset": "リセット",
         "networkProxy": "ネットワークプロキシ",
         "networkProxyDesc": "中国のユーザーは自己ホスト型のCloudflare Workerを通じてWallHavenにアクセスできます。",
         "customWorkerUrl": "カスタム Worker URL",

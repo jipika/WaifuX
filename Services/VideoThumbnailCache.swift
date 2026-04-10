@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import AppKit
 import CryptoKit
+import Kingfisher
 
 /// 视频缩略图缓存服务
 /// 为本地视频文件生成并缓存缩略图
@@ -44,7 +45,7 @@ final class VideoThumbnailCache {
             await generateThumbnail(for: videoURL)
         }
         
-        // 返回视频 URL（ImageLoader 会处理生成）
+        // 返回视频 URL（Kingfisher 会处理生成）
         return videoURL
     }
     
@@ -139,6 +140,16 @@ final class VideoThumbnailCache {
                 }
             }
         }
+    }
+}
+
+// MARK: - String MD5 扩展
+
+extension String {
+    var md5: String {
+        let data = Data(self.utf8)
+        let hash = Insecure.MD5.hash(data: data)
+        return hash.map { String(format: "%02hhx", $0) }.joined()
     }
 }
 

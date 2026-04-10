@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 struct ContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
@@ -42,19 +43,30 @@ struct ContentView: View {
                 .allowsHitTesting(selectedTab == .home)
                 
                 // Wallpaper Explore Tab
-                WallpaperExploreContentView(viewModel: viewModel, selectedWallpaper: $selectedWallpaper)
-                    .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .wallpaperExplore)
-                
+                WallpaperExploreContentView(
+                    viewModel: viewModel,
+                    selectedWallpaper: $selectedWallpaper,
+                    isVisible: selectedTab == .wallpaperExplore
+                )
+                .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
+                .allowsHitTesting(selectedTab == .wallpaperExplore)
+
                 // Anime Explore Tab
-                AnimeExploreView(selectedAnime: $selectedAnime)
-                    .opacity(selectedTab == .animeExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .animeExplore)
-                
+                AnimeExploreView(
+                    selectedAnime: $selectedAnime,
+                    isVisible: selectedTab == .animeExplore
+                )
+                .opacity(selectedTab == .animeExplore ? 1 : 0)
+                .allowsHitTesting(selectedTab == .animeExplore)
+
                 // Media Explore Tab
-                MediaExploreContentView(viewModel: mediaViewModel, selectedMedia: $selectedMedia)
-                    .opacity(selectedTab == .mediaExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .mediaExplore)
+                MediaExploreContentView(
+                    viewModel: mediaViewModel,
+                    selectedMedia: $selectedMedia,
+                    isVisible: selectedTab == .mediaExplore
+                )
+                .opacity(selectedTab == .mediaExplore ? 1 : 0)
+                .allowsHitTesting(selectedTab == .mediaExplore)
                 
                 // My Media Tab
                 MyLibraryContentView(
@@ -949,17 +961,17 @@ private struct MyMediaVideoCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    OptimizedAsyncImage(url: item.thumbnailURL, priority: .low) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        SkeletonCard(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight,
-                            cornerRadius: 0
-                        )
-                    }
+                    KFImage(item.thumbnailURL)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(
+                                width: LibraryCardMetrics.cardWidth,
+                                height: LibraryCardMetrics.thumbnailHeight,
+                                cornerRadius: 0
+                            )
+                        }
+                        .resizable()
+                        .scaledToFill()
                     .frame(
                         width: LibraryCardMetrics.cardWidth,
                         height: LibraryCardMetrics.thumbnailHeight

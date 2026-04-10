@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 // MARK: - 控制栏定时器管理器
 final class ControlsTimerManager: ObservableObject {
@@ -37,9 +38,6 @@ struct FullScreenWallpaperView: View {
     @State private var imageScale: CGFloat = 1.0
     @State private var showControls = true
     @StateObject private var controlsTimerManager = ControlsTimerManager()
-
-    // 图片内存缓存
-    @State private var cachedImage: NSImage?
 
     // MARK: - 下一张弹窗相关
     @StateObject private var nextItemDataSource = NextItemDataSource()
@@ -177,33 +175,19 @@ struct FullScreenWallpaperView: View {
         }
     }
 
-    // MARK: - 壁纸图片视图（带懒加载和缓存）
+    // MARK: - 壁纸图片视图
     private var wallpaperImageView: some View {
-        Group {
-            if let cachedImage = cachedImage {
-                // 使用缓存的图片
-                Image(nsImage: cachedImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // 异步加载图片
-                OptimizedAsyncImage(url: wallpaper.fullImageURL, priority: .high) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .onAppear {
-                            isLoading = false
-                        }
-                } placeholder: {
-                    Color.clear
-                        .onAppear {
-                            isLoading = true
-                        }
-                }
+        KFImage(wallpaper.fullImageURL)
+            .fade(duration: 0.3)
+            .onSuccess { _ in
+                isLoading = false
             }
-        }
+            .placeholder { _ in
+                Color.clear
+            }
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - 顶部工具栏
@@ -365,11 +349,6 @@ struct FullScreenWallpaperView: View {
             }
         }
 
-        // 清理内存缓存（可选，根据内存压力决定）
-        if cachedImage != nil {
-            // 保留缓存以支持快速重新打开
-            // 在内存警告时系统会自动清理
-        }
     }
 
     private func toggleFullScreen() {
@@ -408,15 +387,6 @@ struct FullScreenWallpaperView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 showControls = false
             }
-        }
-    }
-
-    private func cacheImage(from image: Image) {
-        // 将 SwiftUI Image 转换为 NSImage 并缓存
-        // 注意：这里使用延迟加载策略，只在需要时缓存
-        DispatchQueue.global(qos: .utility).async {
-            // 实际的缓存逻辑在 AsyncImage 内部处理
-            // 这里可以添加额外的缓存层
         }
     }
 
@@ -519,7 +489,6 @@ struct FullScreenWallpaperView: View {
             // 重置状态
             isLoading = true
             loadError = nil
-            cachedImage = nil
             imageScale = 1.0
         }
     }

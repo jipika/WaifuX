@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Kingfisher
 
 // MARK: - 底部 Wallpaper Playing 控制条 (macOS 26 Liquid Glass 风格)
 struct WallpaperPlayerBar: View {
@@ -93,13 +94,13 @@ struct ThumbnailView: View {
     var body: some View {
         Group {
             if let wallpaper = wallpaper {
-                OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .low) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    PlaceholderView()
-                }
+                KFImage(wallpaper.smallThumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        PlaceholderView()
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
             } else {
                 PlaceholderView()
             }
@@ -526,13 +527,13 @@ private struct MiniThumbnailView: View {
     var body: some View {
         Group {
             if let wallpaper = wallpaper {
-                OptimizedAsyncImage(url: wallpaper.smallThumbURL, priority: .low) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    MiniPlaceholderView()
-                }
+                KFImage(wallpaper.smallThumbURL)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        MiniPlaceholderView()
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
             } else {
                 MiniPlaceholderView()
             }

@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import Kingfisher
 
 @MainActor
 class SettingsViewModel: ObservableObject {
@@ -13,6 +14,7 @@ class SettingsViewModel: ObservableObject {
     @Published private var themeModeRawValue: String = ThemeMode.system.rawValue { didSet { UserDefaults.standard.set(themeModeRawValue, forKey: "theme_mode") } }
     @Published var launchAtLogin = false { didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launch_at_login") } }
     @Published var grainTextureEnabled = true { didSet { UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled") } }
+    @Published var grainTextureQuality = "high" { didSet { UserDefaults.standard.set(grainTextureQuality, forKey: "grain_texture_quality") } }
     @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
 
     @Published var cacheSize: String = "0 MB"
@@ -75,6 +77,7 @@ class SettingsViewModel: ObservableObject {
         }
         launchAtLogin = defaults.bool(forKey: "launch_at_login")
         grainTextureEnabled = defaults.object(forKey: "grain_texture_enabled") as? Bool ?? true
+        grainTextureQuality = defaults.string(forKey: "grain_texture_quality") ?? "high"
         showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
 
         // 恢复 API Key 缓存
@@ -210,6 +213,57 @@ class SettingsViewModel: ObservableObject {
         try? FileManager.default.createDirectory(at: cacheURL.appendingPathComponent("com.wallhaven.app"), withIntermediateDirectories: true)
 
         await updateCacheSize()
+    }
+
+    /// 重置所有数据（缓存、UserDefaults、Application Support）
+    func resetAllData() async {
+        let fm = FileManager.default
+
+        // 1. Kingfisher 内存 + 磁盘缓存
+        ImageCache.default.clearMemoryCache()
+        await ImageCache.default.clearDiskCache()
+
+        // 2. 业务缓存
+        try? await CacheService.shared.clearCache()
+        await MediaService.shared.clearCache()
+
+        // 3. URLCache 及旧缓存目录
+        URLCache.shared.removeAllCachedResponses()
+        if let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let targets = [
+                cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache"),
+                cacheURL.appendingPathComponent("WallHaven/ImageCache"),
+                cacheURL.appendingPathComponent("com.waifux.app"),
+                cacheURL.appendingPathComponent("org.onevcat.Kingfisher.ImageCache.default")
+            ]
+            for url in targets {
+                try? fm.removeItem(at: url)
+            }
+        }
+
+        // 4. Application Support 下的应用数据
+        if let supportURL = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let targets = [
+                supportURL.appendingPathComponent("WaifuX"),
+                supportURL.appendingPathComponent("WallHaven")
+            ]
+            for url in targets {
+                try? fm.removeItem(at: url)
+            }
+        }
+
+        // 5. UserDefaults
+        if let bundleId = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleId)
+            UserDefaults.standard.synchronize()
+        }
+
+        await updateCacheSize()
+
+        // 6. 退出应用（用户需手动重启）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.terminate(nil)
+        }
     }
 
     var themeMode: ThemeMode {

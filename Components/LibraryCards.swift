@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 // MARK: - Card Metrics
 
@@ -26,17 +27,17 @@ public struct MediaVideoCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    OptimizedAsyncImage(url: item.thumbnailURL, priority: .low) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        SkeletonCard(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight,
-                            cornerRadius: 0
-                        )
-                    }
+                    KFImage(item.thumbnailURL)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(
+                                width: LibraryCardMetrics.cardWidth,
+                                height: LibraryCardMetrics.thumbnailHeight,
+                                cornerRadius: 0
+                            )
+                        }
+                        .resizable()
+                        .scaledToFill()
                     .frame(
                         width: LibraryCardMetrics.cardWidth,
                         height: LibraryCardMetrics.thumbnailHeight
@@ -123,6 +124,7 @@ public struct MediaVideoCard: View {
                 isHovered = hovering
             }
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -145,17 +147,17 @@ public struct WallpaperEditCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    OptimizedAsyncImage(url: wallpaper.thumbURL ?? wallpaper.smallThumbURL, priority: .low) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        SkeletonCard(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight,
-                            cornerRadius: 0
-                        )
-                    }
+                    KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(
+                                width: LibraryCardMetrics.cardWidth,
+                                height: LibraryCardMetrics.thumbnailHeight,
+                                cornerRadius: 0
+                            )
+                        }
+                        .resizable()
+                        .scaledToFill()
                     .frame(
                         width: LibraryCardMetrics.cardWidth,
                         height: LibraryCardMetrics.thumbnailHeight
@@ -239,6 +241,7 @@ public struct WallpaperEditCard: View {
                 isHovered = hovering
             }
         }
+        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
     private var topMetadataRow: some View {

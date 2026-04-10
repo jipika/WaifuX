@@ -125,10 +125,10 @@ public struct CardEntranceAnimation: ViewModifier {
     
     public func body(content: Content) -> some View {
         content
-            .opacity(isVisible ? 1 : 0)
-            .offset(y: isVisible ? 0 : 30)
-            .scaleEffect(isVisible ? 1 : 0.9)
-            .animation(.spring(response: 0.5, dampingFraction: 0.8).delay(delay), value: isVisible)
+            .opacity(isVisible ? 1 : 0.4)
+            .offset(y: isVisible ? 0 : 16)
+            .scaleEffect(isVisible ? 1 : 0.96)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8).delay(delay), value: isVisible)
     }
 }
 

@@ -563,7 +563,7 @@ final class UpdateManager: ObservableObject {
     
     private func createAppleScript(dmgPath: String) -> String {
         let appName = "WaifuX"
-        let bundleId = Bundle.main.bundleIdentifier ?? "com.waifux.app"
+        _ = Bundle.main.bundleIdentifier ?? "com.waifux.app"
         
         // 创建 bash 脚本文件并执行（参考 AltTab 实现）
         let scriptContent = """

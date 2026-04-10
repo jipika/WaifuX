@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AppKit
+import Kingfisher
 
 @MainActor
 class WallpaperViewModel: ObservableObject {
@@ -8,6 +9,9 @@ class WallpaperViewModel: ObservableObject {
     @Published var featuredWallpapers: [Wallpaper] = []
     @Published var topWallpapers: [Wallpaper] = []
     @Published var latestWallpapers: [Wallpaper] = []
+    
+    // MARK: - 内存优化：限制最大数据量，防止无限滚动导致内存占满
+    private let maxDataCount = 200  // 最多保留200条数据，超过时清理早期数据
     @Published var availableTags: [APITag] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -24,8 +28,7 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - Task Cancellation Support
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
-    private var imageLoadTasks: [String: Task<Void, Never>] = [:]
-    
+
     // MARK: - 预加载支持
     private var preloadTask: Task<Void, Never>?
     private var preloadedWallpapers: [Wallpaper] = []
@@ -422,7 +425,6 @@ class WallpaperViewModel: ObservableObject {
 
                 // ⚠️ 分批更新数据，避免一次性大量更新阻塞主线程
                 currentRandomSeed = sortingOption == .random ? results.meta.seed : nil
-                print("✅ Search success: \(results.data.count) wallpapers loaded, total: \(results.meta.total), lastPage: \(results.meta.lastPage)")
                 
                 // 先更新壁纸库（后台操作）
                 // ⚠️ 使用批量更新，减少持久化次数
@@ -458,17 +460,13 @@ class WallpaperViewModel: ObservableObject {
                     preloadImages(for: Array(results.data.prefix(6)))
                 }
             } catch is CancellationError {
-                print("ℹ️ Search was cancelled")
                 isLoading = false
                 return
             } catch let error as URLError where error.code == .cancelled {
-                // 请求被取消（如快速切换筛选条件），不显示错误
-                print("ℹ️ Search request cancelled")
                 isLoading = false
                 return
             } catch {
                 errorMessage = error.localizedDescription
-                print("❌ Search error: \(error)")
             }
 
             isLoading = false
@@ -517,7 +515,6 @@ class WallpaperViewModel: ObservableObject {
                 
                 // 检查是否有预加载的数据
                 if preloadedPage == nextPage && !preloadedWallpapers.isEmpty {
-                    print("[WallpaperViewModel] Using preloaded page \(nextPage)")
                     results = WallpaperSearchResponse(
                         meta: .init(
                             query: searchQuery,
@@ -544,6 +541,9 @@ class WallpaperViewModel: ObservableObject {
                 var existingIDs = Set(wallpapers.map(\.id))
                 let appended = results.data.filter { existingIDs.insert($0.id).inserted }
                 wallpapers.append(contentsOf: appended)
+                
+                // 移除数据上限，避免滚动时出现空白
+                // 内存优化通过降低 Kingfisher 缓存实现
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
@@ -555,15 +555,11 @@ class WallpaperViewModel: ObservableObject {
                     triggerPreloadNextPage()
                 }
             } catch is CancellationError {
-                print("ℹ️ Load more was cancelled")
                 return
             } catch let error as URLError where error.code == .cancelled {
-                // 请求被取消，不显示错误
-                print("ℹ️ Load more request cancelled")
                 return
             } catch {
                 errorMessage = error.localizedDescription
-                print("Load more error: \(error)")
             }
 
             isLoading = false
@@ -586,7 +582,6 @@ class WallpaperViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             
             do {
-                print("[WallpaperViewModel] Preloading page \(nextPageToPreload)...")
                 let results = try await fetchWallpapers(query: currentQuery, page: nextPageToPreload)
                 
                 guard !Task.isCancelled else { return }
@@ -594,9 +589,8 @@ class WallpaperViewModel: ObservableObject {
                 // 存储预加载的数据
                 preloadedPage = nextPageToPreload
                 preloadedWallpapers = results.data
-                print("[WallpaperViewModel] Preloaded page \(nextPageToPreload) with \(results.data.count) wallpapers")
             } catch {
-                print("[WallpaperViewModel] Preload failed: \(error)")
+                // 预加载失败静默忽略
             }
         }
     }
@@ -605,48 +599,12 @@ class WallpaperViewModel: ObservableObject {
     func cancelAllTasks() {
         searchTask?.cancel()
         loadMoreTask?.cancel()
-        for (_, task) in imageLoadTasks {
-            task.cancel()
-        }
-        imageLoadTasks.removeAll()
-        Task {
-            await ImageLoader.shared.cancelAllLoads()
-        }
     }
 
-    // MARK: - 图片预加载（限制并发数量）
+    // MARK: - 图片预加载
     func preloadImages(for wallpapers: [Wallpaper]) {
-        let imageLoader = ImageLoader.shared
-
-        for wallpaper in wallpapers {
-            guard let thumbURL = wallpaper.thumbURL else { continue }
-
-            let task = Task(priority: .low) {
-                _ = await imageLoader.loadImage(from: thumbURL, priority: .low)
-            }
-
-            imageLoadTasks[wallpaper.id] = task
-        }
-    }
-
-    // MARK: - 加载单张图片
-    func loadImage(for wallpaper: Wallpaper, priority: TaskPriority = .medium) async -> NSImage? {
-        guard let thumbURL = wallpaper.thumbURL else { return nil }
-        // 移除外层的 limiter，依赖 ImageLoader 内部的限制，避免双重限制导致死锁
-        return await ImageLoader.shared.loadImage(from: thumbURL, priority: priority)
-    }
-
-    // MARK: - 加载原图（用于轮播大图显示）
-    func loadFullImage(for wallpaper: Wallpaper) async -> NSImage? {
-        // 先尝试加载原图
-        if let fullURL = wallpaper.fullImageURL {
-            if let image = await ImageLoader.shared.loadImage(from: fullURL, priority: .high) {
-                return image
-            }
-        }
-        
-        // 回退到缩略图
-        return await loadImage(for: wallpaper, priority: .high)
+        let urls = wallpapers.compactMap(\.thumbURL)
+        ImagePrefetcher(urls: urls).start()
     }
 
     private func fetchWallpapers(query: String, page: Int) async throws -> WallpaperSearchResponse {
@@ -665,25 +623,11 @@ class WallpaperViewModel: ObservableObject {
             seed: sortingOption == .random ? currentRandomSeed : nil
         )
 
-        // 打印请求参数用于调试
-        print("[WallpaperViewModel] Search params:")
-        print("  - categories: \(parameters.categories)")
-        print("  - purity: \(parameters.purity)")
-        print("  - sorting: \(parameters.sorting)")
-        print("  - order: \(parameters.order)")
-        print("  - topRange: \(parameters.topRange ?? "nil")")
-        print("  - seed: \(parameters.seed ?? "nil")")
-        print("  - query: '\(parameters.query)'")
-        print("  - resolutions: \(parameters.resolutions)")
-        print("  - ratios: \(parameters.ratios)")
-        print("  - colors: \(parameters.colors)")
-        print("  - atleast: \(parameters.atleast ?? "nil")")
-
         return try await fetchWallpapers(parameters: parameters)
     }
 
-    /// Wallhaven 请求最大重试次数
-    private let maxWallhavenRetries = 2
+    /// Wallhaven 请求最大重试次数（⚠️ VM 层不再重试，交给 NetworkService 统一重试）
+    private let maxWallhavenRetries = 0
     
     private func fetchWallpapers(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
         let sourceManager = WallpaperSourceManager.shared
@@ -703,33 +647,21 @@ class WallpaperViewModel: ObservableObject {
             throw NetworkError.invalidResponse
         }
 
-        // 尝试请求，失败时自动重试（最多3次：初始 + 2次重试）
-        var lastError: Error?
-        for attempt in 0...maxWallhavenRetries {
-            if attempt > 0 {
-                print("[WallpaperViewModel] 🔄 Retrying Wallhaven request (attempt \(attempt + 1)/\(maxWallhavenRetries + 1))...")
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        // 单次请求 + 10s 超时保护，重试由 NetworkService 内部处理
+        do {
+            let result = try await withWallhavenTimeout(seconds: 10) {
+                try await self.networkService.fetch(
+                    WallpaperSearchResponse.self,
+                    from: url,
+                    headers: WallhavenAPI.authenticationHeaders(apiKey: self.normalizedAPIKey)
+                )
             }
-            
-            do {
-                let result = try await withWallhavenTimeout(seconds: 5) {
-                    try await self.networkService.fetch(
-                        WallpaperSearchResponse.self,
-                        from: url,
-                        headers: WallhavenAPI.authenticationHeaders(apiKey: self.normalizedAPIKey)
-                    )
-                }
-                return result
-            } catch {
-                lastError = error
-                print("[WallpaperViewModel] ⚠️ Wallhaven attempt \(attempt + 1) failed: \(error.localizedDescription)")
-            }
+            return result
+        } catch {
+            // 显示网络错误提示
+            sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
+            throw error
         }
-        
-        // 所有重试都失败，显示网络错误提示
-        sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
-        
-        throw lastError ?? NetworkError.networkError(URLError(.unknown))
     }
 
     /// 从指定的回退源获取数据
@@ -773,7 +705,6 @@ class WallpaperViewModel: ObservableObject {
                     usePopular: usePopular
                 )
             } catch {
-                print("[WallpaperViewModel] ❌ 4KWallpapers also failed: \(error.localizedDescription)")
                 // 显示网络错误提示
                 sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
                 throw error
@@ -873,7 +804,6 @@ class WallpaperViewModel: ObservableObject {
     func downloadWallpaper(_ wallpaper: Wallpaper) async throws {
         // 确保下载权限
         guard await downloadPathManager.ensureDirectoryStructure() else {
-            print("[WallpaperViewModel] Download failed: permission denied or directory creation failed")
             throw DownloadError.permissionDenied
         }
         
@@ -899,7 +829,6 @@ class WallpaperViewModel: ObservableObject {
             let directory = fileURL.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: directory.path) {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                print("[WallpaperViewModel] Created directory: \(directory.path)")
             }
 
             // 写入文件
@@ -907,15 +836,12 @@ class WallpaperViewModel: ObservableObject {
             
             // 验证文件是否成功写入
             if FileManager.default.fileExists(atPath: fileURL.path) {
-                print("[WallpaperViewModel] ✅ File saved successfully: \(fileURL.path)")
                 wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
                 downloadTaskService.markCompleted(id: task.id)
             } else {
-                print("[WallpaperViewModel] ❌ File write appeared to succeed but file not found: \(fileURL.path)")
                 throw DownloadError.writeFailed(NSError(domain: "WallHaven", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
             }
         } catch {
-            print("[WallpaperViewModel] ❌ Download failed: \(error)")
             downloadTaskService.markFailed(id: task.id)
             throw error
         }
@@ -931,7 +857,6 @@ class WallpaperViewModel: ObservableObject {
            wallpaper.thumbs.original.contains("/images/wallpapers/"),
            let originalURL = URL(string: wallpaper.thumbs.original) {
             downloadURL = originalURL
-            print("[WallpaperViewModel] 4K wallpaper: using original URL from thumbs.original: \(wallpaper.thumbs.original)")
         } else {
             downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL
         }
@@ -945,10 +870,8 @@ class WallpaperViewModel: ObservableObject {
             let originalURL = await FourKWallpapersService.shared.fetchOriginalImageURL(for: wallpaper)
             if let originalURLString = originalURL, let url = URL(string: originalURLString) {
                 downloadURL = url
-                print("[WallpaperViewModel] 4K wallpaper: fallback to detail page parsed URL: \(originalURLString)")
             } else {
                 downloadURL = wallpaper.thumbURL  // 最终兜底用缩略图
-                print("[WallpaperViewModel] 4K wallpaper: all fallbacks failed, using thumbnail")
             }
         }
 
@@ -958,14 +881,11 @@ class WallpaperViewModel: ObservableObject {
         
         // 本地文件：直接读取数据
         if downloadURL.isFileURL {
-            print("[WallpaperViewModel] Reading local file: \(downloadURL.path)")
             guard FileManager.default.fileExists(atPath: downloadURL.path) else {
                 throw DownloadError.fileNotFound
             }
             return try Data(contentsOf: downloadURL)
         }
-
-        print("Downloading from: \(downloadURL)")
 
         return try await networkService.fetchImage(from: downloadURL) { progress in
             guard let taskID else { return }
@@ -1217,7 +1137,7 @@ class WallpaperViewModel: ObservableObject {
                 }
             }
         } catch {
-            print("Failed to fetch featured: \(error)")
+            // 静默忽略
         }
     }
 
@@ -1225,7 +1145,7 @@ class WallpaperViewModel: ObservableObject {
         do {
             topWallpapers = try await fetchTopWallpapers()
         } catch {
-            print("Failed to fetch top: \(error)")
+            // 静默忽略
         }
     }
 
@@ -1233,7 +1153,7 @@ class WallpaperViewModel: ObservableObject {
         do {
             latestWallpapers = try await fetchLatestWallpapers()
         } catch {
-            print("Failed to fetch latest: \(error)")
+            // 静默忽略
         }
     }
 }

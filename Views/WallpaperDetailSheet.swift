@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - 壁纸详情页 - macOS 26 Liquid Glass 沉浸式全屏风格
 struct WallpaperDetailSheet: View {
@@ -220,21 +221,22 @@ struct WallpaperDetailSheet: View {
         if isPortraitWallpaper {
             portraitWallpaperBackground(width: width, height: viewH)
         } else {
-            OptimizedAsyncImage(url: heroImageURL, priority: .high, onLoad: {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    isImageLoaded = true
+            KFImage(heroImageURL)
+                .onSuccess { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isImageLoaded = true
+                    }
                 }
-            }) { image in
-                image
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: width, height: viewH)
-                    .clipped()
-            } placeholder: {
-                Color.clear
-                    .frame(width: width, height: viewH)
-            }
-            .frame(width: width, height: viewH)
+                .fade(duration: 0.3)
+                .placeholder { _ in
+                    Color.clear
+                        .frame(width: width, height: viewH)
+                }
+                .resizable()
+                .scaledToFill()
+                .frame(width: width, height: viewH)
+                .clipped()
+                .frame(width: width, height: viewH)
         }
     }
 
@@ -243,39 +245,41 @@ struct WallpaperDetailSheet: View {
             Color.black
 
             // 左右延伸层：基于居中缩放图做横向拉伸和高斯模糊，仅在两侧显现
-            OptimizedAsyncImage(url: heroImageURL, priority: .medium, onLoad: {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    isImageLoaded = true
+            KFImage(heroImageURL)
+                .onSuccess { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isImageLoaded = true
+                    }
                 }
-            }) { image in
-                image
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: width, height: height)
-                    .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                    .blur(radius: 84)
-                    .saturation(1.12)
-                    .brightness(-0.08)
-                    .mask(portraitWallpaperSideMask)
-            } placeholder: {
-                Color.clear
-            }
+                .fade(duration: 0.3)
+                .placeholder { _ in
+                    Color.clear
+                }
+                .resizable()
+                .scaledToFit()
+                .frame(width: width, height: height)
+                .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                .blur(radius: 84)
+                .saturation(1.12)
+                .brightness(-0.08)
+                .mask(portraitWallpaperSideMask)
 
             // 主图：完整缩放展示，避免竖图被过度裁切
-            OptimizedAsyncImage(url: heroImageURL, priority: .high, onLoad: {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    isImageLoaded = true
+            KFImage(heroImageURL)
+                .onSuccess { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isImageLoaded = true
+                    }
                 }
-            }) { image in
-                image
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: width, height: height)
-                    .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
-            } placeholder: {
-                Color.clear
-                    .frame(width: width, height: height)
-            }
+                .fade(duration: 0.3)
+                .placeholder { _ in
+                    Color.clear
+                        .frame(width: width, height: height)
+                }
+                .resizable()
+                .scaledToFit()
+                .frame(width: width, height: height)
+                .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
 
             LinearGradient(
                 stops: [
@@ -686,16 +690,16 @@ struct WallpaperDetailSheet: View {
                 let h = geo.size.height
 
                 ZStack {
-                    OptimizedAsyncImage(url: heroImageURL, priority: .medium) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: w * 1.08, height: h)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                            .clipped()
-                    } placeholder: {
-                        Rectangle().fill(Color.white.opacity(0.08))
-                    }
+                    KFImage(heroImageURL)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            Rectangle().fill(Color.white.opacity(0.08))
+                        }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: w * 1.08, height: h)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                        .clipped()
                     .frame(width: w, height: h)
 
                     LinearGradient(

@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Kingfisher
 
 // MARK: - 下一张项目数据协议
 /// 用于统一 Wallpaper 和 MediaItem 的预览数据
@@ -250,13 +251,13 @@ public struct LiquidGlassNextItemToast: View {
         var body: some View {
             ZStack {
                 if let url = item.previewThumbnailURL {
-                    OptimizedAsyncImage(url: url, priority: .low) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        PlaceholderView()
-                    }
+                    KFImage(url)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            PlaceholderView()
+                        }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
                 } else {
                     PlaceholderView()
                 }

@@ -176,7 +176,7 @@ struct SettingsView: View {
             ZStack {
                 Color(hex: "1A1A1A").opacity(0.85)
 
-                VisualEffectView(material: .hudWindow)
+                VisualEffectView(material: .sidebar)
                     .allowsHitTesting(false)
             }
         )
@@ -188,9 +188,6 @@ private struct GeneralSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showClearCacheAlert = false
     @State private var importProfileURL = ""
-
-    @AppStorage("grain_texture_enabled") private var grainTextureEnabled = true
-    @AppStorage("grain_texture_quality") private var grainTextureQuality = "high"
 
     private var apiKeyBinding: Binding<String> {
         Binding(get: { viewModel.apiKey }, set: { viewModel.apiKey = $0 })
@@ -258,7 +255,7 @@ private struct GeneralSettingsTab: View {
                     subtitle: t("grainTextureSubtitle"),
                     showDivider: true
                 ) {
-                    MacToggle(isOn: $grainTextureEnabled)
+                    MacToggle(isOn: $viewModel.grainTextureEnabled)
                 }
 
                 MacSettingsRow(
@@ -610,6 +607,7 @@ private struct SchedulerSettingsTab: View {
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showAutoUpdateSheet = false
+    @State private var showResetAlert = false
 
     private var wallpaperRuleSourceText: String {
         if viewModel.currentRuleRepository.isEmpty {
@@ -651,8 +649,35 @@ private struct AboutSettingsTab: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                // 重置所有数据
+                MacSettingsSection(header: t("resetAllData")) {
+                    HStack(spacing: 12) {
+                        Text(t("resetAllData"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.9))
+
+                        Spacer()
+
+                        Button(t("reset")) {
+                            showResetAlert = true
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color(hex: "FF453A"))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
             }
-            
+            .alert(t("resetAllData"), isPresented: $showResetAlert) {
+                Button(t("cancel"), role: .cancel) {}
+                Button(t("reset"), role: .destructive) {
+                    Task { await viewModel.resetAllData() }
+                }
+            } message: {
+                Text(t("resetAllDataConfirm"))
+            }
+
             // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
             if showAutoUpdateSheet, 
                case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {

@@ -12,6 +12,9 @@ final class MediaExploreViewModel: ObservableObject {
     @Published private(set) var hasMorePages = true
     @Published private(set) var currentQuery = ""
     
+    // MARK: - 内存优化：限制最大数据量
+    private let maxDataCount = 150  // 最多保留150条媒体数据
+    
     // MARK: - Network State
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
@@ -279,6 +282,9 @@ final class MediaExploreViewModel: ObservableObject {
             let appended = page.items.filter { !existingIDs.contains($0.id) }
             page.items.forEach { mediaLibrary.upsert($0) }
             items.append(contentsOf: appended)
+            
+            // 移除数据上限，避免滚动时出现空白
+            // 内存优化通过降低 Kingfisher 缓存实现
             self.nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
         } catch {

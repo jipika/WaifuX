@@ -137,11 +137,9 @@ actor NetworkService {
                 
                 do {
                     let data = try await performRequest(request: request, progressHandler: progressHandler)
-                    print("[NetworkService] ✅ GitHub Hosts 加速成功: \(url.host ?? "")")
                     return data
                 } catch {
-                    print("[NetworkService] ⚠️ GitHub Hosts 失败，回退到原始域名: \(error.localizedDescription)")
-                    // 失败时回退到原始域名
+                    // GitHub Hosts 失败，回退到原始域名
                 }
             }
         }
@@ -240,14 +238,12 @@ actor NetworkService {
     /// 清除所有缓存
     func clearCache() {
         cache.removeAllCachedResponses()
-        print("[NetworkService] 🗑️ Cache cleared")
     }
     
     /// 清除特定 URL 的缓存
     func clearCache(for url: URL) {
         let request = URLRequest(url: url)
         cache.removeCachedResponse(for: request)
-        print("[NetworkService] 🗑️ Cache cleared for: \(url.absoluteString)")
     }
     
     /// 获取缓存大小

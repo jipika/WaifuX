@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
@@ -43,6 +44,9 @@ final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
 @main
 struct WaifuXApp {
     static func main() {
+        // 配置 Kingfisher（高性能图片加载）
+        configureKingfisher()
+        
         // 配置全局 URLCache
         let cache = URLCache(
             memoryCapacity: 100_000_000,  // 100 MB 内存缓存
@@ -59,6 +63,31 @@ struct WaifuXApp {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
+    }
+    
+    /// 配置 Kingfisher 高性能图片加载
+    private static func configureKingfisher() {
+        // 内存缓存配置 - 降低到 50MB/80张，减少内存占用
+        ImageCache.default.memoryStorage.config.totalCostLimit = 50 * 1024 * 1024 // 50MB
+        ImageCache.default.memoryStorage.config.countLimit = 80
+        
+        // 磁盘缓存配置
+        ImageCache.default.diskStorage.config.sizeLimit = 500 * 1024 * 1024 // 500MB
+        ImageCache.default.diskStorage.config.expiration = .days(7)
+        
+        // 下载配置
+        let downloader = KingfisherManager.shared.downloader
+        downloader.downloadTimeout = 30.0
+        
+        // 设置内存压力处理（使用 DispatchSource）
+        #if os(macOS)
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global(qos: .utility))
+        source.setEventHandler {
+            // 内存紧张时清理 Kingfisher 内存缓存
+            ImageCache.default.clearMemoryCache()
+        }
+        source.resume()
+        #endif
     }
 }
 
@@ -295,6 +324,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !(settingsWindowController?.window?.isVisible ?? false) {
             updateActivationPolicy(showDockIcon: false)
         }
+        // 窗口隐藏时清理大内存占用，但保留磁盘缓存
+        Task { @MainActor in
+            // 清理 Kingfisher 内存缓存
+            ImageCache.default.clearMemoryCache()
+            // 通知各个 View 清理大内存数据
+            NotificationCenter.default.post(name: .appDidHideWindow, object: nil)
+        }
     }
 
     func quitApplication() {
@@ -314,6 +350,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let settingsWindow = settingsWindowController?.window {
             centerWindow(settingsWindow, relativeTo: window)
             settingsWindow.makeKeyAndOrderFront(nil)
+            settingsWindow.orderFrontRegardless()
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -352,6 +389,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let windowController = NSWindowController(window: settingsWindow)
         settingsWindowController = windowController
         windowController.showWindow(nil)
+        settingsWindow.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
     

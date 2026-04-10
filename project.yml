@@ -12,6 +12,9 @@ packages:
   Kanna:
     url: https://github.com/tid-kijyun/Kanna.git
     from: "5.2.0"
+  Kingfisher:
+    url: https://github.com/onevcat/Kingfisher.git
+    from: "8.8.0"
 
 settings:
   base:
@@ -43,7 +46,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.42
+        MARKETING_VERSION: 38.0.43
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -56,6 +59,7 @@ targets:
     dependencies:
       - package: SwiftSoup
       - package: Kanna
+      - package: Kingfisher
     entitlements:
       path: WaifuX.entitlements
       properties:

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import QuartzCore
+import Kingfisher
 
 // MARK: - 通知名称
 extension Notification.Name {
@@ -75,18 +76,18 @@ private struct AnimeCoverBackground: View {
             // 封面图模糊背景
             if let coverURL = viewModel.anime.coverURL,
                let url = URL(string: coverURL) {
-                OptimizedAsyncImage(url: url, priority: .high) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .blur(radius: 80)
-                        .saturation(0.8)
-                        .brightness(-0.3)
-                        .opacity(0.6)
-                } placeholder: {
-                    Color.clear
-                }
+                KFImage(url)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in
+                        Color.clear
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .blur(radius: 80)
+                    .saturation(0.8)
+                    .brightness(-0.3)
+                    .opacity(0.6)
             }
             
             // 渐变叠加层

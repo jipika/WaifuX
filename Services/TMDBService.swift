@@ -164,15 +164,40 @@ actor TMDBService {
     
     // 缓存
     private var backdropCache: [String: String] = [:] // animeName -> backdropURL
+    private static let backdropCacheKey = "tmdb_backdrop_cache"
+    
+    // 重试配置
+    private let maxRetries = 2
+    private let retryDelays: [TimeInterval] = [1.0, 2.0]
     
     init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForRequest = 10   // 10秒超时，快速降级
+        config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config)
         
         self.decoder = JSONDecoder()
         self.decoder.dateDecodingStrategy = .iso8601
+        
+        // 从 UserDefaults 恢复持久化缓存 - 在 Task 中异步调用
+        Task {
+            await restoreBackdropCache()
+        }
+    }
+    
+    // MARK: - 持久化缓存
+    
+    private func restoreBackdropCache() async {
+        guard let data = UserDefaults.standard.data(forKey: Self.backdropCacheKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+        backdropCache = decoded
+    }
+    
+    private func persistBackdropCache() {
+        guard let data = try? JSONEncoder().encode(backdropCache) else { return }
+        UserDefaults.standard.set(data, forKey: Self.backdropCacheKey)
     }
     
     // MARK: - 搜索动漫并获取横屏背景
@@ -180,14 +205,13 @@ actor TMDBService {
     /// 根据动漫名称搜索并返回最佳匹配的背景图 URL
     /// 使用多种搜索策略确保能找到结果
     func fetchBackdropURL(for animeName: String, originalName: String? = nil) async -> String? {
-        // 检查缓存
+        // 检查缓存（含持久化）
         if let cached = backdropCache[animeName] {
-            print("[TMDBService] Using cached backdrop for: \(animeName)")
             return cached
         }
         
         // 策略1: 使用完整名称搜索
-        if let result = try? await searchAnime(query: animeName) {
+        if let result = try? await searchAnimeWithRetry(query: animeName) {
             return await fetchBackdropFromTV(id: result.id, animeName: animeName)
         }
         
@@ -195,14 +219,14 @@ actor TMDBService {
         let keywords = extractCoreKeywords(animeName)
         if keywords.count > 1 {
             let keywordQuery = keywords.joined(separator: " ")
-            if let result = try? await searchAnime(query: keywordQuery) {
+            if let result = try? await searchAnimeWithRetry(query: keywordQuery) {
                 return await fetchBackdropFromTV(id: result.id, animeName: animeName)
             }
         }
         
         // 策略3: 使用原名（日文/英文）搜索
         if let originalName = originalName, originalName != animeName {
-            if let result = try? await searchAnime(query: originalName) {
+            if let result = try? await searchAnimeWithRetry(query: originalName) {
                 return await fetchBackdropFromTV(id: result.id, animeName: animeName)
             }
         }
@@ -213,7 +237,7 @@ actor TMDBService {
         if let cleanedName = seasonPattern?.stringByReplacingMatches(in: animeName, options: [], range: range, withTemplate: "").trimmingCharacters(in: .whitespaces),
            cleanedName != animeName,
            !cleanedName.isEmpty {
-            if let result = try? await searchAnime(query: cleanedName) {
+            if let result = try? await searchAnimeWithRetry(query: cleanedName) {
                 return await fetchBackdropFromTV(id: result.id, animeName: animeName)
             }
         }
@@ -221,25 +245,24 @@ actor TMDBService {
         // 策略5: 尝试取前N个字符搜索（适合长标题）
         if animeName.count > 10 {
             let shortName = String(animeName.prefix(10))
-            if let result = try? await searchAnime(query: shortName) {
+            if let result = try? await searchAnimeWithRetry(query: shortName) {
                 return await fetchBackdropFromTV(id: result.id, animeName: animeName)
             }
         }
         
-        print("[TMDBService] Could not find any match for: \(animeName)")
         return nil
     }
     
     /// 获取动漫详情中的背景图
     func fetchBackdropFromTV(id: Int, animeName: String) async -> String? {
         do {
-            let detail = try await fetchTVDetail(id: id)
+            let detail = try await fetchTVDetailWithRetry(id: id)
             
             // 优先使用 backdropPath
             if let backdropPath = detail.backdropPath, !backdropPath.isEmpty {
                 let url = TMDBAPI.backdropURL(path: backdropPath, size: .original)
                 backdropCache[animeName] = url
-                print("[TMDBService] Found backdrop for '\(animeName)': \(url)")
+                persistBackdropCache()
                 return url
             }
             
@@ -247,20 +270,36 @@ actor TMDBService {
             if let bestBackdrop = detail.images?.bestBackdrop {
                 let url = TMDBAPI.backdropURL(path: bestBackdrop.filePath, size: .original)
                 backdropCache[animeName] = url
-                print("[TMDBService] Found backdrop from images for '\(animeName)': \(url)")
+                persistBackdropCache()
                 return url
             }
             
-            print("[TMDBService] No backdrop found for: \(animeName)")
             return nil
             
         } catch {
-            print("[TMDBService] Error fetching TV detail: \(error)")
             return nil
         }
     }
     
-    // MARK: - 搜索动漫（模糊匹配）
+    // MARK: - 搜索动漫（模糊匹配 + 静默重试）
+    
+    /// 带静默重试的搜索
+    func searchAnimeWithRetry(query: String) async throws -> TMDBSearchResult {
+        var lastError: Error?
+        
+        for attempt in 0...maxRetries {
+            do {
+                return try await searchAnime(query: query)
+            } catch {
+                lastError = error
+                // 超时或网络错误才重试，其他错误直接抛
+                guard error.isRetryable, attempt < maxRetries else { break }
+                try? await Task.sleep(nanoseconds: UInt64(retryDelays[attempt] * 1_000_000_000))
+            }
+        }
+        
+        throw lastError ?? TMDBError.networkError(URLError(.unknown))
+    }
     
     func searchAnime(query: String) async throws -> TMDBSearchResult {
         let urlString = TMDBAPI.searchAnime(query: query)
@@ -269,12 +308,10 @@ actor TMDBService {
             throw TMDBError.invalidURL
         }
         
-        print("[TMDBService] Fuzzy searching: \(query)")
-        
         var request = URLRequest(url: url)
         request.setValue("Bearer \(TMDBAPI.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("WallHaven/1.0", forHTTPHeaderField: "User-Agent")
         
         let (data, response) = try await session.data(for: request)
         
@@ -292,7 +329,6 @@ actor TMDBService {
         // 使用模糊匹配算法找到最佳匹配
         let bestMatch = findBestMatch(query: query, results: searchResponse.results)
         
-        print("[TMDBService] Best match for '\(query)': \(bestMatch.name) (original: \(bestMatch.originalName ?? "N/A"))")
         return bestMatch
     }
     
@@ -396,12 +432,6 @@ actor TMDBService {
         
         // 按分数排序，返回最高分的结果
         scoredResults.sort { $0.score > $1.score }
-        
-        // 打印前3个匹配结果用于调试
-        print("[TMDBService] Top matches for '\(query)':")
-        for (index, item) in scoredResults.prefix(3).enumerated() {
-            print("  \(index + 1). \(item.result.name) / \(item.result.originalName ?? "-") (score: \(String(format: "%.1f", item.score)))")
-        }
         
         return scoredResults.first?.result ?? results[0]
     }
@@ -567,7 +597,23 @@ actor TMDBService {
             .filter { !$0.isEmpty && $0.count >= 2 }
     }
     
-    // MARK: - 获取 TV 详情
+    // MARK: - 获取 TV 详情（静默重试）
+    
+    func fetchTVDetailWithRetry(id: Int) async throws -> TMDBTVDetail {
+        var lastError: Error?
+        
+        for attempt in 0...maxRetries {
+            do {
+                return try await fetchTVDetail(id: id)
+            } catch {
+                lastError = error
+                guard error.isRetryable, attempt < maxRetries else { break }
+                try? await Task.sleep(nanoseconds: UInt64(retryDelays[attempt] * 1_000_000_000))
+            }
+        }
+        
+        throw lastError ?? TMDBError.networkError(URLError(.unknown))
+    }
     
     func fetchTVDetail(id: Int) async throws -> TMDBTVDetail {
         let urlString = TMDBAPI.tvDetail(id: id)
@@ -579,7 +625,7 @@ actor TMDBService {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(TMDBAPI.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("WallHaven/1.0", forHTTPHeaderField: "User-Agent")
         
         let (data, response) = try await session.data(for: request)
         
@@ -595,9 +641,9 @@ actor TMDBService {
     
     func fetchAnimeInfo(animeName: String, originalName: String? = nil) async -> TMDBAnimeInfo? {
         // 先搜索
-        guard let searchResult = try? await searchAnime(query: animeName) else {
+        guard let searchResult = try? await searchAnimeWithRetry(query: animeName) else {
             if let originalName = originalName, originalName != animeName {
-                guard let originalResult = try? await searchAnime(query: originalName) else {
+                guard let originalResult = try? await searchAnimeWithRetry(query: originalName) else {
                     return nil
                 }
                 return await fetchAnimeInfoFromTV(id: originalResult.id)
@@ -610,7 +656,7 @@ actor TMDBService {
     
     private func fetchAnimeInfoFromTV(id: Int) async -> TMDBAnimeInfo? {
         do {
-            let detail = try await fetchTVDetail(id: id)
+            let detail = try await fetchTVDetailWithRetry(id: id)
             
             let backdropURL: String?
             if let backdropPath = detail.backdropPath {
@@ -645,7 +691,6 @@ actor TMDBService {
             )
             
         } catch {
-            print("[TMDBService] Error fetching anime info: \(error)")
             return nil
         }
     }
