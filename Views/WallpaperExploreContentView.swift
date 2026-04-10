@@ -36,7 +36,7 @@ struct WallpaperExploreContentView: View {
             let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
             
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 20, pinnedViews: []) {
+                LazyVStack(alignment: .leading, spacing: 16, pinnedViews: []) {
                     heroSection
                     categorySection
                     quickFilterSection

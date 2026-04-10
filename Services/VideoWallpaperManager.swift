@@ -596,6 +596,9 @@ final class VideoWallpaperManager: ObservableObject {
             guard let targetScreen = targetScreen else { return }
             let targetScreenID = targetScreen.wallpaperScreenIdentifier
             if let window = windows[targetScreenID] {
+                if let contentView = window.contentView as? WallpaperVideoContainerView {
+                    contentView.playerLayer.player = nil
+                }
                 window.close()
                 windows.removeValue(forKey: targetScreenID)
             }
@@ -603,6 +606,10 @@ final class VideoWallpaperManager: ObservableObject {
                 player.pause()
                 player.removeAllItems()
                 players.removeValue(forKey: targetScreenID)
+                // 延迟释放 player（同 teardownAllWindows 的修复）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    _ = player
+                }
             }
             if let looper = loopers[targetScreenID] {
                 looper.disableLooping()
@@ -661,21 +668,41 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows() {
+        // 1. 先断开所有 playerLayer 与 player 的关联，避免渲染层持有已释放的 player
+        for window in windows.values {
+            if let contentView = window.contentView as? WallpaperVideoContainerView {
+                contentView.playerLayer.player = nil
+            }
+        }
+
+        // 2. 停止 looper
         for looper in loopers.values {
             looper.disableLooping()
         }
         loopers.removeAll()
 
-        for player in players.values {
+        // 3. 暂停 player 并清空 items
+        // ⚠️ 关键：不要立即释放 player！
+        // macOS 26.5 beta 的 MediaToolbox 中 FigNotificationCenterRemoveWeakListener
+        // 在后台线程异步清理 AVPlayerItem 的通知监听器，如果 player 在此期间被释放，
+        // 后台线程访问已释放对象 → 主线程 autorelease pool drain 时 objc_release 已死对象 → SIGSEGV
+        // 修复：先暂停+清空，然后延迟释放，让后台清理完成
+        let playersToDelay = players.values.map { $0 }
+        for player in playersToDelay {
             player.pause()
             player.removeAllItems()
         }
         players.removeAll()
 
+        // 延迟释放 player，让 MediaToolbox 后台线程完成 FigNotificationCenter 清理
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // playersToDelay 被闭包捕获，在此延迟后才释放
+            // 此时 MediaToolbox 后台的 FigNotificationCenterRemoveWeakListener 应已完成
+            _ = playersToDelay
+        }
+
+        // 4. 关闭窗口
         for window in windows.values {
-            if let contentView = window.contentView as? WallpaperVideoContainerView {
-                contentView.playerLayer.player = nil
-            }
             window.orderOut(nil)
             window.contentView = nil
         }

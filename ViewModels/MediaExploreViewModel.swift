@@ -660,6 +660,18 @@ final class MediaExploreViewModel: ObservableObject {
 
     // MARK: - 批量删除
 
+    /// 批量删除媒体收藏
+    /// - Parameter ids: 要删除的项目 ID 集合
+    func removeFavorites(withIDs ids: Set<String>) {
+        mediaLibrary.removeFavoriteRecords(withIDs: ids)
+    }
+
+    /// 批量删除媒体下载记录
+    /// - Parameter ids: 要删除的项目 ID 集合
+    func removeDownloads(withIDs ids: Set<String>) {
+        mediaLibrary.removeDownloadRecords(withIDs: ids)
+    }
+
     /// 批量删除指定 ID 的项目
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeItems(withIDs ids: Set<String>) {

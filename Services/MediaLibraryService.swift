@@ -131,26 +131,62 @@ final class MediaLibraryService: ObservableObject {
 
     // MARK: - 批量删除
 
-    /// 批量删除下载记录
+    /// 批量删除收藏记录
+    /// - Parameter ids: 要删除的项目 ID 集合
+    func removeFavoriteRecords(withIDs ids: Set<String>) {
+        for (index, record) in favoriteRecords.enumerated() {
+            if ids.contains(record.item.id) {
+                favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+            }
+        }
+        persistFavorites()
+        favoriteRecords = favoriteRecords
+    }
+
+    /// 删除单个下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecord(withID id: String) {
         if let index = downloadRecords.firstIndex(where: { $0.item.id == id }) {
+            let filePath = downloadRecords[index].localFilePath
+            // 标记软删除
             downloadRecords[index].metadata.markLocalMutation(deleted: true)
             persistDownloads()
             downloadRecords = downloadRecords
+            // 删除物理文件
+            deletePhysicalFile(at: filePath)
         }
     }
 
-    /// 批量删除下载记录
+    /// 批量删除下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecords(withIDs ids: Set<String>) {
+        var filesToDelete: [String] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.item.id) {
+                filesToDelete.append(record.localFilePath)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
             }
         }
         persistDownloads()
         downloadRecords = downloadRecords
+        // 删除所有对应的物理文件
+        for path in filesToDelete {
+            deletePhysicalFile(at: path)
+        }
+    }
+
+    /// 安全删除物理文件
+    private func deletePhysicalFile(at path: String) {
+        guard !path.isEmpty else { return }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path) {
+            do {
+                try fm.removeItem(atPath: path)
+                print("[MediaLibraryService] ✅ Deleted physical file: \(path)")
+            } catch {
+                print("[MediaLibraryService] ⚠️ Failed to delete file \(path): \(error)")
+            }
+        }
     }
 
     /// 批量删除最近播放记录
@@ -374,16 +410,36 @@ final class WallpaperLibraryService: ObservableObject {
         favoriteRecords = favoriteRecords
     }
 
-    /// 批量删除壁纸下载记录
+    /// 批量删除壁纸下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeWallpaperDownloads(withIDs ids: Set<String>) {
+        var filesToDelete: [String] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.wallpaper.id) {
+                filesToDelete.append(record.localFilePath)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
             }
         }
         persistDownloads()
         downloadRecords = downloadRecords
+        // 删除所有对应的物理文件
+        for path in filesToDelete {
+            wallpaperDeletePhysicalFile(at: path)
+        }
+    }
+
+    /// 安全删除壁纸物理文件
+    private func wallpaperDeletePhysicalFile(at path: String) {
+        guard !path.isEmpty else { return }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path) {
+            do {
+                try fm.removeItem(atPath: path)
+                print("[WallpaperLibraryService] ✅ Deleted physical file: \(path)")
+            } catch {
+                print("[WallpaperLibraryService] ⚠️ Failed to delete file \(path): \(error)")
+            }
+        }
     }
 
     /// 清理无效下载记录（文件不存在的记录）

@@ -3,12 +3,17 @@ import ServiceManagement
 
 @MainActor
 class SettingsViewModel: ObservableObject {
-    @AppStorage("auto_download_original") var autoDownloadOriginal = false
-    @AppStorage("save_to_downloads") var saveToDownloads = true
-    @AppStorage("theme_mode") private var themeModeRawValue = ThemeMode.system.rawValue
-    @AppStorage("launch_at_login") var launchAtLogin = false
-    @AppStorage("grain_texture_enabled") var grainTextureEnabled = true
-    @AppStorage("video_wallpaper_show_poster_on_lock") var showPosterOnLock = true
+    // ⚠️ 不使用 @AppStorage！macOS 26+ beta 上 @AppStorage 在属性包装器 init 时
+    // 直接读 UserDefaults，如果 SettingsViewModel 在 AppDelegate 属性初始化阶段被创建，
+    // 会触发 _CFXPreferences 递归栈溢出（EXC_BAD_ACCESS SIGSEGV）。
+    // 改用 @Published + 手动 UserDefaults 同步 + restoreSavedSettings() 延迟恢复。
+
+    @Published var autoDownloadOriginal = false { didSet { UserDefaults.standard.set(autoDownloadOriginal, forKey: "auto_download_original") } }
+    @Published var saveToDownloads = true { didSet { UserDefaults.standard.set(saveToDownloads, forKey: "save_to_downloads") } }
+    @Published private var themeModeRawValue: String = ThemeMode.system.rawValue { didSet { UserDefaults.standard.set(themeModeRawValue, forKey: "theme_mode") } }
+    @Published var launchAtLogin = false { didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launch_at_login") } }
+    @Published var grainTextureEnabled = true { didSet { UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled") } }
+    @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
 
     @Published var cacheSize: String = "0 MB"
     @Published var cacheProgress: Double = 0.0
@@ -33,12 +38,19 @@ class SettingsViewModel: ObservableObject {
     @Published var schedulerViewModel = WallpaperSchedulerViewModel()
     @Published var downloadTaskViewModel = DownloadTaskViewModel()
 
-    // API Key - 本地存储（UserDefaults 为主，与 WallpaperViewModel 保持同步）
+    // API Key - 使用静态缓存，避免在 getter 中读 UserDefaults
     private let apiKeyUserDefaultsKey = "wallhaven_api_key"
+    private static var _cachedAPIKey: String? = nil
+    private static var _apiKeyRestored = false
     var apiKey: String {
-        get { UserDefaults.standard.string(forKey: apiKeyUserDefaultsKey) ?? "" }
+        get {
+            // ⚠️ 不直接读 UserDefaults！使用启动缓存
+            if Self._apiKeyRestored { return Self._cachedAPIKey ?? "" }
+            return ""
+        }
         set {
             objectWillChange.send()
+            Self._cachedAPIKey = newValue.isEmpty ? nil : newValue
             UserDefaults.standard.set(newValue, forKey: apiKeyUserDefaultsKey)
         }
     }
@@ -46,13 +58,36 @@ class SettingsViewModel: ObservableObject {
     private let maxCacheSize: Int64 = 500_000_000 // 500MB 预估最大值
 
     init() {
+        // ⚠️ init 中不读 UserDefaults！所有持久化数据通过 restoreSavedSettings() 延迟恢复
+        // refreshDataSourceProfiles() 和 syncVideoWallpaperSettings() 也移到 restore 中
+    }
+
+    /// ⚠️ 延迟恢复所有持久化设置（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
+    /// 在 applicationDidFinishLaunching 完成后的 DispatchQueue.main.async 中调用
+    func restoreSavedSettings() {
+        let defaults = UserDefaults.standard
+
+        // 恢复 @Published 属性
+        autoDownloadOriginal = defaults.bool(forKey: "auto_download_original")
+        saveToDownloads = defaults.object(forKey: "save_to_downloads") as? Bool ?? true
+        if let raw = defaults.string(forKey: "theme_mode"), let _ = ThemeMode(rawValue: raw) {
+            themeModeRawValue = raw
+        }
+        launchAtLogin = defaults.bool(forKey: "launch_at_login")
+        grainTextureEnabled = defaults.object(forKey: "grain_texture_enabled") as? Bool ?? true
+        showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
+
+        // 恢复 API Key 缓存
+        Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
+        Self._apiKeyRestored = true
+
+        // 延迟执行异步任务
         Task { await updateCacheSize() }
         refreshDataSourceProfiles()
         Task { await loadRuleRepository() }
-        // 同步动态壁纸设置
         syncVideoWallpaperSettings()
     }
-    
+
     /// 同步动态壁纸设置到 VideoWallpaperManager
     func syncVideoWallpaperSettings() {
         VideoWallpaperManager.shared.showPosterOnLock = showPosterOnLock

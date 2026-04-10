@@ -550,30 +550,34 @@ struct MyLibraryContentView: View {
         switch selectedContentType {
         case .wallpaper:
             // 分别处理收藏和下载的删除
-            let favoriteIDs = selectedItems.intersection(viewModel.favorites.map(\.id))
-            // 只删除有下载记录的项目（本地文件仅支持从列表移除，实际删除文件需要额外确认）
-            let downloadIDs = selectedItems.intersection(
-                viewModel.allLocalWallpapers.compactMap { $0.downloadRecord?.wallpaper.id }
-            )
-            if !favoriteIDs.isEmpty {
-                viewModel.removeWallpaperFavorites(withIDs: favoriteIDs)
+            let favoriteIDs = Set(viewModel.favorites.map(\.id))
+            let selectedFavoriteIDs = selectedItems.intersection(favoriteIDs)
+            if !selectedFavoriteIDs.isEmpty {
+                viewModel.removeWallpaperFavorites(withIDs: selectedFavoriteIDs)
             }
-            if !downloadIDs.isEmpty {
-                viewModel.removeWallpaperDownloads(withIDs: downloadIDs)
+
+            // 处理下载 + 本地文件的删除（包括物理文件）
+            let allLocal = viewModel.allLocalWallpapers
+            let localIDsToDelete = selectedItems.intersection(Set(allLocal.map(\.id)))
+            if !localIDsToDelete.isEmpty {
+                deleteLocalWallpapers(allLocal.filter { localIDsToDelete.contains($0.id) })
             }
-            // 注意：本地文件（无下载记录的）不会被删除，只是从选择中移除
+            
         case .video:
             // 分别处理收藏和下载的删除
-            let favoriteIDs = selectedItems.intersection(mediaViewModel.favoriteItems.map(\.id))
-            let downloadIDs = selectedItems.intersection(
-                mediaViewModel.allLocalMedia.compactMap { $0.downloadRecord?.item.id }
-            )
-            if !favoriteIDs.isEmpty {
-                // mediaViewModel.removeFavorites(withIDs: favoriteIDs)
+            let favoriteIDs = Set(mediaViewModel.favoriteItems.map(\.id))
+            let selectedFavoriteIDs = selectedItems.intersection(favoriteIDs)
+            if !selectedFavoriteIDs.isEmpty {
+                mediaViewModel.removeFavorites(withIDs: selectedFavoriteIDs)
             }
-            if !downloadIDs.isEmpty {
-                // mediaViewModel.removeDownloads(withIDs: downloadIDs)
+
+            // 处理下载 + 本地媒体的删除（包括物理文件）
+            let allLocal = mediaViewModel.allLocalMedia
+            let localIDsToDelete = selectedItems.intersection(Set(allLocal.map(\.id)))
+            if !localIDsToDelete.isEmpty {
+                deleteLocalMedias(allLocal.filter { localIDsToDelete.contains($0.id) })
             }
+            
         case .anime:
             for id in selectedItems {
                 AnimeFavoriteStore.shared.removeFavorite(animeId: id)
@@ -584,6 +588,62 @@ struct MyLibraryContentView: View {
         }
         selectedItems.removeAll()
         isEditing = false
+    }
+
+    /// 删除本地壁纸（含物理文件删除）
+    private func deleteLocalWallpapers(_ items: [UnifiedLocalWallpaper]) {
+        let fileManager = FileManager.default
+        
+        for item in items {
+            // 1. 如果有下载记录，先软删除记录
+            if let record = item.downloadRecord {
+                viewModel.removeWallpaperDownloads(withIDs: [record.wallpaper.id])
+            }
+
+            // 2. 删除物理文件
+            let filePath = item.fileURL.path
+            if fileManager.fileExists(atPath: filePath) {
+                do {
+                    try fileManager.removeItem(atPath: filePath)
+                    print("[MyLibrary] ✅ Deleted file: \(filePath)")
+                } catch {
+                    print("[MyLibrary] ❌ Failed to delete file \(filePath): \(error)")
+                }
+            }
+        }
+
+        // 3. 重新扫描以刷新列表
+        Task {
+            await LocalWallpaperScanner.shared.forceRescan()
+        }
+    }
+
+    /// 删除本地媒体（含物理文件删除）
+    private func deleteLocalMedias(_ items: [UnifiedLocalMedia]) {
+        let fileManager = FileManager.default
+
+        for item in items {
+            // 1. 如果有下载记录，先软删除记录
+            if let record = item.downloadRecord {
+                MediaLibraryService.shared.removeDownloadRecord(withID: record.item.id)
+            }
+
+            // 2. 删除物理文件
+            let filePath = item.fileURL.path
+            if fileManager.fileExists(atPath: filePath) {
+                do {
+                    try fileManager.removeItem(atPath: filePath)
+                    print("[MyLibrary] ✅ Deleted media file: \(filePath)")
+                } catch {
+                    print("[MyLibrary] ❌ Failed to delete media file \(filePath): \(error)")
+                }
+            }
+        }
+
+        // 3. 重新扫描以刷新列表
+        Task {
+            await LocalWallpaperScanner.shared.forceRescan()
+        }
     }
 }
 

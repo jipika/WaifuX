@@ -65,7 +65,9 @@ struct WaifuXApp {
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
-    private let settingsViewModel = SettingsViewModel()
+    // ⚠️ 延迟初始化 SettingsViewModel，不在 AppDelegate 属性初始化阶段创建
+    // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
+    private var settingsViewModel: SettingsViewModel?
     private var settingsWindowController: NSWindowController?
     
     // MARK: - 窗口尺寸（唯一真实来源，全局统一）
@@ -94,8 +96,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
         // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
+        // macOS 26.5 beta 上这个问题更加严格，即使 @AppStorage 属性包装器 init 也会触发
         //
-        // 恢复顺序很重要：语言 → 主题 → 下载权限 → 更新缓存
+        // 恢复顺序很重要：语言 → 主题 → 下载权限 → 更新缓存 → 媒体库 → 动漫 → 调度器
 
         // 0. 🚀 预加载 GitHub Hosts（异步解析 IP）
         Task {
@@ -105,25 +108,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 1. 恢复用户语言偏好（必须在 UI 渲染之前）
         LocalizationService.shared.restoreSavedSettings()
 
-        // 2. 恢复下载权限和路径设置
+        // 2. 恢复主题设置（必须在 UI 渲染之前）
+        ThemeManager.shared.restoreSavedSettings()
+
+        // 3. 恢复下载权限和路径设置
         DownloadPermissionManager.shared.restoreSavedPermission()
 
-        // 3. ⚠️ 延迟恢复更新检查器缓存状态（读取 UserDefaults）
+        // 4. 恢复壁纸收藏/下载数据
+        WallpaperLibraryService.shared.restoreSavedData()
+
+        // 5. 恢复媒体收藏/下载数据
+        MediaLibraryService.shared.restoreSavedData()
+
+        // 6. 恢复动漫收藏数据
+        AnimeFavoriteStore.shared.restoreSavedData()
+
+        // 7. 恢复动漫进度数据
+        AnimeProgressStore.shared.restoreSavedData()
+
+        // 8. 恢复弹幕播放进度缓存
+        PlaybackProgressCache.shared.restoreSavedData()
+
+        // 9. 恢复下载任务列表
+        DownloadTaskService.shared.restoreSavedTasks()
+
+        // 10. 恢复壁纸调度器配置
+        WallpaperSchedulerService.shared.restoreSavedConfig()
+
+        // 11. 延迟恢复更新检查器缓存状态（读取 UserDefaults）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             UpdateChecker.shared.restoreCachedState()
         }
 
-        // 4. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
+        // 12. 恢复 API Key 状态（必须在 WallpaperViewModel 使用之前）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             WallpaperViewModel().restoreAPIKeyState()
         }
 
-        // 5. 恢复壁纸源管理器状态（⚠️ 必须延迟，不能在 init 中读 UserDefaults）
+        // 13. 恢复壁纸源管理器状态
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             WallpaperSourceManager.shared.restoreState()
         }
 
-        // 4. 初始化状态栏控制器（必须在显示窗口之前）
+        // 14. 延迟创建并恢复 SettingsViewModel（包含 @Published 属性的 UserDefaults 读取）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let vm = SettingsViewModel()
+            vm.restoreSavedSettings()
+            self.settingsViewModel = vm
+        }
+
+        // 15. 初始化状态栏控制器（必须在显示窗口之前）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
                 self?.showMainWindow()
@@ -305,8 +339,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.isReleasedWhenClosed = false
         centerWindow(settingsWindow, relativeTo: window)
         settingsWindow.tabbingMode = .disallowed
+        // ⚠️ 如果 SettingsViewModel 尚未初始化，先创建并恢复
+        if settingsViewModel == nil {
+            let vm = SettingsViewModel()
+            vm.restoreSavedSettings()
+            settingsViewModel = vm
+        }
         settingsWindow.contentView = EdgeToEdgeHostingView(
-            rootView: SettingsView(viewModel: settingsViewModel)
+            rootView: SettingsView(viewModel: settingsViewModel!)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         )
 
