@@ -171,10 +171,12 @@ final class ExploreAtmosphereController: ObservableObject {
         self.wallpaperMode = wallpaperMode
         self.tint = wallpaperMode ? .wallpaperFallback : .mediaFallback
         
-        // 监听应用隐藏窗口通知，清理大内存占用
+        // 监听应用隐藏窗口通知，清理大内存占用（异步执行避免卡顿）
         NotificationCenter.default.publisher(for: .appDidHideWindow)
             .sink { [weak self] _ in
-                Task { @MainActor in
+                // 使用低优先级队列异步执行
+                Task(priority: .background) { @MainActor in
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05秒延迟
                     self?.clearMemory()
                 }
             }

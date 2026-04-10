@@ -700,6 +700,11 @@ final class MediaExploreViewModel: ObservableObject {
     func removeRecentItems(withIDs ids: Set<String>) {
         mediaLibrary.removeRecentItems(withIDs: ids)
     }
+    
+    /// 清空所有项目（用于数据源切换时）
+    func clearItems() {
+        items.removeAll()
+    }
 }
 
 // MARK: - 统一的本地媒体表示

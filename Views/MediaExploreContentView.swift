@@ -18,6 +18,8 @@ struct MediaExploreContentView: View {
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var contentSize: CGFloat = 0
+    @State private var containerSize: CGFloat = 0
     @State private var visibleCardIDs: Set<String> = []
 
     @State private var searchTask: Task<Void, Never>?
@@ -48,13 +50,17 @@ struct MediaExploreContentView: View {
                     .padding(.bottom, 48)
                     .frame(width: geometry.size.width, alignment: .leading)
                     .background(scrollTrackingOverlay)
+                    .background(contentSizeTrackingOverlay)
                     .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
                 }
                 .coordinateSpace(name: "exploreScroll")
                 .iosSmoothScroll()
                 .modifier(ScrollLoadMoreModifier(
                     scrollOffset: $scrollOffset,
-                    threshold: 1500,  // 提前两屏预加载
+                    contentSize: $contentSize,
+                    containerSize: $containerSize,
+                    earlyThreshold: 800,
+                    bottomThreshold: 100,
                     onLoadMore: triggerLoadMore,
                     checkLoadMore: checkLoadMore
                 ))
@@ -272,6 +278,15 @@ struct MediaExploreContentView: View {
             )
         }
     }
+    
+    private var contentSizeTrackingOverlay: some View {
+        GeometryReader { contentProxy in
+            Color.clear.preference(
+                key: ExploreContentSizeKey.self,
+                value: contentProxy.size.height
+            )
+        }
+    }
 
     // MARK: - Actions
 
@@ -286,33 +301,6 @@ struct MediaExploreContentView: View {
         rebuildVisibleItems()
         syncAtmosphere()
         isInitialLoading = false
-        // 如果内容不足两屏，继续加载更多
-        checkAndLoadMoreIfNeeded()
-    }
-    
-    /// 检查内容高度，如果不足两屏则继续加载
-    private func checkAndLoadMoreIfNeeded(attemptCount: Int = 0) {
-        // 安全边界：最多尝试3次，避免无限递归
-        guard attemptCount < 3,
-              viewModel.hasMorePages,
-              !viewModel.isLoading,
-              !viewModel.isLoadingMore else { return }
-        
-        let currentCount = displayedItems.count
-        // 简单判断：如果数据少于48条（约两屏），继续加载
-        guard currentCount < 48 else { return }
-        
-        Task {
-            await viewModel.loadMore()
-            await MainActor.run {
-                let newCount = displayedItems.count
-                // 如果没有加载到新数据，停止递归
-                guard newCount > currentCount else { return }
-                appendNewItems()
-                // 递归检查，尝试次数+1
-                checkAndLoadMoreIfNeeded(attemptCount: attemptCount + 1)
-            }
-        }
     }
 
     private func selectCategory(_ category: MediaCategory) {
@@ -324,6 +312,8 @@ struct MediaExploreContentView: View {
 
         displayedItems = []
         visibleCardIDs.removeAll()
+        // 清空 ViewModel 数据避免显示旧数据
+        viewModel.clearItems()
 
         Task {
             if category == .all {
@@ -397,14 +387,20 @@ struct MediaExploreContentView: View {
         }
     }
     
-    private func checkLoadMore(offset: CGFloat) {
-        // 提前两屏预加载，避免触底顿挫感
-        let threshold: CGFloat = 1500
-        guard offset > threshold, viewModel.hasMorePages else { return }
+    private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
+        guard viewModel.hasMorePages else { return }
+        guard !viewModel.isLoading, !isLoadingMore, !viewModel.isLoadingMore else { return }
         
-        if viewModel.isLoading || isLoadingMore || viewModel.isLoadingMore {
-            if let loadMoreTask, !loadMoreTask.isCancelled { return }
-        }
+        // 计算距离底部距离
+        let distanceToBottom = contentHeight - (offset + containerHeight)
+        
+        // 双阈值策略：
+        // 1. 提前加载（距离底部 < 800pt）- 正常预加载
+        // 2. 触底保底（距离底部 < 100pt）- 保底机制
+        let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
+        let shouldLoadBottom = distanceToBottom < 100
+        
+        guard shouldLoadEarly || shouldLoadBottom else { return }
 
         loadMoreTask?.cancel()
         isLoadingMore = true

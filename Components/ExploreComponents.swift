@@ -54,18 +54,27 @@ public struct NoMoreFooter: View {
 /// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 PreferenceKey 滚动追踪
 public struct ScrollLoadMoreModifier: ViewModifier {
     @Binding var scrollOffset: CGFloat
-    let threshold: CGFloat
+    @Binding var contentSize: CGFloat
+    @Binding var containerSize: CGFloat
+    let earlyThreshold: CGFloat  // 提前加载阈值
+    let bottomThreshold: CGFloat // 触底加载阈值
     let onLoadMore: () -> Void
-    let checkLoadMore: (CGFloat) -> Void
+    let checkLoadMore: (CGFloat, CGFloat, CGFloat) -> Void  // offset, contentSize, containerSize
     
     public init(
         scrollOffset: Binding<CGFloat>,
-        threshold: CGFloat = 300,
+        contentSize: Binding<CGFloat> = .constant(0),
+        containerSize: Binding<CGFloat> = .constant(0),
+        earlyThreshold: CGFloat = 800,
+        bottomThreshold: CGFloat = 100,
         onLoadMore: @escaping () -> Void,
-        checkLoadMore: @escaping (CGFloat) -> Void
+        checkLoadMore: @escaping (CGFloat, CGFloat, CGFloat) -> Void
     ) {
         self._scrollOffset = scrollOffset
-        self.threshold = threshold
+        self._contentSize = contentSize
+        self._containerSize = containerSize
+        self.earlyThreshold = earlyThreshold
+        self.bottomThreshold = bottomThreshold
         self.onLoadMore = onLoadMore
         self.checkLoadMore = checkLoadMore
     }
@@ -73,9 +82,19 @@ public struct ScrollLoadMoreModifier: ViewModifier {
     public func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content
+                // 提前加载检测
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                    return bottomOffset >= geometry.contentSize.height - threshold
+                    return bottomOffset >= geometry.contentSize.height - earlyThreshold
+                } action: { oldValue, newValue in
+                    if newValue && !oldValue {
+                        onLoadMore()
+                    }
+                }
+                // 触底保底检测
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
+                    return bottomOffset >= geometry.contentSize.height - bottomThreshold
                 } action: { oldValue, newValue in
                     if newValue && !oldValue {
                         onLoadMore()
@@ -83,13 +102,37 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                 }
         } else {
             content
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear {
+                                containerSize = geometry.size.height
+                            }
+                            .onChange(of: geometry.size.height) { _, newHeight in
+                                containerSize = newHeight
+                            }
+                    }
+                )
                 .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
                     scrollOffset = value
                 }
+                .onPreferenceChange(ExploreContentSizeKey.self) { value in
+                    contentSize = value
+                }
                 .onChange(of: scrollOffset) { _, offset in
-                    checkLoadMore(offset)
+                    checkLoadMore(offset, contentSize, containerSize)
                 }
         }
+    }
+}
+
+// MARK: - Content Size PreferenceKey (macOS 14)
+
+/// macOS 14 用 PreferenceKey 追踪内容高度
+public struct ExploreContentSizeKey: PreferenceKey {
+    public static let defaultValue: CGFloat = 0
+    public static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

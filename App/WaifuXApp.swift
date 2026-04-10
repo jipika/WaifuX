@@ -324,12 +324,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !(settingsWindowController?.window?.isVisible ?? false) {
             updateActivationPolicy(showDockIcon: false)
         }
-        // 窗口隐藏时清理大内存占用，但保留磁盘缓存
+        // 窗口隐藏时异步逐步清理内存，避免卡顿
         Task { @MainActor in
-            // 清理 Kingfisher 内存缓存
-            ImageCache.default.clearMemoryCache()
-            // 通知各个 View 清理大内存数据
+            // 先让窗口动画完成
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+            // 第一步：通知各个 View 清理大内存数据（图片引用等）
             NotificationCenter.default.post(name: .appDidHideWindow, object: nil)
+            // 小延迟后再清理缓存
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2秒
+            // 第二步：清理 Kingfisher 内存缓存
+            ImageCache.default.clearMemoryCache()
         }
     }
 
