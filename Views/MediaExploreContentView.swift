@@ -232,7 +232,7 @@ struct MediaExploreContentView: View {
     }
 
     private func mediaSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center) {
                 Text("\(formattedMediaCount) \(t("media.count")) · \(t("media.loaded")) \(formattedLoadedCount)")
                     .font(.system(size: 15, weight: .semibold))

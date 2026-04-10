@@ -260,7 +260,7 @@ struct AnimeExploreView: View {
     // MARK: - Anime Grid Section
 
     private func animeSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center) {
                 Text("\(displayedAnimeItems.count) \(t("content.animes"))")
                     .font(.system(size: 16, weight: .semibold))

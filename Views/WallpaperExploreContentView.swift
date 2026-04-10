@@ -547,7 +547,7 @@ private extension WallpaperExploreContentView {
     }
     
     func wallpaperSection(gridConfig: WallpaperGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             // 标题栏
             HStack(alignment: .center) {
                 Text("\(displayedWallpapers.count) \(t("wallpaperCount"))")
