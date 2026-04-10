@@ -616,7 +616,6 @@ private extension WallpaperExploreContentView {
             // 内容区域
             if viewModel.isLoading && displayedWallpapers.isEmpty {
                 WallpaperGridSkeleton(contentWidth: gridConfig.contentWidth)
-                    .padding(.top, 8)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedWallpapers.isEmpty {
                 emptyState

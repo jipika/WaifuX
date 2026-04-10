@@ -270,7 +270,6 @@ struct MediaExploreContentView: View {
 
             if viewModel.isLoading && displayedMediaItems.isEmpty {
                 MediaGridSkeleton(contentWidth: gridContentWidth)
-                    .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else if displayedMediaItems.isEmpty {
                 emptyState

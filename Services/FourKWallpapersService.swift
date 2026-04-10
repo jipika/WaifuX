@@ -146,14 +146,14 @@ actor FourKWallpapersService {
 
     private func mapToWallpaper(_ w: Wallpaper4K) -> Wallpaper {
         // 缩略图 — 使用实际可访问的 URL
-        // thumbs_2t (~800px) 用于大缩略图/卡片预览
-        // thumbs (~300px) 用于小缩略图/列表
-        // 判断 originalURL 是否是真正的图片 URL（以 /images/wallpapers/ 开头）
-        let isOriginalImage = w.originalURL.contains("/images/wallpapers/")
+        // thumbs_3t (~1280px) 用于详情页/轮播图高清预览
+        // thumbs (~400px) 用于列表小缩略图
+        // 判断 originalURL 是否是真正的原图 URL（以 /images/wallpapers/ 开头且包含分辨率）
+        let isOriginalImage = w.originalURL.contains("/images/wallpapers/") && w.originalURL.contains("x")
         let thumbs = Wallpaper.Thumbs(
-            large: isOriginalImage ? w.originalURL : w.hdThumbnailURL,  // 原图可用时直接用原图
-            original: isOriginalImage ? w.originalURL : w.hdThumbnailURL,
-            small: w.thumbnailURL          // thumbs (~300px)
+            large: w.hdThumbnailURL,                                    // 详情页/轮播图高清预览（~1280px）
+            original: isOriginalImage ? w.originalURL : w.hdThumbnailURL,  // 原图 URL（用于下载）
+            small: w.thumbnailURL                                       // 列表小缩略图（~400px）
         )
 
         // 从关键词推断分类
@@ -170,8 +170,19 @@ actor FourKWallpapersService {
             Wallpaper.Tag(id: index, name: tag.name, alias: nil)
         }
 
-        // path 用于 fullImageURL，优先使用原图 URL
-        let imagePath = isOriginalImage ? w.originalURL : w.hdThumbnailURL
+        // path 用于 fullImageURL（详情页/轮播图展示），使用 thumbs_3t (~1280px) 保证清晰且快速加载
+        // 原图 URL 只存在 thumbs.original 中，下载时使用
+        let imagePath = w.hdThumbnailURL
+
+        // 文件类型推断
+        let detectedFileType: String
+        if w.originalURL.hasSuffix(".png") {
+            detectedFileType = "image/png"
+        } else if w.originalURL.hasSuffix(".webp") {
+            detectedFileType = "image/webp"
+        } else {
+            detectedFileType = "image/jpeg"
+        }
 
         return Wallpaper(
             id: "4k_\(w.id)",
@@ -188,7 +199,7 @@ actor FourKWallpapersService {
             resolution: resolution,
             ratio: ratio,
             fileSize: nil,
-            fileType: "image/jpeg",
+            fileType: detectedFileType,
             createdAt: nil,
             colors: [],
             path: imagePath,

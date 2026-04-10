@@ -346,9 +346,13 @@ final class FourKWallpapersParser {
             throw FourKWallpapersParserError.parsingFailed("无法获取图片ID")
         }
 
-        // 缩略图 URL
-        let thumbnailURLString = "\(baseURL)/images/walls/thumbs/\(id).jpg"
-        let hdThumbnailURLString = "\(baseURL)/images/walls/thumbs_2t/\(id).jpg"
+        // 从缩略图 URL 或 contentUrl 中提取实际文件扩展名（原图可能是 .jpg 或 .jpeg）
+        let thumbnailExt = (thumbnailSrc as NSString).pathExtension.lowercased()
+        let actualExt = thumbnailExt.isEmpty ? "jpg" : thumbnailExt
+
+        // 缩略图 URL（使用实际扩展名）
+        let thumbnailURLString = "\(baseURL)/images/walls/thumbs/\(id).\(actualExt)"
+        let hdThumbnailURLString = "\(baseURL)/images/walls/thumbs_3t/\(id).\(actualExt)"
 
         // 详情页链接 & 标题（提前解析，originalURL 需要 detailURL）
         let detailLinkElement = try element.select(Selectors.detailLink).first()
@@ -364,10 +368,12 @@ final class FourKWallpapersParser {
         var originalURLString = ""
 
         // 高清图 URL（从 contentUrl 获取，优先于推断的 URL）
+        // contentUrl href 是 thumbs_2t (800px)，替换为 thumbs_3t (1280px) 保证详情页清晰
         let contentUrlElement = try element.select(Selectors.contentUrl).first()
         let resolvedHDURL: String
         if let href = try? contentUrlElement?.attr("href"), !href.isEmpty {
-            resolvedHDURL = href.hasPrefix("http") ? href : "\(baseURL)\(href)"
+            let fullHref = href.hasPrefix("http") ? href : "\(baseURL)\(href)"
+            resolvedHDURL = fullHref.replacingOccurrences(of: "/thumbs_2t/", with: "/thumbs_3t/")
         } else {
             resolvedHDURL = hdThumbnailURLString
         }
@@ -433,9 +439,13 @@ final class FourKWallpapersParser {
         let aspectRatio = calculateAspectRatio(width: width, height: height)
 
         // 构建原图 URL：从详情页 URL（/{category}/{name}-{id}.html）+ width/height 直接推断
-        // 格式：/images/wallpapers/{name}-{W}x{H}-{id}.jpg
+        // 格式：/images/wallpapers/{name}-{W}x{H}-{id}.{ext}
+        // 优先从 contentUrl href 提取扩展名（更可靠），回退到缩略图扩展名
+        let contentUrlExt = (contentUrlHref as NSString).pathExtension.lowercased()
+        let originalExt = contentUrlExt.isEmpty ? actualExt : contentUrlExt
+
         if !detailURLString.isEmpty, width > 0, height > 0 {
-            let builtURL = buildOriginalURL(from: detailURLString, width: width, height: height)
+            let builtURL = buildOriginalURL(from: detailURLString, width: width, height: height, fileExtension: originalExt)
             if !builtURL.isEmpty {
                 originalURLString = builtURL
             } else {
@@ -817,8 +827,8 @@ final class FourKWallpapersParser {
 
     /// 从详情页 URL 推断原图下载 URL
     /// 详情页 URL 格式: https://4kwallpapers.com/{category}/{name}-{id}.html
-    /// 原图 URL 格式:   https://4kwallpapers.com/images/wallpapers/{name}-{W}x{H}-{id}.jpg
-    private func buildOriginalURL(from detailURL: String, width: Int, height: Int) -> String {
+    /// 原图 URL 格式:   https://4kwallpapers.com/images/wallpapers/{name}-{W}x{H}-{id}.{ext}
+    private func buildOriginalURL(from detailURL: String, width: Int, height: Int, fileExtension: String = "jpg") -> String {
         // 从详情页 URL 提取路径部分
         guard let url = URL(string: detailURL) else { return "" }
         let path = url.path
@@ -830,8 +840,16 @@ final class FourKWallpapersParser {
         if let lastSlash = slug.lastIndex(of: "/") {
             slug = String(slug[slug.index(after: lastSlash)...])
         }
-        // slug 现在是 "{name}-{id}"
-        return "\(baseURL)/images/wallpapers/\(slug)-\(width)x\(height).jpg"
+        // slug 现在是 "{name}-{id}"，需要分离出 name 和 id
+        // id 是最后一段数字（如 "26028"），name 是前面的部分
+        // 用最后一个 "-" 分割
+        guard let lastDash = slug.lastIndex(of: "-") else {
+            return "\(baseURL)/images/wallpapers/\(slug)-\(width)x\(height).\(fileExtension)"
+        }
+        let namePart = String(slug[slug.startIndex..<lastDash])
+        let idPart = String(slug[slug.index(after: lastDash)...])
+        // 按正确格式拼接: {name}-{W}x{H}-{id}.{ext}
+        return "\(baseURL)/images/wallpapers/\(namePart)-\(width)x\(height)-\(idPart).\(fileExtension)"
     }
 
     func buildOriginalImageURL(from wallpaper: Wallpaper4K) -> String {

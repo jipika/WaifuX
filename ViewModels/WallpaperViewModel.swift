@@ -876,11 +876,24 @@ class WallpaperViewModel: ObservableObject {
     }
 
     func downloadWallpaperData(_ wallpaper: Wallpaper, taskID: String? = nil) async throws -> Data {
-        var downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL
+        var downloadURL: URL?
 
-        // 4K 源壁纸兜底：如果 fullImageURL 不是图片链接（推断失败时可能存的是详情页链接），从详情页解析原图
+        // 4K 源壁纸：优先使用 thumbs.original（真正的原图 URL）
+        // 因为 fullImageURL（path）现在存的是缩略图 URL，用于展示而非下载
+        if wallpaper.source == "4kwallpapers",
+           !wallpaper.thumbs.original.isEmpty,
+           wallpaper.thumbs.original.contains("/images/wallpapers/"),
+           let originalURL = URL(string: wallpaper.thumbs.original) {
+            downloadURL = originalURL
+            print("[WallpaperViewModel] 4K wallpaper: using original URL from thumbs.original: \(wallpaper.thumbs.original)")
+        } else {
+            downloadURL = wallpaper.fullImageURL ?? wallpaper.thumbURL
+        }
+
+        // 4K 源壁纸兜底：如果原图 URL 不是有效图片链接，从详情页解析原图
         if wallpaper.source == "4kwallpapers",
            let currentURL = downloadURL,
+           !currentURL.isFileURL,
            !currentURL.pathExtension.isEmpty,
            !["jpg", "jpeg", "png", "webp", "gif"].contains(currentURL.pathExtension.lowercased()) {
             let originalURL = await FourKWallpapersService.shared.fetchOriginalImageURL(for: wallpaper)

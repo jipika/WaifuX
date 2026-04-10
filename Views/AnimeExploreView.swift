@@ -296,7 +296,6 @@ struct AnimeExploreView: View {
 
             if viewModel.isLoading && displayedAnimeItems.isEmpty {
                 AnimeGridSkeleton(contentWidth: gridContentWidth)
-                    .padding(.top, 20)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedAnimeItems.isEmpty {
                 emptyState
