@@ -5,39 +5,31 @@ import AVFoundation
 
 // MARK: - 轻量级图片加载器
 // 优化策略：
-// 1. 移除复杂的 actor 并发控制，使用简单的计数器
-// 2. 简化 LRU 磁盘缓存，减少数组操作
-// 3. 降采样移到后台线程
-// 4. 移除重复的状态追踪
+// 1. 使用 actor 保证线程安全
+// 2. 磁盘 I/O 在后台线程执行，通过 await 切换
+// 3. 内存缓存使用 NSCache（线程安全）
 
-@MainActor
-public final class ImageLoader {
+public actor ImageLoader {
     public static let shared = ImageLoader()
 
     // MARK: - 缓存配置
-    private let memoryCache = NSCache<NSString, NSImage>()
-    private let fileManager = FileManager.default
+    // ⚠️ NSCache 是线程安全的，标记为 nonisolated(unsafe) 允许同步访问
+    private nonisolated(unsafe) let memoryCache = NSCache<NSString, NSImage>()
     private let cacheDirectory: URL
     
-    // MARK: - 简单并发控制（无 actor 开销）
+    // MARK: - 并发控制
     private let maxConcurrentLoads = 6
     private var activeLoadCount = 0
     private var loadWaiters: [CheckedContinuation<Void, Never>] = []
     
-    // MARK: - URLSession（简化配置）
-    private lazy var urlSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 300
-        // 只用内存缓存，磁盘缓存自己管理
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.urlCache = nil
-        return URLSession(configuration: config)
-    }()
-    
-    // MARK: - 简单失败追踪
+    // MARK: - 失败追踪
     private var failedURLs: Set<String> = []
     private let maxFailedURLs = 100
+    private var retryAttempts: [String: Int] = [:]
+    private let maxRetryAttempts = 3
+    
+    // MARK: - URLSession
+    private nonisolated let urlSession: URLSession
     
     // MARK: - 重试配置
     public struct RetryConfig: Sendable {
@@ -77,40 +69,49 @@ public final class ImageLoader {
             retryableStatusCodes: []
         )
     }
-    
-    // MARK: - 重试状态追踪
-    private var retryAttempts: [String: Int] = [:]
-    private let maxRetryAttempts = 3
 
     // MARK: - 初始化
     private init() {
         memoryCache.countLimit = 150
         memoryCache.totalCostLimit = 100 * 1024 * 1024 // 100MB
 
-        let urls = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
+        let urls = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
         cacheDirectory = urls[0].appendingPathComponent("WallHaven/ImageCache", isDirectory: true)
-        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         
-        // 内存压力处理
+        // URLSession 配置
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 300
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        urlSession = URLSession(configuration: config)
+        
         setupMemoryPressureHandler()
     }
     
-    private func setupMemoryPressureHandler() {
+    private nonisolated func setupMemoryPressureHandler() {
         #if os(macOS)
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global(qos: .utility))
         source.setEventHandler { [weak self] in
-            self?.memoryCache.removeAllObjects()
+            Task { [weak self] in
+                await self?.handleMemoryPressure()
+            }
         }
         source.resume()
         #endif
     }
+    
+    private func handleMemoryPressure() {
+        memoryCache.removeAllObjects()
+    }
 
-    // MARK: - 公共方法
-
-    /// 同步检查内存缓存（用于 OptimizedAsyncImage 即时显示已缓存的图片，避免异步加载闪烁）
-    public func cachedImage(for url: URL) -> NSImage? {
-        let key = url.absoluteString
-        return memoryCache.object(forKey: key as NSString)
+    // MARK: - 公共 API
+    
+    /// 检查内存缓存（nonisolated，支持从 SwiftUI 同步调用）
+    /// NSCache 本身是线程安全的
+    public nonisolated func cachedImage(for url: URL) -> NSImage? {
+        memoryCache.object(forKey: url.absoluteString as NSString)
     }
 
     public func loadImage(
@@ -126,21 +127,21 @@ public final class ImageLoader {
             return targetSize != nil ? await downsampleAsync(image: cached, to: targetSize!) : cached
         }
         
-        // 2. 检查磁盘缓存
-        if let diskCached = loadFromDisk(key: key) {
+        // 2. 磁盘缓存在后台线程读取
+        if let diskCached = await loadFromDiskAsync(key: key) {
             memoryCache.setObject(diskCached, forKey: key as NSString)
             return targetSize != nil ? await downsampleAsync(image: diskCached, to: targetSize!) : diskCached
         }
         
-        // 3. 检查是否永久失败（手动标记的）
+        // 3. 检查失败记录
         guard !failedURLs.contains(key) else { return nil }
         
-        // 4. 本地文件直接读取（不经过网络）
+        // 4. 本地文件直接读取
         if url.isFileURL {
             return await loadLocalImage(from: url, key: key, targetSize: targetSize)
         }
         
-        // 5. 网络图片执行带重试的加载
+        // 5. 网络图片加载
         return await loadImageWithRetry(
             from: url,
             key: key,
@@ -151,69 +152,46 @@ public final class ImageLoader {
         )
     }
     
-    /// 加载本地文件图片
+    // MARK: - 磁盘缓存（异步，不阻塞 actor）
+    
+    private nonisolated func loadFromDiskAsync(key: String) async -> NSImage? {
+        await Task.detached(priority: .utility) {
+            let fileURL = self.cacheDirectory.appendingPathComponent(key.md5)
+            guard let data = try? Data(contentsOf: fileURL),
+                  let image = NSImage(data: data) else {
+                return nil
+            }
+            return image
+        }.value
+    }
+    
+    private nonisolated func saveToDiskAsync(data: Data, key: String) {
+        Task.detached(priority: .utility) {
+            let fileURL = self.cacheDirectory.appendingPathComponent(key.md5)
+            try? data.write(to: fileURL)
+        }
+    }
+    
+    // MARK: - 本地图片加载
+    
     private func loadLocalImage(from url: URL, key: String, targetSize: CGSize?) async -> NSImage? {
         await waitForSlot()
         defer { releaseSlot() }
         
-        do {
-            let data = try Data(contentsOf: url)
+        return await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: url) else { return nil }
             
-            // 如果是视频文件，生成缩略图
-            if isVideoFile(url) {
-                if let thumbnail = await generateVideoThumbnail(from: url) {
-                    memoryCache.setObject(thumbnail, forKey: key as NSString, cost: Int(thumbnail.size.width * thumbnail.size.height * 4))
-                    return targetSize != nil ? await downsampleAsync(image: thumbnail, to: targetSize!) : thumbnail
-                }
-                return nil
+            // 视频文件生成缩略图
+            if self.isVideoFile(url) {
+                return await self.generateVideoThumbnail(from: url)
             }
             
-            // 图片文件直接加载
-            guard let image = NSImage(data: data) else {
-                print("[ImageLoader] Failed to create NSImage from local file: \(url.path)")
-                return nil
-            }
-            
-            // 存入内存缓存
-            memoryCache.setObject(image, forKey: key as NSString, cost: data.count)
-            
-            print("[ImageLoader] Loaded local image: \(url.lastPathComponent) (\(Int(image.size.width))x\(Int(image.size.height)))")
-            
-            return targetSize != nil ? await downsampleAsync(image: image, to: targetSize!) : image
-            
-        } catch {
-            print("[ImageLoader] Failed to load local file: \(url.path), error: \(error)")
-            return nil
-        }
-    }
-    
-    /// 检查是否是视频文件
-    private func isVideoFile(_ url: URL) -> Bool {
-        let ext = url.pathExtension.lowercased()
-        return ["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"].contains(ext)
-    }
-    
-    /// 生成视频缩略图
-    private func generateVideoThumbnail(from url: URL) async -> NSImage? {
-        await Task.detached(priority: .utility) {
-            let asset = AVAsset(url: url)
-            let imageGenerator = AVAssetImageGenerator(asset: asset)
-            imageGenerator.appliesPreferredTrackTransform = true
-            imageGenerator.maximumSize = CGSize(width: 800, height: 800)
-            
-            do {
-                let cgImage = try imageGenerator.copyCGImage(at: CMTime(seconds: 0, preferredTimescale: 1), actualTime: nil)
-                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                print("[ImageLoader] Generated video thumbnail: \(url.lastPathComponent) (\(cgImage.width)x\(cgImage.height))")
-                return image
-            } catch {
-                print("[ImageLoader] Failed to generate video thumbnail for \(url.lastPathComponent): \(error)")
-                return nil
-            }
+            guard let image = NSImage(data: data) else { return nil }
+            return image
         }.value
     }
     
-    /// 带重试机制的图片加载
+    // MARK: - 网络图片加载（带重试）
     private func loadImageWithRetry(
         from url: URL,
         key: String,
@@ -222,119 +200,70 @@ public final class ImageLoader {
         retryConfig: RetryConfig,
         attempt: Int
     ) async -> NSImage? {
+        // 检查重试次数
+        let currentAttempt = retryAttempts[key] ?? 0
+        guard currentAttempt < maxRetryAttempts else {
+            failedURLs.insert(key)
+            return nil
+        }
+        retryAttempts[key] = currentAttempt + 1
+        
         // 等待并发槽位
         await waitForSlot()
         defer { releaseSlot() }
         
-        // 再次检查缓存（可能其他任务已加载）
-        if let cached = memoryCache.object(forKey: key as NSString) {
-            // 清除重试记录（成功）
-            retryAttempts.removeValue(forKey: key)
-            return targetSize != nil ? await downsampleAsync(image: cached, to: targetSize!) : cached
-        }
+        await Task.yield()
         
         do {
             let (data, response) = try await urlSession.data(from: url)
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                recordFailure(key: key)
-                return nil
+                throw URLError(.badServerResponse)
             }
             
             // 检查是否需要重试
             if retryConfig.retryableStatusCodes.contains(httpResponse.statusCode) {
-                return await handleRetryableFailure(
-                    from: url, key: key, priority: priority, targetSize: targetSize,
-                    retryConfig: retryConfig, attempt: attempt,
-                    statusCode: httpResponse.statusCode
-                )
+                throw URLError(.badServerResponse)
             }
             
-            // 检查是否成功
-            guard (200...299).contains(httpResponse.statusCode),
-                  let image = NSImage(data: data) else {
-                // 非重试错误，记录失败
-                if attempt >= retryConfig.maxAttempts {
-                    recordFailure(key: key)
-                }
-                return nil
+            guard httpResponse.statusCode == 200 else {
+                throw URLError(.badServerResponse)
             }
             
-            // 成功：清除重试记录
+            // 验证图片数据
+            guard let image = NSImage(data: data) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            
+            // 缓存
+            memoryCache.setObject(image, forKey: key as NSString, cost: data.count)
+            saveToDiskAsync(data: data, key: key)
+            
+            // 清除重试记录
             retryAttempts.removeValue(forKey: key)
             
-            // 后台保存到磁盘
-            let cacheDir = cacheDirectory
-            Task.detached(priority: .utility) {
-                let fileURL = cacheDir.appendingPathComponent(key.md5)
-                try? data.write(to: fileURL)
-            }
-            
-            // 存入内存缓存
-            memoryCache.setObject(image, forKey: key as NSString, cost: data.count)
-            
-            // 应用降采样
-            if let targetSize = targetSize {
-                return await downsampleAsync(image: image, to: targetSize)
-            }
-            return image
+            return targetSize != nil ? await downsampleAsync(image: image, to: targetSize!) : image
             
         } catch {
-            // 网络错误，尝试重试
-            return await handleRetryableFailure(
-                from: url, key: key, priority: priority, targetSize: targetSize,
-                retryConfig: retryConfig, attempt: attempt,
-                statusCode: nil, error: error
+            // 计算重试延迟
+            let delay = retryConfig.exponentialBackoff
+                ? min(retryConfig.baseDelay * pow(2.0, Double(attempt - 1)), retryConfig.maxDelay)
+                : retryConfig.baseDelay
+            
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            
+            return await loadImageWithRetry(
+                from: url,
+                key: key,
+                priority: priority,
+                targetSize: targetSize,
+                retryConfig: retryConfig,
+                attempt: attempt + 1
             )
         }
     }
     
-    /// 处理可重试的失败
-    private func handleRetryableFailure(
-        from url: URL,
-        key: String,
-        priority: TaskPriority,
-        targetSize: CGSize?,
-        retryConfig: RetryConfig,
-        attempt: Int,
-        statusCode: Int?,
-        error: Error? = nil
-    ) async -> NSImage? {
-        guard attempt < retryConfig.maxAttempts else {
-            // 达到最大重试次数
-            recordFailure(key: key)
-            retryAttempts.removeValue(forKey: key)
-            return nil
-        }
-        
-        // 计算延迟时间
-        let delay: TimeInterval
-        if retryConfig.exponentialBackoff {
-            delay = min(retryConfig.baseDelay * pow(2.0, Double(attempt - 1)), retryConfig.maxDelay)
-        } else {
-            delay = retryConfig.baseDelay
-        }
-        
-        // 记录重试次数
-        retryAttempts[key] = attempt
-        
-        // 延迟后重试
-        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        
-        // 检查是否被取消
-        guard !Task.isCancelled else { return nil }
-        
-        return await loadImageWithRetry(
-            from: url,
-            key: key,
-            priority: priority,
-            targetSize: targetSize,
-            retryConfig: retryConfig,
-            attempt: attempt + 1
-        )
-    }
-    
-    // MARK: - 简单并发控制
+    // MARK: - 并发控制
     
     private func waitForSlot() async {
         if activeLoadCount < maxConcurrentLoads {
@@ -356,157 +285,97 @@ public final class ImageLoader {
         }
     }
     
-    // MARK: - 磁盘缓存（简化版）
+    // MARK: - 降采样
     
-    private func loadFromDisk(key: String) -> NSImage? {
-        let fileURL = cacheDirectory.appendingPathComponent(key.md5)
-        guard let data = try? Data(contentsOf: fileURL),
-              let image = NSImage(data: data) else {
-            return nil
-        }
-        return image
-    }
-    
-    private func saveToDisk(data: Data, key: String) {
-        let fileURL = cacheDirectory.appendingPathComponent(key.md5)
-        try? data.write(to: fileURL)
-        
-        // 简单清理：每 100 次保存检查一次
-        if Int.random(in: 0...99) == 0 {
-            cleanupDiskCacheIfNeeded()
-        }
-    }
-    
-    private func cleanupDiskCacheIfNeeded() {
-        let contents = (try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
-        
-        var totalSize: Int64 = 0
-        var files: [(url: URL, size: Int64, date: Date)] = []
-        
-        for file in contents {
-            guard let attrs = try? fileManager.attributesOfItem(atPath: file.path),
-                  let size = attrs[.size] as? Int64,
-                  let date = attrs[.modificationDate] as? Date else { continue }
-            totalSize += size
-            files.append((file, size, date))
-        }
-        
-        // 超过 300MB 就清理
-        guard totalSize > 300 * 1024 * 1024 else { return }
-        
-        // 按修改时间排序，删除最旧的
-        let sorted = files.sorted { $0.date < $1.date }
-        var deletedSize: Int64 = 0
-        let targetSize = Int64(Double(totalSize) * 0.7) // 保留 70%
-        
-        for file in sorted {
-            guard totalSize - deletedSize > targetSize else { break }
-            try? fileManager.removeItem(at: file.url)
-            deletedSize += file.size
-        }
-    }
-    
-    // MARK: - 失败追踪
-    
-    private func recordFailure(key: String) {
-        if failedURLs.count < maxFailedURLs {
-            failedURLs.insert(key)
-        }
-    }
-    
-    // MARK: - 降采样（后台线程）
-    
-    private func downsampleAsync(image: NSImage, to size: CGSize) async -> NSImage {
-        await Task.detached(priority: .utility) { [image] in
-            self.downsample(image: image, to: size)
+    private nonisolated func downsampleAsync(image: NSImage, to targetSize: CGSize) async -> NSImage {
+        await Task.detached(priority: .utility) {
+            image.downsampled(to: targetSize)
         }.value
     }
     
-    /// 同步降采样（非隔离，可在后台线程调用）
-    nonisolated private func downsample(image: NSImage, to size: CGSize) -> NSImage {
-        // 如果图片已经够小，直接返回
-        if image.size.width <= size.width && image.size.height <= size.height {
-            return image
+    // MARK: - 视频缩略图
+    
+    private nonisolated func generateVideoThumbnail(from url: URL) async -> NSImage? {
+        let asset = AVAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        
+        do {
+            let cgImage = try generator.copyCGImage(at: .zero, actualTime: nil)
+            return NSImage(cgImage: cgImage, size: .zero)
+        } catch {
+            return nil
         }
-        
-        let aspectRatio = image.size.width / image.size.height
-        let targetAspectRatio = size.width / size.height
-        
-        let targetSize: NSSize
-        if aspectRatio > targetAspectRatio {
-            targetSize = NSSize(width: size.width, height: size.width / aspectRatio)
-        } else {
-            targetSize = NSSize(width: size.height * aspectRatio, height: size.height)
-        }
-        
-        // 使用 2x Retina
-        let retinaSize = NSSize(width: targetSize.width * 2, height: targetSize.height * 2)
-        
-        guard let bitmapRep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                                  pixelsWide: Int(retinaSize.width),
-                                                  pixelsHigh: Int(retinaSize.height),
-                                                  bitsPerSample: 8,
-                                                  samplesPerPixel: 4,
-                                                  hasAlpha: true,
-                                                  isPlanar: false,
-                                                  colorSpaceName: .deviceRGB,
-                                                  bytesPerRow: 0,
-                                                  bitsPerPixel: 0) else {
-            return image
-        }
-        
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
-        NSGraphicsContext.current?.imageInterpolation = .high
-        
-        image.draw(in: NSRect(origin: .zero, size: retinaSize),
-                   from: NSRect(origin: .zero, size: image.size),
-                   operation: .copy,
-                   fraction: 1.0)
-        
-        NSGraphicsContext.restoreGraphicsState()
-        
-        let result = NSImage(size: targetSize)
-        result.addRepresentation(bitmapRep)
-        return result
     }
     
-    // MARK: - 清理
+    private nonisolated func isVideoFile(_ url: URL) -> Bool {
+        let videoExtensions = ["mp4", "mov", "m4v", "avi", "mkv", "webm"]
+        return videoExtensions.contains(url.pathExtension.lowercased())
+    }
     
-    public func clearCache() {
+    // MARK: - 内存清理
+    
+    public func clearMemoryCache() {
         memoryCache.removeAllObjects()
-        let contents = (try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)) ?? []
-        for file in contents {
-            try? fileManager.removeItem(at: file)
+    }
+    
+    public func clearAllCache() {
+        memoryCache.removeAllObjects()
+        Task.detached {
+            try? FileManager.default.removeItem(at: self.cacheDirectory)
+            try? FileManager.default.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
         }
-        retryAttempts.removeAll()
     }
     
-    /// 获取URL的重试次数
-    public func getRetryAttempts(for url: URL) -> Int {
-        retryAttempts[url.absoluteString] ?? 0
+    // MARK: - 失败状态管理
+    
+    public func hasFailedLoading(for url: URL) -> Bool {
+        failedURLs.contains(url.absoluteString)
     }
     
-    /// 重置重试状态
-    public func resetRetryState(for url: URL) {
-        retryAttempts.removeValue(forKey: url.absoluteString)
+    public func resetFailureState(for url: URL) {
         failedURLs.remove(url.absoluteString)
+        retryAttempts.removeValue(forKey: url.absoluteString)
     }
     
-    // MARK: - 预加载
+    // MARK: - 批量预加载（兼容旧代码）
     
-    public nonisolated func prefetchImages(urls: [URL]) {
-        Task(priority: .low) { [weak self] in
-            for url in urls.prefix(10) {
-                _ = await self?.loadImage(from: url, priority: .low)
-                try? await Task.sleep(nanoseconds: 20_000_000) // 20ms 间隔
+    public func prefetchImages(urls: [URL]) {
+        for url in urls {
+            Task {
+                _ = await loadImage(from: url, priority: .low)
+            }
+        }
+    }
+    
+    // MARK: - 取消加载（兼容旧代码）
+    
+    public func cancelLoad(for url: URL) {
+        // 新版依赖 Task cancellation，不再单独追踪
+    }
+    
+    public func cancelAllLoads() {
+        // 简化实现
+    }
+}
+
+// MARK: - ImagePreloader（兼容旧代码）
+
+@MainActor
+final class ImagePreloader {
+    static let shared = ImagePreloader()
+    
+    func preloadImages(from urls: [URL]) {
+        Task {
+            for url in urls {
+                _ = await ImageLoader.shared.loadImage(from: url, priority: .low)
             }
         }
     }
 }
 
-// MARK: - 性能优化的图片视图
-@MainActor
+// MARK: - OptimizedAsyncImage
+
 public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     let url: URL?
     let priority: TaskPriority
@@ -516,7 +385,6 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     @ViewBuilder let content: (Image) -> Content
     @ViewBuilder let placeholder: () -> Placeholder
     
-    private let loader = ImageLoader.shared
     @State private var image: NSImage?
     @State private var isVisible = false
     @State private var loadTask: Task<Void, Never>?
@@ -549,13 +417,12 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
         }
         .onAppear {
             isVisible = true
-            // 先同步检查内存缓存 — 如果命中就直接显示，避免异步加载导致的闪烁
-            if let url = url, image == nil {
-                if let cached = loader.cachedImage(for: url) {
-                    self.image = cached
-                    onLoad?()
-                    return
-                }
+            // ⚠️ 先同步检查内存缓存 — 避免异步加载导致的闪烁
+            if let url = url, image == nil,
+               let cached = ImageLoader.shared.cachedImage(for: url) {
+                self.image = cached
+                onLoad?()
+                return
             }
             loadTask?.cancel()
             loadTask = Task { await load() }
@@ -563,8 +430,6 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
         .onDisappear {
             isVisible = false
             // 只取消进行中的网络请求，不清空已加载的图片
-            // LazyVGrid 回收 cell 后 @State 会被重置，但 ImageLoader 有缓存，
-            // 重新 onAppear 时会同步命中缓存立即显示
             loadTask?.cancel()
             loadTask = nil
         }
@@ -573,7 +438,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
             loadTask?.cancel()
             if isVisible {
                 // 同步检查缓存
-                if let url = url, let cached = loader.cachedImage(for: url) {
+                if let url = url, let cached = ImageLoader.shared.cachedImage(for: url) {
                     self.image = cached
                     onLoad?()
                     return
@@ -586,7 +451,7 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     private func load() async {
         guard let url = url, isVisible else { return }
         
-        if let loadedImage = await loader.loadImage(
+        if let loadedImage = await ImageLoader.shared.loadImage(
             from: url,
             priority: priority,
             targetSize: targetSize,
@@ -599,19 +464,8 @@ public struct OptimizedAsyncImage<Content: View, Placeholder: View>: View {
     }
 }
 
-// MARK: - 批量预加载
-@MainActor
-final class ImagePreloader {
-    static let shared = ImagePreloader()
-    
-    private let loader = ImageLoader.shared
-    
-    func preloadImages(from urls: [URL]) {
-        loader.prefetchImages(urls: urls)
-    }
-}
-
 // MARK: - String MD5 扩展
+
 extension String {
     var md5: String {
         let data = Data(self.utf8)
@@ -620,21 +474,42 @@ extension String {
     }
 }
 
-// MARK: - 取消加载（兼容旧代码）
-extension ImageLoader {
-    func cancelLoad(for url: URL) {
-        // 新版不再单独追踪任务，依赖 Task cancellation
-    }
-    
-    func cancelAllLoads() {
-        // 简化实现
-    }
-    
-    public func resetFailureState(for url: URL) {
-        failedURLs.remove(url.absoluteString)
-    }
-    
-    public func hasFailedLoading(for url: URL) -> Bool {
-        failedURLs.contains(url.absoluteString)
+// MARK: - 图片降采样扩展
+private extension NSImage {
+    func downsampled(to targetSize: CGSize) -> NSImage {
+        var sourceRect = CGRect(origin: .zero, size: self.size)
+        let targetRect = CGRect(origin: .zero, size: targetSize)
+        
+        guard let cgImage = self.cgImage(forProposedRect: &sourceRect, context: nil, hints: nil) else {
+            return self
+        }
+        
+        let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(targetSize.width),
+            pixelsHigh: Int(targetSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )!
+        
+        bitmap.size = targetSize
+        
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        
+        let drawRect = CGRect(origin: .zero, size: targetSize)
+        self.draw(in: drawRect, from: sourceRect, operation: .copy, fraction: 1.0)
+        
+        NSGraphicsContext.restoreGraphicsState()
+        
+        let result = NSImage(size: targetSize)
+        result.addRepresentation(bitmap)
+        return result
     }
 }

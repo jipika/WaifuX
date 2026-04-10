@@ -46,13 +46,17 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     init() {
+        // 监听 Service 数据变化，转发 objectWillChange 通知视图更新
+        // 因为 favoriteItems/allLocalMedia 是计算属性，需要手动转发变化通知
         Publishers.Merge(
             mediaLibrary.$favoriteRecords.map { _ in () },
             mediaLibrary.$downloadRecords.map { _ in () }
         )
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] in
+        .sink { [weak self] _ in
             self?.libraryContentRevision &+= 1
+            // 转发变化通知，让使用计算属性的视图自动更新
+            self?.objectWillChange.send()
         }
         .store(in: &cancellables)
         
@@ -440,9 +444,11 @@ final class MediaExploreViewModel: ObservableObject {
         mediaLibrary.toggleFavorite(item)
     }
 
-    /// 强制刷新库内容（递增 libraryContentRevision，让视图重新读取计算属性）
+    /// 刷新收藏和下载数据（删除操作后调用）
     func refreshLibraryContent() {
         libraryContentRevision &+= 1
+        // 发送变化通知，确保计算属性（favoriteItems/allLocalMedia）的依赖视图更新
+        objectWillChange.send()
     }
 
     func isFavorite(_ item: MediaItem) -> Bool {

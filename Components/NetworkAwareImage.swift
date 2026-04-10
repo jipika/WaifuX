@@ -85,9 +85,9 @@ struct NetworkAwareImage<Content: View>: View {
             let loader = ImageLoader.shared
             
             // 检查 URL 是否之前失败过
-            if loader.hasFailedLoading(for: url) {
+            if await loader.hasFailedLoading(for: url) {
                 // 如果用户主动重试，重置失败状态
-                loader.resetFailureState(for: url)
+                await loader.resetFailureState(for: url)
             }
             
             // 重置重试计数

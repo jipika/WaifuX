@@ -71,8 +71,8 @@ struct AnimePortraitCard: View {
                 .frame(width: cardWidth, height: cardHeight ?? 300)
                 .clipped()
 
-                // 信息栏 - 深色半透明背景
-                VStack(alignment: .leading, spacing: 4) {
+                // 信息栏 - 深色半透明背景（固定44pt高度）
+                VStack(alignment: .leading, spacing: 2) {
                     Text(cachedTitle)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
@@ -87,14 +87,18 @@ struct AnimePortraitCard: View {
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.6))
                         }
+                    } else {
+                        // 占位保持高度一致
+                        Color.clear
+                            .frame(height: 12)
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .frame(width: cardWidth, alignment: .leading)
+                .padding(.vertical, 6)
+                .frame(width: cardWidth, height: 44, alignment: .leading)
                 .background(Color.black.opacity(0.46))
             }
-            .frame(width: cardWidth)
+            .frame(width: cardWidth, height: (cardHeight ?? 300) + 44)
             .contentShape(Self.cardShape)
             .background(
                 Self.cardShape

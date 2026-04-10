@@ -60,6 +60,7 @@ actor NetworkService {
 
     // MARK: - Public API with Retry
     
+    /// 获取 API 数据（⚠️ 禁用缓存，每次重新请求）
     func fetch<T: Decodable>(
         _ type: T.Type,
         from url: URL,
@@ -69,7 +70,8 @@ actor NetworkService {
         let config = effectiveRetryConfiguration(retryConfig)
         
         return try await executeWithRetry(config: config, operation: { attempt in
-            let data = try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt)
+            // ⚠️ API 请求禁用缓存
+            let data = try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt, useCache: false)
             
             let decoder = JSONDecoder()
             do {
@@ -83,6 +85,7 @@ actor NetworkService {
 
     // MARK: - Data Fetching with Retry
     
+    /// 获取数据（⚠️ 禁用缓存，每次重新请求）
     func fetchData(
         from url: URL,
         headers: [String: String] = [:],
@@ -92,7 +95,8 @@ actor NetworkService {
         let config = effectiveRetryConfiguration(retryConfig)
         
         return try await executeWithRetry(config: config) { attempt in
-            try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt, progressHandler: progressHandler)
+            // ⚠️ 数据请求禁用缓存
+            try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt, progressHandler: progressHandler, useCache: false)
         }
     }
     
@@ -103,12 +107,17 @@ actor NetworkService {
         headers: [String: String] = [:],
         attempt: Int = 1,
         progressHandler: (@Sendable (Double) -> Void)? = nil,
-        useHosts: Bool = true  // 是否使用 hosts 加速
+        useHosts: Bool = true,  // 是否使用 hosts 加速
+        useCache: Bool = true   // 是否使用缓存（图片用 true，API 请求用 false）
     ) async throws -> Data {
         
         // 构建请求
         func buildRequest(for targetURL: URL, withHost host: String?) -> URLRequest {
             var request = URLRequest(url: targetURL)
+            // ⚠️ 控制缓存策略：API 请求禁用缓存，图片请求使用缓存
+            if !useCache {
+                request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            }
             if let host = host {
                 request.setValue(host, forHTTPHeaderField: "Host")
             }

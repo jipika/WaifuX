@@ -105,7 +105,8 @@ class WallpaperSourceManager: ObservableObject {
     // MARK: - Health Check 配置
 
     /// 连续多少次失败后触发自动降级
-    private let failureThreshold = 1
+    /// ⚠️ 设为 Int.max 禁用运行时的自动降级，只在应用启动时的健康检查中决定是否切换
+    private let failureThreshold = Int.max
     /// 连续成功多少次后认为已恢复（用于提示用户可切回）
     private let recoveryThreshold = 3
     /// 健康检查超时时间（秒）
@@ -218,9 +219,8 @@ class WallpaperSourceManager: ObservableObject {
         }
 
         // 已经在用备用源了，继续用
+        // ⚠️ 不再在每次请求时检查主源是否恢复，只在应用启动时初始化检测
         if activeSource != .wallhaven {
-            // 定期检查主源是否恢复
-            checkRecoveryIfNeeded()
             return activeSource
         }
 
@@ -233,7 +233,7 @@ class WallpaperSourceManager: ObservableObject {
         return nil
     }
 
-    /// 记录一次请求成功
+    /// 记录一次请求成功（⚠️ 当前仅在应用启动检测中使用，运行时不再调用）
     func recordSuccess() {
         if activeSource == .wallhaven {
             consecutiveSuccesses += 1
@@ -241,7 +241,7 @@ class WallpaperSourceManager: ObservableObject {
         }
     }
 
-    /// 记录一次请求失败
+    /// 记录一次请求失败（⚠️ 当前仅在应用启动检测中使用，运行时不再调用）
     /// - Parameter nextSourceAfterFailure: 当前源失败后建议降级到的源
     func recordFailure(error: Error?) {
         if forceSourceOverride == nil {
@@ -357,21 +357,62 @@ class WallpaperSourceManager: ObservableObject {
         }
     }
 
-    /// Ping Wallhaven 主站是否可达
+    /// 应用启动时的初始化健康检查（只执行一次）
+    /// 用于检测当前使用的备用源是否可以切回 Wallhaven
+    func performInitialHealthCheck() async {
+        // 如果当前已经在使用 Wallhaven，不需要检测
+        guard activeSource != .wallhaven else {
+            print("[WallpaperSourceManager] Initial check: already using Wallhaven, skip")
+            return
+        }
+        
+        // 如果用户手动锁定了备用源，不要自动切换
+        guard forceSourceOverride == nil else {
+            print("[WallpaperSourceManager] Initial check: user locked to fallback, skip")
+            return
+        }
+        
+        print("[WallpaperSourceManager] Performing initial health check for Wallhaven...")
+        
+        do {
+            let reachable = try await pingWallhaven()
+            if reachable {
+                // Wallhaven 可用，自动切回
+                print("[WallpaperSourceManager] Wallhaven is reachable, switching back...")
+                await MainActor.run {
+                    activeSource = .wallhaven
+                    isAutoSwitched = false
+                    consecutiveFailures = 0
+                    consecutiveSuccesses = 0
+                    UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
+                    UserDefaults.standard.set(false, forKey: autoSwitchedKey)
+                    lastSwitchMessage = "✅ Wallhaven 已恢复，已自动切换回主源"
+                }
+                NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+            } else {
+                print("[WallpaperSourceManager] Wallhaven is still unavailable")
+            }
+        } catch {
+            print("[WallpaperSourceManager] Initial health check failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Ping Wallhaven 主站是否可达（轻量级检测）
     func pingWallhaven() async throws -> Bool {
-        let url = URL(string: "https://wallhaven.cc/api/v1/search?page=1&per_page=1")!
-        let _: WallpaperSearchResponse? = try await NetworkService.shared.fetch(
-            WallpaperSearchResponse.self,
-            from: url,
-            headers: ["Accept": "application/json"],
-            retryConfig: RetryConfiguration(
-                maxRetries: 0,
-                initialDelay: 0,
-                maxDelay: 0,
-                delayMultiplier: 1,
-                allowRetryOnCellular: false
-            )
-        )
-        return true
+        // 使用更轻量的 health check 端点，只验证服务状态
+        let url = URL(string: "https://wallhaven.cc/api/v1/search?purity=100&sorting=hot&order=desc&page=1&per_page=1")!
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15  // 15秒超时
+        
+        // 使用简单的 data 请求，只检查 HTTP 状态码，不解析 JSON
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.invalidResponse
+        }
+        
+        return (200...299).contains(httpResponse.statusCode)
     }
 }

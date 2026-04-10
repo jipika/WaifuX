@@ -181,6 +181,8 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            // ⚠️ 延迟一点再加载首页数据，让窗口先完成渲染
+            try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
             await viewModel.initialLoad()
             
             // 延迟2秒后检查更新

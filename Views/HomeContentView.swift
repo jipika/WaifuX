@@ -89,8 +89,9 @@ struct HomeContentView: View {
             syncCarouselState(with: heroWallpapers)
             startCarouselAutoPlay()
 
-            // 加载媒体数据
+            // ⚠️ 延迟加载媒体数据，让首屏先渲染
             Task {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
                 await mediaViewModel.initialLoadIfNeeded()
             }
         }
@@ -119,10 +120,10 @@ struct HomeContentView: View {
     private var heroSection: some View {
         GeometryReader { geometry in
             let wallpapers = heroWallpapers
-            // 方案 D：NSWindow fallback — 首次布局时 GeometryReader 可能读到 provisional bounds，
-            // 用 NSWindow contentView 的实际 frame 作为兜底，消除启动时宽度不一致
-            let windowFallback = NSApp.mainWindow?.contentView?.frame.width ?? 1200
-            let width = max(geometry.size.width, windowFallback)
+            // ⚠️ 使用 GeometryReader 的实际宽度，不应用 fallback
+            // 首次布局时 geometry.size.width 可能为 0，但这是正确的，
+            // 使用 max 会导致骨架屏比窗口还宽
+            let width = geometry.size.width
             let heroCaptionLeadingInset = max(112, width * 0.1)
             let heroCaptionTrailingInset = max(96, width * 0.08)
 

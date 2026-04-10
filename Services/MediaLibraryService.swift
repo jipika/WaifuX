@@ -381,6 +381,34 @@ final class WallpaperLibraryService: ObservableObject {
             downloadRecords = downloadRecords
         }
     }
+    
+    /// 批量更新壁纸（性能优化：只持久化一次）
+    func upsertBatch(_ wallpapers: [Wallpaper]) {
+        var favoritesChanged = false
+        var downloadsChanged = false
+        
+        for wallpaper in wallpapers {
+            if let favoriteIndex = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
+                favoriteRecords[favoriteIndex].wallpaper = wallpaper
+                favoritesChanged = true
+            }
+
+            if let downloadIndex = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
+                downloadRecords[downloadIndex].wallpaper = wallpaper
+                downloadsChanged = true
+            }
+        }
+        
+        // 批量持久化
+        if favoritesChanged {
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        if downloadsChanged {
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
+    }
 
     /// 更新下载记录的本地文件路径
     /// 当路径检测发现文件移动到新位置时调用

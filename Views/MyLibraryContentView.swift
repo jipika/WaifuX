@@ -199,7 +199,6 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
-                        .id(viewModel.libraryContentRevision)
                     }
                 }
             }
@@ -238,7 +237,6 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
-                        .id(viewModel.libraryContentRevision)
                     }
                 }
             }
@@ -281,7 +279,6 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
-                        .id(mediaViewModel.libraryContentRevision)
                     }
                 }
             }
@@ -319,7 +316,6 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
-                        .id(mediaViewModel.libraryContentRevision)
                     }
                 }
             }

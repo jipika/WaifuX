@@ -782,6 +782,15 @@ class AnimeDetailViewModel: ObservableObject {
         // 注意：AVURLAssetHTTPHeaderFieldsKey 对 M3U8 流无效，使用标准 AVPlayerItem
         let playerItem = AVPlayerItem(url: url)
         
+        // 配置高质量播放设置
+        // 1. 不限制码率，使用视频原始码率
+        playerItem.preferredPeakBitRate = 0
+        
+        // 2. 启用 HDR 元数据（如果视频支持）
+        if #available(macOS 10.15, *) {
+            playerItem.appliesPerFrameHDRDisplayMetadata = true
+        }
+        
         // 设置 HTTP 头信息（通过 AVPlayerItem 的 asset 选项对 M3U8 无效，依赖系统 Cookie 管理）
         // 大部分视频源会通过 HTTPCookieStorage 自动获得必要的 Cookie
         

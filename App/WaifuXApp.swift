@@ -98,9 +98,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
         // macOS 26.5 beta 上这个问题更加严格，即使 @AppStorage 属性包装器 init 也会触发
         //
-        // ⚡ 优化：先显示窗口，再异步恢复数据，避免启动卡顿
+        // ⚡ 关键优化：先立即显示窗口，所有数据恢复都在下一个 run loop 异步执行
+        // 避免主线程阻塞导致布局计算延迟
 
-        // 1. 初始化状态栏控制器（必须在显示窗口之前）
+        // 1. 初始化状态栏控制器（轻量级，不阻塞）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
                 self?.showMainWindow()
@@ -110,65 +111,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         )
 
-        // 2. 立即创建并显示窗口（只恢复 UI 必需的最少数据）
-        // 语言和主题必须在窗口显示前恢复
-        LocalizationService.shared.restoreSavedSettings()
-        ThemeManager.shared.restoreSavedSettings()
-        
-        // 3. 异步恢复其他数据（不阻塞窗口显示）
-        Task {
-            // 0. 预加载 GitHub Hosts
-            await GitHubHosts.refreshHosts()
-            
-            // 恢复各项数据（这些操作很快，直接在主线程执行）
-            await MainActor.run {
-                DownloadPermissionManager.shared.restoreSavedPermission()
-                WallpaperLibraryService.shared.restoreSavedData()
-                MediaLibraryService.shared.restoreSavedData()
-                AnimeFavoriteStore.shared.restoreSavedData()
-                AnimeProgressStore.shared.restoreSavedData()
-                PlaybackProgressCache.shared.restoreSavedData()
-                DownloadTaskService.shared.restoreSavedTasks()
-                WallpaperSchedulerService.shared.restoreSavedConfig()
-            }
-            
-            // 延迟恢复其他状态
-            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
-            await MainActor.run {
-                UpdateChecker.shared.restoreCachedState()
-            }
-            
-            try? await Task.sleep(nanoseconds: 50_000_000) // 0.25s total
-            await MainActor.run {
-                WallpaperViewModel().restoreAPIKeyState()
-                WallpaperSourceManager.shared.restoreState()
-            }
-            
-            try? await Task.sleep(nanoseconds: 50_000_000) // 0.3s total
-            await MainActor.run { [weak self] in
-                let vm = SettingsViewModel()
-                vm.restoreSavedSettings()
-                self?.settingsViewModel = vm
-            }
-        }
-
-        // 计算初始窗口大小：优先使用保存的大小，避免缩放动画
-        let initialSize = Self.savedWindowFrame() ?? Self.defaultWindowSize
-        let initialOrigin = Self.savedWindowFrame() != nil ? 
-            NSPoint(x: 0, y: 0) : // 有保存的frame时会由setFrameAutosaveName恢复位置和大小
-            NSPoint(x: (NSScreen.main?.visibleFrame.midX ?? 400) - initialSize.width / 2,
-                   y: (NSScreen.main?.visibleFrame.midY ?? 300) - initialSize.height / 2)
-
+        // 2. 立即创建窗口（使用 defer: false 立即渲染，不等待）
         let contentView = ContentView()
             .frame(
                 minWidth: Self.minimumWindowSize.width,
                 minHeight: Self.minimumWindowSize.height
             )
 
-        // ⚠️ 关键：直接使用最终大小创建窗口，避免 resize 动画
-        // 不使用 defer: true，直接显示最终状态
         window = NSWindow(
-            contentRect: NSRect(origin: initialOrigin, size: initialSize),
+            contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -186,20 +137,88 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 设置最小窗口大小
         window?.minSize = Self.minimumWindowSize
 
-        // 恢复保存的窗口位置（如果有）
-        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
-
-        // 使用无边框托管视图
+        // 设置 contentView
         let hostingView = EdgeToEdgeHostingView(rootView: contentView)
         window?.contentView = hostingView
 
+        // 恢复保存的窗口尺寸
+        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
+
+        // 首次启动时居中显示
+        if !hasSavedWindowFrame() {
+            window?.center()
+        }
+
         window?.delegate = self
 
-        // 显示窗口
+        // ⚠️ 关键：立即显示窗口，不要等待
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
+        // ⚠️ 关键：让出主线程，让 SwiftUI 完成首次布局渲染
+        // 所有数据恢复在下一个 run loop 异步执行
+        DispatchQueue.main.async { [weak self] in
+            self?.restoreAllDataAsync()
+        }
+        
         // 注：更新检查已移到 ContentView 中处理
+    }
+    
+    // MARK: - 异步恢复所有数据（在窗口显示后执行，避免阻塞主线程）
+    private func restoreAllDataAsync() {
+        // ⚠️ 关键：分帧执行，每批数据恢复之间让出时间给主线程渲染 UI
+        
+        // 第1帧：基础设置
+        DispatchQueue.main.async { [weak self] in
+            LocalizationService.shared.restoreSavedSettings()
+            ThemeManager.shared.restoreSavedSettings()
+            
+            // 第2帧：权限和库数据
+            DispatchQueue.main.async {
+                DownloadPermissionManager.shared.restoreSavedPermission()
+                WallpaperLibraryService.shared.restoreSavedData()
+                
+                // 第3帧：媒体库
+                DispatchQueue.main.async {
+                    MediaLibraryService.shared.restoreSavedData()
+                    
+                    // 第4帧：动漫数据
+                    DispatchQueue.main.async {
+                        AnimeFavoriteStore.shared.restoreSavedData()
+                        AnimeProgressStore.shared.restoreSavedData()
+                        
+                        // 第5帧：播放缓存和任务
+                        DispatchQueue.main.async {
+                            PlaybackProgressCache.shared.restoreSavedData()
+                            DownloadTaskService.shared.restoreSavedTasks()
+                            WallpaperSchedulerService.shared.restoreSavedConfig()
+                            
+                            // 第6帧：其他状态
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                Task { await GitHubHosts.refreshHosts() }
+                                UpdateChecker.shared.restoreCachedState()
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    WallpaperViewModel().restoreAPIKeyState()
+                                    WallpaperSourceManager.shared.restoreState()
+                                    
+                                    // 应用启动时的初始化健康检查（只在当前使用备用源时执行）
+                                    Task {
+                                        await WallpaperSourceManager.shared.performInitialHealthCheck()
+                                    }
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                                        let vm = SettingsViewModel()
+                                        vm.restoreSavedSettings()
+                                        self?.settingsViewModel = vm
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -217,29 +236,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateActivationPolicy(showDockIcon: true)
 
         if window == nil {
-            // 计算初始窗口大小：优先使用保存的大小，避免缩放动画
-            let initialSize = Self.savedWindowFrame() ?? Self.defaultWindowSize
-            let initialOrigin: NSPoint
-            if Self.savedWindowFrame() != nil {
-                // 有保存的frame时会由setFrameAutosaveName恢复位置和大小
-                initialOrigin = NSPoint(x: 0, y: 0)
-            } else {
-                let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-                initialOrigin = NSPoint(
-                    x: screenFrame.midX - initialSize.width / 2,
-                    y: screenFrame.midY - initialSize.height / 2
-                )
-            }
-            
             let contentView = ContentView()
                 .frame(
                     minWidth: Self.minimumWindowSize.width,
                     minHeight: Self.minimumWindowSize.height
                 )
 
-            // ⚠️ 关键：直接使用最终大小创建窗口，避免 resize 动画
+            // ⚠️ 使用 defer: false 立即显示窗口
             window = NSWindow(
-                contentRect: NSRect(origin: initialOrigin, size: initialSize),
+                contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -255,13 +260,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
             window?.standardWindowButton(.zoomButton)?.isHidden = true
 
+            // ⚠️ 先设置 contentView，再恢复保存的窗口尺寸
             let hostingView = EdgeToEdgeHostingView(rootView: contentView)
             window?.contentView = hostingView
+            
+            // 恢复保存的窗口尺寸
+            window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
 
             window?.delegate = self
-            
-            // 恢复保存的窗口位置（如果有）
-            window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
         }
 
         // 确保窗口显示在最前面
@@ -418,7 +424,7 @@ struct AutoUpdateSheet: View {
                     // 标题图标
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 44))
-                        .foregroundStyle(LiquidGlassColors.accentCyan)
+                        .foregroundStyle(Color.accentColor)
                         .modifier(BounceSymbolModifier())
                     
                     // 标题
@@ -456,13 +462,13 @@ struct AutoUpdateSheet: View {
                                 .foregroundStyle(.white.opacity(0.5))
                             Text(latestVersion)
                                 .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                .foregroundStyle(LiquidGlassColors.accentCyan)
+                                .foregroundStyle(Color.accentColor)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(LiquidGlassColors.accentCyan.opacity(0.08))
+                                .fill(Color.accentColor.opacity(0.08))
                         )
                     }
                     
@@ -497,7 +503,7 @@ struct AutoUpdateSheet: View {
                             LiquidGlassLinearProgressBar(
                                 progress: updateManager.progress,
                                 height: 6,
-                                tintColor: LiquidGlassColors.accentCyan,
+                                tintColor: Color.accentColor,
                                 trackOpacity: 0.12
                             )
                             
@@ -559,7 +565,7 @@ struct AutoUpdateSheet: View {
                                 .frame(height: 38)
                                 .background(
                                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(LiquidGlassColors.accentCyan.opacity(0.3))
+                                        .fill(Color.accentColor.opacity(0.3))
                                 )
                             }
                             .buttonStyle(.plain)

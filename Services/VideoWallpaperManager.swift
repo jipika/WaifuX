@@ -656,12 +656,34 @@ final class VideoWallpaperManager: ObservableObject {
         window.contentView = containerView
 
         let playerItem = AVPlayerItem(url: videoURL)
+        
+        // 配置高质量播放设置
+        // 1. 不限制码率，使用视频原始码率
+        playerItem.preferredPeakBitRate = 0
+        
+        // 2. 启用 HDR 元数据（如果视频支持）
+        if #available(macOS 10.15, *) {
+            playerItem.appliesPerFrameHDRDisplayMetadata = true
+        }
+        
+        // 3. 设置首选渲染尺寸为屏幕尺寸，避免降采样
+        let screenSize = screen.frame.size
+        playerItem.preferredMaximumResolution = CGSize(
+            width: screenSize.width * screen.backingScaleFactor,
+            height: screenSize.height * screen.backingScaleFactor
+        )
+        
         let queuePlayer = AVQueuePlayer()
         queuePlayer.actionAtItemEnd = .none
         queuePlayer.isMuted = muted
         queuePlayer.volume = muted ? 0 : 1
         queuePlayer.automaticallyWaitsToMinimizeStalling = false
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
+        
+        // 4. 设置更高的视频输出质量
+        if #available(macOS 10.15, *) {
+            queuePlayer.currentItem?.seekingWaitsForVideoCompositionRendering = true
+        }
 
         let looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
         containerView.playerLayer.player = queuePlayer

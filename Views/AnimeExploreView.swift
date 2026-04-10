@@ -11,15 +11,13 @@ struct AnimeExploreView: View {
     @State private var selectedHotTag: AnimeHotTag?
     @State private var searchText = ""
     @State private var selectedSort: AnimeSortOption = .newest
-    @State private var sortAscending = false
-    @State private var displayedAnimeItems: [AnimeSearchResult] = []
+    @State private var displayedItems: [AnimeSearchResult] = []
     @State private var visibleCardIDs: Set<String> = []
     
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
     
     @Binding var selectedAnime: AnimeSearchResult?
-
     @State private var searchTask: Task<Void, Never>?
     @State private var isTagSearchActive = false
 
@@ -31,21 +29,13 @@ struct AnimeExploreView: View {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     heroSection
                     categorySection
-                    animeSection(gridContentWidth: gridContentWidth)
+                    contentSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
                 .padding(.top, 80)
                 .padding(.bottom, 48)
                 .frame(width: geometry.size.width, alignment: .leading)
-                .background(
-                    // macOS 14 滚动追踪：通过 GeometryReader + PreferenceKey 上报滚动位置
-                    GeometryReader { scrollProxy in
-                        Color.clear.preference(
-                            key: ExploreScrollOffsetKey.self,
-                            value: -scrollProxy.frame(in: .named("exploreScroll")).minY
-                        )
-                    }
-                )
+                .background(scrollTrackingOverlay)
                 .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
             }
             .coordinateSpace(name: "exploreScroll")
@@ -62,212 +52,105 @@ struct AnimeExploreView: View {
                     referenceImage: exploreAtmosphere.referenceImage
                 )
             )
-
         }
-        .task {
-            AppLogger.info(.anime, "动漫探索页 onAppear",
-                metadata: ["已有数据": !viewModel.animeItems.isEmpty, "当前数量": viewModel.animeItems.count])
-            
-            if viewModel.animeItems.isEmpty {
-                isInitialLoading = true
-            }
-            let start = Date()
-            await viewModel.loadInitialData()
-            AppLogger.info(.anime, "初始加载完成",
-                metadata: ["耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
-                 "结果数": viewModel.animeItems.count,
-                 "错误": viewModel.errorMessage ?? "无"])
-            syncExploreAtmosphere()
-            isInitialLoading = false
-        }
-        .onChange(of: searchText) { _, newValue in
-            viewModel.searchText = newValue
-            
-            if isTagSearchActive {
-                isTagSearchActive = false
-                return
-            }
-            
-            searchTask?.cancel()
-            
-            if newValue.isEmpty {
-                Task {
-                    await viewModel.fetchPopular()
-                }
-                return
-            }
-            
-            searchTask = Task {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                guard !Task.isCancelled else { return }
-                await viewModel.search()
-            }
-        }
-        .onChange(of: viewModel.animeItems.first?.id) { _, _ in
-            syncExploreAtmosphere()
-            // 数据源变更（新搜索/新分类），重置入场动画
-            visibleCardIDs.removeAll()
-        }
-        .onChange(of: viewModel.animeItems.count) { _, _ in
-            rebuildDisplayedAnimeItems()
-        }
-        .onChange(of: selectedSort) { _, _ in
-            rebuildDisplayedAnimeItems()
-        }
-        .onChange(of: sortAscending) { _, _ in
-            rebuildDisplayedAnimeItems()
-        }
+        .task { await handleInitialLoad() }
+        .onChange(of: searchText) { handleSearchChange($1) }
+        .onChange(of: viewModel.animeItems.first?.id) { _ in handleDataSourceChange() }
+        .onChange(of: viewModel.animeItems.count) { _, _ in rebuildDisplayedItems() }
+        .onChange(of: selectedSort) { _, _ in rebuildDisplayedItems() }
     }
 
-    // MARK: - Hero Section
+    // MARK: - Sections
 
     private var heroSection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(greetingText)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.58))
-
-                    Text("Kazumi")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .padding(.horizontal, 8)
-                        .frame(height: 20)
-                        .liquidGlassSurface(
-                            .regular,
-                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
-                            in: Capsule(style: .continuous)
-                        )
-                }
-
-                Text(t("anime.exploreAnime"))
-                    .font(.system(size: 32, weight: .bold, design: .serif))
-                    .tracking(-0.5)
-                    .foregroundStyle(.white.opacity(0.98))
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
-
-                    TextField(t("anime.searchAnime"), text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .onSubmit {
-                            searchTask?.cancel()
-                            Task {
-                                await viewModel.search()
-                            }
-                        }
-
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                            selectedHotTag = nil
-                            Task {
-                                await viewModel.search()
-                            }
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.36))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .frame(maxWidth: 460)
-                .frame(height: 46)
-                .liquidGlassSurface(
-                    .prominent,
-                    tint: exploreAtmosphere.tint.primary.opacity(0.1),
-                    in: Capsule(style: .continuous)
-                )
-
-                Button {
-                    resetAllFilters()
-                } label: {
-                    ZStack {
-                        // 背景
-                        Circle()
-                            .fill(.white.opacity(0.08))
-                        
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
-                    }
-                    .frame(width: 46, height: 46)
-                }
-                .buttonStyle(.plain)
-            }
-
+            headerTitle
+            searchRow
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
+    
+    private var headerTitle: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(greetingText)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
 
-    // MARK: - Category Section
+                Text("Kazumi")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: exploreAtmosphere.tint.primary.opacity(0.12),
+                        in: Capsule(style: .continuous)
+                    )
+            }
+
+            Text(t("anime.exploreAnime"))
+                .font(.system(size: 32, weight: .bold, design: .serif))
+                .tracking(-0.5)
+                .foregroundStyle(.white.opacity(0.98))
+                .lineLimit(1)
+        }
+    }
+    
+    private var searchRow: some View {
+        HStack(spacing: 12) {
+            ExploreSearchBar(
+                text: $searchText,
+                placeholder: t("anime.searchAnime"),
+                tint: exploreAtmosphere.tint.primary,
+                onSubmit: performSearch,
+                onClear: clearSearch
+            )
+            
+            ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
+                resetAllFilters()
+            }
+        }
+    }
 
     private var categorySection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // 分类芯片
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(AnimeCategory.allCases) { category in
-                        AnimeCategoryChip(
-                            category: category,
-                            isSelected: selectedCategory == category
-                        ) {
-                            withAnimation(AppFluidMotion.interactiveSpring) {
-                                selectedCategory = category
-                                selectedHotTag = nil
-                                isTagSearchActive = true
-                                searchTask?.cancel()
-                                searchText = ""
-                                viewModel.searchText = ""
-                                Task {
-                                    await viewModel.fetchByCategory(category)
-                                }
-                            }
-                        }
+            categoryChips
+            hotTagsSection
+        }
+    }
+    
+    private var categoryChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(AnimeCategory.allCases) { category in
+                    CategoryChip(
+                        icon: category.icon,
+                        title: category.displayName,
+                        accentColors: category.accentColors,
+                        isSelected: selectedCategory == category
+                    ) {
+                        selectCategory(category)
                     }
                 }
             }
+        }
+    }
+    
+    private var hotTagsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(t("anime.hotTags"))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.4))
 
-            // 热门标签
-            VStack(alignment: .leading, spacing: 12) {
-                Text(t("anime.hotTags"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.4))
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(AnimeHotTag.allCases) { tag in
-                            AnimeHotTagChip(tag: tag, isSelected: selectedHotTag == tag) {
-                                withAnimation(AppFluidMotion.interactiveSpring) {
-                                    let newTag = selectedHotTag == tag ? nil : tag
-                                    selectedHotTag = newTag
-                                    selectedCategory = .all
-                                    isTagSearchActive = true
-                                    searchTask?.cancel()
-                                    searchText = ""
-                                    viewModel.searchText = ""
-                                    Task {
-                                        if let tagToSearch = newTag {
-                                            print("[AnimeExploreView] Tag clicked: \(tagToSearch.displayName)")
-                                            await viewModel.searchByTagName(tagToSearch.displayName)
-                                        } else {
-                                            print("[AnimeExploreView] Tag deselected, fetching popular")
-                                            await viewModel.fetchPopular()
-                                        }
-                                    }
-                                }
-                            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(AnimeHotTag.allCases) { tag in
+                        TagChip(
+                            title: tag.displayName,
+                            isSelected: selectedHotTag == tag
+                        ) {
+                            selectHotTag(tag)
                         }
                     }
                 }
@@ -275,139 +158,77 @@ struct AnimeExploreView: View {
         }
     }
 
-    // MARK: - Anime Grid Section
-
-    private func animeSection(gridContentWidth: CGFloat) -> some View {
+    private func contentSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center) {
-                Text("\(displayedAnimeItems.count) \(t("content.animes"))")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.66))
-
-                Spacer()
-
-                Menu {
-                    ForEach(AnimeSortOption.allCases) { option in
-                        Button(option.menuTitle) {
-                            selectedSort = option
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(selectedSort.title)
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .foregroundStyle(.white.opacity(0.92))
-                    .padding(.horizontal, 16)
-                    .frame(height: 38)
-                    .liquidGlassSurface(
-                        .regular,
-                        tint: exploreAtmosphere.tint.primary.opacity(0.1),
-                        in: Capsule(style: .continuous)
-                    )
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-            }
-
-            if viewModel.isLoading && displayedAnimeItems.isEmpty {
+            contentHeader
+            
+            if viewModel.isLoading && displayedItems.isEmpty {
                 AnimeGridSkeleton(contentWidth: gridContentWidth)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
-            } else if displayedAnimeItems.isEmpty {
+            } else if displayedItems.isEmpty {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
                 animeGrid(contentWidth: gridContentWidth)
-
-                if viewModel.isLoadingMore || (viewModel.isLoading && !displayedAnimeItems.isEmpty) {
+                
+                if viewModel.isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
                     LoadingMoreIndicator()
                         .padding(.vertical, 20)
                 }
             }
         }
     }
+    
+    private var contentHeader: some View {
+        HStack(alignment: .center) {
+            Text("\(displayedItems.count) \(t("content.animes"))")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.66))
 
-    // MARK: - Anime Grid (LazyVGrid)
+            Spacer()
+
+            SortMenu(
+                options: AnimeSortOption.allCases,
+                selected: $selectedSort,
+                tint: exploreAtmosphere.tint.primary
+            )
+        }
+    }
+
+    // MARK: - Grid
 
     private func animeGrid(contentWidth: CGFloat) -> some View {
-        let columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
-        let spacing: CGFloat = 20
-        let totalSpacing = CGFloat(columnCount - 1) * spacing
-        let cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
-        let cardHeight = cardWidth * 1.4  // 动漫卡片宽高比约 1:1.4
+        let config = GridConfig(contentWidth: contentWidth, baseRatio: 1.4)
         
         return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount),
-            spacing: spacing
+            columns: config.columns,
+            alignment: .leading,
+            spacing: config.spacing
         ) {
-            ForEach(Array(displayedAnimeItems.enumerated()), id: \.element.id) { index, anime in
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, anime in
                 AnimePortraitCard(
                     anime: anime,
-                    cardWidth: cardWidth,
-                    cardHeight: cardHeight
+                    cardWidth: config.cardWidth,
+                    cardHeight: config.cardHeight
                 ) {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         selectedAnime = anime
                     }
                 }
                 .onAppear {
-                    let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(Double(min(index % 8, 4)) * 0.05)) {
-                        visibleCardIDs.insert(anime.id)
-                    }
+                    animateCardAppearance(id: anime.id, index: index)
                 }
-                .opacity(visibleCardIDs.contains(anime.id) ? 1 : 0)
-                .offset(y: visibleCardIDs.contains(anime.id) ? 0 : 30)
-                .scaleEffect(visibleCardIDs.contains(anime.id) ? 1 : 0.9)
-                .scrollTransition { content, phase in
-                    content
-                        .scaleEffect(phase.isIdentity ? 1 : 0.95)
-                        .opacity(phase.isIdentity ? 1 : 0.8)
-                }
+                .cardEntrance(
+                    isVisible: visibleCardIDs.contains(anime.id),
+                    delay: Double(min(index % 8, 4)) * 0.05
+                )
+                .scrollTransitionEffect()
             }
         }
-        .frame(height: calculateTotalHeight(itemCount: displayedAnimeItems.count, cardHeight: cardHeight, columnCount: columnCount, spacing: spacing))
+        .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 44))
     }
 
-    /// 计算 LazyVGrid 总高度（确保 ScrollView contentSize 正确）
-    private func calculateTotalHeight(itemCount: Int, cardHeight: CGFloat, columnCount: Int, spacing: CGFloat) -> CGFloat {
-        guard itemCount > 0 else { return 0 }
-        let rows = ceil(Double(itemCount) / Double(columnCount))
-        let totalCardHeight = cardHeight + 44 // 卡片高度 + 底部信息栏约 44pt
-        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
-    }
-
-    // MARK: - Loading Indicator
-
-    private struct LoadingMoreIndicator: View {
-        @State private var isAnimating = false
-        
-        var body: some View {
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.2.circlepath")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
-                    .onAppear {
-                        withAnimation(
-                            .linear(duration: 1.0)
-                            .repeatForever(autoreverses: false)
-                        ) {
-                            isAnimating = true
-                        }
-                    }
-                    .onDisappear {
-                        isAnimating = false
-                    }
-                
-                Text(t("loading.simple"))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-        }
-    }
+    // MARK: - UI Components
 
     private var emptyState: some View {
         Group {
@@ -415,18 +236,14 @@ struct AnimeExploreView: View {
                 ErrorStateView(
                     type: .network,
                     message: errorMessage,
-                    retryAction: {
-                        Task { await viewModel.loadInitialData() }
-                    }
+                    retryAction: { Task { await viewModel.loadInitialData() } }
                 )
             } else {
                 ErrorStateView(
                     type: .empty,
                     title: t("anime.noData"),
                     message: t("anime.tryDifferentSource"),
-                    retryAction: {
-                        Task { await viewModel.loadInitialData() }
-                    }
+                    retryAction: { Task { await viewModel.loadInitialData() } }
                 )
             }
         }
@@ -437,88 +254,138 @@ struct AnimeExploreView: View {
             in: RoundedRectangle(cornerRadius: 28, style: .continuous)
         )
     }
-
-    private var greetingText: String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        switch hour {
-        case 5..<12: return "Good Morning"
-        case 12..<18: return "Good Afternoon"
-        default: return "Good Evening"
+    
+    private var scrollTrackingOverlay: some View {
+        GeometryReader { scrollProxy in
+            Color.clear.preference(
+                key: ExploreScrollOffsetKey.self,
+                value: -scrollProxy.frame(in: .named("exploreScroll")).minY
+            )
         }
     }
 
-    private func syncExploreAtmosphere() {
-        if let firstAnime = displayedAnimeItems.first,
-           let coverURL = firstAnime.coverURL {
-            exploreAtmosphere.updateFirstAnime(coverURL: coverURL)
+    // MARK: - Actions
+
+    private func handleInitialLoad() async {
+        AppLogger.info(.anime, "动漫探索页 onAppear",
+            metadata: ["已有数据": !viewModel.animeItems.isEmpty, "当前数量": viewModel.animeItems.count])
+        
+        if viewModel.animeItems.isEmpty {
+            isInitialLoading = true
+        }
+        let start = Date()
+        await viewModel.loadInitialData()
+        AppLogger.info(.anime, "初始加载完成",
+            metadata: [
+                "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                "结果数": viewModel.animeItems.count,
+                "错误": viewModel.errorMessage ?? "无"
+            ])
+        syncAtmosphere()
+        isInitialLoading = false
+    }
+
+    private func selectCategory(_ category: AnimeCategory) {
+        withAnimation(AppFluidMotion.interactiveSpring) {
+            selectedCategory = category
+            selectedHotTag = nil
+            isTagSearchActive = true
+            searchTask?.cancel()
+            searchText = ""
+            viewModel.searchText = ""
+        }
+        Task { await viewModel.fetchByCategory(category) }
+    }
+    
+    private func selectHotTag(_ tag: AnimeHotTag) {
+        withAnimation(AppFluidMotion.interactiveSpring) {
+            let newTag = selectedHotTag == tag ? nil : tag
+            selectedHotTag = newTag
+            selectedCategory = .all
+            isTagSearchActive = true
+            searchTask?.cancel()
+            searchText = ""
+            viewModel.searchText = ""
+        }
+        Task {
+            if let tagToSearch = selectedHotTag {
+                await viewModel.searchByTagName(tagToSearch.displayName)
+            } else {
+                await viewModel.fetchPopular()
+            }
         }
     }
 
-    /// macOS 15+ 使用：触发加载更多
-    private func triggerLoadMore() {
-        guard viewModel.hasMorePages,
-              !viewModel.isLoading,
-              !viewModel.isLoadingMore else {
-            AppLogger.debug(.anime, "loadMore 跳过",
-                metadata: ["hasMore": viewModel.hasMorePages, "isLoading": viewModel.isLoading,
-                 "isLoadingMore": viewModel.isLoadingMore])
+    private func handleSearchChange(_ newValue: String) {
+        viewModel.searchText = newValue
+        
+        if isTagSearchActive {
+            isTagSearchActive = false
             return
         }
         
-        AppLogger.info(.anime, "加载更多", metadata: ["当前数量": displayedAnimeItems.count])
-        let start = Date()
-        Task {
-            await viewModel.loadMore()
-            AppLogger.info(.anime, "加载更多完成",
-                metadata: ["耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
-                 "新总数": viewModel.animeItems.count])
+        searchTask?.cancel()
+        
+        if newValue.isEmpty {
+            Task { await viewModel.fetchPopular() }
+            return
+        }
+        
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await viewModel.search()
         }
     }
     
-    /// macOS 14 使用：通过 scrollOffset 检测是否滚动到底部触发加载更多
-    /// - Parameter offset: 滚动偏移量（已取反，正值表示向上滚动的距离）
-    private func checkLoadMore(offset: CGFloat) {
-        let threshold: CGFloat = 300 // 向上滚动超过 300pt 触发加载
-        guard offset > threshold,
-              viewModel.hasMorePages else { return }
+    private func performSearch() {
+        searchTask?.cancel()
+        Task { await viewModel.search() }
+    }
+    
+    private func clearSearch() {
+        searchText = ""
+        selectedHotTag = nil
+        Task { await viewModel.search() }
+    }
+    
+    private func handleDataSourceChange() {
+        syncAtmosphere()
+        visibleCardIDs.removeAll()
+    }
 
-        // 防死锁：如果 isLoading/isLoadingMore/isLoadMoreInProgress 卡住，检查是否有活跃任务
-        if viewModel.isLoading || viewModel.isLoadingMore {
-            // 已有进行中的加载，不重复触发（ViewModel 内部有自己的防重入）
-            return
+    private func animateCardAppearance(id: String, index: Int) {
+        let _ = withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+            visibleCardIDs.insert(id)
         }
+    }
 
+    private func triggerLoadMore() {
+        guard viewModel.hasMorePages,
+              !viewModel.isLoading,
+              !viewModel.isLoadingMore else { return }
+        
+        AppLogger.info(.anime, "加载更多", metadata: ["当前数量": displayedItems.count])
+        Task { await viewModel.loadMore() }
+    }
+    
+    private func checkLoadMore(offset: CGFloat) {
+        let threshold: CGFloat = 300
+        guard offset > threshold, viewModel.hasMorePages else { return }
+        guard !viewModel.isLoading, !viewModel.isLoadingMore else { return }
         Task { await viewModel.loadMore() }
     }
 
-    private func rebuildDisplayedAnimeItems() {
+    private func rebuildDisplayedItems() {
         let source = viewModel.animeItems
         
-        // 默认 newest 排序 + 正序 = 无需排序，直接使用源数据
-        if selectedSort == .newest && !sortAscending {
-            displayedAnimeItems = source
-        } else {
-            let newItems: [AnimeSearchResult]
-            switch selectedSort {
-            case .newest:
-                newItems = source.reversed()
-            case .title:
-                newItems = source.sorted { lhs, rhs in
-                    let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
-                    if cmp == .orderedSame { return false }
-                    return sortAscending ? cmp == .orderedDescending : cmp == .orderedAscending
-                }
-            case .popular:
-                newItems = source.sorted { lhs, rhs in
-                    let lhsScore = Double(lhs.rating ?? "0") ?? 0
-                    let rhsScore = Double(rhs.rating ?? "0") ?? 0
-                    if lhsScore == rhsScore {
-                        return lhs.rank ?? Int.max < rhs.rank ?? Int.max
-                    }
-                    return sortAscending ? lhsScore < rhsScore : lhsScore > rhsScore
-                }
-            }
-            displayedAnimeItems = newItems
+        guard selectedSort != .newest else {
+            displayedItems = source
+            return
+        }
+        
+        displayedItems = source.sorted { lhs, rhs in
+            selectedSort.sortComparator(lhs, rhs, ascending: false)
         }
     }
     
@@ -526,115 +393,52 @@ struct AnimeExploreView: View {
         searchText = ""
         selectedHotTag = nil
         selectedCategory = .all
-        // ⚠️ 先清空 displayedAnimeItems 避免旧数据显示
-        displayedAnimeItems = []
-        // ⚠️ 延迟修改排序相关状态，避免触发 rebuildDisplayedAnimeItems 的抖动
+        displayedItems = []
+        visibleCardIDs.removeAll()
         selectedSort = .newest
-        sortAscending = false
 
         Task {
             await viewModel.loadInitialData()
-            // 数据加载完成后，重建列表并填充 visibleCardIDs
-            await MainActor.run {
-                rebuildDisplayedAnimeItems()
-                for anime in viewModel.animeItems {
-                    visibleCardIDs.insert(anime.id)
-                }
-            }
+            await MainActor.run { rebuildDisplayedItems() }
+        }
+    }
+
+    private func syncAtmosphere() {
+        if let firstAnime = displayedItems.first, let coverURL = firstAnime.coverURL {
+            exploreAtmosphere.updateFirstAnime(coverURL: coverURL)
         }
     }
 }
 
-// MARK: - Hot Tag Chip
+// MARK: - Grid Configuration
 
-private struct AnimeHotTagChip: View {
-    let tag: AnimeHotTag
-    let isSelected: Bool
-    let action: () -> Void
-
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(tag.displayName)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
-                .padding(.horizontal, 14)
-                .frame(height: 32)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
-                )
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
-            isHovered = hovering
-        }
+private struct GridConfig {
+    let columnCount: Int
+    let spacing: CGFloat
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    let columns: [GridItem]
+    
+    init(contentWidth: CGFloat, baseRatio: CGFloat, spacing: CGFloat = 20) {
+        self.spacing = spacing
+        self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
+        let totalSpacing = CGFloat(columnCount - 1) * spacing
+        self.cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
+        self.cardHeight = cardWidth * baseRatio
+        self.columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
-}
-
-// MARK: - Category Chip
-
-private struct AnimeCategoryChip: View {
-    let category: AnimeCategory
-    let isSelected: Bool
-    let action: () -> Void
-
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: category.accentColors.map(Color.init(hex:)),
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 22, height: 22)
-
-                    Image(systemName: category.icon)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(isSelected ? .white : .black.opacity(0.78))
-                }
-
-                Text(category.displayName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(.ultraThinMaterial)
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
-        .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
-            isHovered = hovering
-        }
+    
+    func calculateHeight(itemCount: Int, extraHeight: CGFloat = 0) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let rows = ceil(Double(itemCount) / Double(columnCount))
+        let totalCardHeight = cardHeight + extraHeight
+        return CGFloat(rows * Double(totalCardHeight) + max(0, rows - 1) * Double(spacing) + 40)
     }
 }
 
 // MARK: - Sort Options
 
-private enum AnimeSortOption: String, CaseIterable, Identifiable {
+private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
     case newest
     case title
     case popular
@@ -656,9 +460,26 @@ private enum AnimeSortOption: String, CaseIterable, Identifiable {
         case .popular: return t("anime.sortByPopular")
         }
     }
+    
+    func sortComparator(_ lhs: AnimeSearchResult, _ rhs: AnimeSearchResult, ascending: Bool) -> Bool {
+        switch self {
+        case .newest:
+            return false // 保持原序
+        case .title:
+            let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+            return ascending ? cmp == .orderedDescending : cmp == .orderedAscending
+        case .popular:
+            let lhsScore = Double(lhs.rating ?? "0") ?? 0
+            let rhsScore = Double(rhs.rating ?? "0") ?? 0
+            if lhsScore == rhsScore {
+                return lhs.rank ?? Int.max < rhs.rank ?? Int.max
+            }
+            return ascending ? lhsScore < rhsScore : lhsScore > rhsScore
+        }
+    }
 }
 
-// MARK: - Grid Skeleton
+// MARK: - Skeleton
 
 private struct AnimeGridSkeleton: View {
     var contentWidth: CGFloat = 800
@@ -676,8 +497,6 @@ private struct AnimeGridSkeleton: View {
         }
     }
 }
-
-// MARK: - Card Skeleton
 
 private struct AnimePortraitCardSkeleton: View {
     var body: some View {
@@ -713,46 +532,5 @@ private struct AnimePortraitCardSkeleton: View {
         )
         .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
         .shimmer()
-    }
-}
-
-// MARK: - Scroll Load More Modifier
-
-/// 跨版本兼容的滚动加载更多修饰符
-/// macOS 15+ 使用 onScrollGeometryChange，macOS 14 使用 PreferenceKey 滚动追踪
-private struct ScrollLoadMoreModifier: ViewModifier {
-    @Binding var scrollOffset: CGFloat
-    let onLoadMore: () -> Void
-    let checkLoadMore: (CGFloat) -> Void
-
-    func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    let threshold: CGFloat = 300
-                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                    return bottomOffset >= geometry.contentSize.height - threshold
-                } action: { oldValue, newValue in
-                    if newValue && !oldValue {
-                        onLoadMore()
-                    }
-                }
-        } else {
-            content
-                .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
-                    scrollOffset = value
-                }
-                .onChange(of: scrollOffset) { _, offset in
-                    checkLoadMore(offset)
-                }
-        }
-    }
-}
-
-// macOS 14 用 PreferenceKey 追踪滚动偏移量（比 GeometryReader overlay 更可靠）
-private struct ExploreScrollOffsetKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }

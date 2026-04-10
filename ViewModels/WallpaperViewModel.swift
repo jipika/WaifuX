@@ -189,13 +189,17 @@ class WallpaperViewModel: ObservableObject {
     }
 
     init() {
+        // 监听 Service 数据变化，转发 objectWillChange 通知视图更新
+        // 因为 favorites/allLocalWallpapers 是计算属性，需要手动转发变化通知
         Publishers.Merge(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
             wallpaperLibrary.$downloadRecords.map { _ in () }
         )
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] in
+        .sink { [weak self] _ in
             self?.libraryContentRevision &+= 1
+            // 转发变化通知，让使用计算属性的视图自动更新
+            self?.objectWillChange.send()
         }
         .store(in: &cancellables)
         
@@ -335,8 +339,11 @@ class WallpaperViewModel: ObservableObject {
         wallpaperLibrary.toggleFavorite(wallpaper)
     }
 
+    /// 刷新收藏和下载数据（删除操作后调用）
     func loadFavorites() {
         libraryContentRevision &+= 1
+        // 发送变化通知，确保计算属性（favorites/allLocalWallpapers）的依赖视图更新
+        objectWillChange.send()
     }
 
     // MARK: - 壁纸批量删除
@@ -413,10 +420,35 @@ class WallpaperViewModel: ObservableObject {
                 // 再次检查是否被取消
                 try Task.checkCancellation()
 
-                results.data.forEach { wallpaperLibrary.upsert($0) }
+                // ⚠️ 分批更新数据，避免一次性大量更新阻塞主线程
                 currentRandomSeed = sortingOption == .random ? results.meta.seed : nil
                 print("✅ Search success: \(results.data.count) wallpapers loaded, total: \(results.meta.total), lastPage: \(results.meta.lastPage)")
-                wallpapers = results.data
+                
+                // 先更新壁纸库（后台操作）
+                // ⚠️ 使用批量更新，减少持久化次数
+                wallpaperLibrary.upsertBatch(results.data)
+                
+                // 分批更新 UI，每 10 个让出一次主线程
+                let batchSize = 10
+                let total = results.data.count
+                for i in stride(from: 0, to: total, by: batchSize) {
+                    let end = min(i + batchSize, total)
+                    let batch = Array(results.data[i..<end])
+                    
+                    // 如果是第一批，立即更新显示
+                    if i == 0 {
+                        wallpapers = batch
+                    } else {
+                        // 后续批次追加
+                        wallpapers.append(contentsOf: batch)
+                    }
+                    
+                    // 让出主线程给 UI 渲染
+                    if end < total {
+                        await Task.yield()
+                    }
+                }
+                
                 hasMorePages = 1 < results.meta.lastPage
 
                 if results.data.isEmpty {
@@ -577,7 +609,9 @@ class WallpaperViewModel: ObservableObject {
             task.cancel()
         }
         imageLoadTasks.removeAll()
-        ImageLoader.shared.cancelAllLoads()
+        Task {
+            await ImageLoader.shared.cancelAllLoads()
+        }
     }
 
     // MARK: - 图片预加载（限制并发数量）
@@ -648,42 +682,54 @@ class WallpaperViewModel: ObservableObject {
         return try await fetchWallpapers(parameters: parameters)
     }
 
+    /// Wallhaven 请求最大重试次数
+    private let maxWallhavenRetries = 2
+    
     private func fetchWallpapers(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
-        // MARK: - 数据源路由：WallHaven → 4KWallpapers 两级降级
         let sourceManager = WallpaperSourceManager.shared
-
-        // 检查是否需要用回退源
-        if let fallbackSource = sourceManager.shouldUseFallback() {
-            print("[WallpaperViewModel] 🔄 Using \(fallbackSource.displayName) fallback source")
-            return try await fetchFromFallbackSource(fallbackSource, parameters: parameters)
+        
+        // 根据当前活跃源决定从哪个数据源获取
+        // ⚠️ 注意：运行时不再自动切换数据源，切换只在应用启动时的健康检查中决定
+        switch sourceManager.activeSource {
+        case .wallhaven:
+            return try await fetchFromWallhaven(parameters: parameters)
+        case .fourKWallpapers:
+            return try await fetchFromFallbackSource(.fourKWallpapers, parameters: parameters)
         }
-
-        // 正常走 Wallhaven（⚠️ 5秒超时，失败立即降级）
+    }
+    
+    private func fetchFromWallhaven(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
         guard let url = WallhavenAPI.url(for: .search(parameters)) else {
             throw NetworkError.invalidResponse
         }
 
-        do {
-            // 带短超时的 WallHaven 请求：5 秒内没返回就视为失败，立即切换到降级源
-            let result = try await withWallhavenTimeout(seconds: 5) {
-                try await self.networkService.fetch(
-                    WallpaperSearchResponse.self,
-                    from: url,
-                    headers: WallhavenAPI.authenticationHeaders(apiKey: self.normalizedAPIKey)
-                )
+        // 尝试请求，失败时自动重试（最多3次：初始 + 2次重试）
+        var lastError: Error?
+        for attempt in 0...maxWallhavenRetries {
+            if attempt > 0 {
+                print("[WallpaperViewModel] 🔄 Retrying Wallhaven request (attempt \(attempt + 1)/\(maxWallhavenRetries + 1))...")
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
-            sourceManager.recordSuccess()
-            return result
-        } catch {
-            sourceManager.recordFailure(error: error)
-            print("[WallpaperViewModel] ⚠️ Wallhaven failed (\(error.localizedDescription)), switching to fallback...")
-
-            // 立即尝试降级（不再等待重试）
-            sourceManager.performAutoSwitch()
-
-            // 从当前降级源获取数据
-            return try await fetchFromFallbackSource(sourceManager.activeSource, parameters: parameters)
+            
+            do {
+                let result = try await withWallhavenTimeout(seconds: 5) {
+                    try await self.networkService.fetch(
+                        WallpaperSearchResponse.self,
+                        from: url,
+                        headers: WallhavenAPI.authenticationHeaders(apiKey: self.normalizedAPIKey)
+                    )
+                }
+                return result
+            } catch {
+                lastError = error
+                print("[WallpaperViewModel] ⚠️ Wallhaven attempt \(attempt + 1) failed: \(error.localizedDescription)")
+            }
         }
+        
+        // 所有重试都失败，显示网络错误提示
+        sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
+        
+        throw lastError ?? NetworkError.networkError(URLError(.unknown))
     }
 
     /// 从指定的回退源获取数据
@@ -728,8 +774,8 @@ class WallpaperViewModel: ObservableObject {
                 )
             } catch {
                 print("[WallpaperViewModel] ❌ 4KWallpapers also failed: \(error.localizedDescription)")
-                // 已是最后一级，无法再降级
-                _ = WallpaperSourceManager.shared.recordCurrentSourceFailedAndDowngrade()
+                // 显示网络错误提示
+                sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
                 throw error
             }
 
@@ -1027,19 +1073,7 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 获取精选壁纸（用于轮播）- 日榜，仅横版
     func fetchFeaturedWallpapers() async throws -> [Wallpaper] {
         let sourceManager = WallpaperSourceManager.shared
-        if let fallbackSource = sourceManager.shouldUseFallback() {
-            print("[WallpaperViewModel] Featured: Using \(fallbackSource.displayName) fallback")
-            do {
-                return try await fetchFeaturedFromSource(fallbackSource)
-            } catch {
-                return try await featuredFromMainSource()
-            }
-        }
-        return try await featuredFromMainSource()
-    }
-
-    private func fetchFeaturedFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
-        switch source {
+        switch sourceManager.activeSource {
         case .fourKWallpapers:
             return try await FourKWallpapersService.shared.fetchFeatured(limit: 24)
         case .wallhaven:
@@ -1065,19 +1099,7 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 获取 Top 列表
     func fetchTopWallpapers() async throws -> [Wallpaper] {
         let sourceManager = WallpaperSourceManager.shared
-        if let fallbackSource = sourceManager.shouldUseFallback() {
-            print("[WallpaperViewModel] Top: Using \(fallbackSource.displayName) fallback")
-            do {
-                return try await fetchTopFromSource(fallbackSource)
-            } catch {
-                return try await topFromMainSource()
-            }
-        }
-        return try await topFromMainSource()
-    }
-
-    private func fetchTopFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
-        switch source {
+        switch sourceManager.activeSource {
         case .fourKWallpapers:
             return try await FourKWallpapersService.shared.fetchTop(limit: 8)
         case .wallhaven:
@@ -1102,19 +1124,7 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 获取 Latest 列表
     func fetchLatestWallpapers() async throws -> [Wallpaper] {
         let sourceManager = WallpaperSourceManager.shared
-        if let fallbackSource = sourceManager.shouldUseFallback() {
-            print("[WallpaperViewModel] Latest: Using \(fallbackSource.displayName) fallback")
-            do {
-                return try await fetchLatestFromSource(fallbackSource)
-            } catch {
-                return try await latestFromMainSource()
-            }
-        }
-        return try await latestFromMainSource()
-    }
-
-    private func fetchLatestFromSource(_ source: WallpaperSourceManager.SourceType) async throws -> [Wallpaper] {
-        switch source {
+        switch sourceManager.activeSource {
         case .fourKWallpapers:
             return try await FourKWallpapersService.shared.fetchLatest(limit: 8)
         case .wallhaven:
@@ -1188,7 +1198,24 @@ class WallpaperViewModel: ObservableObject {
 
     private func fetchFeaturedAndUpdate() async {
         do {
-            featuredWallpapers = try await fetchFeaturedWallpapers()
+            let results = try await fetchFeaturedWallpapers()
+            // ⚠️ 分批更新，避免一次性大量更新阻塞主线程
+            let batchSize = 8
+            let total = results.count
+            for i in stride(from: 0, to: total, by: batchSize) {
+                let end = min(i + batchSize, total)
+                let batch = Array(results[i..<end])
+                
+                if i == 0 {
+                    featuredWallpapers = batch
+                } else {
+                    featuredWallpapers.append(contentsOf: batch)
+                }
+                
+                if end < total {
+                    await Task.yield()
+                }
+            }
         } catch {
             print("Failed to fetch featured: \(error)")
         }

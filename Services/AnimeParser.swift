@@ -719,6 +719,8 @@ actor AnimeParser {
 
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = TimeInterval(rule.timeout ?? 30)
+        // ⚠️ 禁用缓存，每次重新请求
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
         // 设置 headers
         if let headers = rule.headers {

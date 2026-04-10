@@ -35,6 +35,21 @@ enum FourKPageType: String, Codable {
     case collections
 }
 
+/// 4K 源的排序选项
+enum FourKSortingOption: String, CaseIterable, Identifiable {
+    case latest
+    case popular
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .latest: return t("sort.latest")
+        case .popular: return t("sort.popular")
+        }
+    }
+}
+
 /// 分类模型
 struct FourKCategory: Identifiable, Codable, Equatable {
     let id: String       // URL slug，如 "abstract"
