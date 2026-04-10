@@ -105,15 +105,24 @@ struct WallpaperExploreContentView: View {
     // MARK: - 事件处理
     
     private func handleOnAppear() {
+        AppLogger.info(.wallpaper, "壁纸探索页 onAppear",
+            metadata: ["已有数据": !viewModel.wallpapers.isEmpty, "当前数量": viewModel.wallpapers.count])
+        
         if searchText.isEmpty {
             searchText = viewModel.searchQuery
         }
         
         if viewModel.wallpapers.isEmpty {
             isInitialLoading = true
+            AppLogger.info(.wallpaper, "首次加载：开始搜索")
+            let loadStart = Date()
             Task {
                 await viewModel.search()
                 await MainActor.run {
+                    let elapsed = Date().timeIntervalSince(loadStart)
+                    AppLogger.info(.wallpaper, "首次加载完成",
+                        metadata: ["耗时(s)": String(format: "%.2f", elapsed), "结果数": viewModel.wallpapers.count,
+                         "错误": viewModel.errorMessage ?? "无"])
                     rebuildVisibleWallpapers()
                     syncExploreAtmosphere()
                     isInitialLoading = false
@@ -121,6 +130,8 @@ struct WallpaperExploreContentView: View {
                 }
             }
         } else {
+            AppLogger.debug(.wallpaper, "onAppear 使用缓存数据",
+                metadata: ["数量": viewModel.wallpapers.count])
             rebuildVisibleWallpapers()
             syncExploreAtmosphere()
             isFirstAppear = false
@@ -130,12 +141,24 @@ struct WallpaperExploreContentView: View {
     private func triggerLoadMore() {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
-              !isLoadingMore else { return }
+              !isLoadingMore else {
+            AppLogger.debug(.wallpaper, "loadMore 跳过",
+                metadata: ["hasMore": viewModel.hasMorePages, "isLoading": viewModel.isLoading,
+                 "isLoadingMore": isLoadingMore])
+            return
+        }
         
         loadMoreTask?.cancel()
         loadMoreTask = Task {
             isLoadingMore = true
-            defer { isLoadingMore = false }
+            let loadStart = Date()
+            AppLogger.info(.wallpaper, "加载更多：开始", metadata: ["当前数量": displayedWallpapers.count])
+            defer {
+                let elapsed = Date().timeIntervalSince(loadStart)
+                AppLogger.info(.wallpaper, "加载更多完成",
+                    metadata: ["耗时(s)": String(format: "%.2f", elapsed), "新总数": viewModel.wallpapers.count])
+                isLoadingMore = false
+            }
             await viewModel.loadMore()
         }
     }
@@ -215,9 +238,14 @@ struct WallpaperExploreContentView: View {
     }
     
     private func handleWallpapersChange(oldVal: [Wallpaper], newVal: [Wallpaper]) {
+        AppLogger.debug(.wallpaper, "wallpapers 数据变化",
+            metadata: ["旧数量": oldVal.count, "新数量": newVal.count,
+             "当前显示": displayedWallpapers.count])
+        
         if newVal.isEmpty || displayedWallpapers.isEmpty {
             rebuildVisibleWallpapers()
         } else if !oldVal.isEmpty, newVal.count > oldVal.count {
+            AppLogger.debug(.wallpaper, "追加新数据", metadata: ["新增": newVal.count - oldVal.count])
             appendNewWallpapers()
         } else {
             rebuildVisibleWallpapers()
@@ -225,10 +253,16 @@ struct WallpaperExploreContentView: View {
     }
     
     private func reloadData() {
+        AppLogger.info(.wallpaper, "重新搜索：用户操作触发")
         displayedWallpapers = []
         visibleCardIDs.removeAll()
+        let start = Date()
         Task {
             await viewModel.search()
+            AppLogger.info(.wallpaper, "重新搜索完成",
+                metadata: ["耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                 "结果数": viewModel.wallpapers.count,
+                 "错误": viewModel.errorMessage ?? "无"])
         }
     }
     

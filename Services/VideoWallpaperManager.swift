@@ -599,8 +599,15 @@ final class VideoWallpaperManager: ObservableObject {
                 if let contentView = window.contentView as? WallpaperVideoContainerView {
                     contentView.playerLayer.player = nil
                 }
-                window.close()
+                // ⚠️ 用 orderOut 替代 close()，避免 macOS 26.5 的 _NSWindowTransformAnimation 崩溃
+                // close() 可能触发窗口退出动画，动画对象引用可能在窗口释放后成为悬垂指针
+                window.contentView = nil
+                window.orderOut(nil)
                 windows.removeValue(forKey: targetScreenID)
+                // 延迟释放窗口，让退出动画完成
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    _ = window
+                }
             }
             if let player = players[targetScreenID] {
                 player.pause()
@@ -640,6 +647,7 @@ final class VideoWallpaperManager: ObservableObject {
         window.isOpaque = true
         window.backgroundColor = .black
         window.hasShadow = false
+        window.isReleasedWhenClosed = false  // ⚠️ 防止 close() 时自动释放（由我们手动管理生命周期）
         window.ignoresMouseEvents = true
         window.isMovable = false
 
@@ -702,11 +710,23 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         // 4. 关闭窗口
-        for window in windows.values {
-            window.orderOut(nil)
+        // ⚠️ macOS 26.5 beta 会为 orderOut/close 自动创建 _NSWindowTransformAnimation 退出动画
+        // 这些动画对象被 autoreleased，如果窗口在动画完成前被释放 → 动画对象引用悬垂指针
+        // → CA::Transaction::commit 时 autorelease pool drain → objc_release 已死对象 → SIGSEGV
+        // 修复：先将窗口从屏幕移除 + 清空内容，然后延迟释放窗口（同 player 策略）
+        let windowsToDelay = windows.values.map { $0 }
+        for window in windowsToDelay {
             window.contentView = nil
+            window.orderOut(nil)
         }
         windows.removeAll()
+
+        // 延迟释放窗口，让 AppKit 的 _NSWindowTransformAnimation 退出动画完成
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // windowsToDelay 被闭包捕获，在此延迟后才由 ARC 释放
+            // 此时 AppKit 的窗口退出动画应已完成
+            _ = windowsToDelay
+        }
     }
 
     private func persistState() {

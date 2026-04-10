@@ -156,7 +156,8 @@ final class AppLogger {
 
             if !FileManager.default.fileExists(atPath: url.path) {
                 // 新建文件，写 UTF-8 BOM 方便文本编辑器识别
-                try? "\xEF\xBB\xBF".write(to: url, atomically: true, encoding: .utf8)
+                let bomData = Data([0xEF, 0xBB, 0xBF])
+                try? bomData.write(to: url, options: .atomic)
             }
 
             // 检查文件大小，超限则截断
@@ -167,9 +168,9 @@ final class AppLogger {
                     let currentData = try Data(contentsOf: url)
                     let keepRange = currentData.count / 2  // 保留后半段
                     let truncatedData = currentData.subdata(in: keepRange..<currentData.count)
-                    try truncatedData.write(to: url, options: .atomic)
-                    let header = "--- LOG TRUNCATED at \(ISO8601DateFormatter().string(from: Date())) ---\n"
-                    try? header.append(to: url, options: [])
+                    let headerStr = "--- LOG TRUNCATED at \(ISO8601DateFormatter().string(from: Date())) ---\n"
+                    var headerData = (headerStr.data(using: .utf8) ?? Data()) + truncatedData
+                    try headerData.write(to: url, options: .atomic)
                 } catch {
                     // 截断失败则直接清空重建
                     try? "".write(to: url, atomically: true, encoding: .utf8)
@@ -177,7 +178,16 @@ final class AppLogger {
             }
 
             let entry = line + "\n"
-            try? entry.append(to: url, options: [.atomic])
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                if let entryData = entry.data(using: .utf8) {
+                    handle.write(entryData)
+                }
+                try? handle.close()
+            } else {
+                // 文件不存在，创建新文件
+                try? entry.write(to: url, atomically: true, encoding: .utf8)
+            }
 
 #if DEBUG
             // Debug 模式下同步 flush 确保立即可见
@@ -216,7 +226,7 @@ final class AppLogger {
     static func clearLogs() {
         guard let url = shared.logFileURL else { return }
         try? "".write(to: url, atomically: true, encoding: .utf8)
-        AppLogger.info("General", "日志已清空")
+        AppLogger.info(.general, "日志已清空")
     }
 
     /// 返回日志文件 URL（供外部访问/分享）

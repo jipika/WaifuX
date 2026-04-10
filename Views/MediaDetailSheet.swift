@@ -182,6 +182,8 @@ struct MediaDetailSheet: View {
         }
         .navigationBarBackButtonHidden(true)
         .task {
+            AppLogger.info(.media, "媒体详情页 onAppear",
+                metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
             setupNextItemDataSource()
             await loadDetailIfNeeded()
@@ -306,14 +308,23 @@ struct MediaDetailSheet: View {
         .animation(.easeOut(duration: 0.15), value: scrollOffset)
     }
 
+    // MARK: - 顶部返回按钮（下载/设置壁纸中禁用）
     private var floatingBackButton: some View {
-        Button(action: onClose) {
+        Button(action: {
+            if isDownloading || isSettingWallpaper {
+                AppLogger.warn(.ui, "Media 返回被阻止：下载/设置壁纸进行中",
+                    metadata: ["isDownloading": isDownloading, "isSettingWallpaper": isSettingWallpaper])
+                return
+            }
+            onClose()
+        }) {
             Image(systemName: "chevron.left")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.95))
+                .foregroundStyle((isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95))
                 .frame(width: 38, height: 38)
                 .contentShape(Circle())
                 .detailGlassCircleChrome()
+                .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -765,11 +776,16 @@ struct MediaDetailSheet: View {
     private func downloadMedia() {
         // 本地文件无需下载
         if isLocalFile {
+            AppLogger.debug(.download, "跳过下载：本地媒体", metadata: ["id": resolvedItem.id])
             return
         }
-        
+
+        AppLogger.info(.download, "开始下载媒体", metadata:
+            ["id": resolvedItem.id, "title": resolvedItem.title,
+             "选项数": resolvedItem.downloadOptions.count])
         isDownloading = true
         errorMessage = ""
+        let start = Date()
         Task {
             do {
                 // 默认选择最高画质（与设为壁纸逻辑一致）
@@ -781,12 +797,18 @@ struct MediaDetailSheet: View {
                 }
                 if let targetOption {
                     _ = try await viewModel.downloadMedia(resolvedItem, option: targetOption)
+                    AppLogger.info(.download, "媒体下载成功", metadata:
+                        ["id": resolvedItem.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                         "选中选项": targetOption.label])
                 } else {
                     throw NetworkError.invalidResponse
                 }
             } catch {
                 errorMessage = error.localizedDescription
                 showError = true
+                AppLogger.error(.download, "媒体下载失败", metadata:
+                    ["id": resolvedItem.id, "error": error.localizedDescription,
+                     "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             }
             isDownloading = false
         }

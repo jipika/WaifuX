@@ -175,6 +175,8 @@ struct WallpaperDetailSheet: View {
         }
         .navigationBarBackButtonHidden(true)
         .onAppear {
+            AppLogger.info(.wallpaper, "详情页 onAppear",
+                metadata: ["wallpaperId": wallpaper.id, "isLocal": isLocalFile])
             // iOS 丝滑入场：分阶段渐显，模拟原生页面转场
             withAnimation(.easeOut(duration: 0.12).delay(0.02)) {
                 isVisible = true
@@ -335,17 +337,23 @@ struct WallpaperDetailSheet: View {
         return max(viewportHeight * 0.5, 400)
     }
 
-    // MARK: - 顶部返回按钮
+    // MARK: - 顶部返回按钮（下载中禁用）
     private var floatingBackButton: some View {
         Button {
+            if isDownloading || isSettingWallpaper {
+                AppLogger.warn(.ui, "返回被阻止：下载/设置壁纸进行中",
+                    metadata: ["isDownloading": isDownloading, "isSettingWallpaper": isSettingWallpaper])
+                return
+            }
             onClose()
         } label: {
             Image(systemName: "chevron.left")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.95))
+                .foregroundStyle((isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95))
                 .frame(width: 38, height: 38)
                 .contentShape(Circle())
                 .detailGlassCircleChrome()
+                .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -889,17 +897,26 @@ struct WallpaperDetailSheet: View {
     private func downloadWallpaper() {
         // 本地文件无需下载
         if isLocalFile {
+            AppLogger.debug(.download, "跳过下载：本地文件", metadata: ["id": wallpaper.id])
             return
         }
         
+        AppLogger.info(.download, "开始下载壁纸",
+            metadata: ["id": wallpaper.id, "分辨率": wallpaper.resolution, "大小": wallpaper.fileSize.map { "\($0)B" } ?? "未知"])
         isDownloading = true
         errorMessage = ""
+        let start = Date()
         Task {
             do {
                 try await viewModel.downloadWallpaper(wallpaper)
+                AppLogger.info(.download, "下载成功",
+                    metadata: ["id": wallpaper.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             } catch {
                 errorMessage = "\(t("error")): \(error.localizedDescription)"
                 showError = true
+                AppLogger.error(.download, "下载失败",
+                    metadata: ["id": wallpaper.id, "error": error.localizedDescription,
+                     "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
                 print("Download error: \(error)")
             }
             isDownloading = false

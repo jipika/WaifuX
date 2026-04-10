@@ -65,10 +65,18 @@ struct AnimeExploreView: View {
 
         }
         .task {
+            AppLogger.info(.anime, "动漫探索页 onAppear",
+                metadata: ["已有数据": !viewModel.animeItems.isEmpty, "当前数量": viewModel.animeItems.count])
+            
             if viewModel.animeItems.isEmpty {
                 isInitialLoading = true
             }
+            let start = Date()
             await viewModel.loadInitialData()
+            AppLogger.info(.anime, "初始加载完成",
+                metadata: ["耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                 "结果数": viewModel.animeItems.count,
+                 "错误": viewModel.errorMessage ?? "无"])
             syncExploreAtmosphere()
             isInitialLoading = false
         }
@@ -196,9 +204,6 @@ struct AnimeExploreView: View {
                             in: Circle()
                         )
                 }
-                .buttonStyle(.plain)
-            }
-
             }
 
         }
@@ -452,9 +457,21 @@ struct AnimeExploreView: View {
     private func triggerLoadMore() {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
-              !viewModel.isLoadingMore else { return }
+              !viewModel.isLoadingMore else {
+            AppLogger.debug(.anime, "loadMore 跳过",
+                metadata: ["hasMore": viewModel.hasMorePages, "isLoading": viewModel.isLoading,
+                 "isLoadingMore": viewModel.isLoadingMore])
+            return
+        }
         
-        Task { await viewModel.loadMore() }
+        AppLogger.info(.anime, "加载更多", metadata: ["当前数量": displayedAnimeItems.count])
+        let start = Date()
+        Task {
+            await viewModel.loadMore()
+            AppLogger.info(.anime, "加载更多完成",
+                metadata: ["耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                 "新总数": viewModel.animeItems.count])
+        }
     }
     
     /// macOS 14 使用：通过 scrollOffset 检测是否滚动到底部触发加载更多
