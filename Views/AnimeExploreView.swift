@@ -30,6 +30,7 @@ struct AnimeExploreView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     heroSection
+                    categorySection
                     animeSection(gridContentWidth: gridContentWidth)
                 }
                 .padding(.horizontal, 28)
@@ -198,6 +199,17 @@ struct AnimeExploreView: View {
                 .buttonStyle(.plain)
             }
 
+            }
+
+        }
+        .frame(maxWidth: 700, alignment: .leading)
+    }
+
+    // MARK: - Category Section
+
+    private var categorySection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // 分类芯片
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(AnimeCategory.allCases) { category in
@@ -221,6 +233,7 @@ struct AnimeExploreView: View {
                 }
             }
 
+            // 热门标签
             VStack(alignment: .leading, spacing: 12) {
                 Text(t("anime.hotTags"))
                     .font(.system(size: 12, weight: .semibold))
@@ -254,7 +267,6 @@ struct AnimeExploreView: View {
                 }
             }
         }
-        .frame(maxWidth: 700, alignment: .leading)
     }
 
     // MARK: - Anime Grid Section

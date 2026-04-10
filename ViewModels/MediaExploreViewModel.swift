@@ -440,6 +440,11 @@ final class MediaExploreViewModel: ObservableObject {
         mediaLibrary.toggleFavorite(item)
     }
 
+    /// 强制刷新库内容（递增 libraryContentRevision，让视图重新读取计算属性）
+    func refreshLibraryContent() {
+        libraryContentRevision &+= 1
+    }
+
     func isFavorite(_ item: MediaItem) -> Bool {
         mediaLibrary.isFavorite(item)
     }

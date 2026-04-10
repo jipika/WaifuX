@@ -199,6 +199,7 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
+                        .id(viewModel.libraryContentRevision)
                     }
                 }
             }
@@ -237,6 +238,7 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
+                        .id(viewModel.libraryContentRevision)
                     }
                 }
             }
@@ -279,6 +281,7 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
+                        .id(mediaViewModel.libraryContentRevision)
                     }
                 }
             }
@@ -316,6 +319,7 @@ struct MyLibraryContentView: View {
                             }
                         }
                         .padding(.vertical, 2)
+                        .id(mediaViewModel.libraryContentRevision)
                     }
                 }
             }
@@ -612,9 +616,11 @@ struct MyLibraryContentView: View {
             }
         }
 
-        // 3. 重新扫描以刷新列表
+        // 3. 重新扫描以刷新列表（同步等待完成，确保视图立即更新）
         Task {
             await LocalWallpaperScanner.shared.forceRescan()
+            // 扫描完成后强制刷新 ViewModel（计算属性依赖扫描结果）
+            viewModel.loadFavorites()
         }
     }
 
@@ -640,9 +646,11 @@ struct MyLibraryContentView: View {
             }
         }
 
-        // 3. 重新扫描以刷新列表
+        // 3. 重新扫描以刷新列表（同步等待完成，确保视图立即更新）
         Task {
             await LocalWallpaperScanner.shared.forceRescan()
+            // 扫描完成后递增 revision 强制刷新（allLocalMedia 是计算属性）
+            mediaViewModel.refreshLibraryContent()
         }
     }
 }

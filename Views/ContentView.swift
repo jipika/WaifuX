@@ -360,6 +360,7 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .id(viewModel.libraryContentRevision)
                 }
             }
         }
@@ -400,6 +401,7 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
@@ -455,6 +457,7 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .id(viewModel.libraryContentRevision)
                 }
             }
         }
@@ -512,6 +515,7 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
@@ -552,6 +556,7 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
