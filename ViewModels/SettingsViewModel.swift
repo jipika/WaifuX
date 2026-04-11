@@ -36,9 +36,23 @@ class SettingsViewModel: ObservableObject {
 
     private let ruleRepository = RuleRepository.shared
 
-    // MARK: - 调度器相关
-    @Published var schedulerViewModel = WallpaperSchedulerViewModel()
-    @Published var downloadTaskViewModel = DownloadTaskViewModel()
+    // MARK: - 调度器相关（延迟初始化，避免启动时阻塞）
+    private var _schedulerViewModel: WallpaperSchedulerViewModel?
+    private var _downloadTaskViewModel: DownloadTaskViewModel?
+    
+    var schedulerViewModel: WallpaperSchedulerViewModel {
+        if _schedulerViewModel == nil {
+            _schedulerViewModel = WallpaperSchedulerViewModel()
+        }
+        return _schedulerViewModel!
+    }
+    
+    var downloadTaskViewModel: DownloadTaskViewModel {
+        if _downloadTaskViewModel == nil {
+            _downloadTaskViewModel = DownloadTaskViewModel()
+        }
+        return _downloadTaskViewModel!
+    }
 
     // API Key - 使用静态缓存，避免在 getter 中读 UserDefaults
     private let apiKeyUserDefaultsKey = "wallhaven_api_key"
@@ -64,12 +78,11 @@ class SettingsViewModel: ObservableObject {
         // refreshDataSourceProfiles() 和 syncVideoWallpaperSettings() 也移到 restore 中
     }
 
-    /// ⚠️ 延迟恢复所有持久化设置（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
+    /// ⚠️ 延迟恢复所有持久化设置（完全异步，避免阻塞主线程）
     /// 在 applicationDidFinishLaunching 完成后的 DispatchQueue.main.async 中调用
     func restoreSavedSettings() {
+        // 第一步：快速恢复基本设置（UserDefaults 读取很快）
         let defaults = UserDefaults.standard
-
-        // 恢复 @Published 属性
         autoDownloadOriginal = defaults.bool(forKey: "auto_download_original")
         saveToDownloads = defaults.object(forKey: "save_to_downloads") as? Bool ?? true
         if let raw = defaults.string(forKey: "theme_mode"), let _ = ThemeMode(rawValue: raw) {
@@ -83,12 +96,21 @@ class SettingsViewModel: ObservableObject {
         // 恢复 API Key 缓存
         Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
         Self._apiKeyRestored = true
-
-        // 延迟执行异步任务
-        Task { await updateCacheSize() }
-        refreshDataSourceProfiles()
-        Task { await loadRuleRepository() }
+        
+        // 同步视频壁纸设置（轻量级）
         syncVideoWallpaperSettings()
+        
+        // 第二步：后台异步执行耗时操作
+        Task(priority: .background) { @MainActor in
+            // 小延迟确保 UI 先响应
+            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05秒
+            refreshDataSourceProfiles()
+            
+            // 缓存计算和规则仓库加载可以并行
+            async let cacheTask: () = updateCacheSize()
+            async let repoTask: () = loadRuleRepository()
+            _ = await (cacheTask, repoTask)
+        }
     }
 
     /// 同步动态壁纸设置到 VideoWallpaperManager

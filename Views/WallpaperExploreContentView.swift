@@ -816,7 +816,10 @@ private extension WallpaperExploreContentView {
     func togglePurity(_ filter: PurityFilter) {
         // Sketchy 和 NSFW 需要 API Key
         if filter.requiresAPIKey && !viewModel.apiKeyConfigured {
-            showAPIKeyAlert = true
+            // 使用异步触发 alert，避免阻塞当前点击事件处理
+            DispatchQueue.main.async {
+                showAPIKeyAlert = true
+            }
             return
         }
         switch filter {

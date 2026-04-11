@@ -351,6 +351,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - 设置窗口
     
     @objc func showSettingsWindow(_ sender: Any?) {
+        // 如果窗口已存在，直接显示（最快路径）
         if let settingsWindow = settingsWindowController?.window {
             centerWindow(settingsWindow, relativeTo: window)
             settingsWindow.makeKeyAndOrderFront(nil)
@@ -359,6 +360,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
+        // ⚠️ 先异步初始化 ViewModel，再显示窗口
+        Task(priority: .userInitiated) { @MainActor in
+            // 如果 SettingsViewModel 尚未初始化，先创建并恢复
+            if self.settingsViewModel == nil {
+                let vm = SettingsViewModel()
+                // 快速恢复基本设置，耗时操作在后台执行
+                vm.restoreSavedSettings()
+                self.settingsViewModel = vm
+            }
+            
+            // 创建并显示窗口
+            self.createAndShowSettingsWindow()
+        }
+    }
+    
+    private func createAndShowSettingsWindow() {
         let settingsWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -379,12 +396,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.isReleasedWhenClosed = false
         centerWindow(settingsWindow, relativeTo: window)
         settingsWindow.tabbingMode = .disallowed
-        // ⚠️ 如果 SettingsViewModel 尚未初始化，先创建并恢复
-        if settingsViewModel == nil {
-            let vm = SettingsViewModel()
-            vm.restoreSavedSettings()
-            settingsViewModel = vm
-        }
+        
         settingsWindow.contentView = EdgeToEdgeHostingView(
             rootView: SettingsView(viewModel: settingsViewModel!)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
