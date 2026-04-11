@@ -39,11 +39,23 @@ struct HomeContentView: View {
     @State private var isCarouselInteracting = false
     @State private var isCarouselAnimating = false
     @State private var carouselDragOffset: CGFloat = 0
-    
+
     // 优化：缓存 heroPalette 避免每次访问都重新计算
     @State private var cachedHeroPalette: HeroDrivenPalette = HeroDrivenPalette(wallpaper: nil)
 
-    private let heroHeight: CGFloat = 620
+    // 首页背景氛围控制器
+    @StateObject private var atmosphereController = HomeAtmosphereController()
+
+    // 3:8 宽高比，按视口宽度自适应高度
+    private func heroHeight(for width: CGFloat) -> CGFloat {
+        guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 300 }
+        return max(300, width * 0.375)
+    }
+
+    // 跟踪视口宽度和计算出的高度
+    @State private var viewportWidth: CGFloat = 0
+    @State private var computedHeroHeight: CGFloat = 300
+
     private let carouselAutoPlayInterval: TimeInterval = 6.0
     private let carouselPageSnapDuration: TimeInterval = 0.32
     private let carouselDragThresholdRatio: CGFloat = 0.18
@@ -73,6 +85,12 @@ struct HomeContentView: View {
                             key: ScrollOffsetPreferenceKey.self,
                             value: geometry.frame(in: .named("homeScrollView")).minY
                         )
+                        .onAppear {
+                            viewportWidth = geometry.size.width
+                        }
+                        .onChange(of: geometry.size.width) { _, newValue in
+                            viewportWidth = newValue
+                        }
                 }
             )
         }
@@ -81,7 +99,7 @@ struct HomeContentView: View {
         .background(
             homeBackground
                 .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.75), value: currentHeroID)
+                .id(currentHeroID)
         )
         .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
             handleScroll(offset: offset)
@@ -121,18 +139,26 @@ struct HomeContentView: View {
     private var heroSection: some View {
         GeometryReader { geometry in
             let wallpapers = heroWallpapers
-            // ⚠️ 使用 GeometryReader 的实际宽度，不应用 fallback
-            // 首次布局时 geometry.size.width 可能为 0，但这是正确的，
-            // 使用 max 会导致骨架屏比窗口还宽
             let width = geometry.size.width
+            // 确保 width 有效，否则用默认值
+            let effectiveWidth = (width > 0 && width.isFinite && !width.isNaN && !width.isInfinite) ? width : 800
+            let height = heroHeight(for: effectiveWidth)
             let heroCaptionLeadingInset = max(112, width * 0.1)
             let heroCaptionTrailingInset = max(96, width * 0.08)
 
             ZStack {
+                // 存储计算出的高度供外部使用
+                Color.clear
+                    .onAppear {
+                        computedHeroHeight = height
+                    }
+                    .onChange(of: height) { _, newValue in
+                        computedHeroHeight = newValue
+                    }
                 if wallpapers.isEmpty {
-                    HeroSkeletonView(width: width, height: heroHeight)
+                    HeroSkeletonView(width: width, height: height)
                 } else {
-                    heroCarousel(width: width, wallpapers: wallpapers)
+                    heroCarousel(width: width, height: height, wallpapers: wallpapers)
 
                     if let wallpaper = currentHeroWallpaper {
                         HeroCaptionPanel(
@@ -145,7 +171,6 @@ struct HomeContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(.leading, heroCaptionLeadingInset)
                         .padding(.trailing, heroCaptionTrailingInset)
-                        // 轮播切换只需要位移动画，避免信息面板尺寸也参与事务采样。
                         .transaction { transaction in
                             transaction.animation = nil
                         }
@@ -179,32 +204,35 @@ struct HomeContentView: View {
                         }
                         .padding(.horizontal, 26)
                     }
-                }
-
-                Rectangle()
-                    .fill(
+                    
+                    // 底部渐变模糊层 - 让轮播图和背景自然融合
+                    VStack {
+                        Spacer()
                         LinearGradient(
                             colors: [
                                 Color.clear,
-                                Color.clear,
-                                heroPalette.backdropTop.opacity(0.12),
-                                heroPalette.backdropMid.opacity(0.26),
-                                Color.black.opacity(0.44)
+                                Color.black.opacity(0.15),
+                                Color.black.opacity(0.45)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                    )
-                    .allowsHitTesting(false)
+                        .frame(height: 80)
+                        .blur(radius: 20)
+                    }
+                }
             }
-            .frame(width: width, height: heroHeight)
+            .frame(width: width, height: height)
             .clipped()
         }
-        .frame(height: heroHeight)
+        .frame(maxWidth: .infinity, minHeight: 300, idealHeight: computedHeroHeight > 0 && computedHeroHeight.isFinite ? computedHeroHeight : 300)
     }
 
-    private func heroCarousel(width: CGFloat, wallpapers: [Wallpaper]) -> some View {
+    private func heroCarousel(width: CGFloat, height: CGFloat, wallpapers: [Wallpaper]) -> some View {
         let displayWallpapers = carouselDisplayWallpapers(from: wallpapers)
+        // 确保尺寸有效
+        let safeWidth = max(1, width)
+        let safeHeight = max(1, height)
 
         return ZStack(alignment: .leading) {
             HStack(spacing: 0) {
@@ -213,16 +241,16 @@ struct HomeContentView: View {
                         wallpaper: wallpaper,
                         isCurrent: wallpaper.id == currentHeroID
                     )
-                    .frame(width: width, height: heroHeight)
+                    .frame(width: safeWidth, height: safeHeight)
                 }
             }
-            .offset(x: -CGFloat(currentCarouselDisplayIndex) * width + carouselDragOffset)
+            .offset(x: -CGFloat(currentCarouselDisplayIndex) * safeWidth + carouselDragOffset)
         }
-        .frame(width: width, height: heroHeight, alignment: .leading)
-        .contentShape(Rectangle())
+        .frame(width: safeWidth, height: safeHeight, alignment: .leading)
         .clipped()
+        .contentShape(Rectangle())
         .simultaneousGesture(
-            heroCarouselDragGesture(width: width)
+            heroCarouselDragGesture(width: safeWidth)
         )
     }
 
@@ -247,145 +275,18 @@ struct HomeContentView: View {
             )
         }
         .padding(.top, 18)
-        .background(alignment: .top) {
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        heroPalette.backdropTop.opacity(0.28),
-                        heroPalette.backdropMid.opacity(0.18),
-                        Color.black.opacity(0.04),
-                        Color.clear
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                heroPalette.primary.opacity(0.2),
-                                heroPalette.secondary.opacity(0.08),
-                                .clear
-                            ],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: 260
-                        )
-                    )
-                    .frame(width: 760, height: 760)
-                    .blur(radius: 120)
-                    .offset(x: -80, y: -110)
-            }
-            .frame(height: 240)
-            .padding(.top, -46)
-                .allowsHitTesting(false)
-        }
     }
 
     private var homeBackground: some View {
-        let palette = heroPalette
-
-        return ZStack {
-            Color.black
-
-            LinearGradient(
-                colors: [
-                    palette.backdropTop,
-                    palette.backdropMid,
-                    Color.black
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.primary.opacity(0.65),
-                            palette.primary.opacity(0.30),
-                            palette.primary.opacity(0.08),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: 380
-                    )
-                )
-                .frame(width: 900, height: 900)
-                .blur(radius: 80)
-                .offset(x: -80, y: -280)
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.secondary.opacity(0.55),
-                            palette.secondary.opacity(0.22),
-                            palette.secondary.opacity(0.06),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: 420
-                    )
-                )
-                .frame(width: 1000, height: 1000)
-                .blur(radius: 100)
-                .offset(x: 300, y: -200)
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.tertiary.opacity(0.45),
-                            palette.tertiary.opacity(0.18),
-                            palette.tertiary.opacity(0.05),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: 350
-                    )
-                )
-                .frame(width: 800, height: 800)
-                .blur(radius: 90)
-                .offset(x: 50, y: 250)
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.primary.opacity(0.40),
-                            palette.secondary.opacity(0.20),
-                            palette.tertiary.opacity(0.08),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: 450
-                    )
-                )
-                .frame(width: 1100, height: 1100)
-                .blur(radius: 110)
-                .offset(x: -150, y: 380)
-
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.clear,
-                            Color.black.opacity(0.20),
-                            Color.black.opacity(0.45)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-        }
-        // 使用 drawingGroup 将多个模糊层合并为单一离屏渲染通道，大幅减少 GPU 合成开销
-        .drawingGroup()
+        LiquidGlassAtmosphereBackground(
+            primary: atmosphereController.primary,
+            secondary: atmosphereController.secondary,
+            tertiary: atmosphereController.tertiary,
+            baseTop: Color(hex: "1D2128"),
+            baseBottom: Color(hex: "0E1116"),
+            lightweight: false
+        )
+        .ignoresSafeArea()
     }
 
     private var heroWallpapers: [Wallpaper] {
@@ -458,6 +359,7 @@ struct HomeContentView: View {
             carouselDragOffset = 0
             // 更新调色板缓存
             updateCachedHeroPalette()
+            atmosphereController.resetToFallback()
             return
         }
 
@@ -480,6 +382,8 @@ struct HomeContentView: View {
             currentCarouselDisplayIndex = displayIndex
             currentHeroID = wallpapers[targetIndex].id
             isCarouselInteracting = false
+            // 更新背景氛围色
+            atmosphereController.updateWallpaper(wallpapers[targetIndex])
             isCarouselAnimating = false
             carouselDragOffset = 0
         }
@@ -560,6 +464,8 @@ struct HomeContentView: View {
             currentCarouselIndex = resolvedIndex
             currentHeroID = resolvedHeroID
             carouselDragOffset = 0
+            // 更新背景氛围色
+            atmosphereController.updateWallpaper(wallpapers[resolvedIndex])
         }
 
         if animated {
@@ -709,16 +615,23 @@ private struct HeroWallpaperImageSlide: View {
         GeometryReader { geometry in
             let size = geometry.size
 
-            KFImage(imageURL)
-                .fade(duration: 0.3)
-                .placeholder { _ in
+            AsyncImage(url: imageURL) { phase in
+                switch phase {
+                case .empty:
                     heroPlaceholder(size: size, showsProgress: true)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                case .failure:
+                    heroPlaceholder(size: size, showsProgress: false)
+                @unknown default:
+                    EmptyView()
                 }
-                .resizable()
-                .scaledToFill()
-                .scaleEffect(isCurrent ? 1.0 : 1.015)
+            }
         }
-        .clipped()
     }
     
     private func heroLoadedContent(image: Image, size: CGSize) -> some View {
@@ -729,7 +642,11 @@ private struct HeroWallpaperImageSlide: View {
     }
     
     private func heroBackdrop(image: Image, size: CGSize) -> some View {
-        ZStack {
+        // 确保尺寸有效
+        let safeWidth = max(1, size.width)
+        let safeHeight = max(1, size.height)
+        
+        return ZStack {
             // 备用背景色，防止图片加载前或加载失败时显示黑色
             Rectangle()
                 .fill(
@@ -747,8 +664,8 @@ private struct HeroWallpaperImageSlide: View {
             image
                 .resizable()
                 .aspectRatio(contentMode: .fill)
-                .frame(width: size.width * 1.2, height: size.height * 1.2)
-                .position(x: size.width / 2, y: size.height / 2)
+                .frame(width: safeWidth * 1.2, height: safeHeight * 1.2)
+                .position(x: safeWidth / 2, y: safeHeight / 2)
                 .clipped()
 
             Circle()
@@ -760,12 +677,12 @@ private struct HeroWallpaperImageSlide: View {
                         ],
                         center: .center,
                         startRadius: 0,
-                        endRadius: size.width * 0.42
+                        endRadius: max(1, safeWidth * 0.42)
                     )
                 )
-                .frame(width: size.width * 0.72, height: size.width * 0.72)
+                .frame(width: max(1, safeWidth * 0.72), height: max(1, safeWidth * 0.72))
                 .blur(radius: 54)
-                .offset(x: -size.width * 0.18, y: -size.height * 0.22)
+                .offset(x: -safeWidth * 0.18, y: -safeHeight * 0.22)
 
             Circle()
                 .fill(
@@ -776,12 +693,12 @@ private struct HeroWallpaperImageSlide: View {
                         ],
                         center: .center,
                         startRadius: 0,
-                        endRadius: size.width * 0.46
+                        endRadius: max(1, safeWidth * 0.46)
                     )
                 )
-                .frame(width: size.width * 0.78, height: size.width * 0.78)
+                .frame(width: max(1, safeWidth * 0.78), height: max(1, safeWidth * 0.78))
                 .blur(radius: 60)
-                .offset(x: size.width * 0.2, y: -size.height * 0.08)
+                .offset(x: safeWidth * 0.2, y: -safeHeight * 0.08)
 
             Rectangle()
                 .fill(
@@ -812,7 +729,11 @@ private struct HeroWallpaperImageSlide: View {
     }
     
     private func heroPlaceholder(size: CGSize, showsProgress: Bool) -> some View {
-        ZStack {
+        // 确保尺寸有效
+        let safeWidth = max(1, size.width)
+        let safeHeight = max(1, size.height)
+        
+        return ZStack {
             // 使用更亮的默认颜色，避免显示黑色
             Rectangle()
                 .fill(
@@ -841,7 +762,7 @@ private struct HeroWallpaperImageSlide: View {
                 }
             }
         }
-        .frame(width: size.width, height: size.height)
+        .frame(width: safeWidth, height: safeHeight)
         .overlay(heroLightOverlay)
     }
     
@@ -1301,11 +1222,16 @@ private struct HeroEdgeButton: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.92))
                 .frame(width: 46, height: 46)
-                .liquidGlassSurface(.regular, tint: LiquidGlassColors.glassTint, in: Circle())
-                .padding(10) // 扩大点击热区，修复按钮边缘及旁边区域无法点击的问题
+                .background(
+                    Circle()
+                        .fill(Color.clear)
+                        .frame(width: 66, height: 66)
+                )
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .contentShape(Circle())
+        .frame(width: 66, height: 66)
     }
 }
 
@@ -1490,6 +1416,73 @@ private struct HomeMediaCard: View {
             }
         }
         .drawingGroup(opaque: false, colorMode: .linear)
+    }
+}
+
+// MARK: - 首页轮播背景氛围控制器
+
+/// 从轮播图缩略图采样下半部分颜色，用于首页背景渐变
+@MainActor
+final class HomeAtmosphereController: ObservableObject {
+    @Published private(set) var primary: Color = Color(hex: "5A7CFF")
+    @Published private(set) var secondary: Color = Color(hex: "8A5CFF")
+    @Published private(set) var tertiary: Color = Color(hex: "20C1FF")
+    @Published private(set) var referenceImage: NSImage?
+
+    private var loadTask: Task<Void, Never>?
+    private var activeWallpaperID: String?
+
+    static let fallback = HomeAtmosphereController()
+
+    func updateWallpaper(_ wallpaper: Wallpaper?) {
+        guard let wallpaper = wallpaper else {
+            resetToFallback()
+            return
+        }
+
+        let key = wallpaper.id
+        if key == activeWallpaperID, referenceImage != nil {
+            return
+        }
+        activeWallpaperID = key
+
+        loadTask?.cancel()
+        loadTask = nil
+        referenceImage = nil
+
+        guard let url = wallpaper.thumbURL ?? wallpaper.smallThumbURL else { return }
+
+        loadTask = Task {
+            let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+            guard !Task.isCancelled, let image = result?.image else { return }
+
+            let sampledColors = await Task.detached(priority: .userInitiated) {
+                ExploreImageColorSampler.triplet(from: image)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                self.referenceImage = image
+                if let (c1, c2, c3) = sampledColors {
+                    withAnimation(.easeInOut(duration: 0.75)) {
+                        self.primary = c1
+                        self.secondary = c2
+                        self.tertiary = c3
+                    }
+                }
+            }
+        }
+    }
+
+    func resetToFallback() {
+        loadTask?.cancel()
+        loadTask = nil
+        referenceImage = nil
+        activeWallpaperID = nil
+        primary = Color(hex: "5A7CFF")
+        secondary = Color(hex: "8A5CFF")
+        tertiary = Color(hex: "20C1FF")
     }
 }
 

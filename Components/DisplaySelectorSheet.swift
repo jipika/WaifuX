@@ -7,18 +7,24 @@ struct DisplaySelectorSheet: View {
     let message: String
     let onSelect: (NSScreen?) -> Void
     let onCancel: () -> Void
-    
+
     @State private var isVisible = false
-    @State private var selectedScreen: NSScreen?
-    
+    @State private var selectedScreenID: String?
+
     private var screens: [NSScreen] {
         NSScreen.screens
     }
-    
+
     private var hasMultipleDisplays: Bool {
         screens.count > 1
     }
-    
+
+    /// 根据 ID 获取对应的屏幕
+    private func screen(forID id: String?) -> NSScreen? {
+        guard let id = id else { return nil }
+        return screens.first { $0.screenIdentifier == id }
+    }
+
     var body: some View {
         ZStack {
             // 半透明背景
@@ -28,7 +34,7 @@ struct DisplaySelectorSheet: View {
                 .onTapGesture {
                     dismiss()
                 }
-            
+
             // 弹窗内容
             VStack(spacing: 20) {
                 // 标题
@@ -36,18 +42,18 @@ struct DisplaySelectorSheet: View {
                     Image(systemName: "display.2")
                         .font(.system(size: 32, weight: .light))
                         .foregroundStyle(Color.accentColor)
-                    
+
                     Text(title)
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(LiquidGlassColors.textPrimary)
-                    
+
                     Text(message)
                         .font(.system(size: 13))
                         .foregroundStyle(LiquidGlassColors.textSecondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 280)
                 }
-                
+
                 // 显示器选择按钮
                 VStack(spacing: 12) {
                     // 所有显示器选项
@@ -55,24 +61,24 @@ struct DisplaySelectorSheet: View {
                         icon: "display",
                         title: t("allDisplays"),
                         subtitle: "\(screens.count) \(t("screensCount"))",
-                        isSelected: selectedScreen == nil,
+                        isSelected: selectedScreenID == nil,
                         action: {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                selectedScreen = nil
+                                selectedScreenID = nil
                             }
                         }
                     )
-                    
+
                     // 单个显示器选项
                     ForEach(Array(screens.enumerated()), id: \.offset) { index, screen in
                         DisplayOptionButton(
                             icon: "display",
                             title: "\(t("display")) \(index + 1)",
                             subtitle: screen.localizedName,
-                            isSelected: selectedScreen == screen,
+                            isSelected: selectedScreenID == screen.screenIdentifier,
                             action: {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    selectedScreen = screen
+                                    selectedScreenID = screen.screenIdentifier
                                 }
                             }
                         )
@@ -144,7 +150,7 @@ struct DisplaySelectorSheet: View {
             isVisible = false
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            onSelect(selectedScreen)
+            onSelect(screen(forID: selectedScreenID))
         }
     }
 }
@@ -292,6 +298,15 @@ public struct DisplaySelectorOverlay: View {
     }
 }
 
+// MARK: - 私有屏幕标识符扩展
+private extension NSScreen {
+    var screenIdentifier: String {
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return screenNumber.stringValue
+        }
+        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
+    }
+}
 
 
 // MARK: - 预览

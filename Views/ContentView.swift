@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @StateObject private var localization = LocalizationService.shared
+    @ObservedObject private var sourceManager = WallpaperSourceManager.shared
     @State private var selectedTab: MainTab = .home
     @State private var selectedWallpaper: Wallpaper?
     @State private var selectedMedia: MediaItem?
@@ -193,7 +194,20 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-            // ⚠️ 延迟一点再加载首页数据，让窗口先完成渲染
+            // ⚠️ 等待启动时数据源选择完成（ping Google 决策）
+            // 在确定数据源之前不加载壁纸列表数据
+            if !sourceManager.isInitialSourceSelectionComplete {
+                print("[ContentView] Waiting for initial source selection...")
+                // 最多等待 10 秒超时
+                for _ in 0..<20 {
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                    if sourceManager.isInitialSourceSelectionComplete {
+                        break
+                    }
+                }
+            }
+
+            // 数据源确定后再加载首页数据
             try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
             await viewModel.initialLoad()
             
@@ -960,6 +974,7 @@ private struct MyMediaVideoCard: View {
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
+                // 图片区域 - 单独裁剪
                 ZStack {
                     KFImage(item.thumbnailURL)
                         .fade(duration: 0.3)
@@ -972,11 +987,11 @@ private struct MyMediaVideoCard: View {
                         }
                         .resizable()
                         .scaledToFill()
-                    .frame(
-                        width: LibraryCardMetrics.cardWidth,
-                        height: LibraryCardMetrics.thumbnailHeight
-                    )
-                    .clipped()
+                        .frame(
+                            width: LibraryCardMetrics.cardWidth,
+                            height: LibraryCardMetrics.thumbnailHeight
+                        )
+                        .clipped()
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {
@@ -1017,7 +1032,17 @@ private struct MyMediaVideoCard: View {
                         Color.black.opacity(0.3)
                     }
                 }
+                // 只给图片区域顶部圆角
+                .clipShape(
+                    .rect(
+                        topLeadingRadius: 22,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 22
+                    )
+                )
 
+                // 信息区域 - 单独背景
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.title)
                         .font(.system(size: 14.5, weight: .bold))
@@ -1041,17 +1066,25 @@ private struct MyMediaVideoCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
+                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color(hex: "1A1D24").opacity(0.6))
+                        .clipShape(
+                            .rect(
+                                topLeadingRadius: 0,
+                                bottomLeadingRadius: 22,
+                                bottomTrailingRadius: 22,
+                                topTrailingRadius: 0
+                            )
+                        )
+                )
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .liquidGlassSurface(
-                isHovered ? .max : .prominent,
-                tint: accent.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onHover { hovering in
             if !isEditing {
                 withAnimation(.easeOut(duration: 0.16)) {

@@ -2,7 +2,6 @@ import SwiftUI
 import AVKit
 import AVFoundation
 import AppKit
-import Kingfisher
 
 struct MediaDetailSheet: View {
     let initialItem: MediaItem
@@ -220,18 +219,25 @@ struct MediaDetailSheet: View {
                     }
                 )
             } else {
-                KFImage(heroImageURL)
-                    .onSuccess { _ in
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            isMediaLoaded = true
-                        }
-                    }
-                    .fade(duration: 0.3)
-                    .placeholder { _ in
+                AsyncImage(url: heroImageURL) { phase in
+                    switch phase {
+                    case .empty:
+                        Color.clear
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .onAppear {
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    isMediaLoaded = true
+                                }
+                            }
+                    case .failure:
+                        Color.clear
+                    @unknown default:
                         Color.clear
                     }
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                }
             }
 
             LinearGradient(

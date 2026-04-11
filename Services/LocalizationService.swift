@@ -642,7 +642,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "durationPatternPlaceholder": "Pattern to extract video duration...",
         // Network & Error States
         "error.network.title": "CONNECTION ERROR",
-        "error.network.message": "Unable to connect to the server. Please check your network connection and try again.",
+        "error.network.message": "Failed to load. Please try again.",
         "error.empty.title": "NO CONTENT",
         "error.empty.message": "No items found for the current filter. Try adjusting your search or filters.",
         "error.server.title": "SERVER ERROR",
@@ -1444,7 +1444,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "durationPatternPlaceholder": "提取视频时长的模式...",
         // Network & Error States
         "error.network.title": "连接错误",
-        "error.network.message": "无法连接到服务器。请检查网络连接后重试。",
+        "error.network.message": "加载失败，请重试。",
         "error.empty.title": "暂无内容",
         "error.empty.message": "当前筛选条件下没有找到内容。请尝试调整搜索或筛选条件。",
         "error.server.title": "服务器错误",
@@ -2265,7 +2265,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "durationPatternPlaceholder": "動画再生時間を抽出するパターン...",
         // Network & Error States
         "error.network.title": "接続エラー",
-        "error.network.message": "サーバーに接続できません。ネットワーク接続を確認して再試行してください。",
+        "error.network.message": "読み込みに失敗しました。もう一度お試しください。",
         "error.empty.title": "コンテンツなし",
         "error.empty.message": "現在のフィルターで項目が見つかりません。検索やフィルターを調整してみてください。",
         "error.server.title": "サーバーエラー",

@@ -313,10 +313,17 @@ struct AnimeExploreView: View {
     private func handleInitialLoad() async {
         AppLogger.info(.anime, "动漫探索页 onAppear",
             metadata: ["已有数据": !viewModel.animeItems.isEmpty, "当前数量": viewModel.animeItems.count])
-        
-        if viewModel.animeItems.isEmpty {
-            isInitialLoading = true
-        }
+
+        // 重置所有过滤条件，确保初始状态正确
+        searchText = ""
+        selectedHotTag = nil
+        selectedCategory = .all
+        displayedItems = []
+        visibleCardIDs.removeAll()
+        selectedSort = .newest
+        viewModel.searchText = ""
+
+        isInitialLoading = true
         let start = Date()
         await viewModel.loadInitialData()
         AppLogger.info(.anime, "初始加载完成",
@@ -411,9 +418,14 @@ struct AnimeExploreView: View {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
               !viewModel.isLoadingMore else { return }
-        
+
         AppLogger.info(.anime, "加载更多", metadata: ["当前数量": displayedItems.count])
-        Task { await viewModel.loadMore() }
+        Task {
+            await viewModel.loadMore()
+            await MainActor.run {
+                rebuildDisplayedItems()
+            }
+        }
     }
     
     private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {

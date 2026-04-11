@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import Kingfisher
 
 // MARK: - 壁纸详情页 - macOS 26 Liquid Glass 沉浸式全屏风格
 struct WallpaperDetailSheet: View {
@@ -221,22 +220,28 @@ struct WallpaperDetailSheet: View {
         if isPortraitWallpaper {
             portraitWallpaperBackground(width: width, height: viewH)
         } else {
-            KFImage(heroImageURL)
-                .onSuccess { _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
-                    }
-                }
-                .fade(duration: 0.3)
-                .placeholder { _ in
-                    Color.clear
+            AsyncImage(url: heroImageURL) { phase in
+                switch phase {
+                case .empty:
+                    Color.clear.frame(width: width, height: viewH)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
                         .frame(width: width, height: viewH)
+                        .clipped()
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.3)) {
+                                isImageLoaded = true
+                            }
+                        }
+                case .failure:
+                    Color.clear.frame(width: width, height: viewH)
+                @unknown default:
+                    Color.clear.frame(width: width, height: viewH)
                 }
-                .resizable()
-                .scaledToFill()
-                .frame(width: width, height: viewH)
-                .clipped()
-                .frame(width: width, height: viewH)
+            }
+            .frame(width: width, height: viewH)
         }
     }
 
@@ -245,41 +250,49 @@ struct WallpaperDetailSheet: View {
             Color.black
 
             // 左右延伸层：基于居中缩放图做横向拉伸和高斯模糊，仅在两侧显现
-            KFImage(heroImageURL)
-                .onSuccess { _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
-                    }
-                }
-                .fade(duration: 0.3)
-                .placeholder { _ in
+            AsyncImage(url: heroImageURL) { phase in
+                switch phase {
+                case .empty:
+                    Color.clear
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: width, height: height)
+                        .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                        .blur(radius: 84)
+                        .saturation(1.12)
+                        .brightness(-0.08)
+                case .failure:
+                    Color.clear
+                @unknown default:
                     Color.clear
                 }
-                .resizable()
-                .scaledToFit()
-                .frame(width: width, height: height)
-                .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                .blur(radius: 84)
-                .saturation(1.12)
-                .brightness(-0.08)
-                .mask(portraitWallpaperSideMask)
+            }
+            .mask(portraitWallpaperSideMask)
 
             // 主图：完整缩放展示，避免竖图被过度裁切
-            KFImage(heroImageURL)
-                .onSuccess { _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
-                    }
-                }
-                .fade(duration: 0.3)
-                .placeholder { _ in
-                    Color.clear
+            AsyncImage(url: heroImageURL) { phase in
+                switch phase {
+                case .empty:
+                    Color.clear.frame(width: width, height: height)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFit()
                         .frame(width: width, height: height)
+                        .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.3)) {
+                                isImageLoaded = true
+                            }
+                        }
+                case .failure:
+                    Color.clear.frame(width: width, height: height)
+                @unknown default:
+                    Color.clear.frame(width: width, height: height)
                 }
-                .resizable()
-                .scaledToFit()
-                .frame(width: width, height: height)
-                .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
+            }
 
             LinearGradient(
                 stops: [
@@ -690,16 +703,23 @@ struct WallpaperDetailSheet: View {
                 let h = geo.size.height
 
                 ZStack {
-                    KFImage(heroImageURL)
-                        .fade(duration: 0.3)
-                        .placeholder { _ in
+                    AsyncImage(url: heroImageURL) { phase in
+                        switch phase {
+                        case .empty:
+                            Rectangle().fill(Color.white.opacity(0.08))
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: w * 1.08, height: h)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                                .clipped()
+                        case .failure:
+                            Rectangle().fill(Color.white.opacity(0.08))
+                        @unknown default:
                             Rectangle().fill(Color.white.opacity(0.08))
                         }
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: w * 1.08, height: h)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                        .clipped()
+                    }
                     .frame(width: w, height: h)
 
                     LinearGradient(

@@ -60,6 +60,12 @@ struct SkeletonCard: View {
 
 // MARK: - 壁纸卡片骨架屏（简化版）
 struct WallpaperCardSkeleton: View {
+    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
+
+    // 与真实卡片一致的高度
+    private var imageHeight: CGFloat { LibraryCardMetrics.thumbnailHeight }
+    private var infoHeight: CGFloat { 44 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 图片区域骨架 - 深蓝色渐变
@@ -68,7 +74,7 @@ struct WallpaperCardSkeleton: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .frame(height: 152)
+            .frame(width: cardWidth, height: imageHeight)
             .clipShape(
                 UnevenRoundedRectangle(
                     topLeadingRadius: 14,
@@ -79,16 +85,16 @@ struct WallpaperCardSkeleton: View {
                 )
             )
             .shimmer()
-            
+
             // 底部信息栏骨架 - 简化占位
             HStack {
                 // 左侧标题占位
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.06))
                     .frame(width: 100, height: 12)
-                
+
                 Spacer()
-                
+
                 // 右侧统计占位
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.06))
@@ -96,8 +102,10 @@ struct WallpaperCardSkeleton: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
+            .frame(width: cardWidth, height: infoHeight)
             .background(Color.black.opacity(0.46))
         }
+        .frame(width: cardWidth)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -111,12 +119,22 @@ struct WallpaperCardSkeleton: View {
 /// 接受 width 参数以复用与 HeroCaptionPanel 完全一致的 frame 约束。
 struct HeroSkeletonView: View {
     var width: CGFloat = 1200
-    /// 必须与 HomeContentView.heroHeight（620）一致，确保骨架屏高度与真实 hero 区域完全对齐，
+    /// 按视口宽度比例计算（16:9），与真实 hero 区域完全对齐，
     /// 消除 API 数据返回后的纵向跳变。
-    var height: CGFloat = 620
+    var height: CGFloat = 675
+    
+    // 确保尺寸有效
+    private var safeWidth: CGFloat {
+        guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 1200 }
+        return width
+    }
+    private var safeHeight: CGFloat {
+        guard height > 0, height.isFinite, !height.isNaN, !height.isInfinite else { return 675 }
+        return height
+    }
 
-    private var heroCaptionLeadingInset: CGFloat { max(112, width * 0.1) }
-    private var heroCaptionTrailingInset: CGFloat { max(96, width * 0.08) }
+    private var heroCaptionLeadingInset: CGFloat { max(112, safeWidth * 0.1) }
+    private var heroCaptionTrailingInset: CGFloat { max(96, safeWidth * 0.08) }
 
     var body: some View {
         ZStack {
@@ -145,7 +163,7 @@ struct HeroSkeletonView: View {
                 // 大标题骨架（对应 HeroCaptionPanel 的 heroTitle — font size 46 bold serif）
                 RoundedRectangle(cornerRadius: 5)
                     .fill(Color.white.opacity(0.11))
-                    .frame(width: min(width * 0.36, 420), height: 46)
+                    .frame(width: max(100, min(safeWidth * 0.36, 420)), height: 46)
                     .shimmer()
 
                 // 元数据行骨架（对应 HeroMetaLine）
@@ -172,12 +190,12 @@ struct HeroSkeletonView: View {
                 }
             }
             // ★ 核心：与 HomeContentView.swift 中 HeroCaptionPanel 完全一致的 frame + padding
-            .frame(maxWidth: min(width * 0.42, 520), alignment: .leading)
+            .frame(maxWidth: max(200, min(safeWidth * 0.42, 520)), alignment: .leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(.leading, heroCaptionLeadingInset)
             .padding(.trailing, heroCaptionTrailingInset)
         }
-        .frame(width: width, height: height)
+        .frame(width: safeWidth, height: safeHeight)
     }
 }
 
@@ -201,39 +219,47 @@ struct WallpaperGridSkeleton: View {
 
 // MARK: - 媒体卡片骨架屏
 struct MediaCardSkeleton: View {
+    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
+
+    // 固定比例 16:10，与 SimpleMediaCard 一致
+    private var imageHeight: CGFloat { cardWidth * 0.625 }
+    private var infoHeight: CGFloat { 44 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 视频缩略图区域骨架
             ZStack {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.white.opacity(0.06))
                     .shimmer()
-                
+
                 // 播放按钮骨架
                 Circle()
                     .fill(Color.white.opacity(0.1))
-                    .frame(width: 48, height: 48)
+                    .frame(width: 36, height: 36)
                     .shimmer()
             }
-            .frame(height: 160)
-            
+            .frame(width: cardWidth, height: imageHeight)
+
             // 信息栏骨架
             HStack {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.06))
                     .frame(width: 80, height: 12)
-                
+
                 Spacer()
-                
+
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.06))
                     .frame(width: 50, height: 12)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .frame(width: cardWidth, height: infoHeight)
         }
+        .frame(width: cardWidth)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color.white.opacity(0.03))
         )
     }
@@ -458,6 +484,12 @@ struct WallpaperPaginationSkeleton: View {
 // MARK: - 动漫分页骨架卡片
 
 struct AnimePaginationSkeleton: View {
+    var cardWidth: CGFloat = 160
+
+    // 与 AnimePortraitCard 一致：固定比例 10:14
+    private var imageHeight: CGFloat { cardWidth * 1.4 }
+    private var infoHeight: CGFloat { 44 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 竖版图片骨架
@@ -466,6 +498,7 @@ struct AnimePaginationSkeleton: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
+            .frame(width: cardWidth, height: imageHeight)
             .shimmer()
 
             // 信息栏骨架
@@ -480,8 +513,10 @@ struct AnimePaginationSkeleton: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .frame(width: cardWidth, height: infoHeight)
             .background(Color.black.opacity(0.46))
         }
+        .frame(width: cardWidth)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)

@@ -231,9 +231,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                     WallpaperViewModel().restoreAPIKeyState()
                                     WallpaperSourceManager.shared.restoreState()
                                     
-                                    // 应用启动时的初始化健康检查（只在当前使用备用源时执行）
+                                    // 应用启动时的数据源选择（ping Google 决策）
                                     Task {
-                                        await WallpaperSourceManager.shared.performInitialHealthCheck()
+                                        await WallpaperSourceManager.shared.performStartupSourceSelection()
                                     }
                                     
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in

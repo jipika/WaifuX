@@ -66,15 +66,17 @@ extension EnvironmentValues {
 // MARK: - 缩略图三色采样（左/中/右条带平均）
 
 enum ExploreImageColorSampler {
+    /// 从图片采样三色
+    /// - Parameter image: 要采样的图片
     static func triplet(from image: NSImage) -> (Color, Color, Color)? {
-        let pixelWidth = 48
-        let pixelHeight = 48
+        let pixelWidth: CGFloat = 48
+        let pixelHeight: CGFloat = 48
         let size = NSSize(width: pixelWidth, height: pixelHeight)
 
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
-            pixelsWide: pixelWidth,
-            pixelsHigh: pixelHeight,
+            pixelsWide: Int(pixelWidth),
+            pixelsHigh: Int(pixelHeight),
             bitsPerSample: 8,
             samplesPerPixel: 4,
             hasAlpha: true,
@@ -87,10 +89,13 @@ enum ExploreImageColorSampler {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         NSColor.clear.set()
-        NSRect(origin: .zero, size: size).fill()
+
+        let drawRect = NSRect(origin: .zero, size: size)
+        let sourceRect: NSRect = .zero
+
         image.draw(
-            in: NSRect(origin: .zero, size: size),
-            from: .zero,
+            in: drawRect,
+            from: sourceRect,
             operation: .copy,
             fraction: 1
         )

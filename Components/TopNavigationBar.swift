@@ -141,10 +141,17 @@ private struct TopBarCircleButton: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.88))
                 .frame(width: size, height: size)
+                .background(
+                    Circle()
+                        .fill(Color.clear)
+                        .frame(width: size + 16, height: size + 16)
+                )
+                .contentShape(Circle())
                 .detailGlassCircleChrome()
         }
         .buttonStyle(.plain)
         .contentShape(Circle())
+        .frame(width: size + 16, height: size + 16)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.16)) {
                 isHovered = hovering
@@ -192,7 +199,7 @@ private struct TopBarSegmentedControl: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
+        .liquidGlassSurface(.prominent, tint: Color.black.opacity(0.25), in: Capsule(style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
     }
 
@@ -212,14 +219,62 @@ private struct TopBarSegmentedControl: View {
 
     @ViewBuilder
     private func selectedTabGlass(for tab: MainTab) -> some View {
-        Capsule(style: .continuous)
-            .liquidGlassSurface(.max, in: Capsule(style: .continuous))
+        if #available(macOS 26.0, *) {
+            // macOS 26: 使用原生玻璃效果
+            Capsule(style: .continuous)
+                .liquidGlassSurface(.max, tint: Color.black.opacity(0.3), in: Capsule(style: .continuous))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.34),
+                                    Color.white.opacity(0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.8
+                        )
+                )
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                .matchedGeometryEffect(id: "topBarSelectedTabGlass", in: selectionNamespace)
+        } else {
+            // macOS 14/15: 使用深色毛玻璃效果
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(.ultraThickMaterial.opacity(0.9))
+
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: "1A1A2E").opacity(0.5),
+                                Color(hex: "12121F").opacity(0.6)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.12),
+                                Color.white.opacity(0.02)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
             .overlay(
                 Capsule(style: .continuous)
                     .stroke(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.34),
+                                Color.white.opacity(0.25),
                                 Color.white.opacity(0.08)
                             ],
                             startPoint: .topLeading,
@@ -228,7 +283,8 @@ private struct TopBarSegmentedControl: View {
                         lineWidth: 0.8
                     )
             )
-            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
             .matchedGeometryEffect(id: "topBarSelectedTabGlass", in: selectionNamespace)
+        }
     }
 }

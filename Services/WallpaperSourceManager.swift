@@ -95,6 +95,8 @@ class WallpaperSourceManager: ObservableObject {
     @Published private(set) var isAutoSwitched: Bool = false       // 是否因网络问题自动切换过
     @Published var lastSwitchMessage: String?                  // 最近一次切换的消息（用于 Toast 提示）
     @Published private(set) var isCheckingHealth: Bool = false
+    /// 启动时数据源选择是否已完成（ping Google 决策完成）
+    @Published private(set) var isInitialSourceSelectionComplete: Bool = false
 
     // MARK: - Storage Keys
 
@@ -327,92 +329,78 @@ class WallpaperSourceManager: ObservableObject {
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
     }
 
-    private func checkRecoveryIfNeeded() {
-        // 距离上次健康检查太近就跳过
-        guard let last = lastHealthCheckTime else { return }
-        let elapsed = -last.timeIntervalSinceNow
-        guard elapsed > minHealthCheckInterval else { return }
+    /// Ping Google 检测网络是否可达
+    /// - 如果 Google 可达：保持 Wallhaven
+    /// - 如果 Google 不可达（3秒超时）：切换到 4K 源，并启用 GitHub Hosts 加速
+    func performStartupSourceSelection() async {
+        print("[WallpaperSourceManager] Performing startup source selection (ping Google)...")
 
-        // 后台静默检查，不阻塞主流程
-        Task {
-            await silentHealthCheck()
-        }
-    }
-
-    /// 静默健康检查 Wallhaven 是否恢复（后台执行，不显示 loading）
-    private func silentHealthCheck() async {
-        guard !isCheckingHealth else { return }
-        isCheckingHealth = true
-        defer { isCheckingHealth = false }
-
-        do {
-            let reachable = try await pingWallhaven()
-            if reachable {
-                lastHealthCheckTime = Date()
-                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastHealthCheckKey)
-                print("[WallpaperSourceManager] Wallhaven health check passed")
-            }
-        } catch {
-            print("[WallpaperSourceManager] Wallhaven still unavailable: \(error.localizedDescription)")
-        }
-    }
-
-    /// 应用启动时的初始化健康检查（只执行一次）
-    /// 用于检测当前使用的备用源是否可以切回 Wallhaven
-    func performInitialHealthCheck() async {
-        // 如果当前已经在使用 Wallhaven，不需要检测
-        guard activeSource != .wallhaven else {
-            print("[WallpaperSourceManager] Initial check: already using Wallhaven, skip")
-            return
-        }
-        
-        // 如果用户手动锁定了备用源，不要自动切换
+        // 如果用户手动锁定了源，不要自动切换
         guard forceSourceOverride == nil else {
-            print("[WallpaperSourceManager] Initial check: user locked to fallback, skip")
+            print("[WallpaperSourceManager] Startup: user locked to \(forceSourceOverride!.displayName), skip")
+            isInitialSourceSelectionComplete = true
             return
         }
-        
-        print("[WallpaperSourceManager] Performing initial health check for Wallhaven...")
-        
-        do {
-            let reachable = try await pingWallhaven()
-            if reachable {
-                // Wallhaven 可用，自动切回
-                print("[WallpaperSourceManager] Wallhaven is reachable, switching back...")
-                await MainActor.run {
+
+        // Ping Google，5秒超时
+        let googleReachable = await pingGoogle(timeout: 5)
+
+        if googleReachable {
+            // Google 可达，保持 Wallhaven
+            print("[WallpaperSourceManager] Google is reachable, keeping Wallhaven")
+            await MainActor.run {
+                if activeSource != .wallhaven {
+                    // 如果之前用的是 4K，切回 Wallhaven
                     activeSource = .wallhaven
                     isAutoSwitched = false
                     consecutiveFailures = 0
                     consecutiveSuccesses = 0
                     UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
                     UserDefaults.standard.set(false, forKey: autoSwitchedKey)
-                    lastSwitchMessage = "✅ Wallhaven 已恢复，已自动切换回主源"
                 }
-                NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
-            } else {
-                print("[WallpaperSourceManager] Wallhaven is still unavailable")
+                isInitialSourceSelectionComplete = true
             }
-        } catch {
-            print("[WallpaperSourceManager] Initial health check failed: \(error.localizedDescription)")
+        } else {
+            // Google 不可达，切换到 4K 源并启用 GitHub Hosts
+            print("[WallpaperSourceManager] Google is NOT reachable, switching to 4K and enabling GitHub Hosts")
+            await MainActor.run {
+                activeSource = .fourKWallpapers
+                isAutoSwitched = true
+                consecutiveFailures = 0
+                consecutiveSuccesses = 0
+                UserDefaults.standard.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
+                UserDefaults.standard.set(true, forKey: autoSwitchedKey)
+
+                // 启用 GitHub Hosts 加速
+                GitHubHosts.isEnabled = true
+
+                isInitialSourceSelectionComplete = true
+            }
         }
+
+        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
     }
 
-    /// Ping Wallhaven 主站是否可达（轻量级检测）
-    func pingWallhaven() async throws -> Bool {
-        // 使用更轻量的 health check 端点，只验证服务状态
-        let url = URL(string: "https://wallhaven.cc/api/v1/search?purity=100&sorting=hot&order=desc&page=1&per_page=1")!
-        
+    /// Ping Google 检测网络是否可达
+    /// - Parameter timeout: 超时时间（秒）
+    /// - Returns: true 如果 Google 可达
+    func pingGoogle(timeout: TimeInterval = 5) async -> Bool {
+        let url = URL(string: "https://www.google.com/generate_204")!
+
         var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 15  // 15秒超时
-        
-        // 使用简单的 data 请求，只检查 HTTP 状态码，不解析 JSON
-        let (_, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NetworkError.invalidResponse
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = timeout
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return false
+            }
+            // generate_204 返回 204 或者 200 都是可达
+            return httpResponse.statusCode == 204 || httpResponse.statusCode == 200
+        } catch {
+            print("[WallpaperSourceManager] Google ping failed: \(error.localizedDescription)")
+            return false
         }
-        
-        return (200...299).contains(httpResponse.statusCode)
     }
 }

@@ -26,6 +26,7 @@ public struct MediaVideoCard: View {
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
+                // 图片区域 - 单独裁剪
                 ZStack {
                     KFImage(item.thumbnailURL)
                         .fade(duration: 0.3)
@@ -38,11 +39,11 @@ public struct MediaVideoCard: View {
                         }
                         .resizable()
                         .scaledToFill()
-                    .frame(
-                        width: LibraryCardMetrics.cardWidth,
-                        height: LibraryCardMetrics.thumbnailHeight
-                    )
-                    .clipped()
+                        .frame(
+                            width: LibraryCardMetrics.cardWidth,
+                            height: LibraryCardMetrics.thumbnailHeight
+                        )
+                        .clipped()
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {
@@ -83,7 +84,22 @@ public struct MediaVideoCard: View {
                         Color.black.opacity(0.3)
                     }
                 }
+                // 只给图片区域顶部圆角
+                .clipShape(
+                    .rect(
+                        topLeadingRadius: 22,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 22
+                    )
+                )
 
+                // 中间连接背景（消除图片和信息区域之间的间隙）
+                Rectangle()
+                    .fill(Color(hex: "1A1D24").opacity(0.6))
+                    .frame(width: LibraryCardMetrics.cardWidth, height: 1)
+
+                // 信息区域 - 单独背景
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.title)
                         .font(.system(size: 14.5, weight: .bold))
@@ -107,24 +123,31 @@ public struct MediaVideoCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
+                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color(hex: "1A1D24").opacity(0.6))
+                        .clipShape(
+                            .rect(
+                                topLeadingRadius: 0,
+                                bottomLeadingRadius: 22,
+                                bottomTrailingRadius: 22,
+                                topTrailingRadius: 0
+                            )
+                        )
+                )
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .liquidGlassSurface(
-                isHovered ? .max : .prominent,
-                tint: accent.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .animation(.easeOut(duration: 0.16), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
                 isHovered = hovering
             }
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -146,6 +169,7 @@ public struct WallpaperEditCard: View {
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
+                // 图片区域 - 单独裁剪
                 ZStack {
                     KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
                         .fade(duration: 0.3)
@@ -158,11 +182,11 @@ public struct WallpaperEditCard: View {
                         }
                         .resizable()
                         .scaledToFill()
-                    .frame(
-                        width: LibraryCardMetrics.cardWidth,
-                        height: LibraryCardMetrics.thumbnailHeight
-                    )
-                    .clipped()
+                        .frame(
+                            width: LibraryCardMetrics.cardWidth,
+                            height: LibraryCardMetrics.thumbnailHeight
+                        )
+                        .clipped()
 
                     if !isEditing {
                         VStack {
@@ -198,7 +222,22 @@ public struct WallpaperEditCard: View {
                         Color.black.opacity(0.3)
                     }
                 }
+                // 只给图片区域顶部圆角
+                .clipShape(
+                    .rect(
+                        topLeadingRadius: 22,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 22
+                    )
+                )
 
+                // 中间连接背景（消除图片和信息区域之间的间隙）
+                Rectangle()
+                    .fill(Color(hex: "1A1D24").opacity(0.6))
+                    .frame(width: LibraryCardMetrics.cardWidth, height: 1)
+
+                // 信息区域 - 单独背景
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
                         Text(wallpaper.uploader?.username ?? wallpaper.categoryDisplayName)
@@ -223,47 +262,40 @@ public struct WallpaperEditCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .background(Color(hex: "1A1D24").opacity(0.6))
+                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color(hex: "1A1D24").opacity(0.6))
+                        .clipShape(
+                            .rect(
+                                topLeadingRadius: 0,
+                                bottomLeadingRadius: 22,
+                                bottomTrailingRadius: 22,
+                                topTrailingRadius: 0
+                            )
+                        )
+                )
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .liquidGlassSurface(
-                isHovered ? .max : .prominent,
-                tint: accent.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .animation(.easeOut(duration: 0.16), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
                 isHovered = hovering
             }
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
     private var topMetadataRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    metaTag(text: wallpaper.categoryDisplayName)
-                    metaTag(text: wallpaper.purityDisplayName)
+        HStack(alignment: .top, spacing: 8) {
+            metaTag(text: wallpaper.categoryDisplayName)
+            metaTag(text: wallpaper.purityDisplayName)
 
-                    if let primaryColorHex = wallpaper.primaryColorHex {
-                        colorMetaTag(hex: primaryColorHex)
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    metaTag(text: wallpaper.categoryDisplayName)
-                    metaTag(text: wallpaper.purityDisplayName)
-                }
-
-                HStack(spacing: 6) {
-                    metaTag(text: wallpaper.categoryDisplayName)
-                }
+            if let primaryColorHex = wallpaper.primaryColorHex {
+                colorMetaTag(hex: primaryColorHex)
             }
 
             Spacer(minLength: 0)
@@ -273,52 +305,28 @@ public struct WallpaperEditCard: View {
     }
 
     private var trailingMetadataRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                if let primaryColorHex = wallpaper.primaryColorHex {
-                    footerColorTag(hex: primaryColorHex)
-                }
-
-                statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: Color(hex: "FF5A7D")
-                )
-
-                statLabel(
-                    systemImage: "eye.fill",
-                    value: compactNumber(wallpaper.views),
-                    tint: .white.opacity(0.5)
-                )
-
-                if !wallpaper.fileSizeLabel.isEmpty {
-                    statLabel(
-                        systemImage: "doc.fill",
-                        value: wallpaper.fileSizeLabel,
-                        tint: .white.opacity(0.5)
-                    )
-                }
+        HStack(spacing: 8) {
+            if let primaryColorHex = wallpaper.primaryColorHex {
+                footerColorTag(hex: primaryColorHex)
             }
 
-            HStack(spacing: 12) {
-                statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: Color(hex: "FF5A7D")
-                )
+            statLabel(
+                systemImage: "heart.fill",
+                value: compactNumber(wallpaper.favorites),
+                tint: Color(hex: "FF5A7D")
+            )
 
+            statLabel(
+                systemImage: "eye.fill",
+                value: compactNumber(wallpaper.views),
+                tint: .white.opacity(0.5)
+            )
+
+            if !wallpaper.fileSizeLabel.isEmpty {
                 statLabel(
-                    systemImage: "eye.fill",
-                    value: compactNumber(wallpaper.views),
+                    systemImage: "doc.fill",
+                    value: wallpaper.fileSizeLabel,
                     tint: .white.opacity(0.5)
-                )
-            }
-
-            HStack(spacing: 12) {
-                statLabel(
-                    systemImage: "heart.fill",
-                    value: compactNumber(wallpaper.favorites),
-                    tint: Color(hex: "FF5A7D")
                 )
             }
         }

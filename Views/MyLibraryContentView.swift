@@ -47,29 +47,36 @@ struct MyLibraryContentView: View {
                 baseBottom: LiquidGlassColors.deepBackground
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
 
             // 颗粒材质覆盖层
             GrainTextureOverlay()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 32) {
-                    // Hero 区域
-                    mediaHero
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 32) {
+                        // Hero 区域
+                        mediaHero
 
-                    // 内容类型切换器
-                    ContentTypePicker(selected: $selectedContentType)
+                        // 内容类型切换器
+                        ContentTypePicker(selected: $selectedContentType)
 
-                    // 根据类型显示不同内容（保留原有收藏/下载分区）
-                    contentSections
+                        // 根据类型显示不同内容（保留原有收藏/下载分区）
+                        contentSections
+
+                        // 底部填充，确保内容不够时也能占满屏幕
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 112)
+                    .padding(.bottom, 48)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(minHeight: geometry.size.height)
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 112)
-                .padding(.bottom, 48)
-                .frame(maxWidth: 1520, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .scrollClipDisabled()
             }
-            .scrollClipDisabled()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 注意：所有详情页在 ContentView 层级显示，确保能覆盖 TopNavigationBar
@@ -733,6 +740,7 @@ struct AnimeLibraryCard: View {
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
+                // 图片区域
                 ZStack(alignment: .bottomTrailing) {
                     KFImage(URL(string: anime.coverURL ?? ""))
                         .fade(duration: 0.3)
@@ -740,13 +748,13 @@ struct AnimeLibraryCard: View {
                             SkeletonCard(
                                 width: LibraryCardMetrics.cardWidth,
                                 height: LibraryCardMetrics.thumbnailHeight + 72,
-                                cornerRadius: 0
+                                cornerRadius: 22
                             )
                         }
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                    .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
-                    .clipped()
+                        .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
+                        .clipped()
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {
@@ -774,6 +782,7 @@ struct AnimeLibraryCard: View {
                     }
                 }
 
+                // 信息区域 - 贴合图片，共享背景
                 VStack(alignment: .leading, spacing: 6) {
                     Text(anime.title)
                         .font(.system(size: 14.5, weight: .bold))
@@ -789,13 +798,10 @@ struct AnimeLibraryCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
+                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .background(Color(hex: "1A1D24").opacity(0.6))
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .liquidGlassSurface(
-                isHovered ? .max : .prominent,
-                tint: LiquidGlassColors.secondaryViolet.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .scaleEffect(isHovered ? 1.01 : 1.0)
         }
@@ -807,7 +813,6 @@ struct AnimeLibraryCard: View {
                 isHovered = hovering
             }
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 

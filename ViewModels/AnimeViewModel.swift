@@ -366,9 +366,9 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 预加载下一页
     private func triggerPreloadNextPage() {
         preloadTask?.cancel()
-        
+
         let nextPage = currentPage + 1
-        let offset = currentPage * pageSize
+        let offset = nextPage * pageSize
         let mode = currentQueryMode
         
         preloadTask = Task(priority: .low) {

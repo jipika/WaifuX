@@ -249,21 +249,30 @@ actor MediaService {
         }
 
         let trimmed = pathOrURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let relativePath = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        if relativePath.isEmpty {
+        // 保持路径原始格式（不删除尾部斜杠）
+        let pathPart: String
+        if trimmed.hasPrefix("/") {
+            pathPart = String(trimmed.dropFirst()) // 去掉开头的 /
+        } else {
+            pathPart = trimmed
+        }
+
+        if pathPart.isEmpty {
             return baseURL
         }
 
         if let components = URLComponents(string: trimmed),
            let query = components.query {
-            let pathOnly = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            // 保持路径格式（不删除尾部斜杠）
+            let rawPath = components.path
+            let cleanPath = rawPath.hasPrefix("/") ? String(rawPath.dropFirst()) : rawPath
             let joinedBase = baseURL.absoluteString.hasSuffix("/") ? baseURL.absoluteString : baseURL.absoluteString + "/"
-            return URL(string: joinedBase + pathOnly + "?" + query) ?? baseURL
+            return URL(string: joinedBase + cleanPath + "?" + query) ?? baseURL
         }
 
         let joinedBase = baseURL.absoluteString.hasSuffix("/") ? baseURL.absoluteString : baseURL.absoluteString + "/"
-        return URL(string: joinedBase + relativePath) ?? baseURL
+        return URL(string: joinedBase + pathPart) ?? baseURL
     }
 
     private func parseListPage(html: String, source: MediaRouteSource, pageURL: URL) -> MediaListPage {
@@ -344,10 +353,11 @@ actor MediaService {
     }
 
     /// 从图片 src 路径中提取 ID、slug 和分辨率
-    /// 路径格式: /i/c/364x205/media/9147/yuji-itadori-city.3840x2160.jpg
+    /// 路径格式: /i/c/364x205/media/9147/yuji-itadori-city.3840x2160.jpg 或 ...jpg.webp
     private func extractIdSlugResolution(from src: String) -> (id: String, slug: String, resolution: String)? {
-        // 匹配 /i/c/.../media/{id}/{slug}.{resolution}.[^.]+$ 格式
-        let pattern = #"/media/(\d+)/([^/]+)\.([0-9]+x[0-9]+)\.[^.]+$"#
+        // 匹配 /i/c/.../media/{id}/{slug}.{resolution}.[^.]+(\.webp)?$ 格式
+        // 支持双扩展名如 .jpg.webp 或单扩展名如 .jpg
+        let pattern = #"/media/(\d+)/([^/]+)\.([0-9]+x[0-9]+)\.[^.]+(\.webp)?$"#
 
         guard let regex = compileRegex(pattern) else {
             return nil
@@ -457,13 +467,34 @@ actor MediaService {
         do {
             let document = try SwiftSoup.parse(html)
 
-            // 策略 1：使用配置的选择器
-            if let nextPageXPath = config.parsing.nextPage {
+            // 策略 1：使用配置的选择器（仅当 nextPage 非空时）
+            if let nextPageXPath = config.parsing.nextPage, !nextPageXPath.isEmpty {
                 let cssSelector = htmlParser.convertXPathToCSS(nextPageXPath) ?? nextPageXPath
-                if let nextLink = try? document.select(cssSelector).first()?.attr("href"),
-                   !nextLink.isEmpty {
-                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功: '\(nextLink)'")
-                    return pathPreservingQuery(from: nextLink)
+                let matchedLinks = try? document.select(cssSelector)
+
+                // 优先找包含"View More"或"Next"文字的链接（真正的分页链接）
+                if let paginationLink = matchedLinks?.array().first(where: { link in
+                    let text = ((try? link.text()) ?? "").lowercased()
+                    return text.contains("view more") || text.contains("next")
+                }), let href = try? paginationLink.attr("href"), !href.isEmpty {
+                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (pagination): '\(href)'")
+                    return pathPreservingQuery(from: href)
+                }
+
+                // 兜底：找 href 匹配数字页码格式的链接（包括 /tag:xxx/N/ 和 /N/ 格式）
+                if let numericLink = matchedLinks?.array().first(where: { link in
+                    let href = ((try? link.attr("href")) ?? "")
+                    return href.matches(regex: #"^/(tag:[^/]+/)?\d+/?$"#)
+                }), let href = try? numericLink.attr("href"), !href.isEmpty {
+                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (numeric): '\(href)'")
+                    return pathPreservingQuery(from: href)
+                }
+
+                // 最后才用 first()（可能是分类链接）
+                if let firstLink = matchedLinks?.first(),
+                   let href = try? firstLink.attr("href"), !href.isEmpty {
+                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (first): '\(href)'")
+                    return pathPreservingQuery(from: href)
                 }
             }
 
