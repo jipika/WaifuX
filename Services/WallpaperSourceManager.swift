@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - 壁纸源管理器
 ///
@@ -329,11 +330,13 @@ class WallpaperSourceManager: ObservableObject {
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
     }
 
-    /// Ping Google 检测网络是否可达
-    /// - 如果 Google 可达：保持 Wallhaven
-    /// - 如果 Google 不可达（3秒超时）：切换到 4K 源，并启用 GitHub Hosts 加速
+    /// 启动时选择数据源
+    /// - 如果启用了 VPN：保持 Wallhaven
+    /// - 如果未启用 VPN：ping Google 检测网络状态
+    ///   - Google 可达：保持 Wallhaven
+    ///   - Google 不可达：切换到 4K 源，并启用 GitHub Hosts 加速
     func performStartupSourceSelection() async {
-        print("[WallpaperSourceManager] Performing startup source selection (ping Google)...")
+        print("[WallpaperSourceManager] Performing startup source selection...")
 
         // 如果用户手动锁定了源，不要自动切换
         guard forceSourceOverride == nil else {
@@ -342,15 +345,15 @@ class WallpaperSourceManager: ObservableObject {
             return
         }
 
-        // Ping Google，5秒超时
-        let googleReachable = await pingGoogle(timeout: 5)
+        // 首先检测 VPN
+        let vpnEnabled = isVPNEnabled()
+        print("[WallpaperSourceManager] VPN detected: \(vpnEnabled)")
 
-        if googleReachable {
-            // Google 可达，保持 Wallhaven
-            print("[WallpaperSourceManager] Google is reachable, keeping Wallhaven")
+        if vpnEnabled {
+            // 启用了 VPN，保持 Wallhaven
+            print("[WallpaperSourceManager] VPN is enabled, keeping Wallhaven")
             await MainActor.run {
                 if activeSource != .wallhaven {
-                    // 如果之前用的是 4K，切回 Wallhaven
                     activeSource = .wallhaven
                     isAutoSwitched = false
                     consecutiveFailures = 0
@@ -361,24 +364,75 @@ class WallpaperSourceManager: ObservableObject {
                 isInitialSourceSelectionComplete = true
             }
         } else {
-            // Google 不可达，切换到 4K 源并启用 GitHub Hosts
-            print("[WallpaperSourceManager] Google is NOT reachable, switching to 4K and enabling GitHub Hosts")
-            await MainActor.run {
-                activeSource = .fourKWallpapers
-                isAutoSwitched = true
-                consecutiveFailures = 0
-                consecutiveSuccesses = 0
-                UserDefaults.standard.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
-                UserDefaults.standard.set(true, forKey: autoSwitchedKey)
+            // 未启用 VPN，ping Google 检测
+            let googleReachable = await pingGoogle(timeout: 5)
 
-                // 启用 GitHub Hosts 加速
-                GitHubHosts.isEnabled = true
+            if googleReachable {
+                // Google 可达，保持 Wallhaven
+                print("[WallpaperSourceManager] Google is reachable, keeping Wallhaven")
+                await MainActor.run {
+                    if activeSource != .wallhaven {
+                        activeSource = .wallhaven
+                        isAutoSwitched = false
+                        consecutiveFailures = 0
+                        consecutiveSuccesses = 0
+                        UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
+                        UserDefaults.standard.set(false, forKey: autoSwitchedKey)
+                    }
+                    isInitialSourceSelectionComplete = true
+                }
+            } else {
+                // Google 不可达，切换到 4K 源并启用 GitHub Hosts
+                print("[WallpaperSourceManager] Google is NOT reachable, switching to 4K and enabling GitHub Hosts")
+                await MainActor.run {
+                    activeSource = .fourKWallpapers
+                    isAutoSwitched = true
+                    consecutiveFailures = 0
+                    consecutiveSuccesses = 0
+                    UserDefaults.standard.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
+                    UserDefaults.standard.set(true, forKey: autoSwitchedKey)
 
-                isInitialSourceSelectionComplete = true
+                    // 启用 GitHub Hosts 加速
+                    GitHubHosts.isEnabled = true
+
+                    isInitialSourceSelectionComplete = true
+                }
             }
         }
 
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+    }
+
+    /// 检测是否启用了 VPN
+    /// - Returns: true 如果检测到活跃的 VPN 接口
+    func isVPNEnabled() -> Bool {
+        let vpnInterfacePrefixes = ["utun", "ppp", "ipsec", "tun", "tap"]
+
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
+            return false
+        }
+
+        defer { freeifaddrs(ifaddr) }
+
+        var hasVPN = false
+        var ptr = firstAddr
+        while true {
+            let name = String(cString: ptr.pointee.ifa_name)
+            if vpnInterfacePrefixes.contains(where: { name.hasPrefix($0) }) {
+                // 检查接口是否处于活跃状态 (IFF_UP | IFF_RUNNING)
+                let flags = Int32(ptr.pointee.ifa_flags)
+                if (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0 {
+                    hasVPN = true
+                    break
+                }
+            }
+
+            guard let next = ptr.pointee.ifa_next else { break }
+            ptr = next
+        }
+
+        return hasVPN
     }
 
     /// Ping Google 检测网络是否可达

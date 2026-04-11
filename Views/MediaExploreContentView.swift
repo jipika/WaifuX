@@ -295,6 +295,8 @@ struct MediaExploreContentView: View {
             isInitialLoading = true
         }
         await viewModel.initialLoadIfNeeded()
+        // 请求完数据后重置 visibleCardIDs，避免脏数据
+        visibleCardIDs.removeAll()
         if searchText.isEmpty {
             searchText = viewModel.currentQuery
         }

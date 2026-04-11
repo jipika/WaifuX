@@ -467,27 +467,30 @@ struct WallpaperExploreContentView: View {
     private func handleAppear() {
         AppLogger.info(.wallpaper, "壁纸探索页 onAppear",
             metadata: ["已有数据": !viewModel.wallpapers.isEmpty, "当前数量": viewModel.wallpapers.count])
-        
+
         if searchText.isEmpty { searchText = viewModel.searchQuery }
-        
+
         if viewModel.wallpapers.isEmpty {
             isInitialLoading = true
             Task {
                 let start = Date()
                 await viewModel.search()
+                // 请求完数据后重置 visibleCardIDs，避免脏数据
+                await MainActor.run {
+                    visibleCardIDs.removeAll()
+                    rebuildVisibleItems()
+                    syncAtmosphere()
+                    isInitialLoading = false
+                }
                 AppLogger.info(.wallpaper, "首次加载完成",
                     metadata: [
                         "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
                         "结果数": viewModel.wallpapers.count,
                         "错误": viewModel.errorMessage ?? "无"
                     ])
-                await MainActor.run {
-                    rebuildVisibleItems()
-                    syncAtmosphere()
-                    isInitialLoading = false
-                }
             }
         } else {
+            visibleCardIDs.removeAll()
             rebuildVisibleItems()
             syncAtmosphere()
         }

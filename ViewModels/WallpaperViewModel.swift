@@ -412,6 +412,11 @@ class WallpaperViewModel: ObservableObject {
         currentPage = 1
         currentRandomSeed = nil
 
+        // 重置预加载状态
+        preloadTask?.cancel()
+        preloadedWallpapers = []
+        preloadedPage = 0
+
         // 创建新的搜索任务
         searchTask = Task {
             do {
@@ -658,8 +663,6 @@ class WallpaperViewModel: ObservableObject {
             }
             return result
         } catch {
-            // 显示网络错误提示
-            sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
             throw error
         }
     }
@@ -705,8 +708,6 @@ class WallpaperViewModel: ObservableObject {
                     usePopular: usePopular
                 )
             } catch {
-                // 显示网络错误提示
-                sourceManager.lastSwitchMessage = "⚠️ \(t("error.network.title")) - \(t("error.network.message"))"
                 throw error
             }
 

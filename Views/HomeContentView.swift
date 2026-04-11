@@ -52,9 +52,7 @@ struct HomeContentView: View {
         return max(300, width * 0.375)
     }
 
-    // 跟踪视口宽度和计算出的高度
-    @State private var viewportWidth: CGFloat = 0
-    @State private var computedHeroHeight: CGFloat = 300
+
 
     private let carouselAutoPlayInterval: TimeInterval = 6.0
     private let carouselPageSnapDuration: TimeInterval = 0.32
@@ -68,12 +66,16 @@ struct HomeContentView: View {
     }
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 0) {
-                heroSection
-                    .zIndex(1)
+        GeometryReader { containerProxy in
+            let heroH = heroHeight(for: containerProxy.size.width)
+            
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    heroSection
+                        .zIndex(1)
+                        .frame(height: heroH)
 
-                contentSections
+                    contentSections
                     .padding(.horizontal, contentHorizontalInset)
                     .padding(.top, sectionTopSpacing)
             }
@@ -85,17 +87,13 @@ struct HomeContentView: View {
                             key: ScrollOffsetPreferenceKey.self,
                             value: geometry.frame(in: .named("homeScrollView")).minY
                         )
-                        .onAppear {
-                            viewportWidth = geometry.size.width
-                        }
-                        .onChange(of: geometry.size.width) { _, newValue in
-                            viewportWidth = newValue
-                        }
                 }
             )
+            }
+            .coordinateSpace(name: "homeScrollView")
+            .scrollClipDisabled()
         }
-        .coordinateSpace(name: "homeScrollView")
-        .scrollClipDisabled()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             homeBackground
                 .ignoresSafeArea()
@@ -137,26 +135,15 @@ struct HomeContentView: View {
     }
 
     private var heroSection: some View {
-        GeometryReader { geometry in
-            let wallpapers = heroWallpapers
+        let wallpapers = heroWallpapers
+        
+        return GeometryReader { geometry in
             let width = geometry.size.width
-            // 确保 width 有效，否则用默认值
-            let effectiveWidth = (width > 0 && width.isFinite && !width.isNaN && !width.isInfinite) ? width : 800
-            let height = heroHeight(for: effectiveWidth)
-            let heroCaptionLeadingInset = max(112, width * 0.1)
-            let heroCaptionTrailingInset = max(96, width * 0.08)
-
+            let height = heroHeight(for: width)
+            
             ZStack {
-                // 存储计算出的高度供外部使用
-                Color.clear
-                    .onAppear {
-                        computedHeroHeight = height
-                    }
-                    .onChange(of: height) { _, newValue in
-                        computedHeroHeight = newValue
-                    }
                 if wallpapers.isEmpty {
-                    HeroSkeletonView(width: width, height: height)
+                    HeroSkeletonView(height: height)
                 } else {
                     heroCarousel(width: width, height: height, wallpapers: wallpapers)
 
@@ -167,10 +154,10 @@ struct HomeContentView: View {
                             onOpen: { selectedWallpaper = wallpaper },
                             onFavorite: { viewModel.toggleFavorite(wallpaper) }
                         )
-                        .frame(maxWidth: min(width * 0.42, 520), alignment: .leading)
+                        .frame(maxWidth: 520, alignment: .leading)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                        .padding(.leading, heroCaptionLeadingInset)
-                        .padding(.trailing, heroCaptionTrailingInset)
+                        .padding(.leading, 112)
+                        .padding(.trailing, 96)
                         .transaction { transaction in
                             transaction.animation = nil
                         }
@@ -225,14 +212,10 @@ struct HomeContentView: View {
             .frame(width: width, height: height)
             .clipped()
         }
-        .frame(maxWidth: .infinity, minHeight: 300, idealHeight: computedHeroHeight > 0 && computedHeroHeight.isFinite ? computedHeroHeight : 300)
     }
 
     private func heroCarousel(width: CGFloat, height: CGFloat, wallpapers: [Wallpaper]) -> some View {
         let displayWallpapers = carouselDisplayWallpapers(from: wallpapers)
-        // 确保尺寸有效
-        let safeWidth = max(1, width)
-        let safeHeight = max(1, height)
 
         return ZStack(alignment: .leading) {
             HStack(spacing: 0) {
@@ -241,16 +224,16 @@ struct HomeContentView: View {
                         wallpaper: wallpaper,
                         isCurrent: wallpaper.id == currentHeroID
                     )
-                    .frame(width: safeWidth, height: safeHeight)
+                    .frame(width: width, height: height)
                 }
             }
-            .offset(x: -CGFloat(currentCarouselDisplayIndex) * safeWidth + carouselDragOffset)
+            .offset(x: -CGFloat(currentCarouselDisplayIndex) * width + carouselDragOffset)
         }
-        .frame(width: safeWidth, height: safeHeight, alignment: .leading)
+        .frame(width: width, height: height, alignment: .leading)
         .clipped()
         .contentShape(Rectangle())
         .simultaneousGesture(
-            heroCarouselDragGesture(width: safeWidth)
+            heroCarouselDragGesture(width: width)
         )
     }
 
@@ -278,13 +261,15 @@ struct HomeContentView: View {
     }
 
     private var homeBackground: some View {
-        LiquidGlassAtmosphereBackground(
-            primary: atmosphereController.primary,
-            secondary: atmosphereController.secondary,
-            tertiary: atmosphereController.tertiary,
-            baseTop: Color(hex: "1D2128"),
-            baseBottom: Color(hex: "0E1116"),
-            lightweight: false
+        let tint = ExploreAtmosphereTint.fromSampledTriplet(
+            atmosphereController.primary,
+            atmosphereController.secondary,
+            atmosphereController.tertiary
+        )
+        return ExploreDynamicAtmosphereBackground(
+            tint: tint,
+            referenceImage: atmosphereController.referenceImage,
+            lightweightBackdrop: false
         )
         .ignoresSafeArea()
     }

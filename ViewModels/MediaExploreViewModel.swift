@@ -189,6 +189,15 @@ final class MediaExploreViewModel: ObservableObject {
 
         errorMessage = nil
 
+        // 重置分页状态
+        nextPagePath = nil
+        hasMorePages = true
+
+        // 重置预加载状态
+        preloadTask?.cancel()
+        preloadedItems = []
+        preloadedNextPath = nil
+
         // 先测试网络连通性
         do {
             print("[MediaExploreViewModel] testing direct network request...")

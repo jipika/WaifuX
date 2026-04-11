@@ -115,27 +115,9 @@ struct WallpaperCardSkeleton: View {
 }
 
 // MARK: - Hero 区域骨架屏
-/// 方案 B：骨架屏布局压力对齐真实 HeroCaptionPanel，消除 API 返回后的布局跳变。
-/// 接受 width 参数以复用与 HeroCaptionPanel 完全一致的 frame 约束。
 struct HeroSkeletonView: View {
-    var width: CGFloat = 1200
-    /// 按视口宽度比例计算（16:9），与真实 hero 区域完全对齐，
-    /// 消除 API 数据返回后的纵向跳变。
-    var height: CGFloat = 675
+    var height: CGFloat = 450
     
-    // 确保尺寸有效
-    private var safeWidth: CGFloat {
-        guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 1200 }
-        return width
-    }
-    private var safeHeight: CGFloat {
-        guard height > 0, height.isFinite, !height.isNaN, !height.isInfinite else { return 675 }
-        return height
-    }
-
-    private var heroCaptionLeadingInset: CGFloat { max(112, safeWidth * 0.1) }
-    private var heroCaptionTrailingInset: CGFloat { max(96, safeWidth * 0.08) }
-
     var body: some View {
         ZStack {
             // 主图骨架 - 使用渐变色避免纯黑
@@ -150,23 +132,21 @@ struct HeroSkeletonView: View {
             )
             .shimmer()
 
-            // 底部信息面板骨架 — 与 HeroCaptionPanel 完全一致的布局结构
-            // 注意：不加 Spacer()，与真实 HeroCaptionPanel 的 VStack 保持一致对齐方式
+            // 底部信息面板骨架
             VStack(alignment: .leading, spacing: 18) {
-
-                // eyebrow 骨架（对应 HeroCaptionPanel 的 heroEyebrow）
+                // eyebrow 骨架
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.white.opacity(0.08))
                     .frame(width: 80, height: 13)
                     .shimmer()
 
-                // 大标题骨架（对应 HeroCaptionPanel 的 heroTitle — font size 46 bold serif）
+                // 大标题骨架
                 RoundedRectangle(cornerRadius: 5)
                     .fill(Color.white.opacity(0.11))
-                    .frame(width: max(100, min(safeWidth * 0.36, 420)), height: 46)
+                    .frame(width: 300, height: 46)
                     .shimmer()
 
-                // 元数据行骨架（对应 HeroMetaLine）
+                // 元数据行骨架
                 HStack(spacing: 8) {
                     ForEach(0..<4, id: \.self) { i in
                         RoundedRectangle(cornerRadius: 3)
@@ -176,7 +156,7 @@ struct HeroSkeletonView: View {
                     }
                 }
 
-                // 按钮行骨架（对应两个 HeroActionButton）
+                // 按钮行骨架
                 HStack(spacing: 12) {
                     RoundedRectangle(cornerRadius: 22)
                         .fill(Color.white.opacity(0.09))
@@ -189,13 +169,13 @@ struct HeroSkeletonView: View {
                         .shimmer()
                 }
             }
-            // ★ 核心：与 HomeContentView.swift 中 HeroCaptionPanel 完全一致的 frame + padding
-            .frame(maxWidth: max(200, min(safeWidth * 0.42, 520)), alignment: .leading)
+            .frame(maxWidth: 520, alignment: .leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .padding(.leading, heroCaptionLeadingInset)
-            .padding(.trailing, heroCaptionTrailingInset)
+            .padding(.leading, 112)
+            .padding(.trailing, 96)
         }
-        .frame(width: safeWidth, height: safeHeight)
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
     }
 }
 
@@ -208,10 +188,18 @@ struct WallpaperGridSkeleton: View {
         ExploreGridLayout.columns(for: contentWidth)
     }
 
+    /// 与 WallpaperGridConfig 一致，根据可用宽度动态计算卡片宽度
+    private var cardWidth: CGFloat {
+        let columnCount = ExploreGridLayout.columnCount(for: contentWidth)
+        let spacing = ExploreGridLayout.spacing
+        let totalSpacing = spacing * CGFloat(columnCount - 1)
+        return floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+    }
+
     var body: some View {
         LazyVGrid(columns: columns, spacing: ExploreGridLayout.spacing) {
             ForEach(0..<8, id: \.self) { _ in
-                WallpaperCardSkeleton()
+                WallpaperCardSkeleton(cardWidth: cardWidth)
             }
         }
     }
@@ -273,10 +261,18 @@ struct MediaGridSkeleton: View {
         ExploreGridLayout.columns(for: contentWidth)
     }
 
+    /// 与 MediaExploreContentView GridConfig 一致，根据可用宽度动态计算卡片宽度
+    private var cardWidth: CGFloat {
+        let columnCount = ExploreGridLayout.columnCount(for: contentWidth)
+        let spacing = ExploreGridLayout.spacing
+        let totalSpacing = spacing * CGFloat(columnCount - 1)
+        return floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+    }
+
     var body: some View {
         LazyVGrid(columns: columns, spacing: ExploreGridLayout.spacing) {
             ForEach(0..<8, id: \.self) { _ in
-                MediaCardSkeleton()
+                MediaCardSkeleton(cardWidth: cardWidth)
             }
         }
     }
