@@ -56,7 +56,7 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">ビデオ再生 - エピソード選択</p></td>
-    <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">壁紙リスト - スクロール/ページングモード</p></td>
+    <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">マイライブラリ - 設定</p></td>
   </tr>
 </table>
 

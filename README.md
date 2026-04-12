@@ -56,7 +56,7 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
-    <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">壁纸列表 - 分页/滚动模式</p></td>
+    <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">我的库 - 设置</p></td>
   </tr>
 </table>
 
