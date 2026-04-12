@@ -677,3 +677,163 @@ struct AnimatedEmptyState: View {
         }
     }
 }
+
+// MARK: - 底部弹出加载卡片（解决列表抖动问题）
+
+/// 底部弹出加载卡片
+/// 使用液态玻璃背景（macOS 26+ 原生玻璃效果，旧版本使用 NSVisualEffectView 毛玻璃）
+/// 固定在窗口底部，不占用列表空间，避免列表高度变化导致抖动
+struct BottomLoadingCard: View {
+    let isLoading: Bool
+
+    @State private var isVisible = false
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // 旋转加载指示器
+            Image(systemName: "arrow.2.circlepath")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .rotationEffect(.degrees(isAnimating ? 360 : 0))
+                .animation(
+                    .linear(duration: 1.0).repeatForever(autoreverses: false),
+                    value: isAnimating
+                )
+                .onAppear {
+                    isAnimating = true
+                }
+
+            Text(t("loading.simple"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.85))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background {
+            glassBackground
+        }
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+        )
+        .opacity(isVisible ? 1 : 0)
+        .animation(.easeOut(duration: 0.25), value: isVisible)
+        .onAppear {
+            if isLoading {
+                isVisible = true
+            }
+        }
+        .onChange(of: isLoading) { _, newValue in
+            if newValue {
+                isVisible = true
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    isVisible = false
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var glassBackground: some View {
+        if #available(macOS 26.0, *) {
+            Capsule(style: .continuous)
+                .fill(Color.clear)
+                .glassEffect(Glass.regular.tint(Color.white.opacity(0.1)), in: Capsule(style: .continuous))
+        } else {
+            // 使用 .popover 材质，比 hudWindow 更轻量，适合小卡片
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.3))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+        }
+    }
+}
+
+// MARK: - 底部弹出"没有更多数据"卡片
+
+/// 底部弹出"没有更多数据"提示卡片
+/// 使用液态玻璃背景（macOS 26+ 原生玻璃效果，旧版本使用 SwiftUI 轻量毛玻璃）
+struct BottomNoMoreCard: View {
+    @State private var isVisible = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Rectangle()
+                .fill(Color.white.opacity(0.2))
+                .frame(width: 32, height: 1)
+
+            Text("— \(t("noMore")) —")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.5))
+
+            Rectangle()
+                .fill(Color.white.opacity(0.2))
+                .frame(width: 32, height: 1)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background {
+            glassBackground
+        }
+        .opacity(isVisible ? 1 : 0)
+        .animation(.easeOut(duration: 0.25), value: isVisible)
+        .onAppear {
+            isVisible = true
+        }
+    }
+
+    @ViewBuilder
+    private var glassBackground: some View {
+        if #available(macOS 26.0, *) {
+            Capsule(style: .continuous)
+                .fill(Color.clear)
+                .glassEffect(Glass.regular.tint(Color.white.opacity(0.08)), in: Capsule(style: .continuous))
+        } else {
+            // 使用 SwiftUI 的 .ultraThinMaterial，轻量且渲染高效
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.25))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+        }
+    }
+}
+
+// MARK: - 回到顶部按钮
+
+/// 回到顶部按钮
+/// 浮动在列表右下角，使用液态玻璃效果，点击后平滑滚动到顶部
+struct ScrollToTopButton: View {
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    private let buttonSize: CGFloat = 44
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.85))
+                .frame(width: buttonSize, height: buttonSize)
+                .background(
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.1 : 1.0)
+        .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .onHover { isHovered = $0 }
+    }
+}

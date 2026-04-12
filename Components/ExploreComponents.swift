@@ -48,6 +48,14 @@ public struct NoMoreFooter: View {
     }
 }
 
+// MARK: - 滚动加载状态
+
+/// 用于 onScrollGeometryChange 的状态类型
+private struct ScrollLoadState: Equatable {
+    let nearBottom: Bool
+    let atBottom: Bool
+}
+
 // MARK: - 跨版本兼容的滚动加载更多
 
 /// 滚动加载更多修饰符
@@ -60,7 +68,10 @@ public struct ScrollLoadMoreModifier: ViewModifier {
     let bottomThreshold: CGFloat // 触底加载阈值
     let onLoadMore: () -> Void
     let checkLoadMore: (CGFloat, CGFloat, CGFloat) -> Void  // offset, contentSize, containerSize
-    
+
+    // 防止重复触发的状态
+    @State private var isLoadingTriggered = false
+
     public init(
         scrollOffset: Binding<CGFloat>,
         contentSize: Binding<CGFloat> = .constant(0),
@@ -78,26 +89,28 @@ public struct ScrollLoadMoreModifier: ViewModifier {
         self.onLoadMore = onLoadMore
         self.checkLoadMore = checkLoadMore
     }
-    
+
     public func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
             content
-                // 提前加载检测
-                .onScrollGeometryChange(for: Bool.self) { geometry in
+                // 合并的滚动位置检测（避免重复触发）
+                .onScrollGeometryChange(for: ScrollLoadState.self) { geometry in
                     let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                    return bottomOffset >= geometry.contentSize.height - earlyThreshold
+                    let nearBottom = bottomOffset >= geometry.contentSize.height - earlyThreshold
+                    let atBottom = bottomOffset >= geometry.contentSize.height - bottomThreshold
+                    return ScrollLoadState(nearBottom: nearBottom, atBottom: atBottom)
                 } action: { oldValue, newValue in
-                    if newValue && !oldValue {
+                    // 只在从假变真时触发
+                    if newValue.nearBottom && !oldValue.nearBottom {
+                        isLoadingTriggered = true
+                        onLoadMore()
+                    } else if newValue.atBottom && !oldValue.atBottom && !isLoadingTriggered {
+                        // 如果提前加载未触发，才触发触底加载
                         onLoadMore()
                     }
-                }
-                // 触底保底检测
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                    return bottomOffset >= geometry.contentSize.height - bottomThreshold
-                } action: { oldValue, newValue in
-                    if newValue && !oldValue {
-                        onLoadMore()
+                    // 滚动回顶部时重置状态
+                    if !newValue.nearBottom && oldValue.nearBottom {
+                        isLoadingTriggered = false
                     }
                 }
         } else {
@@ -120,6 +133,7 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                     contentSize = value
                 }
                 .onChange(of: scrollOffset) { _, offset in
+                    // 使用简单的距离判断，避免依赖可能过时的 contentSize
                     checkLoadMore(offset, contentSize, containerSize)
                 }
         }

@@ -12,7 +12,6 @@ import Kingfisher
 struct AnimePortraitCard: View {
     let anime: AnimeSearchResult
     var cardWidth: CGFloat? = nil
-    // 移除 cardHeight 参数，使用固定比例
     var onTap: () -> Void = {}
 
     @State private var isHovered = false
@@ -21,12 +20,24 @@ struct AnimePortraitCard: View {
     
     // 静态形状缓存
     private static let cardShape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+    
+    // 初始化器 - 预计算缓存属性
+    init(anime: AnimeSearchResult, cardWidth: CGFloat? = nil, onTap: @escaping () -> Void = {}) {
+        self.anime = anime
+        self.cardWidth = cardWidth
+        self.onTap = onTap
+        // 预计算缓存属性，避免每次 body 重新计算
+        self.cachedTitle = anime.title
+        self.cachedEpisode = anime.latestEpisode
+        self.cachedRating = anime.rating
+        self.shouldShowRating = !(anime.rating ?? "").isEmpty
+    }
 
-    // 缓存属性
-    private var cachedTitle: String { anime.title }
-    private var cachedEpisode: String? { anime.latestEpisode }
-    private var shouldShowRating: Bool { !(anime.rating ?? "").isEmpty }
-    private var cachedRating: String? { anime.rating }
+    // 缓存属性 - 使用 let 避免重复计算
+    private let cachedTitle: String
+    private let cachedEpisode: String?
+    private let shouldShowRating: Bool
+    private let cachedRating: String?
     
     // 固定比例 10:14 (约 1:1.4)
     private var imageHeight: CGFloat {
@@ -34,7 +45,7 @@ struct AnimePortraitCard: View {
     }
     
     // 信息栏高度
-    private var infoHeight: CGFloat { 44 }
+    private let infoHeight: CGFloat = 44
 
     // 图片降采样目标尺寸（Retina 2x）
     private var targetImageSize: CGSize {
@@ -56,7 +67,6 @@ struct AnimePortraitCard: View {
                     KFImage(anime.coverURL.flatMap { URL(string: $0) })
                         .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                         .cacheMemoryOnly(false)
-                        // 移除 cancelOnDisappear(false) 和 fade 避免问题
                         .placeholder { _ in
                             ZStack {
                                 LinearGradient(
@@ -72,9 +82,9 @@ struct AnimePortraitCard: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
 
-                    // 评分标签（始终渲染占位，避免高度不一致导致空白）
-                    HStack(spacing: 2) {
-                        if shouldShowRating, let rating = cachedRating {
+                    // 评分标签 - 条件渲染避免无评分时占用空间
+                    if shouldShowRating, let rating = cachedRating {
+                        HStack(spacing: 2) {
                             Image(systemName: "star.fill")
                                 .font(.system(size: 8))
                                 .foregroundStyle(.yellow)
@@ -82,13 +92,13 @@ struct AnimePortraitCard: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.white)
                         }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.5))
+                        .clipShape(Capsule())
+                        .padding(.top, 10)
+                        .padding(.trailing, 8)
                     }
-                    .padding(.horizontal, shouldShowRating ? 6 : 0)
-                    .padding(.vertical, shouldShowRating ? 4 : 0)
-                    .background(shouldShowRating ? .black.opacity(0.5) : .clear)
-                    .clipShape(Capsule())
-                    .padding(.top, 10)
-                    .padding(.trailing, 8)
                 }
                 // 使用固定比例计算高度
                 .frame(width: cardWidth, height: imageHeight)
@@ -101,6 +111,7 @@ struct AnimePortraitCard: View {
                         .foregroundStyle(.white.opacity(0.95))
                         .lineLimit(1)
 
+                    // 集数信息 - 条件渲染
                     if let episode = cachedEpisode, !episode.isEmpty {
                         HStack(spacing: 2) {
                             Image(systemName: "play.circle.fill")
@@ -110,8 +121,6 @@ struct AnimePortraitCard: View {
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.6))
                         }
-                    } else {
-                        Color.clear.frame(height: 12)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -120,6 +129,7 @@ struct AnimePortraitCard: View {
                 .background(Color.black.opacity(0.46))
             }
             .contentShape(Self.cardShape)
+            // 悬停效果：边框
             .background(
                 Self.cardShape
                     .fill(Color.clear)
@@ -129,16 +139,20 @@ struct AnimePortraitCard: View {
                     )
             )
             .clipShape(Self.cardShape)
+            // 悬停效果：阴影
             .shadow(
                 color: Color.black.opacity(hoverShadowOpacity),
                 radius: hoverShadowRadius,
                 x: 0,
                 y: hoverShadowY
             )
+            // 悬停效果：缩放
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
+        // 悬停动画
         .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
+        // 节流悬停
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }

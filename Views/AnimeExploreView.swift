@@ -31,10 +31,12 @@ struct AnimeExploreView: View {
 
             ZStack {
                 // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
+                // 使用 lightweightBackdrop 模式减少 GPU 负担
                 if isVisible {
                     ExploreDynamicAtmosphereBackground(
                         tint: exploreAtmosphere.tint,
-                        referenceImage: exploreAtmosphere.referenceImage
+                        referenceImage: exploreAtmosphere.referenceImage,
+                        lightweightBackdrop: true  // 启用轻量模式，禁用模糊背景图
                     )
                     .ignoresSafeArea()
                 }
@@ -65,12 +67,25 @@ struct AnimeExploreView: View {
                     checkLoadMore: checkLoadMore
                 ))
                 .disabled(isInitialLoading)
+
+                // 底部弹出加载卡片（解决列表高度抖动问题）
+                VStack {
+                    Spacer()
+                    if viewModel.isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                        BottomLoadingCard(isLoading: true)
+                            .padding(.bottom, 60)
+                    } else if !viewModel.isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
+                        BottomNoMoreCard()
+                            .padding(.bottom, 60)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
         }
         .task { await handleInitialLoad() }
         .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
         .onChange(of: viewModel.animeItems.first?.id) { _, _ in handleDataSourceChange() }
-        .onChange(of: viewModel.animeItems.count) { _, _ in rebuildDisplayedItems() }
+        .onChange(of: viewModel.animeItems) { old, new in handleItemsChange(old: old, new: new) }
         .onChange(of: selectedSort) { _, _ in rebuildDisplayedItems() }
     }
 
@@ -184,11 +199,6 @@ struct AnimeExploreView: View {
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
                 animeGrid(contentWidth: gridContentWidth)
-                
-                if viewModel.isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
-                    LoadingMoreIndicator()
-                        .padding(.vertical, 20)
-                }
             }
         }
     }
@@ -219,44 +229,33 @@ struct AnimeExploreView: View {
             alignment: .leading,
             spacing: config.spacing
         ) {
-            // 使用 id: \.id 确保稳定 ID，优化 SwiftUI 渲染循环
-            ForEach(displayedItems) { anime in
-                let index = displayedItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, anime in
                 AnimePortraitCard(
                     anime: anime,
                     cardWidth: config.cardWidth
-                    // 移除 cardHeight，让卡片自动计算
                 ) {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         selectedAnime = anime
                     }
                 }
                 .onAppear {
-                    // 移除动画触发，直接显示
                     visibleCardIDs.insert(anime.id)
                     preloadNearbyImages(for: index, config: config)
                 }
-                // 移除入场动画和滚动效果
-                // .cardEntrance(...)
-                // .scrollTransitionEffect()
             }
         }
-        // 移除强制高度
-        // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 44))
     }
     
-    /// 智能预加载附近图片（前后各 10 张，与卡片降采样尺寸一致）
+    /// 智能预加载附近图片（前后各 5 张）
     private func preloadNearbyImages(for index: Int, config: GridConfig) {
-        // 使用固定比例计算高度 (10:14)
         let imageHeight = config.cardWidth * 1.4
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
-
+        let range = max(0, index - 5)..<min(displayedItems.count, index + 6)
         let urls = range
             .filter { $0 != index }
             .compactMap { displayedItems[$0].coverURL.flatMap { URL(string: $0) } }
-
-        let prefetcher = Kingfisher.ImagePrefetcher(
+        
+        let prefetcher = ImagePrefetcher(
             urls: urls,
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
@@ -337,6 +336,9 @@ struct AnimeExploreView: View {
     }
 
     private func selectCategory(_ category: AnimeCategory) {
+        // 防止重复选择
+        guard selectedCategory != category else { return }
+
         withAnimation(AppFluidMotion.interactiveSpring) {
             selectedCategory = category
             selectedHotTag = nil
@@ -345,11 +347,13 @@ struct AnimeExploreView: View {
             searchText = ""
             viewModel.searchText = ""
         }
-        // 清空列表数据避免显示旧数据
-        displayedItems = []
-        visibleCardIDs.removeAll()
-        viewModel.animeItems.removeAll()
-        Task { await viewModel.fetchByCategory(category) }
+        // 不要先清空列表，保持显示旧数据直到新数据加载完成
+        Task {
+            await viewModel.fetchByCategory(category)
+            await MainActor.run {
+                rebuildDisplayedItems()
+            }
+        }
     }
     
     private func selectHotTag(_ tag: AnimeHotTag) {
@@ -367,6 +371,9 @@ struct AnimeExploreView: View {
                 await viewModel.searchByTagName(tagToSearch.displayName)
             } else {
                 await viewModel.fetchPopular()
+            }
+            await MainActor.run {
+                rebuildDisplayedItems()
             }
         }
     }
@@ -427,36 +434,54 @@ struct AnimeExploreView: View {
             }
         }
     }
-    
+
     private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
         guard viewModel.hasMorePages else { return }
         guard !viewModel.isLoading, !viewModel.isLoadingMore else { return }
-        
+
         // 计算距离底部距离
         let distanceToBottom = contentHeight - (offset + containerHeight)
-        
+
         // 双阈值策略：
         // 1. 提前加载（距离底部 < 800pt）- 正常预加载
         // 2. 触底保底（距离底部 < 100pt）- 保底机制
         let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
         let shouldLoadBottom = distanceToBottom < 100
-        
+
         guard shouldLoadEarly || shouldLoadBottom else { return }
-        
-        Task { await viewModel.loadMore() }
+
+        // 使用 triggerLoadMore 统一处理，避免重复触发
+        triggerLoadMore()
     }
 
     private func rebuildDisplayedItems() {
         let source = viewModel.animeItems
-        
+
         guard selectedSort != .newest else {
             displayedItems = source
             return
         }
-        
+
         displayedItems = source.sorted { lhs, rhs in
             selectedSort.sortComparator(lhs, rhs, ascending: false)
         }
+    }
+
+    private func handleItemsChange(old: [AnimeSearchResult], new: [AnimeSearchResult]) {
+        if new.isEmpty || displayedItems.isEmpty {
+            rebuildDisplayedItems()
+        } else if !old.isEmpty, new.count > old.count {
+            appendNewItems()
+        } else {
+            rebuildDisplayedItems()
+        }
+    }
+
+    private func appendNewItems() {
+        let existingIDs = Set(displayedItems.map(\.id))
+        let newItems = viewModel.animeItems.filter { !existingIDs.contains($0.id) }
+        guard !newItems.isEmpty else { return }
+        displayedItems.append(contentsOf: newItems)
     }
     
     private func resetAllFilters() {

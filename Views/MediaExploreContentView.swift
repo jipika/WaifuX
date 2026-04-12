@@ -65,6 +65,19 @@ struct MediaExploreContentView: View {
                     checkLoadMore: checkLoadMore
                 ))
                 .disabled(isInitialLoading)
+
+                // 底部弹出加载卡片（解决列表高度抖动问题）
+                VStack {
+                    Spacer()
+                    if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                        BottomLoadingCard(isLoading: true)
+                            .padding(.bottom, 60)
+                    } else if !isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
+                        BottomNoMoreCard()
+                            .padding(.bottom, 60)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
         }
         .task { await handleInitialLoad() }
@@ -176,11 +189,6 @@ struct MediaExploreContentView: View {
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else {
                 mediaGrid(contentWidth: gridContentWidth)
-
-                if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
-                    LoadingMoreIndicator()
-                        .padding(.vertical, 20)
-                }
             }
         }
     }

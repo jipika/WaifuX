@@ -101,8 +101,11 @@ class AnimeViewModel: ObservableObject {
             await MainActor.run {
                 self.animeItems = items.map { $0.toAnimeSearchResult() }
                 self.featuredItem = self.animeItems.first
-                self.hasMorePages = items.count < (total ?? 0)
-                print("[AnimeViewModel] Search updated animeItems with \(self.animeItems.count) items")
+                // 修复：基于总数判断是否还有更多页
+                let totalCount = total ?? 0
+                let loadedCount = self.animeItems.count
+                self.hasMorePages = loadedCount < totalCount
+                print("[AnimeViewModel] Search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
             }
 
             print("[AnimeViewModel] Bangumi search found \(items.count) results for '\(searchText)'")
@@ -141,8 +144,11 @@ class AnimeViewModel: ObservableObject {
                 let newItems = items.map { $0.toAnimeSearchResult() }
                 self.animeItems = newItems
                 self.featuredItem = newItems.first
-                self.hasMorePages = newItems.count < (total ?? 0)
-                print("[AnimeViewModel] Updated animeItems with \(newItems.count) items")
+                // 修复：基于总数判断是否还有更多页
+                let totalCount = total ?? 0
+                let loadedCount = newItems.count
+                self.hasMorePages = loadedCount < totalCount
+                print("[AnimeViewModel] Tag search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
             }
         } catch {
             print("[AnimeViewModel] Bangumi tag search failed: \(error)")
@@ -174,10 +180,12 @@ class AnimeViewModel: ObservableObject {
             await MainActor.run {
                 self.animeItems = items.map { $0.toAnimeSearchResult() }
                 self.featuredItem = self.animeItems.first
-                self.hasMorePages = items.count < (total ?? 0)
+                // 修复：基于总数判断是否还有更多页
+                let totalCount = total ?? 0
+                let loadedCount = self.animeItems.count
+                self.hasMorePages = loadedCount < totalCount
+                print("[AnimeViewModel] Bangumi trending loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
             }
-            
-            print("[AnimeViewModel] Bangumi trending loaded \(items.count) items")
         } catch {
             print("[AnimeViewModel] Bangumi trending failed: \(error)")
             errorMessage = error.localizedDescription
@@ -228,10 +236,13 @@ class AnimeViewModel: ObservableObject {
             await MainActor.run {
                 self.animeItems = Array(sortedItems).map { $0.toAnimeSearchResult() }
                 self.featuredItem = self.animeItems.first
-                self.hasMorePages = items.count < (total ?? 0)
+                // 修复：基于总数判断是否还有更多页
+                let totalCount = total ?? 0
+                let loadedCount = self.animeItems.count
+                self.hasMorePages = loadedCount < totalCount
             }
             
-            print("[AnimeViewModel] Top rated loaded \(sortedItems.count) items")
+            print("[AnimeViewModel] Top rated loaded \(sortedItems.count) items, hasMorePages: \(self.hasMorePages)")
         } catch {
             print("[AnimeViewModel] Top rated fetch failed: \(error)")
             errorMessage = error.localizedDescription
@@ -262,10 +273,13 @@ class AnimeViewModel: ObservableObject {
             await MainActor.run {
                 self.animeItems = items.map { $0.toAnimeSearchResult() }
                 self.featuredItem = self.animeItems.first
-                self.hasMorePages = items.count < (total ?? 0)
+                // 修复：基于总数判断是否还有更多页
+                let totalCount = total ?? 0
+                let loadedCount = self.animeItems.count
+                self.hasMorePages = loadedCount < totalCount
             }
             
-            print("[AnimeViewModel] New arrivals loaded \(items.count) items")
+            print("[AnimeViewModel] New arrivals loaded \(items.count) items, hasMorePages: \(self.hasMorePages)")
         } catch {
             print("[AnimeViewModel] New arrivals fetch failed: \(error)")
             errorMessage = error.localizedDescription
@@ -277,12 +291,19 @@ class AnimeViewModel: ObservableObject {
     private var isLoadMoreInProgress = false
 
     func loadMore() async {
-        // 防止重复调用
-        guard !isLoading, !isLoadingMore, hasMorePages, !isLoadMoreInProgress else { return }
+        // 防止重复调用 - 多重检查避免竞态条件
+        guard !isLoading, !isLoadingMore, hasMorePages, !isLoadMoreInProgress else { 
+            print("[AnimeViewModel] Load more skipped: isLoading=\(isLoading), isLoadingMore=\(isLoadingMore), hasMorePages=\(hasMorePages), isLoadMoreInProgress=\(isLoadMoreInProgress)")
+            return 
+        }
 
+        // 立即设置状态，避免在 Task 创建前被重复调用
         isLoadMoreInProgress = true
+        isLoadingMore = true
+        
         defer { 
             isLoadMoreInProgress = false
+            isLoadingMore = false
             // 加载完成后触发预加载
             if hasMorePages {
                 triggerPreloadNextPage()
@@ -291,12 +312,10 @@ class AnimeViewModel: ObservableObject {
 
         loadMoreTask?.cancel()
 
+        let nextPage = currentPage + 1
+        print("[AnimeViewModel] Loading page \(nextPage), currentPage=\(currentPage)")
+        
         loadMoreTask = Task {
-            isLoadingMore = true
-            defer { isLoadingMore = false }
-
-            let nextPage = currentPage + 1
-            
             do {
                 let items: [BangumiSubject]
                 let total: Int?
@@ -310,25 +329,44 @@ class AnimeViewModel: ObservableObject {
                     isPreloaded = false
                 } else {
                     // 根据当前查询模式调用不同 API
-                    let offset = currentPage * pageSize
+                    // 使用 (nextPage - 1) * pageSize 计算 offset，确保分页正确
+                    // page 1: offset 0, page 2: offset 10, page 3: offset 20...
+                    let offset = (nextPage - 1) * pageSize
+                    print("[AnimeViewModel] Fetching page \(nextPage) with offset \(offset)")
                     (items, total) = try await fetchPageData(offset: offset)
                 }
                 
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else { 
+                    print("[AnimeViewModel] Load more cancelled")
+                    return 
+                }
 
+                let newResults = items.map { $0.toAnimeSearchResult() }
+                
                 await MainActor.run {
-                    let newResults = items.map { $0.toAnimeSearchResult() }
                     guard !newResults.isEmpty else {
+                        print("[AnimeViewModel] No more data, setting hasMorePages=false")
                         self.hasMorePages = false
                         return
                     }
-                    self.animeItems.append(contentsOf: newResults)
                     
-                    // 移除数据上限，避免滚动时出现空白
-                    // 内存优化通过降低 Kingfisher 缓存实现
+                    self.animeItems.append(contentsOf: newResults)
                     self.currentPage = nextPage
-                    self.hasMorePages = self.animeItems.count < (total ?? 0)
-                    print("[AnimeViewModel] Loaded more (mode: \(currentQueryMode)), total: \(self.animeItems.count)")
+                    
+                    // 修复：只有当返回的数据为空，或者已加载总数 >= total 时，才认为没有更多数据
+                    // 不要依赖 receivedCount >= pageSize，因为 API 可能在非最后一页返回较少数据
+                    let totalCount = total ?? 0
+                    let loadedCount = self.animeItems.count
+                    
+                    if totalCount > 0 {
+                        // 如果知道总数，基于总数判断
+                        self.hasMorePages = loadedCount < totalCount
+                    } else {
+                        // 如果不知道总数，只有当返回空数据时才认为没有更多
+                        self.hasMorePages = !newResults.isEmpty
+                    }
+                    
+                    print("[AnimeViewModel] Loaded page \(nextPage): received \(newResults.count) items, total loaded: \(loadedCount), total expected: \(totalCount), hasMorePages: \(self.hasMorePages)")
                 }
             } catch {
                 print("[AnimeViewModel] Load more failed: \(error)")
@@ -368,7 +406,8 @@ class AnimeViewModel: ObservableObject {
         preloadTask?.cancel()
 
         let nextPage = currentPage + 1
-        let offset = nextPage * pageSize
+        // 使用与 loadMore 相同的 offset 计算逻辑: (nextPage - 1) * pageSize
+        let offset = (nextPage - 1) * pageSize
         let mode = currentQueryMode
         
         preloadTask = Task(priority: .low) {
