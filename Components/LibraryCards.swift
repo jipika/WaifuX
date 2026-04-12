@@ -255,10 +255,6 @@ public struct WallpaperEditCard: View {
             metaTag(text: wallpaper.categoryDisplayName)
             metaTag(text: wallpaper.purityDisplayName)
 
-            if let primaryColorHex = wallpaper.primaryColorHex {
-                colorMetaTag(hex: primaryColorHex)
-            }
-
             Spacer(minLength: 0)
 
             metaTag(text: wallpaper.resolution)
@@ -267,10 +263,6 @@ public struct WallpaperEditCard: View {
 
     private var trailingMetadataRow: some View {
         HStack(spacing: 8) {
-            if let primaryColorHex = wallpaper.primaryColorHex {
-                footerColorTag(hex: primaryColorHex)
-            }
-
             statLabel(
                 systemImage: "heart.fill",
                 value: compactNumber(wallpaper.favorites),
@@ -303,36 +295,6 @@ public struct WallpaperEditCard: View {
                 Capsule(style: .continuous)
                     .fill(Color.black.opacity(0.3))
             )
-    }
-
-    private func colorMetaTag(hex: String) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(Color(hex: hex))
-                .frame(width: 8, height: 8)
-
-            Text(hex.uppercased())
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-        }
-        .foregroundStyle(.white.opacity(0.82))
-        .padding(.horizontal, 8)
-        .frame(height: 20)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.3))
-        )
-    }
-
-    private func footerColorTag(hex: String) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(Color(hex: hex))
-                .frame(width: 10, height: 10)
-
-            Text(hex.uppercased())
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-        }
-        .foregroundStyle(.white.opacity(0.7))
     }
 
     private func statLabel(systemImage: String, value: String, tint: Color) -> some View {
