@@ -39,14 +39,13 @@ struct MyLibraryContentView: View {
                     .allowsHitTesting(true)
             }
 
-            LiquidGlassAtmosphereBackground(
-                primary: LiquidGlassColors.primaryPink,
-                secondary: LiquidGlassColors.secondaryViolet,
-                tertiary: LiquidGlassColors.tertiaryBlue,
-                baseTop: LiquidGlassColors.midBackground,
-                baseBottom: LiquidGlassColors.deepBackground
+            // 聚光灯背景效果
+            SpotlightBackground(
+                lightColor: Color.white.opacity(0.95),
+                backgroundColor: Color.black,
+                intensity: 0.9,
+                spread: 0.4
             )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
 
             // 颗粒材质覆盖层
@@ -70,7 +69,7 @@ struct MyLibraryContentView: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 28)
-                    .padding(.top, 112)
+                    .padding(.top, 80)
                     .padding(.bottom, 48)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .frame(minHeight: geometry.size.height)
@@ -119,26 +118,18 @@ struct MyLibraryContentView: View {
 
     // MARK: - Hero
     private var mediaHero: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(t("my.media.library"))
-                        .font(.system(size: 42, weight: .bold, design: .serif))
-                        .foregroundStyle(.white.opacity(0.96))
+        HStack(alignment: .bottom) {
+            Text(t("my.media.library"))
+                .font(.system(size: 42, weight: .bold, design: .serif))
+                .foregroundStyle(.white.opacity(0.96))
 
-                    Text(subtitleForType)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
+            Spacer()
 
-                Spacer()
-
-                SettingsStatusBadge(
-                    title: "\(totalFavorites) \(t("items.favorites"))",
-                    systemImage: "heart.fill",
-                    color: LiquidGlassColors.primaryPink
-                )
-            }
+            SettingsStatusBadge(
+                title: "\(totalFavorites) \(t("items.favorites"))",
+                systemImage: "heart.fill",
+                color: LiquidGlassColors.primaryPink
+            )
         }
     }
 
@@ -740,19 +731,19 @@ struct AnimeLibraryCard: View {
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域
-                ZStack(alignment: .bottomTrailing) {
+                // 图片区域 - 单独裁剪顶部圆角
+                ZStack {
                     KFImage(URL(string: anime.coverURL ?? ""))
                         .fade(duration: 0.3)
                         .placeholder { _ in
                             SkeletonCard(
                                 width: LibraryCardMetrics.cardWidth,
                                 height: LibraryCardMetrics.thumbnailHeight + 72,
-                                cornerRadius: 22
+                                cornerRadius: 0
                             )
                         }
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .scaledToFill()
                         .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
                         .clipped()
 
@@ -774,20 +765,63 @@ struct AnimeLibraryCard: View {
                             }
                             Spacer()
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
-                    // 选中时的遮罩
+                    // 右上角标签（非编辑模式下显示评分/排名）
+                    if !isEditing {
+                        VStack {
+                            HStack {
+                                Spacer()
+                                
+                                // 显示评分或排名标签
+                                if let rating = anime.rating, let score = Double(rating), score > 0 {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundStyle(.yellow)
+                                        Text(String(format: "%.1f", score))
+                                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.95))
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 24)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(Color.black.opacity(0.45))
+                                    )
+                                    .padding(12)
+                                } else if let rank = anime.rank {
+                                    Text("#\(rank)")
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.95))
+                                        .padding(.horizontal, 10)
+                                        .frame(height: 24)
+                                        .background(
+                                            Capsule(style: .continuous)
+                                                .fill(Color.black.opacity(0.45))
+                                        )
+                                        .padding(12)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    }
+
+                    // 选中时的遮罩 - 确保填满整个图片区域
                     if isEditing && isSelected {
                         Color.black.opacity(0.3)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
 
-                // 信息区域 - 贴合图片，共享背景
+                // 信息区域
                 VStack(alignment: .leading, spacing: 6) {
                     Text(anime.title)
                         .font(.system(size: 14.5, weight: .bold))
                         .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(2)
+                        .lineLimit(1)
 
                     if let tags = anime.tags, !tags.isEmpty {
                         Text(tags.prefix(3).map { $0.name }.joined(separator: ", "))
@@ -799,11 +833,14 @@ struct AnimeLibraryCard: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-                .background(Color(hex: "1A1D24").opacity(0.6))
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(hex: "1A1D24").opacity(0.6))
+            )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))

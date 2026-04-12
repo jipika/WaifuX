@@ -5,6 +5,7 @@ import Kingfisher
 struct ContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
+    @StateObject private var animeViewModel = AnimeViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @StateObject private var localization = LocalizationService.shared
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
@@ -54,6 +55,7 @@ struct ContentView: View {
 
                 // Anime Explore Tab
                 AnimeExploreView(
+                    viewModel: animeViewModel,
                     selectedAnime: $selectedAnime,
                     isVisible: selectedTab == .animeExplore
                 )

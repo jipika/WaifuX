@@ -5,7 +5,7 @@ import Kingfisher
 
 public enum LibraryCardMetrics {
     public static let cardWidth: CGFloat = 260
-    public static let thumbnailHeight: CGFloat = 148
+    public static let thumbnailHeight: CGFloat = 180
 }
 
 // MARK: - Media Video Card
@@ -82,29 +82,16 @@ public struct MediaVideoCard: View {
                     // 选中时的遮罩
                     if isEditing && isSelected {
                         Color.black.opacity(0.3)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                // 只给图片区域顶部圆角
-                .clipShape(
-                    .rect(
-                        topLeadingRadius: 22,
-                        bottomLeadingRadius: 0,
-                        bottomTrailingRadius: 0,
-                        topTrailingRadius: 22
-                    )
-                )
 
-                // 中间连接背景（消除图片和信息区域之间的间隙）
-                Rectangle()
-                    .fill(Color(hex: "1A1D24").opacity(0.6))
-                    .frame(width: LibraryCardMetrics.cardWidth, height: 1)
-
-                // 信息区域 - 单独背景
+                // 信息区域
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.title)
                         .font(.system(size: 14.5, weight: .bold))
                         .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(2)
+                        .lineLimit(1)
 
                     Text(item.subtitle)
                         .font(.system(size: 12, weight: .medium))
@@ -124,25 +111,18 @@ public struct MediaVideoCard: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(Color(hex: "1A1D24").opacity(0.6))
-                        .clipShape(
-                            .rect(
-                                topLeadingRadius: 0,
-                                bottomLeadingRadius: 22,
-                                bottomTrailingRadius: 22,
-                                topTrailingRadius: 0
-                            )
-                        )
-                )
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(hex: "1A1D24").opacity(0.6))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .animation(.easeOut(duration: 0.16), value: isHovered)
+        .animation(.easeOut(duration: 0.2), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
                 isHovered = hovering
@@ -169,7 +149,7 @@ public struct WallpaperEditCard: View {
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 单独裁剪
+                // 图片区域
                 ZStack {
                     KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
                         .fade(duration: 0.3)
@@ -215,29 +195,17 @@ public struct WallpaperEditCard: View {
                             }
                             Spacer()
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
                     // 选中时的遮罩
                     if isEditing && isSelected {
                         Color.black.opacity(0.3)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                // 只给图片区域顶部圆角
-                .clipShape(
-                    .rect(
-                        topLeadingRadius: 22,
-                        bottomLeadingRadius: 0,
-                        bottomTrailingRadius: 0,
-                        topTrailingRadius: 22
-                    )
-                )
 
-                // 中间连接背景（消除图片和信息区域之间的间隙）
-                Rectangle()
-                    .fill(Color(hex: "1A1D24").opacity(0.6))
-                    .frame(width: LibraryCardMetrics.cardWidth, height: 1)
-
-                // 信息区域 - 单独背景
+                // 信息区域
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
                         Text(wallpaper.uploader?.username ?? wallpaper.categoryDisplayName)
@@ -263,25 +231,18 @@ public struct WallpaperEditCard: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(Color(hex: "1A1D24").opacity(0.6))
-                        .clipShape(
-                            .rect(
-                                topLeadingRadius: 0,
-                                bottomLeadingRadius: 22,
-                                bottomTrailingRadius: 22,
-                                topTrailingRadius: 0
-                            )
-                        )
-                )
             }
             .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
-            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(hex: "1A1D24").opacity(0.6))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .animation(.easeOut(duration: 0.16), value: isHovered)
+        .animation(.easeOut(duration: 0.2), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
                 isHovered = hovering

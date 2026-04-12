@@ -5,38 +5,46 @@ import Kingfisher
 // MARK: - AnimeExploreView - 动漫探索页
 
 struct AnimeExploreView: View {
-    @StateObject private var viewModel = AnimeViewModel()
+    @ObservedObject var viewModel: AnimeViewModel
+    @Binding var selectedAnime: AnimeSearchResult?
+    var isVisible: Bool = true
+
+    init(viewModel: AnimeViewModel, selectedAnime: Binding<AnimeSearchResult?>, isVisible: Bool = true) {
+        self._viewModel = ObservedObject(wrappedValue: viewModel)
+        self._selectedAnime = selectedAnime
+        self.isVisible = isVisible
+    }
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
 
+    // MARK: State
     @State private var selectedCategory: AnimeCategory = .all
     @State private var selectedHotTag: AnimeHotTag?
     @State private var searchText = ""
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var displayedItems: [AnimeSearchResult] = []
-    @State private var visibleCardIDs: Set<String> = []
-
+    @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
     @State private var contentSize: CGFloat = 0
     @State private var containerSize: CGFloat = 0
-
-    @Binding var selectedAnime: AnimeSearchResult?
-    var isVisible: Bool = true
+    @State private var visibleCardIDs: Set<String> = []
+    @State private var isFirstAppearance = true
+    @State private var loadMoreFailed = false
     @State private var searchTask: Task<Void, Never>?
     @State private var isTagSearchActive = false
 
     var body: some View {
         GeometryReader { geometry in
-            let gridContentWidth = max(0, geometry.size.width - 56)
+            let contentWidth = calculateContentWidth(geometry: geometry)
+            let gridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
             ZStack {
                 // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
-                // 使用 lightweightBackdrop 模式减少 GPU 负担
                 if isVisible {
                     ExploreDynamicAtmosphereBackground(
                         tint: exploreAtmosphere.tint,
                         referenceImage: exploreAtmosphere.referenceImage,
-                        lightweightBackdrop: true  // 启用轻量模式，禁用模糊背景图
+                        lightweightBackdrop: true
                     )
                     .ignoresSafeArea()
                 }
@@ -45,12 +53,13 @@ struct AnimeExploreView: View {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
-                        contentSection(gridContentWidth: gridContentWidth)
+                        hotTagsSection
+                        contentSection(config: gridConfig)
                     }
                     .padding(.horizontal, 28)
                     .padding(.top, 80)
                     .padding(.bottom, 48)
-                    .frame(width: geometry.size.width, alignment: .leading)
+                    .frame(width: geometry.size.width, alignment: .center)
                     .background(scrollTrackingOverlay)
                     .background(contentSizeTrackingOverlay)
                     .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -68,13 +77,19 @@ struct AnimeExploreView: View {
                 ))
                 .disabled(isInitialLoading)
 
-                // 底部弹出加载卡片（解决列表高度抖动问题）
+                // 底部弹出加载卡片
                 VStack {
                     Spacer()
-                    if viewModel.isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                    if loadMoreFailed {
+                        BottomLoadingFailedCard {
+                            loadMoreFailed = false
+                            Task { await viewModel.loadMore() }
+                        }
+                        .padding(.bottom, 60)
+                    } else if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
                         BottomLoadingCard(isLoading: true)
                             .padding(.bottom, 60)
-                    } else if !viewModel.isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
+                    } else if !isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
                         BottomNoMoreCard()
                             .padding(.bottom, 60)
                     }
@@ -82,9 +97,15 @@ struct AnimeExploreView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
         }
-        .task { await handleInitialLoad() }
+        .onAppear {
+            if isFirstAppearance {
+                resetAllFilters(reloadData: true)
+                isFirstAppearance = false
+            } else {
+                handleAppear()
+            }
+        }
         .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
-        .onChange(of: viewModel.animeItems.first?.id) { _, _ in handleDataSourceChange() }
         .onChange(of: viewModel.animeItems) { old, new in handleItemsChange(old: old, new: new) }
         .onChange(of: selectedSort) { _, _ in rebuildDisplayedItems() }
     }
@@ -98,7 +119,7 @@ struct AnimeExploreView: View {
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
-    
+
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -106,7 +127,7 @@ struct AnimeExploreView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.58))
 
-                Text("Kazumi")
+                Text("Bangumi")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.horizontal, 8)
@@ -125,7 +146,7 @@ struct AnimeExploreView: View {
                 .lineLimit(1)
         }
     }
-    
+
     private var searchRow: some View {
         HStack(spacing: 12) {
             ExploreSearchBar(
@@ -135,42 +156,34 @@ struct AnimeExploreView: View {
                 onSubmit: performSearch,
                 onClear: clearSearch
             )
-            
+
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
-                resetAllFilters()
+                resetAllFilters(reloadData: true)
             }
         }
     }
 
     private var categorySection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            categoryChips
-            hotTagsSection
-        }
-    }
-    
-    private var categoryChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(AnimeCategory.allCases) { category in
-                    CategoryChip(
-                        icon: category.icon,
-                        title: category.displayName,
-                        accentColors: category.accentColors,
-                        isSelected: selectedCategory == category
-                    ) {
-                        selectCategory(category)
-                    }
+        FlowLayout(spacing: 12) {
+            ForEach(AnimeCategory.allCases) { category in
+                CategoryChip(
+                    icon: category.icon,
+                    title: category.displayName,
+                    accentColors: category.accentColors,
+                    isSelected: selectedCategory == category
+                ) {
+                    selectCategory(category)
                 }
             }
         }
+        .padding(.vertical, 2)
     }
-    
+
     private var hotTagsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(t("anime.hotTags"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(.white.opacity(0.42))
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
@@ -187,22 +200,22 @@ struct AnimeExploreView: View {
         }
     }
 
-    private func contentSection(gridContentWidth: CGFloat) -> some View {
+    private func contentSection(config: AnimeGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             contentHeader
-            
+
             if viewModel.isLoading && displayedItems.isEmpty {
-                AnimeGridSkeleton(contentWidth: gridContentWidth)
+                AnimeGridSkeleton(contentWidth: config.contentWidth)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else if displayedItems.isEmpty {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                animeGrid(contentWidth: gridContentWidth)
+                animeGrid(config: config)
             }
         }
     }
-    
+
     private var contentHeader: some View {
         HStack(alignment: .center) {
             Text("\(displayedItems.count) \(t("content.animes"))")
@@ -219,25 +232,22 @@ struct AnimeExploreView: View {
         }
     }
 
-    // MARK: - Grid
+    // MARK: - Grid & Cards
 
-    private func animeGrid(contentWidth: CGFloat) -> some View {
-        let config = GridConfig(contentWidth: contentWidth, baseRatio: 1.4)
-        
-        return LazyVGrid(
-            columns: config.columns,
-            alignment: .leading,
-            spacing: config.spacing
-        ) {
-            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, anime in
-                AnimePortraitCard(
+    private func animeGrid(config: AnimeGridConfig) -> some View {
+        LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+            ForEach(displayedItems) { anime in
+                let index = displayedItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+                AnimeCard(
                     anime: anime,
-                    cardWidth: config.cardWidth
-                ) {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        selectedAnime = anime
+                    index: index,
+                    cardWidth: config.cardWidth,
+                    onTap: {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            selectedAnime = anime
+                        }
                     }
-                }
+                )
                 .onAppear {
                     visibleCardIDs.insert(anime.id)
                     preloadNearbyImages(for: index, config: config)
@@ -245,17 +255,17 @@ struct AnimeExploreView: View {
             }
         }
     }
-    
-    /// 智能预加载附近图片（前后各 5 张）
-    private func preloadNearbyImages(for index: Int, config: GridConfig) {
+
+    /// 智能预加载附近图片（前后各 10 张）
+    private func preloadNearbyImages(for index: Int, config: AnimeGridConfig) {
         let imageHeight = config.cardWidth * 1.4
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let range = max(0, index - 5)..<min(displayedItems.count, index + 6)
+        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
             .compactMap { displayedItems[$0].coverURL.flatMap { URL(string: $0) } }
-        
-        let prefetcher = ImagePrefetcher(
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
             urls: urls,
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
@@ -270,25 +280,25 @@ struct AnimeExploreView: View {
                 ErrorStateView(
                     type: .network,
                     message: errorMessage,
-                    retryAction: { Task { await viewModel.loadInitialData() } }
+                    retryAction: reloadData
                 )
             } else {
                 ErrorStateView(
                     type: .empty,
                     title: t("anime.noData"),
                     message: t("anime.tryDifferentSource"),
-                    retryAction: { Task { await viewModel.loadInitialData() } }
+                    retryAction: reloadData
                 )
             }
         }
-        .frame(height: 220)
+        .frame(height: 240)
         .liquidGlassSurface(
             .prominent,
-            tint: exploreAtmosphere.tint.primary.opacity(0.12),
-            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+            tint: exploreAtmosphere.tint.primary.opacity(0.14),
+            in: RoundedRectangle(cornerRadius: 30, style: .continuous)
         )
     }
-    
+
     private var scrollTrackingOverlay: some View {
         GeometryReader { scrollProxy in
             Color.clear.preference(
@@ -297,7 +307,7 @@ struct AnimeExploreView: View {
             )
         }
     }
-    
+
     private var contentSizeTrackingOverlay: some View {
         GeometryReader { contentProxy in
             Color.clear.preference(
@@ -309,37 +319,39 @@ struct AnimeExploreView: View {
 
     // MARK: - Actions
 
-    private func handleInitialLoad() async {
+    private func handleAppear() {
         AppLogger.info(.anime, "动漫探索页 onAppear",
             metadata: ["已有数据": !viewModel.animeItems.isEmpty, "当前数量": viewModel.animeItems.count])
 
-        // 重置所有过滤条件，确保初始状态正确
-        searchText = ""
-        selectedHotTag = nil
-        selectedCategory = .all
-        displayedItems = []
-        visibleCardIDs.removeAll()
-        selectedSort = .newest
-        viewModel.searchText = ""
-
-        isInitialLoading = true
-        let start = Date()
-        await viewModel.loadInitialData()
-        AppLogger.info(.anime, "初始加载完成",
-            metadata: [
-                "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
-                "结果数": viewModel.animeItems.count,
-                "错误": viewModel.errorMessage ?? "无"
-            ])
-        syncAtmosphere()
-        isInitialLoading = false
+        if viewModel.animeItems.isEmpty {
+            isInitialLoading = true
+            Task {
+                let start = Date()
+                await viewModel.loadInitialData()
+                await MainActor.run {
+                    visibleCardIDs.removeAll()
+                    rebuildDisplayedItems()
+                    syncAtmosphere()
+                    isInitialLoading = false
+                }
+                AppLogger.info(.anime, "首次加载完成",
+                    metadata: [
+                        "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                        "结果数": viewModel.animeItems.count,
+                        "错误": viewModel.errorMessage ?? "无"
+                    ])
+            }
+        } else {
+            visibleCardIDs.removeAll()
+            rebuildDisplayedItems()
+            syncAtmosphere()
+        }
     }
 
     private func selectCategory(_ category: AnimeCategory) {
-        // 防止重复选择
         guard selectedCategory != category else { return }
 
-        withAnimation(AppFluidMotion.interactiveSpring) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             selectedCategory = category
             selectedHotTag = nil
             isTagSearchActive = true
@@ -347,7 +359,6 @@ struct AnimeExploreView: View {
             searchText = ""
             viewModel.searchText = ""
         }
-        // 不要先清空列表，保持显示旧数据直到新数据加载完成
         Task {
             await viewModel.fetchByCategory(category)
             await MainActor.run {
@@ -355,9 +366,9 @@ struct AnimeExploreView: View {
             }
         }
     }
-    
+
     private func selectHotTag(_ tag: AnimeHotTag) {
-        withAnimation(AppFluidMotion.interactiveSpring) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             let newTag = selectedHotTag == tag ? nil : tag
             selectedHotTag = newTag
             selectedCategory = .all
@@ -380,90 +391,73 @@ struct AnimeExploreView: View {
 
     private func handleSearchChange(_ newValue: String) {
         viewModel.searchText = newValue
-        
+
         if isTagSearchActive {
             isTagSearchActive = false
             return
         }
-        
+
         searchTask?.cancel()
-        
+
         if newValue.isEmpty {
             Task { await viewModel.fetchPopular() }
             return
         }
-        
+
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             await viewModel.search()
         }
     }
-    
+
     private func performSearch() {
         searchTask?.cancel()
         Task { await viewModel.search() }
     }
-    
+
     private func clearSearch() {
         searchText = ""
         selectedHotTag = nil
         Task { await viewModel.search() }
     }
-    
-    private func handleDataSourceChange() {
-        syncAtmosphere()
-        visibleCardIDs.removeAll()
-    }
-
-    private func animateCardAppearance(id: String, index: Int) {
-        // 直接插入，不使用动画
-        visibleCardIDs.insert(id)
-    }
 
     private func triggerLoadMore() {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
-              !viewModel.isLoadingMore else { return }
+              !isLoadingMore else { return }
 
         AppLogger.info(.anime, "加载更多", metadata: ["当前数量": displayedItems.count])
         Task {
+            isLoadingMore = true
+            loadMoreFailed = false
+            defer { isLoadingMore = false }
             await viewModel.loadMore()
-            await MainActor.run {
-                rebuildDisplayedItems()
+            if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                loadMoreFailed = true
             }
         }
     }
 
     private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
         guard viewModel.hasMorePages else { return }
-        guard !viewModel.isLoading, !viewModel.isLoadingMore else { return }
+        guard !viewModel.isLoading, !isLoadingMore else { return }
 
-        // 计算距离底部距离
         let distanceToBottom = contentHeight - (offset + containerHeight)
 
-        // 双阈值策略：
-        // 1. 提前加载（距离底部 < 800pt）- 正常预加载
-        // 2. 触底保底（距离底部 < 100pt）- 保底机制
         let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
         let shouldLoadBottom = distanceToBottom < 100
 
         guard shouldLoadEarly || shouldLoadBottom else { return }
 
-        // 使用 triggerLoadMore 统一处理，避免重复触发
-        triggerLoadMore()
-    }
-
-    private func rebuildDisplayedItems() {
-        let source = viewModel.animeItems
-
-        guard selectedSort != .newest else {
-            displayedItems = source
-            return
-        }
-
-        displayedItems = source.sorted { lhs, rhs in
-            selectedSort.sortComparator(lhs, rhs, ascending: false)
+        Task {
+            isLoadingMore = true
+            loadMoreFailed = false
+            defer { isLoadingMore = false }
+            await viewModel.loadMore()
+            if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                loadMoreFailed = true
+            }
         }
     }
 
@@ -483,19 +477,47 @@ struct AnimeExploreView: View {
         guard !newItems.isEmpty else { return }
         displayedItems.append(contentsOf: newItems)
     }
-    
-    private func resetAllFilters() {
+
+    private func rebuildDisplayedItems() {
+        let source = viewModel.animeItems
+
+        guard selectedSort != .newest else {
+            displayedItems = source
+            syncAtmosphere()
+            return
+        }
+
+        displayedItems = source.sorted { lhs, rhs in
+            selectedSort.sortComparator(lhs, rhs, ascending: false)
+        }
+        syncAtmosphere()
+    }
+
+    private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
         selectedHotTag = nil
         selectedCategory = .all
+        selectedSort = .newest
         displayedItems = []
         visibleCardIDs.removeAll()
-        selectedSort = .newest
+        loadMoreFailed = false
+        viewModel.searchText = ""
+        viewModel.errorMessage = nil
 
-        Task {
-            await viewModel.loadInitialData()
-            await MainActor.run { rebuildDisplayedItems() }
+        if reloadData {
+            viewModel.animeItems.removeAll()
+            Task { await viewModel.loadInitialData() }
         }
+    }
+
+    private func reloadData() {
+        AppLogger.info(.anime, "重新搜索：用户操作触发")
+        displayedItems = []
+        visibleCardIDs.removeAll()
+        loadMoreFailed = false
+        viewModel.errorMessage = nil
+        viewModel.animeItems.removeAll()
+        Task { await viewModel.loadInitialData() }
     }
 
     private func syncAtmosphere() {
@@ -503,26 +525,29 @@ struct AnimeExploreView: View {
             exploreAtmosphere.updateFirstAnime(coverURL: coverURL)
         }
     }
+
+    private func calculateContentWidth(geometry: GeometryProxy) -> CGFloat {
+        max(0, geometry.size.width - 56)
+    }
 }
 
 // MARK: - Grid Configuration
 
-private struct GridConfig {
+private struct AnimeGridConfig {
     let columnCount: Int
     let spacing: CGFloat
     let cardWidth: CGFloat
-    let columns: [GridItem]
-    
-    init(contentWidth: CGFloat, baseRatio: CGFloat, spacing: CGFloat = 20) {
-        self.spacing = spacing
+    let contentWidth: CGFloat
+    let gridItems: [GridItem]
+
+    init(contentWidth: CGFloat) {
+        self.contentWidth = contentWidth
         self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
-        let totalSpacing = CGFloat(columnCount - 1) * spacing
-        self.cardWidth = (contentWidth - totalSpacing) / CGFloat(columnCount)
-        // 移除 cardHeight 计算，让卡片自动计算高度
-        self.columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        self.spacing = 16
+        let totalSpacing = spacing * CGFloat(columnCount - 1)
+        self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+        self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
-    
-    // 移除强制高度计算方法
 }
 
 // MARK: - Sort Options
@@ -541,7 +566,7 @@ private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
         case .popular: return t("anime.sortPopular")
         }
     }
-    
+
     var menuTitle: String {
         switch self {
         case .newest: return t("anime.sortByNewest")
@@ -549,11 +574,11 @@ private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
         case .popular: return t("anime.sortByPopular")
         }
     }
-    
+
     func sortComparator(_ lhs: AnimeSearchResult, _ rhs: AnimeSearchResult, ascending: Bool) -> Bool {
         switch self {
         case .newest:
-            return false // 保持原序
+            return false
         case .title:
             let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
             return ascending ? cmp == .orderedDescending : cmp == .orderedAscending
@@ -568,26 +593,134 @@ private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
     }
 }
 
+// MARK: - AnimeCard (内嵌私有卡片，参考 WallpaperCard 架构)
+
+private struct AnimeCard: View {
+    let anime: AnimeSearchResult
+    let index: Int
+    let cardWidth: CGFloat
+    let onTap: () -> Void
+
+    @State private var isHovered = false
+
+    // 竖图比例 10:14 (1:1.4)
+    private var imageHeight: CGFloat {
+        cardWidth * 1.4
+    }
+
+    // 信息栏高度
+    private var textAreaHeight: CGFloat { 44 }
+
+    // 降采样目标尺寸（Retina 2x）
+    private var targetImageSize: CGSize {
+        CGSize(width: cardWidth * 2, height: imageHeight * 2)
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Kingfisher 高性能图片加载
+                KFImage(anime.coverURL.flatMap { URL(string: $0) })
+                    .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                    .cacheMemoryOnly(false)
+                    .placeholder { _ in
+                        placeholderGradient
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                .frame(width: cardWidth, height: imageHeight)
+                .clipShape(UnevenRoundedRectangle(
+                    topLeadingRadius: 14, bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0, topTrailingRadius: 14,
+                    style: .continuous
+                ))
+
+                // 信息栏 - 参考 WallpaperCard 的 HStack 布局
+                HStack(spacing: 8) {
+                    Text(anime.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    // 评分标签
+                    if let rating = anime.rating, !rating.isEmpty {
+                        HStack(spacing: 2) {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.yellow)
+                            Text(rating)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+
+                    if let episode = anime.latestEpisode, !episode.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 9))
+                            Text(episode)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
+                .background(Color.black.opacity(0.46))
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
+        }
+    }
+
+    var placeholderGradient: some View {
+        LinearGradient(
+            colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
+            startPoint: .topLeading, endPoint: .bottomTrailing
+        )
+        .overlay {
+            Image(systemName: "tv")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(.white.opacity(0.18))
+        }
+    }
+}
+
 // MARK: - Skeleton
 
 private struct AnimeGridSkeleton: View {
     var contentWidth: CGFloat = 800
 
-    private var columns: [GridItem] {
+    private var gridItems: [GridItem] {
         let count = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
-        return Array(repeating: GridItem(.flexible(), spacing: 20), count: count)
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: count)
     }
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 20) {
+        LazyVGrid(columns: gridItems, spacing: 16) {
             ForEach(0..<6, id: \.self) { _ in
-                AnimePortraitCardSkeleton()
+                AnimeCardSkeleton()
             }
         }
     }
 }
 
-private struct AnimePortraitCardSkeleton: View {
+private struct AnimeCardSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             LinearGradient(
@@ -596,30 +729,32 @@ private struct AnimePortraitCardSkeleton: View {
                 endPoint: .bottomTrailing
             )
             .aspectRatio(10/14, contentMode: .fit)
-            .clipped()
+            .clipShape(UnevenRoundedRectangle(
+                topLeadingRadius: 14, bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0, topTrailingRadius: 14,
+                style: .continuous
+            ))
 
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.white.opacity(0.08))
-                    .frame(width: 100, height: 13)
-
+                    .frame(width: 80, height: 13)
+                Spacer()
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.white.opacity(0.05))
-                    .frame(width: 50, height: 10)
+                    .frame(width: 40, height: 10)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(height: 44)
             .background(Color.black.opacity(0.46))
         }
-        .frame(maxWidth: .infinity)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.clear)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
         )
-        .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .shimmer()
     }
 }

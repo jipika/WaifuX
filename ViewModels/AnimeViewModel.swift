@@ -37,7 +37,7 @@ class AnimeViewModel: ObservableObject {
 
     // MARK: - 私有状态
     private var currentPage = 1
-    private let pageSize = 10
+    private let pageSize = 20
     private var loadMoreTask: Task<Void, Never>?
     
     // MARK: - 预加载支持
