@@ -262,6 +262,12 @@ class WallpaperViewModel: ObservableObject {
             await loadAPIKeyIfNeeded()
         }
     }
+    
+    /// 供外部（如 SettingsViewModel）调用以实时更新 API Key 缓存
+    static func updateSharedAPIKeyCache(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self._launchCachedEffectiveKey = trimmed.isEmpty ? nil : trimmed
+    }
 
     // MARK: - 收藏相关
     var favorites: [Wallpaper] {

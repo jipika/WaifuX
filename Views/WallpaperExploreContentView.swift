@@ -115,6 +115,8 @@ struct WallpaperExploreContentView: View {
         .onChange(of: category) { _, _ in handleCategoryChange() }
         .onChange(of: fourKCategory) { _, _ in handle4KCategoryChange() }
         .onChange(of: hotTag) { _, _ in handleHotTagChange() }
+        .onChange(of: viewModel.sortingOption) { _, _ in handleSortingChange() }
+        .onChange(of: fourKSorting) { _, _ in handle4KSortingChange() }
         .onChange(of: viewModel.wallpapers) { old, new in handleWallpapersChange(old: old, new: new) }
         .alert(t("apiKeyRequired"), isPresented: $showAPIKeyAlert) {
             Button(t("ok"), role: .cancel) {}
@@ -562,6 +564,17 @@ struct WallpaperExploreContentView: View {
             viewModel.atleastResolution = nil
         }
         displayedItems = []
+        reloadData()
+    }
+
+    private func handleSortingChange() {
+        AppLogger.info(.wallpaper, "排序方式变化", metadata: ["排序": viewModel.sortingOption.rawValue])
+        reloadData()
+    }
+
+    private func handle4KSortingChange() {
+        AppLogger.info(.wallpaper, "4K 排序方式变化", metadata: ["排序": fourKSorting.rawValue])
+        viewModel.selected4KSorting = fourKSorting
         reloadData()
     }
 

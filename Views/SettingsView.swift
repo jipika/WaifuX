@@ -321,7 +321,7 @@ private struct GeneralSettingsTab: View {
 
                     Spacer()
 
-                    SecureField(t("api.key.placeholder"), text: apiKeyBinding)
+                    TextField(t("api.key.placeholder"), text: apiKeyBinding)
                         .font(.system(size: 12, weight: .regular))
                         .textFieldStyle(.plain)
                         .frame(width: 200)

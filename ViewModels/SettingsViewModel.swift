@@ -66,8 +66,12 @@ class SettingsViewModel: ObservableObject {
         }
         set {
             objectWillChange.send()
-            Self._cachedAPIKey = newValue.isEmpty ? nil : newValue
-            UserDefaults.standard.set(newValue, forKey: apiKeyUserDefaultsKey)
+            let trimmedValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            Self._cachedAPIKey = trimmedValue.isEmpty ? nil : trimmedValue
+            UserDefaults.standard.set(trimmedValue, forKey: apiKeyUserDefaultsKey)
+            
+            // 同步更新 WallpaperViewModel 的 API Key 缓存，确保实时生效
+            WallpaperViewModel.updateSharedAPIKeyCache(trimmedValue)
         }
     }
 

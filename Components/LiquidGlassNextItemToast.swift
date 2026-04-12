@@ -328,7 +328,7 @@ public struct LiquidGlassNextItemToast: View {
         stopViewTimer()
         Task { @MainActor in
             viewTimer = Timer.scheduledTimer(withTimeInterval: appearDelay, repeats: false) { _ in
-                Task { @MainActor in
+                 Task { @MainActor in
                     isVisible = true
                     performIOSShowAnimation()
                 }
