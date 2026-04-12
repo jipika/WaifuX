@@ -59,8 +59,17 @@ public class NextItemDataSource: ObservableObject {
     }
 
     public func setItems(_ newItems: [NextItemPreviewable], currentIndex: Int) {
-        self.items = newItems
-        self.currentIndex = max(0, min(currentIndex, newItems.count - 1))
+        let newIndex = max(0, min(currentIndex, newItems.count - 1))
+        // 只在真正有变化时才更新，避免不必要的通知
+        let itemsChanged = newItems.map(\.previewId) != items.map(\.previewId)
+        let indexChanged = newIndex != self.currentIndex
+        
+        if itemsChanged {
+            self.items = newItems
+        }
+        if indexChanged {
+            self.currentIndex = newIndex
+        }
     }
 
     public func moveToNext() {
@@ -85,6 +94,8 @@ public struct LiquidGlassNextItemToast: View {
     let onTap: () -> Void
     let onScrollUp: () -> Void
     let onScrollDown: () -> Void
+    /// 预加载回调 - 在 toast 显示时调用，传入下一张的缩略图 URL
+    let onPreload: ((URL?) -> Void)?
 
     @State private var isVisible = false
     @State private var viewTimer: Timer?
@@ -114,12 +125,14 @@ public struct LiquidGlassNextItemToast: View {
         nextItem: NextItemPreviewable?,
         onTap: @escaping () -> Void,
         onScrollUp: @escaping () -> Void = {},
-        onScrollDown: @escaping () -> Void = {}
+        onScrollDown: @escaping () -> Void = {},
+        onPreload: ((URL?) -> Void)? = nil
     ) {
         self.nextItem = nextItem
         self.onTap = onTap
         self.onScrollUp = onScrollUp
         self.onScrollDown = onScrollDown
+        self.onPreload = onPreload
     }
 
     public var body: some View {
@@ -141,10 +154,18 @@ public struct LiquidGlassNextItemToast: View {
             stopViewTimer()
         }
         .onChange(of: nextItem?.previewId) { oldValue, newValue in
-            // 只在真正切换到下一张/上一张时重置（previewId 变化）
-            // 而不是在点击当前弹窗时重置
-            if oldValue != newValue {
+            // 情况 1：首次设置或数据就绪（nil -> 有值）
+            // 需要重置计时器，确保3秒后正确显示
+            if oldValue == nil && newValue != nil {
                 resetForNewItem()
+            }
+            // 情况 2：真正的切换（有值A -> 有值B）
+            else if let old = oldValue, let new = newValue, old != new {
+                resetForNewItem()
+            }
+            // 情况 3：没有下一张了（有值 -> nil）
+            else if oldValue != nil && newValue == nil {
+                hideOnTap()
             }
         }
     }
@@ -329,7 +350,11 @@ public struct LiquidGlassNextItemToast: View {
         Task { @MainActor in
             viewTimer = Timer.scheduledTimer(withTimeInterval: appearDelay, repeats: false) { _ in
                  Task { @MainActor in
+                    // 如果已经显示，则不再重复显示
+                    guard !isVisible else { return }
                     isVisible = true
+                    // 触发预加载
+                    onPreload?(nextItem?.previewThumbnailURL)
                     performIOSShowAnimation()
                 }
             }
@@ -346,17 +371,14 @@ public struct LiquidGlassNextItemToast: View {
         // 停止当前计时器
         stopViewTimer()
         
-        // 如果正在显示，先隐藏
+        // 如果正在显示，先隐藏（不带动画，避免闪烁）
         if isVisible {
-            dismissWithAnimation {
-                isVisible = false
-                // 隐藏后开始新的计时
-                startViewTimer()
-            }
-        } else {
-            // 直接开始新的计时
-            startViewTimer()
+            isVisible = false
+            contentOpacity = 0
         }
+        
+        // 直接开始新的计时
+        startViewTimer()
     }
     
     /// 用户点击弹窗时隐藏，不重新开始计时

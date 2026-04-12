@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - 壁纸详情页 - macOS 26 Liquid Glass 沉浸式全屏风格
 struct WallpaperDetailSheet: View {
@@ -159,6 +160,13 @@ struct WallpaperDetailSheet: View {
                             },
                             onScrollDown: {
                                 navigateToPreviousWallpaper()
+                            },
+                            onPreload: { _ in
+                                // 预加载下一张壁纸的主图（完整分辨率）
+                                if let nextWallpaper = nextItemDataSource.nextItem as? Wallpaper,
+                                   let imageURL = nextWallpaper.fullImageURL ?? nextWallpaper.thumbURL {
+                                    ImagePrefetcher(urls: [imageURL]).start()
+                                }
                             }
                         )
                         .padding(.trailing, 28)
@@ -220,28 +228,20 @@ struct WallpaperDetailSheet: View {
         if isPortraitWallpaper {
             portraitWallpaperBackground(width: width, height: viewH)
         } else {
-            AsyncImage(url: heroImageURL) { phase in
-                switch phase {
-                case .empty:
-                    Color.clear.frame(width: width, height: viewH)
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: width, height: viewH)
-                        .clipped()
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                isImageLoaded = true
-                            }
-                        }
-                case .failure:
-                    Color.clear.frame(width: width, height: viewH)
-                @unknown default:
-                    Color.clear.frame(width: width, height: viewH)
+            // 使用 Kingfisher 加载，有可靠的回调
+            KFImage(heroImageURL)
+                .fade(duration: 0.3)
+                .onSuccess { _ in
+                    isImageLoaded = true
                 }
-            }
-            .frame(width: width, height: viewH)
+                .onFailure { _ in
+                    isImageLoaded = true
+                }
+                .placeholder { _ in Color.clear }
+                .resizable()
+                .scaledToFill()
+                .frame(width: width, height: viewH)
+                .clipped()
         }
     }
 
@@ -250,49 +250,31 @@ struct WallpaperDetailSheet: View {
             Color.black
 
             // 左右延伸层：基于居中缩放图做横向拉伸和高斯模糊，仅在两侧显现
-            AsyncImage(url: heroImageURL) { phase in
-                switch phase {
-                case .empty:
-                    Color.clear
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: width, height: height)
-                        .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                        .blur(radius: 84)
-                        .saturation(1.12)
-                        .brightness(-0.08)
-                case .failure:
-                    Color.clear
-                @unknown default:
-                    Color.clear
-                }
-            }
-            .mask(portraitWallpaperSideMask)
+            KFImage(heroImageURL)
+                .placeholder { _ in Color.clear }
+                .resizable()
+                .scaledToFit()
+                .frame(width: width, height: height)
+                .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                .blur(radius: 84)
+                .saturation(1.12)
+                .brightness(-0.08)
+                .mask(portraitWallpaperSideMask)
 
-            // 主图：完整缩放展示，避免竖图被过度裁切
-            AsyncImage(url: heroImageURL) { phase in
-                switch phase {
-                case .empty:
-                    Color.clear.frame(width: width, height: height)
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: width, height: height)
-                        .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                isImageLoaded = true
-                            }
-                        }
-                case .failure:
-                    Color.clear.frame(width: width, height: height)
-                @unknown default:
-                    Color.clear.frame(width: width, height: height)
+            // 主图：完整缩放展示，避免竖图被过度裁切（控制加载状态）
+            KFImage(heroImageURL)
+                .fade(duration: 0.3)
+                .onSuccess { _ in
+                    isImageLoaded = true
                 }
-            }
+                .onFailure { _ in
+                    isImageLoaded = true
+                }
+                .placeholder { _ in Color.clear }
+                .resizable()
+                .scaledToFit()
+                .frame(width: width, height: height)
+                .shadow(color: Color.black.opacity(0.32), radius: 42, y: 18)
 
             LinearGradient(
                 stops: [

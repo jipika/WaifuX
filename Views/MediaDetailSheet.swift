@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 import AVFoundation
 import AppKit
+import Kingfisher
 
 struct MediaDetailSheet: View {
     let initialItem: MediaItem
@@ -164,8 +165,20 @@ struct MediaDetailSheet: View {
                             onScrollUp: {
                                 navigateToNextMedia()
                             },
-                            onScrollDown: { 
+                            onScrollDown: {
                                 navigateToPreviousMedia()
+                            },
+                            onPreload: { _ in
+                                // 预加载下一张媒体
+                                if let nextMedia = nextItemDataSource.nextItem as? MediaItem {
+                                    // 预加载图片
+                                    let imageURL = nextMedia.posterURL ?? nextMedia.thumbnailURL
+                                    ImagePrefetcher(urls: [imageURL]).start()
+                                    // 预加载视频（如果存在）
+                                    if let videoURL = nextMedia.previewVideoURL {
+                                        VideoPreloader.shared.preload(url: videoURL)
+                                    }
+                                }
                             }
                         )
                         .padding(.trailing, 28)

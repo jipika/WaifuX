@@ -44,6 +44,9 @@ struct FullScreenWallpaperView: View {
     @State private var currentWallpaperIndex: Int = 0
     @State private var isLoadingMore = false
     @State private var preloadTask: Task<Void, Never>?
+    
+    // 用于强制刷新图片加载的状态
+    @State private var imageLoadId = UUID()
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
@@ -152,6 +155,13 @@ struct FullScreenWallpaperView: View {
                     },
                     onScrollDown: {
                         navigateToPreviousWallpaper()
+                    },
+                    onPreload: { _ in
+                        // 预加载下一张壁纸的主图
+                        if let nextWallpaper = nextItemDataSource.nextItem as? Wallpaper,
+                           let imageURL = nextWallpaper.fullImageURL ?? nextWallpaper.thumbURL {
+                            ImagePrefetcher(urls: [imageURL]).start()
+                        }
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -181,6 +191,11 @@ struct FullScreenWallpaperView: View {
             .fade(duration: 0.3)
             .onSuccess { _ in
                 isLoading = false
+                loadError = nil
+            }
+            .onFailure { error in
+                isLoading = false
+                loadError = error
             }
             .placeholder { _ in
                 Color.clear
@@ -188,6 +203,7 @@ struct FullScreenWallpaperView: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .id(imageLoadId)  // 强制在壁纸改变时重建
     }
 
     // MARK: - 顶部工具栏
@@ -482,14 +498,15 @@ struct FullScreenWallpaperView: View {
     }
 
     private func reloadWallpaper(_ newWallpaper: Wallpaper) {
+        // 先重置状态
+        isLoading = true
+        loadError = nil
+        imageScale = 1.0
+        imageLoadId = UUID()  // 强制刷新图片视图
+        
         withAnimation(.easeInOut(duration: 0.3)) {
             // 更新当前壁纸
             currentWallpaper = newWallpaper
-
-            // 重置状态
-            isLoading = true
-            loadError = nil
-            imageScale = 1.0
         }
     }
 
