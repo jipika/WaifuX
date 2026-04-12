@@ -56,7 +56,7 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">Video Player - Episode Select</p></td>
-    <td width="50%"></td>
+    <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">Wallpaper List - Scroll/Paging Mode</p></td>
   </tr>
 </table>
 
