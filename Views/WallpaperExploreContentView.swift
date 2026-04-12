@@ -30,7 +30,9 @@ struct WallpaperExploreContentView: View {
     @State private var containerSize: CGFloat = 0
     @State private var visibleCardIDs: Set<String> = []
     @State private var showAPIKeyAlert = false
-    
+    @State private var isFirstAppearance = true
+    @State private var loadMoreFailed = false
+
     private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
@@ -81,7 +83,13 @@ struct WallpaperExploreContentView: View {
                 // 底部弹出加载卡片（解决列表高度抖动问题）
                 VStack {
                     Spacer()
-                    if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                    if loadMoreFailed {
+                        BottomLoadingFailedCard {
+                            loadMoreFailed = false
+                            Task { await viewModel.loadMore() }
+                        }
+                        .padding(.bottom, 60)
+                    } else if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
                         BottomLoadingCard(isLoading: true)
                             .padding(.bottom, 60)
                     } else if !isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
@@ -93,7 +101,14 @@ struct WallpaperExploreContentView: View {
             }
         }
         // 移除 API Key 弹窗提示
-        .onAppear { handleAppear() }
+        .onAppear {
+            if isFirstAppearance {
+                resetAllFilters(reloadData: true)
+                isFirstAppearance = false
+            } else {
+                handleAppear()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
         }
@@ -157,7 +172,7 @@ struct WallpaperExploreContentView: View {
             )
             
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
-                resetAllFilters()
+                resetAllFilters(reloadData: true)
             }
         }
     }
@@ -567,33 +582,43 @@ struct WallpaperExploreContentView: View {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
               !isLoadingMore else { return }
-        
+
         Task {
             isLoadingMore = true
+            loadMoreFailed = false
             defer { isLoadingMore = false }
             await viewModel.loadMore()
+            // 检查是否加载失败（仍有更多页但没有新数据）
+            if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                loadMoreFailed = true
+            }
         }
     }
 
     private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
         guard viewModel.hasMorePages else { return }
         guard !viewModel.isLoading, !isLoadingMore else { return }
-        
+
         // 计算距离底部距离
         let distanceToBottom = contentHeight - (offset + containerHeight)
-        
+
         // 双阈值策略：
         // 1. 提前加载（距离底部 < 800pt）- 正常预加载
         // 2. 触底保底（距离底部 < 100pt）- 保底机制
         let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
         let shouldLoadBottom = distanceToBottom < 100
-        
+
         guard shouldLoadEarly || shouldLoadBottom else { return }
 
         Task {
             isLoadingMore = true
+            loadMoreFailed = false
             defer { isLoadingMore = false }
             await viewModel.loadMore()
+            // 检查是否加载失败（仍有更多页但没有新数据）
+            if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                loadMoreFailed = true
+            }
         }
     }
 
@@ -607,6 +632,8 @@ struct WallpaperExploreContentView: View {
         AppLogger.info(.wallpaper, "重新搜索：用户操作触发")
         displayedItems = []
         visibleCardIDs.removeAll()
+        loadMoreFailed = false
+        viewModel.errorMessage = nil
         // 清空 ViewModel 的数据，确保数据源切换时不显示旧数据
         viewModel.wallpapers.removeAll()
         Task { await viewModel.search() }
@@ -628,7 +655,7 @@ struct WallpaperExploreContentView: View {
         displayedItems.append(contentsOf: newItems)
     }
 
-    private func resetAllFilters() {
+    private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
         viewModel.searchQuery = ""
         category = .all
@@ -644,7 +671,15 @@ struct WallpaperExploreContentView: View {
         viewModel.selectedRatios = []
         viewModel.selectedResolutions = []
         viewModel.atleastResolution = nil
-        reloadData()
+        displayedItems = []
+        visibleCardIDs.removeAll()
+        loadMoreFailed = false
+        viewModel.errorMessage = nil
+
+        if reloadData {
+            viewModel.wallpapers.removeAll()
+            Task { await viewModel.search() }
+        }
     }
 
     private func syncAtmosphere() {

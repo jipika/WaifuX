@@ -804,6 +804,97 @@ struct BottomNoMoreCard: View {
     }
 }
 
+// MARK: - 底部弹出加载失败卡片
+
+/// 底部弹出"加载失败"提示卡片
+/// 显示"API受限，请重试"文案和重试按钮
+struct BottomLoadingFailedCard: View {
+    let onRetry: () -> Void
+
+    @State private var isVisible = false
+    @State private var isRetrying = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.orange)
+
+            Text(t("error.apiLimited.message"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.85))
+
+            Button {
+                performRetry()
+            } label: {
+                HStack(spacing: 4) {
+                    if isRetrying {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.7)
+                    } else {
+                        Text(t("retry"))
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.orange.opacity(0.8))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(isRetrying)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background {
+            glassBackground
+        }
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+        )
+        .opacity(isVisible ? 1 : 0)
+        .animation(.easeOut(duration: 0.25), value: isVisible)
+        .onAppear {
+            if !isVisible {
+                isVisible = true
+            }
+        }
+    }
+
+    private func performRetry() {
+        guard !isRetrying else { return }
+        isRetrying = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onRetry()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                isRetrying = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var glassBackground: some View {
+        if #available(macOS 26.0, *) {
+            Capsule(style: .continuous)
+                .fill(Color.clear)
+                .glassEffect(Glass.regular.tint(Color.white.opacity(0.1)), in: Capsule(style: .continuous))
+        } else {
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.3))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+        }
+    }
+}
+
 // MARK: - 回到顶部按钮
 
 /// 回到顶部按钮

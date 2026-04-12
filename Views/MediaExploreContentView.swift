@@ -21,6 +21,8 @@ struct MediaExploreContentView: View {
     @State private var contentSize: CGFloat = 0
     @State private var containerSize: CGFloat = 0
     @State private var visibleCardIDs: Set<String> = []
+    @State private var isFirstAppearance = true
+    @State private var loadMoreFailed = false
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -69,7 +71,13 @@ struct MediaExploreContentView: View {
                 // 底部弹出加载卡片（解决列表高度抖动问题）
                 VStack {
                     Spacer()
-                    if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                    if loadMoreFailed {
+                        BottomLoadingFailedCard {
+                            loadMoreFailed = false
+                            Task { await viewModel.loadMore() }
+                        }
+                        .padding(.bottom, 60)
+                    } else if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
                         BottomLoadingCard(isLoading: true)
                             .padding(.bottom, 60)
                     } else if !isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
@@ -80,7 +88,14 @@ struct MediaExploreContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
         }
-        .task { await handleInitialLoad() }
+        .onAppear {
+            if isFirstAppearance {
+                resetAllFilters(reloadData: true)
+                isFirstAppearance = false
+            } else {
+                Task { await handleInitialLoad() }
+            }
+        }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
         .onChange(of: selectedSort) { _, _ in handleFilterChange() }
         .onChange(of: searchText) { _, _ in handleFilterChange() }
@@ -137,7 +152,7 @@ struct MediaExploreContentView: View {
             )
             
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
-                resetAllFilters()
+                resetAllFilters(reloadData: true)
             }
         }
         .frame(maxWidth: 520)
@@ -386,38 +401,48 @@ struct MediaExploreContentView: View {
               !viewModel.isLoadingMore else { return }
 
         isLoadingMore = true
+        loadMoreFailed = false
         Task {
             await viewModel.loadMore()
             await MainActor.run {
                 appendNewItems()
+                // 检查是否加载失败
+                if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                    loadMoreFailed = true
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoadingMore = false
                 }
             }
         }
     }
-    
+
     private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
         guard viewModel.hasMorePages else { return }
         guard !viewModel.isLoading, !isLoadingMore, !viewModel.isLoadingMore else { return }
-        
+
         // 计算距离底部距离
         let distanceToBottom = contentHeight - (offset + containerHeight)
-        
+
         // 双阈值策略：
         // 1. 提前加载（距离底部 < 800pt）- 正常预加载
         // 2. 触底保底（距离底部 < 100pt）- 保底机制
         let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
         let shouldLoadBottom = distanceToBottom < 100
-        
+
         guard shouldLoadEarly || shouldLoadBottom else { return }
 
         loadMoreTask?.cancel()
         isLoadingMore = true
+        loadMoreFailed = false
         Task {
             await viewModel.loadMore()
             await MainActor.run {
                 appendNewItems()
+                // 检查是否加载失败
+                if viewModel.hasMorePages && viewModel.errorMessage != nil {
+                    loadMoreFailed = true
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoadingMore = false
                 }
@@ -446,15 +471,19 @@ struct MediaExploreContentView: View {
         displayedItems.append(contentsOf: newItems)
     }
 
-    private func resetAllFilters() {
+    private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
         selectedHotTag = nil
         selectedCategory = .all
         selectedSort = .newest
         displayedItems = []
         visibleCardIDs.removeAll()
+        loadMoreFailed = false
+        viewModel.errorMessage = nil
 
-        Task { await viewModel.loadHomeFeed() }
+        if reloadData {
+            Task { await viewModel.loadHomeFeed() }
+        }
     }
 
     private func cancelTasks() {

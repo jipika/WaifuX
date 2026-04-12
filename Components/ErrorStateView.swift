@@ -6,8 +6,9 @@ enum ErrorDisplayType {
     case empty
     case server
     case offline
+    case apiLimited
     case unknown
-    
+
     var icon: String {
         switch self {
         case .network:
@@ -18,11 +19,13 @@ enum ErrorDisplayType {
             return "server.rack"
         case .offline:
             return "wifi.slash"
+        case .apiLimited:
+            return "key.slash"
         case .unknown:
             return "exclamationmark.triangle"
         }
     }
-    
+
     var defaultTitle: String {
         switch self {
         case .network:
@@ -33,11 +36,13 @@ enum ErrorDisplayType {
             return t("error.server.title")
         case .offline:
             return t("error.offline.title")
+        case .apiLimited:
+            return t("error.apiLimited.title")
         case .unknown:
             return t("error.unknown.title")
         }
     }
-    
+
     var defaultMessage: String {
         switch self {
         case .network:
@@ -48,6 +53,8 @@ enum ErrorDisplayType {
             return t("error.server.message")
         case .offline:
             return t("error.offline.message")
+        case .apiLimited:
+            return t("error.apiLimited.message")
         case .unknown:
             return t("error.unknown.message")
         }
@@ -131,7 +138,7 @@ struct ErrorStateView: View {
     
     private var iconColor: Color {
         switch type {
-        case .network, .offline:
+        case .network, .offline, .apiLimited:
             return .orange
         case .empty:
             return .secondary
@@ -141,11 +148,11 @@ struct ErrorStateView: View {
             return .yellow
         }
     }
-    
+
     private var buttonColor: Color {
         switch type {
-        case .network, .offline:
-            return .blue
+        case .network, .offline, .apiLimited:
+            return .orange
         case .empty:
             return .secondary
         case .server:
