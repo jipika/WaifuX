@@ -204,6 +204,8 @@ class WallpaperSourceManager: ObservableObject {
 
         lastSwitchMessage = "已切换到 \(source.displayName) \(source.subtitle)"
 
+        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+
         print("[WallpaperSourceManager] Manual switch to \(source.displayName)")
     }
 

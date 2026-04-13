@@ -129,13 +129,15 @@ final class AppLogger {
         let metaStr = formatMetadata(metadata)
         let line = "\(timestamp) [\(level.rawValue)] [\(module.rawValue)] \(message)\(metaStr)"
 
+#if DEBUG
         // 1. 控制台输出（带 emoji + 颜色）
         print("\(level.emoji) \(line)")
 
         // 2. os.log 输出（系统日志，可用 Console.app 查看）
         os_log("%{public}@", log: Self.oslog, type: level.osLogType(), line)
+#endif
 
-        // 3. 文件持久化
+        // 3. 文件持久化（始终写入，用于排查用户问题）
         writeToFile(line)
     }
 

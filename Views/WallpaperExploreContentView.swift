@@ -142,7 +142,7 @@ struct WallpaperExploreContentView: View {
                 Text(greetingText)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.58))
-                
+
                 Text(WallpaperSourceManager.shared.activeSource.displayName)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.72))
@@ -153,6 +153,24 @@ struct WallpaperExploreContentView: View {
                         tint: exploreAtmosphere.tint.primary.opacity(0.12),
                         in: Capsule(style: .continuous)
                     )
+
+                // 切换源按钮
+                Button {
+                    let nextSource: WallpaperSourceManager.SourceType = WallpaperSourceManager.shared.activeSource == .wallhaven ? .fourKWallpapers : .wallhaven
+                    WallpaperSourceManager.shared.switchTo(nextSource)
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .frame(width: 24, height: 20)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("切换到 \(WallpaperSourceManager.shared.activeSource == .wallhaven ? "4K Wallpapers" : "WallHaven")")
             }
             
             Text(t("wallpaperLibrary"))

@@ -600,22 +600,17 @@ private struct HeroWallpaperImageSlide: View {
         GeometryReader { geometry in
             let size = geometry.size
 
-            AsyncImage(url: imageURL) { phase in
-                switch phase {
-                case .empty:
+            KFImage(imageURL)
+                .setProcessor(DownsamplingImageProcessor(size: CGSize(width: size.width * 2, height: size.height * 2)))
+                .cacheOriginalImage()
+                .fade(duration: 0.25)
+                .placeholder { _ in
                     heroPlaceholder(size: size, showsProgress: true)
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: size.width, height: size.height)
-                        .clipped()
-                case .failure:
-                    heroPlaceholder(size: size, showsProgress: false)
-                @unknown default:
-                    EmptyView()
                 }
-            }
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .clipped()
         }
     }
     
