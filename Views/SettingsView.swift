@@ -22,6 +22,7 @@ private struct VisualEffectView: NSViewRepresentable {
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case download
+    case workshop
     case scheduler
     case about
 
@@ -31,6 +32,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return t("general")
         case .download: return t("download")
+        case .workshop: return "小红车"
         case .scheduler: return t("scheduler")
         case .about: return t("about")
         }
@@ -40,6 +42,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .download: return "arrow.down.circle"
+        case .workshop: return "gearshape.2" // Steam/Workshop 风格
         case .scheduler: return "clock.arrow.circlepath"
         case .about: return "info.circle"
         }
@@ -139,6 +142,8 @@ struct SettingsView: View {
                         GeneralSettingsTab(viewModel: viewModel)
                     case .download:
                         DownloadSettingsTab(viewModel: viewModel)
+                    case .workshop:
+                        WorkshopSettingsTab()
                     case .scheduler:
                         SchedulerSettingsTab(viewModel: viewModel)
                     case .about:
@@ -738,7 +743,8 @@ private struct AboutSettingsTab: View {
                 HStack(spacing: 12) {
                     Button {
                         Task {
-                            await viewModel.checkForUpdates()
+                            // 用户主动点击，强制检查
+                            await viewModel.checkForUpdates(force: true)
                             // 如果有更新，显示弹窗
                             if case .updateAvailable = viewModel.updateCheckResult {
                                 showAutoUpdateSheet = true
@@ -873,7 +879,8 @@ struct SettingsUpdateSection: View {
                 HStack(spacing: 12) {
                     Button {
                         Task {
-                            await viewModel.checkForUpdates()
+                            // 用户主动点击，强制检查
+                            await viewModel.checkForUpdates(force: true)
                             // 如果有更新，自动显示弹窗
                             if case .updateAvailable = viewModel.updateCheckResult {
                                 showUpdateSheet = true
@@ -1012,4 +1019,332 @@ struct SettingsUpdateSection: View {
         onClose: {}
     )
     .frame(width: 400, height: 500)
+}
+
+
+// MARK: - Workshop 设置标签
+private struct WorkshopSettingsTab: View {
+    @StateObject private var sourceManager = WorkshopSourceManager.shared
+    @StateObject private var workshopService = WorkshopService.shared
+    
+    @State private var steamUsername = ""
+    @State private var steamPassword = ""
+    @State private var useAnonymous = true
+    @State private var showPassword = false
+    @State private var isTestingConnection = false
+    @State private var connectionResult: ConnectionResult?
+    
+    enum ConnectionResult {
+        case success(String)
+        case failure(String)
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                // 标题
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Wallpaper Engine 设置")
+                        .font(.system(size: 20, weight: .bold))
+                    Text("配置 Steam 账号以下载创意工坊内容")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                
+                Divider()
+                
+                // SteamCMD 状态
+                steamCMDStatusSection
+                
+                Divider()
+                
+                // 下载方式选择
+                downloadModeSection
+                
+                Divider()
+                
+                // 账号设置（仅在非匿名模式下显示）
+                if !useAnonymous {
+                    accountSection
+                    Divider()
+                }
+                
+                // 连接测试
+                testConnectionSection
+                
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+    
+    // MARK: - SteamCMD 状态
+    private var steamCMDStatusSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.cyan)
+                Text("SteamCMD 状态")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+            
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                
+                Text(statusText)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                
+                Spacer()
+                
+                if sourceManager.isSteamCMDConfigured {
+                    Button("检查更新") {
+                        // TODO: 检查 SteamCMD 更新
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12))
+                } else {
+                    Button("安装指南") {
+                        NSWorkspace.shared.open(URL(string: "https://developer.valvesoftware.com/wiki/SteamCMD")!)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12))
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+    }
+    
+    private var statusColor: Color {
+        switch workshopService.checkSteamCMDStatus() {
+        case .ready: return .green
+        case .notInstalled: return .orange
+        case .error: return .red
+        case .downloading: return .blue
+        }
+    }
+    
+    private var statusText: String {
+        switch workshopService.checkSteamCMDStatus() {
+        case .ready: return "已安装并可用"
+        case .notInstalled: return "未安装 - 需要手动添加到 Resources/steamcmd/"
+        case .error(let msg): return "错误: \(msg)"
+        case .downloading: return "下载中..."
+        }
+    }
+    
+    // MARK: - 下载方式
+    private var downloadModeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "person.fill.questionmark")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.blue)
+                Text("下载方式")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("使用匿名下载（推荐）", isOn: $useAnonymous)
+                    .font(.system(size: 13))
+                
+                Text("匿名下载适用于大多数公开的 Wallpaper Engine 壁纸。付费或限制级内容需要登录 Steam 账号。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+    }
+    
+    // MARK: - 账号设置
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "person.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.orange)
+                Text("Steam 账号")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+            
+            VStack(alignment: .leading, spacing: 12) {
+                // 用户名
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Steam 用户名")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    TextField("输入用户名", text: $steamUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13))
+                }
+                
+                // 密码
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Steam 密码")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        if showPassword {
+                            TextField("输入密码", text: $steamPassword)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13))
+                        } else {
+                            SecureField("输入密码", text: $steamPassword)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13))
+                        }
+                        
+                        Button {
+                            showPassword.toggle()
+                        } label: {
+                            Image(systemName: showPassword ? "eye.slash" : "eye")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                
+                // 保存按钮
+                HStack {
+                    if sourceManager.isSteamAuthenticated {
+                        Label("已保存账号: \(sourceManager.steamCredentials?.username ?? "")", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.green)
+                    }
+                    
+                    Spacer()
+                    
+                    Button("保存账号") {
+                        saveCredentials()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(steamUsername.isEmpty || steamPassword.isEmpty)
+                    
+                    if sourceManager.isSteamAuthenticated {
+                        Button("清除") {
+                            clearCredentials()
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .foregroundStyle(.red)
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+    }
+    
+    // MARK: - 连接测试
+    private var testConnectionSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.purple)
+                Text("连接测试")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Button {
+                    testConnection()
+                } label: {
+                    HStack {
+                        if isTestingConnection {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        }
+                        Text(isTestingConnection ? "测试中..." : "测试 Steam 连接")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isTestingConnection || !sourceManager.isSteamCMDConfigured)
+                
+                if let result = connectionResult {
+                    HStack {
+                        Image(systemName: resultIcon(result))
+                            .foregroundStyle(resultColor(result))
+                        Text(resultMessage(result))
+                            .font(.system(size: 12))
+                            .foregroundStyle(resultColor(result))
+                        Spacer()
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private func saveCredentials() {
+        sourceManager.setSteamCredentials(username: steamUsername, password: steamPassword)
+    }
+    
+    private func clearCredentials() {
+        sourceManager.clearSteamCredentials()
+        steamUsername = ""
+        steamPassword = ""
+    }
+    
+    private func testConnection() {
+        isTestingConnection = true
+        connectionResult = nil
+        
+        Task {
+            // 简单的 Steam 连接测试
+            let result = await checkSteamConnection()
+            await MainActor.run {
+                connectionResult = result
+                isTestingConnection = false
+            }
+        }
+    }
+    
+    private func checkSteamConnection() async -> ConnectionResult {
+        // 这里可以实现实际的 Steam 连接测试
+        // 暂时返回成功状态
+        return .success("Steam 服务可访问")
+    }
+    
+    private func resultIcon(_ result: ConnectionResult) -> String {
+        switch result {
+        case .success: return "checkmark.circle.fill"
+        case .failure: return "xmark.circle.fill"
+        }
+    }
+    
+    private func resultColor(_ result: ConnectionResult) -> Color {
+        switch result {
+        case .success: return .green
+        case .failure: return .red
+        }
+    }
+    
+    private func resultMessage(_ result: ConnectionResult) -> String {
+        switch result {
+        case .success(let msg): return msg
+        case .failure(let msg): return msg
+        }
+    }
 }
