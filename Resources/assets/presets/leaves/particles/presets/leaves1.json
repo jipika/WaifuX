@@ -1,0 +1,141 @@
+{
+	"animationmode" : null,
+	"children" : 
+	[
+		{
+			"id" : 13,
+			"name" : "particles/presets/leaves1b.json"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.1 1",
+			"distancemax" : 750,
+			"distancemin" : 0,
+			"id" : 9,
+			"name" : "sphererandom",
+			"origin" : "350 750 0",
+			"rate" : 5
+		}
+	],
+	"flags" : 4,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 10,
+			"min" : 8,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 75,
+			"min" : 70,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "-50 -15 0",
+			"min" : "-100 -100 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "255 255 255",
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 7,
+			"name" : "turbulentvelocityrandom",
+			"offset" : 3,
+			"scale" : 0.5,
+			"speedmax" : 100,
+			"speedmin" : 35
+		},
+		{
+			"id" : 8,
+			"max" : "0 0 1",
+			"min" : "0 0 -1",
+			"name" : "angularvelocityrandom"
+		}
+	],
+	"material" : "materials/presets/leaves1.json",
+	"maxcount" : 50,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 10,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 0.90000000000000002,
+			"id" : 11,
+			"name" : "alphafade"
+		},
+		{
+			"force" : "0 0 0",
+			"id" : 12,
+			"name" : "angularmovement"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : 3,
+	"starttime" : 3
+}

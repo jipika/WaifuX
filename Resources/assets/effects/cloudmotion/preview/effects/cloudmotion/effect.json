@@ -1,0 +1,20 @@
+{
+	"version" : 2,
+	"replacementkey" : "cloudmotion",
+	"name" : "ui_editor_effect_cloudmotion_title",
+	"description" : "ui_editor_effect_cloudmotion_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/cloudmotion.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/cloudmotion.json",
+		"shaders/effects/cloudmotion.frag",
+		"shaders/effects/cloudmotion.vert"
+	]
+}

@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "transform",
+	"name" : "ui_editor_effect_transform_title",
+	"description" : "ui_editor_effect_transform_description",
+	"group" : "distort",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/transform.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/transform.json",
+		"shaders/effects/transform.frag",
+		"shaders/effects/transform.vert"
+	]
+}

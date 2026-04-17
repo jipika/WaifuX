@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "downsample_quarter_bloom",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_FullFrameBuffer"]
+	}]
+}

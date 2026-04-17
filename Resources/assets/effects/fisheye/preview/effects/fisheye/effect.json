@@ -1,0 +1,18 @@
+{
+	"name" : "Fisheye",
+	"description" : "Adds a fisheye warp.",
+	"group" : "distort",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/fisheye.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/fisheye.json",
+		"shaders/effects/fisheye.frag",
+		"shaders/effects/fisheye.vert"
+	]
+}

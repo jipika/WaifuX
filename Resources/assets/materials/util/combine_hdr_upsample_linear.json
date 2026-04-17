@@ -1,0 +1,11 @@
+{
+	"passes": [{
+		"shader": "combine_hdr",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_FullFrameBuffer"],
+		"combos": {
+			"LINEAR": 1
+		}
+	}]
+}

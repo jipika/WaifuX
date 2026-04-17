@@ -90,6 +90,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let durationSeconds: Double?
     let downloadOptions: [MediaDownloadOption]
     let sourceName: String
+    let isAnimatedImage: Bool?
 
     init(
         slug: String,
@@ -105,7 +106,8 @@ struct MediaItem: Identifiable, Codable, Hashable {
         exactResolution: String? = nil,
         durationSeconds: Double? = nil,
         downloadOptions: [MediaDownloadOption] = [],
-        sourceName: String = "MotionBGs"
+        sourceName: String = "MotionBGs",
+        isAnimatedImage: Bool? = nil
     ) {
         self.id = slug
         self.slug = slug
@@ -122,6 +124,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
         self.durationSeconds = durationSeconds
         self.downloadOptions = downloadOptions
         self.sourceName = sourceName
+        self.isAnimatedImage = isAnimatedImage
     }
 
     var primaryBadgeText: String {
@@ -201,6 +204,30 @@ extension MediaItem {
     var kind: String {
         // 如果有预览视频，标记为 live_wallpaper
         previewVideoURL != nil ? "live_wallpaper" : "static"
+    }
+
+    /// 列表/详情封面图 URL（与 UI 一致：海报优先，否则缩略图）。GIF 动效判断与加载都应基于该 URL。
+    var coverImageURL: URL {
+        posterURL ?? thumbnailURL
+    }
+
+    var isGIF: Bool {
+        func urlLooksLikeGIF(_ url: URL) -> Bool {
+            let str = url.absoluteString.lowercased()
+            return str.hasSuffix(".gif")
+                || str.contains(".gif?")
+                || str.contains(".gif&")
+                || url.pathExtension.lowercased() == "gif"
+                // Steam CDN 等可能在查询串里标明 GIF，路径无 .gif 后缀
+                || str.contains("format=gif")
+                || str.contains("output-format=gif")
+        }
+        return urlLooksLikeGIF(coverImageURL)
+    }
+
+    /// 优先使用抓取时探测的 isAnimatedImage；若未探测则回退到 URL 推断。
+    var shouldRenderThumbnailAsAnimatedImage: Bool {
+        isAnimatedImage ?? isGIF
     }
     
     // 上传日期（用于详情页展示）

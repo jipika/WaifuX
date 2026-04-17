@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "iris",
+	"name" : "ui_editor_effect_iris_title",
+	"description" : "ui_editor_effect_iris_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/iris.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/iris.json",
+		"shaders/effects/iris.frag",
+		"shaders/effects/iris.vert"
+	]
+}

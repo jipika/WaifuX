@@ -1,0 +1,22 @@
+{
+	"name" : "ui_editor_preset_refractive_rain_title",
+	"description" : "ui_editor_preset_refractive_rain_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"preview" : "preview/project.json",
+	"objects" :
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"name" : "Rain",
+			"origin" : "0.000 0.000 0.000",
+			"particle" : "particles/presets/refractiverain.json",
+			"scale" : "1.000 1.000 1.000"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/particle/refractiverain.json",
+		"particles/presets/refractiverain.json"
+	]
+}

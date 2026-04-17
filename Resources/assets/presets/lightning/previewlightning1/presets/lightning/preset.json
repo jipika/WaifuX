@@ -1,0 +1,64 @@
+{
+	"name" : "ui_editor_preset_lightning_title",
+	"description" : "ui_editor_preset_lightning_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Lightning cloud",
+				"value" : 0
+			},
+			{
+				"label" : "Thunderbolt",
+				"value" : 1
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewlightning1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Lightning cloud",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/lightning1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/lightning1.json",
+				"materials/presets/lightning1b.json",
+				"particles/presets/lightning1.json",
+				"particles/presets/lightning1b.json"
+			]
+		},
+		{
+			"preview" : "previewlightning2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Thunderbolt",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/lightning2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/lightning2.json",
+				"materials/presets/lightning2glow.json",
+				"particles/presets/lightning2.json",
+				"particles/presets/lightning2glow.json"
+			]
+		}
+	]
+}

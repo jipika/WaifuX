@@ -1,0 +1,553 @@
+{
+	"version" : 1,
+	"replacementkey" : "fluidsimulation",
+	"name" : "ui_editor_effect_advanced_fluid_simulation_title",
+	"description" : "ui_editor_effect_advanced_fluid_simulation_description",
+	"group" : "interactive",
+	"performance" : "veryexpensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/fluidsimulation_curl.json",
+			"target" : "_rt_SmokeCurl",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeVelocity1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_vorticity.json",
+			"target" : "_rt_SmokeVelocity2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeVelocity1",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokeCurl",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_divergence.json",
+			"target" : "_rt_SmokeDivergence",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeVelocity2",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_clear.json",
+			"target" : "_rt_SmokePressure2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_pressure.json",
+			"target" : "_rt_SmokePressure1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDivergence",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokePressure2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_gradientsubtract.json",
+			"target" : "_rt_SmokeVelocity1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokePressure1",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokeVelocity2",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_advection.json",
+			"target" : "_rt_SmokeVelocity2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeVelocity1",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokeVelocity1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_advection_dye.json",
+			"target" : "_rt_SmokeDye2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeVelocity2",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_SmokeDye1",
+					"index" : 1
+				},
+				{
+					"name" : "previous",
+					"index" : 2
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_normal.json",
+			"target" : "_rt_SmokeNormal",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDye2",
+					"index" : 0
+				}
+			],
+			"conditions" :
+			[
+				{
+					"LIGHTING" : 1
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/fluidsimulation_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_SmokeDye2",
+					"index" : 0
+				},
+				{
+					"name" : "previous",
+					"index" : 1
+				},
+				{
+					"name" : "_rt_SmokeNormal",
+					"index" : 2,
+					"conditions" :
+					[
+						{
+							"LIGHTING" : 1
+						}
+					]
+				},
+				{
+					"name" : "_rt_SmokeVelocity2",
+					"index" : 4,
+					"conditions" :
+					[
+						{
+							"RENDERING" : 3
+						}
+					]
+				}
+			]
+		},
+		{
+			"command" : "swap",
+			"source" : "_rt_SmokeVelocity1",
+			"target" : "_rt_SmokeVelocity2"
+		},
+		{
+			"command" : "swap",
+			"source" : "_rt_SmokeDye1",
+			"target" : "_rt_SmokeDye2"
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_SmokeVelocity1",
+			"fit" : 256,
+			"format" : "rg1616f",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeVelocity2",
+			"fit" : 256,
+			"format" : "rg1616f",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokePressure1",
+			"fit" : 256,
+			"format" : "r16f",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokePressure2",
+			"fit" : 256,
+			"format" : "r16f",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeDivergence",
+			"fit" : 256,
+			"format" : "r16f",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeCurl",
+			"fit" : 256,
+			"format" : "r16f",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeDye1",
+			"scale" : 2,
+			"format" : "rgba_backbuffer",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeDye2",
+			"scale" : 2,
+			"format" : "rgba_backbuffer",
+			"clear" : "0 0 0 0",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_SmokeNormal",
+			"scale" : 2,
+			"format" : "rgba8888",
+			"conditions" :
+			[
+				{
+					"LIGHTING" : 1
+				}
+			]
+		}
+	],
+	"functions" : {
+		"clearVelocity" : {
+			"action" : "clear",
+			"fbos" : [ "_rt_SmokeVelocity1", "_rt_SmokeVelocity2" ]
+		},
+		"clearDye" : {
+			"action" : "clear",
+			"fbos" : [ "_rt_SmokeDye1", "_rt_SmokeDye2" ]
+		}
+	},
+	"dependencies" :
+	[
+		"materials/effects/fluidsimulation_advection.json",
+		"materials/effects/fluidsimulation_advection_dye.json",
+		"materials/effects/fluidsimulation_clear.json",
+		"materials/effects/fluidsimulation_combine.json",
+		"materials/effects/fluidsimulation_curl.json",
+		"materials/effects/fluidsimulation_divergence.json",
+		"materials/effects/fluidsimulation_gradientsubtract.json",
+		"materials/effects/fluidsimulation_pressure.json",
+		"materials/effects/fluidsimulation_vorticity.json",
+		"materials/effects/fluidsimulation_normal.json",
+		"shaders/effects/fluidsimulation_advection.frag",
+		"shaders/effects/fluidsimulation_advection.vert",
+		"shaders/effects/fluidsimulation_clear.frag",
+		"shaders/effects/fluidsimulation_clear.vert",
+		"shaders/effects/fluidsimulation_combine.frag",
+		"shaders/effects/fluidsimulation_combine.vert",
+		"shaders/effects/fluidsimulation_curl.frag",
+		"shaders/effects/fluidsimulation_curl.vert",
+		"shaders/effects/fluidsimulation_divergence.frag",
+		"shaders/effects/fluidsimulation_divergence.vert",
+		"shaders/effects/fluidsimulation_gradientsubtract.frag",
+		"shaders/effects/fluidsimulation_gradientsubtract.vert",
+		"shaders/effects/fluidsimulation_pressure.frag",
+		"shaders/effects/fluidsimulation_pressure.vert",
+		"shaders/effects/fluidsimulation_vorticity.frag",
+		"shaders/effects/fluidsimulation_vorticity.vert",
+		"shaders/effects/fluidsimulation_normal.frag",
+		"shaders/effects/fluidsimulation_normal.vert",
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectPointEmitter",
+			"condition" :
+			{
+				"POINTEMITTER" : {
+					"op" : "ge",
+					"value" : 1
+				}
+			},
+			"vars" :
+			{
+				"center" : "emitterPos0",
+				"angle" : "emitterAngle0",
+				"size" : "emitterSize0",
+				"speed" : "emitterSpeed0"
+			}
+		},
+		{
+			"type" : "EffectPointEmitter",
+			"condition" :
+			{
+				"POINTEMITTER" : {
+					"op" : "ge",
+					"value" : 2
+				}
+			},
+			"vars" :
+			{
+				"center" : "emitterPos1",
+				"angle" : "emitterAngle1",
+				"size" : "emitterSize1",
+				"speed" : "emitterSpeed1"
+			}
+		},
+		{
+			"type" : "EffectPointEmitter",
+			"condition" :
+			{
+				"POINTEMITTER" : {
+					"op" : "ge",
+					"value" : 3
+				}
+			},
+			"vars" :
+			{
+				"center" : "emitterPos2",
+				"angle" : "emitterAngle2",
+				"size" : "emitterSize2",
+				"speed" : "emitterSpeed2"
+			}
+		},
+		{
+			"type" : "EffectPointEmitter",
+			"condition" :
+			{
+				"POINTEMITTER" : {
+					"op" : "ge",
+					"value" : 4
+				}
+			},
+			"vars" :
+			{
+				"center" : "emitterPos3",
+				"angle" : "emitterAngle3",
+				"size" : "emitterSize3",
+				"speed" : "emitterSpeed3"
+			}
+		},
+		{
+			"type" : "EffectLineEmitter",
+			"condition" :
+			{
+				"LINEEMITTER" : {
+					"op" : "ge",
+					"value" : 1
+				}
+			},
+			"vars" :
+			{
+				"p0" : "lineEmitterPosA0",
+				"p1" : "lineEmitterPosB0",
+				"angle" : "lineEmitterAngle0",
+				"size" : "lineEmitterSize0",
+				"speed" : "lineEmitterSpeed0"
+			}
+		},
+		{
+			"type" : "EffectLineEmitter",
+			"condition" :
+			{
+				"LINEEMITTER" : {
+					"op" : "ge",
+					"value" : 2
+				}
+			},
+			"vars" :
+			{
+				"p0" : "lineEmitterPosA1",
+				"p1" : "lineEmitterPosB1",
+				"angle" : "lineEmitterAngle1",
+				"size" : "lineEmitterSize1",
+				"speed" : "lineEmitterSpeed1"
+			}
+		},
+		{
+			"type" : "EffectLineEmitter",
+			"condition" :
+			{
+				"LINEEMITTER" : {
+					"op" : "ge",
+					"value" : 3
+				}
+			},
+			"vars" :
+			{
+				"p0" : "lineEmitterPosA2",
+				"p1" : "lineEmitterPosB2",
+				"angle" : "lineEmitterAngle2",
+				"size" : "lineEmitterSize2",
+				"speed" : "lineEmitterSpeed2"
+			}
+		},
+		{
+			"type" : "EffectPerspectiveUV",
+			"condition" :
+			{
+				"PERSPECTIVE" : 1
+			},
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"p2" : "point2",
+				"p3" : "point3"
+			}
+		}
+	]
+}

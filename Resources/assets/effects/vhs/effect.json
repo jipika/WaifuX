@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "vhs",
+	"name" : "ui_editor_effect_vhs_title",
+	"description" : "ui_editor_effect_vhs_description",
+	"group" : "colorize",
+	"preview" : "previewvhs/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/vhs.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/vhs.json",
+		"shaders/effects/vhs.frag",
+		"shaders/effects/vhs.vert"
+	]
+}

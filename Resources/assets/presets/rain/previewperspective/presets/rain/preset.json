@@ -1,0 +1,82 @@
+{
+	"name" : "ui_editor_preset_rain_title",
+	"description" : "ui_editor_preset_rain_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Rain perspective",
+				"value" : 0
+			},
+			{
+				"label" : "Rain downpour",
+				"value" : 1
+			},
+			{
+				"label" : "Rain refractive",
+				"value" : 2
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewperspective/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain perspective",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rainperspective.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rainperspective.json",
+				"particles/presets/rainperspective.json"
+			]
+		},
+		{
+			"preview" : "previewdownpour/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain downpour",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/raindownpour.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/raindownpour.json",
+				"particles/presets/raindownpour.json"
+			]
+		},
+		{
+			"preview" : "previewrefractive/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain refractive",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rainrefractive.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rainrefractive.json",
+				"particles/presets/rainrefractive.json"
+			]
+		}
+	]
+}

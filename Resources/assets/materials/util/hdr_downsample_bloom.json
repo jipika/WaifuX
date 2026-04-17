@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "hdr_downsample",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"combos": {"BLOOM":1}
+	}]
+}

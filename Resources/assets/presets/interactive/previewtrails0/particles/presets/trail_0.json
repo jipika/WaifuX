@@ -1,0 +1,128 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 1,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 1",
+			"distancemax" : 64,
+			"distancemin" : 0,
+			"id" : 6,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 20
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 15,
+			"min" : 10,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "50 50 0",
+			"min" : "-50 -50 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "89 153 255",
+			"min" : "255 70 70",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/trail_0.json",
+	"maxcount" : 128,
+	"operator" : 
+	[
+		{
+			"drag" : 0.20000000000000001,
+			"gravity" : "0 0 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"controlpoint" : 1,
+			"id" : 9,
+			"name" : "controlpointattract",
+			"origin" : "0 0 0",
+			"scale" : 1024,
+			"threshold" : 512
+		},
+		{
+			"distanceinner" : 32,
+			"distanceouter" : 128,
+			"id" : 10,
+			"name" : "vortex",
+			"speedinner" : 128
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 0.5,
+			"name" : "ropetrail"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

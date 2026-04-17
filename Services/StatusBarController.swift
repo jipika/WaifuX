@@ -16,6 +16,7 @@ final class StatusBarController: NSObject {
     private lazy var quitItem = NSMenuItem(title: t("statusbar.quit"), action: #selector(quitApplication), keyEquivalent: "q")
 
     private let videoWallpaperManager = VideoWallpaperManager.shared
+    private let weBridge = WallpaperEngineXBridge.shared
     private var showWindowHandler: (() -> Void)?
     private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
@@ -53,7 +54,7 @@ final class StatusBarController: NSObject {
         var image: NSImage?
         
         for name in systemImageNames {
-            if let img = NSImage(systemSymbolName: name, accessibilityDescription: "WallHaven") {
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: "WaifuX") {
                 image = img
                 break
             }
@@ -70,7 +71,7 @@ final class StatusBarController: NSObject {
             button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         }
         
-        button.toolTip = "WallHaven"
+        button.toolTip = "WaifuX"
 
         openWindowItem.target = self
         toggleWallpaperItem.target = self
@@ -97,19 +98,32 @@ final class StatusBarController: NSObject {
                 self?.refreshMenuState()
             }
             .store(in: &cancellables)
+
+        weBridge.$isControllingExternalEngine
+            .combineLatest(weBridge.$isExternalPaused)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _ in
+                self?.refreshMenuState()
+            }
+            .store(in: &cancellables)
     }
 
     private func refreshMenuState() {
-        let hasWallpaper = videoWallpaperManager.currentVideoURL != nil
+        let hasNativeWallpaper = videoWallpaperManager.currentVideoURL != nil
+        let hasExternalWallpaper = weBridge.isControllingExternalEngine
+        let hasWallpaper = hasNativeWallpaper || hasExternalWallpaper
 
         // 开启/关闭动态壁纸菜单项
         toggleWallpaperItem.title = hasWallpaper ? t("statusbar.disableWallpaper") : t("statusbar.enableWallpaper")
 
-        // 暂停/恢复、静音菜单项只在有动态壁纸时可用
+        // 暂停/恢复只在有动态壁纸时可用
         playPauseItem.isEnabled = hasWallpaper
-        muteItem.isEnabled = hasWallpaper
+        playPauseItem.title = (hasExternalWallpaper ? weBridge.isExternalPaused : videoWallpaperManager.isPaused)
+            ? t("statusbar.resumeWallpaper")
+            : t("statusbar.pauseWallpaper")
 
-        playPauseItem.title = videoWallpaperManager.isPaused ? t("statusbar.resumeWallpaper") : t("statusbar.pauseWallpaper")
+        // 静音只在本机视频壁纸时可用（外部引擎自行处理音频）
+        muteItem.isEnabled = hasNativeWallpaper
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
     }
 
@@ -118,6 +132,16 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func togglePlayback() {
+        // 如果当前由 Wallpaper Engine X 接管，走 URL Scheme
+        if weBridge.isControllingExternalEngine {
+            if weBridge.isExternalPaused {
+                weBridge.resumeWallpaper()
+            } else {
+                weBridge.pauseWallpaper()
+            }
+            return
+        }
+
         // 检测多显示器
         let screens = NSScreen.screens
         if screens.count > 1 && videoWallpaperManager.currentVideoURL != nil {
@@ -127,7 +151,7 @@ final class StatusBarController: NSObject {
                 message: t("selectDisplayToControl")
             ) { [weak self] selectedScreen in
                 guard let self = self else { return }
-                
+
                 if self.videoWallpaperManager.isPaused {
                     self.videoWallpaperManager.resumeWallpaper(for: selectedScreen)
                 } else {
@@ -145,6 +169,12 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func toggleDynamicWallpaper() {
+        if weBridge.isControllingExternalEngine {
+            // 关闭外部引擎壁纸
+            weBridge.stopWallpaper()
+            return
+        }
+
         if videoWallpaperManager.currentVideoURL != nil {
             // 关闭动态壁纸
             videoWallpaperManager.stopWallpaper()
@@ -152,7 +182,10 @@ final class StatusBarController: NSObject {
             // 先尝试恢复上次保存的壁纸，没有则打开主窗口让用户选择
             videoWallpaperManager.restoreIfNeeded()
             if videoWallpaperManager.currentVideoURL == nil {
-                showWindowHandler?()
+                weBridge.restoreIfNeeded()
+                if !weBridge.isControllingExternalEngine {
+                    showWindowHandler?()
+                }
             }
         }
     }

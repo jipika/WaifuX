@@ -1,0 +1,19 @@
+{
+	"passes" : 
+	[
+		{
+			"combos" : 
+			{
+				"VERSION" : 2,
+				"LIGHTING" : 0,
+				"REFLECTION" : 1
+			},
+			"constantshadervalues" : {
+				"reflectivity" : 0.8,
+				"roughness" : 0.15
+			},
+			"shader" : "generic3",
+			"textures" : [ "models/editor/camera" ]
+		}
+	]
+}

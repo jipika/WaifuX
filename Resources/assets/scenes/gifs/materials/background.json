@@ -1,0 +1,15 @@
+{
+	"passes" : 
+	[
+		{
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericimage",
+			"textures" : [ "background" ],
+			"combos" : {
+				"spritesheet" : 1
+			}
+		}
+	]
+}

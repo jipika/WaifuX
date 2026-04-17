@@ -130,6 +130,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // ⚡ 关键优化：先立即显示窗口，所有数据恢复都在下一个 run loop 异步执行
         // 避免主线程阻塞导致布局计算延迟
 
+        // 设置标准菜单栏（包含 Edit 菜单，使 TextField 支持复制粘贴）
+        setupMainMenu()
+
         // 1. 初始化状态栏控制器（轻量级，不阻塞）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
@@ -339,6 +342,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func quitApplication() {
         NSApp.terminate(nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // 主程序退出时，强制清理所有 wallpaperengine-cli 进程（包括 daemon 和 client）
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-9", "-f", "wallpaperengine-cli"]
+        try? pkill.run()
+        pkill.waitUntilExit()
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu(title: "MainMenu")
+
+        // App 菜单
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "WaifuX")
+        appMenu.addItem(NSMenuItem(title: "About WaifuX", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Hide WaifuX", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Quit WaifuX", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        // Edit 菜单（使 TextField 支持 Cmd+C / Cmd+V / Cmd+A 等）
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        // Window 菜单
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func updateActivationPolicy(showDockIcon: Bool) {

@@ -1,0 +1,108 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 1,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 0",
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"flags" : 2,
+			"id" : 5,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 32
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 15,
+			"min" : 10,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "26 255 0",
+			"min" : "255 0 0",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/trail_1.json",
+	"maxcount" : 128,
+	"operator" : 
+	[
+		{
+			"drag" : 0,
+			"gravity" : "0 0 0",
+			"id" : 6,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 0.10000000000000001,
+			"id" : 7,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "rope"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

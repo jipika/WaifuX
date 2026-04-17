@@ -1,0 +1,90 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 -1.00000",
+		"eye" : "0.00000 0.00000 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.70000 0.70000 0.70000",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"castshadow" : false,
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/shimmer/effect.json",
+					"id" : 19,
+					"name" : "",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_amount" : 3.79,
+								"ui_editor_properties_color" : "1 1 1",
+								"ui_editor_properties_delay" : 1.63,
+								"ui_editor_properties_direction" : -1.9300838,
+								"ui_editor_properties_granularity" : 1.0,
+								"ui_editor_properties_speed" : 1,
+								"ui_editor_properties_timescale" : -0.1
+							},
+							"id" : 20,
+							"textures" : 
+							[
+								null,
+								"masks/shimmer_mask_4821b256",
+								"masks/shimmer_mask_82ee9910",
+								null
+							]
+						}
+					],
+					"visible" : true
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.00000 128.00000 0.00000",
+			"size" : "256.00000 256.00000"
+		}
+	],
+	"version" : 0
+}

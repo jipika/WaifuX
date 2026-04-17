@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "hdr_downsample",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "additive",
+		"combos": {"UPSAMPLE":1,"BICUBIC":1}
+	}]
+}

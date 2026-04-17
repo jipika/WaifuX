@@ -1,0 +1,21 @@
+{
+	"version" : 1,
+	"replacementkey" : "iris",
+	"name" : "ui_editor_effect_depth_parallax_title",
+	"description" : "ui_editor_effect_depth_parallax_description",
+	"group" : "interactive",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/depthparallax.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/depthparallax.json",
+		"shaders/effects/depthparallax.frag",
+		"shaders/effects/depthparallax.vert"
+	]
+}

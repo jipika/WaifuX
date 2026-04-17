@@ -1,0 +1,18 @@
+{
+	"passes" : 
+	[
+		{
+			"blending" : "additive",
+			"combos" : {},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_overbright" : 1.2999999523162842
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/debris/debris1" ]
+		}
+	]
+}

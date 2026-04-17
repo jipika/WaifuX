@@ -1,5 +1,7 @@
 import SwiftUI
 import Kingfisher
+import AppKit
+import AVFoundation
 
 struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
@@ -14,14 +16,46 @@ struct MyLibraryContentView: View {
     @Binding var selectedAnime: AnimeSearchResult?
     @State private var animeFavorites: [AnimeSearchResult] = []
 
+    // 子标签：收藏 / 已下载
+    @State private var selectedSubTab: SubTab = .downloads
+
     // 编辑状态
     @State private var isEditing = false
-    @State private var editingSection: EditingSection = .favorites
     @State private var selectedItems = Set<String>()
 
-    enum EditingSection: String, CaseIterable {
+    // 图片预加载由 onAppear 直接触发，无需追踪可见卡片 ID
+
+    // 壁纸比例筛选
+    @State private var wallpaperRatioFilter: WallpaperRatioFilter = .all
+
+    // 缓存壁纸和媒体列表，避免 computed property 在 body 重绘时反复 map/filter
+    @State private var wallpaperItems: [AnyWallpaperItem] = []
+    @State private var mediaItems: [AnyMediaItem] = []
+
+    enum WallpaperRatioFilter: String, CaseIterable {
+        case all = "all"
+        case landscape = "landscape"
+        case portrait = "portrait"
+
+        var title: String {
+            switch self {
+            case .all: return LocalizationService.shared.t("filter.all")
+            case .landscape: return LocalizationService.shared.t("filter.landscape")
+            case .portrait: return LocalizationService.shared.t("filter.portrait")
+            }
+        }
+    }
+
+    enum SubTab: String, CaseIterable {
         case favorites = "favorites"
         case downloads = "downloads"
+
+        var title: String {
+            switch self {
+            case .favorites: return LocalizationService.shared.t("my.favorites")
+            case .downloads: return LocalizationService.shared.t("my.downloads")
+            }
+        }
     }
 
     var body: some View {
@@ -54,6 +88,9 @@ struct MyLibraryContentView: View {
                 .ignoresSafeArea()
 
             GeometryReader { geometry in
+                let contentWidth = max(0, geometry.size.width - 56)
+                let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
+
                 ScrollView {
                     VStack(alignment: .leading, spacing: 32) {
                         // Hero 区域
@@ -62,8 +99,8 @@ struct MyLibraryContentView: View {
                         // 内容类型切换器
                         ContentTypePicker(selected: $selectedContentType)
 
-                        // 根据类型显示不同内容（保留原有收藏/下载分区）
-                        contentSections
+                        // 根据类型显示不同内容
+                        contentSections(config: gridConfig)
 
                         // 底部填充，确保内容不够时也能占满屏幕
                         Spacer(minLength: 0)
@@ -78,18 +115,38 @@ struct MyLibraryContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 注意：所有详情页在 ContentView 层级显示，确保能覆盖 TopNavigationBar
         .task {
             await viewModel.initialLoad()
-            // mediaViewModel.favoriteItems 和 downloadedItems 是计算属性，自动从 MediaLibraryService 获取
             await loadAnimeFavorites()
-            // 扫描本地文件（用户手动复制到目录的文件）
-            await LocalWallpaperScanner.shared.forceRescan()
+            // 后台触发扫描，扫描完成后 ViewModel 会自动重建缓存并通知刷新
+            Task {
+                await LocalWallpaperScanner.shared.forceRescan()
+            }
+            updateWallpaperItems()
+            updateMediaItems()
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
                 await loadAnimeFavorites()
             }
+        }
+        .onChange(of: viewModel.libraryContentRevision) { _, _ in
+            updateWallpaperItems()
+        }
+        .onChange(of: mediaViewModel.libraryContentRevision) { _, _ in
+            updateMediaItems()
+        }
+        .onChange(of: selectedSubTab) { _, _ in
+            updateWallpaperItems()
+            updateMediaItems()
+        }
+        .onChange(of: wallpaperRatioFilter) { _, _ in
+            updateWallpaperItems()
+        }
+        .onChange(of: selectedContentType) { _, _ in
+            // 切换内容类型时重置编辑状态
+            isEditing = false
+            selectedItems.removeAll()
         }
     }
 
@@ -125,321 +182,451 @@ struct MyLibraryContentView: View {
 
             Spacer()
 
+            let (count, icon, color, key) = heroBadgeInfo
             SettingsStatusBadge(
-                title: "\(totalFavorites) \(t("items.favorites"))",
-                systemImage: "heart.fill",
-                color: LiquidGlassColors.primaryPink
+                title: "\(count) \(t(key))",
+                systemImage: icon,
+                color: color
             )
         }
     }
 
-    private var subtitleForType: String {
+    private var heroBadgeInfo: (count: Int, icon: String, color: Color, key: String) {
         switch selectedContentType {
-        case .wallpaper: return t("library.wallpapers")
-        case .video: return t("library.videos")
-        case .anime: return t("library.anime")
-        }
-    }
-
-    private var totalFavorites: Int {
-        switch selectedContentType {
-        case .wallpaper: return viewModel.favorites.count
-        case .video: return mediaViewModel.favoriteItems.count
-        case .anime: return animeFavorites.count
+        case .wallpaper:
+            if selectedSubTab == .favorites {
+                return (viewModel.favorites.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
+            } else {
+                return (viewModel.allLocalWallpapers.count, "arrow.down.circle.fill", LiquidGlassColors.accentCyan, "item.downloads")
+            }
+        case .video:
+            if selectedSubTab == .favorites {
+                return (mediaViewModel.favoriteItems.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
+            } else {
+                return (mediaViewModel.allLocalMedia.count, "arrow.down.circle.fill", LiquidGlassColors.accentCyan, "item.downloads")
+            }
+        case .anime:
+            return (animeFavorites.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
         }
     }
 
     // MARK: - Content Sections
     @ViewBuilder
-    private var contentSections: some View {
+    private func contentSections(config: LibraryGridConfig) -> some View {
         switch selectedContentType {
         case .wallpaper:
-            wallpaperSections
+            wallpaperSection(config: config)
         case .video:
-            mediaSections
+            mediaSection(config: config)
         case .anime:
-            animeSections
+            animeSection(config: config)
         }
     }
 
-    // MARK: - Wallpaper Sections (原有功能)
-    private var wallpaperSections: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // 壁纸收藏
-            VStack(alignment: .leading, spacing: 16) {
-                sectionHeaderWithEdit(
-                    title: t("wallpaper.favorites"),
-                    systemImage: "heart.fill",
-                    color: LiquidGlassColors.primaryPink,
-                    countText: "\(viewModel.favorites.count) \(t("items"))",
-                    section: .favorites
+    // MARK: - Wallpaper Section
+    private func wallpaperSection(config: LibraryGridConfig) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sectionHeader(
+                title: t("library.wallpapers"),
+                color: LiquidGlassColors.primaryPink,
+                importAction: importWallpapers,
+                folderURL: DownloadPathManager.shared.wallpapersFolderURL
+            )
+
+            if wallpaperItems.isEmpty {
+                emptyMediaSurface(
+                    title: selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads"),
+                    subtitle: selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint"),
+                    icon: selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle",
+                    accent: LiquidGlassColors.primaryPink
                 )
+            } else {
+                batchDeleteToolbar(count: wallpaperItems.count)
 
-                if viewModel.favorites.isEmpty {
-                    emptyMediaSurface(
-                        title: t("no.wallpaper.favorites"),
-                        subtitle: t("no.wallpaper.favorites.hint"),
-                        icon: "heart.slash",
-                        accent: LiquidGlassColors.primaryPink
-                    )
-                } else {
-                    batchDeleteToolbar(section: .favorites, count: viewModel.favorites.count)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
-                            ForEach(Array(viewModel.favorites.enumerated()), id: \.element.id) { index, wallpaper in
-                                WallpaperEditCard(
-                                    wallpaper: wallpaper,
-                                    isEditing: isEditing,
-                                    isSelected: selectedItems.contains(wallpaper.id)
-                                ) {
-                                    handleWallpaperTap(wallpaper)
-                                }
-                                .onAppear {
-                                    let urls = (index + 1..<(index + 4))
-                                        .filter { $0 < viewModel.favorites.count }
-                                        .compactMap { viewModel.favorites[$0].thumbURL }
-                                    ImagePrefetcher(urls: urls).start()
-                                }
+                LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+                    ForEach(Array(wallpaperItems.enumerated()), id: \.element.id) { index, item in
+                        wallpaperGridItem(item: item, config: config)
+                            .onAppear {
+                                preloadNearbyWallpapers(for: index, config: config)
                             }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-            }
-
-            // 壁纸下载（包含下载记录和本地扫描的文件）
-            VStack(alignment: .leading, spacing: 16) {
-                sectionHeaderWithEdit(
-                    title: t("wallpaper.downloads"),
-                    systemImage: "arrow.down.circle.fill",
-                    color: LiquidGlassColors.accentCyan,
-                    countText: "\(viewModel.allLocalWallpapers.count) \(t("items"))",
-                    section: .downloads
-                )
-
-                if viewModel.allLocalWallpapers.isEmpty {
-                    emptyMediaSurface(
-                        title: t("no.wallpaper.downloads"),
-                        subtitle: t("no.wallpaper.downloads.hint"),
-                        icon: "arrow.down.circle",
-                        accent: LiquidGlassColors.accentCyan
-                    )
-                } else {
-                    batchDeleteToolbar(section: .downloads, count: viewModel.allLocalWallpapers.count)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
-                            ForEach(viewModel.allLocalWallpapers) { item in
-                                WallpaperEditCard(
-                                    wallpaper: item.wallpaper,
-                                    isEditing: isEditing,
-                                    isSelected: selectedItems.contains(item.id),
-                                    downloadDate: item.downloadRecord?.downloadedAt
-                                ) {
-                                    handleWallpaperTap(item.wallpaper)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 2)
                     }
                 }
             }
         }
     }
 
-    // MARK: - Media Sections (原有功能)
-    private var mediaSections: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // 媒体收藏
-            VStack(alignment: .leading, spacing: 16) {
-                sectionHeaderWithEdit(
-                    title: t("media.favorites"),
-                    systemImage: "heart.fill",
-                    color: LiquidGlassColors.primaryPink,
-                    countText: "\(mediaViewModel.favoriteItems.count) \(t("items"))",
-                    section: .favorites
+    private func updateWallpaperItems() {
+        let baseItems: [AnyWallpaperItem]
+        switch selectedSubTab {
+        case .favorites:
+            baseItems = viewModel.favorites.map { AnyWallpaperItem(wallpaper: $0) }
+        case .downloads:
+            baseItems = viewModel.allLocalWallpapers.map { AnyWallpaperItem(unified: $0) }
+        }
+        switch wallpaperRatioFilter {
+        case .all:
+            wallpaperItems = baseItems
+        case .landscape:
+            wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX >= $0.wallpaper.dimensionY }
+        case .portrait:
+            wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX < $0.wallpaper.dimensionY }
+        }
+    }
+
+    private func updateMediaItems() {
+        switch selectedSubTab {
+        case .favorites:
+            mediaItems = mediaViewModel.favoriteItems.map { AnyMediaItem(item: $0) }
+        case .downloads:
+            mediaItems = mediaViewModel.allLocalMedia.map { AnyMediaItem(unified: $0) }
+        }
+    }
+
+    @ViewBuilder
+    private func wallpaperGridItem(item: AnyWallpaperItem, config: LibraryGridConfig) -> some View {
+        WallpaperEditCard(
+            wallpaper: item.wallpaper,
+            accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
+            isEditing: isEditing,
+            isSelected: selectedItems.contains(item.id),
+            downloadDate: item.downloadDate,
+            cardWidth: config.cardWidth
+        ) {
+            handleWallpaperTap(item.wallpaper)
+        }
+    }
+
+    // MARK: - Media Section
+    private func mediaSection(config: LibraryGridConfig) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sectionHeader(
+                title: t("library.videos"),
+                color: LiquidGlassColors.secondaryViolet,
+                importAction: { Task { await importMedia() } },
+                workshopImportAction: importWorkshop,
+                folderURL: DownloadPathManager.shared.mediaFolderURL
+            )
+
+            if mediaItems.isEmpty {
+                emptyMediaSurface(
+                    title: selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads"),
+                    subtitle: selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint"),
+                    icon: selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle",
+                    accent: LiquidGlassColors.secondaryViolet
                 )
+            } else {
+                batchDeleteToolbar(count: mediaItems.count)
 
-                if mediaViewModel.favoriteItems.isEmpty {
-                    emptyMediaSurface(
-                        title: t("no.media.favorites"),
-                        subtitle: t("no.media.favorites.hint"),
-                        icon: "heart.slash",
-                        accent: LiquidGlassColors.primaryPink
-                    )
-                } else {
-                    batchDeleteToolbar(section: .favorites, count: mediaViewModel.favoriteItems.count)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
-                            ForEach(Array(mediaViewModel.favoriteItems.enumerated()), id: \.element.id) { index, item in
-                                MediaVideoCard(
-                                    item: item,
-                                    isEditing: isEditing,
-                                    isSelected: selectedItems.contains(item.id)
-                                ) {
-                                    handleMediaTap(item)
-                                }
-                                .onAppear {
-                                    let urls = (index + 1..<(index + 4))
-                                        .filter { $0 < mediaViewModel.favoriteItems.count }
-                                        .map { mediaViewModel.favoriteItems[$0].thumbnailURL }
-                                    ImagePrefetcher(urls: urls).start()
-                                }
+                LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+                    ForEach(Array(mediaItems.enumerated()), id: \.element.id) { index, item in
+                        mediaGridItem(item: item, config: config)
+                            .onAppear {
+                                preloadNearbyMedia(for: index, config: config)
                             }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-            }
-
-            // 媒体下载（包含下载记录和本地扫描的文件）
-            VStack(alignment: .leading, spacing: 16) {
-                sectionHeaderWithEdit(
-                    title: t("media.downloads"),
-                    systemImage: "arrow.down.circle.fill",
-                    color: LiquidGlassColors.accentCyan,
-                    countText: "\(mediaViewModel.allLocalMedia.count) \(t("items"))",
-                    section: .downloads
-                )
-
-                if mediaViewModel.allLocalMedia.isEmpty {
-                    emptyMediaSurface(
-                        title: t("no.media.downloads"),
-                        subtitle: t("no.media.downloads.hint"),
-                        icon: "arrow.down.circle",
-                        accent: LiquidGlassColors.accentCyan
-                    )
-                } else {
-                    batchDeleteToolbar(section: .downloads, count: mediaViewModel.allLocalMedia.count)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
-                            ForEach(mediaViewModel.allLocalMedia) { item in
-                                MediaVideoCard(
-                                    item: item.mediaItem,
-                                    isEditing: isEditing,
-                                    isSelected: selectedItems.contains(item.id)
-                                ) {
-                                    handleMediaTap(item.mediaItem)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 2)
                     }
                 }
             }
         }
     }
 
-    // MARK: - Anime Sections
-    private var animeSections: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // 动漫收藏
-            VStack(alignment: .leading, spacing: 16) {
-                sectionHeaderWithEdit(
-                    title: t("anime.favorites"),
-                    systemImage: "heart.fill",
-                    color: LiquidGlassColors.primaryPink,
-                    countText: "\(animeFavorites.count) \(t("items"))",
-                    section: .favorites
+    private var currentMediaItems: [AnyMediaItem] {
+        mediaItems
+    }
+
+    @ViewBuilder
+    private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
+        MediaVideoCard(
+            item: item.mediaItem,
+            badgeText: selectedSubTab == .favorites ? t("badge.favorite") : item.mediaItem.resolutionLabel,
+            accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
+            isEditing: isEditing,
+            isSelected: selectedItems.contains(item.id),
+            cardWidth: config.cardWidth
+        ) {
+            handleMediaTap(item.mediaItem)
+        }
+    }
+
+    // MARK: - Image Preloading
+    private func preloadNearbyWallpapers(for index: Int, config: LibraryGridConfig) {
+        let imageHeight = LibraryCardMetrics.thumbnailHeight
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(wallpaperItems.count, index + 11)
+        let urls = range
+            .filter { $0 != index }
+            .compactMap { wallpaperItems[$0].wallpaper.thumbURL }
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
+    }
+
+    private func preloadNearbyMedia(for index: Int, config: LibraryGridConfig) {
+        let imageHeight = LibraryCardMetrics.thumbnailHeight
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(currentMediaItems.count, index + 11)
+        let urls = range
+            .filter { $0 != index }
+            .map { currentMediaItems[$0].mediaItem }
+            .filter { !$0.shouldRenderThumbnailAsAnimatedImage }
+            .map(\.coverImageURL)
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
+    }
+
+    private func preloadNearbyAnime(for index: Int, config: LibraryGridConfig) {
+        let imageHeight = LibraryCardMetrics.thumbnailHeight + 72
+        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let range = max(0, index - 10)..<min(currentAnimeItems.count, index + 11)
+        let urls = range
+            .filter { $0 != index }
+            .compactMap { URL(string: currentAnimeItems[$0].coverURL ?? "") }
+
+        let prefetcher = Kingfisher.ImagePrefetcher(
+            urls: urls,
+            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+        )
+        prefetcher.start()
+    }
+
+    // MARK: - Anime Section
+    private func animeSection(config: LibraryGridConfig) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sectionHeader(
+                title: t("library.anime"),
+                color: LiquidGlassColors.tertiaryBlue,
+                importAction: nil,
+                folderURL: nil
+            )
+
+            if currentAnimeItems.isEmpty {
+                emptyMediaSurface(
+                    title: t("no.anime.favorites"),
+                    subtitle: t("no.anime.favorites.hint"),
+                    icon: "heart.slash",
+                    accent: LiquidGlassColors.tertiaryBlue
                 )
+            } else {
+                batchDeleteToolbar(count: currentAnimeItems.count)
 
-                if animeFavorites.isEmpty {
-                    emptyMediaSurface(
-                        title: t("no.anime.favorites"),
-                        subtitle: t("no.anime.favorites.hint"),
-                        icon: "heart.slash",
-                        accent: LiquidGlassColors.primaryPink
-                    )
-                } else {
-                    batchDeleteToolbar(section: .favorites, count: animeFavorites.count)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
-                            ForEach(Array(animeFavorites.enumerated()), id: \.element.id) { index, anime in
-                                AnimeLibraryCard(
-                                    anime: anime,
-                                    isEditing: isEditing,
-                                    isSelected: selectedItems.contains(anime.id)
-                                ) {
-                                    handleAnimeTap(anime)
-                                }
-                                .onAppear {
-                                    let urls = (index + 1..<(index + 4))
-                                        .filter { $0 < animeFavorites.count }
-                                        .compactMap { URL(string: animeFavorites[$0].coverURL ?? "") }
-                                    ImagePrefetcher(urls: urls).start()
-                                }
-                            }
+                LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+                    ForEach(Array(currentAnimeItems.enumerated()), id: \.element.id) { index, anime in
+                        AnimeLibraryCard(
+                            anime: anime,
+                            isEditing: isEditing,
+                            isSelected: selectedItems.contains(anime.id),
+                            cardWidth: config.cardWidth
+                        ) {
+                            handleAnimeTap(anime)
                         }
-                        .padding(.vertical, 2)
+                        .onAppear {
+                            preloadNearbyAnime(for: index, config: config)
+                        }
                     }
                 }
             }
         }
     }
 
-    // MARK: - Section Header with Edit
-    private func sectionHeaderWithEdit(
+    private var currentAnimeItems: [AnimeSearchResult] {
+        // 动漫目前只有收藏
+        animeFavorites
+    }
+
+    // MARK: - Section Header
+    private func sectionHeader(
         title: String,
-        systemImage: String,
         color: Color,
-        countText: String,
-        section: EditingSection
+        importAction: (() -> Void)?,
+        workshopImportAction: (() -> Void)? = nil,
+        folderURL: URL?
     ) -> some View {
-        HStack {
+        HStack(spacing: 16) {
+            // 左侧：收藏 / 已下载 下拉选择器 + 壁纸比例筛选
             HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(color)
+                if selectedContentType != .anime {
+                    Menu {
+                        ForEach(SubTab.allCases, id: \.self) { tab in
+                            Button(tab.title) {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    selectedSubTab = tab
+                                    isEditing = false
+                                    selectedItems.removeAll()
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(selectedSubTab.title)
+                                .font(.system(size: 14, weight: .semibold))
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.95))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.1))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        )
+                    }
+                    .menuStyle(.borderlessButton)
+                    .pointingHandCursor()
+                } else {
+                    Text(title)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.95))
+                }
 
-                Text(title)
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.95))
-
-                Text(countText)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
+                // 壁纸比例筛选（仅壁纸类型）
+                if selectedContentType == .wallpaper {
+                    HStack(spacing: 0) {
+                        ForEach(WallpaperRatioFilter.allCases, id: \.self) { filter in
+                            Button {
+                                wallpaperRatioFilter = filter
+                                isEditing = false
+                                selectedItems.removeAll()
+                            } label: {
+                                Text(filter.title)
+                                    .font(.system(size: 12, weight: wallpaperRatioFilter == filter ? .semibold : .medium))
+                                    .foregroundStyle(wallpaperRatioFilter == filter ? .white : .white.opacity(0.7))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .fill(wallpaperRatioFilter == filter ? color.opacity(0.35) : Color.clear)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandCursor()
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+                }
             }
 
             Spacer()
 
-            // 编辑按钮
-            Button {
-                withAnimation {
-                    if isEditing && editingSection == section {
-                        isEditing = false
-                        selectedItems.removeAll()
-                    } else {
-                        isEditing = true
-                        editingSection = section
+            // 右侧：按钮组
+            HStack(spacing: 8) {
+                // 编辑 / 完成
+                Button {
+                    withAnimation {
+                        isEditing.toggle()
                         selectedItems.removeAll()
                     }
+                } label: {
+                    Text(isEditing ? t("done") : t("edit"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isEditing ? .white : .white.opacity(0.9))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(isEditing ? color.opacity(0.35) : Color.white.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
                 }
-            } label: {
-                Text(isEditing && editingSection == section ? t("done") : t("edit"))
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isEditing && editingSection == section ? .white : .white.opacity(0.7))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isEditing && editingSection == section ? color.opacity(0.3) : Color.white.opacity(0.08))
-                    )
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+
+                // 导入
+                if let importAction {
+                    Button(action: importAction) {
+                        Text(t("import"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+
+                // Workshop 导入
+                if let workshopImportAction {
+                    Button(action: workshopImportAction) {
+                        Text(t("import.workshop"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+
+                // 打开文件夹
+                if let folderURL {
+                    Button {
+                        openFolderInFinder(folderURL)
+                    } label: {
+                        Text(t("open.in.finder"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
             }
-            .buttonStyle(.plain)
         }
     }
 
     // MARK: - Batch Delete Toolbar
-    private func batchDeleteToolbar(section: EditingSection, count: Int) -> some View {
+    private func batchDeleteToolbar(count: Int) -> some View {
         HStack {
-            if isEditing && editingSection == section {
+            if isEditing {
                 // 全选/取消全选
                 Button {
-                    toggleSelectAll(for: section)
+                    toggleSelectAll()
                 } label: {
                     Text(selectedItems.count == count ? t("deselect.all") : t("select.all"))
                         .font(.system(size: 13, weight: .medium))
@@ -451,7 +638,7 @@ struct MyLibraryContentView: View {
 
                 // 删除按钮
                 Button {
-                    deleteSelectedItems(for: section)
+                    deleteSelectedItems()
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "trash")
@@ -470,10 +657,9 @@ struct MyLibraryContentView: View {
                 .disabled(selectedItems.isEmpty)
             }
         }
-        .frame(height: isEditing && editingSection == section ? 36 : 0)
-        .opacity(isEditing && editingSection == section ? 1 : 0)
+        .frame(height: isEditing ? 36 : 0)
+        .opacity(isEditing ? 1 : 0)
         .animation(.easeInOut(duration: 0.2), value: isEditing)
-        .animation(.easeInOut(duration: 0.2), value: editingSection)
     }
 
     // MARK: - Empty State
@@ -537,64 +723,54 @@ struct MyLibraryContentView: View {
         }
     }
 
-    private func toggleSelectAll(for section: EditingSection) {
+    private func toggleSelectAll() {
+        let allIDs = Set(currentItemIDs)
+        selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
+    }
+
+    private var currentItemIDs: [String] {
         switch selectedContentType {
         case .wallpaper:
-            if section == .favorites {
-                let allIDs = Set(viewModel.favorites.map(\.id))
-                selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
-            } else {
-                // 使用 allLocalWallpapers 包含下载记录和本地文件
-                let allIDs = Set(viewModel.allLocalWallpapers.map(\.id))
-                selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
-            }
+            return wallpaperItems.map(\.id)
         case .video:
-            if section == .favorites {
-                let allIDs = Set(mediaViewModel.favoriteItems.map(\.id))
-                selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
-            } else {
-                // 使用 allLocalMedia 包含下载记录和本地文件
-                let allIDs = Set(mediaViewModel.allLocalMedia.map(\.id))
-                selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
-            }
+            return currentMediaItems.map(\.id)
         case .anime:
-            let allIDs = Set(animeFavorites.map(\.id))
-            selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
+            return currentAnimeItems.map(\.id)
         }
     }
 
-    private func deleteSelectedItems(for section: EditingSection) {
+    private func deleteSelectedItems() {
         switch selectedContentType {
         case .wallpaper:
-            // 分别处理收藏和下载的删除
-            let favoriteIDs = Set(viewModel.favorites.map(\.id))
-            let selectedFavoriteIDs = selectedItems.intersection(favoriteIDs)
-            if !selectedFavoriteIDs.isEmpty {
-                viewModel.removeWallpaperFavorites(withIDs: selectedFavoriteIDs)
+            if selectedSubTab == .favorites {
+                let favoriteIDs = Set(viewModel.favorites.map(\.id))
+                let ids = selectedItems.intersection(favoriteIDs)
+                if !ids.isEmpty {
+                    viewModel.removeWallpaperFavorites(withIDs: ids)
+                }
+            } else {
+                let allLocal = viewModel.allLocalWallpapers
+                let ids = selectedItems.intersection(Set(allLocal.map(\.id)))
+                if !ids.isEmpty {
+                    deleteLocalWallpapers(allLocal.filter { ids.contains($0.id) })
+                }
             }
 
-            // 处理下载 + 本地文件的删除（包括物理文件）
-            let allLocal = viewModel.allLocalWallpapers
-            let localIDsToDelete = selectedItems.intersection(Set(allLocal.map(\.id)))
-            if !localIDsToDelete.isEmpty {
-                deleteLocalWallpapers(allLocal.filter { localIDsToDelete.contains($0.id) })
-            }
-            
         case .video:
-            // 分别处理收藏和下载的删除
-            let favoriteIDs = Set(mediaViewModel.favoriteItems.map(\.id))
-            let selectedFavoriteIDs = selectedItems.intersection(favoriteIDs)
-            if !selectedFavoriteIDs.isEmpty {
-                mediaViewModel.removeFavorites(withIDs: selectedFavoriteIDs)
+            if selectedSubTab == .favorites {
+                let favoriteIDs = Set(mediaViewModel.favoriteItems.map(\.id))
+                let ids = selectedItems.intersection(favoriteIDs)
+                if !ids.isEmpty {
+                    mediaViewModel.removeFavorites(withIDs: ids)
+                }
+            } else {
+                let allLocal = mediaViewModel.allLocalMedia
+                let ids = selectedItems.intersection(Set(allLocal.map(\.id)))
+                if !ids.isEmpty {
+                    deleteLocalMedias(allLocal.filter { ids.contains($0.id) })
+                }
             }
 
-            // 处理下载 + 本地媒体的删除（包括物理文件）
-            let allLocal = mediaViewModel.allLocalMedia
-            let localIDsToDelete = selectedItems.intersection(Set(allLocal.map(\.id)))
-            if !localIDsToDelete.isEmpty {
-                deleteLocalMedias(allLocal.filter { localIDsToDelete.contains($0.id) })
-            }
-            
         case .anime:
             for id in selectedItems {
                 AnimeFavoriteStore.shared.removeFavorite(animeId: id)
@@ -610,14 +786,11 @@ struct MyLibraryContentView: View {
     /// 删除本地壁纸（含物理文件删除）
     private func deleteLocalWallpapers(_ items: [UnifiedLocalWallpaper]) {
         let fileManager = FileManager.default
-        
+
         for item in items {
-            // 1. 如果有下载记录，先软删除记录
             if let record = item.downloadRecord {
                 viewModel.removeWallpaperDownloads(withIDs: [record.wallpaper.id])
             }
-
-            // 2. 删除物理文件
             let filePath = item.fileURL.path
             if fileManager.fileExists(atPath: filePath) {
                 do {
@@ -629,10 +802,8 @@ struct MyLibraryContentView: View {
             }
         }
 
-        // 3. 重新扫描以刷新列表（同步等待完成，确保视图立即更新）
         Task {
             await LocalWallpaperScanner.shared.forceRescan()
-            // 扫描完成后强制刷新 ViewModel（计算属性依赖扫描结果）
             viewModel.loadFavorites()
         }
     }
@@ -642,12 +813,9 @@ struct MyLibraryContentView: View {
         let fileManager = FileManager.default
 
         for item in items {
-            // 1. 如果有下载记录，先软删除记录
             if let record = item.downloadRecord {
                 MediaLibraryService.shared.removeDownloadRecord(withID: record.item.id)
             }
-
-            // 2. 删除物理文件
             let filePath = item.fileURL.path
             if fileManager.fileExists(atPath: filePath) {
                 do {
@@ -659,12 +827,327 @@ struct MyLibraryContentView: View {
             }
         }
 
-        // 3. 重新扫描以刷新列表（同步等待完成，确保视图立即更新）
         Task {
             await LocalWallpaperScanner.shared.forceRescan()
-            // 扫描完成后递增 revision 强制刷新（allLocalMedia 是计算属性）
             mediaViewModel.refreshLibraryContent()
         }
+    }
+
+    // MARK: - Grid Config
+    private struct LibraryGridConfig {
+        let columnCount: Int
+        let spacing: CGFloat
+        let cardWidth: CGFloat
+        let contentWidth: CGFloat
+        let gridItems: [GridItem]
+
+        init(contentWidth: CGFloat) {
+            self.contentWidth = contentWidth
+            self.columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
+            self.spacing = 16
+            let totalSpacing = spacing * CGFloat(columnCount - 1)
+            self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+            self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        }
+    }
+
+    // MARK: - Import & Folder
+    private func openFolderInFinder(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    private func importWallpapers() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationFolder = DownloadPathManager.shared.wallpapersFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let destURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+            do {
+                if url.standardizedFileURL != destURL.standardizedFileURL {
+                    if fileManager.fileExists(atPath: destURL.path) {
+                        try fileManager.removeItem(at: destURL)
+                    }
+                    try fileManager.copyItem(at: url, to: destURL)
+                }
+                let wallpaper = makeImportedWallpaper(from: destURL)
+                WallpaperLibraryService.shared.recordDownload(wallpaper, fileURL: destURL)
+                importedCount += 1
+            } catch {
+                print("[MyLibrary] Failed to import wallpaper \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            viewModel.objectWillChange.send()
+        }
+    }
+
+    private func importMedia() async {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.movie]
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationFolder = DownloadPathManager.shared.mediaFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let destURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+            do {
+                if url.standardizedFileURL != destURL.standardizedFileURL {
+                    if fileManager.fileExists(atPath: destURL.path) {
+                        try fileManager.removeItem(at: destURL)
+                    }
+                    try fileManager.copyItem(at: url, to: destURL)
+                }
+                let item = await makeImportedMediaItem(from: destURL)
+                MediaLibraryService.shared.recordDownload(item: item, localFileURL: destURL)
+                importedCount += 1
+            } catch {
+                print("[MyLibrary] Failed to import media \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            mediaViewModel.objectWillChange.send()
+        }
+    }
+
+    private func importWorkshop() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationRoot = DownloadPathManager.shared.mediaFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "pkg" else {
+                print("[MyLibrary] Skipped non-pkg file: \(url.lastPathComponent)")
+                continue
+            }
+
+            let sourceDir = url.deletingLastPathComponent()
+            let projectJSONURL = sourceDir.appendingPathComponent("project.json")
+            guard fileManager.fileExists(atPath: projectJSONURL.path) else {
+                print("[MyLibrary] No project.json found next to \(url.lastPathComponent)")
+                continue
+            }
+
+            guard let data = try? Data(contentsOf: projectJSONURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("[MyLibrary] Failed to parse project.json for \(url.lastPathComponent)")
+                continue
+            }
+
+            let title = (json["title"] as? String) ?? sourceDir.lastPathComponent
+            var workshopID = (json["publishedfileid"] as? String) ?? (json["id"] as? String)
+
+            if workshopID == nil {
+                let dirName = sourceDir.lastPathComponent
+                let numeric = dirName.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if !numeric.isEmpty {
+                    workshopID = numeric
+                }
+            }
+
+            guard let id = workshopID, !id.isEmpty else {
+                print("[MyLibrary] Could not infer workshop ID for \(url.lastPathComponent)")
+                continue
+            }
+
+            let destDir = destinationRoot.appendingPathComponent("workshop_\(id)")
+            do {
+                if fileManager.fileExists(atPath: destDir.path) {
+                    try fileManager.removeItem(at: destDir)
+                }
+                try fileManager.copyItem(at: sourceDir, to: destDir)
+
+                let previewExtensions = ["jpg", "jpeg", "png", "webp", "gif"]
+                var previewURL: URL?
+                for pe in previewExtensions {
+                    let candidate = destDir.appendingPathComponent("preview.\(pe)")
+                    if fileManager.fileExists(atPath: candidate.path) {
+                        previewURL = candidate
+                        break
+                    }
+                }
+
+                let item = makeImportedWorkshopItem(
+                    workshopID: id,
+                    title: title,
+                    projectJSON: json,
+                    destDir: destDir,
+                    previewURL: previewURL
+                )
+                MediaLibraryService.shared.recordDownload(item: item, localFileURL: destDir)
+                importedCount += 1
+            } catch {
+                print("[MyLibrary] Failed to import workshop \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            mediaViewModel.objectWillChange.send()
+        }
+    }
+
+    private func makeImportedWallpaper(from fileURL: URL) -> Wallpaper {
+        let fileName = fileURL.lastPathComponent
+        let id: String
+        if fileName.hasPrefix("wallhaven-"), let dotIndex = fileName.firstIndex(of: ".") {
+            let start = fileName.index(fileName.startIndex, offsetBy: 10)
+            let extracted = String(fileName[start..<dotIndex])
+            id = extracted.isEmpty ? "local_import_\(UUID().uuidString.prefix(8))" : extracted
+        } else {
+            id = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+        }
+
+        let localPath = fileURL.absoluteString
+        var dimensionX = 1920
+        var dimensionY = 1080
+        if let image = NSImage(contentsOf: fileURL) {
+            dimensionX = Int(image.size.width)
+            dimensionY = Int(image.size.height)
+        }
+        let resolution = "\(dimensionX)x\(dimensionY)"
+        let ratio = dimensionY > 0 ? Double(dimensionX) / Double(dimensionY) : 1.77
+
+        return Wallpaper(
+            id: id,
+            url: localPath,
+            shortUrl: nil,
+            views: 0,
+            favorites: 0,
+            downloads: nil,
+            source: nil,
+            purity: "sfw",
+            category: "general",
+            dimensionX: dimensionX,
+            dimensionY: dimensionY,
+            resolution: resolution,
+            ratio: String(format: "%.2f", ratio),
+            fileSize: nil,
+            fileType: nil,
+            createdAt: nil,
+            colors: [],
+            path: localPath,
+            thumbs: Wallpaper.Thumbs(large: localPath, original: localPath, small: localPath),
+            tags: nil,
+            uploader: nil
+        )
+    }
+
+    private func makeImportedMediaItem(from fileURL: URL) async -> MediaItem {
+        let fileName = fileURL.lastPathComponent
+        let slug: String
+        if fileName.hasPrefix("motionbgs-") {
+            let parts = fileName.split(separator: "-")
+            if parts.count >= 2 {
+                slug = String(parts[1])
+            } else {
+                slug = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+            }
+        } else {
+            slug = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+        }
+
+        let title = fileURL.deletingPathExtension().lastPathComponent
+        var resolutionLabel = "Unknown"
+        var durationSeconds: Double?
+        let asset = AVAsset(url: fileURL)
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            if let track = tracks.first {
+                let naturalSize = try await track.load(.naturalSize)
+                let preferredTransform = try await track.load(.preferredTransform)
+                let size = naturalSize.applying(preferredTransform)
+                let w = Int(abs(size.width))
+                let h = Int(abs(size.height))
+                resolutionLabel = "\(w)x\(h)"
+            }
+            let duration = try await asset.load(.duration)
+            if duration.isValid && duration != CMTime.indefinite {
+                durationSeconds = CMTimeGetSeconds(duration)
+            }
+        } catch {
+            print("[MyLibrary] Failed to load video metadata: \(error)")
+        }
+
+        // 为导入的视频生成并缓存第一帧缩略图到缓存目录
+        _ = await VideoThumbnailCache.shared.thumbnailImage(for: fileURL)
+        let thumbnailURL = VideoThumbnailCache.shared.thumbnailURL(for: fileURL)
+
+        return MediaItem(
+            slug: slug,
+            title: title,
+            pageURL: fileURL,
+            thumbnailURL: thumbnailURL,
+            resolutionLabel: resolutionLabel,
+            collectionTitle: "Imported",
+            summary: nil,
+            previewVideoURL: fileURL,
+            posterURL: thumbnailURL,
+            tags: [],
+            exactResolution: resolutionLabel,
+            durationSeconds: durationSeconds,
+            downloadOptions: [],
+            sourceName: "Import",
+            isAnimatedImage: nil
+        )
+    }
+
+
+
+    private func makeImportedWorkshopItem(
+        workshopID: String,
+        title: String,
+        projectJSON: [String: Any],
+        destDir: URL,
+        previewURL: URL?
+    ) -> MediaItem {
+        let typeString = (projectJSON["type"] as? String) ?? "pkg"
+        let resolutionLabel = typeString.capitalized
+        let thumbnailURL = previewURL ?? URL(string: "https://steamcommunity.com/favicon.ico")!
+
+        return MediaItem(
+            slug: "workshop_\(workshopID)",
+            title: title,
+            pageURL: URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(workshopID)")!,
+            thumbnailURL: thumbnailURL,
+            resolutionLabel: resolutionLabel,
+            collectionTitle: "Workshop",
+            summary: (projectJSON["description"] as? String),
+            previewVideoURL: nil,
+            posterURL: previewURL,
+            tags: [],
+            exactResolution: nil,
+            durationSeconds: nil,
+            downloadOptions: [],
+            sourceName: t("wallpaperEngine"),
+            isAnimatedImage: nil
+        )
     }
 }
 
@@ -716,6 +1199,7 @@ struct ContentTypeButton: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 }
 
@@ -724,9 +1208,14 @@ struct AnimeLibraryCard: View {
     let anime: AnimeSearchResult
     let isEditing: Bool
     let isSelected: Bool
+    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
     let action: () -> Void
 
     @State private var isHovered = false
+
+    private var thumbnailHeight: CGFloat {
+        LibraryCardMetrics.thumbnailHeight + 72
+    }
 
     var body: some View {
         Button(action: action) {
@@ -734,17 +1223,19 @@ struct AnimeLibraryCard: View {
                 // 图片区域 - 单独裁剪顶部圆角
                 ZStack {
                     KFImage(URL(string: anime.coverURL ?? ""))
+                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)))
+                        .cacheMemoryOnly(false)
                         .fade(duration: 0.3)
                         .placeholder { _ in
                             SkeletonCard(
-                                width: LibraryCardMetrics.cardWidth,
-                                height: LibraryCardMetrics.thumbnailHeight + 72,
+                                width: cardWidth,
+                                height: thumbnailHeight,
                                 cornerRadius: 0
                             )
                         }
                         .resizable()
                         .scaledToFill()
-                        .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight + 72)
+                        .frame(width: cardWidth, height: thumbnailHeight)
                         .clipped()
 
                     // 左上角复选框（编辑模式下显示）
@@ -801,7 +1292,7 @@ struct AnimeLibraryCard: View {
                                             Capsule(style: .continuous)
                                                 .fill(Color.black.opacity(0.45))
                                         )
-                                        .padding(12)
+                                    .padding(12)
                                 }
                             }
                             Spacer()
@@ -832,9 +1323,9 @@ struct AnimeLibraryCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
             }
-            .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(Color(hex: "1A1D24").opacity(0.6))
@@ -853,3 +1344,50 @@ struct AnimeLibraryCard: View {
     }
 }
 
+// MARK: - AnyWallpaperItem (统一封装用于 ForEach)
+private struct AnyWallpaperItem: Identifiable {
+    let id: String
+    let wallpaper: Wallpaper
+    let downloadDate: Date?
+
+    init(wallpaper: Wallpaper) {
+        self.id = wallpaper.id
+        self.wallpaper = wallpaper
+        self.downloadDate = nil
+    }
+
+    init(unified: UnifiedLocalWallpaper) {
+        self.id = unified.id
+        self.wallpaper = unified.wallpaper
+        self.downloadDate = unified.downloadRecord?.downloadedAt
+    }
+}
+
+// MARK: - AnyMediaItem (统一封装用于 ForEach)
+private struct AnyMediaItem: Identifiable {
+    let id: String
+    let mediaItem: MediaItem
+
+    init(item: MediaItem) {
+        self.id = item.id
+        self.mediaItem = item
+    }
+
+    init(unified: UnifiedLocalMedia) {
+        self.id = unified.id
+        self.mediaItem = unified.mediaItem
+    }
+}
+
+// MARK: - Cursor Extension
+private extension View {
+    func pointingHandCursor() -> some View {
+        self.onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+}

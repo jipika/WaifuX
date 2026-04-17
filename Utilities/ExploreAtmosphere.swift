@@ -3,6 +3,24 @@ import AppKit
 import Kingfisher
 import Combine
 
+// MARK: - 全局滚动状态（用于 GIF 播放暂停）
+
+@MainActor
+final class ExploreScrollState: ObservableObject {
+    static let shared = ExploreScrollState()
+    @Published var isScrolling = false
+    private var scrollTask: Task<Void, Never>?
+    
+    func markScrolling() {
+        isScrolling = true
+        scrollTask?.cancel()
+        scrollTask = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await MainActor.run { isScrolling = false }
+        }
+    }
+}
+
 // MARK: - 探索页氛围色（背景光斑 + 液态玻璃主题色）
 
 struct ExploreAtmosphereTint {
@@ -265,7 +283,7 @@ final class ExploreAtmosphereController: ObservableObject {
         referenceImage = nil
 
         tint = .mediaFallback
-        let url = item.posterURLValue ?? item.thumbnailURLValue
+        let url = item.coverImageURL
 
         loadTask = Task {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
@@ -471,5 +489,107 @@ struct ExploreDynamicAtmosphereBackground: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - 媒体封面（静态 / GIF统一加载 + 失败占位）
+
+/// 列表/首页封面：底层始终有色块/渐变，避免加载失败时出现空白或系统错误图。
+/// 统一使用 `KFAnimatedImage`：Kingfisher 内部会解析真实文件格式，
+/// GIF 自动走动画管线，静态图则回退到普通 ImageView 行为，无需外部根据 URL 预判断。
+struct KFMediaCoverImage: View {
+    let url: URL
+    var animated: Bool
+    /// 非 nil 时对静态图做降采样（列表性能）；GIF 分支忽略。
+    var downsampleSize: CGSize? = nil
+    var fadeDuration: Double = 0.25
+    /// 任意一次加载结束（成功或失败）时调用，用于详情页淡入等。
+    var loadFinished: (() -> Void)? = nil
+    /// 列表/卡片必须传入，约束 `KFAnimatedImage`（AppKit）按 GIF 原始尺寸撑开父布局的问题。
+    var layoutSize: CGSize? = nil
+    /// 是否允许播放 GIF 动画；详情页/首页建议 true，列表配合 `isVisible` 使用。
+    var playAnimatedImage: Bool = false
+    /// 当前卡片/视图是否在视口内；不在视口内时即使 `playAnimatedImage==true` 也切回静态首帧，降低滚动开销。
+    var isVisible: Bool = true
+
+    @State private var detectedGIF = false
+    @State private var loadFailed = false
+
+    private var shouldAnimate: Bool {
+        playAnimatedImage && isVisible
+    }
+
+    private var underlay: some View {
+        LinearGradient(
+            colors: [
+                Color(hex: "1C2431"),
+                Color(hex: "233B5A"),
+                Color(hex: "14181F")
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    var body: some View {
+        let core = ZStack {
+            underlay
+            // 1. 底层始终用 KFImage 加载，保证静态图和 GIF 首帧都能显示
+            KFImage(url)
+                .cacheMemoryOnly(false)
+                .fade(duration: fadeDuration)
+                .placeholder { _ in underlay }
+                .onSuccess { result in
+                    // 根据 Kingfisher 解码后的真实内容判断是否为 GIF（比 URL 后缀可靠）
+                    if !detectedGIF, result.image.kf.gifRepresentation() != nil {
+                        detectedGIF = true
+                    }
+                    loadFinished?()
+                }
+                .onFailure { _ in loadFinished?() }
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+
+            // 2. 若真实格式为 GIF 且允许动画，叠加 KFAnimatedImage 播放动效
+            if detectedGIF && !loadFailed {
+                KFAnimatedImage.url(url)
+                    .cacheMemoryOnly(false)
+                    .configure { view in
+                        #if os(macOS)
+                        view.imageScaling = NSImageScaling.scaleAxesIndependently
+                        #elseif canImport(UIKit)
+                        view.contentMode = .scaleAspectFill
+                        view.clipsToBounds = true
+                        #endif
+                        view.autoPlayAnimatedImage = shouldAnimate
+                        view.framePreloadCount = shouldAnimate ? 10 : 1
+                    }
+                    .placeholder { _ in underlay }
+                    .onSuccess { _ in loadFinished?() }
+                    .onFailure { _ in
+                        loadFailed = true
+                        loadFinished?()
+                    }
+                    // 用 id 强制重建，确保 isVisible 变化时重新执行 configure，动画启停生效
+                    .id("kfai_\(url.absoluteString)_\(shouldAnimate)")
+            }
+        }
+
+        Group {
+            if let s = layoutSize {
+                core.frame(width: s.width, height: s.height).clipped()
+            } else {
+                core
+            }
+        }
+    }
+}
+
+/// 兼容旧调用点：等价于 `KFMediaCoverImage(url:animated:true)` 。
+struct KingfisherGIFImage: View {
+    let url: URL
+
+    var body: some View {
+        KFMediaCoverImage(url: url, animated: true, downsampleSize: nil, fadeDuration: 0.2, loadFinished: nil, layoutSize: nil)
     }
 }

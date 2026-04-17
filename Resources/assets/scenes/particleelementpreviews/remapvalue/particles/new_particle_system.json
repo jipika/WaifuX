@@ -1,0 +1,76 @@
+{
+	"children" : null,
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : 512,
+			"distancemin" : 5,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 20
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 200,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 13,
+			"max" : "0 -600 0",
+			"min" : "0 -500 0",
+			"name" : "velocityrandom"
+		}
+	],
+	"material" : "materials/particle/halo_1.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 0.89999998,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 14,
+			"input" : "distancetocontrolpoint",
+			"inputcontrolpoint0" : 1,
+			"inputrangemax" : 200,
+			"inputrangemin" : 150,
+			"name" : "remapvalue",
+			"operation" : "remap",
+			"output" : "color",
+			"outputrangemax" : "0 0 1",
+			"outputrangemin" : "1 0 0"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0
+}

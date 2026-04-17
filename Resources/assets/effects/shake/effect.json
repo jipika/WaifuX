@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "shake",
+	"name" : "ui_editor_effect_shake_title",
+	"description" : "ui_editor_effect_shake_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/shake.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/shake.json",
+		"shaders/effects/shake.frag",
+		"shaders/effects/shake.vert"
+	]
+}

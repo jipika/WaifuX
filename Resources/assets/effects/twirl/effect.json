@@ -1,0 +1,33 @@
+{
+	"version" : 1,
+	"replacementkey" : "twirl",
+	"name" : "ui_editor_effect_twirl_title",
+	"description" : "ui_editor_effect_twirl_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/twirl.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/twirl.json",
+		"shaders/effects/twirl.frag",
+		"shaders/effects/twirl.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectSpinUV",
+			"vars" :
+			{
+				"center" : "center",
+				"ratio" : "ratio",
+				"angle" : "angle",
+				"size" : "size"
+			}
+		}
+	]
+}

@@ -1,0 +1,110 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : "1024 0 0",
+			"id" : 7,
+			"name" : "boxrandom",
+			"origin" : "0 1024 0",
+			"rate" : 1000
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.20000000000000001,
+			"min" : 0.20000000000000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 40,
+			"min" : 30,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "2500 -15000 0",
+			"min" : "1000 -10000 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "255 255 255",
+			"min" : "197 214 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"max" : 1,
+			"min" : 1,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/particle/refractiverain.json",
+	"maxcount" : 200,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 8,
+			"name" : "movement"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 1,
+			"maxlength" : 20,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

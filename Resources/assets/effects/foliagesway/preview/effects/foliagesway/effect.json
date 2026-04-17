@@ -1,0 +1,18 @@
+{
+	"name" : "Foliage Sway",
+	"description" : "Sways the object in each corner of the image.",
+	"group" : "geometry",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/foliagesway.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/foliagesway.json",
+		"shaders/effects/foliagesway.frag",
+		"shaders/effects/foliagesway.vert"
+	]
+}

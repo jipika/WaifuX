@@ -1,0 +1,99 @@
+{
+	"name" : "ui_editor_preset_fireworks_title",
+	"description" : "ui_editor_preset_fireworks_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_fireworks_variant_1",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_fireworks_variant_2",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_fireworks_variant_3",
+				"value" : 2
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "preview_fireworks1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fireworks 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fireworks1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fireworks_halo.json",
+				"materials/presets/fireworks_halo_4.json",
+				"materials/presets/fireworks_hit_distort.json",
+				"particles/presets/fireworks1.json",
+				"particles/presets/fireworks1flare.json",
+				"particles/presets/fireworks1hit.json",
+				"particles/presets/fireworkshitdistort.json"
+			]
+		},
+		{
+			"preview" : "preview_fireworks2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fireworks 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fireworks2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fireworks_halo.json",
+				"materials/presets/fireworks_halo_4.json",
+				"materials/presets/fireworks_hit_distort.json",
+				"materials/presets/fireworks_star.json",
+				"particles/presets/fireworks2.json",
+				"particles/presets/fireworks2flare.json",
+				"particles/presets/fireworks2hit.json",
+				"particles/presets/fireworkshitdistort.json",
+				"particles/presets/fireworks2stars.json"
+			]
+		},
+		{
+			"preview" : "preview_fireworks3/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fireworks 3",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fireworks3.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fireworks_halo.json",
+				"materials/presets/fireworks_halo_4.json",
+				"materials/presets/fireworks_hit_distort.json",
+				"particles/presets/fireworks3.json",
+				"particles/presets/fireworks3flare.json",
+				"particles/presets/fireworks3hit.json",
+				"particles/presets/fireworkshitdistort.json"
+			]
+		}
+	]
+}

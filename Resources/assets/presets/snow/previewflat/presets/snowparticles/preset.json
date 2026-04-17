@@ -1,0 +1,22 @@
+{
+	"name" : "Snow Particles",
+	"description" : "Adds snow particles slowly following from the top of the screen.",
+	"scene" : "2d",
+	"group" : "preset",
+	//"preview" : "preview/project.json",
+	"objects" :
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"name" : "Snow particles",
+			"origin" : "0.000 0.000 0.000",
+			"particle" : "particles/presets/snowparticles.json",
+			"scale" : "1.000 1.000 1.000"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/presets/snowparticles.json",
+		"particles/presets/snowparticles.json"
+	]
+}

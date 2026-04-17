@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/godrays_cast",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}

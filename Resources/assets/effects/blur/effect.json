@@ -1,0 +1,85 @@
+{
+	"version" : 1,
+	"replacementkey" : "blur",
+	"name" : "ui_editor_effect_blur_title",
+	"description" : "ui_editor_effect_blur_description",
+	"group" : "blur",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/blur_downsample4.json",
+			"target" : "_rt_QuarterCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/blur_gaussian_x.json",
+			"target" : "_rt_QuarterCompoBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/blur_gaussian_y.json",
+			"target" : "_rt_QuarterCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer2",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/blur_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer1",
+					"index" : 0
+				},
+				{
+					"name" : "previous",
+					"index" : 2
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_QuarterCompoBuffer1",
+			"scale" : 4,
+			"format" : "rgba_backbuffer"
+		},
+		{
+			"name" : "_rt_QuarterCompoBuffer2",
+			"scale" : 4,
+			"format" : "rgba_backbuffer"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/blur_downsample4.json",
+		"materials/effects/blur_gaussian_x.json",
+		"materials/effects/blur_gaussian_y.json",
+		"materials/effects/blur_combine.json",
+		"shaders/effects/blur_downsample4.frag",
+		"shaders/effects/blur_downsample4.vert",
+		"shaders/effects/blur_gaussian.frag",
+		"shaders/effects/blur_gaussian.vert",
+		"shaders/effects/blur_combine.frag",
+		"shaders/effects/blur_combine.vert"
+	]
+}

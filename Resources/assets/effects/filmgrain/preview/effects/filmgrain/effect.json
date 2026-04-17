@@ -1,0 +1,18 @@
+{
+	"name" : "ui_editor_effect_filmgrain_title",
+	"description" : "ui_editor_effect_filmgrain_description",
+	"group" : "colorize",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/filmgrain.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/filmgrain.json",
+		"shaders/effects/filmgrain.frag",
+		"shaders/effects/filmgrain.vert"
+	]
+}

@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "genericimage4",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}

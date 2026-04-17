@@ -1,0 +1,128 @@
+{
+	"name" : "ui_editor_preset_smoke_title",
+	"description" : "ui_editor_preset_smoke_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Vapor 0",
+				"value" : 0
+			},
+			{
+				"label" : "Vapor 1",
+				"value" : 1
+			},
+			{
+				"label" : "Smoke stream",
+				"value" : 2
+			},
+			{
+				"label" : "Smoke cloud",
+				"value" : 3
+			},
+			{
+				"label" : "Ash",
+				"value" : 4
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewvapor0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Vapor 0",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/vapor0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/vapor0.json",
+				"particles/presets/vapor0.json"
+			]
+		},
+		{
+			"preview" : "previewvapor1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Vapor 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/vapor1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/vapor1.json",
+				"materials/presets/vapor1b.json",
+				"particles/presets/vapor1.json",
+				"particles/presets/vapor1_child.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Smoke stream",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/smoke2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/smoke2.json",
+				"particles/presets/smoke2.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Smoke cloud",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/smoke1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/smoke1.json",
+				"particles/presets/smoke1.json"
+			]
+		},
+		{
+			"preview" : "previewash/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Ash",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/ash.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/ash.json",
+				"particles/presets/ash.json"
+			]
+		}
+	]
+}

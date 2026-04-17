@@ -1,0 +1,78 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.300 0.300 0.300",
+		"bloom" : false,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999997615814209,
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.506 0.231 0.231",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"nearz" : 0.10000000149011612,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.300 0.300 0.300"
+	},
+	"objects" : 
+	[
+		{
+			"alpha" : 1.0,
+			"anchor" : "none",
+			"angles" : "0.000 0.000 0.000",
+			"backgroundcolor" : "0.000 0.000 0.000",
+			"color" : "1.000 1.000 1.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"font" : "systemfont_arial",
+			"horizontalalign" : "center",
+			"id" : 13,
+			"image" : null,
+			"locktransforms" : false,
+			"model" : null,
+			"name" : "Countdown",
+			"opaquebackground" : false,
+			"origin" : "128.000 141.596 0.000",
+			"padding" : 0,
+			"parallaxDepth" : "1.000 1.000",
+			"particle" : null,
+			"perspective" : false,
+			"pointsize" : 24.0,
+			"scale" : "0.245 0.245 0.245",
+			"size" : "927.000 115.000",
+			"solid" : true,
+			"text" : 
+			{
+				"script" : "'use strict';\n\nexport var scriptProperties = createScriptProperties()\n\t// The time that the coutdown will end on.\n\t.addText({\n\t\tname: 'date',\n\t\tlabel: 'ui_editor_properties_date',\n\t\tvalue: '2019-12-25T00:00:00'\n\t})\n\t// Whether the year should be ignored.\n\t.addCheckbox({\n\t\tname: 'recurring',\n\t\tlabel: 'ui_editor_properties_recurring',\n\t\tvalue: true\n\t})\n\t// This text will be shown for non-recurring countdowns after they concluded.\n\t.addCheckbox({\n\t\tname: 'finalMessage',\n\t\tlabel: 'ui_editor_properties_end_message',\n\t\tvalue: 'The countdown finished!'\n\t})\n\t.finish();\n\n/**\n * @param {String} value (for property 'text')\n */\nvar originalText;\nexport function update(value) {\n\tvar currentDate = new Date();\n\tvar targetDate = new Date(scriptProperties.date);\n\tvar isRecurringEachYear = scriptProperties.recurring;\n\tif (isRecurringEachYear) {\n\t\ttargetDate.setUTCFullYear(currentDate.getUTCFullYear());\n\t\tif ((targetDate.getTime() - currentDate.getTime()) < 0) {\n\t\t\ttargetDate.setUTCFullYear(currentDate.getUTCFullYear() + 1);\n\t\t}\n\t}\n\n\tvar diff = targetDate.getTime() - currentDate.getTime();\n\tif (!isRecurringEachYear\n\t\t&& diff < 0) {\n\t\treturn scriptProperties.finalMessage;\n\t}\n\n\tvar years = Math.floor(diff / (1000 * 60 * 60 * 24 * 365));\n\tvar days = Math.floor(diff / (1000 * 60 * 60 * 24));\n\tvar hours = Math.floor(diff / (1000 * 60 * 60)) % 24;\n\tvar minutes = Math.floor(diff / (1000 * 60)) % 60;\n\n\tif (!isRecurringEachYear) {\n\t\tdays %= 365;\n\t}\n\n\tvalue = originalText + '\\n';\n\tif (years > 0 && !isRecurringEachYear) {\n\t\tvalue += years + ' years, ';\n\t}\n\tif (days > 0) {\n\t\tvalue += days + ' days, ';\n\t}\n\tvalue += hours + ' hours';\n\tif (days == 0) {\n\t\tvalue += ', ' + minutes + ' minutes';\n\t}\n\treturn value;\n}\n\n/**\n * @param {String} value (for property 'text')\n */\nexport function init(value) {\n\toriginalText = value;\n\treturn value;\n}\n",
+				"scriptproperties" : 
+				{
+					"date" : "2019-12-25T00:00:00",
+					"finalMessage" : "The countdown finished!",
+					"recurring" : true
+				},
+				"value" : "Time until Christmas:"
+			},
+			"verticalalign" : "center",
+			"visible" : true
+		}
+	]
+}

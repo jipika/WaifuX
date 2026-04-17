@@ -1,0 +1,20 @@
+{
+	"version" : 2,
+	"replacementkey" : "shimmer",
+	"name" : "ui_editor_effect_shimmer_title",
+	"description" : "ui_editor_effect_shimmer_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/shimmer.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/shimmer.json",
+		"shaders/effects/shimmer.frag",
+		"shaders/effects/shimmer.vert"
+	]
+}

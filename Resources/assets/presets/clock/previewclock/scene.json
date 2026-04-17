@@ -1,0 +1,72 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.300 0.300 0.300",
+		"bloom" : false,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999997615814209,
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.267 0.267 0.267",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"nearz" : 0.10000000149011612,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.300 0.300 0.300"
+	},
+	"objects" : 
+	[
+		{
+			"alpha" : 1.0,
+			"anchor" : "none",
+			"angles" : "0.000 0.000 0.000",
+			"backgroundcolor" : "0.000 0.000 0.000",
+			"color" : "1.000 1.000 1.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"font" : "fonts/RobotoMono-Regular.ttf",
+			"horizontalalign" : "center",
+			"id" : 13,
+			"image" : null,
+			"locktransforms" : false,
+			"model" : null,
+			"name" : "Clock",
+			"opaquebackground" : false,
+			"origin" : "128.000 135.567 0.000",
+			"padding" : 0,
+			"parallaxDepth" : "1.000 1.000",
+			"particle" : null,
+			"perspective" : false,
+			"pointsize" : 24.0,
+			"scale" : "0.726 0.726 0.726",
+			"size" : "379.000 117.000",
+			"solid" : true,
+			"text" : 
+			{
+				"script" : "'use strict';\n\n// This will be used to separate each element\nlet delimiter = ':';\n\n// Whether you want to see the seconds or not\nlet showSeconds = false;\n\n// Whether you want a 24h or 12h style format\nlet use24hFormat = true;\n\n/**\n * @param {String} value (for property 'text')\n */\nexport function update(value) {\n\tlet time = new Date();\n\tvar hours = time.getHours();\n\tif (!use24hFormat) {\n\t\thours %= 12;\n\t\tif (hours == 0) {\n\t\t\thours = 12;\n\t\t}\n\t}\n\thours = (\"00\" + hours).slice(-2);\n\tlet minutes = (\"00\" + time.getMinutes()).slice(-2);\n\tvalue = hours + delimiter + minutes;\n\tif (showSeconds) {\n\t\tlet seconds = (\"00\" + time.getSeconds()).slice(-2);\n\t\tvalue += delimiter + seconds;\n\t}\n\treturn value;\n}\n",
+				"value" : "<Clock>"
+			},
+			"verticalalign" : "center",
+			"visible" : true
+		}
+	]
+}

@@ -1,0 +1,121 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.2 0",
+			"distancemax" : 512,
+			"distancemin" : 0,
+			"id" : 8,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 1.5
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 2200,
+			"min" : 1000,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "80 0 0",
+			"min" : "25 0 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "255 255 255",
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 7,
+			"max" : 0.20000000000000001,
+			"min" : 0.14999999999999999,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/fog1.json",
+	"maxcount" : 20,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 9,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 10,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 2
+}

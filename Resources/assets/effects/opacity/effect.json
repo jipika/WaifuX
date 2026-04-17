@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "opacity",
+	"name" : "ui_editor_effect_opacity_title",
+	"description" : "ui_editor_effect_opacity_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/opacity.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/opacity.json",
+		"shaders/effects/opacity.frag",
+		"shaders/effects/opacity.vert"
+	]
+}

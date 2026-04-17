@@ -1,0 +1,108 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : "200 256 0",
+			"id" : 6,
+			"name" : "boxrandom",
+			"rate" : 1
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 2000,
+			"min" : 1000,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 221 155",
+			"min" : "255 196 175",
+			"name" : "colorrandom"
+		},
+		{
+			"exponent" : 2,
+			"id" : 5,
+			"max" : 0.20000000000000001,
+			"min" : 0.10000000000000001,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/emberglow.json",
+	"maxcount" : 32,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 8,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 3
+}

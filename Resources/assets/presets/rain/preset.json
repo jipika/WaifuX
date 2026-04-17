@@ -1,0 +1,162 @@
+{
+	"name" : "ui_editor_preset_rain_title",
+	"description" : "ui_editor_preset_rain_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_rain_variant_1",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_rain_variant_2",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_rain_variant_3",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_rain_splashes",
+				"value" : 3
+			},
+			{
+				"label" : "ui_editor_preset_rain_screen_1080",
+				"value" : 4
+			},
+			{
+				"label" : "ui_editor_preset_rain_screen_4k",
+				"value" : 5
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewperspective/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain perspective",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rainperspective.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rainperspective.json",
+				"particles/presets/rainperspective.json"
+			]
+		},
+		{
+			"preview" : "previewdownpour/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain downpour",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/raindownpour.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/raindownpour.json",
+				"particles/presets/raindownpour.json"
+			]
+		},
+		{
+			"preview" : "previewrefractive/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain refractive",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rainrefractive.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rainrefractive.json",
+				"particles/presets/rainrefractive.json"
+			]
+		},
+		{
+			"preview" : "previewrainsplashes/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain splashes",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rain_splashes.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rain_splashes.json",
+				"particles/presets/rain_splashes.json",
+				"materials/presets/rain_splashes_droplets.json",
+				"particles/presets/rain_splashes_droplets.json"
+			]
+		},
+		{
+			"preview" : "previewrainscreen/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain screen drops 1080p",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rain_screen.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rain_screen.json",
+				"particles/presets/rain_screen.json",
+				"materials/presets/rain_screen_static.json",
+				"particles/presets/rain_screen_static.json",
+				"materials/presets/rain_screen_fast.json",
+				"particles/presets/rain_screen_fast.json",
+				"materials/presets/rain_screen_fast_child.json",
+				"particles/presets/rain_screen_fast_child.json"
+			]
+		},
+		{
+			"preview" : "previewrainscreen/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Rain screen drops 4k",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/rain_screen_4k.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/rain_screen.json",
+				"particles/presets/rain_screen_4k.json",
+				"materials/presets/rain_screen_static.json",
+				"particles/presets/rain_screen_static_4k.json",
+				"materials/presets/rain_screen_fast.json",
+				"particles/presets/rain_screen_fast_4k.json",
+				"materials/presets/rain_screen_fast_child.json",
+				"particles/presets/rain_screen_fast_child.json"
+			]
+		}
+	]
+}

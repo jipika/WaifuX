@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/glitter_prepare",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}

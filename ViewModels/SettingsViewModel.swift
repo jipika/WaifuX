@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import ServiceManagement
 import Kingfisher
 
@@ -35,6 +36,7 @@ class SettingsViewModel: ObservableObject {
     @Published var updateCheckError: String?
 
     private let ruleRepository = RuleRepository.shared
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - 调度器相关（延迟初始化，避免启动时阻塞）
     private var _schedulerViewModel: WallpaperSchedulerViewModel?
@@ -43,6 +45,11 @@ class SettingsViewModel: ObservableObject {
     var schedulerViewModel: WallpaperSchedulerViewModel {
         if _schedulerViewModel == nil {
             _schedulerViewModel = WallpaperSchedulerViewModel()
+            _schedulerViewModel!.objectWillChange
+                .sink { [weak self] _ in
+                    self?.objectWillChange.send()
+                }
+                .store(in: &cancellables)
         }
         return _schedulerViewModel!
     }
@@ -127,12 +134,12 @@ class SettingsViewModel: ObservableObject {
     /// 存储最新的 commit 信息
     @Published var latestCommit: GitHubCommit?
 
-    func checkForUpdates() async {
+    func checkForUpdates(force: Bool = false) async {
         isCheckingUpdate = true
         updateCheckError = nil
         latestCommit = nil
 
-        let result = await updateChecker.checkForUpdates()
+        let result = await updateChecker.checkForUpdates(force: force)
         updateCheckResult = result
 
         // 提取 commit 信息
@@ -206,7 +213,7 @@ class SettingsViewModel: ObservableObject {
             cacheProgress = 0
             return
         }
-        let urlCacheURL = cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache")
+        let urlCacheURL = cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache")
         var urlCacheBytes = 0
         if let enumerator = FileManager.default.enumerator(at: urlCacheURL, includingPropertiesForKeys: [.fileSizeKey]) {
             while let fileURL = enumerator.nextObject() as? URL {
@@ -234,7 +241,7 @@ class SettingsViewModel: ObservableObject {
             await updateCacheSize()
             return
         }
-        let urlCacheURL = cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache")
+        let urlCacheURL = cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache")
         try? FileManager.default.removeItem(at: urlCacheURL)
         try? FileManager.default.createDirectory(at: cacheURL.appendingPathComponent("com.wallhaven.app"), withIntermediateDirectories: true)
 
@@ -257,7 +264,7 @@ class SettingsViewModel: ObservableObject {
         URLCache.shared.removeAllCachedResponses()
         if let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let targets = [
-                cacheURL.appendingPathComponent("com.wallhaven.app/WallHavenCache"),
+                cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache"),
                 cacheURL.appendingPathComponent("WallHaven/ImageCache"),
                 cacheURL.appendingPathComponent("com.waifux.app"),
                 cacheURL.appendingPathComponent("org.onevcat.Kingfisher.ImageCache.default")

@@ -1,0 +1,113 @@
+{
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 2,
+			"id" : 1,
+			"offset" : "450 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 8,
+			"distancemin" : 0,
+			"id" : 7,
+			"name" : "sphererandom",
+			"rate" : 150
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.2,
+			"min" : 0.2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 60,
+			"min" : 20,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "400 400 0",
+			"min" : "-400 -400 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "117 255 248",
+			"min" : "242 255 0",
+			"name" : "colorrandom"
+		},
+		{
+			"count" : 10,
+			"flags" : 15,
+			"id" : 6,
+			"limitbehavior" : "mirror",
+			"name" : "mapsequencebetweencontrolpoints"
+		}
+	],
+	"material" : "materials/presets/dischargearc.json",
+	"maxcount" : 64,
+	"operator" : 
+	[
+		{
+			"drag" : 10,
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"id" : 9,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "rope",
+			"subdivision" : 0
+		}
+	],
+	"starttime" : 0
+}

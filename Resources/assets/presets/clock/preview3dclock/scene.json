@@ -1,0 +1,72 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.300 0.300 0.300",
+		"bloom" : false,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999997615814209,
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.376 0.376 0.376",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"nearz" : 0.10000000149011612,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.300 0.300 0.300"
+	},
+	"objects" : 
+	[
+		{
+			"alpha" : 1.0,
+			"anchor" : "none",
+			"angles" : "0.000 0.000 0.000",
+			"backgroundcolor" : "0.000 0.000 0.000",
+			"color" : "1.000 1.000 1.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"font" : "fonts/Monofur-PK7og.ttf",
+			"horizontalalign" : "center",
+			"id" : 8,
+			"image" : null,
+			"locktransforms" : false,
+			"model" : null,
+			"name" : "3D Clock",
+			"opaquebackground" : false,
+			"origin" : "128.000 139.759 0.000",
+			"padding" : 0,
+			"parallaxDepth" : "1.000 1.000",
+			"particle" : null,
+			"perspective" : true,
+			"pointsize" : 24.0,
+			"scale" : "0.585 0.585 0.585",
+			"size" : "500.000 100.000",
+			"solid" : true,
+			"text" : 
+			{
+				"script" : "'use strict';\n\nimport * as WEMath from 'WEMath';\n\n// This will be used to separate each element\nlet delimiter = ':';\n\n// Whether you want to see the seconds or not\nlet showSeconds = true;\n\n// Whether you want a 24h or 12h style format\nlet use24hFormat = true;\n\n/**\n * @param {String} value (for property 'text')\n */\nvar shadowLayer;\nexport function update(value) {\n\tshadowLayer.visible = thisLayer.visible;\n\tlet time = new Date();\n\tvar hours;\n\tvar suffix = '';\n\tif (use24hFormat) {\n\t\thours = (\"00\" + time.getHours()).slice(-2);\n\t} else {\n\t\thours = time.getHours();\n\t\tsuffix = hours >= 12 ? 'PM' : 'AM';\n\t\thours %= 12;\n\t\tif (hours == 0) {\n\t\t\thours = 12;\n\t\t}\n\t}\n\tlet minutes = (\"00\" + time.getMinutes()).slice(-2);\n\tlet seconds = (\"00\" + time.getSeconds()).slice(-2);\n\tvalue = hours + delimiter + minutes;\n\tif (showSeconds) {\n\t\tvalue += delimiter + seconds;\n\t}\n\tif (!use24hFormat) {\n\t\tvalue += ' ' + suffix;\n\t}\n\n\tvar delta = thisLayer.origin.subtract(input.cursorWorldPosition);\n\tvar shadowOffset = delta.copy();\n\tshadowOffset.z = 0;\n\tdelta = delta.divide(new Vec3(engine.canvasSize, 1));\n\tdelta.z = 0;\n\tvar rotation = new Vec3(delta.y, -delta.x, 4 * WEMath.mix(delta.x, -delta.x, Math.min(1, Math.max(0, delta.y * 0.1 + 0.5)))).multiply(50);\n\tthisLayer.angles = rotation;\n\tshadowLayer.angles = rotation;\n\tshadowLayer.origin = thisLayer.origin.add(shadowOffset.multiply(0.03));\n\tshadowLayer.text = value;\n\treturn value;\n}\n\n/**\n * @param {String} value (for property 'text')\n */\nexport function init() {\n\tshadowLayer = thisScene.createLayer({\n\t\ttext: 'shadow',\n\t\tcolor: '0 0 0',\n\t\talpha: 1,\n\t\tpointsize: thisLayer.pointsize,\n\t\tfont: thisLayer.font,\n\t\tperspective: true\n\t});\n\tshadowLayer.origin = thisLayer.origin;\n\tshadowLayer.angles = thisLayer.angles;\n\tshadowLayer.scale = thisLayer.scale;\n\tthisScene.sortLayer(shadowLayer, thisScene.getLayerIndex(thisLayer));\n}\n",
+				"value" : "<3D Clock>"
+			},
+			"verticalalign" : "center",
+			"visible" : true
+		}
+	]
+}

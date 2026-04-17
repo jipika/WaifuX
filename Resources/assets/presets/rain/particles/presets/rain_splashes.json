@@ -1,0 +1,83 @@
+{
+	"children" : 
+	[
+		{
+			"id" : 13,
+			"maxcount" : 80,
+			"name" : "particles/presets/rain_splashes_droplets.json",
+			"type" : "eventspawn"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : "512 128 0",
+			"id" : 9,
+			"name" : "boxrandom",
+			"rate" : 25
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.6,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 100,
+			"min" : 30,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "219 244 255",
+			"min" : "189 194 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 10,
+			"max" : "1.0471975511965976 0 6.283185307179586",
+			"min" : "1.0471975511965976 0 0",
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 11,
+			"max" : 0.69999999,
+			"min" : 0.30000001,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/rain_splashes.json",
+	"maxcount" : 80,
+	"operator" : 
+	[
+		{
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0,
+			"fadeouttime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"endvalue" : 1,
+			"id" : 12,
+			"name" : "sizechange",
+			"startvalue" : 0.2
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0
+}

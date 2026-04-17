@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "blend",
+	"name" : "ui_editor_effect_blend_title",
+	"description" : "ui_editor_effect_blend_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/blend.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/blend.json",
+		"shaders/effects/blend.frag",
+		"shaders/effects/blend.vert"
+	]
+}

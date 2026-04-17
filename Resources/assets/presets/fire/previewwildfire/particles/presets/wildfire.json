@@ -1,0 +1,132 @@
+{
+	"animationmode" : "sequence",
+	"children" : 
+	[
+		{
+			"id" : 11,
+			"name" : "particles/presets/wildfireembers.json"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.07 0",
+			"distancemax" : 650,
+			"distancemin" : 0,
+			"id" : 7,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 25
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 550,
+			"min" : 450,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 255 255",
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 6,
+			"name" : "turbulentvelocityrandom",
+			"phasemax" : 0.10000000149011612,
+			"scale" : 0.20000000000000001,
+			"speedmax" : 120,
+			"speedmin" : 0,
+			"timescale" : 0.20000000000000001
+		}
+	],
+	"material" : "materials/presets/wildfire.json",
+	"maxcount" : 150,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0,
+			"fadeouttime" : 0.80000000000000004,
+			"id" : 9,
+			"name" : "alphafade"
+		},
+		{
+			"endtime" : 0.59999999999999998,
+			"endvalue" : "1 0 0",
+			"id" : 10,
+			"name" : "colorchange",
+			"startvalue" : "1 0.7490196078431373 0"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : 1,
+	"starttime" : 1
+}

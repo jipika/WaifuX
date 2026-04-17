@@ -1,0 +1,10 @@
+{
+	"passes": [{
+		"shader": "effects/cursorripple_apply_force",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"alphawriting": "enabled"
+	}]
+}

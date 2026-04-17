@@ -1,0 +1,4 @@
+module CRenderer {
+    header "../RendererAPI.h"
+    export *
+}

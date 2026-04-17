@@ -1,0 +1,97 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"id" : 0,
+			"parentcontrolpoint" : 1
+		},
+		{
+			"id" : 1,
+			"parentcontrolpoint" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"flags" : 2,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 20
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 30,
+			"min" : 15,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "10 -200 0",
+			"min" : "-10 -200 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "148 171 255",
+			"min" : "162 230 253",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 9,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 11,
+			"max" : 0.30000001,
+			"min" : 0.1,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/dripping_water_splash.json",
+	"maxcount" : 50,
+	"operator" : 
+	[
+		{
+			"drag" : 2,
+			"gravity" : "0 -1500 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"endvalue" : 0,
+			"id" : 10,
+			"name" : "sizechange",
+			"startvalue" : 2
+		},
+		{
+			"fadeintime" : 0.2,
+			"id" : 13,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 12,
+			"name" : "rope",
+			"uvscale" : 2,
+			"uvscrolling" : true,
+			"uvsmoothing" : false
+		}
+	],
+	"starttime" : 0
+}

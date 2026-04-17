@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "fisheye",
+	"name" : "ui_editor_effect_fisheye_title",
+	"description" : "ui_editor_effect_fisheye_description",
+	"group" : "distort",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/fisheye.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/fisheye.json",
+		"shaders/effects/fisheye.frag",
+		"shaders/effects/fisheye.vert"
+	]
+}

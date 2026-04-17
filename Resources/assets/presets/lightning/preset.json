@@ -1,0 +1,140 @@
+{
+	"name" : "ui_editor_preset_lightning_title",
+	"description" : "ui_editor_preset_lightning_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_lightning_variant_thunderbolt",
+				"value" : 4
+			},
+			{
+				"label" : "ui_editor_preset_lightning_variant_lightning_cloud",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_lightning_variant_discharge",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_lightning_variant_discharge_arc",
+				"value" : 3
+			},
+			{
+				"label" : "ui_editor_preset_lightning_variant_thunderbolt_deprecated",
+				"value" : 1
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewlightning1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Lightning cloud",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/lightning1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/lightning1.json",
+				"materials/presets/lightning1b.json",
+				"particles/presets/lightning1.json",
+				"particles/presets/lightning1b.json"
+			]
+		},
+		{
+			"preview" : "previewlightning2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Thunderbolt (Deprecated)",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/lightning2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/lightning2.json",
+				"materials/presets/lightning2glow.json",
+				"particles/presets/lightning2.json",
+				"particles/presets/lightning2glow.json"
+			]
+		},
+		{
+			"preview" : "previewdischarge/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Discharge",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/discharge.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/discharge.json",
+				"particles/presets/discharge.json"
+			]
+		},
+		{
+			"preview" : "previewdischargearc/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Discharge arc",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dischargearc.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dischargearc.json",
+				"particles/presets/dischargearc.json"
+			]
+		},
+		{
+			"preview" : "previewthunderbolt/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Thunderbolt",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/thunderbolt.json",
+					"scale" : "1.000 1.000 1.000",
+					"instanceoverride" :
+					{
+						"brightness" : 5.0
+					}
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/thunderbolt.json",
+				"materials/presets/thunderbolt_child_spawner.json",
+				"materials/presets/thunderbolt_beam_child.json",
+				"materials/presets/thunderbolt_glow.json",
+				"particles/presets/thunderbolt.json",
+				"particles/presets/thunderbolt_child_spawner.json",
+				"particles/presets/thunderbolt_beam_child.json",
+				"particles/presets/thunderbolt_glow.json"
+			]
+		}
+	]
+}

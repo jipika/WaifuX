@@ -1,0 +1,106 @@
+{
+	"name" : "ui_editor_preset_interactive_title",
+	"description" : "ui_editor_preset_interactive_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_interactive_variant_drops",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_interactive_variant_trails_1",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_interactive_variant_trails_2",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_interactive_variant_fireflies",
+				"value" : 3
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewtrails0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Trails 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/trail_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/trail_0.json",
+				"particles/presets/trail_0.json"
+			]
+		},
+		{
+			"preview" : "previewtrails1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Trails 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/trail_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/trail_1.json",
+				"particles/presets/trail_1.json"
+			]
+		},
+		{
+			"preview" : "previewtrails2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Drops",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/trail_2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/trail_2.json",
+				"particles/presets/trail_2.json"
+			]
+		},
+		{
+			"preview" : "previewfireflies/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fireflies",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fireflies.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fireflies.json",
+				"materials/presets/firefliestrail.json",
+				"particles/presets/fireflies.json",
+				"particles/presets/firefliestrail.json"
+			]
+		}
+	]
+}

@@ -1,0 +1,136 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 1,
+			"id" : 1,
+			"locktopointer" : true,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"locktopointer" : false,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemin" : 256,
+			"id" : 5,
+			"name" : "sphererandom",
+			"rate" : 15000
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 0.5,
+			"name" : "lifetimerandom"
+		},
+		{
+			"exponent" : 3,
+			"id" : 3,
+			"max" : 20,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "200 200 0",
+			"min" : "-200 -200 0",
+			"name" : "velocityrandom"
+		}
+	],
+	"material": "materials/particle/halo.json",
+	"maxcount" : 25000,
+	"operator" : 
+	[
+		{
+			"drag" : 4.0000000000000001,
+			"gravity" : "0 0 0",
+			"id" : 6,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 7,
+			"name" : "alphafade"
+		},
+		{
+			"controlpoint" : 1,
+			"id" : 8,
+			"name" : "controlpointattract",
+			"origin" : "0 0 0",
+			"scale" : -10000,
+			"threshold" : 128
+		},
+		{
+			"id" : 9,
+			"name" : "turbulence",
+			"scale" : 0.0053000000026077031,
+			"speedmax" : 1000,
+			"speedmin" : 500,
+			"timescale" : -50
+		},
+		{
+			"endtime" : 0.80000000000000004,
+			"endvalue" : "0.2823529411764706 0.7450980392156863 1",
+			"id" : 10,
+			"name" : "colorchange",
+			"starttime" : 0.20000000000000001,
+			"startvalue" : "1 0.49019607843137253 0.49019607843137253"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 0.02,
+			"maxlength" : 5,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

@@ -1,0 +1,140 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"effects" : 
+			[
+				{
+					"file" : "effects/colorkey/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"INVERT" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"Color" : "0 0.435294 0.733333",
+								"Fuzziness" : 0.31999999284744263
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/tint/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 0
+							},
+							"constantshadervalues" : 
+							{
+								"Color" : "1 0 0"
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/pulse/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"PULSEALPHA" : 1,
+								"PULSECOLOR" : 0
+							},
+							"constantshadervalues" : 
+							{
+								"Noise amount" : 0,
+								"Power" : 1,
+								"Pulse speed" : 5.869999885559082,
+								"Tint high" : "1 1 1",
+								"Tint low" : "0 0 0"
+							},
+							"textures" : [ null, "util/noise" ]
+						}
+					]
+				}
+			],
+			"id" : 20,
+			"image" : "models/effectpreview.json",
+			"name" : "effectpreview",
+			"origin" : "-160.688 129.964 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"dependencies" : [ 20 ],
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/blend/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 0
+							},
+							"constantshadervalues" : 
+							{
+								"Multiply" : 2.130000114440918
+							},
+							"textures" : [ null, "_rt_imageLayerComposite_20_a" ]
+						}
+					]
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		}
+	]
+}

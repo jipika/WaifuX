@@ -1,0 +1,64 @@
+{
+	"version" : 1,
+	"replacementkey" : "motionblur",
+	"name" : "ui_editor_effect_motion_blur_title",
+	"description" : "ui_editor_effect_motion_blur_description",
+	"group" : "blur",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/motionblur_accumulation.json",
+			"target" : "_rt_FullCompoBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_FullCompoBuffer1",
+					"index" : 1
+				}
+			]
+		},
+		{
+			"command" : "copy",
+			"target" : "_rt_FullCompoBuffer1",
+			"source" : "_rt_FullCompoBuffer2"
+		},
+		{
+			"material" : "materials/effects/motionblur_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_FullCompoBuffer2",
+					"index" : 0
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_FullCompoBuffer1",
+			"scale" : 1,
+			"format" : "rgba_backbuffer",
+			"unique" : true
+		},
+		{
+			"name" : "_rt_FullCompoBuffer2",
+			"scale" : 1,
+			"format" : "rgba_backbuffer"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/motionblur_accumulation.json",
+		"materials/effects/motionblur_combine.json",
+		"shaders/effects/motionblur_accumulation.frag",
+		"shaders/effects/motionblur_accumulation.vert",
+		"shaders/effects/motionblur_combine.frag",
+		"shaders/effects/motionblur_combine.vert"
+	]
+}

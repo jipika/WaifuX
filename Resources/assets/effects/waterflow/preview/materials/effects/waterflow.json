@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/waterflow",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures" : [null, null, "effects/waterflowphase"]
+	}]
+}

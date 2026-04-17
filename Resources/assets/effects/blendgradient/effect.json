@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "blendgradient",
+	"name" : "ui_editor_effect_blend_gradient_title",
+	"description" : "ui_editor_effect_blend_gradient_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/blendgradient.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/blendgradient.json",
+		"shaders/effects/blendgradient.frag",
+		"shaders/effects/blendgradient.vert"
+	]
+}

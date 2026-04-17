@@ -1,0 +1,14 @@
+{
+	"clampuvs" : false,
+	"format" : "r8",
+	"nonpoweroftwo" : true,
+	"spritesheetsequences" : 
+	[
+		{
+			"duration" : 1,
+			"frames" : 32,
+			"height" : 64,
+			"width" : 256
+		}
+	]
+}

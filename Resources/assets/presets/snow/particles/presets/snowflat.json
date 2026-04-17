@@ -1,0 +1,46 @@
+{
+	"material": "materials/presets/snowflat.json",
+	"maxcount": 300,
+	"starttime": 15,
+	"emitter": [{
+		"name": "sphererandom",
+		"rate": 15,
+		"origin": "0 650 0",
+		"directions" : "1 0.03 0",
+		"distancemin": 10,
+		"distancemax": 1200
+	}],
+	"initializer": [{
+		"name": "lifetimerandom",
+		"min": 15,
+		"max": 23
+	}, {
+		"name": "sizerandom",
+		"min": 2,
+		"max": 30
+	}, {
+		"name": "velocityrandom",
+		"min": "-10 -50 0",
+		"max": "-37 -90 0"
+	}, {
+		"name": "colorrandom",
+		"min": "255 255 255",
+		"max": "95 98 100"
+	}],
+	"operator": [{
+		"name": "movement",
+		"gravity": "0 0 0"
+	}, {
+		"name": "oscillateposition",
+		"mask": "1 0.5 0",
+		"scalemin": 20,
+		"scalemax": 35,
+		"frequencymin": 0.8,
+		"frequencymax": 1.0,
+		"phasemin": 0,
+		"phasemax": 1
+	}, {
+		"name": "alphafade",
+		"fadeintime": 0.1
+	}]
+}

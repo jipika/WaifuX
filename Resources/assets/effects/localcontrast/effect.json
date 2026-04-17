@@ -1,0 +1,85 @@
+{
+	"version" : 1,
+	"replacementkey" : "localcontrast",
+	"name" : "ui_editor_effect_local_contrast_title",
+	"description" : "ui_editor_effect_local_contrast_description",
+	"group" : "enhance",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/localcontrast_downsample4.json",
+			"target" : "_rt_QuarterCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/localcontrast_gaussian_x.json",
+			"target" : "_rt_QuarterCompoBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/localcontrast_gaussian_y.json",
+			"target" : "_rt_QuarterCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer2",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/localcontrast_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_QuarterCompoBuffer1",
+					"index" : 0
+				},
+				{
+					"name" : "previous",
+					"index" : 2
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_QuarterCompoBuffer1",
+			"scale" : 4,
+			"format" : "rgba8888"
+		},
+		{
+			"name" : "_rt_QuarterCompoBuffer2",
+			"scale" : 4,
+			"format" : "rgba8888"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/localcontrast_downsample4.json",
+		"materials/effects/localcontrast_gaussian_x.json",
+		"materials/effects/localcontrast_gaussian_y.json",
+		"materials/effects/localcontrast_combine.json",
+		"shaders/effects/localcontrast_downsample4.frag",
+		"shaders/effects/localcontrast_downsample4.vert",
+		"shaders/effects/localcontrast_gaussian.frag",
+		"shaders/effects/localcontrast_gaussian.vert",
+		"shaders/effects/localcontrast_combine.frag",
+		"shaders/effects/localcontrast_combine.vert"
+	]
+}

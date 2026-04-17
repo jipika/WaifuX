@@ -41,7 +41,7 @@ LocalConfig.json
 *.local.json
 
 Docs/*.md
-
+WebWallpaperDemo/
 # Temp
 *.tmp
 .gstack/
@@ -54,3 +54,14 @@ landing/node_modules/
 
 # Trae
 .trae/
+
+# SteamCMD (local install; large binary tree)
+steamcmd/
+
+# Wallpaper Engine Renderer - now open-source
+# wallpaperengine-cli.swift
+# Resources/wallpaperengine-cli
+# Resources/liblinux-wallpaperengine-renderer.dylib
+# Resources/assets/
+# Resources/CRenderer/
+# Resources/RendererAPI.h

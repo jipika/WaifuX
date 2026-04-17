@@ -1,0 +1,4 @@
+{
+	"material" : "materials/util/solidlayer_depthtest.json",
+	"solidlayer" : true
+}

@@ -1,0 +1,196 @@
+{
+	"children" : [],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"delay" : 0.2,
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"duration" : 1,
+			"flags" : 4,
+			"id" : 6,
+			"maxperiodicdelay" : 9999,
+			"maxperiodicduration" : 1,
+			"maxtoemitperperiod" : 8,
+			"minperiodicdelay" : 9999,
+			"minperiodicduration" : 1,
+			"name" : "sphererandom",
+			"rate" : 100
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.60000002,
+			"min" : 0.60000002,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 3,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "78 124 255",
+			"min" : "73 152 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 13,
+			"max" : "50 100 0",
+			"min" : "-50 50 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"distance" : 100,
+			"id" : 22,
+			"name" : "positionoffsetrandom",
+			"scale" : 0,
+			"timescale" : 10
+		},
+		{
+			"arcamount" : 0.1,
+			"count" : 8,
+			"flags" : 19,
+			"id" : 14,
+			"name" : "mapsequencebetweencontrolpoints"
+		},
+		{
+			"id" : 23,
+			"input" : "distancetocontrolpoint",
+			"inputcontrolpoint0" : 1,
+			"inputrangemax" : 50,
+			"operation" : "multiply",
+			"name" : "remapinitialvalue"
+		}
+	],
+	"material" : "materials/presets/thunderbolt_beam_child.json",
+	"maxcount" : 16,
+	"operator" : 
+	[
+		{
+			"drag" : 2,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"id" : 21,
+			"name" : "sizechange",
+			"starttime" : 0.5
+		},
+		{
+			"fadeintime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 15,
+			"name" : "maintaindistancebetweencontrolpoints"
+		},
+		{
+			"blendinend" : 0.5,
+			"blendinstart" : 0.1,
+			"blendoutend" : 0.69999999,
+			"blendoutstart" : 0.60000002,
+			"id" : 16,
+			"name" : "turbulence",
+			"speedmax" : 1000,
+			"speedmin" : 1000,
+			"timescale" : 10000
+		},
+		{
+			"distanceinner" : 20,
+			"distanceouter" : 50,
+			"id" : 17,
+			"name" : "reducemovementnearcontrolpoint",
+			"reductioninner" : 1000
+		},
+		{
+			"controlpoint" : 1,
+			"distanceinner" : 20,
+			"distanceouter" : 50,
+			"id" : 18,
+			"name" : "reducemovementnearcontrolpoint",
+			"reductioninner" : 1000
+		},
+		{
+			"endtime" : 0.2,
+			"endvalue" : 1,
+			"id" : 19,
+			"name" : "alphachange",
+			"startvalue" : 10
+		},
+		{
+			"frequencymax" : 100,
+			"frequencymin" : 30,
+			"id" : 20,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.1
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 12,
+			"name" : "rope",
+			"subdivision" : 0,
+			"uvsmoothing" : false
+		}
+	],
+	"starttime" : 0
+}

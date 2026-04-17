@@ -1,0 +1,13 @@
+{
+	"passes": [{
+		"shader": "composelayer",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "normal",
+		"cullmode": "nocull",
+		"textures": ["_rt_FullFrameBuffer"],
+		"combos": {
+			"CLEARALPHA": 1
+		}
+	}]
+}

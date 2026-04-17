@@ -1,0 +1,130 @@
+{
+	"animationmode" : "randomframe",
+	"children" : 
+	[
+		{
+			"id" : 10,
+			"name" : "particles/presets/snowstormfog.json",
+			"origin" : "0 650 0"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "0.9 0.03 1",
+			"distancemax" : 1200,
+			"distancemin" : 10,
+			"id" : 6,
+			"name" : "sphererandom",
+			"origin" : "150 650 0",
+			"rate" : 250,
+			"sign" : "0 0 1"
+		}
+	],
+	"flags" : 4,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 30,
+			"min" : 2,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "-100 -300 0",
+			"min" : "-300 -1500 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "95 98 100",
+			"min" : "90 92 95",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/snowstorm.json",
+	"maxcount" : 300,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"frequencymax" : 1.0,
+			"frequencymin" : 0.80000000000000004,
+			"id" : 8,
+			"mask" : "1 0.5 0",
+			"name" : "oscillateposition",
+			"phasemax" : 1,
+			"phasemin" : 0,
+			"scalemax" : 35,
+			"scalemin" : 20
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"id" : 9,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 15
+}

@@ -1,0 +1,45 @@
+{
+	"name" : "Blur (precise)",
+	"description" : "Apply gaussian blur to the entire image in full resolution.",
+	"group" : "composite",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/blur_precise_gaussian_x.json",
+			"target" : "_rt_FullCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/blur_precise_gaussian_y.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_FullCompoBuffer1",
+					"index" : 0
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_FullCompoBuffer1",
+			"scale" : 1,
+			"format" : "rgba8888"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/blur_precise_gaussian_x.json",
+		"materials/effects/blur_precise_gaussian_y.json",
+		"shaders/effects/blur_precise_gaussian.frag",
+		"shaders/effects/blur_precise_gaussian.vert"
+	]
+}

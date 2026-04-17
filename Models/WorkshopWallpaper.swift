@@ -22,6 +22,7 @@ struct WorkshopWallpaper: Identifiable, Codable {
     // 壁纸类型
     let type: WallpaperType
     let tags: [String]
+    let isAnimatedImage: Bool?
     
     // 时间戳
     let createdAt: Date?
@@ -53,7 +54,56 @@ struct WorkshopSearchResponse: Codable {
     let hasMore: Bool
 }
 
-// MARK: - Steam API 响应模型
+// MARK: - Steam Workshop Browse JSON API 响应模型
+
+/// Steam 内部 Workshop Browse JSON API 响应
+struct SteamWorkshopBrowseResponse: Codable {
+    let current_page: Int
+    let total_pages: Int
+    let total_count: Int
+    let next_cursor: String?
+    let results: [SteamWorkshopItem]
+}
+
+struct SteamWorkshopItem: Codable {
+    let publishedfileid: String
+    let creator: String
+    let consumer_appid: Int
+    let file_type: Int
+    let preview_url: String?
+    let title: String
+    let short_description: String?
+    let workshop_accepted: Bool
+    let flags: Int
+    let reactions: [SteamWorkshopReaction]?
+    let num_children: Int
+    let children: [SteamWorkshopChild]?
+    let previews: [SteamWorkshopPreview]?
+    let time_created: Int
+    let time_updated: Int
+    let file_size: String?
+    let tags: [SteamWorkshopTag]?
+    let subscriptions: Int?
+    let favorited: Int?
+    let lifetime_subscriptions: Int?
+    let lifetime_favorited: Int?
+    let views: Int?
+    let star_rating: Double?
+    let total_votes: Int?
+}
+
+struct SteamWorkshopTag: Codable {
+    let tag: String
+    let display_name: String
+}
+
+struct SteamWorkshopReaction: Codable {}
+
+struct SteamWorkshopChild: Codable {}
+
+struct SteamWorkshopPreview: Codable {}
+
+// MARK: - Steam Web API 响应模型 (旧版，保留兼容)
 
 /// Steam Web API 返回的创意工坊项目列表
 struct SteamPublishedFileResponse: Codable {
@@ -96,6 +146,7 @@ struct WorkshopSearchParams {
     var pageSize: Int = 20
     var tags: [String] = []
     var type: WorkshopWallpaper.WallpaperType?
+    var contentLevel: String?
     
     enum SortOption: String {
         case ranked = "ranked"           // 综合排序
@@ -108,10 +159,40 @@ struct WorkshopSearchParams {
 // MARK: - 扩展 WorkshopWallpaper
 
 extension WorkshopWallpaper {
-    /// 从 Steam API 响应创建
+    /// 从 Steam Workshop Browse JSON API 响应创建
+    init(from item: SteamWorkshopItem) {
+        self.id = item.publishedfileid
+        self.title = item.title
+        self.description = item.short_description
+        self.previewURL = item.preview_url.flatMap { URL(string: $0) }
+        self.fileURL = nil  // JSON API 不直接返回下载链接
+        self.fileSize = Int64(item.file_size ?? "0")
+        
+        self.author = WorkshopAuthor(
+            steamID: item.creator,
+            name: "Unknown",  // JSON API 不返回作者名称
+            avatarURL: nil
+        )
+        
+        self.steamAppID = String(item.consumer_appid)
+        self.subscriptions = item.subscriptions
+        self.favorites = item.favorited ?? item.lifetime_favorited
+        self.views = item.views
+        self.rating = item.star_rating.flatMap { $0 >= 0 ? $0 : nil }
+        
+        // 检测类型（优先从 tags 推断）
+        self.type = Self.detectType(from: item)
+        self.tags = item.tags?.map { $0.tag } ?? []
+        self.isAnimatedImage = Self.detectAnimatedImage(from: item.preview_url)
+        
+        // 解析时间
+        self.createdAt = Date(timeIntervalSince1970: TimeInterval(item.time_created))
+        self.updatedAt = Date(timeIntervalSince1970: TimeInterval(item.time_updated))
+    }
+    
+    /// 从 Steam Web API 响应创建（旧版兼容）
     init?(from detail: SteamPublishedFileDetail) {
         guard let appName = detail.app_name, appName.contains("Wallpaper") else {
-            // 确保是 Wallpaper Engine 的内容
             return nil
         }
         
@@ -124,7 +205,7 @@ extension WorkshopWallpaper {
         
         self.author = WorkshopAuthor(
             steamID: detail.creator,
-            name: "Unknown",  // 需要通过另一个 API 获取
+            name: "Unknown",
             avatarURL: nil
         )
         
@@ -134,17 +215,49 @@ extension WorkshopWallpaper {
         self.views = Int(detail.views ?? "0")
         self.rating = Double(detail.score ?? "0")
         
-        // 检测类型
         self.type = Self.detectType(from: detail)
         self.tags = detail.tags?.map { $0.tag } ?? []
+        self.isAnimatedImage = Self.detectAnimatedImage(from: detail.preview_url)
         
-        // 解析时间
         let formatter = ISO8601DateFormatter()
         self.createdAt = detail.time_created.flatMap { formatter.date(from: $0) }
         self.updatedAt = detail.time_updated.flatMap { formatter.date(from: $0) }
     }
     
-    /// 根据文件名和内容检测壁纸类型
+    /// 检测预览图是否为动态 GIF
+    private static func detectAnimatedImage(from previewURL: String?) -> Bool {
+        guard let url = previewURL?.lowercased() else { return false }
+        return url.contains(".gif")
+    }
+    
+    /// 从标签数组检测类型
+    public static func detectType(fromTags tags: [String]) -> WallpaperType {
+        let lowerTags = tags.map { $0.lowercased() }
+
+        if lowerTags.contains("video") || lowerTags.contains("video wallpaper") {
+            return .video
+        } else if lowerTags.contains("web") || lowerTags.contains("web wallpaper") {
+            return .web
+        } else if lowerTags.contains("scene") {
+            return .scene
+        } else if lowerTags.contains("application") {
+            return .application
+        } else if lowerTags.contains("image") || lowerTags.contains("wallpaper") {
+            // 默认 Wallpaper Engine 的大多数 "Wallpaper" 标签实际上是视频/动态壁纸
+            return .video
+        }
+
+        return .unknown
+    }
+
+    /// 从 Workshop JSON Item 检测类型
+    private static func detectType(from item: SteamWorkshopItem) -> WallpaperType {
+        let tagStrings = item.tags?.map { $0.tag } ?? []
+        let fromTags = detectType(fromTags: tagStrings)
+        return fromTags == .unknown ? .video : fromTags
+    }
+    
+    /// 根据文件名和内容检测壁纸类型（旧版 API）
     private static func detectType(from detail: SteamPublishedFileDetail) -> WallpaperType {
         let filename = detail.filename?.lowercased() ?? ""
         
@@ -186,6 +299,7 @@ extension WorkshopWallpaper {
             rating: 4.8,
             type: .video,
             tags: ["Cyberpunk", "City", "Night", "Neon", "Sci-Fi"],
+            isAnimatedImage: nil,
             createdAt: Date(),
             updatedAt: Date()
         )

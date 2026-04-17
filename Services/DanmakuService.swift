@@ -16,7 +16,7 @@ class DanmakuService {
         config.timeoutIntervalForResource = 30
         config.httpAdditionalHeaders = [
             "Accept": "application/json",
-            "User-Agent": "WallHaven/1.0"
+            "User-Agent": "WaifuX/1.0"
         ]
         self.session = URLSession(configuration: config)
     }

@@ -285,7 +285,7 @@ actor BangumiService {
 
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         let (data, response) = try await session.data(for: request)
 
@@ -315,7 +315,7 @@ actor BangumiService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         // 构建搜索参数 - 使用 keyword 进行搜索
         let searchRequest: [String: Any] = [
@@ -360,7 +360,7 @@ actor BangumiService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         // 构建搜索参数 (参考 Kazumi) - 使用 tag 过滤
         let searchRequest: [String: Any] = [
@@ -404,7 +404,7 @@ actor BangumiService {
 
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         let (data, response) = try await session.data(for: request)
 
@@ -431,7 +431,7 @@ actor BangumiService {
 
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         let (data, response) = try await session.data(for: request)
 
@@ -458,7 +458,7 @@ actor BangumiService {
 
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("User-Agent", forHTTPHeaderField: "WallHaven/1.0")
+        request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
 
         let (data, response) = try await session.data(for: request)
 

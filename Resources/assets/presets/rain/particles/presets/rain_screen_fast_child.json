@@ -1,0 +1,66 @@
+{
+	"animationmode" : "randomframe",
+	"children" : null,
+	"emitter" : 
+	[
+		{
+			"distancemax" : 0,
+			"id" : 16,
+			"name" : "sphererandom",
+			"rate" : 15
+		}
+	],
+	"flags" : 3,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 40,
+			"min" : 20,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 9,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 13,
+			"name" : "rotationrandom"
+		}
+	],
+	"material" : "materials/presets/rain_screen_fast_child.json",
+	"maxcount" : 64,
+	"operator" : 
+	[
+		{
+			"fadeintime" : 0.0099999998,
+			"fadeouttime" : 0.0099999998,
+			"id" : 14,
+			"name" : "alphafade"
+		},
+		{
+			"endvalue" : 0.2,
+			"id" : 15,
+			"name" : "sizechange"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 17,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0
+}

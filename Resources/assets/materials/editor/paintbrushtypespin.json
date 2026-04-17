@@ -1,0 +1,11 @@
+{
+	"passes": [{
+		"shader": "editorpaintbrush",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"combos": {
+			"SPIN": 1
+		}
+	}]
+}

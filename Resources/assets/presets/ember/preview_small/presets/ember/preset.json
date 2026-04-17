@@ -1,0 +1,64 @@
+{
+	"name" : "ui_editor_preset_ember_title",
+	"description" : "ui_editor_preset_ember_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_variant_large",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_variant_small",
+				"value" : 1
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "preview_large/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Ember",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/ember.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/ember.json",
+				"materials/presets/emberglow.json",
+				"particles/presets/ember.json",
+				"particles/presets/emberglow.json"
+			]
+		},
+		{
+			"preview" : "preview_small/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Ember small",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/ember_small.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/ember_small.json",
+				"materials/presets/emberglow_small.json",
+				"particles/presets/ember_small.json",
+				"particles/presets/emberglow_small.json"
+			]
+		}
+	]
+}

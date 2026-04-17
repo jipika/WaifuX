@@ -1,0 +1,134 @@
+{
+	"name" : "ui_editor_preset_leaves_title",
+	"description" : "ui_editor_preset_leaves_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Leaves 1",
+				"value" : 0
+			},
+			{
+				"label" : "Leaves 2",
+				"value" : 1
+			},
+			{
+				"label" : "Leaves 3",
+				"value" : 2
+			},
+			{
+				"label" : "Leaves 4",
+				"value" : 3
+			},
+			{
+				"label" : "Sakura",
+				"value" : 4
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewleaves1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Leaves 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/leaves1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/leaves1.json",
+				"materials/presets/leaves1b.json",
+				"particles/presets/leaves1.json",
+				"particles/presets/leaves1b.json"
+			]
+		},
+		{
+			"preview" : "previewleaves2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Leaves 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/leaves2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/leaves2.json",
+				"materials/presets/leaves2b.json",
+				"particles/presets/leaves2.json",
+				"particles/presets/leaves2b.json"
+			]
+		},
+		{
+			"preview" : "previewleaves3/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Leaves 3",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/leaves3.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/leaves3.json",
+				"materials/presets/leaves3b.json",
+				"particles/presets/leaves3.json",
+				"particles/presets/leaves3b.json"
+			]
+		},
+		{
+			"preview" : "previewleaves4/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Leaves 4",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/leaves4.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/leaves4.json",
+				"materials/presets/leaves4b.json",
+				"particles/presets/leaves4.json",
+				"particles/presets/leaves4b.json"
+			]
+		},
+		{
+			"preview" : "previewleaves5/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Sakura",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/leaves5.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/leaves5.json",
+				"particles/presets/leaves5.json"
+			]
+		}
+	]
+}

@@ -1,0 +1,26 @@
+{
+	"version" : 1,
+	"replacementkey" : "refract",
+	"name" : "ui_editor_effect_refract_title",
+	"description" : "ui_editor_effect_refract_description",
+	"group" : "distort",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/util/effectcomposebackground.json",
+			"compose" : true
+		},
+		{
+			"material" : "materials/effects/refract.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/refract.json",
+		"materials/effects/refractnormal.png",
+		"materials/effects/refractnormal.tex-json",
+		"shaders/effects/refract.frag",
+		"shaders/effects/refract.vert"
+	]
+}

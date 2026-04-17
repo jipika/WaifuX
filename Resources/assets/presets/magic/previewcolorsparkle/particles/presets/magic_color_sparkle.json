@@ -1,0 +1,68 @@
+{
+	"animationmode" : "randomframe",
+	"children" : null,
+	"emitter" : 
+	[
+		{
+			"distancemax" : 64,
+			"distancemin" : 0,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 20
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 750,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"huemax" : 0.93267971,
+			"huemin" : 0.49150327,
+			"id" : 10,
+			"name" : "hsvcolorrandom",
+			"saturationmin" : 1,
+			"valuemin" : 1
+		}
+	],
+	"material" : "materials/presets/magic_color_sparkle.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 0.89999998,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"frequencymax" : 15,
+			"frequencymin" : 2,
+			"id" : 9,
+			"name" : "oscillatealpha"
+		},
+		{
+			"frequencymax" : 25,
+			"frequencymin" : 10,
+			"id" : 11,
+			"name" : "oscillatesize"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 3
+}

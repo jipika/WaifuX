@@ -1,0 +1,20 @@
+{
+	"version" : 2,
+	"replacementkey" : "foliagesway",
+	"name" : "ui_editor_effect_foliage_sway_title",
+	"description" : "ui_editor_effect_foliage_sway_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/foliagesway.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/foliagesway.json",
+		"shaders/effects/foliagesway.frag",
+		"shaders/effects/foliagesway.vert"
+	]
+}

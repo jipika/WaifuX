@@ -12,6 +12,7 @@ enum DownloadStatus: String, Codable {
 enum DownloadTaskKind: String, Codable {
     case wallpaper
     case media
+    case workshop
 }
 
 struct DownloadTask: Identifiable, Codable {
@@ -19,6 +20,8 @@ struct DownloadTask: Identifiable, Codable {
     let kind: DownloadTaskKind
     var wallpaper: Wallpaper?
     var mediaItem: MediaItem?
+    var workshopItem: MediaItem?  // Workshop 转换后的 MediaItem
+    var workshopID: String?        // 原始 Workshop ID
     var progress: Double           // 0.0 - 1.0
     var status: DownloadStatus     // pending, downloading, paused, completed, failed, cancelled
     let createdAt: Date
@@ -30,6 +33,8 @@ struct DownloadTask: Identifiable, Codable {
         self.kind = .wallpaper
         self.wallpaper = wallpaper
         self.mediaItem = nil
+        self.workshopItem = nil
+        self.workshopID = nil
         self.progress = 0.0
         self.status = .pending
         self.createdAt = Date()
@@ -42,6 +47,23 @@ struct DownloadTask: Identifiable, Codable {
         self.kind = .media
         self.wallpaper = nil
         self.mediaItem = mediaItem
+        self.workshopItem = nil
+        self.workshopID = nil
+        self.progress = 0.0
+        self.status = .pending
+        self.createdAt = Date()
+        self.completedAt = nil
+        self.lastUpdatedAt = Date()
+    }
+
+    init(workshopWallpaper: MediaItem) {
+        // workshopWallpaper.id 格式为 "workshop_xxx"
+        self.id = "workshop.\(workshopWallpaper.id)"
+        self.kind = .workshop
+        self.wallpaper = nil
+        self.mediaItem = nil
+        self.workshopItem = workshopWallpaper
+        self.workshopID = String(workshopWallpaper.id.dropFirst("workshop_".count))
         self.progress = 0.0
         self.status = .pending
         self.createdAt = Date()
@@ -55,6 +77,8 @@ struct DownloadTask: Identifiable, Codable {
             return wallpaper?.id ?? id.replacingOccurrences(of: "wallpaper.", with: "")
         case .media:
             return mediaItem?.id ?? id.replacingOccurrences(of: "media.", with: "")
+        case .workshop:
+            return workshopItem?.id ?? workshopID ?? id.replacingOccurrences(of: "workshop.", with: "")
         }
     }
 
@@ -70,6 +94,8 @@ struct DownloadTask: Identifiable, Codable {
             return "Wallpaper \(itemID.uppercased())"
         case .media:
             return mediaItem?.title ?? itemID
+        case .workshop:
+            return workshopItem?.title ?? "Workshop \(itemID)"
         }
     }
 
@@ -79,6 +105,8 @@ struct DownloadTask: Identifiable, Codable {
             return wallpaper?.categoryDisplayName ?? ""
         case .media:
             return mediaItem?.subtitle ?? ""
+        case .workshop:
+            return workshopItem?.subtitle ?? "Steam Workshop"
         }
     }
 
@@ -88,6 +116,8 @@ struct DownloadTask: Identifiable, Codable {
             return wallpaper?.resolution ?? ""
         case .media:
             return mediaItem?.resolutionLabel ?? ""
+        case .workshop:
+            return workshopItem?.resolutionLabel ?? "Workshop"
         }
     }
 
@@ -97,6 +127,8 @@ struct DownloadTask: Identifiable, Codable {
             return wallpaper?.thumbURL ?? wallpaper?.smallThumbURL
         case .media:
             return mediaItem?.posterURL ?? mediaItem?.thumbnailURL
+        case .workshop:
+            return workshopItem?.posterURL ?? workshopItem?.thumbnailURL
         }
     }
 
@@ -117,6 +149,8 @@ struct DownloadTask: Identifiable, Codable {
         case kind
         case wallpaper
         case mediaItem
+        case workshopItem
+        case workshopID
         case progress
         case status
         case createdAt
@@ -129,9 +163,13 @@ struct DownloadTask: Identifiable, Codable {
         let decodedID = try container.decode(String.self, forKey: .id)
         let decodedWallpaper = try container.decodeIfPresent(Wallpaper.self, forKey: .wallpaper)
         let decodedMediaItem = try container.decodeIfPresent(MediaItem.self, forKey: .mediaItem)
+        let decodedWorkshopItem = try container.decodeIfPresent(MediaItem.self, forKey: .workshopItem)
+        let decodedWorkshopID = try container.decodeIfPresent(String.self, forKey: .workshopID)
 
         if let decodedKind = try container.decodeIfPresent(DownloadTaskKind.self, forKey: .kind) {
             kind = decodedKind
+        } else if decodedWorkshopItem != nil || decodedWorkshopID != nil {
+            kind = .workshop
         } else if decodedMediaItem != nil {
             kind = .media
         } else {
@@ -141,6 +179,8 @@ struct DownloadTask: Identifiable, Codable {
         id = decodedID
         wallpaper = decodedWallpaper
         mediaItem = decodedMediaItem
+        workshopItem = decodedWorkshopItem
+        workshopID = decodedWorkshopID
         progress = try container.decodeIfPresent(Double.self, forKey: .progress) ?? 0.0
         status = try container.decodeIfPresent(DownloadStatus.self, forKey: .status) ?? .pending
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
@@ -154,6 +194,8 @@ struct DownloadTask: Identifiable, Codable {
         try container.encode(kind, forKey: .kind)
         try container.encodeIfPresent(wallpaper, forKey: .wallpaper)
         try container.encodeIfPresent(mediaItem, forKey: .mediaItem)
+        try container.encodeIfPresent(workshopItem, forKey: .workshopItem)
+        try container.encodeIfPresent(workshopID, forKey: .workshopID)
         try container.encode(progress, forKey: .progress)
         try container.encode(status, forKey: .status)
         try container.encode(createdAt, forKey: .createdAt)

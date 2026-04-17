@@ -1,0 +1,76 @@
+{
+	"animationmode" : "randomframe",
+	"children" : 
+	[
+		{
+			"id" : 14,
+			"name" : "particles/presets/rain_screen_fast_child.json",
+			"type" : "eventfollow"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : "1900 200 0",
+			"id" : 8,
+			"name" : "boxrandom",
+			"origin" : "0 1400 0",
+			"rate" : 1
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 120,
+			"min" : 100,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 9,
+			"name" : "rotationrandom"
+		}
+	],
+	"material" : "materials/presets/rain_screen_fast.json",
+	"maxcount" : 8,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 -1000 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"id" : 11,
+			"name" : "remapvalue",
+			"operation" : "remap",
+			"output" : "velocity",
+			"outputrangemax" : "200 -2400 1",
+			"outputrangemin" : "-200 -400 0",
+			"transformfunction" : "simplexnoise",
+			"transforminputscale" : 10
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 12,
+			"length" : 0.0020000001,
+			"maxlength" : 2,
+			"minlength" : 1,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

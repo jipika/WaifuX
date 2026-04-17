@@ -17,22 +17,22 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/jipika/waifuX-pro/releases">
+    <img src="https://img.shields.io/github/v/release/jipika/waifuX-pro?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-06b6d4?style=flat-square" alt="License">
+    <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/jipika/waifuX-pro/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/waifuX-pro?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/WaifuX/forks">
-    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/jipika/waifuX-pro/forks">
+    <img src="https://img.shields.io/github/forks/jipika/waifuX-pro?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/jipika/waifuX-pro/releases">
+    <img src="https://img.shields.io/github/downloads/jipika/waifuX-pro/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/WaifuX">
+  <a href="https://jipika.github.io/waifuX-pro">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -74,6 +74,7 @@
 | ⚡️ **一键设为桌面** | ✅ | 浏览中即可快速设置为桌面壁纸或动态桌面 |
 | 🖥️ **多显示器支持** | ✅ | 支持为每个显示器分别设置不同壁纸，多屏用户福音 |
 | 📥 **本地数据导入** | ✅ | 支持导入本地壁纸文件夹，统一管理个人壁纸收藏 |
+| 🧊 **Wallpaper Engine 渲染 (Beta)** | ✅ | 实验性支持基于 OpenGL 的 Wallpaper Engine 场景/动态壁纸渲染 |
 | 🔄 **规则自动更新** | ✅ | 通过 GitHub 远程加载规则配置，源站改版可快速适配 |
 | 📱 **跨设备同步** | 🚧 | 收藏夹云端同步（开发中）|
 
@@ -83,11 +84,11 @@
 
 ### 方式一：官网下载（推荐）
 
-👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
+👉 **[https://jipika.github.io/waifuX-pro](https://jipika.github.io/waifuX-pro)**
 
 ### 方式二：GitHub Releases
 
-👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
+👉 **[Releases](https://github.com/jipika/waifuX-pro/releases)**
 
 > ⚠️ 首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行。
 
@@ -146,7 +147,8 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 - **WaifuX 用户交流群**: [点击加入](https://qm.qq.com/q/SRCj8msygq) 👈 971414910
 
 <p align="center">
-  <img src="reward.jpg" width="280" alt="赞助二维码" />
+  <img src="reward.jpg" width="280" alt="微信赞赏码" />
+  <img src="afdian_reward.jpg" width="280" alt="爱发电赞助码" />
 </p>
 
 当然，**给项目点个 Star ⭐️** 同样是对开发者最大的鼓励！
@@ -157,26 +159,52 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 
 ## 📄 开源协议
 
-本项目基于 [MIT License](LICENSE) 开源，可自由使用和分发。
+本项目基于 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 开源。
 
 ---
 
 ## ⚠️ 免责声明
 
-WaifuX 本身**不存储任何内容**，仅作为聚合工具使用：
-
+### 1. 内容聚合声明
+WaifuX 本身**不存储、不托管任何内容**，仅作为第三方内容的聚合与展示工具：
 - [Wallhaven](https://wallhaven.cc) 壁纸通过其公开 API 获取
 - [MotionBGs](https://motionbgs.com) 内容由用户自行配置源地址
-- 动漫视频由用户自行提供解析源
+- 动漫视频解析源由用户自行提供与配置
 - 所有内容的版权归原网站及原作者所有
-- 请遵守各平台服务条款，仅供个人学习研究使用
+
+### 2. Wallpaper Engine 兼容性声明（实验性 / Beta）
+WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristjan Skutta / Wallpaper Engine 及其关联方**不存在任何官方合作、赞助或隶属关系**。应用内集成的 Wallpaper Engine 场景渲染功能属于**实验性第三方兼容实现**，基于用户自行拥有的 Workshop 内容或本地文件进行 OpenGL 渲染，仅供个人学习、研究与 interoperability（互操作性）目的使用。
+- 用户**必须自行合法拥有** Wallpaper Engine 软件许可及相关 Workshop 内容的合法使用权
+- 本应用不会、也无法验证用户是否拥有相应内容的合法授权
+- 若用户未购买 Wallpaper Engine 或未获得内容授权，请**不要**使用本功能
+- 因使用本功能产生的任何版权、许可或服务条款争议，**由用户自行承担全部法律责任**
+- **本软件本身不包含任何 Wallpaper Engine 的版权数据、Workshop 内容、着色器、模型或纹理。** 所有渲染所需的素材均来源于用户自行提供的本地文件或 Workshop 订阅，本应用仅在运行时读取并渲染这些用户已有的数据
+
+### 3. 第三方软件与素材声明
+- 本应用包含对第三方专有格式（如 PKG）的结构解析，仅用于在 macOS 平台上实现互操作性
+- 用户通过本应用加载、播放或展示的任何第三方素材（包括但不限于壁纸、视频、音频、模型、Shader），其合法性、版权归属及使用授权均由用户自行负责
+- 开发者不对用户上传、导入或访问的任何第三方内容的合法性做任何担保
+
+### 4. 使用限制
+- 请严格遵守各内容平台的服务条款与最终用户许可协议（EULA）
+- 禁止将本应用用于任何侵犯知识产权、传播非法内容或违反适用法律法规的行为
+- 本应用仅供个人学习研究使用，**禁止商业性再分发或用于非法营利**
+
+### 5. 责任限制
+本应用按「**原样（AS IS）**」提供，开发者不对以下情形承担任何责任：
+- 因网络波动、第三方服务变更、源站屏蔽等原因导致的内容无法加载
+- 因用户设备配置、系统更新、驱动兼容性（特别是 OpenGL / GPU 驱动）导致的渲染异常、崩溃或硬件损坏
+- 因用户违反当地法律法规或第三方服务条款而产生的任何法律纠纷、行政处罚或经济损失
+- 因用户误操作、数据丢失或其他不可抗力导致的任何直接或间接损失
+
+**使用本应用即表示您已充分理解并同意上述全部条款。如您不同意，请立即停止使用并卸载本应用。**
 
 ---
 
 ## 🌟 Star 历史
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=jipika/waifuX-pro&type=Date" alt="Star History Chart">
 </p>
 
 ---
@@ -188,7 +216,7 @@ WaifuX 本身**不存储任何内容**，仅作为聚合工具使用：
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
+  <a href="https://github.com/jipika/waifuX-pro/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/waifuX-pro?style=social" alt="Stars">
   </a>
 </p>

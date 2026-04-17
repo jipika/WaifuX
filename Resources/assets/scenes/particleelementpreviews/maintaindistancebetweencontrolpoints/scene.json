@@ -1,0 +1,364 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 -0.92034 -1.00000",
+		"eye" : "0.00000 -0.92034 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.70196 0.70196 0.70196",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"gravitydirection" : "0.00000 -1.00000 0.00000",
+		"gravitystrength" : 1.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"winddirection" : "0.70700 0.70700 0.00000",
+		"windenabled" : false,
+		"windstrength" : 1.0,
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"castshadow" : false,
+			"clampuvs" : true,
+			"color" : "0.27843 0.27843 0.27843",
+			"id" : 35,
+			"image" : "models/util/solidlayer.json",
+			"name" : "Solid",
+			"origin" : 
+			{
+				"animation" : 
+				{
+					"c0" : 
+					[
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 0,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : 0
+						},
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 30,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : 0
+						}
+					],
+					"c1" : 
+					[
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 0,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : 0
+						},
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 30,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : -126.1462
+						}
+					],
+					"c2" : 
+					[
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 0,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : 0
+						},
+						{
+							"back" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : -1,
+								"y" : -0.0
+							},
+							"frame" : 30,
+							"front" : 
+							{
+								"enabled" : true,
+								"magic" : true,
+								"x" : 1,
+								"y" : 0
+							},
+							"lockangle" : true,
+							"locklength" : true,
+							"value" : 0
+						}
+					],
+					"options" : 
+					{
+						"fps" : 30,
+						"length" : 60,
+						"mode" : "loop",
+						"wraploop" : true
+					},
+					"relative" : true
+				},
+				"value" : "128.00000 238.94785 0.00000"
+			},
+			"scale" : "1.00000 0.05264 1.00000",
+			"size" : "256.00000 256.00000"
+		},
+		{
+			"id" : 26,
+			"instanceoverride" : 
+			{
+				"controlpoint1" : 
+				{
+					"animation" : 
+					{
+						"c0" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0
+							},
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 30,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0
+							}
+						],
+						"c1" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 436.42032
+							},
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 30,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 145.37645
+							}
+						],
+						"c2" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0
+							},
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : -0.0
+								},
+								"frame" : 30,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0
+							}
+						],
+						"options" : 
+						{
+							"fps" : 30,
+							"length" : 60,
+							"mode" : "loop",
+							"wraploop" : true
+						}
+					},
+					"value" : "0.00000 436.42032 0.00000"
+				},
+				"id" : 27,
+				"rate" : 2.3299999,
+				"size" : 0.33000001
+			},
+			"name" : "new_particle_system",
+			"origin" : "128.86108 46.21583 0.00000",
+			"particle" : "particles/new_particle_system.json",
+			"scale" : "0.41602 0.41602 0.41602"
+		}
+	],
+	"version" : 0
+}

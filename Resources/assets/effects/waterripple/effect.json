@@ -1,0 +1,39 @@
+{
+	"version" : 1,
+	"replacementkey" : "waterripple",
+	"name" : "ui_editor_effect_water_ripple_title",
+	"description" : "ui_editor_effect_water_ripple_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/waterripple.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/waterripple.json",
+		"materials/effects/waterripplenormal.png",
+		"materials/effects/waterripplenormal.tex-json",
+		"shaders/effects/waterripple.frag",
+		"shaders/effects/waterripple.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectPerspectiveUV",
+			"condition" :
+			{
+				"PERSPECTIVE" : 1
+			},
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"p2" : "point2",
+				"p3" : "point3"
+			}
+		}
+	]
+}

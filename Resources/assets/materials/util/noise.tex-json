@@ -1,0 +1,7 @@
+{
+	"clampuvs" : false,
+	"format" : "rgba8888",
+	"nointerpolation" : false,
+	"nomip" : true,
+	"forcerawcompression" : true
+}

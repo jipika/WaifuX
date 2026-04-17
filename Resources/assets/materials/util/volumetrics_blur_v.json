@@ -1,0 +1,13 @@
+{
+	"passes": [{
+		"shader": "blur_k3",
+		"depthwrite": "disabled",
+		"depthtest": "disabled",
+		"blending": "normal",
+		"cullmode" : "nocull",
+		"combos": {
+			"VERTICAL": 1
+		},
+		"textures": ["_rt_volumetricsLightBufferB"]
+	}]
+}

@@ -1,0 +1,141 @@
+{
+	"animationmode" : "randomframe",
+	"children" : [],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.1 1",
+			"distancemax" : 750,
+			"distancemin" : 0,
+			"id" : 10,
+			"name" : "sphererandom",
+			"origin" : "350 750 0",
+			"rate" : 20
+		}
+	],
+	"flags" : 4,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 10,
+			"min" : 8,
+			"name" : "lifetimerandom"
+		},
+		{
+			"exponent" : 2,
+			"id" : 3,
+			"max" : 50,
+			"min" : 20,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "-50 -15 0",
+			"min" : "-100 -100 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "255 192 248",
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 7,
+			"name" : "turbulentvelocityrandom",
+			"offset" : 3,
+			"scale" : 0.5,
+			"speedmax" : 100,
+			"speedmin" : 35
+		},
+		{
+			"id" : 8,
+			"max" : "5 5 5",
+			"min" : "-5 -5 -5",
+			"name" : "angularvelocityrandom"
+		},
+		{
+			"id" : 9,
+			"max" : "6.283 6.283 6.283",
+			"name" : "rotationrandom"
+		}
+	],
+	"material" : "materials/presets/leaves5.json",
+	"maxcount" : 200,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 11,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 0.90000000000000002,
+			"id" : 12,
+			"name" : "alphafade"
+		},
+		{
+			"force" : "0 0 0",
+			"id" : 13,
+			"name" : "angularmovement"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : 3,
+	"starttime" : 3
+}

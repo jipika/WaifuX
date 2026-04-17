@@ -1,0 +1,64 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/transform/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"CLAMP" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"Angle" : 0.67000001668930054,
+								"Offset" : "0 0.5",
+								"Scale" : "2 3"
+							}
+						}
+					]
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.000 128.000 0.000",
+			"scale" : "1.000 1.000 1.000"
+		}
+	]
+}

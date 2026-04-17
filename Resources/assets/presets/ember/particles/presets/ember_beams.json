@@ -1,0 +1,90 @@
+{
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.1 0",
+			"distancemax" : "128 64 0",
+			"id" : 6,
+			"name" : "boxrandom",
+			"rate" : 10
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 15,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 218 108",
+			"min" : "255 143 102",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"name" : "turbulentvelocityrandom",
+			"offset" : -0.5,
+			"scale" : 0.1,
+			"speedmax" : 300
+		}
+	],
+	"material" : "materials/presets/ember_beams.json",
+	"maxcount" : 40,
+	"operator" : 
+	[
+		{
+			"drag" : 0.1,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 0.89999998,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 9,
+			"mask" : "1 0.4 0",
+			"name" : "turbulence",
+			"phasemax" : 50,
+			"phasemin" : 5,
+			"speedmax" : 1000,
+			"speedmin" : 250,
+			"timescale" : 50
+		},
+		{
+			"id" : 11,
+			"name" : "sizechange",
+			"starttime" : 0.69999999
+		},
+		{
+			"frequencymax" : 25,
+			"frequencymin" : 15,
+			"id" : 14,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.30000001
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 13,
+			"length" : 0.003,
+			"maxlength" : 2,
+			"minlength" : null,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 3
+}

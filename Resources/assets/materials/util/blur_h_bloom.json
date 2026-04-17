@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "blur_h_bloom",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_8FrameBuffer"]
+	}]
+}

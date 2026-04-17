@@ -1,0 +1,17 @@
+{
+	"version" : 1,
+	"replacementkey" : "empty",
+	"group" : "colorize",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/empty.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/empty.json",
+		"shaders/effects/empty.frag",
+		"shaders/effects/empty.vert"
+	]
+}

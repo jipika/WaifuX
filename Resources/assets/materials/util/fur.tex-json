@@ -1,0 +1,7 @@
+{
+	"clampuvs" : false,
+	"format" : "r8",
+	"nointerpolation" : false,
+	"nomip" : true,
+	"forcerawcompression" : true
+}

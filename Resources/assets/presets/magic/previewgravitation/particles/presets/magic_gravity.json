@@ -1,0 +1,119 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 0",
+			"distancemax" : 128,
+			"distancemin" : 64,
+			"id" : 7,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 5,
+			"speedmax" : 0
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "500 500 0",
+			"min" : "-500 -500 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "83 225 255",
+			"min" : "60 143 255",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/magic_gravity.json",
+	"maxcount" : 32,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 9,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 10,
+			"name" : "controlpointattract",
+			"scale" : 10000,
+			"threshold" : 9999
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 0.20000000000000001,
+			"name" : "ropetrail"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

@@ -1,0 +1,114 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.158",
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/foliagesway/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Power" : 0.75,
+								"Speed" : 3.2100000381469727,
+								"Strength" : 93.339996337890625
+							}
+						}
+					]
+				}
+			],
+			"id" : 35,
+			"image" : "models/plant1.json",
+			"name" : "",
+			"origin" : "90.869 109.808 0.000",
+			"scale" : "0.311 0.311 1.000"
+		},
+		{
+			"angles" : "0.000 0.000 -0.112",
+			"depth" : -1.8400000333786011,
+			"effects" : 
+			[
+				{
+					"file" : "effects/foliagesway/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Phase" : 3.0999999046325684,
+								"Power" : 0.82999998331069946,
+								"Speed" : 3.869999885559082,
+								"Strength" : 66.680000305175781
+							}
+						}
+					]
+				}
+			],
+			"id" : 43,
+			"image" : "models/plant1.json",
+			"name" : "",
+			"origin" : "187.171 96.043 0.000",
+			"scale" : "-0.187 0.272 1.000"
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/foliagesway/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Phase" : 3.5199999809265137,
+								"Power" : 0.82999998331069946,
+								"Speed" : 2.809999942779541,
+								"Strength" : 33.340000152587891
+							}
+						}
+					]
+				}
+			],
+			"id" : 56,
+			"image" : "models/vegetation_grass_card_03.json",
+			"name" : "",
+			"origin" : "112.015 17.422 0.000",
+			"scale" : "1.000 1.000 1.000"
+		}
+	]
+}

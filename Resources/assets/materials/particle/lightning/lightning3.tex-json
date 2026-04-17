@@ -1,0 +1,17 @@
+{
+	"clampuvs" : false,
+	"format" : "r8",
+	"nonpoweroftwo" : true,
+	"alphachannelpriority" : true,
+	"nomip" : true,
+	"bleedtransparentcolors" : true,
+	"spritesheetsequences" : 
+	[
+		{
+			"duration" : 1,
+			"frames" : 50,
+			"height" : 102.4,
+			"width" : 204.8
+		}
+	]
+}

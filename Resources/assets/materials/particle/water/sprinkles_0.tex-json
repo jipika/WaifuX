@@ -1,0 +1,6 @@
+{
+	"clampuvs" : true,
+	"format" : "rg88",
+	"alphachannelpriority" : true,
+	"nonpoweroftwo" : true
+}

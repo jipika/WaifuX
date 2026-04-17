@@ -191,20 +191,28 @@ class WallpaperViewModel: ObservableObject {
         canShowNSFW
     }
 
+    /// 缓存的本地壁纸列表，避免每次 body 重绘时重复计算和文件 I/O
+    @Published var cachedAllLocalWallpapers: [UnifiedLocalWallpaper] = []
+
     init() {
         // 监听 Service 数据变化，转发 objectWillChange 通知视图更新
         // 因为 favorites/allLocalWallpapers 是计算属性，需要手动转发变化通知
-        Publishers.Merge(
+        Publishers.Merge3(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
-            wallpaperLibrary.$downloadRecords.map { _ in () }
+            wallpaperLibrary.$downloadRecords.map { _ in () },
+            localScanner.$scanRevision.map { _ in () }
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
+            self?.rebuildLocalWallpaperCache()
             self?.libraryContentRevision &+= 1
             // 转发变化通知，让使用计算属性的视图自动更新
             self?.objectWillChange.send()
         }
         .store(in: &cancellables)
+        
+        // 初始重建一次缓存
+        rebuildLocalWallpaperCache()
         
         // 监听网络状态变化
         networkMonitor.$status
@@ -275,9 +283,7 @@ class WallpaperViewModel: ObservableObject {
     }
 
     var downloadedWallpapers: [WallpaperDownloadRecord] {
-        // 每次访问时清理无效记录
-        wallpaperLibrary.cleanupInvalidDownloadRecords()
-        return wallpaperLibrary.downloadedWallpapers
+        wallpaperLibrary.downloadedWallpapers
     }
     
     /// 本地扫描的壁纸（用户手动复制到目录的文件）
@@ -286,12 +292,20 @@ class WallpaperViewModel: ObservableObject {
     }
     
     /// 所有可显示的本地壁纸（下载记录 + 扫描到的本地文件）
-    /// 用于库页面显示
+    /// 用于库页面显示。现在返回内存缓存，避免重复文件 I/O。
     var allLocalWallpapers: [UnifiedLocalWallpaper] {
+        cachedAllLocalWallpapers
+    }
+    
+    /// 重建本地壁纸缓存（在 downloadRecords / favoriteRecords / scanRevision 变化时自动调用）
+    private func rebuildLocalWallpaperCache() {
+        let downloads = wallpaperLibrary.downloadedWallpapers
+        let locals = localScanner.getLocalWallpapers()
+        
         var result: [UnifiedLocalWallpaper] = []
         
         // 添加下载记录
-        for record in downloadedWallpapers {
+        for record in downloads {
             result.append(UnifiedLocalWallpaper(
                 id: record.wallpaper.id,
                 wallpaper: record.wallpaper,
@@ -303,13 +317,9 @@ class WallpaperViewModel: ObservableObject {
         }
         
         // 添加扫描到的本地文件（排除已在下载记录中的）
-        // ⚠️ 必须用文件路径去重，不能用 ID：
-        //   - 下载记录的 id = 原始 Wallpaper.id（如 "wallhaven-abc123"）
-        //   - 本地扫描的 id = "local_文件名_扩展名"（如 "local_wallhaven-abc123_jpg"）
-        //   两者永远不匹配！同一文件会以两个身份同时出现导致重复
-        let downloadedPaths = Set(downloadedWallpapers.compactMap { URL(string: $0.localFilePath)?.path })
+        let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
             .map { ($0 as NSString).standardizingPath as String }
-        for item in localWallpapers where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
+        for item in locals where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
             result.append(UnifiedLocalWallpaper(
                 id: item.id,
                 wallpaper: item.toWallpaper(),
@@ -321,11 +331,17 @@ class WallpaperViewModel: ObservableObject {
         }
         
         // 按下载/创建时间排序
-        return result.sorted { a, b in
+        cachedAllLocalWallpapers = result.sorted { a, b in
             let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601($0) } ?? Date.distantPast
             let dateB = b.downloadRecord?.downloadedAt ?? b.localItem?.createdAt.flatMap { parseISO8601($0) } ?? Date.distantPast
             return dateA > dateB
         }
+    }
+    
+    /// 显式清理无效下载记录（文件不存在的记录），不应在 computed property 中自动调用
+    func cleanupInvalidDownloadRecords() {
+        wallpaperLibrary.cleanupInvalidDownloadRecords()
+        rebuildLocalWallpaperCache()
     }
 
     var favoriteSyncRecords: [WallpaperFavoriteRecord] {
@@ -846,7 +862,7 @@ class WallpaperViewModel: ObservableObject {
                 wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
                 downloadTaskService.markCompleted(id: task.id)
             } else {
-                throw DownloadError.writeFailed(NSError(domain: "WallHaven", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
+                throw DownloadError.writeFailed(NSError(domain: "WaifuX", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
             }
         } catch {
             downloadTaskService.markFailed(id: task.id)
@@ -950,7 +966,7 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 设为壁纸（通过 Wallpaper 对象）
     func setAsWallpaper(_ wallpaper: Wallpaper) async throws {
         guard let imageURL = wallpaper.fullImageURL else {
-            throw NSError(domain: "WallHaven", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid image URL"])
+            throw NSError(domain: "WaifuX", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid image URL"])
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -958,7 +974,7 @@ class WallpaperViewModel: ObservableObject {
                 do {
                     let workspace = NSWorkspace.shared
                     guard let screen = NSScreen.main else {
-                        continuation.resume(throwing: NSError(domain: "WallHaven", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
+                        continuation.resume(throwing: NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
                         return
                     }
                     try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])

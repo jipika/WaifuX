@@ -1,0 +1,10 @@
+{
+	"passes": [{
+		"shader": "effects/refract",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"textures": [null, null, "effects/refractnormal"]
+	}]
+}

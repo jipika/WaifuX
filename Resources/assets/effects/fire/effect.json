@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "fire",
+	"name" : "ui_editor_effect_fire_title",
+	"description" : "ui_editor_effect_fire_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/fire.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/fire.json",
+		"shaders/effects/fire.frag",
+		"shaders/effects/fire.vert"
+	]
+}

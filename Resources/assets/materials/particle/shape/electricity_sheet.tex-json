@@ -1,0 +1,15 @@
+{
+	"clampuvs" : false,
+	"format" : "rg88",
+	"alphachannelpriority" : true,
+	"nonpoweroftwo" : true,
+	"spritesheetsequences" : 
+	[
+		{
+			"duration" : 1,
+			"frames" : 8,
+			"height" : 128,
+			"width" : 128
+		}
+	]
+}

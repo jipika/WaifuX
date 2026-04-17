@@ -1,0 +1,18 @@
+{
+	"name" : "ui_editor_effect_nitro_title",
+	"description" : "ui_editor_effect_nitro_description",
+	"group" : "colorize",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/nitro.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/nitro.json",
+		"shaders/effects/nitro.frag",
+		"shaders/effects/nitro.vert"
+	]
+}

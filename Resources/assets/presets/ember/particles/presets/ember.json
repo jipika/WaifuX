@@ -1,0 +1,92 @@
+{
+	"children" : 
+	[
+		{
+			"id" : 12,
+			"name" : "particles/presets/emberglow.json"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.1 0",
+			"distancemax" : "512 256 0",
+			"id" : 6,
+			"name" : "boxrandom",
+			"rate" : 10
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 200,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 218 108",
+			"min" : "255 143 102",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"name" : "turbulentvelocityrandom",
+			"offset" : -0.5,
+			"scale" : 0.1
+		}
+	],
+	"material" : "materials/presets/ember.json",
+	"maxcount" : 40,
+	"operator" : 
+	[
+		{
+			"drag" : 0,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 9,
+			"mask" : "1 0.4 0",
+			"name" : "turbulence",
+			"phasemax" : 50,
+			"phasemin" : 5,
+			"speedmax" : 1000,
+			"speedmin" : 250,
+			"timescale" : 50
+		},
+		{
+			"frequencymax" : 20,
+			"id" : 10,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.69999999
+		},
+		{
+			"id" : 11,
+			"name" : "sizechange",
+			"starttime" : 0.69999999
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 13,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 3
+}

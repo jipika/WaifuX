@@ -1,0 +1,19 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 0.00000",
+		"eye" : "1.70000 1.00000 2.90000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"camerafade" : true,
+		"clearcolor" : "0.7 0.7 0.7",
+		"skylightcolor" : "0.3 0.3 0.3",
+		"transparentsorting" : true,
+		"zoom" : 1.0
+	},
+	"objects" : []
+}

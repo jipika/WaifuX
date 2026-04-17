@@ -1,0 +1,112 @@
+{
+	"children" : 
+	[
+		{
+			"id" : 15,
+			"name" : "particles/presets/dripping_water_droplets_single.json"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"id" : 0
+		},
+		{
+			"flags" : 16,
+			"id" : 1
+		},
+		{
+			"flags" : 16,
+			"id" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 6
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.5,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 5,
+			"min" : 2,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "187 196 255",
+			"min" : "181 230 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 10,
+			"max" : "0 -250 0",
+			"min" : "0 -250 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"exponent" : 2,
+			"id" : 12,
+			"max" : 0.5,
+			"min" : 0.25,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/dripping_water_single.json",
+	"maxcount" : 16,
+	"operator" : 
+	[
+		{
+			"drag" : 0,
+			"gravity" : "0 -1000 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"endtime" : 0.2,
+			"endvalue" : 1,
+			"id" : 11,
+			"name" : "sizechange",
+			"starttime" : 0,
+			"startvalue" : 0
+		},
+		{
+			"alignmentfactor" : 5,
+			"cohesionfactor" : 5,
+			"flags" : 0,
+			"id" : 14,
+			"name" : "boids",
+			"neighborthreshold" : 150,
+			"separationfactor" : 0
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"fadealpha" : true,
+			"id" : 9,
+			"length" : 0.5,
+			"name" : "ropetrail",
+			"segments" : 6
+		}
+	],
+	"starttime" : 0
+}

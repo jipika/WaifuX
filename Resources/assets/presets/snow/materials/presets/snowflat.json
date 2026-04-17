@@ -1,0 +1,10 @@
+{
+	"passes": [{
+		"shader": "genericparticle",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "additive",
+		"cullmode" : "nocull",
+		"textures": ["particle/chromaticdot"]
+	}]
+}

@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/motionblur_accumulation",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}

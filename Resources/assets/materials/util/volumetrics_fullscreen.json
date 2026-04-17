@@ -1,0 +1,12 @@
+{
+	"passes": [{
+		"shader": "volumetricsfront",
+		"depthwrite": "disabled",
+		"depthtest": "disabled",
+		"cullmode": "nocull",
+		"blending": "additive",
+		"combos": {
+			"FULLSCREEN": 1
+		}
+	}]
+}

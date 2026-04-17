@@ -1,0 +1,22 @@
+{
+	"passes" : 
+	[
+		{
+			"blending" : "additive",
+			"combos" : 
+			{
+				"REFRACT" : 1
+			},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_overbright" : 1.0,
+				"ui_editor_properties_refract_amount" : 0.17000000178813934
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/bubbles/bubble1", "particle/bubbles/bubble1normal" ]
+		}
+	]
+}

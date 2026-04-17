@@ -1,0 +1,88 @@
+{
+	"animationmode" : "randomframe",
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"id" : 0,
+			"parentcontrolpoint" : 1
+		},
+		{
+			"id" : 1,
+			"parentcontrolpoint" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.5 0",
+			"distancemax" : 4,
+			"distancemin" : 0,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 11
+		}
+	],
+	"flags" : 3,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.5,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 2,
+			"min" : 0.5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "183 199 255",
+			"min" : "200 248 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 10,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 11,
+			"max" : "5 -250 0",
+			"min" : "-5 -200 0",
+			"name" : "velocityrandom"
+		}
+	],
+	"material" : "materials/presets/dripping_water_droplets_single.json",
+	"maxcount" : 64,
+	"operator" : 
+	[
+		{
+			"drag" : 1,
+			"gravity" : "0 -1000 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 12,
+			"name" : "sizechange"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 13,
+			"length" : 0.1,
+			"maxlength" : 3,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

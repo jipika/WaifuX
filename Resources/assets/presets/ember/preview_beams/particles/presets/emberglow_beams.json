@@ -1,0 +1,62 @@
+{
+	"children" : null,
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : "100 256 0",
+			"id" : 6,
+			"name" : "boxrandom",
+			"rate" : 1
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 1000,
+			"min" : 500,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 221 155",
+			"min" : "255 196 175",
+			"name" : "colorrandom"
+		},
+		{
+			"exponent" : 2,
+			"id" : 5,
+			"max" : 0.2,
+			"min" : 0.1,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/emberglow_beams.json",
+	"maxcount" : 32,
+	"operator" : 
+	[
+		{
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"id" : 8,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 3
+}

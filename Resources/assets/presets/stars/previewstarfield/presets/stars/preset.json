@@ -1,0 +1,22 @@
+{
+	"name" : "ui_editor_preset_stars_title",
+	"description" : "ui_editor_preset_stars_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"preview" : "preview/project.json",
+	"objects" :
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"name" : "Stars",
+			"origin" : "0.000 0.000 0.000",
+			"particle" : "particles/presets/starfield.json",
+			"scale" : "1.000 1.000 1.000"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/presets/starfield.json",
+		"particles/presets/starfield.json"
+	]
+}

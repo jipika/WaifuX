@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "tint",
+	"name" : "ui_editor_effect_tint_title",
+	"description" : "ui_editor_effect_tint_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/tint.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/tint.json",
+		"shaders/effects/tint.frag",
+		"shaders/effects/tint.vert"
+	]
+}

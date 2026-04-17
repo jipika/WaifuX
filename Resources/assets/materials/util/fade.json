@@ -1,0 +1,11 @@
+{
+	"passes": [{
+		"shader": "fade",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "translucent",
+		"usershadervalues": {
+			"schemecolor": "tint"
+		}
+	}]
+}

@@ -1,0 +1,123 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 -1.00000",
+		"eye" : "0.00000 0.00000 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.70000 0.70000 0.70000",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"alignment" : "center",
+			"alpha" : 1.0,
+			"angles" : "0.00000 0.00000 0.00000",
+			"brightness" : 1.0,
+			"color" : "1.00000 1.00000 1.00000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/blurradial/effect.json",
+					"id" : 18,
+					"name" : "",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"scale" : 0.58,
+								"ui_editor_properties_center" : "0.50633568 0.46990585"
+							},
+							"id" : 19
+						}
+					],
+					"visible" : true
+				},
+				{
+					"file" : "effects/blurradial/effect.json",
+					"id" : 24,
+					"name" : "",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"scale" : 0.58,
+								"ui_editor_properties_center" : "0.50633568 0.46990585"
+							},
+							"id" : 0
+						}
+					],
+					"visible" : true
+				},
+				{
+					"file" : "effects/blurradial/effect.json",
+					"id" : 29,
+					"name" : "",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"scale" : 0.58,
+								"ui_editor_properties_center" : "0.50633568 0.46990585"
+							},
+							"id" : 30
+						}
+					],
+					"visible" : true
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"ledsource" : false,
+			"locktransforms" : false,
+			"name" : "",
+			"origin" : "128.00000 128.00000 0.00000",
+			"parallaxDepth" : "1.00000 1.00000",
+			"perspective" : false,
+			"scale" : "1.00000 1.00000 1.00000",
+			"size" : "256.00000 256.00000",
+			"solid" : true,
+			"visible" : true
+		}
+	],
+	"version" : 0
+}

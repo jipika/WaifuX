@@ -1,0 +1,18 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "additive",
+			"combos" : 
+			{
+				"REFRACT" : 0
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "enabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/beam/beam_1" ]
+		}
+	]
+}

@@ -16,6 +16,9 @@ final class LocalWallpaperScanner {
     private var scannedMediaItems: [LocalMediaItem] = []
     private var lastScanTime: Date?
     
+    /// 扫描版本号，扫描完成后递增，供 ViewModel 监听以重建缓存
+    @Published private(set) var scanRevision: UInt = 0
+    
     // 扫描间隔（秒）- 增加到 30 秒避免频繁扫描
     private let scanInterval: TimeInterval = 30
     
@@ -132,37 +135,10 @@ final class LocalWallpaperScanner {
             }
         }
         
-        // 扫描旧版根目录（兼容性）
-        let legacyFolder = downloadPathManager.legacyFolderURL
-        if fileManager.fileExists(atPath: legacyFolder.path) {
-            do {
-                let contents = try fileManager.contentsOfDirectory(
-                    at: legacyFolder,
-                    includingPropertiesForKeys: [.contentTypeKey, .fileSizeKey],
-                    options: .skipsHiddenFiles
-                )
-                
-                for fileURL in contents where !fileURL.hasDirectoryPath {
-                    if isImageFile(fileURL) {
-                        if let item = createWallpaperItem(from: fileURL),
-                           !wallpapers.contains(where: { $0.id == item.id }) {
-                            wallpapers.append(item)
-                        }
-                    } else if isVideoFile(fileURL) {
-                        if let item = await createMediaItem(from: fileURL),
-                           !mediaItems.contains(where: { $0.id == item.id }) {
-                            mediaItems.append(item)
-                        }
-                    }
-                }
-            } catch {
-                print("[LocalWallpaperScanner] Failed to scan legacy folder: \(error)")
-            }
-        }
-        
         scannedWallpapers = wallpapers
         scannedMediaItems = mediaItems
         lastScanTime = Date()
+        scanRevision &+= 1
         
         print("[LocalWallpaperScanner] Scan completed in \(Date().timeIntervalSince(startTime))s, found \(wallpapers.count) wallpapers, \(mediaItems.count) media files")
     }
@@ -211,6 +187,9 @@ final class LocalWallpaperScanner {
         let duration = await getVideoDuration(fileURL)
         
         let id = "local_\(fileName)_\(fileExtension)"
+        
+        // 确保视频缩略图已生成（新导入和已有文件都会处理）
+        _ = await VideoThumbnailCache.shared.thumbnailImage(for: fileURL)
         
         return LocalMediaItem(
             id: id,

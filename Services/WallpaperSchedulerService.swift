@@ -13,12 +13,9 @@ class WallpaperSchedulerService: ObservableObject {
     private var timer: Timer?
     private let userDefaultsKey = "wallpaper_scheduler_config"
 
-    private init() {
-        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
-        // 调度配置通过 restoreSavedConfig() 延迟恢复
-    }
+    private init() {}
 
-    /// 延迟恢复保存的调度配置（必须在 applicationDidFinishLaunching 中调用）
+    /// 延迟恢复保存的调度配置
     func restoreSavedConfig() {
         loadConfig()
     }
@@ -43,10 +40,43 @@ class WallpaperSchedulerService: ObservableObject {
         config = newConfig
         saveConfig()
         if isRunning {
-            // 重启调度器以应用新配置
             stop()
             start()
         }
+    }
+
+    // MARK: - Per-Display Updates
+
+    func updateDisplayEnabled(_ enabled: Bool, for screenID: String) {
+        var newConfig = config
+        var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
+        displayConfig.isEnabled = enabled
+        newConfig.displayConfigs[screenID] = displayConfig
+        updateConfig(newConfig)
+    }
+
+    func updateDisplayInterval(_ minutes: Int, for screenID: String) {
+        var newConfig = config
+        var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
+        displayConfig.intervalMinutes = minutes
+        newConfig.displayConfigs[screenID] = displayConfig
+        updateConfig(newConfig)
+    }
+
+    func updateDisplayOrder(_ order: ScheduleOrder, for screenID: String) {
+        var newConfig = config
+        var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
+        displayConfig.order = order
+        newConfig.displayConfigs[screenID] = displayConfig
+        updateConfig(newConfig)
+    }
+
+    func updateDisplaySource(_ source: WallpaperSource, for screenID: String) {
+        var newConfig = config
+        var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
+        displayConfig.source = source
+        newConfig.displayConfigs[screenID] = displayConfig
+        updateConfig(newConfig)
     }
 
     // MARK: - Scheduling
@@ -55,54 +85,56 @@ class WallpaperSchedulerService: ObservableObject {
         timer?.invalidate()
 
         let interval = TimeInterval(config.intervalMinutes * 60)
+        guard interval > 0 else { return }
 
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.changeWallpaper()
+                self?.changeWallpaperIfNeeded()
             }
         }
     }
 
-    private func changeWallpaper() {
-        guard let wallpaper = selectNextWallpaper() else { return }
+    private func changeWallpaperIfNeeded() {
+        let screens = NSScreen.screens
+        for screen in screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            let displayConfig = config.resolvedDisplayConfig(for: screenID)
+            guard displayConfig.isEnabled else { continue }
 
-        do {
-            let imageURL = wallpaper.fullImageURL ?? wallpaper.thumbURL
-            guard let url = imageURL else { return }
+            if let wallpaper = selectNextWallpaper(for: displayConfig) {
+                applyWallpaper(wallpaper, to: screen)
+            }
+        }
+    }
 
-            let workspace = NSWorkspace.shared
-            guard let screen = NSScreen.main else { return }
+    private func applyWallpaper(_ wallpaper: Wallpaper, to screen: NSScreen) {
+        guard let url = wallpaper.fullImageURL ?? wallpaper.thumbURL else { return }
 
-            // 下载图片到临时文件再设置为壁纸
-            Task { @MainActor in
-                do {
-                    let tempURL = try await downloadImage(from: url)
-                    try workspace.setDesktopImageURL(tempURL, for: screen, options: [:])
-                    lastChangedWallpaper = wallpaper
-                } catch {
-                    print("Failed to set wallpaper: \(error)")
-                }
+        Task { @MainActor in
+            do {
+                let tempURL = try await downloadImage(from: url)
+                try NSWorkspace.shared.setDesktopImageURL(tempURL, for: screen, options: [:])
+                lastChangedWallpaper = wallpaper
+            } catch {
+                print("[WallpaperSchedulerService] Failed to set wallpaper: \(error)")
             }
         }
     }
 
     private func downloadImage(from url: URL) async throws -> URL {
         let (data, _) = try await URLSession.shared.data(from: url)
-        let tempDir = FileManager.default.temporaryDirectory
-        let tempFile = tempDir.appendingPathComponent("wallpaper_\(UUID().uuidString).jpg")
+        let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("wallpaper_\(UUID().uuidString).jpg")
         try data.write(to: tempFile)
         return tempFile
     }
 
     // MARK: - Wallpaper Selection
 
-    func selectNextWallpaper() -> Wallpaper? {
-        // 获取壁纸列表
-        let wallpapers = getWallpapersForSource()
-
+    func selectNextWallpaper(for displayConfig: DisplaySchedulerConfig) -> Wallpaper? {
+        let wallpapers = getWallpapersForSource(displayConfig.source)
         guard !wallpapers.isEmpty else { return nil }
 
-        switch config.order {
+        switch displayConfig.order {
         case .sequential:
             return selectSequential(from: wallpapers)
         case .random:
@@ -110,32 +142,28 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
-    private func getWallpapersForSource() -> [Wallpaper] {
-        switch config.source {
+    private func getWallpapersForSource(_ source: WallpaperSource) -> [Wallpaper] {
+        let vm = WallpaperViewModel()
+        switch source {
         case .online:
-            // 在线壁纸需要从 ViewModel 获取
-            return WallpaperViewModel().wallpapers
+            return vm.wallpapers
         case .local:
-            // 本地壁纸需要从缓存获取
             return []
         case .favorites:
-            // 使用收藏列表
-            return WallpaperViewModel().favorites
+            return vm.favorites
         }
     }
 
     private func selectSequential(from wallpapers: [Wallpaper]) -> Wallpaper? {
-        // 简单实现：随机选择（严格顺序需要跟踪索引）
-        return wallpapers.randomElement()
+        wallpapers.randomElement()
     }
 
     private func selectRandom(from wallpapers: [Wallpaper]) -> Wallpaper? {
-        // 避免选择与上次相同的壁纸
         var available = wallpapers
         if let last = lastChangedWallpaper, let index = available.firstIndex(where: { $0.id == last.id }) {
             available.remove(at: index)
         }
-        return available.randomElement()
+        return available.randomElement() ?? wallpapers.randomElement()
     }
 
     // MARK: - Persistence
@@ -154,5 +182,14 @@ class WallpaperSchedulerService: ObservableObject {
                 start()
             }
         }
+    }
+}
+
+private extension NSScreen {
+    var wallpaperScreenIdentifier: String {
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return screenNumber.stringValue
+        }
+        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
     }
 }

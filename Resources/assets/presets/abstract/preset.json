@@ -1,0 +1,38 @@
+{
+	"name" : "ui_editor_preset_abstract_title",
+	"description" : "ui_editor_preset_abstract_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "DNA",
+				"value" : 0
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewdna/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "DNA",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dna.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dna.json",
+				"particles/presets/dna.json"
+			]
+		}
+	]
+}

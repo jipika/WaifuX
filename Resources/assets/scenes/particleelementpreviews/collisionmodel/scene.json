@@ -1,0 +1,106 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 -1.00000",
+		"eye" : "0.00000 0.00000 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.00000 0.00000 0.00000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.28627 0.34902 0.48627",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"gravitydirection" : "0.00000 -1.00000 0.00000",
+		"gravitystrength" : 1.0,
+		"hdr" : false,
+		"lightconfig" : 
+		{
+			"point" : 1,
+			"pointshadow" : 1
+		},
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"winddirection" : "0.70700 0.70700 0.00000",
+		"windenabled" : false,
+		"windstrength" : 1.0,
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"id" : 24,
+			"model" : "models/sphere/sphere.mdl",
+			"name" : "sphere",
+			"origin" : "128.00000 128.00000 0.00000",
+			"scale" : "0.67765 0.67765 0.67765"
+		},
+		{
+			"dependencies" : 
+			[
+				{
+					"id" : 24,
+					"index" : 0,
+					"type" : "collisionmodel"
+				}
+			],
+			"id" : 23,
+			"instanceoverride" : 
+			{
+				"colorn" : "1.00000 0.58431 0.27843",
+				"id" : 10,
+				"rate" : 1.91,
+				"size" : 1.67
+			},
+			"name" : "new_particle_system",
+			"origin" : "128.00000 319.35617 0.00000",
+			"particle" : "particles/new_particle_system.json",
+			"scale" : "0.16886 0.16886 0.16886"
+		},
+		{
+			"angles" : "0.00000 0.62531 -2.25934",
+			"cascadedistance0" : 0.0,
+			"cascadedistance1" : 100.0,
+			"cascadedistance2" : 200.0,
+			"castshadow" : true,
+			"color" : "1.00000 1.00000 1.00000",
+			"density" : 7.48,
+			"exponent" : 2.0,
+			"id" : 28,
+			"intensity" : 6.4400001,
+			"light" : "lpoint",
+			"name" : "",
+			"origin" : "281.83707 315.16809 162.00000",
+			"parallaxDepth" : "0.00000 0.00000",
+			"radius" : 811.69,
+			"volumetricsexponent" : 4.0
+		}
+	],
+	"version" : 0
+}

@@ -1,0 +1,97 @@
+{
+	"camera" : 
+	{
+		"center" : "0.96342 -7.22564 -1.00000",
+		"eye" : "0.96342 -7.22564 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.70000 0.70000 0.70000",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"castshadow" : false,
+			"color" : "0.56863 0.56863 0.56863",
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/lightshafts/effect.json",
+					"id" : 19,
+					"name" : "",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"RAYMODE" : 2,
+								"RENDERING" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"colorend" : "0.5 0.8 1",
+								"colorstart" : "1 1 1",
+								"colorwexponent" : 1.52,
+								"colorwintensity" : 8.02,
+								"noiseamount" : 0.33,
+								"noisescale" : 1.0,
+								"point0" : "0.07252 0.03708",
+								"point1" : "1.06537 0.04142",
+								"point2" : "1.21069 1.01650",
+								"point3" : "-0.09353 1.00193",
+								"rayfeather" : "0.05 0.2",
+								"rayradius" : 0.16,
+								"rayscale" : "0.74 0.1",
+								"raysmoothness" : 0.75,
+								"rayspeed" : 0.2
+							},
+							"id" : 20
+						}
+					],
+					"visible" : true
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.00000 128.00000 0.00000",
+			"size" : "256.00000 256.00000"
+		}
+	],
+	"version" : 0
+}

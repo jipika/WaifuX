@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "combine",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_FullFrameBuffer", "util/black"]
+	}]
+}

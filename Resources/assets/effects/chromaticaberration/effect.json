@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "chromatic_aberration",
+	"name" : "ui_editor_effect_chromatic_abberation_title",
+	"description" : "ui_editor_effect_chromatic_abberation_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/chromatic_aberration.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/chromatic_aberration.json",
+		"shaders/effects/chromatic_aberration.frag",
+		"shaders/effects/chromatic_aberration.vert"
+	]
+}

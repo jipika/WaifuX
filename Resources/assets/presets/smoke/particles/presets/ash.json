@@ -1,0 +1,132 @@
+{
+	"animationmode" : "randomframe",
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.5 0.5",
+			"distancemax" : 900,
+			"distancemin" : 0,
+			"id" : 7,
+			"name" : "sphererandom",
+			"origin" : "0 100 0",
+			"rate" : 10
+		}
+	],
+	"flags" : 6,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 10,
+			"min" : 7,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 35,
+			"min" : 30,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "50 0 0",
+			"min" : "-50 -50 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "161 157 127",
+			"min" : "169 141 141",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"max" : "0 0 2",
+			"min" : "0 0 -2",
+			"name" : "angularvelocityrandom"
+		}
+	],
+	"material" : "materials/presets/ash.json",
+	"maxcount" : 150,
+	"operator" : 
+	[
+		{
+			"drag" : 0.10000000000000001,
+			"gravity" : "0 -10 0",
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 0.90000000000000002,
+			"id" : 9,
+			"name" : "alphafade"
+		},
+		{
+			"force" : "0 0 0",
+			"id" : 10,
+			"name" : "angularmovement"
+		},
+		{
+			"id" : 11,
+			"name" : "turbulence",
+			"scale" : 0.0049999999776482581,
+			"speedmax" : 50,
+			"speedmin" : 25,
+			"timescale" : 5
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 5
+}

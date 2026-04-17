@@ -1,0 +1,152 @@
+{
+	"camera" : 
+	{
+		"center" : "-1.873 4.397 -1.000",
+		"eye" : "-1.873 4.397 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"depth" : 1,
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"config" : 
+			{
+				"passthrough" : true
+			},
+			"copybackground" : false,
+			"effects" : 
+			[
+				{
+					"file" : "effects/tint/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 0
+							},
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_alpha" : 1,
+								"ui_editor_properties_color" : "1 1 1"
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/clouds/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 2,
+								"SHADING" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_alpha" : 1,
+								"ui_editor_properties_color_end" : "0.7647058823529411 0.8235294117647058 1",
+								"ui_editor_properties_color_start" : "1 1 1",
+								"ui_editor_properties_direction" : 4.0199999809265137,
+								"ui_editor_properties_feather" : 0.079999998211860657,
+								"ui_editor_properties_scale" : "2 1.3",
+								"ui_editor_properties_shading" : 1,
+								"ui_editor_properties_shading_direction" : 3.2699999809265137,
+								"ui_editor_properties_threshold" : 0.27000001072883606
+							},
+							"textures" : [ null, "util/clouds_256" ]
+						}
+					]
+				},
+				{
+					"file" : "effects/blurprecise/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"KERNEL" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_scale" : "1.16 1.16"
+							}
+						},
+						{
+							"combos" : 
+							{
+								"KERNEL" : 1,
+								"VERTICAL" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_scale" : "1.16 1.16"
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/motionblur/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Accumulation rate" : 0.059999998658895493
+							},
+							"textures" : [ null, "_rt_FullCompoBuffer1_23_40" ]
+						},
+						{}
+					]
+				}
+			],
+			"id" : 23,
+			"image" : "models/util/composelayer.json",
+			"name" : "Compose",
+			"origin" : "128.000 127.535 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		}
+	]
+}

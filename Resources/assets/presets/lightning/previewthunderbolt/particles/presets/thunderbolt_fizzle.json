@@ -1,0 +1,130 @@
+{
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 4,
+			"id" : 1,
+			"offset" : null,
+			"parentcontrolpoint" : 1
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 5,
+			"distancemin" : 0,
+			"id" : 6,
+			"instantaneous" : 8,
+			"name" : "sphererandom",
+			"rate" : 0,
+			"speedmax" : 1000,
+			"speedmin" : 5
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.69999999,
+			"min" : 0.30000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 3,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "163 223 255",
+			"min" : "69 248 255",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/thunderbolt_fizzle.json",
+	"maxcount" : 8,
+	"operator" : 
+	[
+		{
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 0.30000001,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 10,
+			"name" : "turbulence",
+			"scale" : 0.1
+		},
+		{
+			"id" : 11,
+			"name" : "sizechange",
+			"startvalue" : 2
+		},
+		{
+			"blendinstart" : 0,
+			"controlpoint" : 1,
+			"id" : 12,
+			"name" : "controlpointattract",
+			"origin" : "0 0 0",
+			"scale" : 500,
+			"threshold" : 99999
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 9,
+			"maxlength" : 2,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

@@ -10,11 +10,11 @@ actor RuleLoader {
         let fileManager = FileManager.default
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             // 使用临时目录作为回退
-            rulesDirectory = fileManager.temporaryDirectory.appendingPathComponent("WallHaven/Rules", isDirectory: true)
+            rulesDirectory = fileManager.temporaryDirectory.appendingPathComponent("WaifuX/Rules", isDirectory: true)
             print("[RuleLoader] 使用临时目录: \(rulesDirectory.path)")
             return
         }
-        rulesDirectory = appSupport.appendingPathComponent("WallHaven/Rules", isDirectory: true)
+        rulesDirectory = appSupport.appendingPathComponent("WaifuX/Rules", isDirectory: true)
         print("[RuleLoader] 规则目录: \(rulesDirectory.path)")
 
         do {

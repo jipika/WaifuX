@@ -1,0 +1,75 @@
+{
+	"children" : [],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 256,
+			"distancemin" : 256,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 450,
+			"speedmax" : 128,
+			"speedmin" : 128
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.69999999,
+			"min" : 0.40000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "4 255 0",
+			"min" : "134 255 64",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"max" : 1,
+			"min" : 1,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/magic_vortex_1.json",
+	"maxcount" : 512,
+	"operator" : 
+	[
+		{
+			"drag" : 0.5,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.69999999,
+			"fadeouttime" : 0.69999999,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"distanceinner" : 0,
+			"distanceouter" : 32,
+			"flags" : 2,
+			"id" : 9,
+			"name" : "vortex_v2",
+			"speedinner" : 0,
+			"speedouter" : 2500
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 11,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

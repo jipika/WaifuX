@@ -1,0 +1,133 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 500 0"
+		},
+		{
+			"flags" : 1,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 1",
+			"distancemax" : 32,
+			"distancemin" : 32,
+			"id" : 6,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 32
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 80,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"axis" : "0 1 0",
+			"count" : 2.2000000000000002,
+			"id" : 4,
+			"name" : "mapsequencearoundcontrolpoint"
+		},
+		{
+			"count" : 64,
+			"id" : 5,
+			"name" : "mapsequencebetweencontrolpoints"
+		}
+	],
+	"material" : "materials/presets/dna.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"axis" : "0 1 0",
+			"distanceinner" : 0,
+			"distanceouter" : 0,
+			"flags" : 1,
+			"id" : 9,
+			"name" : "vortex",
+			"speedinner" : -250,
+			"speedouter" : -250
+		},
+		{
+			"endtime" : 0.69999999999999996,
+			"endvalue" : "1 0 0",
+			"id" : 10,
+			"name" : "colorchange"
+		},
+		{
+			"endvalue" : 0,
+			"id" : 11,
+			"name" : "sizechange",
+			"startvalue" : 1
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/localcontrast_combine",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}

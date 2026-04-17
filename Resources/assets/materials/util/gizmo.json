@@ -1,0 +1,6 @@
+{
+	"passes": [{
+		"shader": "flat",
+		"cullmode": "nocull"
+	}]
+}

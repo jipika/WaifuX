@@ -1,0 +1,276 @@
+{
+	"name" : "ui_editor_preset_light_shafts_title",
+	"description" : "ui_editor_preset_light_shafts_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_corner",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_radial",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_linear",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_dust_motes",
+				"value" : 3
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_1",
+				"value" : 4
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_2",
+				"value" : 5
+			},
+			{
+				"label" : "ui_editor_preset_light_shafts_variant_3",
+				"value" : 6
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewlscorner/project.json",
+			"objects" :
+			[
+				{
+					"castshadow" : false,
+					"effects" : 
+					[
+						{
+							"file" : "effects/lightshafts/effect.json",
+							"name" : "",
+							"passes" : 
+							[
+								{
+									"combos" : 
+									{
+										"RAYCORNER" : 1,
+										"RAYMODE" : 2,
+										"RENDERING" : 1
+									},
+									"constantshadervalues" : 
+									{
+										"colorastart" : "1 1 1",
+										"colorend" : "0.43529411764705883 0.8862745098039215 1",
+										"colorwexponent" : 1,
+										"colorwintensity" : 1,
+										"noiseamount" : 0.33000001,
+										"noisescale" : 0.85,
+										"point1" : "0.85704 0.06238",
+										"point2" : "0.94690 0.66185",
+										"point3" : "0.07415 0.95000",
+										"point0" : "0.24560 0.09457",
+										"rayfeather" : "0.22 0.1",
+										"rayradius" : 0.15,
+										"rayscale" : "0.4 1.01",
+										"raysmoothness" : 0.54,
+										"rayspeed" : 0.38999999
+									}
+								}
+							],
+							"visible" : true
+						}
+					],
+					"name" : "Light shafts - corner",
+					"shape" : "quad"
+				}
+			],
+			"dependencies" :
+			[
+				{
+					"file" : "effects/lightshafts/effect.json"
+				}
+			]
+		},
+		{
+			"preview" : "previewlsradial/project.json",
+			"objects" :
+			[
+				{
+					"castshadow" : false,
+					"effects" : 
+					[
+						{
+							"file" : "effects/lightshafts/effect.json",
+							"name" : "",
+							"passes" : 
+							[
+								{
+									"combos" : 
+									{
+										"RAYMODE" : 1,
+										"RENDERING" : 1
+									},
+									"constantshadervalues" : 
+									{
+										"colorastart" : "1 1 1",
+										"colorend" : "0.43529411764705883 0.8862745098039215 1",
+										"colorwexponent" : 1.12,
+										"colorwintensity" : 1,
+										"noiseamount" : 0.33000001,
+										"noisescale" : 1.17,
+										"point0" : "0.75 0.25",
+										"point1" : "0.75 0.75",
+										"point2" : "0.25 0.75",
+										"point3" : "0.25 0.25",
+										"rayfeather" : "0.01 0.07",
+										"rayradius" : 0.14,
+										"rayscale" : "0.66 1.01",
+										"raysmoothness" : 0.6,
+										"rayspeed" : 0.38999999
+									}
+								}
+							],
+							"visible" : true
+						}
+					],
+					"name" : "Light shafts - radial",
+					"shape" : "quad"
+				}
+			],
+			"dependencies" :
+			[
+				{
+					"file" : "effects/lightshafts/effect.json"
+				}
+			]
+		},
+		{
+			"preview" : "previewlslinear/project.json",
+			"objects" :
+			[
+				{
+					"castshadow" : false,
+					"effects" : 
+					[
+						{
+							"file" : "effects/lightshafts/effect.json",
+							"name" : "",
+							"passes" : 
+							[
+								{
+									"combos" : 
+									{
+										"RAYMODE" : 0,
+										"RENDERING" : 1
+									},
+									"constantshadervalues" : 
+									{
+										"colorastart" : "1 1 1",
+										"colorend" : "0.43529411764705883 0.8862745098039215 1",
+										"colorwexponent" : 0.9,
+										"colorwintensity" : 1,
+										"noiseamount" : 0.33000001,
+										"noisescale" : 1.17,
+										"point0" : "0.4 0.25",
+										"point1" : "0.6 0.25",
+										"point2" : "0.8 0.8",
+										"point3" : "0.2 0.8",
+										"rayfeather" : "0.16 0.13",
+										"rayradius" : 0.14,
+										"rayscale" : "0.8 0.2",
+										"raysmoothness" : 0.5,
+										"rayspeed" : 0.38999999
+									}
+								}
+							],
+							"visible" : true
+						}
+					],
+					"name" : "Light shafts - linear",
+					"shape" : "quad"
+				}
+			],
+			"dependencies" :
+			[
+				{
+					"file" : "effects/lightshafts/effect.json"
+				}
+			]
+		},
+		{
+			"preview" : "previewdustmotes0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Dust motes",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dust_motes_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dust_motes_0.json",
+				"particles/presets/dust_motes_0.json"
+			]
+		},
+		{
+			"preview" : "previewlightshafts0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 0",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_0.json",
+				"particles/presets/light_shafts_0.json"
+			]
+		},
+		{
+			"preview" : "previewlightshafts1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_1.json",
+				"particles/presets/light_shafts_1.json"
+			]
+		},
+		{
+			"preview" : "previewlightshafts2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_2.json",
+				"particles/presets/light_shafts_2.json"
+			]
+		}
+	]
+}

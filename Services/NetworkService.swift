@@ -15,7 +15,7 @@ actor NetworkService {
         let cache = URLCache(
             memoryCapacity: 50_000_000,  // 50 MB 内存缓存
             diskCapacity: 200_000_000,   // 200 MB 磁盘缓存
-            diskPath: "WallHavenCache"
+            diskPath: "WaifuXCache"
         )
         self.cache = cache
 
@@ -166,11 +166,15 @@ actor NetworkService {
             }
 
             let expectedLength = response.expectedContentLength
-            let chunkSize = 32 * 1024
+            let chunkSize = 64 * 1024  // 增大缓冲区至 64KB 减少处理频率
             var receivedLength: Int64 = 0
             var data = Data()
             var buffer: [UInt8] = []
             buffer.reserveCapacity(chunkSize)
+            
+            // 节流控制：只有当进度变化超过阈值时才回调，避免 UI 频繁刷新
+            var lastReportedProgress: Double = 0
+            let progressThreshold = 0.01  // 1% 变化阈值
 
             progressHandler(expectedLength > 0 ? 0.0 : 0.08)
 
@@ -183,7 +187,12 @@ actor NetworkService {
                     buffer.removeAll(keepingCapacity: true)
 
                     if expectedLength > 0 {
-                        progressHandler(min(max(Double(receivedLength) / Double(expectedLength), 0.0), 1.0))
+                        let currentProgress = min(max(Double(receivedLength) / Double(expectedLength), 0.0), 1.0)
+                        // 只有进度变化超过阈值或接近完成时才回调
+                        if currentProgress - lastReportedProgress >= progressThreshold || currentProgress >= 0.99 {
+                            lastReportedProgress = currentProgress
+                            progressHandler(currentProgress)
+                        }
                     }
                 }
             }

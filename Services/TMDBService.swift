@@ -311,7 +311,7 @@ actor TMDBService {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(TMDBAPI.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("WallHaven/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("WaifuX/1.0", forHTTPHeaderField: "User-Agent")
         
         let (data, response) = try await session.data(for: request)
         
@@ -625,7 +625,7 @@ actor TMDBService {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(TMDBAPI.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("WallHaven/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("WaifuX/1.0", forHTTPHeaderField: "User-Agent")
         
         let (data, response) = try await session.data(for: request)
         

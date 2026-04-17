@@ -27,12 +27,12 @@ actor UserLibrary {
         // ⚠️ 不在 init 中做任何 I/O（FileManager/UserDefaults），避免 _CFXPreferences 递归栈溢出
         guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             self.libraryDirectory = fileManager.temporaryDirectory
-                .appendingPathComponent("WallHaven", isDirectory: true)
+                .appendingPathComponent("WaifuX", isDirectory: true)
                 .appendingPathComponent("Library", isDirectory: true)
             return
         }
         self.libraryDirectory = supportDir
-            .appendingPathComponent("WallHaven", isDirectory: true)
+            .appendingPathComponent("WaifuX", isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)
     }
     

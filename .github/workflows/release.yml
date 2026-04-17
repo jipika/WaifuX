@@ -94,7 +94,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
-          name: WaifuX ${{ steps.version.outputs.version }}
+          name: waifuX-pro ${{ steps.version.outputs.version }}
           body: |
             ## 更新内容
 

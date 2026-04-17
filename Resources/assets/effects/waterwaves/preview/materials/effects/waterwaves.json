@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "effects/waterwaves",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled"
+	}]
+}

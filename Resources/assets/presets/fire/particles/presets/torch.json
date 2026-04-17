@@ -1,0 +1,140 @@
+{
+	"animationmode" : null,
+	"children" : 
+	[
+		{
+			"id" : 13,
+			"name" : "particles/presets/torchembers.json"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 0",
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"id" : 7,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 10
+		}
+	],
+	"flags" : null,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 3,
+			"min" : 2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 350,
+			"min" : 250,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 6,
+			"name" : "turbulentvelocityrandom",
+			"phasemax" : 0.10000000149011612,
+			"scale" : 0.20000000000000001,
+			"speedmax" : 120,
+			"speedmin" : 0,
+			"timescale" : 0.20000000000000001
+		}
+	],
+	"material" : "materials/presets/torch.json",
+	"maxcount" : 50,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0,
+			"fadeouttime" : 0.80000000000000004,
+			"id" : 9,
+			"name" : "alphafade"
+		},
+		{
+			"endtime" : 0.80000000000000004,
+			"endvalue" : "1 0 0",
+			"id" : 10,
+			"name" : "colorchange",
+			"startvalue" : "1 0.7490196078431373 0"
+		},
+		{
+			"endtime" : 0.20000000000000001,
+			"endvalue" : 1,
+			"id" : 11,
+			"name" : "sizechange",
+			"starttime" : 0,
+			"startvalue" : 0
+		},
+		{
+			"endvalue" : 0.5,
+			"id" : 12,
+			"name" : "sizechange",
+			"starttime" : 0.20000000000000001
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 1
+}

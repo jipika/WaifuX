@@ -1,0 +1,134 @@
+{
+	"children" : 
+	[
+		{
+			"id" : 12,
+			"name" : "particles/presets/emberglow_small.json"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 32,
+			"id" : 6,
+			"name" : "sphererandom"
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 50,
+			"min" : 20,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "255 218 108",
+			"min" : "251 124 23",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"name" : "turbulentvelocityrandom",
+			"offset" : -0.5,
+			"scale" : 0.10000000000000001
+		}
+	],
+	"material" : "materials/presets/ember_small.json",
+	"maxcount" : 40,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 9,
+			"mask" : "1 0 0",
+			"name" : "turbulence",
+			"phasemax" : 5,
+			"scale" : 0.0019999999776482581,
+			"speedmax" : 150,
+			"speedmin" : 100
+		},
+		{
+			"frequencymax" : 20,
+			"frequencymin" : 5,
+			"id" : 10,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.20000000000000001
+		},
+		{
+			"id" : 11,
+			"name" : "sizechange",
+			"starttime" : 0.5
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 0.0070000000745058062,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 3
+}

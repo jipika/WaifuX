@@ -1,0 +1,7 @@
+{
+	"actions" : [{
+		"file" : "js/index.js",
+		"replace" : "renderer = new THREE.WebGLRenderer({alpha: true, antialias: true });",
+		"insert" : "renderer = new THREE.WebGLRenderer({alpha: false, antialias: true }); renderer.setClearColor( 0xe0dacd, 1);"
+	}]
+}

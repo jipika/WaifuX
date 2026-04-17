@@ -1,0 +1,27 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "translucent",
+			"combos" : 
+			{
+				"CUTOUT" : 0,
+				"REFRACT" : 1
+			},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_cutout_end" : 0.23,
+				"ui_editor_properties_cutout_opacity" : 0.26,
+				"ui_editor_properties_cutout_start" : 0,
+				"ui_editor_properties_overbright" : 1,
+				"ui_editor_properties_refract_amount" : 0.05
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/beam/hose_2", "particle/beam/hose_2_normal" ]
+		}
+	]
+}

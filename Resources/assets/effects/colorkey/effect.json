@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "colorkey",
+	"name" : "ui_editor_effect_color_key_title",
+	"description" : "ui_editor_effect_color_key_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/colorkey.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/colorkey.json",
+		"shaders/effects/colorkey.frag",
+		"shaders/effects/colorkey.vert"
+	]
+}

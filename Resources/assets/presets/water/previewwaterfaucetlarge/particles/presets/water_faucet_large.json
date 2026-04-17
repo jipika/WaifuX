@@ -1,0 +1,97 @@
+{
+	"children" : [],
+	"controlpoint" : 
+	[
+		{
+			"id" : 0,
+			"parentcontrolpoint" : 1
+		},
+		{
+			"flags" : 2,
+			"id" : 1,
+			"parentcontrolpoint" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"flags" : 2,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 20
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 120,
+			"min" : 60,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "20 -1500 0",
+			"min" : "-20 -1500 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 9,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 11,
+			"max" : 1,
+			"min" : 1,
+			"name" : "alpharandom"
+		},
+		{
+			"id" : 15,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/water_faucet.json",
+	"maxcount" : 50,
+	"operator" : 
+	[
+		{
+			"drag" : 3,
+			"gravity" : "0 -4500 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"endvalue" : 0.5,
+			"id" : 10,
+			"name" : "sizechange",
+			"startvalue" : 1
+		},
+		{
+			"fadeintime" : 0.05,
+			"id" : 13,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 12,
+			"name" : "rope",
+			"uvscale" : 0.5,
+			"uvscrolling" : true,
+			"uvsmoothing" : false
+		}
+	],
+	"starttime" : 0
+}

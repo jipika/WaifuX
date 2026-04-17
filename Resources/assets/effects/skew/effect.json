@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "skew",
+	"name" : "ui_editor_effect_skew_title",
+	"description" : "ui_editor_effect_skew_description",
+	"group" : "distort",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/skew.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/skew.json",
+		"shaders/effects/skew.frag",
+		"shaders/effects/skew.vert"
+	]
+}

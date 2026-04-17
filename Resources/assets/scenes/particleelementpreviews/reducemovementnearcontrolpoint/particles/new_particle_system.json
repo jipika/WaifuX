@@ -1,0 +1,84 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"id" : 0
+		},
+		{
+			"id" : 1,
+			"offset" : "50 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : 512,
+			"distancemin" : 5,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 20
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 5,
+			"min" : 3,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 200,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 10,
+			"max" : "0 -500 0",
+			"min" : "0 -500 0",
+			"name" : "velocityrandom"
+		}
+	],
+	"material" : "materials/particle/halo_1.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 -500 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 0.89999998,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"controlpoint" : 1,
+			"distanceinner" : 50,
+			"distanceouter" : 150,
+			"id" : 9,
+			"name" : "reducemovementnearcontrolpoint",
+			"reductioninner" : 10,
+			"reductionouter" : 0
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0
+}

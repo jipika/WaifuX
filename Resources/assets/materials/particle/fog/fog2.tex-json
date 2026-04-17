@@ -1,0 +1,15 @@
+{
+	"clampuvs" : false,
+	"format" : "rg88",
+	"nomip" : false,
+	"nonpoweroftwo" : true,
+	"spritesheetsequences" : 
+	[
+		{
+			"duration" : 1,
+			"frames" : 64,
+			"height" : 128,
+			"width" : 128
+		}
+	]
+}

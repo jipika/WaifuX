@@ -1,0 +1,33 @@
+{
+	"version" : 2,
+	"replacementkey" : "spin",
+	"name" : "ui_editor_effect_spin_title",
+	"description" : "ui_editor_effect_spin_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/spin.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/spin.json",
+		"shaders/effects/spin.frag",
+		"shaders/effects/spin.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectSpinUV",
+			"vars" :
+			{
+				"center" : "center",
+				"ratio" : "ratio",
+				"angle" : "angle",
+				"size" : "size"
+			}
+		}
+	]
+}

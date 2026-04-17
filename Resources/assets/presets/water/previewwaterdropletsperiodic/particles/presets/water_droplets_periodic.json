@@ -1,0 +1,94 @@
+{
+	"animationmode" : "randomframe",
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"id" : 0,
+			"parentcontrolpoint" : 1
+		},
+		{
+			"id" : 1,
+			"parentcontrolpoint" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0.5 0",
+			"distancemax" : 4,
+			"distancemin" : 0,
+			"flags" : 4,
+			"id" : 6,
+			"maxperiodicdelay" : 1,
+			"maxperiodicduration" : 1,
+			"minperiodicdelay" : 0.5,
+			"minperiodicduration" : 0.5,
+			"name" : "sphererandom",
+			"rate" : 11
+		}
+	],
+	"flags" : 3,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.5,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "183 199 255",
+			"min" : "200 248 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 10,
+			"name" : "rotationrandom"
+		},
+		{
+			"id" : 11,
+			"max" : "5 -100 0",
+			"min" : "-5 -50 0",
+			"name" : "velocityrandom"
+		}
+	],
+	"material" : "materials/presets/water_droplets_periodic.json",
+	"maxcount" : 32,
+	"operator" : 
+	[
+		{
+			"drag" : 1,
+			"gravity" : "0 -1500 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 12,
+			"name" : "sizechange"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 13,
+			"length" : 0.01,
+			"maxlength" : 3,
+			"minlength" : null,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

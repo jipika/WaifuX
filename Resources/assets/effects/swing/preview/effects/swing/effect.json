@@ -1,0 +1,33 @@
+{
+	"version" : 1,
+	"replacementkey" : "swing",
+	"name" : "ui_editor_effect_swing_title",
+	"description" : "ui_editor_effect_swing_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/swing.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/swing.json",
+		"shaders/effects/swing.frag",
+		"shaders/effects/swing.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectSwingUV",
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"center" : "center",
+				"size" : "size"
+			}
+		}
+	]
+}

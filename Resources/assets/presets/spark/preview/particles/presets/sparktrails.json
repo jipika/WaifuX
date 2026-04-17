@@ -1,0 +1,111 @@
+{
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "0.1 1 0",
+			"distancemax" : 32,
+			"distancemin" : 16,
+			"id" : 5,
+			"instantaneous" : 100,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 0,
+			"sign" : "0 1 0",
+			"speedmax" : 1024,
+			"speedmin" : 0
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"exponent" : 2,
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.10000000000000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 20,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "254 255 181",
+			"min" : "255 249 170",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/sparktrails.json",
+	"maxcount" : 100,
+	"operator" : 
+	[
+		{
+			"drag" : 0.20000000000000001,
+			"gravity" : "0 -3500 0",
+			"id" : 6,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.10000000000000001,
+			"fadeouttime" : 0.10000000000000001,
+			"id" : 7,
+			"name" : "alphafade"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 0.010000000745058061,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

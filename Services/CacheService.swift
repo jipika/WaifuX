@@ -10,11 +10,11 @@ actor CacheService {
     private init() {
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             // 使用临时目录作为回退
-            cacheDirectory = fileManager.temporaryDirectory.appendingPathComponent("WallHaven/Cache", isDirectory: true)
+            cacheDirectory = fileManager.temporaryDirectory.appendingPathComponent("WaifuX/Cache", isDirectory: true)
             try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
             return
         }
-        cacheDirectory = appSupport.appendingPathComponent("WallHaven/Cache", isDirectory: true)
+        cacheDirectory = appSupport.appendingPathComponent("WaifuX/Cache", isDirectory: true)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
 

@@ -1,0 +1,117 @@
+{
+	"animationmode" : null,
+	"children" : [],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 0",
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"id" : 6,
+			"instantaneous" : 1,
+			"name" : "sphererandom",
+			"origin" : "0 250 0",
+			"rate" : 0,
+			"speedmax" : 0
+		}
+	],
+	"flags" : 2,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.10000000000000001,
+			"min" : 0.10000000000000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"exponent" : 5,
+			"id" : 3,
+			"max" : 3000,
+			"min" : 300,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "187 217 255",
+			"min" : "196 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"name" : "rotationrandom"
+		}
+	],
+	"material" : "materials/presets/lightning2glow.json",
+	"maxcount" : 8,
+	"operator" : 
+	[
+		{
+			"fadeintime" : 0,
+			"fadeouttime" : 0.10000000000000001,
+			"id" : 7,
+			"name" : "alphafade"
+		},
+		{
+			"drag" : 5,
+			"id" : 8,
+			"name" : "movement"
+		},
+		{
+			"id" : 9,
+			"name" : "sizechange"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

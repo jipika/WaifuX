@@ -1,0 +1,158 @@
+{
+	"name" : "ui_editor_preset_magic_title",
+	"description" : "ui_editor_preset_magic_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Charge",
+				"value" : 0
+			},
+			{
+				"label" : "Sparkle",
+				"value" : 1
+			},
+			{
+				"label" : "Gravitation",
+				"value" : 2
+			},
+			{
+				"label" : "Vortex",
+				"value" : 3
+			},
+			{
+				"label" : "Glyphs 0",
+				"value" : 4
+			},
+			{
+				"label" : "Glyphs 1",
+				"value" : 5
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewcharge/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic charge",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_charge.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_charge.json",
+				"materials/presets/magic_charge_rays.json",
+				"particles/presets/magic_charge.json",
+				"particles/presets/magic_charge_rays.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic sparkle",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_sparkle.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_sparkle.json",
+				"particles/presets/magic_sparkle.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic gravitation",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_gravity.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_gravity.json",
+				"particles/presets/magic_gravity.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic vortex",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_vortex.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_vortex.json",
+				"materials/presets/magic_vortex_glow.json",
+				"particles/presets/magic_vortex.json",
+				"particles/presets/magic_vortex_glow.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Glyphs 0",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_glyphs_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_glyph_0.json",
+				"materials/presets/magic_glyph_0_swirl.json",
+				"particles/presets/magic_glyphs_0.json",
+				"particles/presets/magic_glyphs_0_swirl.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Glyphs 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_glyphs_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_glyph_1.json",
+				"materials/presets/magic_glyph_1_swirl.json",
+				"materials/presets/magic_glyph_1_grow.json",
+				"particles/presets/magic_glyphs_1.json",
+				"particles/presets/magic_glyphs_1_swirl.json",
+				"particles/presets/magic_glyphs_1_grow.json"
+			]
+		}
+	]
+}

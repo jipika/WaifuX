@@ -1,0 +1,79 @@
+{
+	"children" : null,
+	"emitter" : 
+	[
+		{
+			"directions" : "0.2 1 0",
+			"distancemax" : 1,
+			"distancemin" : 0.1,
+			"id" : 14,
+			"instantaneous" : 8,
+			"name" : "sphererandom",
+			"rate" : 0,
+			"sign" : "0 1 0",
+			"speedmax" : 120,
+			"speedmin" : 40
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.5,
+			"min" : 0.30000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 10,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "219 244 255",
+			"min" : "189 194 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 11,
+			"max" : 0.69999999,
+			"min" : 0.30000001,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/rain_splashes_droplets.json",
+	"maxcount" : 8,
+	"operator" : 
+	[
+		{
+			"flags" : 1,
+			"gravity" : "0 -200 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0,
+			"fadeouttime" : 0.80000001,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"endvalue" : 1,
+			"id" : 12,
+			"name" : "sizechange",
+			"startvalue" : 0.5
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 13,
+			"length" : 0.02,
+			"maxlength" : 2,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

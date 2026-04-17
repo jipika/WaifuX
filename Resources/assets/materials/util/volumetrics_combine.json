@@ -1,0 +1,10 @@
+{
+	"passes": [{
+		"shader": "passthrough",
+		"depthwrite": "disabled",
+		"depthtest": "disabled",
+		"blending": "additive",
+		"cullmode" : "nocull",
+		"textures": ["_rt_volumetricsLightBuffer"]
+	}]
+}

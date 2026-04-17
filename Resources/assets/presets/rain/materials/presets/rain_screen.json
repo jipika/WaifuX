@@ -1,0 +1,27 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "translucent",
+			"combos" : 
+			{
+				"CUTOUT" : 0,
+				"REFRACT" : 1
+			},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_refract_amount" : -0.1
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : 
+			[
+				"particle/water/rain_drops_sheet",
+				"particle/water/rain_drops_sheet_normal"
+			]
+		}
+	]
+}

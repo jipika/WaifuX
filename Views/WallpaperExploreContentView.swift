@@ -947,40 +947,6 @@ private struct FilterChipData: Identifiable {
 
 // MARK: - Filter Chips
 
-private struct FilterChip: View {
-    let title: String
-    let subtitle: String
-    let isSelected: Bool
-    let tint: Color
-    let action: () -> Void
-    @State private var isHovered = false
-    
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white.opacity(0.94))
-                Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.55))
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(tint.opacity(isSelected ? 0.15 : 0.08))
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(tint.opacity(isSelected ? 0.4 : 0.2), lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(AppFluidMotion.hoverEase, value: isHovered)
-        .onHover { isHovered = $0 }
-    }
-}
-
 private struct ColorChip: View {
     let preset: WallhavenAPI.ColorPreset
     let isSelected: Bool

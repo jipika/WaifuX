@@ -1,0 +1,6 @@
+{
+	"material" : "materials/util/composelayer.json",
+	"passthrough" : true,
+	"autosize" : true,
+	"projectlayer" : true
+}

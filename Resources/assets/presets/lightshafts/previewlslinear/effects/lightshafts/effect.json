@@ -1,0 +1,33 @@
+{
+	"version" : 1,
+	"replacementkey" : "lightshafts",
+	"name" : "ui_editor_effect_light_shafts_title",
+	"description" : "ui_editor_effect_light_shafts_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/lightshafts.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/lightshafts.json",
+		"shaders/effects/lightshafts.frag",
+		"shaders/effects/lightshafts.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectPerspectiveUV",
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"p2" : "point2",
+				"p3" : "point3"
+			}
+		}
+	]
+}

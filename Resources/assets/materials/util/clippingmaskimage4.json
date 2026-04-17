@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "clippingmaskimage4",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "translucent"
+	}]
+}

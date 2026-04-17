@@ -49,6 +49,8 @@ class DownloadTaskService: ObservableObject {
 
     private let userDefaultsKey = "download_tasks"
     private var saveTask: Task<Void, Never>?
+    private var lastProgressUpdateTimes: [String: Date] = [:]
+    private let progressUpdateMinInterval: TimeInterval = 0.08
 
     // MARK: - Active Download Tasks Management
     /// 使用 actor 隔离存储确保线程安全
@@ -72,6 +74,10 @@ class DownloadTaskService: ObservableObject {
 
     func addTask(mediaItem: MediaItem) -> DownloadTask {
         upsertTask(DownloadTask(mediaItem: mediaItem))
+    }
+
+    func addTask(workshopWallpaper: MediaItem) -> DownloadTask {
+        upsertTask(DownloadTask(workshopWallpaper: workshopWallpaper))
     }
 
     func updateWallpaper(_ wallpaper: Wallpaper, id: String? = nil) {
@@ -145,6 +151,7 @@ class DownloadTaskService: ObservableObject {
         tasks[index].status = .cancelled
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
+        lastProgressUpdateTimes.removeValue(forKey: id)
         persistTasks()
 
         print("[DownloadTaskService] Task \(id) cancelled")
@@ -203,6 +210,7 @@ class DownloadTaskService: ObservableObject {
     func removeTask(id: String) {
         objectWillChange.send()
         tasks.removeAll { $0.id == id }
+        lastProgressUpdateTimes.removeValue(forKey: id)
         persistTasks()
     }
 
@@ -216,12 +224,31 @@ class DownloadTaskService: ObservableObject {
 
     func updateProgress(id: String, progress: Double) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let clampedProgress = min(max(progress, 0.0), 1.0)
+        
+        // 防抖优化：如果进度变化小于 0.5% 且不是开始/结束，跳过更新
+        let currentProgress = tasks[index].progress
+        let isStart = currentProgress == 0 && clampedProgress > 0
+        let isComplete = clampedProgress >= 1.0
+        if abs(clampedProgress - currentProgress) < 0.005 && !isStart && !isComplete {
+            return
+        }
+
+        // 节流优化：限制高频进度发布，减少主线程重绘压力（约 12.5fps）
+        let now = Date()
+        if !isStart && !isComplete,
+           let lastTime = lastProgressUpdateTimes[id],
+           now.timeIntervalSince(lastTime) < progressUpdateMinInterval {
+            return
+        }
+        
         objectWillChange.send()
-        tasks[index].progress = min(max(progress, 0.0), 1.0)
+        tasks[index].progress = clampedProgress
         if tasks[index].status != .paused {
             tasks[index].status = .downloading
         }
         tasks[index].lastUpdatedAt = .now
+        lastProgressUpdateTimes[id] = now
         schedulePersistTasks()
     }
 
@@ -232,8 +259,17 @@ class DownloadTaskService: ObservableObject {
         tasks[index].progress = 1.0
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
+        lastProgressUpdateTimes.removeValue(forKey: id)
         persistTasks()
         scheduleVisibilityRefresh()
+    }
+
+    func markDownloading(id: String) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        objectWillChange.send()
+        tasks[index].status = .downloading
+        tasks[index].lastUpdatedAt = .now
+        persistTasks()
     }
 
     func markFailed(id: String) {
@@ -242,6 +278,7 @@ class DownloadTaskService: ObservableObject {
         tasks[index].status = .failed
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
+        lastProgressUpdateTimes.removeValue(forKey: id)
         persistTasks()
     }
 
@@ -273,10 +310,10 @@ class DownloadTaskService: ObservableObject {
     private func loadTasks() {
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let loadedTasks = try? JSONDecoder().decode([DownloadTask].self, from: data) {
-            // 重置正在下载的任务为暂停状态（因为重启后下载应该暂停）
+            // 重置中间态任务为暂停状态（因为重启后下载不会自动继续）
             tasks = loadedTasks.map { task in
                 var modifiedTask = task
-                if task.status == .downloading {
+                if task.status == .downloading || task.status == .pending {
                     modifiedTask.status = .paused
                     modifiedTask.lastUpdatedAt = .now
                 }

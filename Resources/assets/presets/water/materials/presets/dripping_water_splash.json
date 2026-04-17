@@ -1,0 +1,26 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "additive",
+			"combos" : 
+			{
+				"CUTOUT" : 0,
+				"REFRACT" : 0
+			},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_cutout_end" : 0.23,
+				"ui_editor_properties_cutout_opacity" : 0.26,
+				"ui_editor_properties_cutout_start" : 0,
+				"ui_editor_properties_refract_amount" : 0.23
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/beam/hose_4", null ]
+		}
+	]
+}

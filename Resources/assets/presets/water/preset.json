@@ -1,0 +1,169 @@
+{
+	"name" : "ui_editor_preset_water_title",
+	"description" : "ui_editor_preset_water_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_water_dripping",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_water_dripping_single",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_water_droplets",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_water_faucet",
+				"value" : 3
+			},
+			{
+				"label" : "ui_editor_preset_water_faucet_large",
+				"value" : 4
+			},
+			{
+				"label" : "ui_editor_preset_water_impact",
+				"value" : 5
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewdrippingwater/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Dripping water",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dripping_water.json",
+					"scale" : "1.000 1.000 1.000",
+					"instanceoverride" : 
+					{
+						"controlpoint1" : "22 0 0.00000",
+						"controlpoint2" : "-22 0 0.00000",
+						"controlpointangle1" : "0.00000 0.00000 -0.52360",
+						"controlpointangle2" : "0.00000 0.00000 0.52360",
+					}
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dripping_water.json",
+				"particles/presets/dripping_water.json",
+				"materials/presets/dripping_water_refract.json",
+				"particles/presets/dripping_water_refract.json",
+				"materials/presets/dripping_water_splash.json",
+				"particles/presets/dripping_water_splash.json",
+				"materials/presets/dripping_water_droplets.json",
+				"particles/presets/dripping_water_droplets.json"
+			]
+		},
+		{
+			"preview" : "previewdrippingwatersingle/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Dripping water single",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dripping_water_single.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dripping_water_single.json",
+				"particles/presets/dripping_water_single.json",
+				"materials/presets/dripping_water_droplets_single.json",
+				"particles/presets/dripping_water_droplets_single.json"
+			]
+		},
+		{
+			"preview" : "previewwaterdropletsperiodic/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Droplets",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/water_droplets_periodic.json",
+					"scale" : "1.000 1.000 1.000",
+					"instanceoverride" : 
+					{
+						"alpha" : 0.2
+					}
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/water_droplets_periodic.json",
+				"particles/presets/water_droplets_periodic.json"
+			]
+		},
+		{
+			"preview" : "previewwaterfaucet/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Faucet",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/water_faucet.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/water_faucet.json",
+				"particles/presets/water_faucet.json"
+			]
+		},
+		{
+			"preview" : "previewwaterfaucetlarge/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Faucet large",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/water_faucet_large.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/water_faucet.json",
+				"particles/presets/water_faucet_large.json"
+			]
+		},
+		{
+			"preview" : "previewwaterimpact/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Water impact",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/water_impact.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/water_impact.json",
+				"particles/presets/water_impact.json",
+				"materials/presets/water_impact_droplets.json",
+				"particles/presets/water_impact_droplets.json"
+			]
+		}
+	]
+}

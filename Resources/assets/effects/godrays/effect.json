@@ -1,0 +1,99 @@
+{
+	"version" : 1,
+	"replacementkey" : "godrays",
+	"name" : "ui_editor_effect_godrays_title",
+	"description" : "ui_editor_effect_godrays_description",
+	"group" : "enhance",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/godrays_downsample2.json",
+			"target" : "_rt_HalfCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/godrays_cast.json",
+			"target" : "_rt_HalfCompoBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_HalfCompoBuffer1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/godrays_gaussian_x.json",
+			"target" : "_rt_HalfCompoBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_HalfCompoBuffer2",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/godrays_gaussian_y.json",
+			"target" : "_rt_HalfCompoBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_HalfCompoBuffer1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/godrays_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_HalfCompoBuffer2",
+					"index" : 0
+				},
+				{
+					"name" : "previous",
+					"index" : 1
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_HalfCompoBuffer1",
+			"scale" : 2,
+			"format" : "rgba_backbuffer"
+		},
+		{
+			"name" : "_rt_HalfCompoBuffer2",
+			"scale" : 2,
+			"format" : "rgba_backbuffer"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/godrays_downsample2.json",
+		"materials/effects/godrays_cast.json",
+		"materials/effects/godrays_gaussian_x.json",
+		"materials/effects/godrays_gaussian_y.json",
+		"materials/effects/godrays_combine.json",
+		"shaders/effects/godrays_downsample2.frag",
+		"shaders/effects/godrays_downsample2.vert",
+		"shaders/effects/godrays_cast.frag",
+		"shaders/effects/godrays_cast.vert",
+		"shaders/effects/godrays_gaussian.frag",
+		"shaders/effects/godrays_gaussian.vert",
+		"shaders/effects/godrays_combine.frag",
+		"shaders/effects/godrays_combine.vert"
+	]
+}

@@ -1,0 +1,200 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"depth" : 1,
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "0.608 0.608 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"effects" : 
+			[
+				{
+					"file" : "effects/scroll/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Speed X" : -0.34999999403953552,
+								"Speed Y" : -0.61000001430511475
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/transform/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Angle" : 0.75,
+								"Scale" : "0.5 0.5"
+							}
+						}
+					]
+				}
+			],
+			"id" : 68,
+			"image" : "models/clouds.json",
+			"name" : "clouds",
+			"origin" : "-180.120 -130.583 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"dependencies" : [ 68 ],
+			"effects" : 
+			[
+				{
+					"file" : "effects/scroll/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Speed X" : 0.50999999046325684,
+								"Speed Y" : 0.61000001430511475
+							}
+						}
+					]
+				},
+				{
+					"file" : "effects/blend/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 9
+							},
+							"textures" : [ null, "_rt_imageLayerComposite_68_a" ]
+						}
+					]
+				}
+			],
+			"id" : 49,
+			"image" : "models/clouds.json",
+			"name" : "clouds",
+			"origin" : "-182.542 134.042 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"config" : 
+			{
+				"passthrough" : true
+			},
+			"copybackground" : true,
+			"dependencies" : [ 49, 203 ],
+			"effects" : 
+			[
+				{
+					"file" : "effects/godrays/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Ray threshold" : 0.73000001907348633
+							},
+							"textures" : [ null, "_rt_imageLayerComposite_49_a" ]
+						},
+						{
+							"constantshadervalues" : 
+							{
+								"Color end" : "1 1 1",
+								"Color start" : "0 0.294118 1",
+								"Ray intensity" : 2,
+								"Ray length" : 0.82999998331069946
+							}
+						},
+						{
+							"combos" : 
+							{
+								"KERNEL" : 2
+							},
+							"constantshadervalues" : 
+							{
+								"Blur scale" : "1 1"
+							}
+						},
+						{
+							"combos" : 
+							{
+								"KERNEL" : 2,
+								"VERTICAL" : 1
+							},
+							"constantshadervalues" : 
+							{
+								"Blur scale" : "1 1"
+							}
+						},
+						{
+							"textures" : [ null, "_rt_imageLayerComposite_203_a" ]
+						}
+					]
+				}
+			],
+			"id" : 203,
+			"image" : "models/util/composelayer.json",
+			"name" : "Compose",
+			"origin" : "127.190 131.439 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "0.581 0.581 1.000",
+			"size" : "512.000 512.000",
+			"visible" : true
+		}
+	]
+}

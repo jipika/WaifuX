@@ -1,0 +1,18 @@
+{
+	"name" : "Water Waves",
+	"description" : "Adds a simple wave effect using sines.",
+	"group" : "image",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/waterwaves.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/waterwaves.json",
+		"shaders/effects/waterwaves.frag",
+		"shaders/effects/waterwaves.vert"
+	]
+}

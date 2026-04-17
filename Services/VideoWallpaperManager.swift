@@ -108,6 +108,16 @@ final class VideoWallpaperManager: ObservableObject {
         pendingRebuildWorkItem = nil
     }
 
+    func applyVideoWallpaper(from localFileURL: URL, posterURL: URL? = nil, muted: Bool = true, targetScreens: [NSScreen]?) throws {
+        if let screens = targetScreens, !screens.isEmpty {
+            for screen in screens {
+                try applyVideoWallpaper(from: localFileURL, posterURL: posterURL, muted: muted, targetScreen: screen)
+            }
+        } else {
+            try applyVideoWallpaper(from: localFileURL, posterURL: posterURL, muted: muted, targetScreen: nil)
+        }
+    }
+
     func applyVideoWallpaper(from localFileURL: URL, posterURL: URL? = nil, muted: Bool = true, targetScreen: NSScreen? = nil) throws {
         guard localFileURL.isFileURL else {
             throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: "动态壁纸必须使用本地视频文件。"])
@@ -115,6 +125,11 @@ final class VideoWallpaperManager: ObservableObject {
 
         guard FileManager.default.fileExists(atPath: localFileURL.path) else {
             throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: "视频文件不存在。"])
+        }
+
+        // 如果当前由外部 Wallpaper Engine X 接管，先停止外部引擎，避免两层壁纸重叠
+        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
+            WallpaperEngineXBridge.shared.stopWallpaper()
         }
 
         let expectedScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
@@ -251,12 +266,17 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     func stopWallpaper() {
+        // 如果当前由外部 Wallpaper Engine X 接管，同时停止外部引擎
+        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
+            WallpaperEngineXBridge.shared.stopWallpaper()
+        }
+
         teardownAllWindows()
         currentVideoURL = nil
         currentPosterURL = nil
         isPaused = false
         // 不删除保存的状态，以便下次可以恢复
-        
+
         // 恢复用户原始桌面壁纸
         restoreOriginalWallpaper()
     }

@@ -32,9 +32,9 @@ final class DownloadPermissionManager {
     // MARK: - 默认路径
     
     private static var defaultDownloadURL: URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?
-            .appendingPathComponent("WallHaven", isDirectory: true) ?? URL(fileURLWithPath: NSHomeDirectory() + "/Downloads/WallHaven")
+            .appendingPathComponent("WaifuX", isDirectory: true) ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/WaifuX")
     }
     
     // MARK: - 延迟恢复（启动后调用）
@@ -65,107 +65,6 @@ final class DownloadPermissionManager {
         print("[DownloadPermissionManager] Reset to default path: \(self.currentFolderURL?.path ?? "unknown")")
     }
     
-    // MARK: - 权限检查（启动时调用）
-    
-    /// 检查并请求下载目录权限（应用启动时调用）
-    /// - Returns: 是否已有权限或成功获取权限
-    @discardableResult
-    func checkAndRequestPermissionOnLaunch() async -> Bool {
-        // 首先尝试静默检查是否已有权限
-        if await checkSilentPermission() {
-            print("[DownloadPermissionManager] ✅ Already has download folder access")
-            return true
-        }
-        
-        // 检查是否已经请求过权限（避免重复打扰用户）
-        let alreadyRequested = UserDefaults.standard.bool(forKey: permissionRequestedKey)
-        
-        if !alreadyRequested {
-            // 首次启动，记录已请求
-            UserDefaults.standard.set(true, forKey: permissionRequestedKey)
-        }
-        
-        // 显示权限提示对话框
-        return await showPermissionAlertAndRequest()
-    }
-    
-    /// 静默检查是否有下载目录权限（不触发系统弹窗）
-    private func checkSilentPermission() async -> Bool {
-        guard let url = currentFolderURL else { return false }
-        
-        // 尝试静默访问 - 使用 access 系统调用检查权限
-        let path = url.path
-        let result = await Task.detached {
-            // 尝试创建测试文件来验证写入权限
-            let testFile = path + ".write_test_" + UUID().uuidString
-            let created = FileManager.default.createFile(atPath: testFile, contents: Data(), attributes: nil)
-            if created {
-                try? FileManager.default.removeItem(atPath: testFile)
-            }
-            return created
-        }.value
-        
-        return result
-    }
-    
-    /// 显示权限提示并请求
-    private func showPermissionAlertAndRequest() async -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "需要下载文件夹权限"
-        alert.informativeText = "WallHaven 需要访问您的下载文件夹来保存壁纸和媒体文件。请在接下来的对话框中选择允许访问。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "继续")
-        alert.addButton(withTitle: "稍后设置")
-        
-        let response = await MainActor.run {
-            alert.runModal()
-        }
-        
-        guard response == .alertFirstButtonReturn else {
-            print("[DownloadPermissionManager] User postponed permission request")
-            return false
-        }
-        
-        // 打开文件选择器让用户授权
-        return await requestDownloadPermissionWithOpenPanel()
-    }
-    
-    /// 使用 OpenPanel 请求权限（这会触发系统 TCC 提示）
-    @discardableResult
-    private func requestDownloadPermissionWithOpenPanel() async -> Bool {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.message = "请选择下载文件夹以授权 WallHaven 访问"
-        panel.prompt = "允许访问"
-        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        
-        let response = await panel.begin()
-        
-        guard response == .OK, let selectedURL = panel.url else {
-            print("[DownloadPermissionManager] User cancelled permission request")
-            return false
-        }
-        
-        // 验证选中的路径确实是 Downloads 或其子目录
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        let isInDownloads = selectedURL.path.hasPrefix(downloadsURL?.path ?? "")
-        
-        if isInDownloads {
-            savePath(for: selectedURL)
-            print("[DownloadPermissionManager] ✅ Permission granted for: \(selectedURL.path)")
-            onPermissionStatusChanged?(true)
-            return true
-        } else {
-            // 用户选择了其他位置，仍然允许但记录为自定义路径
-            savePath(for: selectedURL)
-            print("[DownloadPermissionManager] ✅ Custom path selected: \(selectedURL.path)")
-            onPermissionStatusChanged?(true)
-            return true
-        }
-    }
-    
     // MARK: - Public Methods
     
     /// 检查是否有有效的下载权限（无沙箱版本：直接检查路径是否可写）
@@ -174,22 +73,22 @@ final class DownloadPermissionManager {
         return FileManager.default.isWritableFile(atPath: url.path)
     }
     
-    /// 请求下载文件夹权限
-    /// - Returns: 授权的文件夹URL，如果用户取消则返回nil
+    /// 请求下载文件夹（用于用户手动更改存储位置）
+    /// - Returns: 选择的文件夹URL，取消则返回nil
     @discardableResult
     func requestDownloadPermission() async -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "请选择壁纸保存位置"
+        panel.message = "请选择壁纸和媒体的保存位置"
         panel.prompt = "选择文件夹"
         
         // 预选之前的目录
         if let currentPath = currentFolderURL?.path {
             panel.directoryURL = URL(fileURLWithPath: currentPath)
         } else {
-            panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            panel.directoryURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         }
         
         let response = await panel.begin()
@@ -215,27 +114,21 @@ final class DownloadPermissionManager {
         return url
     }
     
-    /// 确保有下载权限（无沙箱版本：直接创建目录并返回）
-    /// - Returns: 是否有有效权限（无沙箱下始终返回 true）
+    /// 确保存储目录存在
+    /// - Returns: 目录是否可用
     func ensurePermission() async -> Bool {
-        // 无沙箱模式：不需要权限弹窗，确保目录存在即可
         if let url = currentFolderURL {
             ensureDirectoryExists(at: url)
         }
         return true
     }
     
-    /// 开始访问安全作用域资源（无沙箱版本：空操作，始终成功）
+    /// 开始访问安全作用域资源（空操作，保留兼容性）
     @discardableResult
-    func startAccessingSecurityScope() -> Bool {
-        // 无沙箱不需要安全作用域，直接返回 true
-        return true
-    }
+    func startAccessingSecurityScope() -> Bool { true }
     
-    /// 停止访问安全作用域资源（无沙箱版本：空操作）
-    func stopAccessingSecurityScope() {
-        // 无沙箱不需要安全作用域管理
-    }
+    /// 停止访问安全作用域资源（空操作，保留兼容性）
+    func stopAccessingSecurityScope() {}
     
     /// 清除保存的路径
     func clearPermission() {

@@ -1,0 +1,18 @@
+{
+	"name" : "Pulse",
+	"description" : "",
+	"group" : "animate",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/pulse.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/pulse.json",
+		"shaders/effects/pulse.frag",
+		"shaders/effects/pulse.vert"
+	]
+}

@@ -19,31 +19,45 @@ public struct MediaVideoCard: View {
     var progress: Double? = nil
     var progressTint: Color? = nil
     var progressLabel: String? = nil
+    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
     let action: () -> Void
 
     @State private var isHovered = false
+    @State private var isCardVisible = false
+
+    private var thumbnailHeight: CGFloat {
+        LibraryCardMetrics.thumbnailHeight
+    }
 
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 // 图片区域 - 单独裁剪
                 ZStack {
-                    KFImage(item.thumbnailURL)
-                        .fade(duration: 0.3)
-                        .placeholder { _ in
-                            SkeletonCard(
-                                width: LibraryCardMetrics.cardWidth,
-                                height: LibraryCardMetrics.thumbnailHeight,
-                                cornerRadius: 0
-                            )
-                        }
-                        .resizable()
-                        .scaledToFill()
-                        .frame(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight
-                        )
-                        .clipped()
+                    KFMediaCoverImage(
+                        url: item.coverImageURL,
+                        animated: item.shouldRenderThumbnailAsAnimatedImage,
+                        downsampleSize: CGSize(
+                            width: cardWidth * 2,
+                            height: thumbnailHeight * 2
+                        ),
+                        fadeDuration: 0.3,
+                        loadFinished: nil,
+                        layoutSize: CGSize(
+                            width: cardWidth,
+                            height: thumbnailHeight
+                        ),
+                        playAnimatedImage: true,
+                        isVisible: isCardVisible
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(
+                        width: cardWidth,
+                        height: thumbnailHeight
+                    )
+                    .clipped()
+                    .onAppear { isCardVisible = true }
+                    .onDisappear { isCardVisible = false }
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {
@@ -67,16 +81,23 @@ public struct MediaVideoCard: View {
 
                     // 右上角标签（非编辑模式下显示）
                     if !isEditing && !badgeText.isEmpty {
-                        Text(badgeText)
-                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.82))
-                            .padding(.horizontal, 10)
-                            .frame(height: 22)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Color.black.opacity(0.3))
-                            )
-                            .padding(12)
+                        VStack {
+                            HStack {
+                                Spacer()
+                                Text(badgeText)
+                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 22)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(Color.black.opacity(0.3))
+                                    )
+                                    .padding(12)
+                            }
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     }
 
                     // 选中时的遮罩
@@ -110,15 +131,16 @@ public struct MediaVideoCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
             }
-            .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(Color(hex: "1A1D24").opacity(0.6))
             )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
+            .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -142,9 +164,14 @@ public struct WallpaperEditCard: View {
     var progress: Double? = nil
     var progressTint: Color? = nil
     var progressLabel: String? = nil
+    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
     let action: () -> Void
 
     @State private var isHovered = false
+
+    private var thumbnailHeight: CGFloat {
+        LibraryCardMetrics.thumbnailHeight
+    }
 
     public var body: some View {
         Button(action: action) {
@@ -152,19 +179,21 @@ public struct WallpaperEditCard: View {
                 // 图片区域
                 ZStack {
                     KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
+                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)))
+                        .cacheMemoryOnly(false)
                         .fade(duration: 0.3)
                         .placeholder { _ in
                             SkeletonCard(
-                                width: LibraryCardMetrics.cardWidth,
-                                height: LibraryCardMetrics.thumbnailHeight,
+                                width: cardWidth,
+                                height: thumbnailHeight,
                                 cornerRadius: 0
                             )
                         }
                         .resizable()
                         .scaledToFill()
                         .frame(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight
+                            width: cardWidth,
+                            height: thumbnailHeight
                         )
                         .clipped()
 
@@ -230,15 +259,16 @@ public struct WallpaperEditCard: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
             }
-            .frame(width: LibraryCardMetrics.cardWidth, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(Color(hex: "1A1D24").opacity(0.6))
             )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
+            .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))

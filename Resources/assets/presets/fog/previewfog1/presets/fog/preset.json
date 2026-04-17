@@ -1,0 +1,60 @@
+{
+	"name" : "ui_editor_preset_fog_title",
+	"description" : "ui_editor_preset_fog_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Fog 1",
+				"value" : 0
+			},
+			{
+				"label" : "Fog 2",
+				"value" : 1
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewfog1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fog 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fog1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fog1.json",
+				"particles/presets/fog1.json"
+			]
+		},
+		{
+			"preview" : "previewfog2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Fog 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/fog2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/fog2.json",
+				"particles/presets/fog2.json"
+			]
+		}
+	]
+}

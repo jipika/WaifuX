@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "passthrough",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_QuarterFrameBuffer"]
+	}]
+}

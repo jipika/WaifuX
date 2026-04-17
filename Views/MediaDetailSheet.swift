@@ -22,6 +22,10 @@ struct MediaDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
+    @State private var showWallpaperEngineInstallAlert = false
+    @State private var showWallpaperEngineActivationAlert = false
+    @State private var showSteamGuardAlert = false
+    @State private var pendingSteamGuardCode = ""
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -193,6 +197,36 @@ struct MediaDetailSheet: View {
         } message: {
             Text(errorMessage)
         }
+        .alert(t("wallpaperEngineRequiredTitle"), isPresented: $showWallpaperEngineInstallAlert) {
+            Button(t("cancel"), role: .cancel) {}
+            Button(t("goToAppStore")) {
+                if let url = URL(string: "https://apps.apple.com/cn/app/wallpaper-engine/id1573093741") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        } message: {
+            Text(t("wallpaperEngineRequiredMessage"))
+        }
+        .alert("需要激活码", isPresented: $showWallpaperEngineActivationAlert) {
+            Button("取消", role: .cancel) {}
+            Button("去爱发电购买") {
+                if let url = URL(string: "https://afdian.net/a/your-shop") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        } message: {
+            Text("该功能需要 Wallpaper Engine X 激活码。请前往爱发电购买，然后在设置 → Wallpaper Engine 中输入。")
+        }
+        .alert("Steam Guard 验证码", isPresented: $showSteamGuardAlert) {
+            TextField("输入验证码", text: $pendingSteamGuardCode)
+            Button("取消", role: .cancel) {}
+            Button("确认下载") {
+                WorkshopSourceManager.shared.updateGuardCode(pendingSteamGuardCode)
+                downloadWorkshop(guardCode: pendingSteamGuardCode)
+            }
+        } message: {
+            Text("当前账号启用了 Steam Guard，请输入 Authenticator 应用中的验证码以继续下载。")
+        }
         .navigationBarBackButtonHidden(true)
         .task {
             AppLogger.info(.media, "媒体详情页 onAppear",
@@ -203,8 +237,8 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private var heroImageURL: URL? {
-        resolvedItem.posterURL ?? resolvedItem.thumbnailURL
+    private var heroImageURL: URL {
+        resolvedItem.coverImageURL
     }
 
     private var previewVideoURL: URL? {
@@ -232,25 +266,19 @@ struct MediaDetailSheet: View {
                     }
                 )
             } else {
-                AsyncImage(url: heroImageURL) { phase in
-                    switch phase {
-                    case .empty:
-                        Color.clear
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .onAppear {
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    isMediaLoaded = true
-                                }
-                            }
-                    case .failure:
-                        Color.clear
-                    @unknown default:
-                        Color.clear
-                    }
-                }
+                KFMediaCoverImage(
+                    url: heroImageURL,
+                    animated: resolvedItem.shouldRenderThumbnailAsAnimatedImage,
+                    downsampleSize: nil,
+                    fadeDuration: 0.3,
+                    loadFinished: {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isMediaLoaded = true
+                        }
+                    },
+                    playAnimatedImage: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             LinearGradient(
@@ -519,16 +547,23 @@ struct MediaDetailSheet: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    if !isAlreadyDownloaded {
+                    if !isAlreadyDownloaded && !isDownloading {
                         downloadMedia()
                     }
                 } label: {
-                    Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    ZStack {
+                        if isDownloading {
+                            CustomProgressView(tint: .white)
+                                .scaleEffect(0.7)
+                        }
+                        Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(.white)
+                            .opacity(isDownloading ? 0 : 1)
+                    }
+                    .frame(width: 42, height: 42)
+                    .contentShape(Circle())
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
                 .disabled(isDownloading || isAlreadyDownloaded)
@@ -710,8 +745,8 @@ struct MediaDetailSheet: View {
 
     private func loadDetailIfNeeded() async {
         let detail = await viewModel.ensureDetail(for: initialItem)
-        resolvedItem = detail
-        viewModel.recordViewed(detail)
+        resolvedItem = itemWithLocalWorkshopVideo(detail)
+        viewModel.recordViewed(resolvedItem)
         // 来源数据已加载并排序完成
         withAnimation(.easeInOut(duration: 0.3)) {
             isSourcesReady = true
@@ -786,8 +821,8 @@ struct MediaDetailSheet: View {
 
     private func loadDetailIfNeededFor(_ item: MediaItem) async {
         let detail = await viewModel.ensureDetail(for: item)
-        resolvedItem = detail
-        viewModel.recordViewed(detail)
+        resolvedItem = itemWithLocalWorkshopVideo(detail)
+        viewModel.recordViewed(resolvedItem)
         // 来源数据已加载并排序完成
         withAnimation(.easeInOut(duration: 0.3)) {
             isSourcesReady = true
@@ -798,6 +833,12 @@ struct MediaDetailSheet: View {
         // 本地文件无需下载
         if isLocalFile {
             AppLogger.debug(.download, "跳过下载：本地媒体", metadata: ["id": resolvedItem.id])
+            return
+        }
+
+        // Workshop 下载
+        if resolvedItem.id.hasPrefix("workshop_") {
+            downloadWorkshop()
             return
         }
 
@@ -825,8 +866,10 @@ struct MediaDetailSheet: View {
                     throw NetworkError.invalidResponse
                 }
             } catch {
-                errorMessage = error.localizedDescription
-                showError = true
+                await MainActor.run {
+                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                    showError = true
+                }
                 AppLogger.error(.download, "媒体下载失败", metadata:
                     ["id": resolvedItem.id, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
@@ -835,12 +878,101 @@ struct MediaDetailSheet: View {
         }
     }
 
+    private func downloadWorkshop(guardCode: String? = nil) {
+        AppLogger.info(.download, "开始下载 Workshop 内容", metadata:
+            ["id": resolvedItem.id, "title": resolvedItem.title, "guardCode": guardCode != nil ? "provided" : "nil"])
+        isDownloading = true
+        errorMessage = ""
+        let start = Date()
+        Task { @MainActor in
+            do {
+                try await viewModel.downloadWorkshopWallpaper(resolvedItem, guardCode: guardCode)
+                isDownloading = false
+                AppLogger.info(.download, "Workshop 下载成功", metadata:
+                    ["id": resolvedItem.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
+            } catch let error as WorkshopError {
+                if case .guardCodeRequired = error {
+                    isDownloading = false
+                    pendingSteamGuardCode = ""
+                    showSteamGuardAlert = true
+                } else {
+                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                    showError = true
+                    isDownloading = false
+                    AppLogger.error(.download, "Workshop 下载失败", metadata:
+                        ["id": resolvedItem.id, "error": error.localizedDescription,
+                         "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
+                }
+            } catch {
+                errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                showError = true
+                isDownloading = false
+                AppLogger.error(.download, "Workshop 下载失败", metadata:
+                    ["id": resolvedItem.id, "error": error.localizedDescription,
+                     "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
+            }
+        }
+    }
+
+    private static func truncateErrorMessage(_ message: String, maxLength: Int = 600) -> String {
+        if message.count <= maxLength { return message }
+        let endIndex = message.index(message.startIndex, offsetBy: maxLength)
+        return String(message[..<endIndex]) + "\n\n[日志已截断，完整错误请查看控制台]"
+    }
+
     private func setAsDesktopWallpaper() {
+        // Workshop 壁纸特殊处理：先检查本地文件类型
+        if resolvedItem.id.hasPrefix("workshop_") {
+            if let localURL = findLocalWorkshopFile() {
+                let ext = localURL.pathExtension.lowercased()
+                let isVideoFile = ["mp4", "mov", "webm"].contains(ext)
+                var isDirectory: ObjCBool = false
+                FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
+
+                if isVideoFile && !isDirectory.boolValue {
+                    // 视频文件直接走现有动态壁纸逻辑
+                    print("[MediaDetailSheet] Workshop video detected, using VideoWallpaperManager: \(localURL.path)")
+                    applyWorkshopVideoWallpaper(videoURL: localURL)
+                    return
+                }
+
+                // scene/pkg/目录类型需要 Wallpaper Engine CLI 渲染
+                print("[MediaDetailSheet] Workshop content requires CLI rendering: \(localURL.path) (ext=\(ext), isDir=\(isDirectory.boolValue))")
+
+                // 提前检测 project.json 类型，拦截不支持的内容（如 application、游戏等）
+                if isDirectory.boolValue {
+                    let contentType = determineWorkshopContentType(at: localURL)
+                    if case .unsupported(let detectedType) = contentType {
+                        errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
+                        showError = true
+                        return
+                    }
+                }
+
+                if !WorkshopService.isWallpaperEngineAppInstalled() {
+                    showWallpaperEngineInstallAlert = true
+                    return
+                }
+                // 检查激活码
+                let code = WorkshopSourceManager.shared.wallpaperEngineActivationCode
+                if code.isEmpty {
+                    showWallpaperEngineActivationAlert = true
+                    return
+                }
+                // 通过 wallpaperengine-cli 渲染壁纸（支持多显示器选择）
+                applyWorkshopRendererWallpaper(path: localURL.path, posterURL: resolvedItem.posterURL)
+                return
+            } else {
+                // 本地无文件，提示先下载
+                errorMessage = t("downloadFirstToLocal")
+                showError = true
+                return
+            }
+        }
+
         // 检测多显示器
         let screens = NSScreen.screens
         if screens.count > 1 {
-            // 多显示器环境下显示选择弹窗
-            // selectedScreen == nil 表示"所有显示器"，非 nil 表示特定显示器
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")
@@ -849,11 +981,10 @@ struct MediaDetailSheet: View {
                 errorMessage = ""
                 Task {
                     do {
-                        // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
                         try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted, targetScreen: selectedScreen)
                     } catch {
                         await MainActor.run {
-                            errorMessage = error.localizedDescription
+                            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                             showError = true
                             isSettingWallpaper = false
                         }
@@ -864,7 +995,6 @@ struct MediaDetailSheet: View {
                 }
             }
         } else {
-            // 单显示器环境下直接设置
             isSettingWallpaper = true
             errorMessage = ""
             Task {
@@ -872,6 +1002,344 @@ struct MediaDetailSheet: View {
                     try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
                 } catch {
                     errorMessage = error.localizedDescription
+                    showError = true
+                }
+                isSettingWallpaper = false
+            }
+        }
+    }
+
+    /// 查找本地已下载的 Workshop 文件
+    private func findLocalWorkshopFile() -> URL? {
+        findLocalWorkshopFile(for: resolvedItem)
+    }
+
+    private func findLocalWorkshopFile(for item: MediaItem) -> URL? {
+        guard item.id.hasPrefix("workshop_") else { return nil }
+        let workshopID = String(item.id.dropFirst("workshop_".count))
+        let fm = FileManager.default
+
+        // 1) 优先使用下载记录中的路径，兼容历史版本写入的不同层级路径
+        if let record = MediaLibraryService.shared.downloadedItems.first(where: { $0.item.id == item.id }) {
+            let recordedURL = record.localFileURL
+            if let resolved = resolveWorkshopContentPath(recordedURL, workshopID: workshopID), fm.fileExists(atPath: resolved.path) {
+                return pickWorkshopPlayableFile(from: resolved)
+            }
+        }
+
+        // 2) 回退到固定目录规则（先尝试标准 Steam 结构，再尝试导入的根目录本身）
+        let mediaFolder = DownloadPathManager.shared.mediaFolderURL
+        let steamPath = mediaFolder
+            .appendingPathComponent("workshop_\(workshopID)/steamapps/workshop/content/431960/\(workshopID)")
+        let rootPath = mediaFolder.appendingPathComponent("workshop_\(workshopID)")
+
+        if fm.fileExists(atPath: steamPath.path) {
+            return pickWorkshopPlayableFile(from: steamPath)
+        }
+        if fm.fileExists(atPath: rootPath.path) {
+            return pickWorkshopPlayableFile(from: rootPath)
+        }
+        return nil
+    }
+
+    private func resolveWorkshopContentPath(_ url: URL, workshopID: String) -> URL? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+
+        // 已经是最终内容目录
+        if isDir.boolValue,
+           url.pathComponents.suffix(2).joined(separator: "/") == "431960/\(workshopID)" {
+            return url
+        }
+
+        // 可能记录的是 workshop_xxx 根目录
+        if isDir.boolValue {
+            let nested = url.appendingPathComponent("steamapps/workshop/content/431960/\(workshopID)")
+            if fm.fileExists(atPath: nested.path) {
+                return nested
+            }
+        }
+
+        // 可能直接记录了 scene.pkg 或视频文件
+        if !isDir.boolValue {
+            let ext = url.pathExtension.lowercased()
+            if ["pkg", "mp4", "mov", "webm"].contains(ext) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    /// Workshop 内容类型
+    private enum WorkshopContentType: Equatable {
+        case video        // 纯视频类型，WaifuX 可直接播放
+        case scene        // 场景类型，需要 Wallpaper Engine CLI 渲染
+        case web          // Web 类型，需要 Wallpaper Engine CLI 渲染
+        case unsupported(String) // 不支持的类型（如 application、游戏等）
+        case unknown
+    }
+
+    /// 确定 Workshop 内容类型（通过 project.json 判断）
+    private func determineWorkshopContentType(at contentDir: URL) -> WorkshopContentType {
+        let projectURL = contentDir.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let typeString = json["type"] as? String else {
+            return .unknown
+        }
+        let type = typeString.lowercased()
+        switch type {
+        case "video": return .video
+        case "scene": return .scene
+        case "web": return .web
+        default: return .unsupported(typeString)
+        }
+    }
+
+    private func pickWorkshopPlayableFile(from contentPath: URL) -> URL {
+        var isDir: ObjCBool = false
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: contentPath.path, isDirectory: &isDir), isDir.boolValue else {
+            // 如果不是目录，检查是否是视频文件
+            let ext = contentPath.pathExtension.lowercased()
+            if ["mp4", "mov", "webm"].contains(ext) {
+                return contentPath
+            }
+            // pkg 文件也直接返回
+            if ext == "pkg" {
+                return contentPath
+            }
+            // 其他文件返回目录（让 CLI 处理）
+            return contentPath.deletingLastPathComponent()
+        }
+
+        // 目录内容：先统计有哪些文件类型
+        let rootContents = try? fm.contentsOfDirectory(at: contentPath, includingPropertiesForKeys: nil)
+        let hasPkgFile = rootContents?.contains(where: { $0.pathExtension.lowercased() == "pkg" }) ?? false
+        let hasProjectJson = fm.fileExists(atPath: contentPath.appendingPathComponent("project.json").path)
+
+        // 1. 先检查 project.json 确定内容类型
+        let contentType = determineWorkshopContentType(at: contentPath)
+
+        // 2. 纯视频类型或有 .mp4 文件的情况 → 返回视频文件
+        if contentType == .video {
+            // 递归查找视频文件
+            if let videoURL = findVideoFile(in: contentPath) {
+                return videoURL
+            }
+            // 有 project.json 且类型是 video 但没找到视频，返回目录
+            return contentPath
+        }
+
+        // 3. 如果根目录直接有 .mp4/.mov/.webm 文件（这是纯视频 Workshop 的常见情况）
+        if let rootVideo = rootContents?.first(where: {
+            ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased())
+        }) {
+            return rootVideo
+        }
+
+        // 4. 如果根目录直接有 .pkg 文件，这是 scene 类型，需要 CLI
+        if hasPkgFile {
+            return contentPath
+        }
+
+        // 5. scene 类型或 unknown 类型：递归查找 .pkg 文件
+        if contentType == .scene || contentType == .unknown {
+            if let pkgURL = findPkgFile(in: contentPath) {
+                return pkgURL
+            }
+        }
+
+        // 6. 如果有 project.json 但不是 video 类型，返回目录让 CLI 处理
+        if hasProjectJson {
+            return contentPath
+        }
+
+        // 7. 兜底：递归找视频文件（处理嵌套目录中的视频）
+        if let videoURL = findVideoFile(in: contentPath) {
+            return videoURL
+        }
+
+        // 8. 什么都没找到，返回目录
+        return contentPath
+    }
+
+    /// 递归查找目录中的视频文件
+    private func findVideoFile(in directory: URL) -> URL? {
+        let videoExts = ["mp4", "mov", "webm"]
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        for case let fileURL as URL in enumerator {
+            if videoExts.contains(fileURL.pathExtension.lowercased()) {
+                return fileURL
+            }
+        }
+        return nil
+    }
+
+    /// 递归查找目录中的 .pkg 文件
+    private func findPkgFile(in directory: URL) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        for case let fileURL as URL in enumerator {
+            if fileURL.pathExtension.lowercased() == "pkg" {
+                return fileURL
+            }
+        }
+        return nil
+    }
+
+    private func workshopContentDirectory(for item: MediaItem) -> URL? {
+        let fm = FileManager.default
+        guard let localURL = findLocalWorkshopFile(for: item) else { return nil }
+
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: localURL.path, isDirectory: &isDir) {
+            if isDir.boolValue {
+                return localURL
+            }
+            return localURL.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    private func localWorkshopPreviewImageURL(for item: MediaItem) -> URL? {
+        let fm = FileManager.default
+        guard let contentDir = workshopContentDirectory(for: item) else { return nil }
+
+        let projectURL = contentDir.appendingPathComponent("project.json")
+        if let data = try? Data(contentsOf: projectURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let previewName = json["preview"] as? String,
+           !previewName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let previewURL = contentDir.appendingPathComponent(previewName)
+            if fm.fileExists(atPath: previewURL.path) {
+                return previewURL
+            }
+        }
+
+        // 兼容无 project.json 或字段缺失
+        let fallbackNames = ["preview.gif", "preview.jpg", "preview.jpeg", "preview.png", "preview.webp"]
+        for name in fallbackNames {
+            let candidate = contentDir.appendingPathComponent(name)
+            if fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// 如果 Workshop 项已下载本地资产，优先注入本地视频和本地预览图
+    private func itemWithLocalWorkshopVideo(_ item: MediaItem) -> MediaItem {
+        guard item.id.hasPrefix("workshop_") else { return item }
+
+        var updatedPreviewVideoURL = item.previewVideoURL
+        var updatedPosterURL = item.posterURL
+
+        if let localVideoURL = findLocalWorkshopFile(for: item) {
+        let videoExts = ["mp4", "mov", "webm"]
+            if updatedPreviewVideoURL == nil, videoExts.contains(localVideoURL.pathExtension.lowercased()) {
+                updatedPreviewVideoURL = localVideoURL
+            }
+        }
+
+        if let localPreviewURL = localWorkshopPreviewImageURL(for: item) {
+            updatedPosterURL = localPreviewURL
+        }
+
+        if updatedPreviewVideoURL == item.previewVideoURL && updatedPosterURL == item.posterURL {
+            return item
+        }
+
+        return MediaItem(
+            slug: item.slug,
+            title: item.title,
+            pageURL: item.pageURL,
+            thumbnailURL: item.thumbnailURL,
+            resolutionLabel: item.resolutionLabel,
+            collectionTitle: item.collectionTitle,
+            summary: item.summary,
+            previewVideoURL: updatedPreviewVideoURL,
+            posterURL: updatedPosterURL,
+            tags: item.tags,
+            exactResolution: item.exactResolution,
+            durationSeconds: item.durationSeconds,
+            downloadOptions: item.downloadOptions,
+            sourceName: item.sourceName,
+            isAnimatedImage: item.isAnimatedImage
+        )
+    }
+
+    /// 直接应用 Workshop 视频壁纸
+    private func applyWorkshopVideoWallpaper(videoURL: URL) {
+        let screens = NSScreen.screens
+        if screens.count > 1 {
+            DisplaySelectorManager.shared.showSelector(
+                title: t("setWallpaper"),
+                message: t("multiDisplayDetected")
+            ) { [self] selectedScreen in
+                isSettingWallpaper = true
+                Task {
+                    do {
+                        try await wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted, targetScreens: selectedScreen.map { [$0] })
+                    } catch {
+                        errorMessage = error.localizedDescription
+                        showError = true
+                    }
+                    isSettingWallpaper = false
+                }
+            }
+        } else {
+            isSettingWallpaper = true
+            Task {
+                do {
+                    try await wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted)
+                } catch {
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
+                isSettingWallpaper = false
+            }
+        }
+    }
+
+    private func applyWorkshopRendererWallpaper(path: String, posterURL: URL?) {
+        let screens = NSScreen.screens
+        if screens.count > 1 {
+            DisplaySelectorManager.shared.showSelector(
+                title: t("setWallpaper"),
+                message: t("multiDisplayDetected")
+            ) { [self] selectedScreen in
+                isSettingWallpaper = true
+                Task { @MainActor in
+                    do {
+                        try WallpaperEngineXBridge.shared.setWallpaper(
+                            path: path,
+                            posterURL: posterURL,
+                            targetScreens: selectedScreen.map { [$0] }
+                        )
+                    } catch {
+                        errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                        showError = true
+                    }
+                    isSettingWallpaper = false
+                }
+            }
+        } else {
+            isSettingWallpaper = true
+            Task { @MainActor in
+                do {
+                    try WallpaperEngineXBridge.shared.setWallpaper(
+                        path: path,
+                        posterURL: posterURL,
+                        targetScreens: nil
+                    )
+                } catch {
+                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
                 }
                 isSettingWallpaper = false

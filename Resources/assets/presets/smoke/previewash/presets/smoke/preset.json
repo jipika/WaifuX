@@ -1,0 +1,82 @@
+{
+	"name" : "ui_editor_preset_smoke_title",
+	"description" : "ui_editor_preset_smoke_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Smoke stream",
+				"value" : 0
+			},
+			{
+				"label" : "Smoke cloud",
+				"value" : 1
+			},
+			{
+				"label" : "Ash",
+				"value" : 2
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewsmoke2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Smoke stream",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/smoke2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/smoke2.json",
+				"particles/presets/smoke2.json"
+			]
+		},
+		{
+			"preview" : "previewsmoke1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Smoke cloud",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/smoke1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/smoke1.json",
+				"particles/presets/smoke1.json"
+			]
+		},
+		{
+			"preview" : "previewash/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Ash",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/ash.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/ash.json",
+				"particles/presets/ash.json"
+			]
+		}
+	]
+}

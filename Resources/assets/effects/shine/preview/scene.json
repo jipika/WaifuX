@@ -1,0 +1,99 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0 0 0",
+		"clearenabled" : null,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"id" : 22,
+			"image" : null,
+			"instanceoverride" : null,
+			"model" : null,
+			"name" : "Snow flat",
+			"origin" : "181.267 289.241 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"particle" : "particles/presets/snowflat.json",
+			"scale" : "1.000 1.000 1.000"
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"dependencies" : [ 25 ],
+			"effects" : 
+			[
+				{
+					"file" : "effects/shine/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_ray_threshold" : 0.0
+							},
+							"textures" : [ null, "util/white", "util/clouds_256" ]
+						},
+						{
+							"constantshadervalues" : 
+							{
+								"ui_editor_properties_color" : "1 0.2196078431372549 0",
+								"ui_editor_properties_direction" : 0.0,
+								"ui_editor_properties_ray_intensity" : 1.3600000143051147,
+								"ui_editor_properties_ray_length" : 0.41999998688697815,
+								"ui_editor_properties_speed" : -0.33000001311302185
+							}
+						},
+						{},
+						{
+							"combos" : 
+							{
+								"VERTICAL" : 1
+							}
+						},
+						{
+							"textures" : [ null, "_rt_imageLayerComposite_25_a" ]
+						}
+					],
+					"username" : "",
+					"visible" : true
+				}
+			],
+			"id" : 25,
+			"image" : "models/util/fullscreenlayer.json",
+			"name" : "Fullscreen",
+			"origin" : "0.000 0.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "194.000 196.000",
+			"visible" : true
+		}
+	]
+}

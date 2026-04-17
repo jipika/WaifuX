@@ -1,0 +1,119 @@
+{
+	"animationmode" : null,
+	"children" : null,
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 0",
+			"distancemax" : 64,
+			"distancemin" : 64,
+			"id" : 5,
+			"name" : "sphererandom",
+			"origin" : "0 0 0",
+			"rate" : 96
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 50,
+			"min" : 20,
+			"name" : "sizerandom"
+		},
+		{
+			"bounds" : "0 1",
+			"count" : 3.02,
+			"id" : 4,
+			"limitbehavior" : "repeat",
+			"name" : "mapsequencearoundcontrolpoint",
+			"speedmax" : "0 100 0",
+			"speedmin" : "0 10 0"
+		}
+	],
+	"material" : "materials/presets/magic_trinity.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 0 0",
+			"id" : 6,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.5,
+			"id" : 7,
+			"name" : "alphafade"
+		},
+		{
+			"endtime" : 0.69999999999999996,
+			"endvalue" : "1 0.615686274509804 0",
+			"id" : 8,
+			"name" : "colorchange"
+		},
+		{
+			"id" : 9,
+			"name" : "sizechange",
+			"startvalue" : 2
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"sequencemultiplier" : null,
+	"starttime" : 0
+}

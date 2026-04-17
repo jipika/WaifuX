@@ -9,6 +9,7 @@ struct MediaExploreContentView: View {
     @Binding var selectedMedia: MediaItem?
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
+    @StateObject private var workshopSourceManager = WorkshopSourceManager.shared
 
     @State private var selectedCategory: MediaCategory = .all
     @State private var selectedHotTag: MediaHotTag?
@@ -26,6 +27,15 @@ struct MediaExploreContentView: View {
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
+
+    // Workshop 筛选
+    @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
+    @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
+    @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel?
+    @State private var workshopSearchQuery: String = ""
+    private var workshopService: WorkshopService {
+        WorkshopService.shared
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -45,6 +55,11 @@ struct MediaExploreContentView: View {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
+                        if workshopSourceManager.activeSource == .wallpaperEngine {
+                            filterSection
+                            workshopTagsSection
+                            activeFiltersSection
+                        }
                         contentSection(gridContentWidth: gridContentWidth)
                     }
                     .padding(.horizontal, 28)
@@ -100,6 +115,9 @@ struct MediaExploreContentView: View {
         .onChange(of: selectedSort) { _, _ in handleFilterChange() }
         .onChange(of: searchText) { _, _ in handleFilterChange() }
         .onChange(of: viewModel.items) { oldVal, newVal in handleItemsChange(old: oldVal, new: newVal) }
+        .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
+            handleSourceChange()
+        }
         .onDisappear { cancelTasks() }
     }
 
@@ -109,7 +127,9 @@ struct MediaExploreContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             headerTitle
             searchRow
-            hotTagsRow
+            if workshopSourceManager.activeSource != .wallpaperEngine {
+                hotTagsRow
+            }
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
@@ -121,7 +141,8 @@ struct MediaExploreContentView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.56))
 
-                Text("MotionBG")
+                // 当前源标签
+                Text(workshopSourceManager.activeSource.displayName)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.horizontal, 8)
@@ -131,6 +152,23 @@ struct MediaExploreContentView: View {
                         tint: exploreAtmosphere.tint.primary.opacity(0.12),
                         in: Capsule(style: .continuous)
                     )
+
+                // 切换源按钮
+                Button {
+                    workshopSourceManager.switchToNext()
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .frame(width: 24, height: 20)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("切换到 \(workshopSourceManager.activeSource == .motionBG ? t("wallpaperEngine") : "MotionBG")")
             }
 
             Text(t("exploreMedia"))
@@ -159,6 +197,10 @@ struct MediaExploreContentView: View {
     }
     
     private var hotTagsRow: some View {
+        motionBGTagsRow
+    }
+
+    private var motionBGTagsRow: some View {
         HStack(alignment: .center, spacing: 10) {
             Text(t("hotWallpaper") + ":")
                 .font(.system(size: 12, weight: .semibold))
@@ -177,19 +219,209 @@ struct MediaExploreContentView: View {
         }
     }
 
+    private func applyWorkshopFilters() async {
+        displayedItems = []
+        viewModel.clearItems()
+
+        let tags = selectedWorkshopTag.map { [$0.name] } ?? []
+        await viewModel.loadWorkshopWithFilters(
+            query: workshopSearchQuery,
+            tags: tags,
+            type: selectedWorkshopType,
+            contentLevel: selectedWorkshopContentLevel
+        )
+    }
+
+    @ViewBuilder
     private var categorySection: some View {
-        FlowLayout(spacing: 12) {
-            ForEach(MediaCategory.allCases) { category in
-                CategoryChip(
-                    icon: category.icon,
-                    title: category.title,
-                    accentColors: category.accentColors,
-                    isSelected: selectedCategory == category
-                ) {
-                    selectCategory(category)
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            workshopTypeSection
+        } else {
+            FlowLayout(spacing: 12) {
+                ForEach(MediaCategory.allCases) { category in
+                    CategoryChip(
+                        icon: category.icon,
+                        title: category.title,
+                        accentColors: category.accentColors,
+                        isSelected: selectedCategory == category
+                    ) {
+                        selectCategory(category)
+                    }
                 }
             }
         }
+    }
+
+    private var workshopTypeSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(t("categories"))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.46))
+            FlowLayout(spacing: 12) {
+                ForEach(WorkshopSourceManager.WorkshopTypeFilter.allCases) { type in
+                    CategoryChip(
+                        icon: type.icon,
+                        title: type.displayName,
+                        accentColors: type.accentColors,
+                        isSelected: selectedWorkshopType.id == type.id
+                    ) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            selectedWorkshopType = type
+                            Task { await applyWorkshopFilters() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var workshopTagsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(t("tags"))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.46))
+            FlowLayout(spacing: 12) {
+                ForEach(workshopSourceManager.availableTags) { tag in
+                    CategoryChip(
+                        icon: tag.icon,
+                        title: tag.displayName,
+                        accentColors: tag.accentColors,
+                        isSelected: selectedWorkshopTag?.id == tag.id
+                    ) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            if selectedWorkshopTag?.id == tag.id {
+                                selectedWorkshopTag = nil
+                            } else {
+                                selectedWorkshopTag = tag
+                            }
+                            Task { await applyWorkshopFilters() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var filterSection: some View {
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(t("contentLevel"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.46))
+                FlowLayout(spacing: 10) {
+                    ForEach(visibleWorkshopContentLevels) { level in
+                        FilterChip(
+                            title: level.title,
+                            subtitle: level.subtitle,
+                            isSelected: selectedWorkshopContentLevel?.id == level.id,
+                            tint: level.tint
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                if selectedWorkshopContentLevel?.id == level.id {
+                                    selectedWorkshopContentLevel = nil
+                                } else {
+                                    selectedWorkshopContentLevel = level
+                                }
+                                Task { await applyWorkshopFilters() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
+        Array(WorkshopSourceManager.WorkshopContentLevel.allCases)
+    }
+
+    @ViewBuilder
+    private var activeFiltersSection: some View {
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            let chips = workshopActiveFilterChips
+            if !chips.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        Text(t("currentFilters"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                        Button(t("clear")) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                selectedWorkshopTag = nil
+                                selectedWorkshopContentLevel = nil
+                                selectedWorkshopType = .all
+                                Task { await applyWorkshopFilters() }
+                            }
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .buttonStyle(.plain)
+                    }
+                    FlowLayout(spacing: 10) {
+                        ForEach(chips) { chip in
+                            WorkshopActiveFilterChip(
+                                title: chip.title,
+                                accentHex: chip.accentHex
+                            ) {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                    removeWorkshopFilter(chip)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private struct WorkshopFilterChipData: Identifiable {
+        let id: String
+        let title: String
+        let accentHex: String
+        let kind: Kind
+        enum Kind { case type, tag, contentLevel }
+    }
+
+    private var workshopActiveFilterChips: [WorkshopFilterChipData] {
+        var chips: [WorkshopFilterChipData] = []
+        if selectedWorkshopType != .all {
+            chips.append(WorkshopFilterChipData(
+                id: "type_\(selectedWorkshopType.id)",
+                title: selectedWorkshopType.displayName,
+                accentHex: selectedWorkshopType.accentColors.first ?? "FFFFFF",
+                kind: .type
+            ))
+        }
+        if let tag = selectedWorkshopTag {
+            chips.append(WorkshopFilterChipData(
+                id: "tag_\(tag.id)",
+                title: tag.displayName,
+                accentHex: tag.accentColors.first ?? "FFFFFF",
+                kind: .tag
+            ))
+        }
+        if let level = selectedWorkshopContentLevel {
+            chips.append(WorkshopFilterChipData(
+                id: "level_\(level.id)",
+                title: level.title,
+                accentHex: level.accentHex,
+                kind: .contentLevel
+            ))
+        }
+        return chips
+    }
+
+    private func removeWorkshopFilter(_ chip: WorkshopFilterChipData) {
+        switch chip.kind {
+        case .type:
+            selectedWorkshopType = .all
+        case .tag:
+            selectedWorkshopTag = nil
+        case .contentLevel:
+            selectedWorkshopContentLevel = nil
+        }
+        Task { await applyWorkshopFilters() }
     }
 
     private func contentSection(gridContentWidth: CGFloat) -> some View {
@@ -257,7 +489,9 @@ struct MediaExploreContentView: View {
         let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
-            .compactMap { displayedItems[$0].posterURLValue ?? displayedItems[$0].thumbnailURLValue }
+            .map { displayedItems[$0] }
+            .filter { !$0.shouldRenderThumbnailAsAnimatedImage }
+            .map(\.coverImageURL)
 
         let prefetcher = ImagePrefetcher(
             urls: urls,
@@ -332,6 +566,9 @@ struct MediaExploreContentView: View {
         withAnimation(AppFluidMotion.interactiveSpring) {
             selectedCategory = category
             selectedHotTag = nil
+            selectedWorkshopTag = nil
+            selectedWorkshopType = .all
+            selectedWorkshopContentLevel = nil
             searchText = ""
         }
 
@@ -340,8 +577,12 @@ struct MediaExploreContentView: View {
         // 清空 ViewModel 数据避免显示旧数据
         viewModel.clearItems()
 
-        Task {
-            if category == .all {
+        searchTask?.cancel()
+        searchTask = Task {
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                // Workshop 模式下，加载 Workshop 内容
+                await viewModel.loadWorkshopFeed()
+            } else if category == .all {
                 await viewModel.loadHomeFeed()
             } else {
                 await viewModel.loadTagFeed(slug: category.slug, title: category.title)
@@ -354,18 +595,33 @@ struct MediaExploreContentView: View {
         if query != nil { searchText = "" }
         selectedCategory = .all
         selectedHotTag = nil
+        selectedWorkshopTag = nil
+        selectedWorkshopType = .all
+        selectedWorkshopContentLevel = nil
         displayedItems = []
-        Task {
-            await viewModel.search(query: searchQuery)
+        searchTask?.cancel()
+        searchTask = Task {
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                await viewModel.searchWorkshop(query: searchQuery)
+            } else {
+                await viewModel.search(query: searchQuery)
+            }
             await MainActor.run {
                 viewModel.items.forEach { visibleCardIDs.insert($0.id) }
             }
+            searchTask = nil
         }
     }
 
     private func handleFilterChange() {
         visibleCardIDs.removeAll()
-        
+
+        // Workshop 模式下不支持标签过滤
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            rebuildVisibleItems()
+            return
+        }
+
         if let hotTag = selectedHotTag, hotTag.isServerSide,
            let slug = hotTag.serverSlug {
             displayedItems = []
@@ -382,6 +638,11 @@ struct MediaExploreContentView: View {
         }
 
         rebuildVisibleItems()
+    }
+
+    private func handleSourceChange() {
+        // 数据源切换时重置并重新加载
+        resetAllFilters(reloadData: true)
     }
 
     private func handleItemsChange(old: [MediaItem], new: [MediaItem]) {
@@ -402,8 +663,13 @@ struct MediaExploreContentView: View {
 
         isLoadingMore = true
         loadMoreFailed = false
-        Task {
-            await viewModel.loadMore()
+        loadMoreTask?.cancel()
+        loadMoreTask = Task {
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                await viewModel.loadMoreWorkshop()
+            } else {
+                await viewModel.loadMore()
+            }
             await MainActor.run {
                 appendNewItems()
                 // 检查是否加载失败
@@ -414,6 +680,7 @@ struct MediaExploreContentView: View {
                     isLoadingMore = false
                 }
             }
+            loadMoreTask = nil
         }
     }
 
@@ -436,7 +703,11 @@ struct MediaExploreContentView: View {
         isLoadingMore = true
         loadMoreFailed = false
         Task {
-            await viewModel.loadMore()
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                await viewModel.loadMoreWorkshop()
+            } else {
+                await viewModel.loadMore()
+            }
             await MainActor.run {
                 appendNewItems()
                 // 检查是否加载失败
@@ -450,18 +721,26 @@ struct MediaExploreContentView: View {
         }
     }
 
+    @State private var lastSyncedFirstItemID: String? = nil
+
     private func rebuildVisibleItems() {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
-        
+
         let filtered = viewModel.items.filter { item in
             let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
             let matchesHotTag = selectedHotTag?.matches(item) ?? true
             return matchesSearch && matchesHotTag
         }
-        
+
         displayedItems = selectedSort.sort(items: filtered, sourceOrder: sourceOrder)
-        syncAtmosphere()
+
+        // 只有首图真正变化时才更新氛围色，避免重复加载和重绘
+        let newFirstID = displayedItems.first?.id
+        if newFirstID != lastSyncedFirstItemID {
+            lastSyncedFirstItemID = newFirstID
+            syncAtmosphere()
+        }
     }
 
     private func appendNewItems() {
@@ -474,15 +753,27 @@ struct MediaExploreContentView: View {
     private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
         selectedHotTag = nil
+        selectedWorkshopTag = nil
+        selectedWorkshopType = .all
+        selectedWorkshopContentLevel = nil
         selectedCategory = .all
         selectedSort = .newest
+        viewModel.clearItems()
         displayedItems = []
         visibleCardIDs.removeAll()
         loadMoreFailed = false
         viewModel.errorMessage = nil
 
         if reloadData {
-            Task { await viewModel.loadHomeFeed() }
+            searchTask?.cancel()
+            searchTask = Task {
+                if workshopSourceManager.activeSource == .wallpaperEngine {
+                    await viewModel.loadWorkshopFeed()
+                } else {
+                    await viewModel.loadHomeFeed()
+                }
+                searchTask = nil
+            }
         }
     }
 
@@ -735,6 +1026,7 @@ private struct SimpleMediaCard: View {
     let onTap: () -> Void
 
     @State private var isHovered = false
+    @State private var isCardVisible = false
 
     private static let thumbShape = UnevenRoundedRectangle(
         topLeadingRadius: 14,
@@ -772,20 +1064,23 @@ private struct SimpleMediaCard: View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    // Kingfisher 高性能图片加载 - 移除 cancelOnDisappear 避免重复加载问题
-                    KFImage(item.posterURLValue ?? item.thumbnailURLValue)
-                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                        .cacheMemoryOnly(false)
-                        // 移除 fade 动画避免闪烁问题
-                        .placeholder { _ in
-                            fallbackArtwork
-                        }
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
+                    KFMediaCoverImage(
+                        url: item.coverImageURL,
+                        animated: item.shouldRenderThumbnailAsAnimatedImage,
+                        downsampleSize: targetImageSize,
+                        fadeDuration: 0.25,
+                        loadFinished: nil,
+                        layoutSize: CGSize(width: cardWidth, height: imageHeight),
+                        playAnimatedImage: true,
+                        isVisible: isCardVisible
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 // 使用固定比例而非固定高度
                 .frame(width: cardWidth, height: imageHeight)
                 .clipShape(Self.thumbShape)
+                .onAppear { isCardVisible = true }
+                .onDisappear { isCardVisible = false }
                 .overlay(alignment: .topLeading) {
                     simplifiedMetadataRow
                         .padding(10)
@@ -842,6 +1137,9 @@ private struct SimpleMediaCard: View {
             if let tag = firstListTag {
                 metaTag(text: tag)
             }
+            if item.isGIF {
+                metaTag(text: "GIF")
+            }
             if item.previewVideoURL != nil {
                 metaTag(text: "LIVE")
             }
@@ -873,5 +1171,42 @@ private struct SimpleMediaCard: View {
                 .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(.white.opacity(0.18))
         }
+    }
+}
+
+private struct WorkshopActiveFilterChip: View {
+    let title: String
+    let accentHex: String
+    let onRemove: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onRemove) {
+            HStack(spacing: 8) {
+                Circle().fill(Color(hex: "#\(accentHex)")).frame(width: 8, height: 8)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.94))
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.72))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                ZStack {
+                    Capsule(style: .continuous).fill(.ultraThinMaterial)
+                    Capsule(style: .continuous).fill(Color(hex: "#\(accentHex)").opacity(0.12))
+                }
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color(hex: "#\(accentHex)").opacity(0.3), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .onHover { isHovered = $0 }
     }
 }

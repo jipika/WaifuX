@@ -249,6 +249,52 @@ public struct SortMenu<SortOption: SortOptionProtocol>: View {
     }
 }
 
+// MARK: - Filter Chip
+
+public struct FilterChip: View {
+    public let title: String
+    public let subtitle: String
+    public let isSelected: Bool
+    public let tint: Color
+    public let action: () -> Void
+    @State private var isHovered = false
+    
+    public init(title: String, subtitle: String = "", isSelected: Bool, tint: Color, action: @escaping () -> Void) {
+        self.title = title
+        self.subtitle = subtitle
+        self.isSelected = isSelected
+        self.tint = tint
+        self.action = action
+    }
+    
+    public var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white.opacity(0.94))
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(tint.opacity(isSelected ? 0.15 : 0.08))
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(tint.opacity(isSelected ? 0.4 : 0.2), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .onHover { isHovered = $0 }
+    }
+}
+
 // MARK: - 排序选项协议
 
 public protocol SortOptionProtocol: Identifiable, Hashable {

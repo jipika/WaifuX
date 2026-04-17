@@ -32,7 +32,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return t("general")
         case .download: return t("download")
-        case .workshop: return "小红车"
+        case .workshop: return t("wallpaperEngine")
         case .scheduler: return t("scheduler")
         case .about: return t("about")
         }
@@ -489,6 +489,10 @@ private struct DownloadSettingsTab: View {
 // MARK: - 调度器设置标签
 private struct SchedulerSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
+    
+    private var screens: [NSScreen] {
+        NSScreen.screens
+    }
 
     private var schedulerEnabledBinding: Binding<Bool> {
         Binding(
@@ -514,77 +518,113 @@ private struct SchedulerSettingsTab: View {
                 }
             }
 
-            // 配置组
+            // 每屏配置
             MacSettingsSection(header: t("scheduleConfig")) {
-                // 间隔选择
-                HStack(spacing: 12) {
-                    Text(t("replaceInterval"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-
-                    Spacer()
-
-                    Menu {
-                        ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
-                            Button(intervalLabel(for: minutes)) {
-                                viewModel.schedulerViewModel.updateInterval(minutes)
+                ForEach(Array(screens.enumerated()), id: \.offset) { index, screen in
+                    let screenID = screen.wallpaperScreenIdentifier
+                    let displayConfig = viewModel.schedulerViewModel.displayConfig(for: screenID)
+                    
+                    VStack(spacing: 0) {
+                        HStack(spacing: 12) {
+                            Text("\(t("display")) \(index + 1) · \(screen.localizedName)")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.9))
+                            
+                            Spacer()
+                            
+                            MacToggle(isOn: Binding(
+                                get: { displayConfig.isEnabled },
+                                set: { viewModel.schedulerViewModel.updateDisplayEnabled($0, for: screenID) }
+                            ))
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        
+                        if displayConfig.isEnabled {
+                            dividerLine
+                            
+                            // 间隔选择
+                            HStack(spacing: 12) {
+                                Text(t("replaceInterval"))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.9))
+                                
+                                Spacer()
+                                
+                                Menu {
+                                    ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
+                                        Button(intervalLabel(for: minutes)) {
+                                            viewModel.schedulerViewModel.updateDisplayInterval(minutes, for: screenID)
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text(intervalLabel(for: displayConfig.intervalMinutes))
+                                            .font(.system(size: 12, weight: .regular))
+                                            .foregroundStyle(Color.white.opacity(0.6))
+                                        Image(systemName: "chevron.down")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundStyle(Color.white.opacity(0.35))
+                                    }
+                                }
+                                .menuStyle(.borderlessButton)
                             }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            
+                            dividerLine
+                            
+                            // 顺序选择
+                            HStack(spacing: 12) {
+                                Text(t("replaceOrder"))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.9))
+                                
+                                Spacer()
+                                
+                                Picker("", selection: Binding(
+                                    get: { displayConfig.order },
+                                    set: { viewModel.schedulerViewModel.updateDisplayOrder($0, for: screenID) }
+                                )) {
+                                    Text(t("sequential")).tag(ScheduleOrder.sequential)
+                                    Text(t("random")).tag(ScheduleOrder.random)
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 130, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            
+                            dividerLine
+                            
+                            // 来源选择
+                            HStack(spacing: 12) {
+                                Text(t("wallpaperSource"))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.9))
+                                
+                                Spacer()
+                                
+                                Picker("", selection: Binding(
+                                    get: { displayConfig.source },
+                                    set: { viewModel.schedulerViewModel.updateDisplaySource($0, for: screenID) }
+                                )) {
+                                    Text(t("online")).tag(WallpaperSource.online)
+                                    Text(t("local")).tag(WallpaperSource.local)
+                                    Text(t("favorites")).tag(WallpaperSource.favorites)
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 170, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
                         }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(intervalLabel(for: viewModel.schedulerViewModel.config.intervalMinutes))
-                                .font(.system(size: 12, weight: .regular))
-                                .foregroundStyle(Color.white.opacity(0.6))
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(Color.white.opacity(0.35))
-                        }
                     }
-                    .menuStyle(.borderlessButton)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-
-                dividerLine
-
-                // 顺序选择
-                HStack(spacing: 12) {
-                    Text(t("replaceOrder"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-
-                    Spacer()
-
-                    Picker("", selection: Binding(get: { viewModel.schedulerViewModel.config.order }, set: { viewModel.schedulerViewModel.updateOrder($0) })) {
-                        Text(t("sequential")).tag(ScheduleOrder.sequential)
-                        Text(t("random")).tag(ScheduleOrder.random)
+                    
+                    if index < screens.count - 1 {
+                        dividerLine
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 130, alignment: .trailing)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-
-                dividerLine
-
-                // 来源选择
-                HStack(spacing: 12) {
-                    Text(t("wallpaperSource"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-
-                    Spacer()
-
-                    Picker("", selection: Binding(get: { viewModel.schedulerViewModel.config.source }, set: { viewModel.schedulerViewModel.updateSource($0) })) {
-                        Text(t("online")).tag(WallpaperSource.online)
-                        Text(t("local")).tag(WallpaperSource.local)
-                        Text(t("favorites")).tag(WallpaperSource.favorites)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 170, alignment: .trailing)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
             }
         }
     }
@@ -605,6 +645,15 @@ private struct SchedulerSettingsTab: View {
         case 1440: return "24 \(t("hours"))"
         default: return "\(minutes) \(t("minutes"))"
         }
+    }
+}
+
+private extension NSScreen {
+    var wallpaperScreenIdentifier: String {
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return screenNumber.stringValue
+        }
+        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
     }
 }
 
@@ -642,17 +691,27 @@ private struct AboutSettingsTab: View {
 
                 // 链接组
                 MacSettingsSection(header: t("links")) {
-                    Link(destination: URL(string: "https://wallhaven.cc")!) {
-                        MacLinkRow(title: t("visitWebsite"), action: nil)
-                    }
-                    .buttonStyle(.plain)
+                    MacLinkRow(title: t("visitWebsite"), action: {
+                        if let url = URL(string: "https://github.com/jipika/WaifuX") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    })
 
                     Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
 
-                    Link(destination: URL(string: "https://github.com/jipika/WaifuX")!) {
-                        MacLinkRow(title: t("reportProblem"), action: nil)
-                    }
-                    .buttonStyle(.plain)
+                    MacLinkRow(title: t("reportProblem"), action: {
+                        if let url = URL(string: "https://github.com/jipika/WaifuX") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    })
+
+                    Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
+
+                    MacLinkRow(title: t("joinQQGroup"), action: {
+                        if let url = URL(string: "https://qm.qq.com/q/SRCj8msygq") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    })
                 }
 
                 // 重置所有数据
@@ -1000,7 +1059,7 @@ struct SettingsUpdateSection: View {
             tagName: "v38.0.25",
             name: "WaifuX 38.0.25",
             body: "修复了一些问题",
-            htmlUrl: "https://github.com/jipika/WaifuX/releases/tag/v38.0.25",
+            htmlUrl: "https://github.com/jipika/waifuX-pro/releases/tag/v38.0.25",
             publishedAt: "2024-01-01T00:00:00Z",
             prerelease: false,
             draft: false,
@@ -1026,58 +1085,211 @@ struct SettingsUpdateSection: View {
 private struct WorkshopSettingsTab: View {
     @StateObject private var sourceManager = WorkshopSourceManager.shared
     @StateObject private var workshopService = WorkshopService.shared
-    
     @State private var steamUsername = ""
     @State private var steamPassword = ""
-    @State private var useAnonymous = true
-    @State private var showPassword = false
-    @State private var isTestingConnection = false
-    @State private var connectionResult: ConnectionResult?
-    
-    enum ConnectionResult {
-        case success(String)
-        case failure(String)
-    }
-    
+    @State private var steamGuardCode = ""
+    @State private var isVerifyingSteamLogin = false
+    @State private var steamLoginStatusText: String?
+    @State private var activationCode = ""
+    @State private var activationCodeSaved = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 // 标题
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Wallpaper Engine 设置")
+                    Text(t("wallpaperEngineSettings"))
                         .font(.system(size: 20, weight: .bold))
-                    Text("配置 Steam 账号以下载创意工坊内容")
+                    Text(t("wallpaperEngineSettingsDesc"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Divider()
-                
+
                 // SteamCMD 状态
                 steamCMDStatusSection
                 
-                Divider()
-                
-                // 下载方式选择
-                downloadModeSection
-                
-                Divider()
-                
-                // 账号设置（仅在非匿名模式下显示）
-                if !useAnonymous {
-                    accountSection
-                    Divider()
-                }
-                
-                // 连接测试
-                testConnectionSection
-                
+                // SteamCMD 登录
+                steamCMDLoginSection
+
+                // 壁纸引擎激活码
+                activationCodeSection
+
                 Spacer()
             }
             .padding(24)
         }
     }
     
+    private var steamCMDLoginSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "person.badge.key.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.cyan)
+                Text(t("steamCMDAccount"))
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                if sourceManager.isSteamCMDLoggedIn {
+                    Label(t("loginDetected"), systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                }
+            }
+            
+            if sourceManager.isSteamCMDLoggedIn {
+                HStack {
+                    Text(String(format: t("accountSaved"), sourceManager.steamCredentials?.username ?? ""))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(t("logout")) {
+                        sourceManager.clearSteamCredentials()
+                        steamUsername = ""
+                        steamPassword = ""
+                        steamGuardCode = ""
+                    }
+                    .controlSize(.small)
+                }
+                .padding(12)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(8)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField(t("steamUsernamePlaceholder"), text: $steamUsername)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField(t("steamPasswordPlaceholder"), text: $steamPassword)
+                        .textFieldStyle(.roundedBorder)
+                    TextField(t("steamGuardCodePlaceholder"), text: $steamGuardCode)
+                        .textFieldStyle(.roundedBorder)
+                    Text(t("steamGuardCodeHint"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    
+                    HStack {
+                        if isVerifyingSteamLogin {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text(t("testing"))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else if let steamLoginStatusText {
+                            Text(steamLoginStatusText)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+                        Button(t("saveAccount")) {
+                            guard !steamUsername.isEmpty, !steamPassword.isEmpty else { return }
+                            isVerifyingSteamLogin = true
+                            steamLoginStatusText = nil
+                            Task {
+                                do {
+                                    // 先验证登录，成功后再保存凭证
+                                    try await workshopService.verifySteamLogin(
+                                        username: steamUsername,
+                                        password: steamPassword,
+                                        guardCode: steamGuardCode
+                                    )
+                                    sourceManager.setSteamCredentials(
+                                        username: steamUsername,
+                                        password: steamPassword,
+                                        guardCode: steamGuardCode
+                                    )
+                                    await MainActor.run {
+                                        steamLoginStatusText = t("loginDetected")
+                                        isVerifyingSteamLogin = false
+                                    }
+                                } catch let error as WorkshopError {
+                                    await MainActor.run {
+                                        switch error {
+                                        case .guardCodeRequired(let msg):
+                                            steamLoginStatusText = msg
+                                        case .timeout:
+                                            steamLoginStatusText = "连接 SteamCMD 超时，请稍后重试"
+                                        case .loginTimeout:
+                                            steamLoginStatusText = "Steam 登录超时，请检查网络连接后重试"
+                                        case .sessionExpired:
+                                            steamLoginStatusText = "Steam 登录已过期，请重新验证"
+                                        case .invalidCredentials:
+                                            steamLoginStatusText = "账号或密码错误，请检查"
+                                        default:
+                                            steamLoginStatusText = t("steamPasswordError")
+                                        }
+                                        isVerifyingSteamLogin = false
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        steamLoginStatusText = t("steamPasswordError")
+                                        isVerifyingSteamLogin = false
+                                    }
+                                }
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(steamUsername.isEmpty || steamPassword.isEmpty || isVerifyingSteamLogin)
+                    }
+                }
+                .padding(12)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(8)
+            }
+            
+            Text(t("anonymousDownloadDesc"))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
+    }
+
+    private var activationCodeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.cyan)
+                Text(t("workshop.activationCode"))
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    TextField(t("workshop.activationCodePlaceholder"), text: $activationCode)
+                        .textFieldStyle(.roundedBorder)
+                    Button(t("workshop.saveActivationCode")) {
+                        sourceManager.wallpaperEngineActivationCode = activationCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            activationCodeSaved = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                activationCodeSaved = false
+                            }
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(activationCode.isEmpty)
+                }
+
+                if activationCodeSaved {
+                    Text(t("workshop.activationCodeSaved"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.green)
+                        .transition(.opacity)
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+        .onAppear {
+            activationCode = sourceManager.wallpaperEngineActivationCode
+        }
+    }
+
     // MARK: - SteamCMD 状态
     private var steamCMDStatusSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1085,34 +1297,30 @@ private struct WorkshopSettingsTab: View {
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 14))
                     .foregroundStyle(.cyan)
-                Text("SteamCMD 状态")
+                Text(t("steamCMDStatus"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
             }
-            
+
             HStack(spacing: 12) {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
-                
+
                 Text(statusText)
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                
+
                 Spacer()
-                
+
                 if sourceManager.isSteamCMDConfigured {
-                    Button("检查更新") {
-                        // TODO: 检查 SteamCMD 更新
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 12))
+                    Label(t("steamCMDReady"), systemImage: "checkmark.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
                 } else {
-                    Button("安装指南") {
-                        NSWorkspace.shared.open(URL(string: "https://developer.valvesoftware.com/wiki/SteamCMD")!)
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 12))
+                    Label(t("steamCMDNotInstalled"), systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.orange)
                 }
             }
             .padding(12)
@@ -1120,7 +1328,7 @@ private struct WorkshopSettingsTab: View {
             .cornerRadius(8)
         }
     }
-    
+
     private var statusColor: Color {
         switch workshopService.checkSteamCMDStatus() {
         case .ready: return .green
@@ -1129,222 +1337,13 @@ private struct WorkshopSettingsTab: View {
         case .downloading: return .blue
         }
     }
-    
+
     private var statusText: String {
         switch workshopService.checkSteamCMDStatus() {
-        case .ready: return "已安装并可用"
-        case .notInstalled: return "未安装 - 需要手动添加到 Resources/steamcmd/"
-        case .error(let msg): return "错误: \(msg)"
-        case .downloading: return "下载中..."
-        }
-    }
-    
-    // MARK: - 下载方式
-    private var downloadModeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "person.fill.questionmark")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.blue)
-                Text("下载方式")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-            }
-            
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("使用匿名下载（推荐）", isOn: $useAnonymous)
-                    .font(.system(size: 13))
-                
-                Text("匿名下载适用于大多数公开的 Wallpaper Engine 壁纸。付费或限制级内容需要登录 Steam 账号。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(8)
-        }
-    }
-    
-    // MARK: - 账号设置
-    private var accountSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "person.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.orange)
-                Text("Steam 账号")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-            }
-            
-            VStack(alignment: .leading, spacing: 12) {
-                // 用户名
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Steam 用户名")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    TextField("输入用户名", text: $steamUsername)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 13))
-                }
-                
-                // 密码
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Steam 密码")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        if showPassword {
-                            TextField("输入密码", text: $steamPassword)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 13))
-                        } else {
-                            SecureField("输入密码", text: $steamPassword)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 13))
-                        }
-                        
-                        Button {
-                            showPassword.toggle()
-                        } label: {
-                            Image(systemName: showPassword ? "eye.slash" : "eye")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                
-                // 保存按钮
-                HStack {
-                    if sourceManager.isSteamAuthenticated {
-                        Label("已保存账号: \(sourceManager.steamCredentials?.username ?? "")", systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.green)
-                    }
-                    
-                    Spacer()
-                    
-                    Button("保存账号") {
-                        saveCredentials()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(steamUsername.isEmpty || steamPassword.isEmpty)
-                    
-                    if sourceManager.isSteamAuthenticated {
-                        Button("清除") {
-                            clearCredentials()
-                        }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                        .foregroundStyle(.red)
-                    }
-                }
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(8)
-        }
-    }
-    
-    // MARK: - 连接测试
-    private var testConnectionSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "network.badge.shield.half.filled")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.purple)
-                Text("连接测试")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-            }
-            
-            VStack(alignment: .leading, spacing: 12) {
-                Button {
-                    testConnection()
-                } label: {
-                    HStack {
-                        if isTestingConnection {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        }
-                        Text(isTestingConnection ? "测试中..." : "测试 Steam 连接")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isTestingConnection || !sourceManager.isSteamCMDConfigured)
-                
-                if let result = connectionResult {
-                    HStack {
-                        Image(systemName: resultIcon(result))
-                            .foregroundStyle(resultColor(result))
-                        Text(resultMessage(result))
-                            .font(.system(size: 12))
-                            .foregroundStyle(resultColor(result))
-                        Spacer()
-                    }
-                }
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(8)
-        }
-    }
-    
-    // MARK: - Helpers
-    
-    private func saveCredentials() {
-        sourceManager.setSteamCredentials(username: steamUsername, password: steamPassword)
-    }
-    
-    private func clearCredentials() {
-        sourceManager.clearSteamCredentials()
-        steamUsername = ""
-        steamPassword = ""
-    }
-    
-    private func testConnection() {
-        isTestingConnection = true
-        connectionResult = nil
-        
-        Task {
-            // 简单的 Steam 连接测试
-            let result = await checkSteamConnection()
-            await MainActor.run {
-                connectionResult = result
-                isTestingConnection = false
-            }
-        }
-    }
-    
-    private func checkSteamConnection() async -> ConnectionResult {
-        // 这里可以实现实际的 Steam 连接测试
-        // 暂时返回成功状态
-        return .success("Steam 服务可访问")
-    }
-    
-    private func resultIcon(_ result: ConnectionResult) -> String {
-        switch result {
-        case .success: return "checkmark.circle.fill"
-        case .failure: return "xmark.circle.fill"
-        }
-    }
-    
-    private func resultColor(_ result: ConnectionResult) -> Color {
-        switch result {
-        case .success: return .green
-        case .failure: return .red
-        }
-    }
-    
-    private func resultMessage(_ result: ConnectionResult) -> String {
-        switch result {
-        case .success(let msg): return msg
-        case .failure(let msg): return msg
+        case .ready: return t("steamCMDReady")
+        case .notInstalled: return t("steamCMDNotInstalled")
+        case .error(let msg): return String(format: t("steamCMDError"), msg)
+        case .downloading: return t("downloading")
         }
     }
 }

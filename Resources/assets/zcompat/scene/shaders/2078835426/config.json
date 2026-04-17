@@ -1,0 +1,5 @@
+{
+	"maximumprojectid" : "9223372036854775807",
+	"frag" : "pixelate.frag",
+	"vert" : "pixelate.vert"
+}

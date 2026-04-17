@@ -1,0 +1,19 @@
+{
+	"dependencies" : 
+	[
+		"materials/effects/circle.json",
+		"shaders/effects/circle.frag",
+		"shaders/effects/circle.vert"
+	],
+	"editable" : true,
+	"group" : "localeffects",
+	"name" : "circle",
+	"passes" : 
+	[
+		{
+			"material" : "materials/effects/circle.json"
+		}
+	],
+	"replacementkey" : "circle",
+	"version" : 1
+}

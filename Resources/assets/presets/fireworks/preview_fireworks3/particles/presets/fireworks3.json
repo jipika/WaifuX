@@ -1,0 +1,154 @@
+{
+	"children" : 
+	[
+		{
+			"angles" : "0 0 0",
+			"controlpointstartindex" : null,
+			"flags" : null,
+			"id" : 10,
+			"maxcount" : 10,
+			"name" : "particles/presets/fireworkshitdistort.json",
+			"origin" : "0 0 0",
+			"probability" : 1.0,
+			"scale" : "1 1 1",
+			"type" : "eventdeath"
+		},
+		{
+			"angles" : "0 0 0",
+			"controlpointstartindex" : null,
+			"flags" : null,
+			"id" : 11,
+			"maxcount" : 10,
+			"name" : "particles/presets/fireworks3flare.json",
+			"origin" : "0 0 0",
+			"probability" : 1.0,
+			"scale" : "1 1 1",
+			"type" : "eventdeath"
+		},
+		{
+			"angles" : "0 0 0",
+			"controlpointstartindex" : null,
+			"flags" : null,
+			"id" : 12,
+			"maxcount" : 10,
+			"name" : "particles/presets/fireworks3hit.json",
+			"origin" : "0 0 0",
+			"probability" : 1.0,
+			"scale" : "1 1 1",
+			"type" : "eventdeath"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : "0 0 0"
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : "0 0 0"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"id" : 6,
+			"instantaneous" : 0,
+			"name" : "sphererandom",
+			"rate" : 0.5
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 0.80000001,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 500,
+			"min" : 400,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "1000 3500 0",
+			"min" : "-1000 2500 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"max" : "255 240 128",
+			"min" : "255 250 85",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/fireworks_halo_4.json",
+	"maxcount" : 4,
+	"operator" : 
+	[
+		{
+			"drag" : 4,
+			"gravity" : "0 -1000 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"endvalue" : 0.050000001,
+			"id" : 8,
+			"name" : "sizechange"
+		},
+		{
+			"frequencymax" : 50,
+			"frequencymin" : 20,
+			"id" : 9,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.2
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0
+}

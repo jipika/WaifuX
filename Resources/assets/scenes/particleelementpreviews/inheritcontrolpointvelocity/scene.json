@@ -1,0 +1,92 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 -1.00000",
+		"eye" : "0.00000 0.00000 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.70000 0.70000 0.70000",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"gravitydirection" : "0.00000 -1.00000 0.00000",
+		"gravitystrength" : 1.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"winddirection" : "0.70700 0.70700 0.00000",
+		"windenabled" : false,
+		"windstrength" : 1.0,
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"angles" : 
+			{
+				"script" : "'use strict';\n\n/**\n * @param {Vec3} value - for property 'angles'\n * @return {Vec3} - update current property value\n */\nexport function update(value) {\n\t\n\tvalue.z = Math.sin(engine.runtime * 3) * 180.0;\n\treturn value;\n}\n",
+				"value" : "0.00000 0.00000 0.00000"
+			},
+			"id" : 24,
+			"name" : "",
+			"origin" : "128.00000 128.00000 0.00000"
+		},
+		{
+			"angles" : "0.00000 -0.00000 0.00000",
+			"castshadow" : false,
+			"clampuvs" : true,
+			"color" : "0.00000 0.00000 0.00000",
+			"id" : 31,
+			"image" : "models/util/solidlayer.json",
+			"name" : "Solid",
+			"origin" : "26.01227 0.00000 0.00000",
+			"parent" : 24,
+			"scale" : "0.19815 0.01678 1.00000",
+			"size" : "256.00000 256.00000"
+		},
+		{
+			"angles" : "0.00000 -0.00000 0.00000",
+			"id" : 15,
+			"instanceoverride" : 
+			{
+				"controlpoint1" : "0.00000 0.00000 0.00000",
+				"controlpointangle1" : "0.00000 -0.00000 0.00000",
+				"id" : 16,
+				"size" : 0.38
+			},
+			"name" : "new_particle_system",
+			"origin" : "57.80678 0.00000 0.00000",
+			"parent" : 24,
+			"particle" : "particles/new_particle_system.json"
+		}
+	],
+	"version" : 0
+}

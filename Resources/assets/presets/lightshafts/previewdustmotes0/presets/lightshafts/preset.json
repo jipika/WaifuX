@@ -1,0 +1,104 @@
+{
+	"name" : "ui_editor_preset_light_shafts_title",
+	"description" : "ui_editor_preset_light_shafts_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Light shafts 0",
+				"value" : 0
+			},
+			{
+				"label" : "Light shafts 1",
+				"value" : 1
+			},
+			{
+				"label" : "Light shafts 2",
+				"value" : 2
+			},
+			{
+				"label" : "Dust motes",
+				"value" : 3
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewlightshafts0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 0",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_0.json",
+				"particles/presets/light_shafts_0.json"
+			]
+		},
+		{
+			"preview" : "previewlightshafts1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_1.json",
+				"particles/presets/light_shafts_1.json"
+			]
+		},
+		{
+			"preview" : "previewlightshafts2/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Light shafts 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/light_shafts_2.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/light_shafts_2.json",
+				"particles/presets/light_shafts_2.json"
+			]
+		},
+		{
+			"preview" : "previewdustmotes0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Dust motes",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/dust_motes_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/dust_motes_0.json",
+				"particles/presets/dust_motes_0.json"
+			]
+		}
+	]
+}

@@ -1,0 +1,90 @@
+{
+	"animationmode" : "randomframe",
+	"children" : 
+	[
+		{
+			"id" : 13,
+			"name" : "particles/presets/rain_screen_static.json"
+		},
+		{
+			"id" : 14,
+			"name" : "particles/presets/rain_screen_fast.json"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"distancemax" : "1000 400 0",
+			"id" : 12,
+			"name" : "boxrandom",
+			"origin" : "0 500 0",
+			"rate" : 8
+		}
+	],
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 6,
+			"min" : 4,
+			"name" : "lifetimerandom"
+		},
+		{
+			"exponent" : 2,
+			"id" : 3,
+			"max" : 90,
+			"min" : 25,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		}
+	],
+	"material" : "materials/presets/rain_screen.json",
+	"maxcount" : 60,
+	"operator" : 
+	[
+		{
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 9,
+			"name" : "remapvalue",
+			"operation" : "remap",
+			"output" : "velocity",
+			"outputrangemax" : "100 -500 0",
+			"outputrangemin" : "-100 -50 0",
+			"transformfunction" : "simplexnoise",
+			"transforminputscale" : 10
+		},
+		{
+			"flags" : 3,
+			"id" : 10,
+			"name" : "remapvalue",
+			"output" : "speed",
+			"outputrangemax" : 7,
+			"outputrangemin" : -5,
+			"transformfunction" : "fbmnoise",
+			"transforminputscale" : 8
+		},
+		{
+			"gravity" : "0 -50 0",
+			"id" : 7,
+			"name" : "movement"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 11,
+			"length" : 0.0099999998,
+			"maxlength" : 1.5,
+			"minlength" : 1,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 2
+}

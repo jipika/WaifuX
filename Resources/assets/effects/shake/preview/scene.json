@@ -1,0 +1,186 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 -1.000",
+		"eye" : "0.000 0.000 0.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"effects" : 
+			[
+				{
+					"file" : "effects/blend/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : 
+							{
+								"BLENDMODE" : 0
+							},
+							"textures" : 
+							[
+								null,
+								"util/white",
+								"masks/blend_mask_843377ec5689457129ad9ee2dd9c051f084db05d"
+							]
+						}
+					]
+				}
+			],
+			"id" : 34,
+			"image" : "models/effectpreview.json",
+			"name" : "effectpreview",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"copybackground" : true,
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/opacity/effect.json",
+					"passes" : 
+					[
+						{
+							"textures" : [ null, "masks/opacity_mask_681d95af21112ea41fc4cd51aa49d9c553ef1173" ]
+						}
+					]
+				},
+				{
+					"file" : "effects/shake/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Strength" : 0.30000001192092896
+							},
+							"textures" : 
+							[
+								null,
+								"masks/shake_mask_ee0d9bbc6d0516b8583c8fb3e841485c0b7ec4e8",
+								"masks/shake_mask_ddade403536094982c53ec13507b52893dc373c9"
+							]
+						}
+					]
+				}
+			],
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "256.000 256.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"config" : 
+			{
+				"passthrough" : true
+			},
+			"copybackground" : true,
+			"effects" : 
+			[
+				{
+					"file" : "effects/shake/effect.json",
+					"passes" : 
+					[
+						{
+							"constantshadervalues" : 
+							{
+								"Power" : 0.77999997138977051,
+								"Speed" : 1,
+								"Strength" : 0.14000000059604645
+							},
+							"textures" : 
+							[
+								null,
+								"masks/shake_mask_bdbea347ab7838b0661ae6af118d7d24d301b354",
+								"masks/shake_mask_15c0e340127e863c97e552f860f4a84c3cb6ab74"
+							]
+						}
+					]
+				}
+			],
+			"id" : 46,
+			"image" : "models/util/composelayer.json",
+			"name" : "Compose",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "512.000 512.000",
+			"visible" : true
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"colorBlendMode" : 0,
+			"config" : 
+			{
+				"passthrough" : true
+			},
+			"copybackground" : true,
+			"effects" : 
+			[
+				{
+					"file" : "effects/shake/effect.json",
+					"passes" : 
+					[
+						{
+							"textures" : 
+							[
+								null,
+								"masks/shake_mask_2056d10e108144c65bea005697dd88d5b58d3b9d",
+								"masks/shake_mask_36ce62bcec300a6727192313c920263bc9bc4096"
+							]
+						}
+					]
+				}
+			],
+			"id" : 60,
+			"image" : "models/util/composelayer.json",
+			"name" : "Compose",
+			"origin" : "128.000 128.000 0.000",
+			"parallaxDepth" : "1.000 1.000",
+			"scale" : "1.000 1.000 1.000",
+			"size" : "512.000 512.000",
+			"visible" : false
+		}
+	]
+}

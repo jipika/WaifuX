@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Kingfisher
+import AVFoundation
 
 struct ContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
@@ -186,6 +187,9 @@ struct ContentView: View {
                 DownloadProgressToastHost(viewModel: downloadTaskViewModel)
                 WallpaperSourceSwitchToast()
                     .padding(.horizontal, 24)
+                    .padding(.bottom, 8)
+                WorkshopSourceSwitchToast()
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 20)
             }
             .zIndex(400)
@@ -213,10 +217,11 @@ struct ContentView: View {
             try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
             await viewModel.initialLoad()
             
-            // 延迟2秒后检查更新
+            // 延迟2秒后检查更新（自动检查，非强制，避免频繁触发）
             try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
             let checker = UpdateChecker.shared
-            let result = await checker.checkForUpdates()
+            let result = await checker.checkForUpdates(force: false)
+            // 只在有更新时显示弹窗，错误或频率限制时静默处理
             if case .updateAvailable(current: _, latest: let release, commit: let commit) = result {
                 updateRelease = release
                 updateCommit = commit
@@ -439,12 +444,14 @@ struct MyMediaContentView: View {
 
     private var wallpaperDownloadsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeaderWithEdit(
+            downloadsSectionHeader(
                 title: t("wallpaper.downloads"),
                 systemImage: "arrow.down.circle.fill",
                 color: LiquidGlassColors.tertiaryBlue,
                 countText: "\(wallpaperDownloadCount) \(t("items"))",
-                section: .wallpaperDownloads
+                section: .wallpaperDownloads,
+                folderURL: DownloadPathManager.shared.wallpapersFolderURL,
+                importAction: importWallpapers
             )
 
             if wallpaperDownloadCount == 0 {
@@ -495,12 +502,15 @@ struct MyMediaContentView: View {
 
     private var mediaDownloadsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeaderWithEdit(
+            downloadsSectionHeader(
                 title: t("media.downloads"),
                 systemImage: "arrow.down.circle.fill",
                 color: LiquidGlassColors.tertiaryBlue,
                 countText: "\(mediaDownloadCount) \(t("items"))",
-                section: .mediaDownloads
+                section: .mediaDownloads,
+                folderURL: DownloadPathManager.shared.mediaFolderURL,
+                importAction: { Task { await importMedia() } },
+                workshopImportAction: importWorkshop
             )
 
             if mediaDownloadCount == 0 {
@@ -609,6 +619,109 @@ struct MyMediaContentView: View {
             Text(countText)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.52))
+
+            // 编辑按钮
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                    if isEditing && editingSection == section {
+                        isEditing = false
+                        selectedItems.removeAll()
+                    } else {
+                        editingSection = section
+                        isEditing = true
+                        selectedItems.removeAll()
+                    }
+                }
+            } label: {
+                Text(isEditing && editingSection == section ? t("done") : t("edit"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: isEditing && editingSection == section ? color.opacity(0.2) : color.opacity(0.1),
+                        in: Capsule(style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(Capsule(style: .continuous))
+        }
+    }
+
+    private func downloadsSectionHeader(
+        title: String,
+        systemImage: String,
+        color: Color,
+        countText: String,
+        section: EditingSection,
+        folderURL: URL,
+        importAction: @escaping () -> Void,
+        workshopImportAction: (() -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(color)
+
+            Text(title)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+
+            Spacer()
+
+            Text(countText)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.52))
+
+            // Workshop 导入按钮
+            if let workshopImportAction {
+                Button(action: workshopImportAction) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .frame(width: 32, height: 32)
+                        .liquidGlassSurface(
+                            .regular,
+                            tint: color.opacity(0.1),
+                            in: Capsule(style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .contentShape(Capsule(style: .continuous))
+            }
+
+            // 导入按钮
+            Button(action: importAction) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .frame(width: 32, height: 32)
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: color.opacity(0.1),
+                        in: Capsule(style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(Capsule(style: .continuous))
+
+            // 在访达中显示按钮
+            Button {
+                openFolderInFinder(folderURL)
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .frame(width: 32, height: 32)
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: color.opacity(0.1),
+                        in: Capsule(style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(Capsule(style: .continuous))
 
             // 编辑按钮
             Button {
@@ -882,6 +995,305 @@ struct MyMediaContentView: View {
         }
     }
 
+    // MARK: - 导入与文件夹操作
+
+    private func openFolderInFinder(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    private func importWallpapers() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationFolder = DownloadPathManager.shared.wallpapersFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let destURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+            do {
+                if url.standardizedFileURL != destURL.standardizedFileURL {
+                    if fileManager.fileExists(atPath: destURL.path) {
+                        try fileManager.removeItem(at: destURL)
+                    }
+                    try fileManager.copyItem(at: url, to: destURL)
+                }
+                let wallpaper = makeImportedWallpaper(from: destURL)
+                WallpaperLibraryService.shared.recordDownload(wallpaper, fileURL: destURL)
+                importedCount += 1
+            } catch {
+                print("[ContentView] Failed to import wallpaper \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            viewModel.objectWillChange.send()
+        }
+    }
+
+    private func importMedia() async {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.movie]
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationFolder = DownloadPathManager.shared.mediaFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let destURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+            do {
+                if url.standardizedFileURL != destURL.standardizedFileURL {
+                    if fileManager.fileExists(atPath: destURL.path) {
+                        try fileManager.removeItem(at: destURL)
+                    }
+                    try fileManager.copyItem(at: url, to: destURL)
+                }
+                let item = await makeImportedMediaItem(from: destURL)
+                MediaLibraryService.shared.recordDownload(item: item, localFileURL: destURL)
+                importedCount += 1
+            } catch {
+                print("[ContentView] Failed to import media \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            mediaViewModel.objectWillChange.send()
+        }
+    }
+
+    private func makeImportedWallpaper(from fileURL: URL) -> Wallpaper {
+        let fileName = fileURL.lastPathComponent
+        let id: String
+        if fileName.hasPrefix("wallhaven-"), let dotIndex = fileName.firstIndex(of: ".") {
+            let start = fileName.index(fileName.startIndex, offsetBy: 10)
+            let extracted = String(fileName[start..<dotIndex])
+            id = extracted.isEmpty ? "local_import_\(UUID().uuidString.prefix(8))" : extracted
+        } else {
+            id = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+        }
+
+        let localPath = fileURL.absoluteString
+        var dimensionX = 1920
+        var dimensionY = 1080
+        if let image = NSImage(contentsOf: fileURL) {
+            dimensionX = Int(image.size.width)
+            dimensionY = Int(image.size.height)
+        }
+        let resolution = "\(dimensionX)x\(dimensionY)"
+        let ratio = dimensionY > 0 ? Double(dimensionX) / Double(dimensionY) : 1.77
+
+        return Wallpaper(
+            id: id,
+            url: localPath,
+            shortUrl: nil,
+            views: 0,
+            favorites: 0,
+            downloads: nil,
+            source: nil,
+            purity: "sfw",
+            category: "general",
+            dimensionX: dimensionX,
+            dimensionY: dimensionY,
+            resolution: resolution,
+            ratio: String(format: "%.2f", ratio),
+            fileSize: nil,
+            fileType: nil,
+            createdAt: nil,
+            colors: [],
+            path: localPath,
+            thumbs: Wallpaper.Thumbs(large: localPath, original: localPath, small: localPath),
+            tags: nil,
+            uploader: nil
+        )
+    }
+
+    private func makeImportedMediaItem(from fileURL: URL) async -> MediaItem {
+        let fileName = fileURL.lastPathComponent
+        let slug: String
+        if fileName.hasPrefix("motionbgs-") {
+            let parts = fileName.split(separator: "-")
+            if parts.count >= 2 {
+                slug = String(parts[1])
+            } else {
+                slug = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+            }
+        } else {
+            slug = "local_import_\(fileURL.deletingPathExtension().lastPathComponent)"
+        }
+
+        let title = fileURL.deletingPathExtension().lastPathComponent
+        var resolutionLabel = "Unknown"
+        var durationSeconds: Double?
+        let asset = AVAsset(url: fileURL)
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            if let track = tracks.first {
+                let naturalSize = try await track.load(.naturalSize)
+                let preferredTransform = try await track.load(.preferredTransform)
+                let size = naturalSize.applying(preferredTransform)
+                let w = Int(abs(size.width))
+                let h = Int(abs(size.height))
+                resolutionLabel = "\(w)x\(h)"
+            }
+            let duration = try await asset.load(.duration)
+            if duration.isValid && duration != CMTime.indefinite {
+                durationSeconds = CMTimeGetSeconds(duration)
+            }
+        } catch {
+            print("[ContentView] Failed to load video metadata: \(error)")
+        }
+
+        _ = await VideoThumbnailCache.shared.thumbnailImage(for: fileURL)
+        let thumbnailURL = VideoThumbnailCache.shared.thumbnailURL(for: fileURL)
+
+        return MediaItem(
+            slug: slug,
+            title: title,
+            pageURL: fileURL,
+            thumbnailURL: thumbnailURL,
+            resolutionLabel: resolutionLabel,
+            collectionTitle: "Imported",
+            summary: nil,
+            previewVideoURL: fileURL,
+            posterURL: thumbnailURL,
+            tags: [],
+            exactResolution: resolutionLabel,
+            durationSeconds: durationSeconds,
+            downloadOptions: [],
+            sourceName: "Import",
+            isAnimatedImage: nil
+        )
+    }
+
+
+
+    private func importWorkshop() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.prompt = t("import")
+
+        guard panel.runModal() == .OK else { return }
+
+        let destinationRoot = DownloadPathManager.shared.mediaFolderURL
+        let fileManager = FileManager.default
+        var importedCount = 0
+
+        for url in panel.urls {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "pkg" else {
+                print("[ContentView] Skipped non-pkg file: \(url.lastPathComponent)")
+                continue
+            }
+
+            let sourceDir = url.deletingLastPathComponent()
+            let projectJSONURL = sourceDir.appendingPathComponent("project.json")
+            guard fileManager.fileExists(atPath: projectJSONURL.path) else {
+                print("[ContentView] No project.json found next to \(url.lastPathComponent)")
+                continue
+            }
+
+            guard let data = try? Data(contentsOf: projectJSONURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("[ContentView] Failed to parse project.json for \(url.lastPathComponent)")
+                continue
+            }
+
+            let title = (json["title"] as? String) ?? sourceDir.lastPathComponent
+            var workshopID = (json["publishedfileid"] as? String) ?? (json["id"] as? String)
+
+            if workshopID == nil {
+                let dirName = sourceDir.lastPathComponent
+                let numeric = dirName.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if !numeric.isEmpty {
+                    workshopID = numeric
+                }
+            }
+
+            guard let id = workshopID, !id.isEmpty else {
+                print("[ContentView] Could not infer workshop ID for \(url.lastPathComponent)")
+                continue
+            }
+
+            let destDir = destinationRoot.appendingPathComponent("workshop_\(id)")
+            do {
+                if fileManager.fileExists(atPath: destDir.path) {
+                    try fileManager.removeItem(at: destDir)
+                }
+                try fileManager.copyItem(at: sourceDir, to: destDir)
+
+                let previewExtensions = ["jpg", "jpeg", "png", "webp", "gif"]
+                var previewURL: URL?
+                for pe in previewExtensions {
+                    let candidate = destDir.appendingPathComponent("preview.\(pe)")
+                    if fileManager.fileExists(atPath: candidate.path) {
+                        previewURL = candidate
+                        break
+                    }
+                }
+
+                let item = makeImportedWorkshopItem(
+                    workshopID: id,
+                    title: title,
+                    projectJSON: json,
+                    destDir: destDir,
+                    previewURL: previewURL
+                )
+                MediaLibraryService.shared.recordDownload(item: item, localFileURL: destDir)
+                importedCount += 1
+            } catch {
+                print("[ContentView] Failed to import workshop \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if importedCount > 0 {
+            mediaViewModel.objectWillChange.send()
+        }
+    }
+
+    private func makeImportedWorkshopItem(
+        workshopID: String,
+        title: String,
+        projectJSON: [String: Any],
+        destDir: URL,
+        previewURL: URL?
+    ) -> MediaItem {
+        let typeString = (projectJSON["type"] as? String) ?? "pkg"
+        let resolutionLabel = typeString.capitalized
+        let thumbnailURL = previewURL ?? URL(string: "https://steamcommunity.com/favicon.ico")!
+
+        return MediaItem(
+            slug: "workshop_\(workshopID)",
+            title: title,
+            pageURL: URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(workshopID)")!,
+            thumbnailURL: thumbnailURL,
+            resolutionLabel: resolutionLabel,
+            collectionTitle: "Workshop",
+            summary: (projectJSON["description"] as? String),
+            previewVideoURL: nil,
+            posterURL: previewURL,
+            tags: [],
+            exactResolution: nil,
+            durationSeconds: nil,
+            downloadOptions: [],
+            sourceName: t("wallpaperEngine"),
+            isAnimatedImage: nil
+        )
+    }
+
     private func downloadStatusText(for status: DownloadStatus) -> String {
         switch status {
         case .pending:
@@ -972,28 +1384,37 @@ private struct MyMediaVideoCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @State private var isCardVisible = false
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 // 图片区域 - 单独裁剪
                 ZStack {
-                    KFImage(item.thumbnailURL)
-                        .fade(duration: 0.3)
-                        .placeholder { _ in
-                            SkeletonCard(
-                                width: LibraryCardMetrics.cardWidth,
-                                height: LibraryCardMetrics.thumbnailHeight,
-                                cornerRadius: 0
-                            )
-                        }
-                        .resizable()
-                        .scaledToFill()
-                        .frame(
+                    KFMediaCoverImage(
+                        url: item.coverImageURL,
+                        animated: item.shouldRenderThumbnailAsAnimatedImage,
+                        downsampleSize: CGSize(
+                            width: LibraryCardMetrics.cardWidth * 2,
+                            height: LibraryCardMetrics.thumbnailHeight * 2
+                        ),
+                        fadeDuration: 0.3,
+                        loadFinished: nil,
+                        layoutSize: CGSize(
                             width: LibraryCardMetrics.cardWidth,
                             height: LibraryCardMetrics.thumbnailHeight
-                        )
-                        .clipped()
+                        ),
+                        playAnimatedImage: true,
+                        isVisible: isCardVisible
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(
+                        width: LibraryCardMetrics.cardWidth,
+                        height: LibraryCardMetrics.thumbnailHeight
+                    )
+                    .clipped()
+                    .onAppear { isCardVisible = true }
+                    .onDisappear { isCardVisible = false }
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {
@@ -1259,6 +1680,8 @@ private struct DownloadProgressToast: View {
             return "photo.fill"
         case .media:
             return "play.rectangle.fill"
+        case .workshop:
+            return "gearshape.fill"
         }
     }
 
@@ -1285,9 +1708,9 @@ private struct DownloadProgressToast: View {
 
     private var isCompleted: Bool { task.status == .completed }
 
-    /// 进度条动画：平滑跟随
+    /// 进度条动画：平滑跟随（优化：更长的响应时间减少重绘频率）
     private var progressAnimation: Animation {
-        .spring(response: 0.30, dampingFraction: 0.88, blendDuration: 0)
+        .interpolatingSpring(stiffness: 120, damping: 20)
     }
 
     var body: some View {
@@ -1455,5 +1878,73 @@ private struct WallpaperSourceSwitchToast: View {
         }
         self.hideWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
+    }
+}
+
+
+// MARK: - Wallpaper Engine 数据源切换 Toast
+private struct WorkshopSourceSwitchToast: View {
+    @ObservedObject private var sourceManager = WorkshopSourceManager.shared
+    @State private var isShowing: Bool = false
+    @State private var hideWorkItem: DispatchWorkItem?
+
+    var body: some View {
+        VStack {
+            if let message = sourceManager.lastSwitchMessage, isShowing {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: sourceManager.activeSource.icon)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Color(hex: "0A84FF"))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.5))
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Color(hex: "5E5CE6"))
+                    }
+                    Text(message)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                        )
+                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
+                )
+                .frame(maxWidth: 360)
+            }
+        }
+        .opacity(isShowing ? 1 : 0)
+        .offset(y: isShowing ? 0 : 20)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .onChange(of: sourceManager.lastSwitchMessage) { _, _ in
+            checkForNewMessage()
+        }
+    }
+
+    private func checkForNewMessage() {
+        guard sourceManager.lastSwitchMessage != nil else { return }
+        
+        hideWorkItem?.cancel()
+        isShowing = true
+        
+        let workItem = DispatchWorkItem { [weak sourceManager] in
+            withAnimation(.easeOut(duration: 0.25)) {
+                isShowing = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                sourceManager?.lastSwitchMessage = nil
+            }
+        }
+        self.hideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: workItem)
     }
 }

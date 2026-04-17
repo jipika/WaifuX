@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "brushpreview",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled"
+	}]
+}

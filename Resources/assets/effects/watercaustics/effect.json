@@ -1,0 +1,37 @@
+{
+	"version" : 2,
+	"replacementkey" : "caustics",
+	"name" : "ui_editor_effect_water_caustics_title",
+	"description" : "ui_editor_effect_water_caustics_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/caustics.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/caustics.json",
+		"shaders/effects/caustics.frag",
+		"shaders/effects/caustics.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectPerspectiveUV",
+			"condition" :
+			{
+				"PERSPECTIVE" : 1
+			},
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"p2" : "point2",
+				"p3" : "point3"
+			}
+		}
+	]
+}

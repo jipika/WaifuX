@@ -1,0 +1,12 @@
+{
+	"passes": [{
+		"shader": "font",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode" : "nocull",
+		"combos" : {
+			"COLORFONT" : 1
+		}
+	}]
+}

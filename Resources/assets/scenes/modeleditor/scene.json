@@ -1,0 +1,72 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 0.00000",
+		"eye" : "1.70000 1.00000 2.90000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.40000 0.40000 0.40000",
+		"bloom" : true,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.5,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.50000 0.50000 0.50000",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"hdr" : false,
+		"nearz" : 0.1,
+		"lightconfig" : 
+		{
+			"point" : 2
+		},
+		"orthogonalprojection" : null,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"transparentsorting" : true,
+		"zoom" : 1.0
+	},
+	"objects" : [{
+			"angles" : "0.00000 0.00000 0.00000",
+			"color" : "0.63137 1.00000 0.95294",
+			"id" : 2,
+			"intensity" : 6.0,
+			"light" : "lpoint",
+			"locktransforms" : false,
+			"name" : "",
+			"origin" : "15.64404 15.90002 15.00000",
+			"parallaxDepth" : "0.00000 0.00000",
+			"radius" : 150,
+			"scale" : "1.00000 1.00000 1.00000",
+			"visible" : true
+		}, {
+			"angles" : "0.00000 0.00000 0.00000",
+			"color" : "0.5 0.20000 1.0",
+			"id" : 3,
+			"intensity" : 5.0,
+			"light" : "lpoint",
+			"locktransforms" : false,
+			"name" : "",
+			"origin" : "-2.64404 -5.90002 -4.00000",
+			"parallaxDepth" : "0.00000 0.00000",
+			"radius" : 50,
+			"scale" : "1.00000 1.00000 1.00000",
+			"visible" : true
+		}],
+	"version" : 3
+}

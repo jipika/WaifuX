@@ -1,0 +1,19 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "normal",
+			"constantshadervalues" : 
+			{
+				"metallic" : 0.19,
+				"roughness" : 0.36
+			},
+			"cullmode" : "normal",
+			"depthtest" : "enabled",
+			"depthwrite" : "enabled",
+			"shader" : "generic4",
+			"textures" : [ "models/sphere/sphere" ]
+		}
+	]
+}

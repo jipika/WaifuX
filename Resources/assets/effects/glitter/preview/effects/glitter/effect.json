@@ -1,0 +1,48 @@
+{
+	"version" : 1,
+	"replacementkey" : "glitter",
+	"name" : "ui_editor_effect_glitter_title",
+	"description" : "ui_editor_effect_glitter_description",
+	"group" : "colorize",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/glitter_prepare.json",
+			"target" : "_rt_GlitterTiles"
+		},
+		{
+			"material" : "materials/effects/glitter_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "previous",
+					"index" : 0
+				},
+				{
+					"name" : "_rt_GlitterTiles",
+					"index" : 1
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_GlitterTiles",
+			"width" : 256,
+			"height" : 256,
+			"format" : "r8",
+			"uvs" : "repeat"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/glitter_prepare.json",
+		"materials/effects/glitter_combine.json",
+		"shaders/effects/glitter_prepare.frag",
+		"shaders/effects/glitter_prepare.vert",
+		"shaders/effects/glitter_combine.frag",
+		"shaders/effects/glitter_combine.vert"
+	]
+}

@@ -1,0 +1,10 @@
+{
+	"passes": [{
+		"shader": "composelayer",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"blending": "translucent",
+		"cullmode": "nocull",
+		"textures": ["_rt_FullFrameBuffer"]
+	}]
+}

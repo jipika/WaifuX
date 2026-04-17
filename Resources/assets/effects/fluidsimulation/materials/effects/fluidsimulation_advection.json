@@ -1,0 +1,12 @@
+{
+	"passes": [{
+		"shader": "effects/fluidsimulation_advection",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"constantshadervalues" : {
+			"dissipation" : 0.2
+		}
+	}]
+}

@@ -5,7 +5,7 @@ struct CustomProgressView: View {
     var tint: Color = .white
     var scale: CGFloat = 1.0
     
-    @State private var isAnimating = false
+    @State private var rotation: Double = 0
     
     var body: some View {
         ZStack {
@@ -17,16 +17,16 @@ struct CustomProgressView: View {
                 .trim(from: 0, to: 0.7)
                 .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .frame(width: 20 * scale, height: 20 * scale)
-                .rotationEffect(Angle(degrees: isAnimating ? 360 : 0))
+                .rotationEffect(Angle(degrees: rotation))
         }
         .onAppear {
-            withAnimation(
-                .linear(duration: 1)
-                .repeatForever(autoreverses: false)
-            ) {
-                isAnimating = true
-            }
+            rotation = 360
         }
+        .animation(
+            .linear(duration: 1)
+                .repeatForever(autoreverses: false),
+            value: rotation
+        )
     }
 }
 
@@ -114,5 +114,7 @@ struct LiquidGlassLinearProgressBar: View {
             }
         }
         .frame(height: height)
+        // 关键优化：使用 drawingGroup 将视图渲染为单个纹理，避免离屏渲染导致的卡顿
+        .drawingGroup(opaque: false)
     }
 }

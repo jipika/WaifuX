@@ -110,6 +110,7 @@ struct HomeContentView: View {
             Task {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
                 await mediaViewModel.initialLoadIfNeeded()
+                await mediaViewModel.refreshHomeItems()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
@@ -239,10 +240,10 @@ struct HomeContentView: View {
 
     private var contentSections: some View {
         VStack(alignment: .leading, spacing: 38) {
-            // 热门动态壁纸
+            // 热门动态壁纸（使用独立的首页数据，不跟随 Explore 列表变化）
             HomeMediaSection(
                 title: t("hotDynamic"),
-                mediaItems: Array(mediaViewModel.items.prefix(10)),
+                mediaItems: mediaViewModel.homeItems,
                 onSelect: { item in
                     selectedMedia = item
                 }
@@ -1124,7 +1125,6 @@ struct HomeShelfCard: View {
                 isHovered = hovering
             }
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
     private func tagChip(text: String) -> some View {
@@ -1307,7 +1307,7 @@ private struct HomeMediaSection: View {
                             .onAppear {
                                 let urls = (index + 1..<(index + 4))
                                     .filter { $0 < mediaItems.count }
-                                    .map { mediaItems[$0].thumbnailURL }
+                                    .map { mediaItems[$0].coverImageURL }
                                 ImagePrefetcher(urls: urls).start()
                             }
                         }
@@ -1330,14 +1330,17 @@ private struct HomeMediaCard: View {
     var body: some View {
         Button(action: onTap) {
             ZStack {
-                // 背景图
-                KFImage(item.thumbnailURL)
-                    .fade(duration: 0.3)
-                    .placeholder { _ in
-                        SkeletonCard(width: cardSize.width, height: cardSize.height, cornerRadius: 18)
-                    }
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                // 背景图（底层色块 + 失败占位由 KFMediaCoverImage 统一处理）
+                KFMediaCoverImage(
+                    url: item.coverImageURL,
+                    animated: item.shouldRenderThumbnailAsAnimatedImage,
+                    downsampleSize: CGSize(width: cardSize.width * 2, height: cardSize.height * 2),
+                    fadeDuration: 0.3,
+                    loadFinished: nil,
+                    layoutSize: cardSize,
+                    playAnimatedImage: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // 渐变遮罩
                 LinearGradient(
@@ -1395,7 +1398,6 @@ private struct HomeMediaCard: View {
                 isHovered = hovering
             }
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 

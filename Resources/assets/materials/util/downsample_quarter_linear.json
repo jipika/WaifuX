@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "downsample_quarter_linear",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": ["_rt_FullFrameBuffer"],
+		"cullmode" : "nocull"
+	}]
+}

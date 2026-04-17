@@ -6,20 +6,12 @@ class DownloadTaskViewModel: ObservableObject {
     @Published var tasks: [DownloadTask] = []
 
     private let downloadService = DownloadTaskService.shared
-    private var cancellables = Set<AnyCancellable>()
 
     init() {
-        // 监听下载服务的变化
+        // 仅桥接 tasks，避免重复 objectWillChange 转发导致全局重绘频率过高
         downloadService.$tasks
             .receive(on: DispatchQueue.main)
             .assign(to: &$tasks)
-
-        downloadService.objectWillChange
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Task Actions

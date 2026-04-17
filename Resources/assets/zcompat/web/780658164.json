@@ -1,0 +1,19 @@
+{
+	"actions" : [{
+		"file" : "index_files/index.min.js.Download",
+		"replace" : "u(t,e){t.texImage2D",
+		"insert" : "u(t,e){if(e!=null)t.texImage2D"
+	}, {
+		"file" : "js/index.min.js",
+		"replace" : "u(t,e){t.texImage2D",
+		"insert" : "u(t,e){if(e!=null)t.texImage2D"
+	}, {
+		"file" : "js/index2.min.js",
+		"replace" : "u(e,t){e.texImage2D",
+		"insert" : "u(e,t){if(t!=null)e.texImage2D"
+	}, {
+		"file" : "js/index3.min.js",
+		"replace" : "u(t,e){t.texImage2D",
+		"insert" : "u(t,e){if(e!=null)t.texImage2D"
+	}]
+}

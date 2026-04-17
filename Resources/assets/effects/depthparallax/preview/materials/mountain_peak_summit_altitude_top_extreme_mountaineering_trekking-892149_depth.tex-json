@@ -1,0 +1,8 @@
+{
+	"bleedtransparentcolors" : true,
+	"clampuvs" : true,
+	"format" : "r8",
+	"halfmip" : true,
+	"nomip" : true,
+	"nonpoweroftwo" : true
+}

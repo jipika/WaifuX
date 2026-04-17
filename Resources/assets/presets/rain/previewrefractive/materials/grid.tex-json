@@ -1,0 +1,6 @@
+{
+	"clampuvs" : true,
+	"format" : "rgba8888",
+	"nointerpolation" : true,
+	"nonpoweroftwo" : true
+}

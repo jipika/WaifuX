@@ -1,0 +1,6 @@
+{
+	"passes": [{
+		"shader": "occlusiontest",
+		"depthwrite": "disabled"
+	}]
+}

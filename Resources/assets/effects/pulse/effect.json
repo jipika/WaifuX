@@ -1,0 +1,20 @@
+{
+	"version" : 1,
+	"replacementkey" : "pulse",
+	"name" : "ui_editor_effect_pulse_title",
+	"description" : "ui_editor_effect_pulse_description",
+	"group" : "animate",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/pulse.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/pulse.json",
+		"shaders/effects/pulse.frag",
+		"shaders/effects/pulse.vert"
+	]
+}

@@ -1,0 +1,84 @@
+{
+	"name" : "ui_editor_preset_stars_title",
+	"description" : "ui_editor_preset_stars_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "Star field",
+				"value" : 0
+			},
+			{
+				"label" : "Star circle",
+				"value" : 1
+			},
+			{
+				"label" : "Shooting star",
+				"value" : 2
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewstarfield/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Star field",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/starfield.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/starfield.json",
+				"particles/presets/starfield.json"
+			]
+		},
+		{
+			"preview" : "previewstarcircle/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Star circle",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/starcircle.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/starcircle.json",
+				"particles/presets/starcircle.json"
+			]
+		},
+		{
+			"preview" : "previewshootingstar/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Shooting star",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/shootingstar.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/shootingstar.json",
+				"materials/presets/shootingstarglow.json",
+				"particles/presets/shootingstar.json",
+				"particles/presets/shootingstarglow.json"
+			]
+		}
+	]
+}

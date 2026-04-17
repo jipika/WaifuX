@@ -1,0 +1,8 @@
+{
+	"passes": [{
+		"shader": "editorsprite",
+		"textures": ["editor/tubelightsprite"],
+		"blending": "translucent",
+		"cullmode" : "nocull"
+	}]
+}

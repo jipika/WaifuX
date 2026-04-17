@@ -1,0 +1,90 @@
+{
+	"version" : 1,
+	"replacementkey" : "cursorripple",
+	"name" : "ui_editor_effect_cursor_ripple_title",
+	"description" : "ui_editor_effect_cursor_ripple_description",
+	"group" : "interactive",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/cursorripple_apply_force.json",
+			"target" : "_rt_EightBuffer1",
+			"bind" :
+			[
+				{
+					"name" : "_rt_EightBuffer2",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/cursorripple_simulate_force.json",
+			"target" : "_rt_EightBuffer2",
+			"bind" :
+			[
+				{
+					"name" : "_rt_EightBuffer1",
+					"index" : 0
+				}
+			]
+		},
+		{
+			"material" : "materials/effects/cursorripple_combine.json",
+			"bind" :
+			[
+				{
+					"name" : "_rt_EightBuffer2",
+					"index" : 0
+				},
+				{
+					"name" : "previous",
+					"index" : 1
+				}
+			]
+		}
+	],
+	"fbos" :
+	[
+		{
+			"name" : "_rt_EightBuffer1",
+			"fit" : 512,
+			"format" : "rgba8888"
+		},
+		{
+			"name" : "_rt_EightBuffer2",
+			"fit" : 512,
+			"format" : "rgba8888"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/cursorripple_apply_force.json",
+		"materials/effects/cursorripple_simulate_force.json",
+		"materials/effects/cursorripple_combine.json",
+		"shaders/effects/cursorripple_apply_force.frag",
+		"shaders/effects/cursorripple_apply_force.vert",
+		"shaders/effects/cursorripple_simulate_force.frag",
+		"shaders/effects/cursorripple_simulate_force.vert",
+		"shaders/effects/cursorripple_combine.frag",
+		"shaders/effects/cursorripple_combine.vert"
+	],
+	"gizmos" :
+	[
+		{
+			"type" : "EffectPerspectiveUV",
+			"condition" :
+			{
+				"PERSPECTIVE" : 1
+			},
+			"vars" :
+			{
+				"p0" : "point0",
+				"p1" : "point1",
+				"p2" : "point2",
+				"p3" : "point3"
+			}
+		}
+	]
+}

@@ -1,0 +1,46 @@
+{
+	"material": "materials/presets/snowparticles.json",
+	"maxcount": 300,
+	"starttime": 15,
+	"emitter": [{
+		"name": "sphererandom",
+		"rate": 10,
+		"origin": "0 650 0",
+		"directions" : "1 0.03 0",
+		"distancemin": 10,
+		"distancemax": 256
+	}],
+	"initializer": [{
+		"name": "lifetimerandom",
+		"min": 8,
+		"max": 20
+	}, {
+		"name": "sizerandom",
+		"min": 2,
+		"max": 30
+	}, {
+		"name": "velocityrandom",
+		"min": "-10 -50 0",
+		"max": "-37 -90 0"
+	}, {
+		"name": "colorrandom",
+		"min": "90 92 95",
+		"max": "95 98 100"
+	}],
+	"operator": [{
+		"name": "movement",
+		"gravity": "0 0 0"
+	}, {
+		"name": "oscillateposition",
+		"mask": "1 0.5 0",
+		"scalemin": 20,
+		"scalemax": 35,
+		"frequencymin": 0.1,
+		"frequencymax": 0.6,
+		"phasemin": 0,
+		"phasemax": 1
+	}, {
+		"name": "alphafade",
+		"fadeintime": 0.1
+	}]
+}

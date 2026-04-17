@@ -1,0 +1,83 @@
+{
+	"children" : 
+	[
+		{
+			"id" : 15,
+			"name" : "particles/new_particle_system_child.json",
+			"type" : "eventfollow"
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 0 0",
+			"distancemax" : 200,
+			"distancemin" : 5,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 1
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 2,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 200,
+			"min" : 50,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"min" : "255 255 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 13,
+			"max" : "0 600 0",
+			"min" : "0 500 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"huesteps" : 12,
+			"id" : 16,
+			"name" : "hsvcolorrandom"
+		}
+	],
+	"material" : "materials/particle/halo_1.json",
+	"maxcount" : 500,
+	"operator" : 
+	[
+		{
+			"gravity" : "0 -500 0",
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.1,
+			"fadeouttime" : 1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"endtime" : 0.69999999,
+			"id" : 17,
+			"name" : "colorchange",
+			"starttime" : 0.5
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"name" : "sprite"
+		}
+	],
+	"starttime" : 0.80000001
+}

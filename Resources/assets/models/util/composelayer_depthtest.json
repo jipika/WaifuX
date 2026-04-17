@@ -1,0 +1,4 @@
+{
+	"material" : "materials/util/composelayer_depthtest.json",
+	"passthrough" : true
+}

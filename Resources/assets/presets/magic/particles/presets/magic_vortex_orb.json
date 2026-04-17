@@ -1,0 +1,111 @@
+{
+	"children" : [],
+	"controlpoint" : 
+	[
+		{
+			"id" : 0
+		},
+		{
+			"flags" : 16,
+			"id" : 1
+		},
+		{
+			"flags" : 1,
+			"id" : 2
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"cone" : 0,
+			"distancemax" : 200,
+			"distancemin" : 200,
+			"id" : 6,
+			"name" : "sphererandom",
+			"rate" : 5000,
+			"speedmax" : 128,
+			"speedmin" : 128
+		}
+	],
+	"flags" : 1,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"exponent" : 1,
+			"id" : 3,
+			"max" : 10,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "204 0 255",
+			"min" : "124 64 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 5,
+			"max" : 1,
+			"min" : 1,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/magic_vortex_orb.json",
+	"maxcount" : 15000,
+	"operator" : 
+	[
+		{
+			"drag" : 1,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"fadeintime" : 0.69999999,
+			"fadeouttime" : 0.69999999,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"controlpoint" : 1,
+			"distanceinner" : 0,
+			"distanceouter" : 1,
+			"flags" : 2,
+			"id" : 9,
+			"name" : "vortex_v2",
+			"ringpulldistance" : 250,
+			"ringradius" : 256,
+			"ringwidth" : 5,
+			"speedinner" : 0,
+			"speedouter" : 2500
+		},
+		{
+			"id" : 12,
+			"name" : "maintaindistancetocontrolpoint",
+			"variablestrength" : 5
+		},
+		{
+			"controlpoint" : 2,
+			"flags" : 0,
+			"id" : 13,
+			"name" : "controlpointattract",
+			"origin" : "0 0 0",
+			"scale" : -20000,
+			"threshold" : 128
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 11,
+			"maxlength" : 3,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

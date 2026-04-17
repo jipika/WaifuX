@@ -1,0 +1,167 @@
+{
+	"shaders": [{
+		"value": "default",
+		"shader": "generic4",
+		"label": "Generic",
+		"combos": {},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rgba8888", "label":"ui_editor_importer_texture_format_rgba8888"},
+				{"value":"rg88", "label":"ui_editor_importer_texture_format_rg88"},
+				{"value":"dxt5", "label":"ui_editor_importer_texture_format_dxt5"}],
+			"config": {
+				"format": "dxt5"
+			}
+		}]
+	}],
+	"imageshaders": [{
+		"value": "imagegeneric",
+		"shader": "genericimage4",
+		"label": "Image",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rgba8888", "label":"ui_editor_importer_texture_format_rgba8888"}, {"value":"dxt5", "label":"ui_editor_importer_texture_format_dxt5"}, {"value":"dxt1", "label":"ui_editor_importer_texture_format_dxt1"}],
+			"config": {
+				"clampuvs" : true,
+				"nonpoweroftwo": true,
+				"halfmip": true
+			}
+		}]
+	}],
+	"imageshadersrg88": [{
+		"value": "imagegeneric",
+		"shader": "genericimage4",
+		"label": "Image",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rg88", "label":"ui_editor_importer_texture_format_rg88"}],
+			"config": {
+				"clampuvs" : true,
+				"nonpoweroftwo": true,
+				"halfmip": true
+			}
+		}]
+	}],
+	"imageshadersr8": [{
+		"value": "imagegeneric",
+		"shader": "genericimage4",
+		"label": "Image",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"r8", "label":"ui_editor_importer_texture_format_r8"}],
+			"config": {
+				"clampuvs" : true,
+				"nonpoweroftwo": true,
+				"nomip" : true,
+				"halfmip": true,
+				"format": "r8"
+			}
+		}]
+	}],
+	"imageshadersn": [{
+		"value": "imagegeneric",
+		"shader": "genericimage4",
+		"label": "Image (normal map)",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rg88n", "label":"ui_editor_importer_texture_format_rg88"}, {"value":"rgba8888n", "label":"ui_editor_importer_texture_format_rgba8888"}, {"value":"dxt5n", "label":"ui_editor_importer_texture_format_dxt5"}],
+			"config": {
+				"clampuvs" : true,
+				"nonpoweroftwo": true,
+				"halfmip": true,
+				"format": "rg88n"
+			}
+		}]
+	}],
+	"animatedimageshaders":	[{
+		"value": "imagegenericspritesheet",
+		"shader": "genericimage4",
+		"label": "Image (animated)",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {
+			"SPRITESHEET": 1
+		},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rgba8888", "label":"ui_editor_importer_texture_format_rgba8888"}, {"value":"dxt5", "label":"ui_editor_importer_texture_format_dxt5"}, {"value":"dxt1", "label":"ui_editor_importer_texture_format_dxt1"}],
+			"config": {
+				"nonpoweroftwo": true,
+				"nointerpolation" : true,
+				"clampuvs" : true,
+				"nomip" : true,
+				"halfmip": true,
+				"format": "rgba8888"
+			}
+		}]
+	}],
+	"animatedimageshaderssmooth":	[{
+		"value": "imagegenericspritesheet",
+		"shader": "genericimage4",
+		"label": "Image (animated)",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {
+			"SPRITESHEET": 1
+		},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rgba8888", "label":"ui_editor_importer_texture_format_rgba8888"}, {"value":"dxt5", "label":"ui_editor_importer_texture_format_dxt5"}],
+			"config": {
+				"nonpoweroftwo": true,
+				"clampuvs" : true,
+				"nomip" : true,
+				"halfmip": true,
+				"format": "rgba8888"
+			}
+		}]
+	}],
+	"animatedimageshadersn":	[{
+		"value": "imagegenericspritesheet",
+		"shader": "genericimage4",
+		"label": "Image (animated, normal map)",
+		"blending": "translucent",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {
+			"SPRITESHEET": 1
+		},
+		"textures": [{
+			"suffix": "",
+			"formats": [{"value":"rgba8888n", "label":"ui_editor_importer_texture_format_rgba8888"}, {"value":"dxt5n", "label":"ui_editor_importer_texture_format_dxt5"}],
+			"config": {
+				"nonpoweroftwo": true,
+				"nointerpolation" : true,
+				"clampuvs" : true,
+				"nomip" : true,
+				"halfmip": true,
+				"format": "rgba8888"
+			}
+		}]
+	}]
+}

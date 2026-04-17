@@ -11,27 +11,29 @@ final class DownloadPathManager {
     private let permissionManager = DownloadPermissionManager.shared
 
     // MARK: - 文件夹结构
-    /// 根目录: ~/Downloads/WallHaven/ 或用户选择的目录
+    /// 根目录: ~/Library/Application Support/WaifuX/ 或用户选择的目录
     var rootFolderURL: URL {
-        if let permittedURL = permissionManager.currentFolderURL {
+        if let permittedURL = permissionManager.currentFolderURL,
+           permittedURL.path != legacyFolderURL.path,
+           !permittedURL.path.hasPrefix(legacyFolderURL.path) {
             return permittedURL
         }
-        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
-            .appendingPathComponent("WallHaven", isDirectory: true)
+            .appendingPathComponent("WaifuX", isDirectory: true)
     }
 
-    /// 壁纸目录: ~/Downloads/WallHaven/Wallpapers/
+    /// 壁纸目录: ~/Library/Application Support/WaifuX/Wallpapers/
     var wallpapersFolderURL: URL {
         rootFolderURL.appendingPathComponent("Wallpapers", isDirectory: true)
     }
 
-    /// 媒体目录: ~/Downloads/WallHaven/Media/
+    /// 媒体目录: ~/Library/Application Support/WaifuX/Media/
     var mediaFolderURL: URL {
         rootFolderURL.appendingPathComponent("Media", isDirectory: true)
     }
 
-    /// 旧版统一目录（用于迁移检测）
+    /// 旧版统一目录（仅作参考，不再自动读取）
     var legacyFolderURL: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
             .first!
@@ -152,59 +154,31 @@ final class DownloadPathManager {
         }
     }
 
-    /// 查找壁纸文件（自动检测多个可能位置）
-    /// 搜索顺序: 1. 新位置 -> 2. 旧位置 -> 3. 未找到
+    /// 查找壁纸文件（仅检测新位置）
     func locateWallpaperFile(id: String, fileExtension: String) -> FileLocation {
         let fileName = "wallhaven-\(id).\(fileExtension)"
-
-        // 1. 检查新位置
-        let newLocation = wallpapersFolderURL.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: newLocation.path) {
-            return FileLocation(url: newLocation, foundIn: .wallpapersFolder)
+        let location = wallpapersFolderURL.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: location.path) {
+            return FileLocation(url: location, foundIn: .wallpapersFolder)
         }
-
-        // 2. 检查旧位置（根目录）
-        let legacyLocation = legacyFolderURL.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: legacyLocation.path) {
-            return FileLocation(url: legacyLocation, foundIn: .legacyRootFolder)
-        }
-
-        // 3. 未找到
-        return FileLocation(
-            url: wallpapersFolderURL.appendingPathComponent(fileName),
-            foundIn: .notFound
-        )
+        return FileLocation(url: location, foundIn: .notFound)
     }
 
-    /// 查找媒体文件（自动检测多个可能位置）
-    /// 搜索顺序: 1. 新位置 -> 2. 旧位置 -> 3. 未找到
+    /// 查找媒体文件（仅检测新位置）
     func locateMediaFile(slug: String, label: String, fileExtension: String) -> FileLocation {
         let safeSlug = slug
             .replacingOccurrences(of: #"[^a-zA-Z0-9\-]+"#, with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         let safeLabel = label.lowercased().replacingOccurrences(of: " ", with: "-")
         let fileName = "motionbgs-\(safeSlug)-\(safeLabel).\(fileExtension)"
-
-        // 1. 检查新位置
-        let newLocation = mediaFolderURL.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: newLocation.path) {
-            return FileLocation(url: newLocation, foundIn: .mediaFolder)
+        let location = mediaFolderURL.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: location.path) {
+            return FileLocation(url: location, foundIn: .mediaFolder)
         }
-
-        // 2. 检查旧位置（根目录）
-        let legacyLocation = legacyFolderURL.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: legacyLocation.path) {
-            return FileLocation(url: legacyLocation, foundIn: .legacyRootFolder)
-        }
-
-        // 3. 未找到
-        return FileLocation(
-            url: mediaFolderURL.appendingPathComponent(fileName),
-            foundIn: .notFound
-        )
+        return FileLocation(url: location, foundIn: .notFound)
     }
 
-    /// 查找任意文件（通过文件名）
+    /// 查找任意文件（通过文件名，仅检测新位置）
     /// - Parameter fileName: 文件名
     /// - Returns: 文件位置信息
     func locateFile(named fileName: String) -> FileLocation {
@@ -220,13 +194,7 @@ final class DownloadPathManager {
             return FileLocation(url: mediaLocation, foundIn: .mediaFolder)
         }
 
-        // 3. 检查旧位置
-        let legacyLocation = legacyFolderURL.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: legacyLocation.path) {
-            return FileLocation(url: legacyLocation, foundIn: .legacyRootFolder)
-        }
-
-        // 4. 未找到，返回默认位置（根据文件名推断）
+        // 3. 未找到，返回默认位置（根据文件名推断）
         let defaultURL = inferDefaultLocation(for: fileName)
         return FileLocation(url: defaultURL, foundIn: .notFound)
     }
@@ -241,68 +209,6 @@ final class DownloadPathManager {
             // 未知类型，默认放到根目录
             return rootFolderURL.appendingPathComponent(fileName)
         }
-    }
-
-    // MARK: - 批量扫描
-    /// 扫描旧目录中的所有文件，返回可以迁移的文件列表
-    func scanLegacyFiles() -> [URL] {
-        guard FileManager.default.fileExists(atPath: legacyFolderURL.path) else {
-            return []
-        }
-
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: legacyFolderURL,
-                includingPropertiesForKeys: nil,
-                options: .skipsHiddenFiles
-            )
-            return contents.filter { !$0.hasDirectoryPath }
-        } catch {
-            print("[DownloadPathManager] Failed to scan legacy folder: \(error)")
-            return []
-        }
-    }
-
-    /// 自动迁移旧目录中的文件到新目录结构
-    /// - Returns: 迁移结果 (成功数量, 失败数量)
-    @discardableResult
-    func migrateLegacyFiles() -> (success: Int, failed: Int) {
-        let legacyFiles = scanLegacyFiles()
-        guard !legacyFiles.isEmpty else { return (0, 0) }
-
-        var successCount = 0
-        var failedCount = 0
-
-        for fileURL in legacyFiles {
-            let fileName = fileURL.lastPathComponent
-            let destinationURL: URL
-
-            // 根据文件名判断目标位置
-            if fileName.hasPrefix("wallhaven-") {
-                destinationURL = wallpapersFolderURL.appendingPathComponent(fileName)
-            } else if fileName.hasPrefix("motionbgs-") {
-                destinationURL = mediaFolderURL.appendingPathComponent(fileName)
-            } else {
-                // 未知类型，跳过或放入根目录
-                continue
-            }
-
-            // 如果目标已存在，跳过
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                continue
-            }
-
-            do {
-                try FileManager.default.moveItem(at: fileURL, to: destinationURL)
-                print("[DownloadPathManager] Migrated: \(fileName) -> \(destinationURL.path)")
-                successCount += 1
-            } catch {
-                print("[DownloadPathManager] Failed to migrate \(fileName): \(error)")
-                failedCount += 1
-            }
-        }
-
-        return (successCount, failedCount)
     }
 
     // MARK: - 下载记录路径更新

@@ -1,0 +1,205 @@
+{
+	"camera" : 
+	{
+		"center" : "0.00000 0.00000 -1.00000",
+		"eye" : "0.00000 0.00000 0.00000",
+		"up" : "0.00000 1.00000 0.00000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.30000 0.30000 0.30000",
+		"bloom" : false,
+		"bloomhdrfeather" : 0.1,
+		"bloomhdriterations" : 8,
+		"bloomhdrscatter" : 1.619,
+		"bloomhdrstrength" : 2.0,
+		"bloomhdrthreshold" : 1.0,
+		"bloomstrength" : 2.0,
+		"bloomthreshold" : 0.64999998,
+		"bloomtint" : "1.00000 1.00000 1.00000",
+		"camerafade" : true,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.1,
+		"cameraparallaxmouseinfluence" : 0.0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1.0,
+		"camerashakespeed" : 3.0,
+		"clearcolor" : "0.21961 0.21961 0.21961",
+		"clearenabled" : true,
+		"farz" : 10000.0,
+		"fov" : 50.0,
+		"gravitydirection" : "0.00000 -1.00000 0.00000",
+		"gravitystrength" : 1.0,
+		"hdr" : false,
+		"nearz" : 0.0099999998,
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"perspectiveoverridefov" : 95.0,
+		"skylightcolor" : "0.30000 0.30000 0.30000",
+		"winddirection" : "0.70700 0.70700 0.00000",
+		"windenabled" : false,
+		"windstrength" : 1.0,
+		"zoom" : 1.0
+	},
+	"objects" : 
+	[
+		{
+			"id" : 17,
+			"instanceoverride" : 
+			{
+				"controlpointangle1" : 
+				{
+					"animation" : 
+					{
+						"c0" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : 0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 0.50833333,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 2.4783676
+							},
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -0.50833333,
+									"y" : 0
+								},
+								"frame" : 60,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 2.4783676
+							}
+						],
+						"c1" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : false,
+									"x" : -1,
+									"y" : 0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : false,
+									"x" : 0.50833333,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : -0.62831855
+							},
+							{
+								"back" : 
+								{
+									"enabled" : false,
+									"x" : -0.50833333,
+									"y" : 0
+								},
+								"frame" : 60,
+								"front" : 
+								{
+									"enabled" : false,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : -6.9710331
+							}
+						],
+						"c2" : 
+						[
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -1,
+									"y" : 0
+								},
+								"frame" : 0,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 0.50833333,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0.022130774
+							},
+							{
+								"back" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : -0.50833333,
+									"y" : 0
+								},
+								"frame" : 60,
+								"front" : 
+								{
+									"enabled" : true,
+									"magic" : true,
+									"x" : 1,
+									"y" : 0
+								},
+								"lockangle" : true,
+								"locklength" : true,
+								"value" : 0.022130774
+							}
+						],
+						"options" : 
+						{
+							"fps" : 20,
+							"length" : 60,
+							"mode" : "loop",
+							"wraploop" : null
+						}
+					},
+					"value" : "2.47837 -0.62832 0.02213"
+				},
+				"id" : 20,
+				"size" : 0.36000001
+			},
+			"name" : "ui_editor_preset_magic_vortex_orb",
+			"origin" : "128.00000 128.00000 0.00000",
+			"particle" : "particles/presets/magic_vortex_orb.json",
+			"scale" : "0.55664 0.55664 0.55664"
+		}
+	],
+	"version" : 0
+}

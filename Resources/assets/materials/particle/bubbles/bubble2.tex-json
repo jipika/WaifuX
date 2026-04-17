@@ -1,0 +1,14 @@
+{
+	"clampuvs" : false,
+	"format" : "rgba8888",
+	"nonpoweroftwo" : true,
+	"spritesheetsequences" : 
+	[
+		{
+			"duration" : 1,
+			"frames" : 30,
+			"width" : 102.4,
+			"height" : 85.334
+		}
+	]
+}

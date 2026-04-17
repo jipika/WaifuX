@@ -1,0 +1,40 @@
+{
+	"name" : "ui_editor_preset_spark_title",
+	"description" : "ui_editor_preset_spark_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_spark_title",
+				"value" : 0
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "preview/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Spark",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/spark.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/spark.json",
+				"materials/presets/sparktrails.json",
+				"particles/presets/spark.json",
+				"particles/presets/sparktrails.json"
+			]
+		}
+	]
+}

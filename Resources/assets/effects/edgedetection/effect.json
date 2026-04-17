@@ -1,0 +1,21 @@
+{
+	"version" : 1,
+	"replacementkey" : "edgedetection",
+	"name" : "ui_editor_effect_edge_detection_title",
+	"description" : "ui_editor_effect_edge_detection_description",
+	"group" : "enhance",
+	"performance" : "expensive",
+	"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/edgedetection.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/edgedetection.json",
+		"shaders/effects/edgedetection.frag",
+		"shaders/effects/edgedetection.vert"
+	]
+}

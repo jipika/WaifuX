@@ -1,0 +1,462 @@
+{
+	"name" : "ui_editor_preset_magic_title",
+	"description" : "ui_editor_preset_magic_description",
+	"tag" : "scene2d",
+	"group" : "preset",
+	"options" :
+	{
+		"droplistVisible" : true,
+		"droplistOptions" :
+		[
+			{
+				"label" : "ui_editor_preset_magic_variant_1",
+				"value" : 0
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_2",
+				"value" : 1
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_3",
+				"value" : 2
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_4",
+				"value" : 10
+			},
+			{
+				"label" : "ui_editor_preset_magic_color_sparkle",
+				"value" : 11
+			},
+			{
+				"label" : "ui_editor_preset_magic_vortex_orb",
+				"value" : 12
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_5",
+				"value" : 3
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_6",
+				"value" : 4
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_7",
+				"value" : 5
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_8",
+				"value" : 6
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_9",
+				"value" : 7
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_10",
+				"value" : 8
+			},
+			{
+				"label" : "ui_editor_preset_magic_variant_11",
+				"value" : 9
+			}
+		]
+	},
+	"variants" :
+	[
+		{
+			"preview" : "previewcharge/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic charge",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_charge.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_charge.json",
+				"materials/presets/magic_charge_rays.json",
+				"particles/presets/magic_charge.json",
+				"particles/presets/magic_charge_rays.json"
+			]
+		},
+		{
+			"preview" : "previewsparkle/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic sparkle",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_sparkle.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_sparkle.json",
+				"particles/presets/magic_sparkle.json"
+			]
+		},
+		{
+			"preview" : "previewgravitation/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic gravitation",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_gravity.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_gravity.json",
+				"particles/presets/magic_gravity.json"
+			]
+		},
+		{
+			"preview" : "previewvortex0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic vortex 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_vortex_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_vortex_0.json",
+				"materials/presets/magic_vortex_0_glow.json",
+				"particles/presets/magic_vortex_0.json",
+				"particles/presets/magic_vortex_0_glow.json"
+			]
+		},
+		{
+			"preview" : "previewvortex1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic vortex 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_vortex_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_vortex_1.json",
+				"particles/presets/magic_vortex_1.json"
+			]
+		},
+		{
+			"preview" : "previewglyphs0/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Glyphs 1",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_glyphs_0.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_glyph_0.json",
+				"materials/presets/magic_glyph_0_swirl.json",
+				"particles/presets/magic_glyphs_0.json",
+				"particles/presets/magic_glyphs_0_swirl.json"
+			]
+		},
+		{
+			"preview" : "previewglyphs1/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Glyphs 2",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_glyphs_1.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_glyph_1.json",
+				"materials/presets/magic_glyph_1_swirl.json",
+				"materials/presets/magic_glyph_1_grow.json",
+				"particles/presets/magic_glyphs_1.json",
+				"particles/presets/magic_glyphs_1_swirl.json",
+				"particles/presets/magic_glyphs_1_grow.json"
+			]
+		},
+		{
+			"preview" : "previewfocus/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic focus",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_focus.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_focus.json",
+				"materials/presets/magic_focus_trails.json",
+				"particles/presets/magic_focus.json",
+				"particles/presets/magic_focus_trails.json"
+			]
+		},
+		{
+			"preview" : "previewtrinity/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic trinity",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_trinity.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_trinity.json",
+				"particles/presets/magic_trinity.json"
+			]
+		},
+		{
+			"preview" : "previewpulse/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic pulse",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_pulse.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_pulse.json",
+				"particles/presets/magic_pulse.json"
+			]
+		},
+		{
+			"preview" : "previewpowerup/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Power up",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/powerup.json",
+					"scale" : "1.000 1.000 1.000"
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/powerup.json",
+				"materials/presets/poweruptrail.json",
+				"particles/presets/powerup.json",
+				"particles/presets/poweruptrails.json"
+			]
+		},
+		{
+			"preview" : "previewcolorsparkle/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Color sparkle",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_color_sparkle.json",
+					"scale" : "1.000 1.000 1.000",
+					"instanceoverride" : 
+					{
+						"alpha" : 2
+					}
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_color_sparkle.json",
+				"particles/presets/magic_color_sparkle.json"
+			]
+		},
+		{
+			"preview" : "previewvortexorb/project.json",
+			"objects" :
+			[
+				{
+					"angles" : "0.000 0.000 0.000",
+					"name" : "Magic vortex orb",
+					"origin" : "0.000 0.000 0.000",
+					"particle" : "particles/presets/magic_vortex_orb.json",
+					"scale" : "1.000 1.000 1.000",
+					"instanceoverride" : 
+					{
+						"controlpointangle1" : 
+						{
+							"animation" : 
+							{
+								"c0" : 
+								[
+									{
+										"back" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : -1,
+											"y" : -0.0
+										},
+										"frame" : 0,
+										"front" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : 0.50833333,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : 2.4783676
+									},
+									{
+										"back" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : -0.50833333,
+											"y" : -0.0
+										},
+										"frame" : 60,
+										"front" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : 1,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : 2.4783676
+									}
+								],
+								"c1" : 
+								[
+									{
+										"back" : 
+										{
+											"enabled" : false,
+											"x" : -1,
+											"y" : -0.0
+										},
+										"frame" : 0,
+										"front" : 
+										{
+											"enabled" : false,
+											"x" : 0.50833333,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : -0.62831855
+									},
+									{
+										"back" : 
+										{
+											"enabled" : false,
+											"x" : -0.50833333,
+											"y" : -0.0
+										},
+										"frame" : 60,
+										"front" : 
+										{
+											"enabled" : false,
+											"x" : 1,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : -6.9710331
+									}
+								],
+								"c2" : 
+								[
+									{
+										"back" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : -1,
+											"y" : -0.0
+										},
+										"frame" : 0,
+										"front" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : 0.50833333,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : 0.022130774
+									},
+									{
+										"back" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : -0.50833333,
+											"y" : -0.0
+										},
+										"frame" : 60,
+										"front" : 
+										{
+											"enabled" : true,
+											"magic" : true,
+											"x" : 1,
+											"y" : 0
+										},
+										"lockangle" : true,
+										"locklength" : true,
+										"value" : 0.022130774
+									}
+								],
+								"options" : 
+								{
+									"fps" : 20,
+									"length" : 60,
+									"mode" : "loop",
+									"wraploop" : null
+								}
+							},
+							"value" : "2.47837 -0.62832 0.02213"
+						}
+					}
+				}
+			],
+			"dependencies" :
+			[
+				"materials/presets/magic_vortex_orb.json",
+				"particles/presets/magic_vortex_orb.json"
+			]
+		}
+	]
+}

@@ -1,4 +1,4 @@
-# Wallpaper Engine (小红车) 集成分支
+# Wallpaper Engine 集成分支
 
 ## 概述
 
@@ -59,7 +59,7 @@ Views/
 ## 使用方法
 
 1. 在媒体探索页点击 "MotionBG" 旁边的切换按钮
-2. 切换到 "小红车" 即可浏览 Wallpaper Engine 内容
+2. 切换到 "Wallpaper Engine" 即可浏览 Workshop 内容
 3. 需要配置 SteamCMD 后才能下载内容
 
 ## 注意事项

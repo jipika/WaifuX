@@ -1,0 +1,20 @@
+{
+	"name" : "Water Flow",
+	"description" : "Adds a flow animation. The direction can be controlled with a flow mask that you can paint in the editor.",
+	"group" : "image",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/waterflow.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/waterflow.json",
+		"materials/effects/waterflowphase.png",
+		"materials/effects/waterflowphase.tex-json",
+		"shaders/effects/waterflow.frag",
+		"shaders/effects/waterflow.vert"
+	]
+}

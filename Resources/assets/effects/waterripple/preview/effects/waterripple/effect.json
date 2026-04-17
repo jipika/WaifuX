@@ -1,0 +1,20 @@
+{
+	"name" : "Water Ripple",
+	"description" : "Add a ripple animation. Draw a mask to limit the animation to a specific area of the image.",
+	"group" : "image",
+	//"preview" : "preview/project.json",
+	"passes" :
+	[
+		{
+			"material" : "materials/effects/waterripple.json"
+		}
+	],
+	"dependencies" :
+	[
+		"materials/effects/waterripple.json",
+		"materials/effects/waterripplenormal.png",
+		"materials/effects/waterripplenormal.tex-json",
+		"shaders/effects/waterripple.frag",
+		"shaders/effects/waterripple.vert"
+	]
+}

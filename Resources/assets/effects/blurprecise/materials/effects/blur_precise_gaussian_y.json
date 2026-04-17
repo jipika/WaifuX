@@ -1,0 +1,13 @@
+{
+	"passes": [{
+		"shader": "effects/blur_precise_gaussian",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull",
+		"combos": {
+			"VERTICAL" : 1,
+			"ENABLEMASK" : 1
+		}
+	}]
+}

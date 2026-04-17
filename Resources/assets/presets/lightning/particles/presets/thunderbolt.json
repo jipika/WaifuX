@@ -1,0 +1,233 @@
+{
+	"children" : 
+	[
+		{
+			"angles" : "0 0 0",
+			"controlpointstartindex" : null,
+			"flags" : 1,
+			"id" : 23,
+			"maxcount" : 5,
+			"name" : "particles/presets/thunderbolt_child_spawner.json",
+			"origin" : "0 0 0",
+			"probability" : 0.2,
+			"scale" : "1 1 1",
+			"type" : "eventfollow"
+		},
+		{
+			"angles" : "0 0 0",
+			"controlpointstartindex" : null,
+			"flags" : 2,
+			"id" : 26,
+			"maxcount" : 10,
+			"name" : "particles/presets/thunderbolt_glow.json",
+			"origin" : "0 0 0",
+			"probability" : 1.0,
+			"scale" : "1 1 1",
+			"type" : "static"
+		}
+	],
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"offset" : "0 0 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 2,
+			"id" : 1,
+			"offset" : "0 -450 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"offset" : "0 0 0",
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"offset" : null,
+			"parentcontrolpoint" : 0
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"delay" : 0,
+			"distancemax" : 0,
+			"distancemin" : 0,
+			"flags" : 4,
+			"id" : 6,
+			"maxperiodicdelay" : 1,
+			"maxperiodicduration" : 1,
+			"maxtoemitperperiod" : 32,
+			"minperiodicdelay" : 1,
+			"minperiodicduration" : 1,
+			"name" : "sphererandom",
+			"rate" : 100
+		}
+	],
+	"flags" : 0,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 1,
+			"min" : 1,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 20,
+			"min" : 5,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 5,
+			"max" : "97 145 255",
+			"min" : "76 146 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 13,
+			"max" : "50 100 0",
+			"min" : "-50 50 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"distance" : 100,
+			"id" : 22,
+			"name" : "positionoffsetrandom",
+			"scale" : 0,
+			"timescale" : 5
+		},
+		{
+			"arcamount" : 0.1,
+			"flags" : 23,
+			"id" : 14,
+			"name" : "mapsequencebetweencontrolpoints"
+		}
+	],
+	"material" : "materials/presets/thunderbolt.json",
+	"maxcount" : 64,
+	"operator" : 
+	[
+		{
+			"drag" : 2,
+			"id" : 7,
+			"name" : "movement"
+		},
+		{
+			"id" : 21,
+			"name" : "sizechange",
+			"starttime" : 0.5
+		},
+		{
+			"fadeintime" : 0.1,
+			"id" : 8,
+			"name" : "alphafade"
+		},
+		{
+			"id" : 15,
+			"name" : "maintaindistancebetweencontrolpoints"
+		},
+		{
+			"blendinend" : 0.5,
+			"blendinstart" : 0.1,
+			"blendoutend" : 0.69999999,
+			"blendoutstart" : 0.60000002,
+			"id" : 16,
+			"name" : "turbulence",
+			"speedmax" : 1000,
+			"speedmin" : 1000,
+			"timescale" : 10000
+		},
+		{
+			"distanceinner" : 20,
+			"distanceouter" : 50,
+			"id" : 17,
+			"name" : "reducemovementnearcontrolpoint",
+			"reductioninner" : 1000
+		},
+		{
+			"controlpoint" : 1,
+			"distanceinner" : 20,
+			"distanceouter" : 50,
+			"id" : 18,
+			"name" : "reducemovementnearcontrolpoint",
+			"reductioninner" : 1000
+		},
+		{
+			"endtime" : 0.2,
+			"endvalue" : 1,
+			"id" : 19,
+			"name" : "alphachange",
+			"startvalue" : 10
+		},
+		{
+			"frequencymax" : 100,
+			"frequencymin" : 30,
+			"id" : 20,
+			"name" : "oscillatealpha",
+			"scalemin" : 0.1
+		},
+		{
+			"blendinend" : 0.69999999,
+			"blendinstart" : 0.5,
+			"frequencymax" : 25,
+			"frequencymin" : 5,
+			"id" : 24,
+			"name" : "oscillateposition",
+			"scalemax" : 8,
+			"scalemin" : 3
+		},
+		{
+			"blendinend" : 0.60000002,
+			"blendinstart" : 0.5,
+			"flags" : 0,
+			"id" : 25,
+			"input" : "particlesystemtime",
+			"name" : "remapvalue",
+			"output" : "opacity",
+			"transformfunction" : "sine",
+			"transforminputscale" : 6
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 12,
+			"name" : "rope",
+			"subdivision" : 0,
+			"uvsmoothing" : false
+		}
+	],
+	"starttime" : 0
+}

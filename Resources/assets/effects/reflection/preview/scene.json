@@ -1,0 +1,94 @@
+{
+	"camera" : 
+	{
+		"center" : "0.000 0.000 0.000",
+		"eye" : "0.000 0.000 1.000",
+		"up" : "0.000 1.000 0.000"
+	},
+	"general" : 
+	{
+		"ambientcolor" : "0.3 0.3 0.3",
+		"bloom" : false,
+		"bloomstrength" : 2,
+		"bloomthreshold" : 0.64999997615814209,
+		"cameraparallax" : false,
+		"cameraparallaxamount" : 0.5,
+		"cameraparallaxdelay" : 0.10000000149011612,
+		"cameraparallaxmouseinfluence" : 0,
+		"camerapreview" : true,
+		"camerashake" : false,
+		"camerashakeamplitude" : 0.5,
+		"camerashakeroughness" : 1,
+		"camerashakespeed" : 3,
+		"clearcolor" : "0.7 0.7 0.7",
+		"orthogonalprojection" : 
+		{
+			"height" : 256,
+			"width" : 256
+		},
+		"skylightcolor" : "0.3 0.3 0.3"
+	},
+	"objects" : 
+	[
+		{
+			"angles" : "0.000 0.000 0.000",
+			"depth" : 1,
+			"id" : 38,
+			"image" : "models/effectpreview.json",
+			"name" : "",
+			"origin" : "128.675 193.939 0.000",
+			"scale" : "0.405 0.405 1.000"
+		},
+		{
+			"angles" : "0.000 0.000 0.000",
+			"depth" : 1,
+			"effects" : 
+			[
+				{
+					"file" : "effects/reflection/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : null,
+							"constantshadervalues" : 
+							{
+								"Additive" : 0,
+								"Offset" : 0.070000000298023224
+							},
+							"textures" : 
+							[
+								null,
+								"masks/reflection_mask_ee0d9bbc6d0516b8583c8fb3e841485c0b7ec4e8"
+							]
+						}
+					]
+				},
+				{
+					"file" : "effects/waterripple/effect.json",
+					"passes" : 
+					[
+						{
+							"combos" : null,
+							"constantshadervalues" : 
+							{
+								"Ripple strength" : 0.070000000298023224,
+								"Scroll speed" : 0.23000000417232513
+							},
+							"textures" : 
+							[
+								null,
+								"effects/waterripplenormal",
+								"masks/waterripple_mask_ee0d9bbc6d0516b8583c8fb3e841485c0b7ec4e8"
+							]
+						}
+					]
+				}
+			],
+			"id" : 15,
+			"image" : "models/util/fullscreenlayer.json",
+			"name" : "Fullscreen",
+			"origin" : "0.000 0.000 0.000",
+			"scale" : "0.802 0.802 1.000"
+		}
+	]
+}

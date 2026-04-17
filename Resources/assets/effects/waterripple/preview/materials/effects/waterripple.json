@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/waterripple",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"textures": [null, "effects/waterripplenormal"]
+	}]
+}

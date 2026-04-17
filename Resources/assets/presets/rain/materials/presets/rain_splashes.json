@@ -1,0 +1,25 @@
+{
+	"passes" : 
+	[
+		{
+			"alphawriting" : "default",
+			"blending" : "translucent",
+			"combos" : 
+			{
+				"CUTOUT" : 0,
+				"REFRACT" : 0
+			},
+			"constantshadervalues" : 
+			{
+				"ui_editor_properties_cutout_end" : 0.19,
+				"ui_editor_properties_cutout_opacity" : 0.42,
+				"ui_editor_properties_cutout_start" : 0
+			},
+			"cullmode" : "nocull",
+			"depthtest" : "disabled",
+			"depthwrite" : "disabled",
+			"shader" : "genericparticle",
+			"textures" : [ "particle/water/ripple_single", null ]
+		}
+	]
+}

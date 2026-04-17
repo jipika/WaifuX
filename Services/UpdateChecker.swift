@@ -85,13 +85,19 @@ final class UpdateChecker: ObservableObject {
 
     // GitHub 仓库配置
     private let owner = "jipika"
-    private let repo = "WaifuX"
-    private let apiURL = "https://api.github.com/repos/jipika/WaifuX/releases/latest"
+    private let repo = "waifuX-pro"
+    private let apiURL = "https://api.github.com/repos/jipika/waifuX-pro/releases/latest"
 
     // UserDefaults keys
     private let lastCheckKey = "update_checker_last_check"
     private let cachedReleaseKey = "update_checker_cached_release"
     private let cachedCommitKey = "update_checker_cached_commit"
+    private let rateLimitUntilKey = "update_checker_rate_limit_until"
+    
+    // 最小检查间隔（秒）- 5分钟
+    private let minCheckInterval: TimeInterval = 300
+    // 遇到 403 后的冷却时间（秒）- 15分钟
+    private let rateLimitCooldown: TimeInterval = 900
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
@@ -127,16 +133,40 @@ final class UpdateChecker: ObservableObject {
     }
 
     /// 检查更新
-    func checkForUpdates() async -> UpdateCheckResult {
+    /// - Parameter force: 是否强制检查，忽略时间间隔限制
+    func checkForUpdates(force: Bool = false) async -> UpdateCheckResult {
         isChecking = true
         defer { isChecking = false }
+        
+        // 检查是否在冷却期内
+        if !force, let rateLimitUntil = UserDefaults.standard.object(forKey: rateLimitUntilKey) as? Date,
+           Date() < rateLimitUntil {
+            let remaining = Int(rateLimitUntil.timeIntervalSince(Date()))
+            let minutes = remaining / 60
+            return .error("GitHub API 速率限制，请\(minutes)分钟后重试")
+        }
+        
+        // 检查是否过于频繁（非强制模式下）
+        if !force, let lastCheck = lastCheckDate {
+            let elapsed = Date().timeIntervalSince(lastCheck)
+            if elapsed < minCheckInterval {
+                let remaining = Int(minCheckInterval - elapsed)
+                let minutes = remaining / 60
+                let seconds = remaining % 60
+                if minutes > 0 {
+                    return .error("检查过于频繁，请\(minutes)分\(seconds)秒后再试")
+                } else {
+                    return .error("检查过于频繁，请\(seconds)秒后再试")
+                }
+            }
+        }
 
         guard let url = URL(string: apiURL) else {
             return .error("无效的 API URL")
         }
 
         var request = URLRequest(url: url)
-        request.setValue("WallHaven-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("WaifuX-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
 
         do {
@@ -147,9 +177,14 @@ final class UpdateChecker: ObservableObject {
             }
 
             if httpResponse.statusCode == 403 {
-                // API 速率限制
-                return .error("GitHub API 速率限制，请稍后重试")
+                // API 速率限制 - 设置冷却期
+                let cooldownUntil = Date().addingTimeInterval(rateLimitCooldown)
+                UserDefaults.standard.set(cooldownUntil, forKey: rateLimitUntilKey)
+                return .error("GitHub API 速率限制，请15分钟后重试")
             }
+            
+            // 清除冷却期
+            UserDefaults.standard.removeObject(forKey: rateLimitUntilKey)
 
             guard httpResponse.statusCode == 200 else {
                 return .error("服务器返回错误 (\(httpResponse.statusCode))")
@@ -194,7 +229,7 @@ final class UpdateChecker: ObservableObject {
         }
 
         var request = URLRequest(url: url)
-        request.setValue("WallHaven-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("WaifuX-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
 
         do {
@@ -337,7 +372,7 @@ final class UpdateManager: ObservableObject {
     
     // MARK: - 配置
     private let owner = "jipika"
-    private let repo = "WaifuX"
+    private let repo = "waifuX-pro"
     
     private init() {}
     
@@ -400,7 +435,7 @@ final class UpdateManager: ObservableObject {
         let session = URLSession(configuration: config)
         
         var request = URLRequest(url: url)
-        request.setValue("WallHaven-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
         
         let (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
             Task { @MainActor [weak self] in

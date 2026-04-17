@@ -1,0 +1,41 @@
+{
+	"material": "materials/presets/light_shafts_1.json",
+	"maxcount": 16,
+	"starttime": 15,
+	"emitter": [{
+		"name": "sphererandom",
+		"rate": 0.3,
+		"origin": "0 0 0",
+		"directions" : "1 0.03 0",
+		"distancemin": 10,
+		"distancemax": 320
+	}],
+	"initializer": [{
+		"name": "lifetimerandom",
+		"min": 8,
+		"max": 20
+	}, {
+		"name": "sizerandom",
+		"min": 350,
+		"max": 750
+	}, {
+		"name": "velocityrandom",
+		"min": "-20 0 0",
+		"max": "-5 10 0"
+	}, {
+		"name": "colorrandom",
+		"min": "110 92 20",
+		"max": "170 110 40"
+	}, {
+		"name": "rotationrandom",
+		"min": -0.4,
+		"max": -0.3
+	}],
+	"operator": [{
+		"name": "movement",
+		"gravity": "0 0 0"
+	}, {
+		"name": "alphafade",
+		"fadeintime": 0.1
+	}]
+}

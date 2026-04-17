@@ -1,0 +1,108 @@
+{
+	"controlpoint" : 
+	[
+		{
+			"flags" : 0,
+			"id" : 0,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 1,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 2,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 3,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 4,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 5,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 6,
+			"parentcontrolpoint" : 0
+		},
+		{
+			"flags" : 0,
+			"id" : 7,
+			"parentcontrolpoint" : 0
+		}
+	],
+	"emitter" : 
+	[
+		{
+			"directions" : "1 1 1",
+			"distancemax" : "1024 0 1000",
+			"id" : 7,
+			"name" : "boxrandom",
+			"origin" : "0 1024 0",
+			"rate" : 1000
+		}
+	],
+	"flags" : 4,
+	"initializer" : 
+	[
+		{
+			"id" : 2,
+			"max" : 0.2,
+			"min" : 0.2,
+			"name" : "lifetimerandom"
+		},
+		{
+			"id" : 3,
+			"max" : 20,
+			"min" : 10,
+			"name" : "sizerandom"
+		},
+		{
+			"id" : 4,
+			"max" : "2500 -15000 0",
+			"min" : "1000 -10000 0",
+			"name" : "velocityrandom"
+		},
+		{
+			"id" : 5,
+			"min" : "197 214 255",
+			"name" : "colorrandom"
+		},
+		{
+			"id" : 6,
+			"max" : 0.5,
+			"min" : 0.40000001,
+			"name" : "alpharandom"
+		}
+	],
+	"material" : "materials/presets/rainrefractive.json",
+	"maxcount" : 256,
+	"operator" : 
+	[
+		{
+			"id" : 8,
+			"name" : "movement"
+		}
+	],
+	"renderer" : 
+	[
+		{
+			"id" : 1,
+			"length" : 1,
+			"maxlength" : 20,
+			"name" : "spritetrail"
+		}
+	],
+	"starttime" : 0
+}

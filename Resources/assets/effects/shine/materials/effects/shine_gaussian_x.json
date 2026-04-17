@@ -1,0 +1,9 @@
+{
+	"passes": [{
+		"shader": "effects/shine_gaussian",
+		"blending": "normal",
+		"depthtest": "disabled",
+		"depthwrite": "disabled",
+		"cullmode": "nocull"
+	}]
+}
