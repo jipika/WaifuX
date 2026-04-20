@@ -498,6 +498,8 @@ private func detectWallpaperProjectType(path: String) -> String? {
     if url.pathExtension.lowercased() == "pkg" {
         guard let extracted = extractPKG(at: url) else { return nil }
         contentDir = extracted
+    } else {
+        contentDir = URL(fileURLWithPath: resolveSteamWorkshopDirectoryIfNeeded(path))
     }
 
     let projectJSON = contentDir.appendingPathComponent("project.json")
@@ -536,12 +538,79 @@ private func extractPKG(at url: URL) -> URL? {
     return nil
 }
 
+/// SteamCMD 解压目录常见为 `.../431960/<id>/`，真实 `project.json` 可能在唯一子目录内；与 App 内 `WorkshopService.resolveWallpaperEngineProjectRoot` 行为对齐。
+private func resolveSteamWorkshopDirectoryIfNeeded(_ path: String) -> String {
+    let url = URL(fileURLWithPath: path)
+    var isDir: ObjCBool = false
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+        return path
+    }
+    return resolveWEWorkshopNestedRoot(url, depthLeft: 8, fm: fm).path
+}
+
+private func resolveWEWorkshopNestedRoot(_ url: URL, depthLeft: UInt, fm: FileManager) -> URL {
+    if depthLeft == 0 { return url }
+    if fm.fileExists(atPath: url.appendingPathComponent("project.json").path) { return url }
+    guard let entries = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+        return url
+    }
+    if entries.contains(where: { $0.pathExtension.lowercased() == "pkg" }) { return url }
+    if entries.contains(where: { ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased()) }) { return url }
+    var childDirs: [URL] = []
+    for entry in entries {
+        var d: ObjCBool = false
+        guard fm.fileExists(atPath: entry.path, isDirectory: &d), d.boolValue else { continue }
+        childDirs.append(entry)
+    }
+    if childDirs.count == 1 {
+        return resolveWEWorkshopNestedRoot(childDirs[0], depthLeft: depthLeft - 1, fm: fm)
+    }
+    if childDirs.count > 1 {
+        let withProject = childDirs
+            .filter { fm.fileExists(atPath: $0.appendingPathComponent("project.json").path) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        if let first = withProject.first {
+            return resolveWEWorkshopNestedRoot(first, depthLeft: depthLeft - 1, fm: fm)
+        }
+    }
+    return url
+}
+
+/// Steam 布局：`.../steamapps/workshop/content/431960/<workshopId>/.../project.json`。
+/// Web 壁纸的 HTML 常在子目录，但用 `../` 引用与 `<workshopId>` 同级的资源；`loadFileURL` 的 readAccess 仅设 project 目录会导致 WebKit 拒读，表现为贴图/脚本缺失、画面残缺。
+private func steamWorkshopContentInstallRootIfApplicable(forProjectDir projectDir: URL) -> URL? {
+    let comps = projectDir.standardizedFileURL.pathComponents
+    guard let idx = comps.firstIndex(of: "431960"), idx + 1 < comps.count else {
+        return nil
+    }
+    let prefix = comps.prefix(through: idx + 1)
+    let path = "/" + prefix.dropFirst().joined(separator: "/")
+    var isDir: ObjCBool = false
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+        return nil
+    }
+    return url
+}
+
+/// Web 本地文件可读范围：`SteamCMD` 解压的 workshop 根，否则退化为工程目录（本地 .pkg 解压或扁平导入）。
+private func webWallpaperFileReadAccessURL(projectContentDir: URL, cliWallpaperPath: String) -> URL {
+    if cliWallpaperPath.contains("/steamapps/workshop/content/"),
+       let root = steamWorkshopContentInstallRootIfApplicable(forProjectDir: projectContentDir) {
+        return root
+    }
+    return projectContentDir
+}
+
 private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile: String)? {
     let url = URL(fileURLWithPath: path)
     var contentDir = url
     if url.pathExtension.lowercased() == "pkg" {
         guard let extracted = extractPKG(at: url) else { return nil }
         contentDir = extracted
+    } else {
+        contentDir = URL(fileURLWithPath: resolveSteamWorkshopDirectoryIfNeeded(path))
     }
     let projectJSON = contentDir.appendingPathComponent("project.json")
     guard FileManager.default.fileExists(atPath: projectJSON.path),
@@ -571,6 +640,47 @@ private func readWebWallpaperUserPropertiesJSON(contentDir: URL) -> String? {
 // MARK: - Web Renderer Bridge (WKWebView-based HTML wallpaper)
 private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     static let shared = WebRendererBridge()
+
+    /// 对齐 [Wallpaper Engine Web 文档](https://docs.wallpaperengine.io/en/web/api/propertylistener.html) 等：提供 `wallpaperRegisterAudioListener`、
+    /// 媒体集成注册函数与 `wallpaperMediaIntegration` 命名空间。无系统音频捕获时音频为全零；媒体集成默认 `enabled: false`。
+    /// 避免壁纸脚本因 `undefined is not a function` 整页中断。
+    private static let wallpaperEngineWebAPIShim = WKUserScript(
+        source: """
+        (function() {
+          try {
+            window.wallpaperMediaIntegration = {
+              playback: { PLAYING: 1, PAUSED: 2, STOPPED: 0 }
+            };
+            var __wxAudioCbs = [];
+            var __wxAudioBuf = new Float32Array(128);
+            window.wallpaperRegisterAudioListener = function(cb) {
+              if (typeof cb === 'function') __wxAudioCbs.push(cb);
+            };
+            setInterval(function() {
+              for (var i = 0; i < __wxAudioBuf.length; i++) __wxAudioBuf[i] = 0;
+              for (var j = 0; j < __wxAudioCbs.length; j++) {
+                try { __wxAudioCbs[j](__wxAudioBuf); } catch (e) {}
+              }
+            }, 33);
+            window.wallpaperRegisterMediaStatusListener = function(cb) {
+              if (typeof cb === 'function') {
+                try { cb({ enabled: false }); } catch (e) {}
+              }
+            };
+            window.wallpaperRegisterMediaPropertiesListener = function(cb) {};
+            window.wallpaperRegisterMediaThumbnailListener = function(cb) {};
+            window.wallpaperRegisterMediaPlaybackListener = function(cb) {
+              if (typeof cb === 'function') {
+                try { cb({ state: window.wallpaperMediaIntegration.playback.STOPPED }); } catch (e) {}
+              }
+            };
+            window.wallpaperRegisterMediaTimelineListener = function(cb) {};
+          } catch (e) {}
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
 
     /// `file://` 壁纸常见兼容问题：
     /// 1) Spine 等库对 `HTMLImageElement` 设置 `crossOrigin = "anonymous"`，WebKit 在本地文件场景下会拒绝加载同目录纹理 → 画面空白。
@@ -707,6 +817,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         // 允许本地 HTML 引用同目录资源（Workshop web 壁纸依赖）
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         let ucc = WKUserContentController()
+        ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
         config.userContentController = ucc
         if #available(macOS 14.0, *) {
@@ -728,7 +839,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         self.webView = web
 
         let fileURL = baseURL.appendingPathComponent(indexFile)
-        web.loadFileURL(fileURL, allowingReadAccessTo: baseURL)
+        let readAccessURL = webWallpaperFileReadAccessURL(projectContentDir: baseURL, cliWallpaperPath: path)
+        if readAccessURL.path != baseURL.path {
+            dlog("[WebRendererBridge] file read access expanded to workshop root: \(readAccessURL.path)")
+        }
+        web.loadFileURL(fileURL, allowingReadAccessTo: readAccessURL)
         w.orderBack(nil)
 
         dlog("[WebRendererBridge] Loading web wallpaper: \(fileURL.path) on screen \(targetScreen.localizedName)")
@@ -832,6 +947,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             } catch(e) {}
             """
         }
+        let generalPropsBlock = """
+        try {
+          if (window.wallpaperPropertyListener && typeof window.wallpaperPropertyListener.applyGeneralProperties === 'function') {
+            window.wallpaperPropertyListener.applyGeneralProperties({ fps: { value: 30, type: 'slider' } });
+          }
+        } catch(eGP) {}
+        """
         let layoutBlock = """
         try {
           document.documentElement.style.cssText = 'width:100%;height:100%;margin:0;padding:0;background:transparent;overflow:hidden;';
@@ -845,7 +967,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
           window.dispatchEvent(new Event('resize'));
         } catch(e2) {}
         """
-        let source = "(function(){\(propsBlock)\(layoutBlock); return true;})();"
+        let source = "(function(){\(propsBlock)\(generalPropsBlock)\(layoutBlock); return true;})();"
         webView?.evaluateJavaScript(source) { _, _ in
             DispatchQueue.main.async { completion?() }
         }
@@ -1081,6 +1203,7 @@ private final class DesktopWallpaperManager {
     private init() {}
 
     func setWallpaper(path: String, width: Int = 1920, height: Int = 1080, screen: Int? = nil, completion: ((Bool) -> Void)? = nil) {
+        let path = resolveSteamWorkshopDirectoryIfNeeded(path)
         dlog("[DesktopWallpaperManager] setWallpaper path=\(path) width=\(width) height=\(height) screen=\(screen ?? -1)")
 
         lastErrorMessage = nil
@@ -1903,10 +2026,11 @@ private func sceneBakePixelBuffer(from image: CGImage) throws -> CVPixelBuffer {
 }
 
 private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
+    let sceneRoot = resolveSteamWorkshopDirectoryIfNeeded(cfg.sceneRoot)
     var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: cfg.sceneRoot, isDirectory: &isDir),
+    guard FileManager.default.fileExists(atPath: sceneRoot, isDirectory: &isDir),
           isDir.boolValue,
-          FileManager.default.fileExists(atPath: URL(fileURLWithPath: cfg.sceneRoot).appendingPathComponent("project.json").path) else {
+          FileManager.default.fileExists(atPath: URL(fileURLWithPath: sceneRoot).appendingPathComponent("project.json").path) else {
         throw SceneOfflineBakeError.scenePathNotDirectory
     }
 
@@ -1915,7 +2039,7 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     }
 
     RendererBridge.shared.destroy()
-    RendererBridge.shared.loadWallpaper(path: cfg.sceneRoot, width: cfg.width, height: cfg.height, autoStartTicking: false)
+    RendererBridge.shared.loadWallpaper(path: sceneRoot, width: cfg.width, height: cfg.height, autoStartTicking: false)
     RendererBridge.shared.setDesktopWindow(false)
     RendererBridge.shared.hideWindow()
 
@@ -1927,7 +2051,10 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     }
 
     for _ in 0 ..< 120 {
-        if !RendererBridge.shared.tickOnce() {
+        let ok: Bool = autoreleasepool {
+            RendererBridge.shared.tickOnce()
+        }
+        if !ok {
             RendererBridge.shared.destroy()
             throw SceneOfflineBakeError.loadFailed
         }
@@ -1965,36 +2092,38 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     writer.startSession(atSourceTime: .zero)
 
     for i in 0 ..< frameCount {
-        if !RendererBridge.shared.tickOnce() {
-            input.markAsFinished()
-            writer.cancelWriting()
-            RendererBridge.shared.destroy()
-            throw SceneOfflineBakeError.captureFailed
-        }
-        guard let cg = RendererBridge.shared.captureFrame() else {
-            input.markAsFinished()
-            writer.cancelWriting()
-            RendererBridge.shared.destroy()
-            throw SceneOfflineBakeError.captureFailed
-        }
-        let pb = try sceneBakePixelBuffer(from: cg)
-        let pts = CMTime(value: Int64(i), timescale: cfg.fps)
-        var wait = 0
-        while !input.isReadyForMoreMediaData, wait < 6000 {
-            usleep(500)
-            wait += 1
-        }
-        guard input.isReadyForMoreMediaData else {
-            input.markAsFinished()
-            writer.cancelWriting()
-            RendererBridge.shared.destroy()
-            throw SceneOfflineBakeError.writerFailed("writer not ready")
-        }
-        if !adaptor.append(pb, withPresentationTime: pts) {
-            input.markAsFinished()
-            writer.cancelWriting()
-            RendererBridge.shared.destroy()
-            throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "append failed")
+        try autoreleasepool {
+            if !RendererBridge.shared.tickOnce() {
+                input.markAsFinished()
+                writer.cancelWriting()
+                RendererBridge.shared.destroy()
+                throw SceneOfflineBakeError.captureFailed
+            }
+            guard let cg = RendererBridge.shared.captureFrame() else {
+                input.markAsFinished()
+                writer.cancelWriting()
+                RendererBridge.shared.destroy()
+                throw SceneOfflineBakeError.captureFailed
+            }
+            let pb = try sceneBakePixelBuffer(from: cg)
+            let pts = CMTime(value: Int64(i), timescale: cfg.fps)
+            var wait = 0
+            while !input.isReadyForMoreMediaData, wait < 6000 {
+                usleep(500)
+                wait += 1
+            }
+            guard input.isReadyForMoreMediaData else {
+                input.markAsFinished()
+                writer.cancelWriting()
+                RendererBridge.shared.destroy()
+                throw SceneOfflineBakeError.writerFailed("writer not ready")
+            }
+            if !adaptor.append(pb, withPresentationTime: pts) {
+                input.markAsFinished()
+                writer.cancelWriting()
+                RendererBridge.shared.destroy()
+                throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "append failed")
+            }
         }
     }
 
@@ -2026,16 +2155,32 @@ private final class SceneOfflineBakeAppDelegate: NSObject, NSApplicationDelegate
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        defer { NSApp.stop(nil) }
-        do {
-            let cfg = try sceneBakeParseConfig(arguments)
-            fputs("[bake] \(cfg.sceneRoot) → \(cfg.outputURL.path) \(cfg.width)x\(cfg.height) @\(cfg.fps)fps \(cfg.durationSeconds)s\n", stderr)
-            try sceneBakePerform(cfg)
-            print(cfg.outputURL.path)
-            sceneOfflineBakeExitCode = 0
-        } catch {
-            fputs("Bake failed: \(error.localizedDescription)\n", stderr)
-            sceneOfflineBakeExitCode = 1
+        // 不得在主线程同步跑 sceneBakePerform：`AVAssetWriter.finishWriting` 的 completion 常派回主队列，
+        // 与主线程上的 `DispatchSemaphore.wait` 会形成死锁，表现为烘焙卡住、需点击 Dock 才继续。
+        let args = arguments
+        DispatchQueue.global(qos: .userInitiated).async {
+            var code: Int32 = 1
+            defer {
+                sceneOfflineBakeExitCode = code
+                DispatchQueue.main.async {
+                    NSApp.stop(nil)
+                }
+            }
+            do {
+                let cfg = try sceneBakeParseConfig(args)
+                fputs(
+                    "[bake] \(cfg.sceneRoot) → \(cfg.outputURL.path) \(cfg.width)x\(cfg.height) @\(cfg.fps)fps \(cfg.durationSeconds)s\n",
+                    stderr
+                )
+                try sceneBakePerform(cfg)
+                print(cfg.outputURL.path)
+                fflush(stdout)
+                code = 0
+            } catch {
+                fputs("Bake failed: \(error.localizedDescription)\n", stderr)
+                fflush(stderr)
+                code = 1
+            }
         }
     }
 }

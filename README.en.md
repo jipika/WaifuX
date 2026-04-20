@@ -74,7 +74,7 @@
 | ⚡️ **One-click Apply** | ✅ | Set as desktop wallpaper or dynamic desktop directly while browsing |
 | 🖥️ **Multi-display Support** | ✅ | Set different wallpapers for each display — perfect for multi-monitor setups |
 | 📥 **Local Data Import** | ✅ | Import local wallpaper folders for unified management of personal collections |
-| 🧊 **Wallpaper Engine Rendering (Beta)** | ✅ | Experimental OpenGL-based rendering for Wallpaper Engine scene / live wallpapers |
+| 🧊 **Wallpaper Engine Rendering (Beta)** | ✅ | Experimental Wallpaper Engine live wallpapers: **scene** (OpenGL) and **Web** (HTML/JS) types, both via the built-in renderer — not a generic “any website as wallpaper” feature |
 | 🔄 **Auto-updating Rules** | ✅ | Rule configurations loaded remotely via GitHub — quick adaptation when source sites change |
 | ☁️ **Cross-device Sync** | 🚧 | Cloud sync for favorites (in development) |
 

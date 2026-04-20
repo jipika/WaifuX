@@ -6,6 +6,7 @@ enum SceneOfflineBakeError: LocalizedError {
     case ineligible
     case contentRootMissing
     case insufficientMemory
+    case concurrentBakeInProgress
     case bakeProcessFailed(String)
 
     var errorDescription: String? {
@@ -14,8 +15,25 @@ enum SceneOfflineBakeError: LocalizedError {
         case .ineligible: return "当前 Scene 不适合离线烘焙（资格不足）"
         case .contentRootMissing: return "内容目录不存在，请重新下载"
         case .insufficientMemory: return LocalizationService.shared.t("sceneBake.error.insufficientMemory.bake")
+        case .concurrentBakeInProgress: return LocalizationService.shared.t("sceneBake.error.concurrent")
         case .bakeProcessFailed(let msg): return msg
         }
+    }
+}
+
+/// 全局只允许一个 `wallpaperengine-cli bake` 子进程，避免重叠渲染导致内存成倍上涨。
+private actor SceneOfflineBakeConcurrencyGate {
+    static let shared = SceneOfflineBakeConcurrencyGate()
+    private var busy = false
+
+    func tryEnter() -> Bool {
+        if busy { return false }
+        busy = true
+        return true
+    }
+
+    func leave() {
+        busy = false
     }
 }
 
@@ -57,6 +75,35 @@ enum SceneOfflineBakeService {
         durationSeconds: Double = 8,
         fps: Int32 = 30,
         persistArtifactToItemID: String? = nil
+    ) async throws -> SceneBakeArtifact {
+        let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
+        guard entered else {
+            throw SceneOfflineBakeError.concurrentBakeInProgress
+        }
+        do {
+            let result = try await bakeCore(
+                eligibility: eligibility,
+                contentRoot: contentRoot,
+                cacheItemID: cacheItemID,
+                durationSeconds: durationSeconds,
+                fps: fps,
+                persistArtifactToItemID: persistArtifactToItemID
+            )
+            await SceneOfflineBakeConcurrencyGate.shared.leave()
+            return result
+        } catch {
+            await SceneOfflineBakeConcurrencyGate.shared.leave()
+            throw error
+        }
+    }
+
+    private static func bakeCore(
+        eligibility: SceneBakeEligibilitySnapshot,
+        contentRoot: URL,
+        cacheItemID: String,
+        durationSeconds: Double,
+        fps: Int32,
+        persistArtifactToItemID: String?
     ) async throws -> SceneBakeArtifact {
         guard eligibility.isEligibleForOfflineBake else {
             throw SceneOfflineBakeError.ineligible
@@ -242,7 +289,11 @@ enum SceneOfflineBakeService {
                 _ = try await bake(record: record)
                 print("[SceneOfflineBake] auto-bake finished \(itemID)")
             } catch {
-                print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
+                if case SceneOfflineBakeError.concurrentBakeInProgress = error {
+                    print("[SceneOfflineBake] auto-bake skipped (busy) \(itemID)")
+                } else {
+                    print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
+                }
             }
         }
     }
