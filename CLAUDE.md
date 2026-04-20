@@ -74,6 +74,6 @@ There are currently no unit tests in this repository.
 
 ## CI / CD
 
-- `.github/workflows/ci.yml` — Builds and releases a DMG on pushes to `main` when `VERSION` changes
+- `.github/workflows/ci.yml` — Builds and releases a DMG on pushes to `feature/wallpaper-engine` when `VERSION` changes
 - `.github/workflows/release.yml` — Drafts a release on tag push (`v*`)
 - Both require the `macos-26` runner and Xcode 26.4

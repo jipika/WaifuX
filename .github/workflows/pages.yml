@@ -3,7 +3,7 @@ name: GitHub Pages
 on:
   push:
     branches:
-      - main
+      - feature/wallpaper-engine
     paths:
       - 'Docs/**'
       - 'landing/**'

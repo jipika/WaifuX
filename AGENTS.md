@@ -28,6 +28,8 @@
 
 **`Resources/assets` 不提交 Git**（`.gitignore`）。**`Resources/wallpaperengine-cli` 由本地构建后提交**；GitHub Actions **不再**在 CI 里编 CLI，`xcodebuild` 也不会每次跑嵌入脚本。
 
+**CI 默认分支**：仓库以 `feature/wallpaper-engine` 为集成分支（无 `main`）。推送改 `VERSION`、PR 目标分支、Pages 触发分支均以此为准；若改名需同步 `.github/workflows/*.yml`。
+
 本地更新 CLI 时：
 
 ```bash

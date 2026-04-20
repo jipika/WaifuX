@@ -1,12 +1,13 @@
 name: CI
 
+# 本仓库默认集成分支为 feature/wallpaper-engine（无 main）；若改名请同步下方 branches 与 refs/heads/* 条件
 on:
   push:
-    branches: [main]
+    branches: [feature/wallpaper-engine]
     paths:
       - 'VERSION'
   pull_request:
-    branches: [main]
+    branches: [feature/wallpaper-engine]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -83,7 +84,7 @@ jobs:
           fi
 
       - name: Build & Package
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wallpaper-engine' && steps.check_tag.outputs.exists == 'false'
         run: |
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
@@ -103,7 +104,7 @@ jobs:
             clean build
 
       - name: Generate Changelog
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wallpaper-engine' && steps.check_tag.outputs.exists == 'false'
         id: changelog
         run: |
           # 获取上一个 tag（用于生成变更日志）
@@ -127,7 +128,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create Release & Upload Asset
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wallpaper-engine' && steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
