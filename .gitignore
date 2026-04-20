@@ -32,9 +32,12 @@ Pods/
 .WallHavenCache/
 .WallHavenImageCache/
 
-# Editor / AI 助手说明（仅本地，不提交）
+# Editor / AI 助手说明（仅本地，不提交、不推送）
 AGENTS.md
 CLAUDE.md
+# 其他常见 AI 编辑器说明（若放在仓库根目录）
+GEMINI.md
+.cursorrules
 
 # Editor
 .1code/
