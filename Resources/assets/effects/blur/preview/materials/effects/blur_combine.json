@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "effects/blur_combine",
-		"blending": "translucent",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"cullmode": "nocull"
-	}]
-}

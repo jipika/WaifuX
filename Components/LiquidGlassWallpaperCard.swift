@@ -17,6 +17,7 @@ struct LiquidGlassWallpaperCard: View {
                 // 图片区域 - 液态玻璃边框
                 ZStack {
                     KFImage(wallpaper.smallThumbURL)
+                        .cancelOnDisappear(true)
                         .fade(duration: 0.3)
                         .placeholder { _ in
                             ZStack {
@@ -82,7 +83,6 @@ struct LiquidGlassWallpaperCard: View {
             isHovered = hovering
         }
         .help(wallpaper.resolution)
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 
 }
@@ -101,6 +101,7 @@ struct LiquidGlassCarouselCard: View {
             ZStack(alignment: .bottomLeading) {
                 // 图片
                 KFImage(wallpaper.thumbURL)
+                    .cancelOnDisappear(true)
                     .fade(duration: 0.3)
                     .placeholder { _ in
                         Rectangle()
@@ -156,7 +157,6 @@ struct LiquidGlassCarouselCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -174,6 +174,7 @@ struct LiquidGlassFeaturedCard: View {
             ZStack(alignment: .bottomLeading) {
                 // 图片
                 KFImage(wallpaper.thumbURL)
+                    .cancelOnDisappear(true)
                     .fade(duration: 0.3)
                     .placeholder { _ in
                         Rectangle()
@@ -230,7 +231,6 @@ struct LiquidGlassFeaturedCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
@@ -247,6 +247,7 @@ struct LiquidGlassCompactWallpaperCard: View {
         Button(action: onTap) {
             ZStack(alignment: .topTrailing) {
                 KFImage(wallpaper.smallThumbURL)
+                    .cancelOnDisappear(true)
                     .fade(duration: 0.3)
                     .placeholder { _ in
                         Rectangle()
@@ -298,6 +299,5 @@ struct LiquidGlassCompactWallpaperCard: View {
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }

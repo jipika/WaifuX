@@ -1,8 +1,0 @@
-{
-	"passes": [{
-		"shader": "wireframe",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"blending": "translucent"
-	}]
-}

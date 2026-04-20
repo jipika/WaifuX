@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "volumetricsfront",
-		"depthwrite": "disabled",
-		"depthtest": "disabled",
-		"cullmode": "normal",
-		"blending": "additive"
-	}]
-}

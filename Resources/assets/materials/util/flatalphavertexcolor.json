@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "flat",
-		"combos": {
-			"vertexcolor": 1
-		},
-		"blending": "translucent"
-	}]
-}

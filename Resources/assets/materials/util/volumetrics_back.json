@@ -1,7 +1,0 @@
-{
-	"passes": [{
-		"shader": "volumetricsback",
-		"cullmode": "normal",
-		"blending": "normal"
-	}]
-}

@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "editor/meshviewportshading",
-		"blending": "translucent",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"cullmode": "normal"
-	}]
-}

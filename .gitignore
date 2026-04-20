@@ -3,8 +3,12 @@
 *.xcworkspace
 xcuserdata/
 build/
-*.xcodeproj/
+# 仅忽略 xcodeproj 内除 pbxproj / 共享 Scheme 外的内容（否则克隆后无 Scheme，Cmd+R 无法 Run）
+*.xcodeproj/*
 !*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/xcshareddata/xcschemes/
+!*.xcodeproj/xcshareddata/xcschemes/*.xcscheme
 
 # macOS
 .DS_Store
@@ -58,10 +62,12 @@ landing/node_modules/
 # SteamCMD (local install; large binary tree)
 steamcmd/
 
+# Wallpaper Engine：材质包不提交（构建时嵌入 CLI；本地保留或 CI 用 WAIFUX_WE_ASSETS_PACK_URL 拉取）
+Resources/assets/
+
 # Wallpaper Engine Renderer - now open-source
 # wallpaperengine-cli.swift
 # Resources/wallpaperengine-cli
 # Resources/liblinux-wallpaperengine-renderer.dylib
-# Resources/assets/
 # Resources/CRenderer/
 # Resources/RendererAPI.h

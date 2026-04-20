@@ -10,6 +10,7 @@ struct MediaExploreContentView: View {
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
     @StateObject private var workshopSourceManager = WorkshopSourceManager.shared
+    @ObservedObject private var exploreScrollState = ExploreScrollState.shared
 
     @State private var selectedCategory: MediaCategory = .all
     @State private var selectedHotTag: MediaHotTag?
@@ -24,6 +25,7 @@ struct MediaExploreContentView: View {
     @State private var visibleCardIDs: Set<String> = []
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
+    @State private var gridImagePrefetcher: ImagePrefetcher?
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -31,27 +33,27 @@ struct MediaExploreContentView: View {
     // Workshop 筛选
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
     @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
-    @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel?
+    @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
     @State private var workshopSearchQuery: String = ""
     private var workshopService: WorkshopService {
         WorkshopService.shared
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let gridContentWidth = max(0, geometry.size.width - 56)
+        Group {
+            if isVisible {
+                GeometryReader { geometry in
+                    let gridContentWidth = max(0, geometry.size.width - 56)
 
-            ZStack {
-                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
-                if isVisible {
-                    ExploreDynamicAtmosphereBackground(
-                        tint: exploreAtmosphere.tint,
-                        referenceImage: exploreAtmosphere.referenceImage
-                    )
-                    .ignoresSafeArea()
-                }
+                    ZStack {
+                        ExploreDynamicAtmosphereBackground(
+                            tint: exploreAtmosphere.tint,
+                            referenceImage: exploreAtmosphere.referenceImage,
+                            lightweightBackdrop: exploreScrollState.isScrolling
+                        )
+                        .ignoresSafeArea()
 
-                ScrollView(.vertical, showsIndicators: false) {
+                        ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
@@ -101,14 +103,21 @@ struct MediaExploreContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            }
-        }
-        .onAppear {
-            if isFirstAppearance {
-                resetAllFilters(reloadData: true)
-                isFirstAppearance = false
+                    }
+                }
+                .onAppear {
+                    if isFirstAppearance {
+                        resetAllFilters(reloadData: true)
+                        isFirstAppearance = false
+                    } else {
+                        Task { await handleInitialLoad() }
+                    }
+                }
+                .onDisappear { cancelTasks() }
             } else {
-                Task { await handleInitialLoad() }
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
@@ -118,7 +127,6 @@ struct MediaExploreContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
             handleSourceChange()
         }
-        .onDisappear { cancelTasks() }
     }
 
     // MARK: - Sections
@@ -349,7 +357,7 @@ struct MediaExploreContentView: View {
                         Button(t("clear")) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 selectedWorkshopTag = nil
-                                selectedWorkshopContentLevel = nil
+                                selectedWorkshopContentLevel = .everyone
                                 selectedWorkshopType = .all
                                 Task { await applyWorkshopFilters() }
                             }
@@ -419,7 +427,7 @@ struct MediaExploreContentView: View {
         case .tag:
             selectedWorkshopTag = nil
         case .contentLevel:
-            selectedWorkshopContentLevel = nil
+            selectedWorkshopContentLevel = .everyone
         }
         Task { await applyWorkshopFilters() }
     }
@@ -458,9 +466,7 @@ struct MediaExploreContentView: View {
         let config = GridConfig(contentWidth: contentWidth, columns: contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2), baseRatio: 0.6)
         
         return LazyVGrid(columns: config.columns, alignment: .leading, spacing: config.spacing) {
-            // 使用 id: \.id 确保稳定 ID
-            ForEach(displayedItems) { item in
-                let index = displayedItems.firstIndex(where: { $0.id == item.id }) ?? 0
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, item in
                 SimpleMediaCard(
                     item: item,
                     cardWidth: config.cardWidth,
@@ -481,22 +487,30 @@ struct MediaExploreContentView: View {
         // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 40))
     }
     
-    /// 智能预加载附近图片（前后各 10 张）
+    /// 智能预加载附近图片（前后各 8 张）
     private func preloadNearbyImages(for index: Int, config: GridConfig) {
         // 使用固定比例计算高度 (16:10)
         let imageHeight = config.cardWidth * 0.625
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+        let count = displayedItems.count
+        guard count > 0 else { return }
+        let clamped = min(max(0, index), count - 1)
+        let lower = max(0, clamped - 8)
+        let upper = min(count, clamped + 9)
+        guard lower < upper else { return }
+        let range = lower..<upper
         let urls = range
-            .filter { $0 != index }
+            .filter { $0 != clamped }
             .map { displayedItems[$0] }
             .filter { !$0.shouldRenderThumbnailAsAnimatedImage }
             .map(\.coverImageURL)
 
+        gridImagePrefetcher?.stop()
         let prefetcher = ImagePrefetcher(
             urls: urls,
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
+        gridImagePrefetcher = prefetcher
         prefetcher.start()
     }
 
@@ -568,7 +582,7 @@ struct MediaExploreContentView: View {
             selectedHotTag = nil
             selectedWorkshopTag = nil
             selectedWorkshopType = .all
-            selectedWorkshopContentLevel = nil
+            selectedWorkshopContentLevel = .everyone
             searchText = ""
         }
 
@@ -597,7 +611,7 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
-        selectedWorkshopContentLevel = nil
+        selectedWorkshopContentLevel = .everyone
         displayedItems = []
         searchTask?.cancel()
         searchTask = Task {
@@ -755,7 +769,7 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
-        selectedWorkshopContentLevel = nil
+        selectedWorkshopContentLevel = .everyone
         selectedCategory = .all
         selectedSort = .newest
         viewModel.clearItems()

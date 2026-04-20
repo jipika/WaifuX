@@ -1,8 +1,0 @@
-{
-	"passes": [{
-		"shader": "orthogrid",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"blending": "translucent"
-	}]
-}

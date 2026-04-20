@@ -1,7 +1,0 @@
-{
-	"passes": [{
-		"shader": "compilerbackdrop",
-		"depthtest": "disabled",
-		"blending": "translucent"
-	}]
-}

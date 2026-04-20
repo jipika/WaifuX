@@ -13,6 +13,23 @@ APP_NAME="WaifuX.app"
 echo "📦 WaifuX 打包开始..."
 echo "项目目录: $PROJECT_DIR"
 
+# CLI 默认使用仓库里已提交的 Resources/wallpaperengine-cli（本地构建后提交）。
+# 若该文件不存在，或设置 WAIFUX_FORCE_CLI_REBUILD=1，则尝试 ensure assets 并执行 build 脚本。
+CLI_BIN="$PROJECT_DIR/Resources/wallpaperengine-cli"
+if [[ ! -f "$CLI_BIN" ]] || [[ -n "${WAIFUX_FORCE_CLI_REBUILD:-}" ]]; then
+  if [[ -f "$PROJECT_DIR/scripts/ensure-wallpaperengine-assets.sh" ]]; then
+    chmod +x "$PROJECT_DIR/scripts/ensure-wallpaperengine-assets.sh"
+    "$PROJECT_DIR/scripts/ensure-wallpaperengine-assets.sh"
+  fi
+  if [[ -f "$PROJECT_DIR/scripts/build-wallpaperengine-cli.sh" ]]; then
+    echo "🔧 构建 wallpaperengine-cli（内嵌 assets）..."
+    chmod +x "$PROJECT_DIR/scripts/build-wallpaperengine-cli.sh"
+    "$PROJECT_DIR/scripts/build-wallpaperengine-cli.sh"
+  fi
+else
+  echo "🔧 使用已提交的 $CLI_BIN（跳过 CLI 构建）。若需重编请设 WAIFUX_FORCE_CLI_REBUILD=1"
+fi
+
 # 清理旧构建
 echo "🧹 清理旧构建..."
 rm -rf "$BUILD_DIR"

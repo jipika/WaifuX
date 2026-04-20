@@ -177,6 +177,34 @@ enum ExploreImageColorSampler {
     }
 }
 
+// MARK: - 氛围底图用缩略 NSImage（降低全屏 blur 的像素与内存）
+
+extension NSImage {
+    /// 限制最大边长（点），供 `ExploreDynamicAtmosphereBackground` 做大面积模糊用，避免对原图全尺寸 blur。
+    func constrainedForAtmosphereBackdrop(maxEdge: CGFloat = 256) -> NSImage {
+        let w = size.width
+        let h = size.height
+        guard w > 0, h > 0, w.isFinite, h.isFinite else { return self }
+        let longest = max(w, h)
+        guard longest > maxEdge else { return self }
+        let scale = maxEdge / longest
+        let nw = max(1, floor(w * scale))
+        let nh = max(1, floor(h * scale))
+        let newSize = NSSize(width: nw, height: nh)
+        let img = NSImage(size: newSize)
+        img.lockFocus()
+        defer { img.unlockFocus() }
+        NSGraphicsContext.current?.imageInterpolation = .low
+        draw(
+            in: NSRect(origin: .zero, size: newSize),
+            from: NSRect(origin: .zero, size: NSSize(width: w, height: h)),
+            operation: .copy,
+            fraction: 1
+        )
+        return img
+    }
+}
+
 // MARK: - 控制器（首张卡片缩略图 + 采样）
 
 @MainActor
@@ -251,15 +279,17 @@ final class ExploreAtmosphereController: ObservableObject {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
             guard !Task.isCancelled, let image = result?.image else { return }
 
-            let sampledColors = await Task.detached(priority: .userInitiated) {
-                ExploreImageColorSampler.triplet(from: image)
+            let processed = await Task.detached(priority: .userInitiated) {
+                let small = image.constrainedForAtmosphereBackdrop()
+                let sampledColors = ExploreImageColorSampler.triplet(from: small)
+                return (small, sampledColors)
             }.value
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                self.referenceImage = image
-                if let (c1, c2, c3) = sampledColors {
+                self.referenceImage = processed.0
+                if let (c1, c2, c3) = processed.1 {
                     self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
@@ -289,15 +319,17 @@ final class ExploreAtmosphereController: ObservableObject {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
             guard !Task.isCancelled, let image = result?.image else { return }
 
-            let sampledColors = await Task.detached(priority: .userInitiated) {
-                ExploreImageColorSampler.triplet(from: image)
+            let processed = await Task.detached(priority: .userInitiated) {
+                let small = image.constrainedForAtmosphereBackdrop()
+                let sampledColors = ExploreImageColorSampler.triplet(from: small)
+                return (small, sampledColors)
             }.value
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                self.referenceImage = image
-                if let (c1, c2, c3) = sampledColors {
+                self.referenceImage = processed.0
+                if let (c1, c2, c3) = processed.1 {
                     self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
@@ -327,15 +359,17 @@ final class ExploreAtmosphereController: ObservableObject {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
             guard !Task.isCancelled, let image = result?.image else { return }
 
-            let sampledColors = await Task.detached(priority: .userInitiated) {
-                ExploreImageColorSampler.triplet(from: image)
+            let processed = await Task.detached(priority: .userInitiated) {
+                let small = image.constrainedForAtmosphereBackdrop()
+                let sampledColors = ExploreImageColorSampler.triplet(from: small)
+                return (small, sampledColors)
             }.value
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                self.referenceImage = image
-                if let (c1, c2, c3) = sampledColors {
+                self.referenceImage = processed.0
+                if let (c1, c2, c3) = processed.1 {
                     self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
                 }
             }
@@ -395,6 +429,8 @@ struct GrainTextureOverlay: View {
     @State private var enabled = true
     @State private var quality = "high"
     var lightweight: Bool = false
+    /// `UserDefaults.didChange` 触发极频繁，合并读取避免主线程反复刷新整层叠加
+    @State private var settingsReadTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -411,6 +447,15 @@ struct GrainTextureOverlay: View {
         }
         .onAppear(perform: readSettings)
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            scheduleReadSettings()
+        }
+    }
+
+    private func scheduleReadSettings() {
+        settingsReadTask?.cancel()
+        settingsReadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
             readSettings()
         }
     }
@@ -448,12 +493,14 @@ struct ExploreDynamicAtmosphereBackground: View {
 
             // 参考图片模糊背景（轻量模式时完全禁用）
             if !lightweightBackdrop, let referenceImage {
+                // 参考图已在控制器中压到最长边约 256pt，此处用适中 blur 即可铺满视觉，避免对大图做超大半径模糊
                 Image(nsImage: referenceImage)
                     .resizable()
+                    .interpolation(.low)
                     .aspectRatio(contentMode: .fill)
-                    .frame(minWidth: 200, minHeight: 200) // 进一步降低分辨率
-                    .blur(radius: 60) // 增加模糊减少细节
-                    .opacity(0.2) // 降低不透明度
+                    .frame(minWidth: 160, minHeight: 160)
+                    .blur(radius: 32)
+                    .opacity(0.2)
                     .saturation(1.05)
                     .allowsHitTesting(false)
             }
@@ -537,6 +584,7 @@ struct KFMediaCoverImage: View {
             // 1. 底层始终用 KFImage 加载，保证静态图和 GIF 首帧都能显示
             KFImage(url)
                 .cacheMemoryOnly(false)
+                .cancelOnDisappear(true)
                 .fade(duration: fadeDuration)
                 .placeholder { _ in underlay }
                 .onSuccess { result in
@@ -554,6 +602,7 @@ struct KFMediaCoverImage: View {
             if detectedGIF && !loadFailed {
                 KFAnimatedImage.url(url)
                     .cacheMemoryOnly(false)
+                    .cancelOnDisappear(true)
                     .configure { view in
                         #if os(macOS)
                         view.imageScaling = NSImageScaling.scaleAxesIndependently

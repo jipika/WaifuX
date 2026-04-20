@@ -47,7 +47,8 @@ final class MediaExploreViewModel: ObservableObject {
     private var workshopSearchQuery = ""
     private var workshopCurrentTags: [String] = []
     private var workshopCurrentType: WorkshopSourceManager.WorkshopTypeFilter = .all
-    private var workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil
+    /// 默认 SFW（Steam `requiredtags[]=Everyone`），避免未选级别时混入全年龄未分级内容
+    private var workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -400,11 +401,23 @@ final class MediaExploreViewModel: ObservableObject {
         let source = workshopSourceManager.activeSource
         do {
             if source == .wallpaperEngine {
+                let wallpaperType: WorkshopWallpaper.WallpaperType? = (workshopCurrentType == .all) ? nil : {
+                    switch workshopCurrentType {
+                    case .scene: return .scene
+                    case .video: return .video
+                    case .web: return .web
+                    case .application: return .application
+                    case .all: return nil
+                    }
+                }()
                 let params = WorkshopSearchParams(
                     query: "",
                     sortBy: .ranked,
                     page: 1,
-                    pageSize: 10
+                    pageSize: 10,
+                    tags: workshopCurrentTags,
+                    type: wallpaperType,
+                    contentLevel: workshopCurrentContentLevel?.rawValue
                 )
                 let response = try await workshopService.search(params: params)
                 homeItems = workshopService.convertToMediaItems(response.items)
@@ -955,46 +968,31 @@ final class MediaExploreViewModel: ObservableObject {
         workshopSourceManager.activeSource == .wallpaperEngine
     }
 
-    /// 加载 Workshop 首页/搜索内容
+    /// 加载 Workshop 首页/搜索内容（沿用当前类型 / 标签 / 内容级别，默认含 SFW）
     func loadWorkshopFeed() async {
-        guard !isLoading else { return }
-
-        isLoading = true
-        errorMessage = nil
-
-        defer { isLoading = false }
-
-        // 重置分页状态
-        workshopCurrentPage = 1
-        workshopHasMore = true
-
-        let params = WorkshopSearchParams(
+        await loadWorkshopFeedInternal(
             query: workshopSearchQuery,
-            sortBy: .ranked,
-            page: 1,
-            pageSize: 20
+            tags: workshopCurrentTags,
+            type: workshopCurrentType,
+            contentLevel: workshopCurrentContentLevel
         )
-
-        do {
-            let response = try await workshopService.search(params: params)
-            let mediaItems = workshopService.convertToMediaItems(response.items)
-            items = mediaItems
-            workshopHasMore = response.hasMore
-            currentTitle = workshopSearchQuery.isEmpty ? "Workshop" : "搜索: \(workshopSearchQuery)"
-            print("[MediaExploreViewModel] loadWorkshopFeed completed: \(items.count) items")
-        } catch {
-            errorMessage = error.localizedDescription
-            print("[MediaExploreViewModel] loadWorkshopFeed failed: \(error)")
-        }
     }
 
-    /// Workshop 搜索
+    /// Workshop 搜索（与 Explore 搜索栏提交一致：清空标签/类型并回到默认 SFW）
     func searchWorkshop(query: String) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         workshopSearchQuery = trimmedQuery
         currentQuery = trimmedQuery
+        workshopCurrentTags = []
+        workshopCurrentType = .all
+        workshopCurrentContentLevel = .everyone
 
-        await loadWorkshopFeedInternal(query: trimmedQuery, tags: [])
+        await loadWorkshopFeedInternal(
+            query: trimmedQuery,
+            tags: [],
+            type: .all,
+            contentLevel: .everyone
+        )
     }
 
     /// 按标签筛选 Workshop 内容
@@ -1045,6 +1043,8 @@ final class MediaExploreViewModel: ObservableObject {
             }
         }()
 
+        let resolvedContentLevel = contentLevel ?? workshopCurrentContentLevel
+
         let params = WorkshopSearchParams(
             query: query,
             sortBy: .ranked,
@@ -1052,7 +1052,7 @@ final class MediaExploreViewModel: ObservableObject {
             pageSize: 20,
             tags: tags,
             type: wallpaperType,
-            contentLevel: contentLevel?.rawValue
+            contentLevel: resolvedContentLevel?.rawValue
         )
 
         do {

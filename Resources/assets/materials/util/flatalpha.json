@@ -1,6 +1,0 @@
-{
-	"passes": [{
-		"shader": "flat",
-		"blending": "translucent"
-	}]
-}

@@ -1,7 +1,0 @@
-{
-	"passes": [{
-		"shader": "hdr_downsample",
-		"depthtest": "disabled",
-		"depthwrite": "disabled"
-	}]
-}

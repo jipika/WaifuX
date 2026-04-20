@@ -113,6 +113,12 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                         isLoadingTriggered = false
                     }
                 }
+                // 滚动过程中标记全局状态，供探索页背景降级 GPU 开销
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentOffset.y
+                } action: { _, _ in
+                    ExploreScrollState.shared.markScrolling()
+                }
         } else {
             content
                 .background(
@@ -128,6 +134,7 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                 )
                 .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
                     scrollOffset = value
+                    ExploreScrollState.shared.markScrolling()
                 }
                 .onPreferenceChange(ExploreContentSizeKey.self) { value in
                     contentSize = value

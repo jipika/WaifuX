@@ -26,28 +26,17 @@
 
 ### 编译命令
 
-**必须带 `-rpath` 参数**，否则运行时找不到 `liblinux-wallpaperengine-renderer.dylib`：
+**`Resources/assets` 不提交 Git**（`.gitignore`）。**`Resources/wallpaperengine-cli` 由本地构建后提交**；GitHub Actions **不再**在 CI 里编 CLI，`xcodebuild` 也不会每次跑嵌入脚本。
+
+本地更新 CLI 时：
 
 ```bash
-swiftc \
-  -parse-as-library \
-  -I Resources/CRenderer \
-  -I Resources \
-  -L Resources \
-  -llinux-wallpaperengine-renderer \
-  -Xlinker -rpath -Xlinker @loader_path \
-  -Xlinker -rpath -Xlinker @loader_path/Resources \
-  -Xlinker -rpath -Xlinker @loader_path/../Resources \
-  -framework AppKit \
-  -framework IOKit \
-  -framework WebKit \
-  -framework Combine \
-  -o Resources/wallpaperengine-cli \
-  wallpaperengine-cli.swift
-
-# 必须同时复制到根目录，否则开发模式会加载旧版本
-cp Resources/wallpaperengine-cli wallpaperengine-cli
+chmod +x scripts/ensure-wallpaperengine-assets.sh scripts/build-wallpaperengine-cli.sh
+./scripts/ensure-wallpaperengine-assets.sh   # 已有本地 Resources/assets 则跳过；否则设 WAIFUX_WE_ASSETS_PACK_URL
+./scripts/build-wallpaperengine-cli.sh      # 产出 Resources/wallpaperengine-cli 与仓库根目录 wallpaperengine-cli，再 git add 提交
 ```
+
+`package.sh`：若已存在 `Resources/wallpaperengine-cli` 则跳过上述构建；需要强制重编时设 `WAIFUX_FORCE_CLI_REBUILD=1`。
 
 如果编译后发现 dylib 加载失败，也可以用 `install_name_tool` 补救：
 

@@ -33,53 +33,50 @@ struct ContentView: View {
                 .ignoresSafeArea()
                 .zIndex(0)
 
-            // Tab 缓存 - 使用 opacity 保持视图存活，避免重新渲染
+            // Tab：各页在非选中时仅保留 Color.clear 占位，重 UI（ScrollView/网格）不挂载，避免五页同跑
             ZStack {
-                // Home Tab
                 HomeContentView(
                     viewModel: viewModel,
                     mediaViewModel: mediaViewModel,
                     selectedWallpaper: $selectedWallpaper,
-                    selectedMedia: $selectedMedia
+                    selectedMedia: $selectedMedia,
+                    isTabActive: selectedTab == .home
                 )
-                .opacity(selectedTab == .home ? 1 : 0)
+                .zIndex(selectedTab == .home ? 1 : 0)
                 .allowsHitTesting(selectedTab == .home)
-                
-                // Wallpaper Explore Tab
+
                 WallpaperExploreContentView(
                     viewModel: viewModel,
                     selectedWallpaper: $selectedWallpaper,
                     isVisible: selectedTab == .wallpaperExplore
                 )
-                .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
+                .zIndex(selectedTab == .wallpaperExplore ? 1 : 0)
                 .allowsHitTesting(selectedTab == .wallpaperExplore)
 
-                // Anime Explore Tab
                 AnimeExploreView(
                     viewModel: animeViewModel,
                     selectedAnime: $selectedAnime,
                     isVisible: selectedTab == .animeExplore
                 )
-                .opacity(selectedTab == .animeExplore ? 1 : 0)
+                .zIndex(selectedTab == .animeExplore ? 1 : 0)
                 .allowsHitTesting(selectedTab == .animeExplore)
 
-                // Media Explore Tab
                 MediaExploreContentView(
                     viewModel: mediaViewModel,
                     selectedMedia: $selectedMedia,
                     isVisible: selectedTab == .mediaExplore
                 )
-                .opacity(selectedTab == .mediaExplore ? 1 : 0)
+                .zIndex(selectedTab == .mediaExplore ? 1 : 0)
                 .allowsHitTesting(selectedTab == .mediaExplore)
-                
-                // My Media Tab
+
                 MyLibraryContentView(
                     selectedWallpaper: $librarySelectedWallpaper,
                     selectedMedia: $librarySelectedMedia,
-                    selectedAnime: $librarySelectedAnime
+                    selectedAnime: $librarySelectedAnime,
+                    isTabActive: selectedTab == .myMedia
                 )
-                    .opacity(selectedTab == .myMedia ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .myMedia)
+                .zIndex(selectedTab == .myMedia ? 1 : 0)
+                .allowsHitTesting(selectedTab == .myMedia)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .id(localization.currentLanguage)

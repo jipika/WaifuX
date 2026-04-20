@@ -5,6 +5,17 @@ options:
     macOS: "14.0"
   xcodeVersion: "26.4"
 
+# 共享 Scheme 纳入仓库，避免仅存在 xcuserdata 时换机/重装后 Cmd+R 无可用方案
+schemes:
+  WaifuX:
+    build:
+      targets:
+        WaifuX: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
 packages:
   SwiftSoup:
     url: https://github.com/scinfu/SwiftSoup.git
@@ -36,9 +47,13 @@ targets:
       - path: Components
       - path: DesignSystem
       - path: Assets.xcassets
+      # 含 wallpaperengine-cli（材质已嵌入二进制尾部）、dylib、JSON 等；assets/ 仅用于构建 CLI，不复制进 .app
       - path: Resources
         type: folder
         buildPhase: resources
+        excludes:
+          - assets
+          - assets/**
       - path: AnimeRules
         type: folder
         buildPhase: resources
@@ -46,7 +61,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.60
+        MARKETING_VERSION: 38.0.61
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"

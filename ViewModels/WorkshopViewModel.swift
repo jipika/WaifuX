@@ -61,7 +61,8 @@ class WorkshopViewModel: ObservableObject {
             query: searchQuery,
             sortBy: selectedSort,
             page: 1,
-            pageSize: pageSize
+            pageSize: pageSize,
+            contentLevel: WorkshopSourceManager.WorkshopContentLevel.everyone.rawValue
         )
         
         do {
@@ -91,7 +92,8 @@ class WorkshopViewModel: ObservableObject {
             query: searchQuery,
             sortBy: selectedSort,
             page: currentPage + 1,
-            pageSize: pageSize
+            pageSize: pageSize,
+            contentLevel: WorkshopSourceManager.WorkshopContentLevel.everyone.rawValue
         )
         
         do {

@@ -1285,7 +1285,7 @@ struct MediaDetailSheet: View {
                 isSettingWallpaper = true
                 Task {
                     do {
-                        try await wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted, targetScreens: selectedScreen.map { [$0] })
+                        try wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted, targetScreens: selectedScreen.map { [$0] })
                     } catch {
                         errorMessage = error.localizedDescription
                         showError = true
@@ -1297,7 +1297,7 @@ struct MediaDetailSheet: View {
             isSettingWallpaper = true
             Task {
                 do {
-                    try await wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted)
+                    try wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted)
                 } catch {
                     errorMessage = error.localizedDescription
                     showError = true

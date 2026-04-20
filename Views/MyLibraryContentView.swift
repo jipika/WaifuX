@@ -14,6 +14,7 @@ struct MyLibraryContentView: View {
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
     @Binding var selectedAnime: AnimeSearchResult?
+    var isTabActive: Bool = true
     @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
@@ -59,71 +60,68 @@ struct MyLibraryContentView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            // 编辑模式背景遮罩（放在最底层，不阻挡卡片点击）
-            if isEditing {
-                Color.black.opacity(0.3)
+        Group {
+            if isTabActive {
+                ZStack(alignment: .topLeading) {
+                    if isEditing {
+                        Color.black.opacity(0.3)
+                            .ignoresSafeArea()
+                            .onTapGesture {
+                                withAnimation {
+                                    isEditing = false
+                                    selectedItems.removeAll()
+                                }
+                            }
+                            .allowsHitTesting(true)
+                    }
+
+                    SpotlightBackground(
+                        lightColor: Color.white.opacity(0.95),
+                        backgroundColor: Color.black,
+                        intensity: 0.9,
+                        spread: 0.4
+                    )
                     .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation {
-                            isEditing = false
-                            selectedItems.removeAll()
+
+                    GrainTextureOverlay()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea()
+
+                    GeometryReader { geometry in
+                        let contentWidth = max(0, geometry.size.width - 56)
+                        let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
+
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 32) {
+                                mediaHero
+                                ContentTypePicker(selected: $selectedContentType)
+                                contentSections(config: gridConfig)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 28)
+                            .padding(.top, 80)
+                            .padding(.bottom, 48)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .frame(minHeight: geometry.size.height)
                         }
+                        .scrollClipDisabled()
                     }
-                    .allowsHitTesting(true)
-            }
-
-            // 聚光灯背景效果
-            SpotlightBackground(
-                lightColor: Color.white.opacity(0.95),
-                backgroundColor: Color.black,
-                intensity: 0.9,
-                spread: 0.4
-            )
-            .ignoresSafeArea()
-
-            // 颗粒材质覆盖层
-            GrainTextureOverlay()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .ignoresSafeArea()
-
-            GeometryReader { geometry in
-                let contentWidth = max(0, geometry.size.width - 56)
-                let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 32) {
-                        // Hero 区域
-                        mediaHero
-
-                        // 内容类型切换器
-                        ContentTypePicker(selected: $selectedContentType)
-
-                        // 根据类型显示不同内容
-                        contentSections(config: gridConfig)
-
-                        // 底部填充，确保内容不够时也能占满屏幕
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 80)
-                    .padding(.bottom, 48)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .frame(minHeight: geometry.size.height)
                 }
-                .scrollClipDisabled()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .task {
+                    await viewModel.initialLoad()
+                    await loadAnimeFavorites()
+                    Task {
+                        await LocalWallpaperScanner.shared.forceRescan()
+                    }
+                    updateWallpaperItems()
+                    updateMediaItems()
+                }
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task {
-            await viewModel.initialLoad()
-            await loadAnimeFavorites()
-            // 后台触发扫描，扫描完成后 ViewModel 会自动重建缓存并通知刷新
-            Task {
-                await LocalWallpaperScanner.shared.forceRescan()
-            }
-            updateWallpaperItems()
-            updateMediaItems()
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {

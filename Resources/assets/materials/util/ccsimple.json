@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "ccsimple",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"cullmode": "nocull",
-		"textures": ["_rt_FullFrameBuffer"]
-	}]
-}

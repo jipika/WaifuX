@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "effects/fluidsimulation_pressure",
-		"blending": "normal",
-		"depthtest": "disabled",
-		"depthwrite": "disabled",
-		"cullmode": "nocull"
-	}]
-}

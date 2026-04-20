@@ -1,9 +1,0 @@
-{
-	"passes": [{
-		"shader": "flat",
-		"cullmode": "nocull",
-		"depthtest": "enabled",
-		"depthwrite": "disabled",
-		"blending": "translucent"
-	}]
-}

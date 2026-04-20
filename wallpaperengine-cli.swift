@@ -50,6 +50,19 @@ private final class RendererBridge {
     private init() {}
 
     private func defaultAssetsPath() -> String {
+        // 1) CLI 自包含：材质 zip 追加在可执行文件尾部，解压到 Caches（主 App 不再带 assets 目录）
+        if let embedded = WallpaperEngineEmbeddedAssets.materializedAssetsRootIfPresent(),
+           FileManager.default.fileExists(atPath: embedded) {
+            return embedded
+        }
+
+        // 2) 开发/调试：环境变量覆盖
+        if let injected = ProcessInfo.processInfo.environment["WAIFUX_WALLPAPERENGINE_ASSETS"],
+           !injected.isEmpty,
+           FileManager.default.fileExists(atPath: injected) {
+            return injected
+        }
+
         let executableDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         let candidates = [
             executableDir.appendingPathComponent("assets").path,
@@ -416,26 +429,118 @@ private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile:
     return (contentDir, file)
 }
 
+/// 读取 Wallpaper Engine `project.json` 中 `general.properties`，供 `wallpaperPropertyListener.applyUserProperties` 注入（背景 schemecolor、滑块 x/y/z 等）。
+private func readWebWallpaperUserPropertiesJSON(contentDir: URL) -> String? {
+    let projectURL = contentDir.appendingPathComponent("project.json")
+    guard let data = try? Data(contentsOf: projectURL),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let general = json["general"] as? [String: Any],
+          let props = general["properties"] as? [String: Any],
+          !props.isEmpty,
+          let out = try? JSONSerialization.data(withJSONObject: props, options: []),
+          let str = String(data: out, encoding: .utf8) else {
+        return nil
+    }
+    return str
+}
+
 // MARK: - Web Renderer Bridge (WKWebView-based HTML wallpaper)
 private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     static let shared = WebRendererBridge()
+
+    /// `file://` 壁纸常见兼容问题：
+    /// 1) Spine 等库对 `HTMLImageElement` 设置 `crossOrigin = "anonymous"`，WebKit 在本地文件场景下会拒绝加载同目录纹理 → 画面空白。
+    /// 2) 部分 Workshop 脚本用 `fetch()` 读相对路径 JSON，在 `file` 协议下可能失败；XHR 更稳。
+    private static let localFileCompatScript = WKUserScript(
+        source: """
+        (function() {
+          try {
+            if (location.protocol !== "file:") return;
+            var proto = HTMLImageElement.prototype;
+            var srcDesc = Object.getOwnPropertyDescriptor(proto, "src");
+            if (srcDesc && srcDesc.set) {
+              Object.defineProperty(proto, "src", {
+                set: function(value) {
+                  try {
+                    var s = String(value || "");
+                    if (s.indexOf("http:") !== 0 && s.indexOf("https:") !== 0 && s.indexOf("data:") !== 0 && s.indexOf("blob:") !== 0) {
+                      this.removeAttribute("crossorigin");
+                    }
+                  } catch (e) {}
+                  srcDesc.set.call(this, value);
+                },
+                get: srcDesc.get,
+                configurable: true
+              });
+            }
+            var origFetch = window.fetch;
+            if (typeof origFetch === "function") {
+              window.fetch = function(input, init) {
+                var url = typeof input === "string" ? input : (input && input.url) ? input.url : "";
+                if (url && url.indexOf("http:") !== 0 && url.indexOf("https:") !== 0 && url.indexOf("data:") !== 0 && url.indexOf("blob:") !== 0) {
+                  return new Promise(function(resolve, reject) {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("GET", url, true);
+                    xhr.onload = function() {
+                      if (xhr.status === 200 || xhr.status === 0) {
+                        resolve(new Response(xhr.responseText, { status: 200, statusText: "OK" }));
+                      } else {
+                        reject(new Error("HTTP " + xhr.status));
+                      }
+                    };
+                    xhr.onerror = function() { reject(new Error("network error")); };
+                    xhr.send();
+                  });
+                }
+                return origFetch.call(this, input, init);
+              };
+            }
+          } catch (e) {}
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
 
     private var window: NSWindow?
     private var webView: WKWebView?
     private var captureTimer: Timer?
     private var pendingCompletion: ((Bool) -> Void)?
     private var extractedPKGDir: URL?
+    /// `project.json` → `general.properties` 的 JSON 文本，加载完成后注入 JS
+    private var injectedPropertiesJSON: String?
+    /// 递增以取消进行中的首帧采样（stop / 重新加载）
+    private var firstFrameSettleGeneration: UInt64 = 0
     private(set) var isLoaded = false
     private let capturePath = "/tmp/wallpaperengine-cli-capture.png"
+
+    private enum FirstFramePolicy {
+        /// 至少经历此时长后才允许「稳定」判真，避免白屏/首帧未绘制误判
+        static let minElapsed: TimeInterval = 1.05
+        /// 含加载动画时最长等到此时长，取最后一帧作为首帧
+        static let maxElapsed: TimeInterval = 24
+        static let pollInterval: TimeInterval = 0.5
+        /// 48×48 灰度缩略图平均通道差，低于此认为两帧近似
+        static let diffThreshold: Double = 0.014
+        /// 连续多少次「近似」后认为加载动画结束
+        static let stablePassesRequired: Int = 2
+        static let thumbDimension: Int = 48
+    }
 
     func loadWallpaper(path: String, width: Int, height: Int, screen: Int? = nil, completion: ((Bool) -> Void)? = nil) {
         stop() // 清理旧的（包括临时目录）
         pendingCompletion = completion
+        injectedPropertiesJSON = nil
 
         guard let (baseURL, indexFile) = resolveWebWallpaperEntry(path: path) else {
             dlog("[WebRendererBridge] Failed to resolve web wallpaper entry for \(path)")
             completion?(false)
             return
+        }
+
+        injectedPropertiesJSON = readWebWallpaperUserPropertiesJSON(contentDir: baseURL)
+        if injectedPropertiesJSON != nil {
+            dlog("[WebRendererBridge] Loaded user properties from project.json for injection")
         }
 
         // 记录 .pkg 解压目录以便 stop 时清理
@@ -468,12 +573,19 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         w.backgroundColor = .clear
         w.hasShadow = false
         w.setFrame(targetScreen.frame, display: true)
-        w.ignoresMouseEvents = true
+        // 允许交互式 Web 壁纸（如 Spine 点击）接收鼠标；桌面图标层仍高于 desktopWindow，一般仍可点到图标
+        w.acceptsMouseMovedEvents = false
+        w.ignoresMouseEvents = false
         w.isReleasedWhenClosed = false
 
         // 配置 WKWebView
         let config = WKWebViewConfiguration()
         config.preferences.javaScriptEnabled = true
+        // 允许本地 HTML 引用同目录资源（Workshop web 壁纸依赖）
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        let ucc = WKUserContentController()
+        ucc.addUserScript(Self.localFileCompatScript)
+        config.userContentController = ucc
         if #available(macOS 14.0, *) {
             config.defaultWebpagePreferences.allowsContentJavaScript = true
         }
@@ -485,6 +597,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         web.navigationDelegate = self
         web.wantsLayer = true
         web.layer?.backgroundColor = NSColor.black.cgColor
+        web.layer?.contentsScale = targetScreen.backingScaleFactor
 
         w.contentView?.addSubview(web)
 
@@ -501,30 +614,31 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         dlog("[WebRendererBridge] didFinish")
         isLoaded = true
-        // 首帧截图存 capture
-        captureFrame { [weak self] success in
-            self?.pendingCompletion?(success)
-            self?.pendingCompletion = nil
+        // 对齐 Wallpaper Engine：注入 project 属性 + 修正缺失背景图与全屏布局，再稍等 Spine 应用相机/缩放
+        runWebWallpaperBootstrap { [weak self] in
+            guard let self = self else { return }
+            self.beginSettlingFirstFrame()
         }
-        // 之后定时截图（锁屏/静态桌面能看到更新）
-        startCaptureTimer()
         NSApp.setActivationPolicy(.prohibited)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         dlog("[WebRendererBridge] didFail: \(error)")
+        firstFrameSettleGeneration += 1
         pendingCompletion?(false)
         pendingCompletion = nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         dlog("[WebRendererBridge] didFailProvisional: \(error)")
+        firstFrameSettleGeneration += 1
         pendingCompletion?(false)
         pendingCompletion = nil
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         dlog("[WebRendererBridge] WebContent process terminated")
+        firstFrameSettleGeneration += 1
         pendingCompletion?(false)
         pendingCompletion = nil
         isLoaded = false
@@ -553,12 +667,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             document.querySelectorAll('*').forEach(el => {
                 if (el.style.animationPlayState === 'paused') el.style.animationPlayState = 'running';
             });
+            window.dispatchEvent(new Event('resize'));
         """) { _, _ in }
         startCaptureTimer()
         NSApp.setActivationPolicy(.prohibited)
     }
 
     func stop() {
+        firstFrameSettleGeneration += 1
         captureTimer?.invalidate()
         captureTimer = nil
         // 中断可能还在等待的 completion
@@ -575,6 +691,194 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             try? FileManager.default.removeItem(at: dir)
             extractedPKGDir = nil
         }
+        injectedPropertiesJSON = nil
+    }
+
+    /// 注入 WE 用户属性、去掉常见坏掉的 `background.png`、铺满视口并触发 resize（供 Spine/Canvas 重算）
+    private func runWebWallpaperBootstrap(completion: (() -> Void)? = nil) {
+        var propsBlock = ""
+        if let json = injectedPropertiesJSON,
+           let data = json.data(using: .utf8) {
+            let b64 = data.base64EncodedString()
+            propsBlock = """
+            try {
+              var props = JSON.parse(atob("\(b64)"));
+              if (window.wallpaperPropertyListener && typeof window.wallpaperPropertyListener.applyUserProperties === 'function') {
+                window.wallpaperPropertyListener.applyUserProperties(props);
+              }
+            } catch(e) {}
+            """
+        }
+        let layoutBlock = """
+        try {
+          document.documentElement.style.cssText = 'width:100%;height:100%;margin:0;padding:0;background:transparent;overflow:hidden;';
+          document.body.style.setProperty('background-image', 'none', 'important');
+          document.body.style.setProperty('width', '100%');
+          document.body.style.setProperty('height', '100%');
+          document.body.style.setProperty('margin', '0');
+          document.body.style.setProperty('overflow', 'hidden');
+          var pc = document.getElementById('player-container');
+          if (pc) { pc.style.width = '100%'; pc.style.height = '100%'; }
+          window.dispatchEvent(new Event('resize'));
+        } catch(e2) {}
+        """
+        let source = "(function(){\(propsBlock)\(layoutBlock); return true;})();"
+        webView?.evaluateJavaScript(source) { _, _ in
+            DispatchQueue.main.async { completion?() }
+        }
+    }
+
+    /// 轮询截图直到画面连续稳定（加载动画结束）或超时，避免把 Loading 当首帧
+    private func beginSettlingFirstFrame() {
+        firstFrameSettleGeneration += 1
+        let gen = firstFrameSettleGeneration
+        let t0 = Date()
+
+        final class SettleState {
+            var lastThumb: [UInt8]?
+            var stablePasses = 0
+            var lastImage: NSImage?
+        }
+        let state = SettleState()
+
+        func finish(_ image: NSImage?, reason: String) {
+            guard gen == firstFrameSettleGeneration else { return }
+            let ok: Bool
+            if let image = image {
+                ok = saveImage(image)
+            } else {
+                ok = false
+            }
+            dlog("[WebRendererBridge] First frame settle: \(reason), saveOk=\(ok)")
+            pendingCompletion?(ok)
+            pendingCompletion = nil
+            startCaptureTimer()
+        }
+
+        func scheduleStep() {
+            guard gen == firstFrameSettleGeneration, webView != nil else { return }
+            let elapsed = Date().timeIntervalSince(t0)
+            if elapsed >= FirstFramePolicy.maxElapsed {
+                finish(state.lastImage, reason: "timeout_elapsed=\(String(format: "%.2f", elapsed))s")
+                return
+            }
+
+            snapshotWebView { [weak self] image in
+                guard let self = self, gen == self.firstFrameSettleGeneration else { return }
+                guard let image = image else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + FirstFramePolicy.pollInterval) { scheduleStep() }
+                    return
+                }
+                state.lastImage = image
+                let thumb = self.grayscaleThumb(from: image, dimension: FirstFramePolicy.thumbDimension)
+                defer {
+                    if let t = thumb { state.lastThumb = t }
+                }
+                if let prev = state.lastThumb, let curr = thumb {
+                    let diff = Self.meanAbsDiffGrayscale(prev, curr)
+                    if diff < FirstFramePolicy.diffThreshold, elapsed >= FirstFramePolicy.minElapsed {
+                        state.stablePasses += 1
+                    } else {
+                        state.stablePasses = 0
+                    }
+                    if state.stablePasses >= FirstFramePolicy.stablePassesRequired {
+                        finish(image, reason: "stable_diff=\(String(format: "%.4f", diff)) elapsed=\(String(format: "%.2f", elapsed))s")
+                        return
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + FirstFramePolicy.pollInterval) { scheduleStep() }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { scheduleStep() }
+    }
+
+    private func snapshotWebView(completion: @escaping (NSImage?) -> Void) {
+        guard let webView = webView else {
+            completion(nil)
+            return
+        }
+        if #available(macOS 11.0, *) {
+            let config = WKSnapshotConfiguration()
+            config.rect = CGRect(origin: .zero, size: webView.bounds.size)
+            webView.takeSnapshot(with: config) { image, error in
+                if image == nil {
+                    dlog("[WebRendererBridge] snapshotWebView failed: \(error?.localizedDescription ?? "unknown")")
+                }
+                DispatchQueue.main.async {
+                    completion(image)
+                }
+            }
+        } else {
+            DispatchQueue.main.async { [weak webView] in
+                guard let webView = webView else { completion(nil); return }
+                guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                                     pixelsWide: max(1, Int(webView.bounds.width)),
+                                                     pixelsHigh: max(1, Int(webView.bounds.height)),
+                                                     bitsPerSample: 8,
+                                                     samplesPerPixel: 4,
+                                                     hasAlpha: true,
+                                                     isPlanar: false,
+                                                     colorSpaceName: .deviceRGB,
+                                                     bytesPerRow: 0,
+                                                     bitsPerPixel: 0) else {
+                    completion(nil)
+                    return
+                }
+                NSGraphicsContext.saveGraphicsState()
+                let ctx = NSGraphicsContext(bitmapImageRep: bitmap)
+                NSGraphicsContext.current = ctx
+                webView.layer?.render(in: ctx!.cgContext)
+                NSGraphicsContext.restoreGraphicsState()
+                let img = NSImage(size: bitmap.size)
+                img.addRepresentation(bitmap)
+                completion(img)
+            }
+        }
+    }
+
+    private func grayscaleThumb(from image: NSImage, dimension: Int) -> [UInt8]? {
+        guard dimension > 0 else { return nil }
+        let target = NSSize(width: dimension, height: dimension)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: dimension,
+                                         pixelsHigh: dimension,
+                                         bitsPerSample: 8,
+                                         samplesPerPixel: 4,
+                                         hasAlpha: true,
+                                         isPlanar: false,
+                                         colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0,
+                                         bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: target).fill()
+        image.draw(in: NSRect(origin: .zero, size: target),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy,
+                   fraction: 1.0,
+                   respectFlipped: false,
+                   hints: [.interpolation: NSImageInterpolation.low])
+        NSGraphicsContext.restoreGraphicsState()
+        var out = [UInt8](repeating: 0, count: dimension * dimension)
+        for y in 0..<dimension {
+            for x in 0..<dimension {
+                guard let c = rep.colorAt(x: x, y: y) else { continue }
+                let g = UInt8(min(255, max(0, (c.redComponent * 0.299 + c.greenComponent * 0.587 + c.blueComponent * 0.114) * 255.0)))
+                out[y * dimension + x] = g
+            }
+        }
+        return out
+    }
+
+    private static func meanAbsDiffGrayscale(_ a: [UInt8], _ b: [UInt8]) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return 1 }
+        var sum: Int = 0
+        for i in 0..<a.count {
+            sum += abs(Int(a[i]) - Int(b[i]))
+        }
+        return Double(sum) / Double(a.count * 255)
     }
 
     private func startCaptureTimer() {
@@ -585,44 +889,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     }
 
     private func captureFrame(completion: ((Bool) -> Void)? = nil) {
-        guard let webView = webView else { completion?(false); return }
-
-        if #available(macOS 11.0, *) {
-            let config = WKSnapshotConfiguration()
-            config.rect = CGRect(origin: .zero, size: webView.bounds.size)
-            webView.takeSnapshot(with: config) { [weak self] image, error in
-                guard let image = image else {
-                    dlog("[WebRendererBridge] takeSnapshot failed: \(error?.localizedDescription ?? "unknown")")
-                    completion?(false)
-                    return
-                }
-                let success = self?.saveImage(image) ?? false
-                completion?(success)
+        snapshotWebView { [weak self] image in
+            guard let image = image else {
+                completion?(false)
+                return
             }
-        } else {
-            // fallback for macOS 10.x
-            DispatchQueue.main.async { [weak self] in
-                guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                                     pixelsWide: Int(webView.bounds.width),
-                                                     pixelsHigh: Int(webView.bounds.height),
-                                                     bitsPerSample: 8,
-                                                     samplesPerPixel: 4,
-                                                     hasAlpha: true,
-                                                     isPlanar: false,
-                                                     colorSpaceName: .deviceRGB,
-                                                     bytesPerRow: 0,
-                                                     bitsPerPixel: 0) else {
-                    completion?(false)
-                    return
-                }
-                NSGraphicsContext.saveGraphicsState()
-                let ctx = NSGraphicsContext(bitmapImageRep: bitmap)
-                NSGraphicsContext.current = ctx
-                webView.layer?.render(in: ctx!.cgContext)
-                NSGraphicsContext.restoreGraphicsState()
-                let success = self?.saveBitmap(bitmap) ?? false
-                completion?(success)
-            }
+            let success = self?.saveImage(image) ?? false
+            completion?(success)
         }
     }
 
@@ -706,6 +979,10 @@ private final class DesktopWallpaperManager {
                     self.isWebMode = false
                     self.currentWallpaperPath = nil
                     self.restoreOriginalWallpaper()
+                } else {
+                    // 与 Scene 一致：把快照同步到系统桌面（锁屏/调度中心等），并定时刷新实现「动态壁纸」
+                    self.applyCaptureAsDesktopWallpaper(screen: screen)
+                    self.startPeriodicCapture(screen: screen)
                 }
                 NSApp.setActivationPolicy(.prohibited)
                 completion?(success)
@@ -822,11 +1099,17 @@ private final class DesktopWallpaperManager {
         // 使用 500ms 间隔（2fps）在性能与流畅度之间取得平衡
         // 注意：saveCapture 依赖 OpenGL 上下文，必须在主线程执行
         captureUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self, self.isRunning, !self.isPaused, !self.isWebMode else { return }
-            let url = URL(fileURLWithPath: self.capturePath)
-            let success = RendererBridge.shared.saveCapture(to: url)
-            guard success else { return }
-            self.applyCaptureAsDesktopWallpaper(screen: screen)
+            guard let self = self, self.isRunning, !self.isPaused else { return }
+            if self.isWebMode {
+                // Web：由 WebRendererBridge 定时写入 capturePath，这里只负责推到系统桌面
+                guard FileManager.default.fileExists(atPath: self.capturePath) else { return }
+                self.applyCaptureAsDesktopWallpaper(screen: screen)
+            } else {
+                let url = URL(fileURLWithPath: self.capturePath)
+                let success = RendererBridge.shared.saveCapture(to: url)
+                guard success else { return }
+                self.applyCaptureAsDesktopWallpaper(screen: screen)
+            }
         }
     }
 

@@ -31,6 +31,8 @@ struct HomeContentView: View {
     @ObservedObject var mediaViewModel: MediaExploreViewModel
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
+    /// 为 false 时不挂载重 UI（非当前 Tab），避免五 Tab 同时跑 ScrollView/轮播
+    var isTabActive: Bool = true
 
     @State private var currentCarouselIndex = 0
     @State private var currentCarouselDisplayIndex = 0
@@ -66,51 +68,63 @@ struct HomeContentView: View {
     }
 
     var body: some View {
-        GeometryReader { containerProxy in
-            let heroH = heroHeight(for: containerProxy.size.width)
-            
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
-                    heroSection
-                        .zIndex(1)
-                        .frame(height: heroH)
+        Group {
+            if isTabActive {
+                GeometryReader { containerProxy in
+                    let heroH = heroHeight(for: containerProxy.size.width)
 
-                    contentSections
-                    .padding(.horizontal, contentHorizontalInset)
-                    .padding(.top, sectionTopSpacing)
-            }
-            .padding(.bottom, 42)
-            .background(
-                GeometryReader { geometry in
-                    Color.clear
-                        .preference(
-                            key: ScrollOffsetPreferenceKey.self,
-                            value: geometry.frame(in: .named("homeScrollView")).minY
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 0) {
+                            heroSection
+                                .zIndex(1)
+                                .frame(height: heroH)
+
+                            contentSections
+                                .padding(.horizontal, contentHorizontalInset)
+                                .padding(.top, sectionTopSpacing)
+                        }
+                        .padding(.bottom, 42)
+                        .background(
+                            GeometryReader { geometry in
+                                Color.clear
+                                    .preference(
+                                        key: ScrollOffsetPreferenceKey.self,
+                                        value: geometry.frame(in: .named("homeScrollView")).minY
+                                    )
+                            }
                         )
+                    }
+                    .coordinateSpace(name: "homeScrollView")
+                    .scrollClipDisabled()
                 }
-            )
-            }
-            .coordinateSpace(name: "homeScrollView")
-            .scrollClipDisabled()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            homeBackground
-                .ignoresSafeArea()
-                .id(currentHeroID)
-        )
-        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-            handleScroll(offset: offset)
-        }
-        .onAppear {
-            syncCarouselState(with: heroWallpapers)
-            startCarouselAutoPlay()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    homeBackground
+                        .ignoresSafeArea()
+                        .id(currentHeroID)
+                )
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
+                    handleScroll(offset: offset)
+                }
+                .onAppear {
+                    syncCarouselState(with: heroWallpapers)
+                    startCarouselAutoPlay()
 
-            // ⚠️ 延迟加载媒体数据，让首屏先渲染
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
-                await mediaViewModel.initialLoadIfNeeded()
-                await mediaViewModel.refreshHomeItems()
+                    Task {
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        await mediaViewModel.initialLoadIfNeeded()
+                        await mediaViewModel.refreshHomeItems()
+                    }
+                }
+                .onDisappear {
+                    stopCarouselAutoPlay()
+                    cancelCarouselLoopReset()
+                    cancelCarouselInteractionReset()
+                }
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
@@ -118,12 +132,18 @@ struct HomeContentView: View {
                 await viewModel.refresh()
             }
         }
-        .onDisappear {
-            stopCarouselAutoPlay()
-            cancelCarouselLoopReset()
-            cancelCarouselInteractionReset()
+        .onChange(of: isTabActive) { _, active in
+            if active {
+                syncCarouselState(with: heroWallpapers)
+                startCarouselAutoPlay()
+            } else {
+                stopCarouselAutoPlay()
+                cancelCarouselLoopReset()
+                cancelCarouselInteractionReset()
+            }
         }
         .onChange(of: heroWallpaperIDs) { _, _ in
+            guard isTabActive else { return }
             syncCarouselState(with: heroWallpapers)
             stopCarouselAutoPlay()
             startCarouselAutoPlay()
@@ -1438,15 +1458,17 @@ final class HomeAtmosphereController: ObservableObject {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
             guard !Task.isCancelled, let image = result?.image else { return }
 
-            let sampledColors = await Task.detached(priority: .userInitiated) {
-                ExploreImageColorSampler.triplet(from: image)
+            let processed = await Task.detached(priority: .userInitiated) {
+                let small = image.constrainedForAtmosphereBackdrop()
+                let sampledColors = ExploreImageColorSampler.triplet(from: small)
+                return (small, sampledColors)
             }.value
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                self.referenceImage = image
-                if let (c1, c2, c3) = sampledColors {
+                self.referenceImage = processed.0
+                if let (c1, c2, c3) = processed.1 {
                     withAnimation(.easeInOut(duration: 0.75)) {
                         self.primary = c1
                         self.secondary = c2

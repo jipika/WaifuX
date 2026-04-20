@@ -9,6 +9,7 @@ struct WallpaperExploreContentView: View {
     @Binding var selectedWallpaper: Wallpaper?
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
+    @ObservedObject private var exploreScrollState = ExploreScrollState.shared
 
     init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
@@ -32,26 +33,27 @@ struct WallpaperExploreContentView: View {
     @State private var showAPIKeyAlert = false
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
+    /// 保留预取器引用，避免局部变量立即释放导致预取被取消，并可在新预取前停止旧任务
+    @State private var gridImagePrefetcher: Kingfisher.ImagePrefetcher?
 
     private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
-        GeometryReader { geometry in
-            let contentWidth = calculateContentWidth(geometry: geometry)
-            let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
+        Group {
+            if isVisible {
+                GeometryReader { geometry in
+                    let contentWidth = calculateContentWidth(geometry: geometry)
+                    let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
 
-            ZStack {
-                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
-                if isVisible {
-                    ExploreDynamicAtmosphereBackground(
-                        tint: exploreAtmosphere.tint,
-                        referenceImage: exploreAtmosphere.referenceImage,
-                        lightweightBackdrop: false
-                    )
-                    .ignoresSafeArea()
-                }
+                    ZStack {
+                        ExploreDynamicAtmosphereBackground(
+                            tint: exploreAtmosphere.tint,
+                            referenceImage: exploreAtmosphere.referenceImage,
+                            lightweightBackdrop: exploreScrollState.isScrolling
+                        )
+                        .ignoresSafeArea()
 
-                ScrollView(.vertical, showsIndicators: false) {
+                        ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
@@ -98,15 +100,20 @@ struct WallpaperExploreContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            }
-        }
-        // 移除 API Key 弹窗提示
-        .onAppear {
-            if isFirstAppearance {
-                resetAllFilters(reloadData: true)
-                isFirstAppearance = false
+                    }
+                }
+                .onAppear {
+                    if isFirstAppearance {
+                        resetAllFilters(reloadData: true)
+                        isFirstAppearance = false
+                    } else {
+                        handleAppear()
+                    }
+                }
             } else {
-                handleAppear()
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
@@ -372,9 +379,8 @@ struct WallpaperExploreContentView: View {
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
         LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-            // 使用稳定 ID 优化 SwiftUI 渲染循环
-            ForEach(displayedItems) { wallpaper in
-                let index = displayedItems.firstIndex(where: { $0.id == wallpaper.id }) ?? 0
+            // 使用 enumerated 提供索引，避免对每个 cell 做 firstIndex 的 O(n²) 扫描
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, wallpaper in
                 WallpaperCard(
                     wallpaper: wallpaper,
                     isFavorite: viewModel.isFavorite(wallpaper),
@@ -401,20 +407,28 @@ struct WallpaperExploreContentView: View {
         // .frame(height: config.calculateTotalHeight(itemCount: displayedItems.count))
     }
     
-    /// 智能预加载附近图片（前后各 10 张）
+    /// 智能预加载附近图片（前后各 8 张，减轻滚动时调度压力）
     private func preloadNearbyImages(for index: Int, config: WallpaperGridConfig) {
         // 使用固定比例计算高度 (10:6)
         let imageHeight = config.cardWidth * 0.6
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+        let count = displayedItems.count
+        guard count > 0 else { return }
+        let clamped = min(max(0, index), count - 1)
+        let lower = max(0, clamped - 8)
+        let upper = min(count, clamped + 9)
+        guard lower < upper else { return }
+        let range = lower..<upper
         let urls = range
-            .filter { $0 != index }
+            .filter { $0 != clamped }
             .compactMap { displayedItems[$0].thumbURL }
 
+        gridImagePrefetcher?.stop()
         let prefetcher = Kingfisher.ImagePrefetcher(
             urls: urls,
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
+        gridImagePrefetcher = prefetcher
         prefetcher.start()
     }
 
@@ -1111,7 +1125,7 @@ private struct WallpaperCard: View {
                 KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
                     .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                     .cacheMemoryOnly(false)
-                    // 移除 cancelOnDisappear(false) 和 fade 避免闪烁和加载问题
+                    .cancelOnDisappear(true)
                     .placeholder { _ in
                         placeholderGradient
                     }

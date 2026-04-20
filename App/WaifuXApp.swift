@@ -49,7 +49,7 @@ struct WaifuXApp {
         
         // 配置全局 URLCache
         let cache = URLCache(
-            memoryCapacity: 100_000_000,  // 100 MB 内存缓存
+            memoryCapacity: 50_000_000,  // 50 MB，与 Kingfisher 内存缓存叠加后更可控
             diskCapacity: 500_000_000,   // 500 MB 磁盘缓存
             diskPath: "WaifuXImageCache"
         )

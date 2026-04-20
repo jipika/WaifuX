@@ -32,24 +32,24 @@ struct AnimeExploreView: View {
     @State private var loadMoreFailed = false
     @State private var searchTask: Task<Void, Never>?
     @State private var isTagSearchActive = false
+    @State private var gridImagePrefetcher: Kingfisher.ImagePrefetcher?
 
     var body: some View {
-        GeometryReader { geometry in
-            let contentWidth = calculateContentWidth(geometry: geometry)
-            let gridConfig = AnimeGridConfig(contentWidth: contentWidth)
+        Group {
+            if isVisible {
+                GeometryReader { geometry in
+                    let contentWidth = calculateContentWidth(geometry: geometry)
+                    let gridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
-            ZStack {
-                // 背景放在 ScrollView 同级底层，避免滚动耦合重绘
-                if isVisible {
-                    ExploreDynamicAtmosphereBackground(
-                        tint: exploreAtmosphere.tint,
-                        referenceImage: exploreAtmosphere.referenceImage,
-                        lightweightBackdrop: true
-                    )
-                    .ignoresSafeArea()
-                }
+                    ZStack {
+                        ExploreDynamicAtmosphereBackground(
+                            tint: exploreAtmosphere.tint,
+                            referenceImage: exploreAtmosphere.referenceImage,
+                            lightweightBackdrop: true
+                        )
+                        .ignoresSafeArea()
 
-                ScrollView(.vertical, showsIndicators: false) {
+                        ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
@@ -95,14 +95,20 @@ struct AnimeExploreView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            }
-        }
-        .onAppear {
-            if isFirstAppearance {
-                resetAllFilters(reloadData: true)
-                isFirstAppearance = false
+                    }
+                }
+                .onAppear {
+                    if isFirstAppearance {
+                        resetAllFilters(reloadData: true)
+                        isFirstAppearance = false
+                    } else {
+                        handleAppear()
+                    }
+                }
             } else {
-                handleAppear()
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
         }
         .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
@@ -236,8 +242,7 @@ struct AnimeExploreView: View {
 
     private func animeGrid(config: AnimeGridConfig) -> some View {
         LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-            ForEach(displayedItems) { anime in
-                let index = displayedItems.firstIndex(where: { $0.id == anime.id }) ?? 0
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, anime in
                 AnimeCard(
                     anime: anime,
                     index: index,
@@ -256,19 +261,27 @@ struct AnimeExploreView: View {
         }
     }
 
-    /// 智能预加载附近图片（前后各 10 张）
+    /// 智能预加载附近图片（前后各 8 张）
     private func preloadNearbyImages(for index: Int, config: AnimeGridConfig) {
         let imageHeight = config.cardWidth * 1.4
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let range = max(0, index - 10)..<min(displayedItems.count, index + 11)
+        let count = displayedItems.count
+        guard count > 0 else { return }
+        let clamped = min(max(0, index), count - 1)
+        let lower = max(0, clamped - 8)
+        let upper = min(count, clamped + 9)
+        guard lower < upper else { return }
+        let range = lower..<upper
         let urls = range
-            .filter { $0 != index }
+            .filter { $0 != clamped }
             .compactMap { displayedItems[$0].coverURL.flatMap { URL(string: $0) } }
 
+        gridImagePrefetcher?.stop()
         let prefetcher = Kingfisher.ImagePrefetcher(
             urls: urls,
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
+        gridImagePrefetcher = prefetcher
         prefetcher.start()
     }
 
@@ -623,6 +636,7 @@ private struct AnimeCard: View {
                 KFImage(anime.coverURL.flatMap { URL(string: $0) })
                     .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                     .cacheMemoryOnly(false)
+                    .cancelOnDisappear(true)
                     .placeholder { _ in
                         placeholderGradient
                     }
