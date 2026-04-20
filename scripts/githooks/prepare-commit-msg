@@ -1,0 +1,14 @@
+#!/bin/sh
+# 仅在「合并提交」时自动将 VERSION patch +1 并纳入同一提交（需存在 merge 提交，非 fast-forward 时不会触发）。
+COMMIT_MSG_FILE=$1
+SOURCE=${2:-}
+
+case "$SOURCE" in
+  merge)
+    ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+    if [ -f "$ROOT/scripts/bump-version-patch.sh" ]; then
+      bash "$ROOT/scripts/bump-version-patch.sh"
+    fi
+    ;;
+esac
+exit 0
