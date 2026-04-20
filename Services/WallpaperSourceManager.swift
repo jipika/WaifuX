@@ -355,6 +355,8 @@ class WallpaperSourceManager: ObservableObject {
             // 启用了 VPN，保持 Wallhaven
             print("[WallpaperSourceManager] VPN is enabled, keeping Wallhaven")
             await MainActor.run {
+                // GitHub Hosts 会把请求改成直连固定 IP，容易绕过系统 VPN（尤其分流）；走 VPN 时关闭
+                GitHubHosts.isEnabled = false
                 if activeSource != .wallhaven {
                     activeSource = .wallhaven
                     isAutoSwitched = false
