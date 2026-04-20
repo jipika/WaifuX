@@ -3,10 +3,9 @@ name: CI
 # 本仓库（WaifuX main 线）默认集成分支为 main。
 # 若另有 fork/仓库以 feature/wallpaper-engine 为默认分支，应在那个仓库里单独维护 workflow，勿与这里混用。
 on:
+  # 每次推 main 都跑 CI；发版打包/Release 仍仅在「VERSION 对应 v* tag 尚不存在」时执行（见下方 if）
   push:
     branches: [main]
-    paths:
-      - 'VERSION'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -90,8 +89,23 @@ jobs:
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
 
-      - name: Build (for PRs)
+      - name: Build (PRs)
         if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p build
+          xcodebuild -project WaifuX.xcodeproj \
+            -scheme WaifuX \
+            -destination 'platform=macOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      # push 且当前 VERSION 已有 tag 时不会跑「Build & Package」，此处补一次编译校验
+      - name: Build (verify push to main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'true'
         run: |
           mkdir -p build
           xcodebuild -project WaifuX.xcodeproj \
