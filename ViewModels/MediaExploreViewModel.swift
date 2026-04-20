@@ -570,6 +570,11 @@ final class MediaExploreViewModel: ObservableObject {
         mediaLibrary.recordViewed(item)
     }
 
+    /// 是否与设置一致：下载后写入应用内媒体库（而非仅临时缓存）。与系统「下载」文件夹无关。
+    private var persistDownloadedMediaToAppLibrary: Bool {
+        UserDefaults.standard.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
+    }
+
     func download(_ item: MediaItem, preferredOption: MediaDownloadOption? = nil) async throws {
         let task = downloadTaskService.addTask(mediaItem: item)
 
@@ -577,7 +582,7 @@ final class MediaExploreViewModel: ObservableObject {
             _ = try await ensureLocalVideoFile(
                 for: item,
                 preferredOption: preferredOption,
-                saveToDownloads: true,
+                saveToDownloads: persistDownloadedMediaToAppLibrary,
                 taskID: task.id
             )
             downloadTaskService.markCompleted(id: task.id)
@@ -619,7 +624,7 @@ final class MediaExploreViewModel: ObservableObject {
             let localURL = try await ensureLocalVideoFile(
                 for: item,
                 preferredOption: option,
-                saveToDownloads: true,
+                saveToDownloads: persistDownloadedMediaToAppLibrary,
                 taskID: task.id
             )
             downloadTaskService.markCompleted(id: task.id)
@@ -896,7 +901,7 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         if saveToDownloads {
-            // 复制到下载目录（安全作用域访问已由 ensureDirectoryStructure 确保）
+            // 复制到应用内媒体库目录（Application Support 下 WaifuX/Media）
             if !FileManager.default.fileExists(atPath: fileURL.path) {
                 do {
                     // 确保目标目录存在
@@ -917,7 +922,7 @@ final class MediaExploreViewModel: ObservableObject {
                         throw DownloadError.writeFailed(NSError(domain: "WaifuX", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
                     }
                 } catch {
-                    print("[MediaExploreViewModel] ❌ Failed to write file to download directory: \(error)")
+                    print("[MediaExploreViewModel] ❌ Failed to write file to app media library: \(error)")
                     throw DownloadError.writeFailed(error)
                 }
             }

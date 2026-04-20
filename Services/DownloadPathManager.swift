@@ -6,7 +6,10 @@ import Foundation
 @MainActor
 final class DownloadPathManager {
     static let shared = DownloadPathManager()
-    
+
+    /// 与设置中的开关一致：是否写入应用内媒体库（Application Support 下 `WaifuX`）。与系统「下载」文件夹无关。
+    static let persistDownloadsToAppLibraryDefaultsKey = "save_to_downloads"
+
     // 权限管理器
     private let permissionManager = DownloadPermissionManager.shared
 
@@ -38,11 +41,9 @@ final class DownloadPathManager {
         rootFolderURL.appendingPathComponent("SceneBakes", isDirectory: true)
     }
 
-    /// 旧版统一目录（仅作参考，不再自动读取）
+    /// 旧版目录占位（历史上曾为 `~/Downloads/WallHaven`）。仅用于路径比较，不访问「下载」文件夹 API，避免触发相关权限能力。
     var legacyFolderURL: URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("WallHaven", isDirectory: true)
+        URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent("Downloads/WallHaven"), isDirectory: true)
     }
 
     private init() {
@@ -50,12 +51,9 @@ final class DownloadPathManager {
     }
 
     // MARK: - 权限管理
-    /// 确保下载权限有效（无沙箱版本：直接创建目录并返回）
-    /// - Returns: 是否有有效权限（无沙箱下始终返回 true）
+    /// 确保应用数据目录（Application Support 下 `WaifuX`）可创建且可写。
     func ensureDownloadPermission() async -> Bool {
-        // 无沙箱模式：直接创建目录结构，不需要权限弹窗
         createDirectoryStructure()
-        return true
     }
     
     /// 请求下载文件夹权限
@@ -70,14 +68,17 @@ final class DownloadPathManager {
     }
 
     // MARK: - 目录创建
-    /// 创建完整的目录结构（需要先确保有权限）
-    func createDirectoryStructure() {
+    /// 创建完整的目录结构；任一必需目录无法创建或不可写则返回 `false`。
+    @discardableResult
+    func createDirectoryStructure() -> Bool {
         let directories = [rootFolderURL, wallpapersFolderURL, mediaFolderURL, sceneBakesFolderURL]
+        let fm = FileManager.default
+        var ok = true
 
         for directory in directories {
-            if !FileManager.default.fileExists(atPath: directory.path) {
+            if !fm.fileExists(atPath: directory.path) {
                 do {
-                    try FileManager.default.createDirectory(
+                    try fm.createDirectory(
                         at: directory,
                         withIntermediateDirectories: true,
                         attributes: nil
@@ -85,22 +86,20 @@ final class DownloadPathManager {
                     print("[DownloadPathManager] Created directory: \(directory.path)")
                 } catch {
                     print("[DownloadPathManager] Failed to create directory: \(error)")
+                    ok = false
                 }
             }
+            if fm.fileExists(atPath: directory.path), !fm.isWritableFile(atPath: directory.path) {
+                print("[DownloadPathManager] Directory not writable: \(directory.path)")
+                ok = false
+            }
         }
+        return ok
     }
-    
-    /// 确保目录结构存在（异步版本，会先检查权限）
+
+    /// 确保目录结构存在（异步版本）
     func ensureDirectoryStructure() async -> Bool {
-        // 确保有权限
-        guard await ensureDownloadPermission() else {
-            print("[DownloadPathManager] No download permission")
-            return false
-        }
-        
-        // 创建目录
-        createDirectoryStructure()
-        return true
+        await ensureDownloadPermission()
     }
 
     // MARK: - 路径解析
