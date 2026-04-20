@@ -30,6 +30,8 @@
 
 **CI 默认分支**：仓库以 `feature/wallpaper-engine` 为集成分支（无 `main`）。推送改 `VERSION`、PR 目标分支、Pages 触发分支均以此为准；若改名需同步 `.github/workflows/*.yml`。
 
+**WE 动态壁纸**：`scene` 与 `web` 均由 `wallpaperengine-cli` 渲染，在 App 内与本机视频壁纸一并视为动态壁纸；`WallpaperEngineXBridge.isControllingExternalEngine` 为真时，状态栏暂停/恢复/关闭必须走 CLI，不得误用 `VideoWallpaperManager`。设置 WE 壁纸前只能调用 `stopNativeVideoWallpaperOnly()`，禁止先置 `isControllingExternalEngine = true` 再调 `VideoWallpaperManager.stopWallpaper()`（否则会 `stopWallpaper` 链式停掉 CLI 并清掉标志）。
+
 本地更新 CLI 时：
 
 ```bash

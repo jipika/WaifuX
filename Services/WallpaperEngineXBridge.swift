@@ -3,7 +3,8 @@ import AppKit
 import Combine
 
 /// 负责与 Wallpaper Engine CLI 通信的桥接层
-/// 通过调用 wallpaperengine-cli 二进制控制壁纸引擎
+/// 通过调用 wallpaperengine-cli 二进制控制壁纸引擎。
+/// **scene** 与 **web** 均由 CLI 渲染，与本机视频壁纸一样属于「动态壁纸」：`isControllingExternalEngine` 为真时菜单栏应走 pause/resume/stop CLI，而非 `VideoWallpaperManager`。
 @MainActor
 final class WallpaperEngineXBridge: ObservableObject {
     static let shared = WallpaperEngineXBridge()
@@ -46,11 +47,12 @@ final class WallpaperEngineXBridge: ObservableObject {
             throw WallpaperEngineError.notInstalled
         }
         lastWallpaperPath = path
-        isControllingExternalEngine = true
         isExternalPaused = false
 
-        // 先停止 WallHaven 自己的视频壁纸，避免两层重叠
-        VideoWallpaperManager.shared.stopWallpaper()
+        // 只停本机视频层；切勿调用 VideoWallpaperManager.stopWallpaper()，否则其内会因 isControllingExternalEngine==true 而 stop CLI（见该文件注释）。
+        VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+
+        isControllingExternalEngine = true
 
         if let screens = targetScreens, !screens.isEmpty {
             for screen in screens {
@@ -98,29 +100,25 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     // MARK: - 私有方法
 
-    private func resolveCLIPath() -> URL? {
-        // 1. 标准 bundle 资源查找
+    /// 与 `executeCLI` 相同规则解析 bundled `wallpaperengine-cli`（供离线烘焙子进程使用）。
+    nonisolated static func resolvedCLIExecutableURL() -> URL? {
         if let url = Bundle.main.url(forResource: "wallpaperengine-cli", withExtension: nil) {
             return url
         }
-        // 2. macOS App Bundle Contents/Resources
         let bundleResources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/wallpaperengine-cli")
         if FileManager.default.fileExists(atPath: bundleResources.path) {
             return bundleResources
         }
-        // 3. Bundle 的 Resources 目录
         if let resourceURL = Bundle.main.resourceURL {
             let resourcePath = resourceURL.appendingPathComponent("wallpaperengine-cli")
             if FileManager.default.fileExists(atPath: resourcePath.path) {
                 return resourcePath
             }
         }
-        // 4. 与 .app 同级的开发目录（Xcode 运行时常用）
         let siblingPath = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("wallpaperengine-cli")
         if FileManager.default.fileExists(atPath: siblingPath.path) {
             return siblingPath
         }
-        // 5. 项目根目录 fallback（开发模式）
         let projectPaths = [
             "/Volumes/mac/CodeLibrary/Claude/WallHaven/wallpaperengine-cli",
             "/Volumes/mac/CodeLibrary/Claude/WallHaven/Resources/wallpaperengine-cli"
@@ -131,6 +129,10 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func resolveCLIPath() -> URL? {
+        Self.resolvedCLIExecutableURL()
     }
 
     private func executeCLI(arguments: [String]) throws {

@@ -3,20 +3,34 @@ import AppKit
 import Kingfisher
 import Combine
 
-// MARK: - 全局滚动状态（用于 GIF 播放暂停）
+// MARK: - 列表滚动时暂停 GIF（减轻 Lazy 列表滚动主线程压力；勿用于驱动全屏背景）
 
 @MainActor
-final class ExploreScrollState: ObservableObject {
-    static let shared = ExploreScrollState()
-    @Published var isScrolling = false
-    private var scrollTask: Task<Void, Never>?
-    
-    func markScrolling() {
-        isScrolling = true
-        scrollTask?.cancel()
-        scrollTask = Task {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            await MainActor.run { isScrolling = false }
+final class ExploreListGIFPlaybackState: ObservableObject {
+    static let shared = ExploreListGIFPlaybackState()
+
+    /// true 时 `KFMediaCoverImage` 只显示首帧，不跑 `KFAnimatedImage` 动画
+    @Published private(set) var shouldPauseListGIFs = false
+    private var idleTask: Task<Void, Never>?
+
+    /// 由 `ScrollLoadMoreModifier` 在滚动偏移变化时调用；仅在 false→true、停顿后 true→false 时发布，避免每帧刷新
+    func noteListScrolling() {
+        if !shouldPauseListGIFs {
+            shouldPauseListGIFs = true
+        }
+        idleTask?.cancel()
+        idleTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(180))
+            } catch {
+                return
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if self.shouldPauseListGIFs {
+                    self.shouldPauseListGIFs = false
+                }
+            }
         }
     }
 }
@@ -545,6 +559,8 @@ struct ExploreDynamicAtmosphereBackground: View {
 /// 统一使用 `KFAnimatedImage`：Kingfisher 内部会解析真实文件格式，
 /// GIF 自动走动画管线，静态图则回退到普通 ImageView 行为，无需外部根据 URL 预判断。
 struct KFMediaCoverImage: View {
+    @ObservedObject private var listGIFPlayback = ExploreListGIFPlaybackState.shared
+
     let url: URL
     var animated: Bool
     /// 非 nil 时对静态图做降采样（列表性能）；GIF 分支忽略。
@@ -563,7 +579,7 @@ struct KFMediaCoverImage: View {
     @State private var loadFailed = false
 
     private var shouldAnimate: Bool {
-        playAnimatedImage && isVisible
+        playAnimatedImage && isVisible && !listGIFPlayback.shouldPauseListGIFs
     }
 
     private var underlay: some View {
@@ -611,7 +627,8 @@ struct KFMediaCoverImage: View {
                         view.clipsToBounds = true
                         #endif
                         view.autoPlayAnimatedImage = shouldAnimate
-                        view.framePreloadCount = shouldAnimate ? 10 : 1
+                        // 列表内降低预加载帧数，减轻解码与内存峰值
+                        view.framePreloadCount = shouldAnimate ? 4 : 1
                     }
                     .placeholder { _ in underlay }
                     .onSuccess { _ in loadFinished?() }

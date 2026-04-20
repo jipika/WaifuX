@@ -113,11 +113,11 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                         isLoadingTriggered = false
                     }
                 }
-                // 滚动过程中标记全局状态，供探索页背景降级 GPU 开销
+                // 滚动中暂停列表 GIF 动画（仅更新 ExploreListGIFPlaybackState，不驱动背景）
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     geometry.contentOffset.y
                 } action: { _, _ in
-                    ExploreScrollState.shared.markScrolling()
+                    ExploreListGIFPlaybackState.shared.noteListScrolling()
                 }
         } else {
             content
@@ -134,7 +134,7 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                 )
                 .onPreferenceChange(ExploreScrollOffsetKey.self) { value in
                     scrollOffset = value
-                    ExploreScrollState.shared.markScrolling()
+                    ExploreListGIFPlaybackState.shared.noteListScrolling()
                 }
                 .onPreferenceChange(ExploreContentSizeKey.self) { value in
                     contentSize = value

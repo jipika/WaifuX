@@ -16,6 +16,9 @@ final class VideoWallpaperManager: ObservableObject {
     private var players: [String: AVQueuePlayer] = [:]
     private var loopers: [String: AVPlayerLooper] = [:]
 
+    /// 应挂载 MP4 壁纸层的屏幕 ID（`NSScreen.wallpaperScreenIdentifier`）。唤醒 / 分辨率变化时全局 `rebuildWindows()` 只重建这些屏，避免「只设一块屏动态」却给所有显示器都建了视频窗。
+    private var videoTargetScreenIDs = Set<String>()
+
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
     private let showPosterOnLockKey = "video_wallpaper_show_poster_on_lock"
@@ -132,10 +135,15 @@ final class VideoWallpaperManager: ObservableObject {
             WallpaperEngineXBridge.shared.stopWallpaper()
         }
 
-        let expectedScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+        let isNewVideo = currentVideoURL != localFileURL
         let activeScreenIDs = Set(windows.keys)
+        let screenIDsNow = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
 
-        if currentVideoURL == localFileURL, expectedScreenIDs == activeScreenIDs, !windows.isEmpty {
+        if !isNewVideo,
+           currentVideoURL == localFileURL,
+           !windows.isEmpty,
+           activeScreenIDs == videoTargetScreenIDs,
+           videoTargetScreenIDs.isSubset(of: screenIDsNow) {
             currentVideoURL = localFileURL
             setMuted(muted)
             isPaused = false
@@ -145,6 +153,18 @@ final class VideoWallpaperManager: ObservableObject {
                 }
             }
             return
+        }
+
+        if isNewVideo {
+            if let targetScreen {
+                videoTargetScreenIDs = [targetScreen.wallpaperScreenIdentifier]
+            } else {
+                videoTargetScreenIDs = screenIDsNow
+            }
+        } else if let targetScreen {
+            videoTargetScreenIDs.insert(targetScreen.wallpaperScreenIdentifier)
+        } else {
+            videoTargetScreenIDs = screenIDsNow
         }
 
         // 保存用户原始壁纸（如果是首次设置）
@@ -275,9 +295,22 @@ final class VideoWallpaperManager: ObservableObject {
         currentVideoURL = nil
         currentPosterURL = nil
         isPaused = false
+        videoTargetScreenIDs = []
         // 不删除保存的状态，以便下次可以恢复
 
         // 恢复用户原始桌面壁纸
+        restoreOriginalWallpaper()
+    }
+
+    /// 仅拆掉本机 AVPlayer 视频壁纸，**不**调用 `WallpaperEngineXBridge.stopWallpaper()`。
+    /// 在即将通过 CLI 设置 scene / web 等 WE 壁纸前调用，否则会误停 CLI 且把 `isControllingExternalEngine` 清掉，菜单栏暂停恢复会走错视频分支。
+    func stopNativeVideoWallpaperOnly() {
+        teardownAllWindows()
+        currentVideoURL = nil
+        currentPosterURL = nil
+        isPaused = false
+        videoTargetScreenIDs = []
+        defaults.removeObject(forKey: stateKey)
         restoreOriginalWallpaper()
     }
     
@@ -338,8 +371,14 @@ final class VideoWallpaperManager: ObservableObject {
         
         Task { @MainActor in
             do {
-                // 1. 下载预览图
-                let (data, _) = try await URLSession.shared.data(from: posterURL)
+                // 1. 读取预览图（本地文件或网络）
+                let data: Data
+                if posterURL.isFileURL {
+                    data = try Data(contentsOf: posterURL)
+                } else {
+                    let (d, _) = try await URLSession.shared.data(from: posterURL)
+                    data = d
+                }
                 
                 // 2. 保存到持久化目录（而不是临时目录）
                 let persistentURL = persistedPosterDirectory
@@ -512,9 +551,30 @@ final class VideoWallpaperManager: ObservableObject {
         let posterURL = savedState.posterURL.flatMap { URL(string: $0) }
 
         do {
-            try applyVideoWallpaper(from: url, posterURL: posterURL, muted: savedState.isMuted)
-            if savedState.isPaused {
-                pauseWallpaper()
+            if let ids = savedState.videoScreenIDs, !ids.isEmpty {
+                if currentVideoURL == nil {
+                    saveOriginalWallpaper()
+                }
+                currentVideoURL = url
+                currentPosterURL = posterURL
+                isMuted = savedState.isMuted
+                isPaused = false
+                videoTargetScreenIDs = Set(ids)
+                if let posterURL {
+                    for screen in screensForVideoWallpaperTargets() {
+                        setPosterAsDesktopWallpaper(posterURL, targetScreen: screen)
+                    }
+                }
+                try rebuildWindows()
+                if savedState.isPaused {
+                    pauseWallpaper()
+                }
+                persistState()
+            } else {
+                try applyVideoWallpaper(from: url, posterURL: posterURL, muted: savedState.isMuted)
+                if savedState.isPaused {
+                    pauseWallpaper()
+                }
             }
         } catch {
             defaults.removeObject(forKey: stateKey)
@@ -603,7 +663,7 @@ final class VideoWallpaperManager: ObservableObject {
                 }
             }
         } else {
-            screensToRebuild = NSScreen.screens
+            screensToRebuild = screensForVideoWallpaperTargets()
         }
 
         NSLog("[VideoWallpaperManager] Rebuilding windows for \(screensToRebuild.count) screen(s)")
@@ -649,6 +709,22 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         NSLog("[VideoWallpaperManager] Windows rebuilt successfully")
+    }
+
+    /// 全局重建时只返回应显示 MP4 的 `NSScreen`（与 `videoTargetScreenIDs` 对齐）
+    private func screensForVideoWallpaperTargets() -> [NSScreen] {
+        if videoTargetScreenIDs.isEmpty {
+            return NSScreen.screens
+        }
+        var matched = NSScreen.screens.filter { videoTargetScreenIDs.contains($0.wallpaperScreenIdentifier) }
+        if matched.isEmpty {
+            // 睡眠唤醒后偶发 NSScreenNumber 变化，单屏目标退回到主屏；多屏则退回全部以免无窗口
+            if videoTargetScreenIDs.count == 1, let main = NSScreen.main {
+                return [main]
+            }
+            return NSScreen.screens
+        }
+        return matched
     }
 
     private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) throws {
@@ -778,7 +854,8 @@ final class VideoWallpaperManager: ObservableObject {
             fileURL: currentVideoURL.absoluteString,
             posterURL: currentPosterURL?.absoluteString,
             isMuted: isMuted,
-            isPaused: isPaused
+            isPaused: isPaused,
+            videoScreenIDs: videoTargetScreenIDs.isEmpty ? nil : videoTargetScreenIDs.sorted()
         )
 
         if let encoded = try? JSONEncoder().encode(state) {
@@ -835,6 +912,8 @@ private struct SavedVideoWallpaperState: Codable {
     let posterURL: String?
     let isMuted: Bool
     let isPaused: Bool
+    /// 应显示 MP4 的屏幕 ID；旧版持久化无此字段时表示「当时逻辑等价于全部屏幕」
+    let videoScreenIDs: [String]?
 }
 
 /// v2: 单个屏幕的壁纸配置

@@ -49,6 +49,62 @@ final class VideoThumbnailCache {
         return videoURL
     }
     
+    /// 从本地视频抽一帧为 JPEG，用作动态壁纸的**静态桌面/锁屏**底图（与 `VideoWallpaperManager.setPosterAsDesktopWallpaper` 配套）。
+    /// - Note: 输出在 `VideoThumbnails` 目录，文件名由视频路径哈希决定；失败时返回 `nil`。
+    func posterJPEGFileURL(forLocalVideo videoURL: URL) async -> URL? {
+        guard videoURL.isFileURL else { return nil }
+        let pathKey = (try? videoURL.standardizedFileURL.path) ?? videoURL.path
+        guard fileManager.fileExists(atPath: pathKey) else { return nil }
+
+        let outURL = posterCacheURL(forPathKey: pathKey)
+        if fileManager.fileExists(atPath: outURL.path),
+           let attrs = try? fileManager.attributesOfItem(atPath: outURL.path),
+           let sz = attrs[.size] as? NSNumber, sz.intValue > 500 {
+            return outURL
+        }
+
+        let fileURL = URL(fileURLWithPath: pathKey)
+        return await generatePosterJPEGFile(from: fileURL, outputURL: outURL)
+    }
+
+    private func posterCacheURL(forPathKey pathKey: String) -> URL {
+        cacheDirectory.appendingPathComponent("poster_wallpaper_\(pathKey.md5).jpg")
+    }
+
+    private func generatePosterJPEGFile(from videoURL: URL, outputURL: URL) async -> URL? {
+        await Task.detached(priority: .utility) {
+            let asset = AVAsset(url: videoURL)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 3840, height: 2160)
+
+            var seconds: Double = 0.5
+            if let duration = try? await asset.load(.duration) {
+                let d = CMTimeGetSeconds(duration)
+                if d.isFinite, d > 0 {
+                    seconds = min(0.5, max(0.05, d * 0.15))
+                }
+            }
+            let t = CMTime(seconds: seconds, preferredTimescale: 600)
+
+            do {
+                let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
+                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                guard let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
+                    return nil
+                }
+                try jpeg.write(to: outputURL, options: .atomic)
+                print("[VideoThumbnailCache] Poster frame for wallpaper: \(outputURL.path)")
+                return outputURL
+            } catch {
+                print("[VideoThumbnailCache] Failed to generate poster frame: \(error)")
+                return nil
+            }
+        }.value
+    }
+
     /// 获取缩略图图片
     /// - Parameter videoURL: 视频文件 URL
     /// - Returns: 缩略图

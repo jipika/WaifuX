@@ -35,7 +35,7 @@ swiftc -parse-as-library \
   -Xlinker -rpath -Xlinker @loader_path \
   -Xlinker -rpath -Xlinker @loader_path/Resources \
   -Xlinker -rpath -Xlinker @loader_path/../Resources \
-  -framework AppKit -framework IOKit -framework WebKit -framework Combine \
+  -framework AppKit -framework AVFoundation -framework IOKit -framework WebKit -framework Combine \
   -o "$OUT_CLI" \
   "$SRC_MAIN" "$SRC_EMBED"
 

@@ -10,6 +10,7 @@ struct MediaDetailSheet: View {
     let onClose: () -> Void
 
     @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
+    @ObservedObject private var mediaLibrary = MediaLibraryService.shared
     @State private var resolvedItem: MediaItem
     @State private var isDownloading = false
     @State private var isSettingWallpaper = false
@@ -26,6 +27,7 @@ struct MediaDetailSheet: View {
     @State private var showWallpaperEngineActivationAlert = false
     @State private var showSteamGuardAlert = false
     @State private var pendingSteamGuardCode = ""
+    @State private var isBakingScene = false
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -53,6 +55,23 @@ struct MediaDetailSheet: View {
     /// 是否已下载（包括网络下载和本地文件）
     private var isAlreadyDownloaded: Bool {
         isLocalFile || viewModel.isDownloaded(resolvedItem)
+    }
+
+    private var currentDownloadRecord: MediaDownloadRecord? {
+        mediaLibrary.downloadedItems.first { $0.item.id == resolvedItem.id }
+    }
+
+    private var sceneOfflineBakeButtonVisible: Bool {
+        guard isAlreadyDownloaded,
+              let record = currentDownloadRecord,
+              let eligibility = record.sceneBakeEligibility,
+              eligibility.isEligibleForOfflineBake else { return false }
+        return true
+    }
+
+    /// 已展示「预渲染循环视频」且英雄区可见时，仅用按钮内进度即可，避免与全屏「正在烘焙…」重复。
+    private var sceneBakeUsesInlineProgressOnly: Bool {
+        sceneOfflineBakeButtonVisible && !isHeroContentHidden
     }
 
     var body: some View {
@@ -155,6 +174,11 @@ struct MediaDetailSheet: View {
                     topBarTopInset: topBarTopInset
                 )
                 .zIndex(100)
+
+                if isBakingScene, !sceneBakeUsesInlineProgressOnly {
+                    sceneBakeProgressOverlay(width: viewW, height: viewH)
+                        .zIndex(250)
+                }
 
                 // 下一张弹窗 - 固定在右下角，不覆盖全屏
                 VStack {
@@ -339,6 +363,10 @@ struct MediaDetailSheet: View {
                     .frame(maxWidth: .infinity, alignment: .center)
 
                     buttonRowWithDividers
+
+                    if sceneOfflineBakeButtonVisible {
+                        sceneBakeActionRow
+                    }
                 }
 
                 Text(statusText)
@@ -360,9 +388,9 @@ struct MediaDetailSheet: View {
     // MARK: - 顶部返回按钮（下载/设置壁纸中禁用）
     private var floatingBackButton: some View {
         Button(action: {
-            if isDownloading || isSettingWallpaper {
-                AppLogger.warn(.ui, "Media 返回被阻止：下载/设置壁纸进行中",
-                    metadata: ["isDownloading": isDownloading, "isSettingWallpaper": isSettingWallpaper])
+            if isDownloading || isSettingWallpaper || isBakingScene {
+                AppLogger.warn(.ui, "Media 返回被阻止：下载/设置壁纸/烘焙进行中",
+                    metadata: ["isDownloading": isDownloading, "isSettingWallpaper": isSettingWallpaper, "isBakingScene": isBakingScene])
                 return
             }
             onClose()
@@ -483,6 +511,114 @@ struct MediaDetailSheet: View {
                 isLast: index == metadataItems.count - 1
             )
         }
+    }
+
+    private func sceneBakeProgressOverlay(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            Color.black.opacity(0.5)
+                .ignoresSafeArea()
+            VStack(spacing: 18) {
+                CustomProgressView(tint: .white)
+                    .scaleEffect(1.35)
+                Text(t("sceneBake.progressTitle"))
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text(t("sceneBake.progressSubtitle"))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: min(360, width * 0.85))
+            }
+            .padding(.horizontal, 36)
+            .padding(.vertical, 32)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+            )
+        }
+        .frame(width: width, height: height)
+        .contentShape(Rectangle())
+        .allowsHitTesting(true)
+    }
+
+    private var sceneBakeActionRow: some View {
+        VStack(spacing: 8) {
+            Text(t("sceneBake.tierHint"))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 520)
+
+            Button {
+                runSceneOfflineBake()
+            } label: {
+                HStack(spacing: 8) {
+                    if isBakingScene {
+                        CustomProgressView(tint: .white)
+                            .scaleEffect(0.75)
+                    } else {
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    Text(t("sceneBake.button"))
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundStyle(.white.opacity(0.95))
+                .padding(.horizontal, 20)
+                .frame(height: 40)
+                .contentShape(Capsule())
+                .detailGlassCapsuleChrome(level: .prominent)
+            }
+            .buttonStyle(.plain)
+            .disabled(isBakingScene)
+
+            if let art = currentDownloadRecord?.sceneBakeArtifact {
+                Text("\(t("sceneBake.cached")) · \(URL(fileURLWithPath: art.videoPath).lastPathComponent)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func runSceneOfflineBake() {
+        guard let record = currentDownloadRecord else { return }
+        guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
+            errorMessage = t("sceneBake.error.insufficientMemory.bake")
+            showError = true
+            return
+        }
+        isBakingScene = true
+        errorMessage = ""
+        Task {
+            do {
+                let artifact = try await SceneOfflineBakeService.bake(record: record)
+                let videoURL = URL(fileURLWithPath: artifact.videoPath)
+                await MainActor.run {
+                    isBakingScene = false
+                    // 烘焙目的即替代 Scene 实时渲染：直接走本机 MP4 壁纸
+                    applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+                }
+            } catch {
+                await MainActor.run {
+                    isBakingScene = false
+                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                    showError = true
+                }
+            }
+        }
+    }
+
+    /// Workshop 视频/烘焙成片：锁屏海报优先用本地 project 预览图，其次 item.posterURL
+    private var preferredWorkshopPosterForVideo: URL? {
+        localWorkshopPreviewImageURL(for: resolvedItem) ?? resolvedItem.posterURL
     }
 
     private var buttonRowWithDividers: some View {
@@ -921,53 +1057,49 @@ struct MediaDetailSheet: View {
     }
 
     private func setAsDesktopWallpaper() {
-        // Workshop 壁纸特殊处理：先检查本地文件类型
-        if resolvedItem.id.hasPrefix("workshop_") {
-            if let localURL = findLocalWorkshopFile() {
-                let ext = localURL.pathExtension.lowercased()
-                let isVideoFile = ["mp4", "mov", "webm"].contains(ext)
-                var isDirectory: ObjCBool = false
-                FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
+        // Wallpaper Engine 类内容：Workshop 与本地入库（同一套路径解析）
+        if let localURL = findLocalWorkshopFile(for: resolvedItem) {
+            let ext = localURL.pathExtension.lowercased()
+            let isVideoFile = ["mp4", "mov", "webm"].contains(ext)
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
 
-                if isVideoFile && !isDirectory.boolValue {
-                    // 视频文件直接走现有动态壁纸逻辑
-                    print("[MediaDetailSheet] Workshop video detected, using VideoWallpaperManager: \(localURL.path)")
-                    applyWorkshopVideoWallpaper(videoURL: localURL)
-                    return
-                }
-
-                // scene/pkg/目录类型需要 Wallpaper Engine CLI 渲染
-                print("[MediaDetailSheet] Workshop content requires CLI rendering: \(localURL.path) (ext=\(ext), isDir=\(isDirectory.boolValue))")
-
-                // 提前检测 project.json 类型，拦截不支持的内容（如 application、游戏等）
-                if isDirectory.boolValue {
-                    let contentType = determineWorkshopContentType(at: localURL)
-                    if case .unsupported(let detectedType) = contentType {
-                        errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
-                        showError = true
-                        return
-                    }
-                }
-
-                if !WorkshopService.isWallpaperEngineAppInstalled() {
-                    showWallpaperEngineInstallAlert = true
-                    return
-                }
-                // 检查激活码
-                let code = WorkshopSourceManager.shared.wallpaperEngineActivationCode
-                if code.isEmpty {
-                    showWallpaperEngineActivationAlert = true
-                    return
-                }
-                // 通过 wallpaperengine-cli 渲染壁纸（支持多显示器选择）
-                applyWorkshopRendererWallpaper(path: localURL.path, posterURL: resolvedItem.posterURL)
+            if isVideoFile && !isDirectory.boolValue {
+                print("[MediaDetailSheet] WE video file, using VideoWallpaperManager: \(localURL.path)")
+                applyWorkshopVideoWallpaper(videoURL: localURL)
                 return
-            } else {
-                // 本地无文件，提示先下载
-                errorMessage = t("downloadFirstToLocal")
+            }
+
+            let contentRoot = sceneEngineContentRoot(for: localURL)
+            let contentType = determineWorkshopContentType(at: contentRoot)
+            if case .unsupported(let detectedType) = contentType {
+                errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
                 showError = true
                 return
             }
+
+            if !WorkshopService.isWallpaperEngineAppInstalled() {
+                showWallpaperEngineInstallAlert = true
+                return
+            }
+            let code = WorkshopSourceManager.shared.wallpaperEngineActivationCode
+            if code.isEmpty {
+                showWallpaperEngineActivationAlert = true
+                return
+            }
+
+            if contentType == .scene {
+                applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
+            } else {
+                applyWorkshopRendererWallpaper(path: localURL.path, posterURL: preferredWorkshopPosterForVideo)
+            }
+            return
+        }
+
+        if resolvedItem.id.hasPrefix("workshop_") {
+            errorMessage = t("downloadFirstToLocal")
+            showError = true
+            return
         }
 
         // 检测多显示器
@@ -1015,31 +1147,152 @@ struct MediaDetailSheet: View {
     }
 
     private func findLocalWorkshopFile(for item: MediaItem) -> URL? {
-        guard item.id.hasPrefix("workshop_") else { return nil }
-        let workshopID = String(item.id.dropFirst("workshop_".count))
-        let fm = FileManager.default
+        if item.id.hasPrefix("workshop_") {
+            let workshopID = String(item.id.dropFirst("workshop_".count))
+            let fm = FileManager.default
 
-        // 1) 优先使用下载记录中的路径，兼容历史版本写入的不同层级路径
+            if let record = MediaLibraryService.shared.downloadedItems.first(where: { $0.item.id == item.id }) {
+                let recordedURL = record.localFileURL
+                if let resolved = resolveWorkshopContentPath(recordedURL, workshopID: workshopID), fm.fileExists(atPath: resolved.path) {
+                    return pickWorkshopPlayableFile(from: resolved)
+                }
+            }
+
+            let mediaFolder = DownloadPathManager.shared.mediaFolderURL
+            let steamPath = mediaFolder
+                .appendingPathComponent("workshop_\(workshopID)/steamapps/workshop/content/431960/\(workshopID)")
+            let rootPath = mediaFolder.appendingPathComponent("workshop_\(workshopID)")
+
+            if fm.fileExists(atPath: steamPath.path) {
+                return pickWorkshopPlayableFile(from: steamPath)
+            }
+            if fm.fileExists(atPath: rootPath.path) {
+                return pickWorkshopPlayableFile(from: rootPath)
+            }
+            return nil
+        }
+
+        // 本地导入等非 workshop_ id：依赖媒体库下载记录路径
         if let record = MediaLibraryService.shared.downloadedItems.first(where: { $0.item.id == item.id }) {
             let recordedURL = record.localFileURL
-            if let resolved = resolveWorkshopContentPath(recordedURL, workshopID: workshopID), fm.fileExists(atPath: resolved.path) {
-                return pickWorkshopPlayableFile(from: resolved)
-            }
-        }
-
-        // 2) 回退到固定目录规则（先尝试标准 Steam 结构，再尝试导入的根目录本身）
-        let mediaFolder = DownloadPathManager.shared.mediaFolderURL
-        let steamPath = mediaFolder
-            .appendingPathComponent("workshop_\(workshopID)/steamapps/workshop/content/431960/\(workshopID)")
-        let rootPath = mediaFolder.appendingPathComponent("workshop_\(workshopID)")
-
-        if fm.fileExists(atPath: steamPath.path) {
-            return pickWorkshopPlayableFile(from: steamPath)
-        }
-        if fm.fileExists(atPath: rootPath.path) {
-            return pickWorkshopPlayableFile(from: rootPath)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: recordedURL.path, isDirectory: &isDir) else { return nil }
+            return pickWorkshopPlayableFile(from: recordedURL)
         }
         return nil
+    }
+
+    /// 含 `project.json` 的工程根（目录本身，或单文件的父目录）
+    private func sceneEngineContentRoot(for localURL: URL) -> URL {
+        var isDir: ObjCBool = false
+        _ = FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDir)
+        return isDir.boolValue ? localURL : localURL.deletingLastPathComponent()
+    }
+
+    /// Scene：优先已烘焙 MP4 → 无则现场资格分析 + 烘焙 MP4（无媒体库记录也可）→ 不合格或失败再 CLI
+    private func applySceneWallpaperPreferringBake(sceneContentRoot: URL, cliPath: String) {
+        let itemID = resolvedItem.id
+        if let record = currentDownloadRecord,
+           let art = record.sceneBakeArtifact,
+           art.analysisId == record.sceneBakeEligibility?.analysisId,
+           FileManager.default.fileExists(atPath: art.videoPath) {
+            applyWorkshopVideoWallpaper(
+                videoURL: URL(fileURLWithPath: art.videoPath),
+                preferPosterFrameFromVideo: true
+            )
+            return
+        }
+
+        isBakingScene = true
+        Task {
+            do {
+                let snapshotRecord = await MainActor.run {
+                    mediaLibrary.downloadedItems.first { $0.item.id == itemID }
+                }
+                let needsFreshAnalyze: Bool = {
+                    guard let existing = snapshotRecord?.sceneBakeEligibility,
+                          existing.contentRootPath == sceneContentRoot.path else { return true }
+                    return false
+                }()
+                if needsFreshAnalyze, !SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() {
+                    await MainActor.run {
+                        isBakingScene = false
+                        errorMessage = t("sceneBake.error.insufficientMemory.analysis")
+                        showError = true
+                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
+                    }
+                    return
+                }
+
+                let eligibility: SceneBakeEligibilitySnapshot
+                if let existing = snapshotRecord?.sceneBakeEligibility,
+                   existing.contentRootPath == sceneContentRoot.path {
+                    eligibility = existing
+                } else {
+                    eligibility = try await Task.detached(priority: .userInitiated) {
+                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: sceneContentRoot)
+                    }.value
+                }
+
+                await MainActor.run {
+                    MediaLibraryService.shared.attachSceneBakeEligibility(
+                        itemID: itemID,
+                        snapshot: eligibility,
+                        triggerAutoBake: false
+                    )
+                }
+
+                guard eligibility.isEligibleForOfflineBake else {
+                    await MainActor.run {
+                        isBakingScene = false
+                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
+                    }
+                    return
+                }
+
+                if !SystemMemoryPressure.hasRoomForSceneOfflineBake() {
+                    await MainActor.run {
+                        isBakingScene = false
+                        errorMessage = t("sceneBake.error.insufficientMemory.bake")
+                        showError = true
+                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
+                    }
+                    return
+                }
+
+                let persistID = await MainActor.run {
+                    mediaLibrary.downloadedItems.first { $0.item.id == itemID && $0.isActive }?.id
+                }
+                let cacheKey =
+                    persistID ?? SceneOfflineBakeService.stableOrphanCacheItemID(contentRootPath: sceneContentRoot.path)
+
+                let artifact = try await SceneOfflineBakeService.bake(
+                    eligibility: eligibility,
+                    contentRoot: sceneContentRoot,
+                    cacheItemID: cacheKey,
+                    persistArtifactToItemID: persistID
+                )
+                let videoURL = URL(fileURLWithPath: artifact.videoPath)
+                await MainActor.run {
+                    isBakingScene = false
+                    applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+                }
+            } catch {
+                await MainActor.run {
+                    isBakingScene = false
+                    if let bakeErr = error as? SceneOfflineBakeError, case .insufficientMemory = bakeErr {
+                        errorMessage = t("sceneBake.error.insufficientMemory.bake")
+                        showError = true
+                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
+                    } else {
+                        let detail = Self.truncateErrorMessage(error.localizedDescription)
+                        errorMessage = detail + "\n\n" + t("sceneBake.error.afterBakeFailureHint")
+                        showError = true
+                        print("[SceneWallpaper] 离线烘焙/分析失败（未自动切换实时渲染）: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
     }
 
     private func resolveWorkshopContentPath(_ url: URL, workshopID: String) -> URL? {
@@ -1274,8 +1527,26 @@ struct MediaDetailSheet: View {
         )
     }
 
-    /// 直接应用 Workshop 视频壁纸
-    private func applyWorkshopVideoWallpaper(videoURL: URL) {
+    /// 直接应用 Workshop / 烘焙 MP4 视频壁纸（须在主线程调用；内部 `Task` 使用 `@MainActor` 以匹配 `VideoWallpaperManager`）
+    /// - Parameter preferPosterFrameFromVideo: 为 true 时从该 MP4 抽一帧作静态桌面/锁屏（与 Workshop 预览图逻辑一致，失败则回退 `preferredWorkshopPosterForVideo`）。
+    private func applyWorkshopVideoWallpaper(videoURL: URL, preferPosterFrameFromVideo: Bool = false) {
+        let path = videoURL.path
+        guard FileManager.default.fileExists(atPath: path) else {
+            errorMessage = t("sceneBake.error.outputMissing")
+            showError = true
+            return
+        }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let sz = attrs[.size] as? NSNumber, sz.int64Value <= 10_000 {
+            errorMessage = t("sceneBake.error.outputMissing")
+            showError = true
+            return
+        }
+        // 烘焙前可能停过 WE；应用本机 MP4 前再确保未处于 CLI 接管，避免又去跑 set / 与播放器叠层
+        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
+            WallpaperEngineXBridge.shared.stopWallpaper()
+        }
+
         let screens = NSScreen.screens
         if screens.count > 1 {
             DisplaySelectorManager.shared.showSelector(
@@ -1283,9 +1554,20 @@ struct MediaDetailSheet: View {
                 message: t("multiDisplayDetected")
             ) { [self] selectedScreen in
                 isSettingWallpaper = true
-                Task {
+                Task { @MainActor in
+                    let posterFromVideo: URL? = if preferPosterFrameFromVideo {
+                        await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL)
+                    } else {
+                        nil
+                    }
+                    let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                     do {
-                        try wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted, targetScreens: selectedScreen.map { [$0] })
+                        try wallpaperManager.applyVideoWallpaper(
+                            from: videoURL,
+                            posterURL: posterURL,
+                            muted: isMuted,
+                            targetScreens: selectedScreen.map { [$0] }
+                        )
                     } catch {
                         errorMessage = error.localizedDescription
                         showError = true
@@ -1295,9 +1577,19 @@ struct MediaDetailSheet: View {
             }
         } else {
             isSettingWallpaper = true
-            Task {
+            Task { @MainActor in
+                let posterFromVideo: URL? = if preferPosterFrameFromVideo {
+                    await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL)
+                } else {
+                    nil
+                }
+                let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                 do {
-                    try wallpaperManager.applyVideoWallpaper(from: videoURL, posterURL: resolvedItem.posterURL, muted: isMuted)
+                    try wallpaperManager.applyVideoWallpaper(
+                        from: videoURL,
+                        posterURL: posterURL,
+                        muted: isMuted
+                    )
                 } catch {
                     errorMessage = error.localizedDescription
                     showError = true

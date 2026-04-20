@@ -11,6 +11,15 @@ public protocol NextItemPreviewable {
     var previewThumbnailURL: URL? { get }
     var previewResolution: String { get }
     var previewBadge: String? { get }
+    /// 下一张弹窗小图是否按 GIF 播放（默认仅根据 URL 是否含 `.gif` 判断）
+    var previewThumbnailPrefersAnimatedPlayback: Bool { get }
+}
+
+public extension NextItemPreviewable {
+    var previewThumbnailPrefersAnimatedPlayback: Bool {
+        guard let u = previewThumbnailURL else { return false }
+        return u.absoluteString.lowercased().contains(".gif")
+    }
 }
 
 // MARK: - Wallpaper 扩展
@@ -31,6 +40,7 @@ extension MediaItem: NextItemPreviewable {
     public var previewThumbnailURL: URL? { posterURL ?? thumbnailURL }
     public var previewResolution: String { primaryBadgeText }
     public var previewBadge: String? { previewVideoURL != nil ? "LIVE" : nil }
+    public var previewThumbnailPrefersAnimatedPlayback: Bool { shouldRenderThumbnailAsAnimatedImage }
 }
 
 // MARK: - 下一张项目数据源
@@ -268,22 +278,40 @@ public struct LiquidGlassNextItemToast: View {
     // MARK: - 缩略图视图（结构体版本）
     private struct ThumbnailView: View {
         let item: NextItemPreviewable
-        
+
+        private static let thumbSize = CGSize(width: 56, height: 56)
+        private static var downsampleSize: CGSize {
+            CGSize(width: thumbSize.width * 2, height: thumbSize.height * 2)
+        }
+
         var body: some View {
             ZStack {
                 if let url = item.previewThumbnailURL {
-                    KFImage(url)
-                        .fade(duration: 0.3)
-                        .placeholder { _ in
-                            PlaceholderView()
-                        }
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
+                    if item.previewThumbnailPrefersAnimatedPlayback {
+                        KFMediaCoverImage(
+                            url: url,
+                            animated: true,
+                            downsampleSize: Self.downsampleSize,
+                            fadeDuration: 0.3,
+                            loadFinished: nil,
+                            layoutSize: Self.thumbSize,
+                            playAnimatedImage: true,
+                            isVisible: true
+                        )
+                    } else {
+                        KFImage(url)
+                            .fade(duration: 0.3)
+                            .placeholder { _ in
+                                PlaceholderView()
+                            }
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    }
                 } else {
                     PlaceholderView()
                 }
             }
-            .frame(width: 56, height: 56)
+            .frame(width: Self.thumbSize.width, height: Self.thumbSize.height)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)

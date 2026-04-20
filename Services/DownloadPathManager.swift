@@ -33,6 +33,11 @@ final class DownloadPathManager {
         rootFolderURL.appendingPathComponent("Media", isDirectory: true)
     }
 
+    /// Scene 离线烘焙 MP4（与 `Media` / `Wallpapers` 同级，随 `rootFolderURL` 迁移）
+    var sceneBakesFolderURL: URL {
+        rootFolderURL.appendingPathComponent("SceneBakes", isDirectory: true)
+    }
+
     /// 旧版统一目录（仅作参考，不再自动读取）
     var legacyFolderURL: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
@@ -67,7 +72,7 @@ final class DownloadPathManager {
     // MARK: - 目录创建
     /// 创建完整的目录结构（需要先确保有权限）
     func createDirectoryStructure() {
-        let directories = [rootFolderURL, wallpapersFolderURL, mediaFolderURL]
+        let directories = [rootFolderURL, wallpapersFolderURL, mediaFolderURL, sceneBakesFolderURL]
 
         for directory in directories {
             if !FileManager.default.fileExists(atPath: directory.path) {

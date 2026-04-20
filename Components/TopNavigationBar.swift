@@ -152,6 +152,7 @@ private struct TopBarCircleButton: View {
         .buttonStyle(.plain)
         .contentShape(Circle())
         .frame(width: size + 16, height: size + 16)
+        .preferredColorScheme(.dark)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.16)) {
                 isHovered = hovering

@@ -117,6 +117,9 @@
 		D35A0942D440550F4240FCE8 /* LiquidGlassModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB8B239A357D0A8869892193 /* LiquidGlassModifier.swift */; };
 		D4E05F5C7852AF98EB7C9B88 /* Print.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB805E534CA1B0DF8F944037 /* Print.swift */; };
 		D54F3D91342ED2263D52F8E7 /* MediaLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D02D76F3DC7DB2F623B5A75 /* MediaLibraryService.swift */; };
+		C91D8E2A3F4B5061728394A5 /* SceneBakeEligibilityService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C91D8E2A3F4B5061728394A6 /* SceneBakeEligibilityService.swift */; };
+		E2F3A4B5C6D708192A3B4C5D6 /* SceneOfflineBakeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D708192A3B4C5D7 /* SceneOfflineBakeService.swift */; };
+		B7E8F901C1D2E30405162738A2 /* SystemMemoryPressure.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E8F901C1D2E30405162738A1 /* SystemMemoryPressure.swift */; };
 		D8248F4D14AE1D42EB68B81E /* WallpaperEngineXBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2934909A6169304E41884812 /* WallpaperEngineXBridge.swift */; };
 		DB540D9F6379FDAEFB285F76 /* VideoThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */; };
 		DB8871BEB9E5BFA5DF65AA40 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FBFD203D24AC295FEDADA9 /* StatusBarController.swift */; };
@@ -168,6 +171,9 @@
 		2934909A6169304E41884812 /* WallpaperEngineXBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperEngineXBridge.swift; sourceTree = "<group>"; };
 		2B48D0B0A573FA14F04F81C6 /* TMDBService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBService.swift; sourceTree = "<group>"; };
 		2D02D76F3DC7DB2F623B5A75 /* MediaLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaLibraryService.swift; sourceTree = "<group>"; };
+		C91D8E2A3F4B5061728394A6 /* SceneBakeEligibilityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneBakeEligibilityService.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D708192A3B4C5D7 /* SceneOfflineBakeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneOfflineBakeService.swift; sourceTree = "<group>"; };
+		B7E8F901C1D2E30405162738A1 /* SystemMemoryPressure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMemoryPressure.swift; sourceTree = "<group>"; };
 		2D9714C3DBCF062B148341C8 /* VideoToolboxProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoToolboxProcessor.swift; sourceTree = "<group>"; };
 		321D10F7AC7FE5D9813FA58C /* AnimeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeDetailView.swift; sourceTree = "<group>"; };
 		346599B5EA4571FB1FEAA1F3 /* VideoPreloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPreloader.swift; sourceTree = "<group>"; };
@@ -393,6 +399,9 @@
 				20800427BABE4A3571DDE289 /* LocalizationService.swift */,
 				1EBC0A700BAC0396D0C64DA4 /* LocalWallpaperScanner.swift */,
 				2D02D76F3DC7DB2F623B5A75 /* MediaLibraryService.swift */,
+				C91D8E2A3F4B5061728394A6 /* SceneBakeEligibilityService.swift */,
+				E2F3A4B5C6D708192A3B4C5D7 /* SceneOfflineBakeService.swift */,
+				B7E8F901C1D2E30405162738A1 /* SystemMemoryPressure.swift */,
 				4327334BCEFE99F8F0378880 /* MediaService.swift */,
 				83707A763B2805C336790529 /* NetworkMonitor.swift */,
 				F8A1F069303042F1C890A63B /* NetworkService.swift */,
@@ -653,6 +662,9 @@
 				64B8046E4DA6E6D8BAF0171C /* MediaFilters.swift in Sources */,
 				7A599DE765CF1CC79C17B9FA /* MediaItem.swift in Sources */,
 				D54F3D91342ED2263D52F8E7 /* MediaLibraryService.swift in Sources */,
+				C91D8E2A3F4B5061728394A5 /* SceneBakeEligibilityService.swift in Sources */,
+				E2F3A4B5C6D708192A3B4C5D6 /* SceneOfflineBakeService.swift in Sources */,
+				B7E8F901C1D2E30405162738A2 /* SystemMemoryPressure.swift in Sources */,
 				35A192A50C85395F3510784E /* MediaService.swift in Sources */,
 				2B3DCCC8D22D833DC8EA4E02 /* MessagesContentView.swift in Sources */,
 				9C99399DC5F0B0993EC7DE28 /* MyLibraryContentView.swift in Sources */,

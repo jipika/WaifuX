@@ -275,18 +275,35 @@ struct MediaFavoriteRecord: Identifiable, Codable, Hashable {
     }
 }
 
+/// Scene 离线烘焙产物（H.264 MP4）；与 `SceneBakeEligibilitySnapshot.analysisId` 对齐便于缓存失效
+struct SceneBakeArtifact: Codable, Hashable, Sendable {
+    var analysisId: UUID
+    var videoPath: String
+    var width: Int
+    var height: Int
+    var fps: Int
+    var durationSeconds: Double
+    var bakedAt: Date
+}
+
 struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     let id: String
     var item: MediaItem
     var localFilePath: String
     var downloadedAt: Date
     var metadata: SyncMetadata
+    /// Workshop scene 离线烘焙资格（下载入库后异步写入；`analysisId` 用于后续缓存键）
+    var sceneBakeEligibility: SceneBakeEligibilitySnapshot?
+    /// 已成功烘焙的循环视频路径（与下载库 `DownloadPathManager.rootFolderURL` 下同级的 `SceneBakes/...`；默认即 Application Support 下 WaifuX）；与 eligibility 的 analysisId 一致时视为命中缓存
+    var sceneBakeArtifact: SceneBakeArtifact?
 
     init(
         item: MediaItem,
         localFilePath: String,
         downloadedAt: Date = .now,
-        metadata: SyncMetadata? = nil
+        metadata: SyncMetadata? = nil,
+        sceneBakeEligibility: SceneBakeEligibilitySnapshot? = nil,
+        sceneBakeArtifact: SceneBakeArtifact? = nil
     ) {
         self.id = item.id
         self.item = item
@@ -296,6 +313,8 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
             recordID: "media.download.\(item.id)",
             entityType: "media.download"
         )
+        self.sceneBakeEligibility = sceneBakeEligibility
+        self.sceneBakeArtifact = sceneBakeArtifact
     }
 
     var localFileURL: URL {
@@ -307,7 +326,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, item, localFilePath, downloadedAt, metadata
+        case id, item, localFilePath, downloadedAt, metadata, sceneBakeEligibility, sceneBakeArtifact
     }
 
     init(from decoder: Decoder) throws {
@@ -318,5 +337,10 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         downloadedAt = try container.decodeIfPresent(Date.self, forKey: .downloadedAt) ?? .now
         metadata = try container.decodeIfPresent(SyncMetadata.self, forKey: .metadata)
             ?? SyncMetadata(recordID: "media.download.\(item.id)", entityType: "media.download")
+        sceneBakeEligibility = try container.decodeIfPresent(
+            SceneBakeEligibilitySnapshot.self,
+            forKey: .sceneBakeEligibility
+        )
+        sceneBakeArtifact = try container.decodeIfPresent(SceneBakeArtifact.self, forKey: .sceneBakeArtifact)
     }
 }

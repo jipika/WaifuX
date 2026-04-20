@@ -1,5 +1,9 @@
+import Darwin
 import Foundation
 import AppKit
+import AVFoundation
+import CoreMedia
+import CoreVideo
 import IOKit
 import CryptoKit
 import WebKit
@@ -9,6 +13,10 @@ import CRenderer
 private let SOCKET_PATH = "/tmp/wallpaperengine-cli.sock"
 private let PID_PATH = "/tmp/wallpaperengine-cli.pid"
 private let DEBUG_LOG_PATH = "/tmp/wallpaperengine-cli-debug.log"
+/// Scene/Web 截图写入；推系统桌面时再复制到 desk-0/1 交替路径
+private let PRIMARY_CAPTURE_PATH = "/tmp/wallpaperengine-cli-capture.png"
+private let DESK_CAPTURE_PATH_0 = "/tmp/wallpaperengine-cli-desk-0.png"
+private let DESK_CAPTURE_PATH_1 = "/tmp/wallpaperengine-cli-desk-1.png"
 
 private func dlog(_ msg: String) {
     let line = "[\(Date())] \(msg)\n"
@@ -23,6 +31,51 @@ private func dlog(_ msg: String) {
             try? data.write(to: URL(fileURLWithPath: DEBUG_LOG_PATH), options: .atomic)
         }
     }
+}
+
+/// Scene 首帧缩略图比较（与 Web 侧逻辑一致）
+private func waifuXMeanAbsDiffGrayscale(_ a: [UInt8], _ b: [UInt8]) -> Double {
+    guard a.count == b.count, !a.isEmpty else { return 1 }
+    var sum: Int = 0
+    for i in 0..<a.count {
+        sum += abs(Int(a[i]) - Int(b[i]))
+    }
+    return Double(sum) / Double(a.count * 255)
+}
+
+private func waifuXGrayscaleThumb(from cgImage: CGImage, dimension: Int) -> [UInt8]? {
+    guard dimension > 0 else { return nil }
+    let cw = dimension
+    let ch = dimension
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+    guard let ctx = CGContext(
+        data: nil,
+        width: cw,
+        height: ch,
+        bitsPerComponent: 8,
+        bytesPerRow: cw * 4,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo.rawValue
+    ) else { return nil }
+    ctx.interpolationQuality = .low
+    ctx.translateBy(x: 0, y: CGFloat(ch))
+    ctx.scaleBy(x: 1, y: -1)
+    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(cw), height: CGFloat(ch)))
+    guard let data = ctx.data else { return nil }
+    let ptr = data.bindMemory(to: UInt8.self, capacity: cw * ch * 4)
+    var out = [UInt8](repeating: 0, count: cw * ch)
+    for y in 0..<ch {
+        for x in 0..<cw {
+            let i = (y * cw + x) * 4
+            let r = Float(ptr[i])
+            let g = Float(ptr[i + 1])
+            let b = Float(ptr[i + 2])
+            let gry = UInt8(min(255, max(0, 0.299 * r + 0.587 * g + 0.114 * b)))
+            out[y * cw + x] = gry
+        }
+    }
+    return out
 }
 
 // MARK: - IPC
@@ -41,13 +94,23 @@ private final class RendererBridge {
     static let shared = RendererBridge()
 
     private var handle: UnsafeMutableRawPointer?
-    private var tickSource: DispatchSourceTimer?
-    private let tickQueue = DispatchQueue(label: "com.wallpaperenginex.renderer.tick", qos: .userInitiated)
+    /// Bumped on stop/cancel so in-flight `asyncAfter` tick chains exit without piling up work.
+    private var tickGeneration: UInt64 = 0
+    private let tickQueue = DispatchQueue(label: "com.wallpaperenginex.renderer.tick", qos: .utility)
     private let rendererLock = NSLock()
     private var isLoaded = false
     private var lastAssetsPath: String? = nil
 
     private init() {}
+
+    /// Default 24 fps; override with env `WAIFUX_WALLPAPERENGINE_FPS` (e.g. 20–30).
+    private func effectiveTargetFPS() -> Double {
+        if let s = ProcessInfo.processInfo.environment["WAIFUX_WALLPAPERENGINE_FPS"],
+           let v = Double(s), v > 0, v <= 120 {
+            return v
+        }
+        return 24.0
+    }
 
     private func defaultAssetsPath() -> String {
         // 1) CLI 自包含：材质 zip 追加在可执行文件尾部，解压到 Caches（主 App 不再带 assets 目录）
@@ -116,7 +179,7 @@ private final class RendererBridge {
         rendererLock.unlock()
     }
 
-    func loadWallpaper(path: String, width: Int, height: Int) {
+    func loadWallpaper(path: String, width: Int, height: Int, autoStartTicking: Bool = true) {
         rendererLock.lock()
         if isLoaded {
             rendererLock.unlock()
@@ -144,43 +207,86 @@ private final class RendererBridge {
         lw_renderer_load(h, path, Int32(width), Int32(height))
         isLoaded = true
         rendererLock.unlock()
-        startTicking()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            let w = self.renderWidth
-            let h = self.renderHeight
-            if w <= 0 || h <= 0 {
-                dlog("[RendererBridge] ERROR: Wallpaper load failed for \(path). Render size is \(w)x\(h).")
+        if autoStartTicking {
+            startTicking(fps: effectiveTargetFPS())
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self = self else { return }
+                let w = self.renderWidth
+                let h = self.renderHeight
+                if w <= 0 || h <= 0 {
+                    dlog("[RendererBridge] ERROR: Wallpaper load failed for \(path). Render size is \(w)x\(h).")
+                }
             }
         }
     }
 
-    func startTicking(fps: Double = 30.0) {
+    /// 单步 tick（离线烘焙）；返回 false 表示应停止（close_requested 或无效状态）
+    func tickOnce() -> Bool {
+        rendererLock.lock()
+        guard let h = handle, isLoaded else {
+            rendererLock.unlock()
+            return false
+        }
+        lw_renderer_tick(h)
+        let close = lw_renderer_close_requested(h) != 0
+        rendererLock.unlock()
+        if close {
+            cancelTickTimer()
+            rendererLock.lock()
+            if let hh = handle {
+                lw_renderer_hide_window(hh)
+            }
+            isLoaded = false
+            rendererLock.unlock()
+            return false
+        }
+        return true
+    }
+
+    func startTicking(fps: Double? = nil) {
         cancelTickTimer()
         _ = drainTickQueue(timeout: 2.0)
 
-        let source = DispatchSource.makeTimerSource(queue: tickQueue)
-        source.schedule(deadline: .now(), repeating: 1.0 / fps, leeway: .milliseconds(1))
-        source.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            self.rendererLock.lock()
-            guard let h = self.handle else {
-                self.rendererLock.unlock()
-                return
-            }
-            lw_renderer_tick(h)
-            if lw_renderer_close_requested(h) != 0 {
-                self.rendererLock.unlock()
-                self.cancelTickTimer()
+        let targetFps = fps ?? effectiveTargetFPS()
+        let period = 1.0 / max(1.0, min(120.0, targetFps))
+        tickGeneration &+= 1
+        let generation = tickGeneration
+
+        func scheduleNext() {
+            tickQueue.async { [weak self] in
+                guard let self else { return }
+                guard generation == self.tickGeneration else { return }
+                let frameStart = CFAbsoluteTimeGetCurrent()
                 self.rendererLock.lock()
-                lw_renderer_hide_window(h)
-                self.isLoaded = false
+                guard generation == self.tickGeneration, let h = self.handle else {
+                    self.rendererLock.unlock()
+                    return
+                }
+                lw_renderer_tick(h)
+                let close = lw_renderer_close_requested(h) != 0
+                self.rendererLock.unlock()
+
+                if close {
+                    self.cancelTickTimer()
+                    self.rendererLock.lock()
+                    if let hh = self.handle {
+                        lw_renderer_hide_window(hh)
+                    }
+                    self.isLoaded = false
+                    self.rendererLock.unlock()
+                    return
+                }
+
+                guard generation == self.tickGeneration else { return }
+                let elapsed = CFAbsoluteTimeGetCurrent() - frameStart
+                let delay = max(0.002, period - elapsed)
+                self.tickQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, generation == self.tickGeneration else { return }
+                    scheduleNext()
+                }
             }
-            self.rendererLock.unlock()
         }
-        source.resume()
-        tickSource = source
+        scheduleNext()
     }
 
     func stop() {
@@ -188,9 +294,27 @@ private final class RendererBridge {
         _ = drainTickQueue(timeout: 2.0)
     }
 
+    /// Scene 动态壁纸暂停：只停渲染 tick，**不** `hideWindow()`。
+    /// 隐藏 GL 窗口在部分环境下会触发 close 语义，恢复后首帧 tick 即认为需退出，表现为「像退出且无法恢复」。
+    /// 不 tick 时画面已静止；与彻底 `destroy` 的「停止壁纸」不同。
+    func pauseSceneRendering() {
+        cancelTickTimer()
+        _ = drainTickQueue(timeout: 2.0)
+    }
+
+    /// 从暂停恢复：确保 `isLoaded` 与窗口状态正确后重启 tick
+    func resumeSceneRendering() {
+        showWindow()
+        rendererLock.lock()
+        if handle != nil {
+            isLoaded = true
+        }
+        rendererLock.unlock()
+        startTicking(fps: effectiveTargetFPS())
+    }
+
     private func cancelTickTimer() {
-        tickSource?.cancel()
-        tickSource = nil
+        tickGeneration &+= 1
     }
 
     private func drainTickQueue(timeout: TimeInterval) -> Bool {
@@ -512,7 +636,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     /// 递增以取消进行中的首帧采样（stop / 重新加载）
     private var firstFrameSettleGeneration: UInt64 = 0
     private(set) var isLoaded = false
-    private let capturePath = "/tmp/wallpaperengine-cli-capture.png"
 
     private enum FirstFramePolicy {
         /// 至少经历此时长后才允许「稳定」判真，避免白屏/首帧未绘制误判
@@ -904,7 +1027,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else { return false }
         do {
-            try png.write(to: URL(fileURLWithPath: capturePath), options: .atomic)
+            try png.write(to: URL(fileURLWithPath: PRIMARY_CAPTURE_PATH), options: .atomic)
             return true
         } catch {
             dlog("[WebRendererBridge] saveImage failed: \(error)")
@@ -915,7 +1038,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     private func saveBitmap(_ bitmap: NSBitmapImageRep) -> Bool {
         guard let png = bitmap.representation(using: .png, properties: [:]) else { return false }
         do {
-            try png.write(to: URL(fileURLWithPath: capturePath), options: .atomic)
+            try png.write(to: URL(fileURLWithPath: PRIMARY_CAPTURE_PATH), options: .atomic)
             return true
         } catch {
             return false
@@ -931,7 +1054,26 @@ private final class DesktopWallpaperManager {
     private var isRunning = false
     private var isPaused = false
     private var isWebMode = false
-    private let capturePath = "/tmp/wallpaperengine-cli-capture.png"
+    private var desktopCaptureSlot = 0
+    /// scene 切换时作废尚未触发的首次截图延迟任务，避免旧 completion 与新壁纸错乱
+    private var sceneLoadGeneration: UInt64 = 0
+
+    /// Scene 首帧：不再固定等 5s；轮询直到渲染尺寸就绪、画面非黑且略稳定（或超时兜底）
+    private enum SceneFirstFramePolicy {
+        static let initialDelay: TimeInterval = 0.42
+        static let pollInterval: TimeInterval = 0.34
+        static let maxElapsed: TimeInterval = 18
+        static let minRenderSize: Int = 32
+        static let minElapsedBeforeCapture: TimeInterval = 0.62
+        static let consecutiveNonBlackFrames: Int = 2
+        /// 缩略图平均亮度，低于此视为尚未出画（黑屏/未提交 GL）
+        static let minMeanLuma: Double = 0.014
+        static let stableDiffThreshold: Double = 0.022
+        static let stablePassesRequired: Int = 2
+        /// 强动画场景可能永不「稳定」，此时在足够亮的前提下按时长兜底截图
+        static let busyFallbackElapsed: TimeInterval = 4.0
+    }
+
     private let originalWallpaperKey = "renderer_original_wallpaper_v1"
     private var captureUpdateTimer: Timer?
     private(set) var lastErrorMessage: String?
@@ -942,6 +1084,9 @@ private final class DesktopWallpaperManager {
         dlog("[DesktopWallpaperManager] setWallpaper path=\(path) width=\(width) height=\(height) screen=\(screen ?? -1)")
 
         lastErrorMessage = nil
+
+        captureUpdateTimer?.invalidate()
+        captureUpdateTimer = nil
 
         // 提前检测并拦截不支持的类型
         isWebMode = isWebWallpaper(path: path)
@@ -963,8 +1108,11 @@ private final class DesktopWallpaperManager {
             saveOriginalWallpaper()
         }
 
-        // Remove stale capture
-        try? FileManager.default.removeItem(atPath: capturePath)
+        // 清掉旧截图与桌面用副本，切换 scene/web 时避免继续显示上一张
+        try? FileManager.default.removeItem(atPath: PRIMARY_CAPTURE_PATH)
+        try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_0)
+        try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_1)
+        desktopCaptureSlot = 0
 
         currentWallpaperPath = path
         isRunning = true
@@ -990,6 +1138,9 @@ private final class DesktopWallpaperManager {
             return
         }
 
+        sceneLoadGeneration += 1
+        let loadGen = sceneLoadGeneration
+
         RendererBridge.shared.loadWallpaper(path: path, width: width, height: height)
         if let s = screen {
             RendererBridge.shared.setScreen(s)
@@ -998,30 +1149,111 @@ private final class DesktopWallpaperManager {
         RendererBridge.shared.showWindow()
         fixupRendererWindow(screen: screen)
 
-        // Capture frame after renderer has ticked a few times
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            guard let self = self, self.currentWallpaperPath == path else {
+        beginSceneFirstCapture(path: path, loadGen: loadGen, screen: screen, completion: completion)
+    }
+
+    /// Scene：自适应首帧截图时机（主线程；依赖 OpenGL 读回）
+    private func beginSceneFirstCapture(path: String, loadGen: UInt64, screen: Int?, completion: ((Bool) -> Void)?) {
+        final class SceneSettleState {
+            var lastThumb: [UInt8]?
+            var stablePasses = 0
+            var consecutiveNonBlack = 0
+        }
+        let state = SceneSettleState()
+        let t0 = Date()
+
+        func complete(success: Bool) {
+            guard loadGen == sceneLoadGeneration, currentWallpaperPath == path else {
                 completion?(false)
                 return
             }
-            let url = URL(fileURLWithPath: self.capturePath)
-            let success = RendererBridge.shared.saveCapture(to: url)
-            print("[DesktopWallpaperManager] Capture saved to \(self.capturePath): \(success)")
-            if !success {
-                self.isRunning = false
-                self.isWebMode = false
-                self.currentWallpaperPath = nil
-                self.restoreOriginalWallpaper()
-            }
-            // Set capture as desktop wallpaper so it's visible on lock screen / mission control
             if success {
-                self.applyCaptureAsDesktopWallpaper(screen: screen)
-                self.startPeriodicCapture(screen: screen)
+                print("[DesktopWallpaperManager] Scene first capture OK → \(PRIMARY_CAPTURE_PATH)")
+                applyCaptureAsDesktopWallpaper(screen: screen)
+                startPeriodicCapture(screen: screen)
+            } else {
+                isRunning = false
+                isWebMode = false
+                currentWallpaperPath = nil
+                restoreOriginalWallpaper()
             }
-            // Re-enforce hidden dock icon after window creation
             NSApp.setActivationPolicy(.prohibited)
             completion?(success)
         }
+
+        func scheduleStep() {
+            guard loadGen == sceneLoadGeneration, currentWallpaperPath == path, isRunning, !isWebMode else {
+                completion?(false)
+                return
+            }
+
+            let elapsed = Date().timeIntervalSince(t0)
+            if elapsed >= SceneFirstFramePolicy.maxElapsed {
+                let url = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
+                let ok = RendererBridge.shared.saveCapture(to: url)
+                dlog("[DesktopWallpaperManager] Scene first capture timeout elapsed=\(String(format: "%.2f", elapsed))s saveOk=\(ok)")
+                complete(success: ok)
+                return
+            }
+
+            let rw = RendererBridge.shared.renderWidth
+            let rh = RendererBridge.shared.renderHeight
+            if rw < SceneFirstFramePolicy.minRenderSize || rh < SceneFirstFramePolicy.minRenderSize {
+                DispatchQueue.main.asyncAfter(deadline: .now() + SceneFirstFramePolicy.pollInterval) { scheduleStep() }
+                return
+            }
+
+            guard let cg = RendererBridge.shared.captureFrame(),
+                  let thumb = waifuXGrayscaleThumb(from: cg, dimension: 48) else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + SceneFirstFramePolicy.pollInterval) { scheduleStep() }
+                return
+            }
+
+            let luma = Double(thumb.reduce(0) { $0 + Int($1) }) / Double(thumb.count * 255)
+            let notBlack = luma >= SceneFirstFramePolicy.minMeanLuma
+            if notBlack {
+                state.consecutiveNonBlack += 1
+            } else {
+                state.consecutiveNonBlack = 0
+            }
+
+            if let prev = state.lastThumb, elapsed >= SceneFirstFramePolicy.minElapsedBeforeCapture {
+                let diff = waifuXMeanAbsDiffGrayscale(prev, thumb)
+                if diff < SceneFirstFramePolicy.stableDiffThreshold, notBlack {
+                    state.stablePasses += 1
+                } else {
+                    state.stablePasses = 0
+                }
+            }
+            state.lastThumb = thumb
+
+            let url = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
+            var shouldSave = false
+            if state.stablePasses >= SceneFirstFramePolicy.stablePassesRequired, notBlack {
+                shouldSave = true
+                dlog("[DesktopWallpaperManager] Scene first capture: stable (diff settled) elapsed=\(String(format: "%.2f", elapsed))s")
+            } else if state.consecutiveNonBlack >= SceneFirstFramePolicy.consecutiveNonBlackFrames,
+                      elapsed >= SceneFirstFramePolicy.minElapsedBeforeCapture, notBlack {
+                shouldSave = true
+                dlog("[DesktopWallpaperManager] Scene first capture: consecutive non-black elapsed=\(String(format: "%.2f", elapsed))s")
+            } else if notBlack, elapsed >= SceneFirstFramePolicy.busyFallbackElapsed {
+                shouldSave = true
+                dlog("[DesktopWallpaperManager] Scene first capture: busy fallback elapsed=\(String(format: "%.2f", elapsed))s")
+            }
+
+            if shouldSave {
+                if RendererBridge.shared.saveCapture(to: url) {
+                    complete(success: true)
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + SceneFirstFramePolicy.pollInterval) { scheduleStep() }
+                }
+                return
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + SceneFirstFramePolicy.pollInterval) { scheduleStep() }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + SceneFirstFramePolicy.initialDelay) { scheduleStep() }
     }
 
     func pauseWallpaper() {
@@ -1029,8 +1261,7 @@ private final class DesktopWallpaperManager {
         if isWebMode {
             WebRendererBridge.shared.pause()
         } else {
-            RendererBridge.shared.stop()
-            RendererBridge.shared.hideWindow()
+            RendererBridge.shared.pauseSceneRendering()
         }
         isPaused = true
     }
@@ -1040,8 +1271,7 @@ private final class DesktopWallpaperManager {
         if isWebMode {
             WebRendererBridge.shared.resume()
         } else {
-            RendererBridge.shared.showWindow()
-            RendererBridge.shared.startTicking()
+            RendererBridge.shared.resumeSceneRendering()
             fixupRendererWindow()
         }
         isPaused = false
@@ -1058,7 +1288,9 @@ private final class DesktopWallpaperManager {
             RendererBridge.shared.destroy()
         }
         isWebMode = false
-        try? FileManager.default.removeItem(atPath: capturePath)
+        try? FileManager.default.removeItem(atPath: PRIMARY_CAPTURE_PATH)
+        try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_0)
+        try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_1)
         currentWallpaperPath = nil
         isRunning = false
         isPaused = false
@@ -1067,10 +1299,21 @@ private final class DesktopWallpaperManager {
 
     // MARK: - Desktop Wallpaper Capture Updates
 
-    /// Set the captured frame as the macOS desktop wallpaper
+    /// 将主截图复制到交替路径再设为桌面图，避免系统因固定路径缓存上一张壁纸（锁屏/静态桌面不更新）
     private func applyCaptureAsDesktopWallpaper(screen: Int? = nil) {
-        let captureURL = URL(fileURLWithPath: capturePath)
-        guard FileManager.default.fileExists(atPath: capturePath) else { return }
+        guard FileManager.default.fileExists(atPath: PRIMARY_CAPTURE_PATH) else { return }
+        let src = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
+        desktopCaptureSlot = 1 - desktopCaptureSlot
+        let dstPath = desktopCaptureSlot == 0 ? DESK_CAPTURE_PATH_0 : DESK_CAPTURE_PATH_1
+        let dst = URL(fileURLWithPath: dstPath)
+        let fm = FileManager.default
+        try? fm.removeItem(at: dst)
+        do {
+            try fm.copyItem(at: src, to: dst)
+        } catch {
+            print("[DesktopWallpaperManager] Failed to copy capture for desktop: \(error)")
+            return
+        }
 
         let workspace = NSWorkspace.shared
         let screens = NSScreen.screens
@@ -1083,14 +1326,14 @@ private final class DesktopWallpaperManager {
 
         for targetScreen in targetScreens {
             do {
-                try workspace.setDesktopImageURL(captureURL, for: targetScreen, options: [
+                try workspace.setDesktopImageURL(dst, for: targetScreen, options: [
                     .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue)
                 ])
             } catch {
                 print("[DesktopWallpaperManager] Failed to set desktop image: \(error)")
             }
         }
-        dlog("[DesktopWallpaperManager] Applied capture as desktop wallpaper for \(targetScreens.count) screen(s)")
+        dlog("[DesktopWallpaperManager] Applied capture as desktop wallpaper for \(targetScreens.count) screen(s) via \(dstPath)")
     }
 
     /// Periodically re-capture and update desktop wallpaper to reflect animation
@@ -1101,11 +1344,11 @@ private final class DesktopWallpaperManager {
         captureUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self, self.isRunning, !self.isPaused else { return }
             if self.isWebMode {
-                // Web：由 WebRendererBridge 定时写入 capturePath，这里只负责推到系统桌面
-                guard FileManager.default.fileExists(atPath: self.capturePath) else { return }
+                // Web：由 WebRendererBridge 定时写入主截图文件，这里只负责推到系统桌面
+                guard FileManager.default.fileExists(atPath: PRIMARY_CAPTURE_PATH) else { return }
                 self.applyCaptureAsDesktopWallpaper(screen: screen)
             } else {
-                let url = URL(fileURLWithPath: self.capturePath)
+                let url = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
                 let success = RendererBridge.shared.saveCapture(to: url)
                 guard success else { return }
                 self.applyCaptureAsDesktopWallpaper(screen: screen)
@@ -1564,6 +1807,267 @@ private final class Daemon: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Offline scene bake（独立进程，不经 daemon；输出 H.264 MP4 循环片）
+
+private enum SceneOfflineBakeError: Error, LocalizedError {
+    case invalidArguments
+    case scenePathNotDirectory
+    case loadFailed
+    case captureFailed
+    case writerFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidArguments: return "Invalid bake arguments"
+        case .scenePathNotDirectory: return "Scene path must be a directory with project.json"
+        case .loadFailed: return "Renderer failed to load scene"
+        case .captureFailed: return "Frame capture failed"
+        case .writerFailed(let s): return s
+        }
+    }
+}
+
+private struct SceneOfflineBakeConfig {
+    let sceneRoot: String
+    let outputURL: URL
+    let width: Int
+    let height: Int
+    let fps: Int32
+    let durationSeconds: Double
+}
+
+private func sceneBakeParseConfig(_ arguments: [String]) throws -> SceneOfflineBakeConfig {
+    guard arguments.count >= 2 else { throw SceneOfflineBakeError.invalidArguments }
+    let root = arguments[0]
+    let outPath = arguments[1]
+    var w = 1920
+    var h = 1080
+    var fps: Int32 = 30
+    var seconds = 8.0
+    if arguments.count >= 6 {
+        w = max(32, Int(arguments[2]) ?? 1920)
+        h = max(32, Int(arguments[3]) ?? 1080)
+        fps = Int32(max(1, min(60, Int(arguments[4]) ?? 30)))
+        seconds = max(0.5, Double(arguments[5]) ?? 8.0)
+    }
+    w = (w / 2) * 2
+    h = (h / 2) * 2
+    return SceneOfflineBakeConfig(
+        sceneRoot: root,
+        outputURL: URL(fileURLWithPath: outPath),
+        width: w,
+        height: h,
+        fps: fps,
+        durationSeconds: seconds
+    )
+}
+
+private func sceneBakePixelBuffer(from image: CGImage) throws -> CVPixelBuffer {
+    let width = image.width
+    let height = image.height
+    var buffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [
+        kCVPixelBufferCGImageCompatibilityKey: true,
+        kCVPixelBufferCGBitmapContextCompatibilityKey: true
+    ]
+    guard CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        kCVPixelFormatType_32BGRA,
+        attrs as CFDictionary,
+        &buffer
+    ) == kCVReturnSuccess,
+        let px = buffer else {
+        throw SceneOfflineBakeError.writerFailed("CVPixelBufferCreate failed")
+    }
+    CVPixelBufferLockBaseAddress(px, [])
+    defer { CVPixelBufferUnlockBaseAddress(px, []) }
+    guard let base = CVPixelBufferGetBaseAddress(px) else {
+        throw SceneOfflineBakeError.writerFailed("pixel buffer base address nil")
+    }
+    let rowBytes = CVPixelBufferGetBytesPerRow(px)
+    guard let ctx = CGContext(
+        data: base,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: rowBytes,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+    ) else {
+        throw SceneOfflineBakeError.writerFailed("CGContext failed")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return px
+}
+
+private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: cfg.sceneRoot, isDirectory: &isDir),
+          isDir.boolValue,
+          FileManager.default.fileExists(atPath: URL(fileURLWithPath: cfg.sceneRoot).appendingPathComponent("project.json").path) else {
+        throw SceneOfflineBakeError.scenePathNotDirectory
+    }
+
+    if FileManager.default.fileExists(atPath: cfg.outputURL.path) {
+        try FileManager.default.removeItem(at: cfg.outputURL)
+    }
+
+    RendererBridge.shared.destroy()
+    RendererBridge.shared.loadWallpaper(path: cfg.sceneRoot, width: cfg.width, height: cfg.height, autoStartTicking: false)
+    RendererBridge.shared.setDesktopWindow(false)
+    RendererBridge.shared.hideWindow()
+
+    let rw = RendererBridge.shared.renderWidth
+    let rh = RendererBridge.shared.renderHeight
+    guard rw > 0, rh > 0 else {
+        RendererBridge.shared.destroy()
+        throw SceneOfflineBakeError.loadFailed
+    }
+
+    for _ in 0 ..< 120 {
+        if !RendererBridge.shared.tickOnce() {
+            RendererBridge.shared.destroy()
+            throw SceneOfflineBakeError.loadFailed
+        }
+    }
+
+    let frameCount = max(1, Int(Double(cfg.fps) * cfg.durationSeconds))
+    let outSettings: [String: Any] = [
+        AVVideoCodecKey: AVVideoCodecType.h264,
+        AVVideoWidthKey: rw,
+        AVVideoHeightKey: rh,
+        AVVideoCompressionPropertiesKey: [
+            AVVideoAverageBitRateKey: rw * rh * 3,
+            AVVideoExpectedSourceFrameRateKey: cfg.fps,
+            AVVideoMaxKeyFrameIntervalKey: Int(cfg.fps) * 2
+        ] as [String: Any]
+    ]
+    let writer = try AVAssetWriter(outputURL: cfg.outputURL, fileType: .mp4)
+    let input = AVAssetWriterInput(mediaType: .video, outputSettings: outSettings)
+    input.expectsMediaDataInRealTime = false
+    let sourceAttrs: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+        kCVPixelBufferWidthKey as String: rw,
+        kCVPixelBufferHeightKey as String: rh
+    ]
+    let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: sourceAttrs)
+    guard writer.canAdd(input) else {
+        RendererBridge.shared.destroy()
+        throw SceneOfflineBakeError.writerFailed("cannot add video input")
+    }
+    writer.add(input)
+    guard writer.startWriting() else {
+        RendererBridge.shared.destroy()
+        throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "startWriting failed")
+    }
+    writer.startSession(atSourceTime: .zero)
+
+    for i in 0 ..< frameCount {
+        if !RendererBridge.shared.tickOnce() {
+            input.markAsFinished()
+            writer.cancelWriting()
+            RendererBridge.shared.destroy()
+            throw SceneOfflineBakeError.captureFailed
+        }
+        guard let cg = RendererBridge.shared.captureFrame() else {
+            input.markAsFinished()
+            writer.cancelWriting()
+            RendererBridge.shared.destroy()
+            throw SceneOfflineBakeError.captureFailed
+        }
+        let pb = try sceneBakePixelBuffer(from: cg)
+        let pts = CMTime(value: Int64(i), timescale: cfg.fps)
+        var wait = 0
+        while !input.isReadyForMoreMediaData, wait < 6000 {
+            usleep(500)
+            wait += 1
+        }
+        guard input.isReadyForMoreMediaData else {
+            input.markAsFinished()
+            writer.cancelWriting()
+            RendererBridge.shared.destroy()
+            throw SceneOfflineBakeError.writerFailed("writer not ready")
+        }
+        if !adaptor.append(pb, withPresentationTime: pts) {
+            input.markAsFinished()
+            writer.cancelWriting()
+            RendererBridge.shared.destroy()
+            throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "append failed")
+        }
+    }
+
+    input.markAsFinished()
+    let sem = DispatchSemaphore(value: 0)
+    var finishErr: Error?
+    writer.finishWriting {
+        if writer.status == .failed {
+            finishErr = writer.error
+        }
+        sem.signal()
+    }
+    sem.wait()
+    RendererBridge.shared.destroy()
+    if let finishErr {
+        throw SceneOfflineBakeError.writerFailed(finishErr.localizedDescription)
+    }
+    guard writer.status == .completed else {
+        throw SceneOfflineBakeError.writerFailed("writer status \(writer.status.rawValue)")
+    }
+}
+
+private final class SceneOfflineBakeAppDelegate: NSObject, NSApplicationDelegate {
+    let arguments: [String]
+
+    init(arguments: [String]) {
+        self.arguments = arguments
+        super.init()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        defer { NSApp.stop(nil) }
+        do {
+            let cfg = try sceneBakeParseConfig(arguments)
+            fputs("[bake] \(cfg.sceneRoot) → \(cfg.outputURL.path) \(cfg.width)x\(cfg.height) @\(cfg.fps)fps \(cfg.durationSeconds)s\n", stderr)
+            try sceneBakePerform(cfg)
+            print(cfg.outputURL.path)
+            sceneOfflineBakeExitCode = 0
+        } catch {
+            fputs("Bake failed: \(error.localizedDescription)\n", stderr)
+            sceneOfflineBakeExitCode = 1
+        }
+    }
+}
+
+/// `NSApplication.delegate` 为 weak，需强引用至 `run()` 结束
+private final class SceneOfflineBakeDelegateBox {
+    let delegate: SceneOfflineBakeAppDelegate
+    init(arguments: [String]) {
+        delegate = SceneOfflineBakeAppDelegate(arguments: arguments)
+    }
+}
+
+private var sceneOfflineBakeDelegateBox: SceneOfflineBakeDelegateBox?
+
+/// bake 子进程退出码；用 `NSApp.stop` 结束 run loop 后再退出。
+private var sceneOfflineBakeExitCode: Int32 = 1
+
+private func sceneOfflineBakeRunStandalone(arguments: [String]) -> Never {
+    sceneOfflineBakeExitCode = 1
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    let box = SceneOfflineBakeDelegateBox(arguments: arguments)
+    sceneOfflineBakeDelegateBox = box
+    app.delegate = box.delegate
+    app.run()
+    fflush(stdout)
+    fflush(stderr)
+    // 必须用 `_exit`：`exit(3)` 会跑 C++ 静态析构，glslang 在 FinalizeProcess 里对全局 mutex 加锁，
+    // 与 AppKit 子线程同时收尾时会在 libc++ 里抛 system_error → abort（见 bake 成功后的崩溃栈）。
+    _exit(sceneOfflineBakeExitCode)
+}
+
 // MARK: - Main
 @main
 struct WallpaperEngineCLI {
@@ -1583,6 +2087,15 @@ struct WallpaperEngineCLI {
         guard let command = remainingArgs.first else {
             printUsage()
             exit(1)
+        }
+
+        if command == "bake" {
+            let bakeArgs = Array(remainingArgs.dropFirst())
+            guard bakeArgs.count >= 2 else {
+                print("Usage: wallpaperengine-cli bake <scene_dir> <out.mp4> [width height fps seconds]")
+                exit(1)
+            }
+            sceneOfflineBakeRunStandalone(arguments: bakeArgs)
         }
 
         switch command {
@@ -1708,6 +2221,10 @@ struct WallpaperEngineCLI {
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = ["daemon"]
         let logURL = URL(fileURLWithPath: "/tmp/wallpaperengine-cli-daemon.log")
+        // FileHandle(forWritingTo:) requires the file to exist; otherwise logging is silently disabled.
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: nil)
+        }
         task.standardOutput = try? FileHandle(forWritingTo: logURL)
         task.standardError = task.standardOutput
         var env = ProcessInfo.processInfo.environment
@@ -1748,6 +2265,7 @@ struct WallpaperEngineCLI {
           resume                      Resume wallpaper
           stop                        Stop wallpaper
           exit                        Alias for stop
+          bake <dir> <out.mp4> [w h fps sec]   Offline H.264 bake (no daemon)
         """)
     }
 }

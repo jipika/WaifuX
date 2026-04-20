@@ -86,6 +86,35 @@ final class MediaLibraryService: ObservableObject {
 
         persistDownloads()
         upsert(item)
+
+        SceneBakeEligibilityAnalyzer.scheduleAnalysisIfSceneProject(itemID: item.id, localFileURL: localFileURL)
+    }
+
+    /// 由 `SceneBakeEligibilityAnalyzer` 在后台线程完成后调用，写入带 UUID 的分析快照。
+    /// - Parameter triggerAutoBake: 为 false 时不在此触发后台自动烘焙（例如用户正在「设为壁纸」流程里同步烘焙）。
+    func attachSceneBakeEligibility(itemID: String, snapshot: SceneBakeEligibilitySnapshot, triggerAutoBake: Bool = true) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
+            return
+        }
+        if let art = downloadRecords[index].sceneBakeArtifact, art.analysisId != snapshot.analysisId {
+            downloadRecords[index].sceneBakeArtifact = nil
+        }
+        downloadRecords[index].sceneBakeEligibility = snapshot
+        persistDownloads()
+        downloadRecords = downloadRecords
+
+        if triggerAutoBake, snapshot.isEligibleForOfflineBake {
+            SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
+        }
+    }
+
+    func attachSceneBakeArtifact(itemID: String, artifact: SceneBakeArtifact) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
+            return
+        }
+        downloadRecords[index].sceneBakeArtifact = artifact
+        persistDownloads()
+        downloadRecords = downloadRecords
     }
 
     func upsert(_ item: MediaItem) {

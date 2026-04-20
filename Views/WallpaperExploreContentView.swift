@@ -9,8 +9,6 @@ struct WallpaperExploreContentView: View {
     @Binding var selectedWallpaper: Wallpaper?
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
-    @ObservedObject private var exploreScrollState = ExploreScrollState.shared
-
     init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedWallpaper = selectedWallpaper
@@ -49,7 +47,7 @@ struct WallpaperExploreContentView: View {
                         ExploreDynamicAtmosphereBackground(
                             tint: exploreAtmosphere.tint,
                             referenceImage: exploreAtmosphere.referenceImage,
-                            lightweightBackdrop: exploreScrollState.isScrolling
+                            lightweightBackdrop: false
                         )
                         .ignoresSafeArea()
 

@@ -10,7 +10,6 @@ struct MediaExploreContentView: View {
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
     @StateObject private var workshopSourceManager = WorkshopSourceManager.shared
-    @ObservedObject private var exploreScrollState = ExploreScrollState.shared
 
     @State private var selectedCategory: MediaCategory = .all
     @State private var selectedHotTag: MediaHotTag?
@@ -49,7 +48,7 @@ struct MediaExploreContentView: View {
                         ExploreDynamicAtmosphereBackground(
                             tint: exploreAtmosphere.tint,
                             referenceImage: exploreAtmosphere.referenceImage,
-                            lightweightBackdrop: exploreScrollState.isScrolling
+                            lightweightBackdrop: false
                         )
                         .ignoresSafeArea()
 
