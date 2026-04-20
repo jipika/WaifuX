@@ -1264,6 +1264,54 @@ extension WorkshopService {
 
 // MARK: - Error & Status
 
+// MARK: - SteamCMD 解压目录 → 真实 WE 工程根
+
+extension WorkshopService {
+    /// SteamCMD 解压路径常为 `.../steamapps/workshop/content/431960/<id>/`，但 `project.json` 往往在**唯一子目录**或**多子目录之一**内。
+    /// 在根目录没有 `project.json`、`.pkg`、视频文件时向下解析，避免类型检测与 CLI 加载失败。
+    nonisolated static func resolveWallpaperEngineProjectRoot(startingAt base: URL, maxDescend: UInt = 8) -> URL {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: base.path, isDirectory: &isDir), isDir.boolValue else {
+            return base
+        }
+        return resolveWEProjectRootRecursive(base, depthLeft: maxDescend, fm: fm)
+    }
+
+    private nonisolated static func resolveWEProjectRootRecursive(_ url: URL, depthLeft: UInt, fm: FileManager) -> URL {
+        if depthLeft == 0 { return url }
+        if fm.fileExists(atPath: url.appendingPathComponent("project.json").path) {
+            return url
+        }
+        guard let entries = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return url
+        }
+        let hasRootPkg = entries.contains { $0.pathExtension.lowercased() == "pkg" }
+        let hasRootVideo = entries.contains { ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased()) }
+        if hasRootPkg || hasRootVideo {
+            return url
+        }
+        var childDirs: [URL] = []
+        for entry in entries {
+            var d: ObjCBool = false
+            guard fm.fileExists(atPath: entry.path, isDirectory: &d), d.boolValue else { continue }
+            childDirs.append(entry)
+        }
+        if childDirs.count == 1 {
+            return resolveWEProjectRootRecursive(childDirs[0], depthLeft: depthLeft - 1, fm: fm)
+        }
+        if childDirs.count > 1 {
+            let withProject = childDirs
+                .filter { fm.fileExists(atPath: $0.appendingPathComponent("project.json").path) }
+                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            if let first = withProject.first {
+                return resolveWEProjectRootRecursive(first, depthLeft: depthLeft - 1, fm: fm)
+            }
+        }
+        return url
+    }
+}
+
 enum WorkshopError: LocalizedError {
     case invalidURL
     case apiError(String)

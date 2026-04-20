@@ -590,6 +590,7 @@ struct MediaDetailSheet: View {
 
     private func runSceneOfflineBake() {
         guard let record = currentDownloadRecord else { return }
+        if isBakingScene { return }
         guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
             errorMessage = t("sceneBake.error.insufficientMemory.bake")
             showError = true
@@ -1203,6 +1204,7 @@ struct MediaDetailSheet: View {
             return
         }
 
+        if isBakingScene { return }
         isBakingScene = true
         Task {
             do {
@@ -1367,6 +1369,8 @@ struct MediaDetailSheet: View {
             // 其他文件返回目录（让 CLI 处理）
             return contentPath.deletingLastPathComponent()
         }
+
+        let contentPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: contentPath)
 
         // 目录内容：先统计有哪些文件类型
         let rootContents = try? fm.contentsOfDirectory(at: contentPath, includingPropertiesForKeys: nil)

@@ -714,7 +714,8 @@ final class MediaExploreViewModel: ObservableObject {
             guard fm.fileExists(atPath: path.path, isDirectory: &isDir) else { continue }
 
             if isDir.boolValue {
-                let rootContents = try? fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil)
+                let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: path)
+                let rootContents = try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil)
                 let hasPkgFile = rootContents?.contains(where: { $0.pathExtension.lowercased() == "pkg" }) ?? false
 
                 // 如果有 .pkg 文件，这是 scene 类型，跳过
@@ -723,14 +724,14 @@ final class MediaExploreViewModel: ObservableObject {
                 }
 
                 // 先检查 project.json 确定内容类型
-                let contentType = determineWorkshopContentType(at: path)
+                let contentType = determineWorkshopContentType(at: resolved)
                 if contentType == .scene {
                     // scene 类型跳过
                     continue
                 }
 
                 // video 或 unknown 类型：查找视频文件
-                if let videoURL = findVideoFile(in: path) {
+                if let videoURL = findVideoFile(in: resolved) {
                     return videoURL
                 }
             } else if ["mp4", "mov", "webm"].contains(path.pathExtension.lowercased()) {
@@ -746,18 +747,19 @@ final class MediaExploreViewModel: ObservableObject {
             var isDir: ObjCBool = false
             fm.fileExists(atPath: recordedPath.path, isDirectory: &isDir)
             if isDir.boolValue {
-                let rootContents = try? fm.contentsOfDirectory(at: recordedPath, includingPropertiesForKeys: nil)
+                let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: recordedPath)
+                let rootContents = try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil)
                 let hasPkgFile = rootContents?.contains(where: { $0.pathExtension.lowercased() == "pkg" }) ?? false
 
                 if hasPkgFile {
                     return nil
                 }
 
-                let contentType = determineWorkshopContentType(at: recordedPath)
+                let contentType = determineWorkshopContentType(at: resolved)
                 if contentType == .scene {
                     return nil
                 }
-                if let videoURL = findVideoFile(in: recordedPath) {
+                if let videoURL = findVideoFile(in: resolved) {
                     return videoURL
                 }
             } else if ["mp4", "mov", "webm"].contains(recordedPath.pathExtension.lowercased()) {
@@ -786,15 +788,16 @@ final class MediaExploreViewModel: ObservableObject {
             guard fm.fileExists(atPath: path.path, isDirectory: &isDir) else { continue }
 
             if isDir.boolValue {
+                let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: path)
                 // 检查是否有 .pkg 文件
-                if let contents = try? fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) {
+                if let contents = try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil) {
                     if contents.contains(where: { $0.pathExtension.lowercased() == "pkg" }) {
-                        return path
+                        return resolved
                     }
                 }
                 // 检查是否有 project.json
-                if fm.fileExists(atPath: path.appendingPathComponent("project.json").path) {
-                    return path
+                if fm.fileExists(atPath: resolved.appendingPathComponent("project.json").path) {
+                    return resolved
                 }
             } else if path.pathExtension.lowercased() == "pkg" {
                 return path
