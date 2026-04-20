@@ -1,9 +1,10 @@
 name: GitHub Pages
 
+# 与默认分支 main 对齐；文档/落地页变更时部署。
 on:
   push:
     branches:
-      - feature/wallpaper-engine
+      - main
     paths:
       - 'Docs/**'
       - 'landing/**'
