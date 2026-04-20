@@ -10,7 +10,7 @@ enum DownloadError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .permissionDenied:
-            return "下载权限被拒绝，请在设置中授权访问下载文件夹"
+            return "无法在应用数据目录保存文件（通常位于「资源库 → 应用程序支持 → WaifuX」）。请检查磁盘空间与文件夹权限。"
         case .fileNotFound:
             return "文件未找到"
         case .writeFailed(let error):

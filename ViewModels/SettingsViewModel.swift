@@ -11,7 +11,9 @@ class SettingsViewModel: ObservableObject {
     // 改用 @Published + 手动 UserDefaults 同步 + restoreSavedSettings() 延迟恢复。
 
     @Published var autoDownloadOriginal = false { didSet { UserDefaults.standard.set(autoDownloadOriginal, forKey: "auto_download_original") } }
-    @Published var saveToDownloads = true { didSet { UserDefaults.standard.set(saveToDownloads, forKey: "save_to_downloads") } }
+    @Published var saveToDownloads = true {
+        didSet { UserDefaults.standard.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
+    }
     @Published private var themeModeRawValue: String = ThemeMode.system.rawValue { didSet { UserDefaults.standard.set(themeModeRawValue, forKey: "theme_mode") } }
     @Published var launchAtLogin = false { didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launch_at_login") } }
     @Published var grainTextureEnabled = true { didSet { UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled") } }
@@ -95,7 +97,7 @@ class SettingsViewModel: ObservableObject {
         // 第一步：快速恢复基本设置（UserDefaults 读取很快）
         let defaults = UserDefaults.standard
         autoDownloadOriginal = defaults.bool(forKey: "auto_download_original")
-        saveToDownloads = defaults.object(forKey: "save_to_downloads") as? Bool ?? true
+        saveToDownloads = defaults.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
         if let raw = defaults.string(forKey: "theme_mode"), let _ = ThemeMode(rawValue: raw) {
             themeModeRawValue = raw
         }
