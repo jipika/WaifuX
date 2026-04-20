@@ -1,0 +1,14 @@
+#!/bin/sh
+# 禁止将仅本地 AI 助手说明纳入版本库（即使使用 git add -f）
+forbidden_bases="AGENTS.md CLAUDE.md GEMINI.md .cursorrules COPILOT.md"
+for path in $(git diff --cached --name-only); do
+  base=$(basename "$path")
+  for f in $forbidden_bases; do
+    if [ "$base" = "$f" ]; then
+      echo "pre-commit: 拒绝提交「$path」（AI/编辑器本地说明，见 .gitignore）。" >&2
+      echo "请从暂存区移除: git reset HEAD -- \"$path\"" >&2
+      exit 1
+    fi
+  done
+done
+exit 0
