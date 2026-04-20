@@ -1,11 +1,14 @@
 name: CI
 
-# 本仓库默认集成分支为 feature/wallpaper-engine（无 main）；若改名请同步下方 branches 与 refs/heads/* 条件
+# 本仓库默认集成分支为 feature/wallpaper-engine（与 origin/HEAD 一致）。
+# main 线若另有 workflow，勿与这里混用；触发规则对齐 main：每次推送跑 CI（仅忽略文档）。
 on:
+  # 每次推 feature/wallpaper-engine 都跑 CI（纯文档/Markdown 变更不触发，见 paths-ignore）；发版逻辑见下方 if
   push:
     branches: [feature/wallpaper-engine]
-    paths:
-      - 'VERSION'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [feature/wallpaper-engine]
     paths-ignore:
@@ -91,6 +94,21 @@ jobs:
 
       - name: Build (for PRs)
         if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p build
+          xcodebuild -project WaifuX.xcodeproj \
+            -scheme WaifuX \
+            -destination 'platform=macOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      # push 且当前 VERSION 已有 tag 时不会跑「Build & Package」，此处补一次编译校验（与 main 分支一致）
+      - name: Build (verify push to feature/wallpaper-engine)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wallpaper-engine' && steps.check_tag.outputs.exists == 'true'
         run: |
           mkdir -p build
           xcodebuild -project WaifuX.xcodeproj \
