@@ -1,5 +1,22 @@
 # Agent Development Notes
 
+## Git 远程与分支（切勿推错仓库）
+
+
+| 分支                                            | 应推送的远程仓库                                | 说明                          |
+| --------------------------------------------- | --------------------------------------- | --------------------------- |
+| `**main**`                                    | `**jipika/WaifuX**`（URL 中 **无** `-pro`） | 主线应用 / 合并后的默认分支             |
+| **壁纸引擎（小红车）集成线**，如 `feature/wallpaper-engine` | `**jipika/waifuX-pro`**                 | Pro / Wallpaper Engine 专项仓库 |
+
+
+**禁止**将本地 `main` 推送到 `waifuX-pro`。`waifuX-pro` 上不应保留 `main`（若误建已删除）。推送前用 `git remote -v` 与 `git status -sb` 确认上游。
+
+建议远程命名：`waifu` → `https://github.com/jipika/WaifuX.git`，`pro` 或保持 `origin` → `https://github.com/jipika/waifuX-pro.git`；本地 `main` 的上游设为 `waifu/main`。
+
+**CI / Pages**：壁纸引擎相关 workflow 仍以 `feature/wallpaper-engine` 等为触发分支时，以 `.github/workflows/*.yml` 为准；改默认分支须同步 YAML。
+
+---
+
 ## Wallpaper Engine CLI 二进制部署说明
 
 项目依赖一个独立的 Swift 可执行文件 `wallpaperengine-cli`（源码为根目录下的 `wallpaperengine-cli.swift`），该文件负责通过 C++ renderer (`liblinux-wallpaperengine-renderer.dylib`) 渲染 Scene/Web 类型壁纸。
@@ -13,22 +30,23 @@
 3. `Bundle.main.resourceURL/wallpaperengine-cli`
 4. `Bundle.main.bundleURL` 的同级目录下的 `wallpaperengine-cli`
 5. 硬编码 fallback：
-   - `/Volumes/mac/CodeLibrary/Claude/WallHaven/wallpaperengine-cli`
-   - `/Volumes/mac/CodeLibrary/Claude/WallHaven/Resources/wallpaperengine-cli`
+  - `/Volumes/mac/CodeLibrary/Claude/WallHaven/wallpaperengine-cli`
+  - `/Volumes/mac/CodeLibrary/Claude/WallHaven/Resources/wallpaperengine-cli`
 
 ### ⚠️ 关键陷阱
 
 **在 Xcode 运行或本地开发时，如果根目录下存在 `wallpaperengine-cli`，它会优先于 `Resources/wallpaperengine-cli` 被加载。**
 
 因此：
+
 - **编译后必须同时替换根目录和 `Resources/` 下的二进制**，否则旧版本仍会被执行。
 - 旧 daemon 可能已在后台运行，可通过 `ps aux | grep wallpaperengine-cli` 检查；重新设置壁纸时 client 会杀掉旧 daemon 并启动新的。
 
 ### 编译命令
 
-**`Resources/assets` 不提交 Git**（`.gitignore`）。**`Resources/wallpaperengine-cli` 由本地构建后提交**；GitHub Actions **不再**在 CI 里编 CLI，`xcodebuild` 也不会每次跑嵌入脚本。
+`**Resources/assets` 不提交 Git**（`.gitignore`）。`**Resources/wallpaperengine-cli` 由本地构建后提交**；GitHub Actions **不再**在 CI 里编 CLI，`xcodebuild` 也不会每次跑嵌入脚本。
 
-**CI 默认分支**：仓库以 `feature/wallpaper-engine` 为集成分支（无 `main`）。推送改 `VERSION`、PR 目标分支、Pages 触发分支均以此为准；若改名需同步 `.github/workflows/*.yml`。
+**CI / 集成分支**：部分 workflow（如 Pages）仍绑定 `feature/wallpaper-engine`；修改触发分支或默认分支时需同步 `.github/workflows/*.yml`。
 
 **WE 动态壁纸**：`scene` 与 `web` 均由 `wallpaperengine-cli` 渲染，在 App 内与本机视频壁纸一并视为动态壁纸；`WallpaperEngineXBridge.isControllingExternalEngine` 为真时，状态栏暂停/恢复/关闭必须走 CLI，不得误用 `VideoWallpaperManager`。设置 WE 壁纸前只能调用 `stopNativeVideoWallpaperOnly()`，禁止先置 `isControllingExternalEngine = true` 再调 `VideoWallpaperManager.stopWallpaper()`（否则会 `stopWallpaper` 链式停掉 CLI 并清掉标志）。
 
@@ -49,3 +67,4 @@ install_name_tool -add_rpath "@loader_path" Resources/wallpaperengine-cli
 install_name_tool -add_rpath "@loader_path/Resources" Resources/wallpaperengine-cli
 install_name_tool -add_rpath "@loader_path/../Resources" Resources/wallpaperengine-cli
 ```
+
