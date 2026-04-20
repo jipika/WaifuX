@@ -3,9 +3,12 @@ name: CI
 # 本仓库（WaifuX main 线）默认集成分支为 main。
 # 若另有 fork/仓库以 feature/wallpaper-engine 为默认分支，应在那个仓库里单独维护 workflow，勿与这里混用。
 on:
-  # 每次推 main 都跑 CI；发版打包/Release 仍仅在「VERSION 对应 v* tag 尚不存在」时执行（见下方 if）
+  # 每次推 main 都跑 CI（纯文档/Markdown 变更不触发，见 paths-ignore）；发版逻辑见下方 if
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
     paths-ignore:
