@@ -343,7 +343,13 @@ class WallpaperSourceManager: ObservableObject {
         // 如果用户手动锁定了源，不要自动切换
         guard forceSourceOverride == nil else {
             print("[WallpaperSourceManager] Startup: user locked to \(forceSourceOverride!.displayName), skip")
-            isInitialSourceSelectionComplete = true
+            let vpnEnabled = isVPNEnabled()
+            await MainActor.run {
+                if vpnEnabled {
+                    GitHubHosts.isEnabled = false
+                }
+                isInitialSourceSelectionComplete = true
+            }
             return
         }
 

@@ -165,7 +165,7 @@ final class UpdateChecker: ObservableObject {
             return .error("无效的 API URL")
         }
 
-        var request = URLRequest(url: url)
+        var request = GitHubHosts.urlRequest(forGitHubURL: url)
         request.setValue("WaifuX-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
 
@@ -228,7 +228,7 @@ final class UpdateChecker: ObservableObject {
             return nil
         }
 
-        var request = URLRequest(url: url)
+        var request = GitHubHosts.urlRequest(forGitHubURL: url)
         request.setValue("WaifuX-App/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
 
@@ -320,8 +320,6 @@ final class UpdateChecker: ObservableObject {
         return isVersion(release.version, newerThan: localVersion)
     }
 }
-import Foundation
-import AppKit
 
 /// 自动更新管理器 - 处理下载和安装（参考 AltTab 实现）
 @MainActor
@@ -434,9 +432,9 @@ final class UpdateManager: ObservableObject {
         config.timeoutIntervalForResource = 600
         let session = URLSession(configuration: config)
         
-        var request = URLRequest(url: url)
+        var request = GitHubHosts.urlRequest(forGitHubURL: url)
         request.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
-        
+
         let (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }

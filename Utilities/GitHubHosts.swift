@@ -117,6 +117,20 @@ enum GitHubHosts {
         }
         return hosts[host] != nil || host.contains("github")
     }
+
+    /// 为 GitHub 相关请求准备 `URLRequest`：与 `NetworkService` 一致，`isEnabled == false` 时不改写 URL（走系统 DNS / VPN）。
+    static func urlRequest(forGitHubURL url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        guard isEnabled,
+              let host = url.host,
+              hosts[host] != nil,
+              let resolvedURL = resolveURL(url.absoluteString) else {
+            return request
+        }
+        request.url = resolvedURL
+        request.setValue(host, forHTTPHeaderField: "Host")
+        return request
+    }
 }
 
 // MARK: - NetworkService 扩展
