@@ -181,6 +181,35 @@ class WorkshopSourceManager: ObservableObject {
     }
 
     // MARK: - SteamCMD 路径管理
+    //
+    // 用户侧：安装/打开 App 即可，无需自己找路径。首次使用 Workshop 下载时，若尚未准备可写副本，
+    // 会自动把 **App 内已打包的** `Contents/Resources/steamcmd/` 复制到 Application Support（见 `steamCMDExecutableURL()`）。
+    // 原因：Valve 的 `steamcmd.sh` 会在运行目录写入更新与 `config/` 登录缓存，`.app` 内 Resources 在正式安装环境下通常不可写，
+    // 因此工作副本固定在 `~/Library/Application Support/com.waifux.app/steamcmd/`，避免自更新/登录失败。
+    //
+    // 开发侧：`Resources/steamcmd/` 已随仓库提交即可直接构建；更新二进制时运行 `scripts/sync-steamcmd-into-resources.sh`（默认拉官方包）。
+
+    /// 应用包内 `Resources/steamcmd/`（与 Valve 官方 macOS 解压目录一致，根目录须有 `steamcmd.sh`）。
+    private static func bundledSteamCMDDirectoryURL() -> URL? {
+        let fm = FileManager.default
+        if let sh = Bundle.main.url(forResource: "steamcmd", withExtension: "sh", subdirectory: "steamcmd"),
+           fm.fileExists(atPath: sh.path) {
+            return sh.deletingLastPathComponent()
+        }
+        if let bin = Bundle.main.url(forResource: "steamcmd", withExtension: nil, subdirectory: "steamcmd"),
+           fm.fileExists(atPath: bin.path) {
+            return bin.deletingLastPathComponent()
+        }
+        if let resources = Bundle.main.resourceURL {
+            let dir = resources.appendingPathComponent("steamcmd", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
+               fm.fileExists(atPath: dir.appendingPathComponent("steamcmd.sh").path) {
+                return dir
+            }
+        }
+        return nil
+    }
     
     /// 返回 SteamCMD 可执行文件路径
     /// 首次调用时会将 Bundle 中的 steamcmd 复制到 Application Support，
@@ -197,12 +226,10 @@ class WorkshopSourceManager: ObservableObject {
             return script
         }
         
-        // 从 Bundle 复制原始 steamcmd
-        guard let bundleSteamcmd = Bundle.main.url(forResource: "steamcmd", withExtension: nil, subdirectory: "steamcmd") else {
+        // 从 Bundle 复制原始 steamcmd 目录
+        guard let bundleSteamcmdDir = Self.bundledSteamCMDDirectoryURL() else {
             return nil
         }
-        
-        let bundleSteamcmdDir = bundleSteamcmd.deletingLastPathComponent()
         
         do {
             try FileManager.default.createDirectory(at: destDir.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -377,8 +404,8 @@ class WorkshopSourceManager: ObservableObject {
     
     /// SteamCMD 是否已配置/安装
     var isSteamCMDConfigured: Bool {
-        // 检查 bundle 中是否包含 steamcmd 可执行文件
-        Bundle.main.url(forResource: "steamcmd", withExtension: nil, subdirectory: "steamcmd") != nil
+        guard let dir = Self.bundledSteamCMDDirectoryURL() else { return false }
+        return FileManager.default.fileExists(atPath: dir.appendingPathComponent("steamcmd.sh").path)
     }
     
     /// 是否已通过 SteamCMD 凭证配置

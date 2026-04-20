@@ -32,6 +32,10 @@ Pods/
 .WallHavenCache/
 .WallHavenImageCache/
 
+# Editor / AI 助手说明（仅本地，不提交）
+AGENTS.md
+CLAUDE.md
+
 # Editor
 .1code/
 .claude/
@@ -59,8 +63,8 @@ landing/node_modules/
 # Trae
 .trae/
 
-# SteamCMD (local install; large binary tree)
-steamcmd/
+# SteamCMD：随仓库提供 `Resources/steamcmd/`（见该目录 README），以便克隆/CI 可打包；勿将用户 Application Support 下的自更新缓存提交进来。
+/steamcmd/
 
 # Wallpaper Engine：材质包不提交（构建时嵌入 CLI；本地保留或 CI 用 WAIFUX_WE_ASSETS_PACK_URL 拉取）
 Resources/assets/
