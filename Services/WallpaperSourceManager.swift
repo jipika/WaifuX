@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CFNetwork
 
 // MARK: - 壁纸源管理器
 ///
@@ -333,19 +334,20 @@ class WallpaperSourceManager: ObservableObject {
     }
 
     /// 启动时选择数据源
-    /// - 如果启用了 VPN：保持 Wallhaven
-    /// - 如果未启用 VPN：ping Google 检测网络状态
+    /// - 如果启用了 VPN（虚拟网卡）：保持 Wallhaven
+    /// - 否则：ping Google 检测网络状态
     ///   - Google 可达：保持 Wallhaven
     ///   - Google 不可达：切换到 4K 源，并启用 GitHub Hosts 加速
+    /// - 任意时刻：若存在 VPN 网卡或系统 HTTP(S)/SOCKS/PAC 代理，关闭 GitHub Hosts 固定 IP，避免绕开隧道/代理
     func performStartupSourceSelection() async {
         print("[WallpaperSourceManager] Performing startup source selection...")
 
         // 如果用户手动锁定了源，不要自动切换
         guard forceSourceOverride == nil else {
             print("[WallpaperSourceManager] Startup: user locked to \(forceSourceOverride!.displayName), skip")
-            let vpnEnabled = isVPNEnabled()
+            let disableHostsPinning = shouldDisableGitHubHostsPinning()
             await MainActor.run {
-                if vpnEnabled {
+                if disableHostsPinning {
                     GitHubHosts.isEnabled = false
                 }
                 isInitialSourceSelectionComplete = true
@@ -353,15 +355,15 @@ class WallpaperSourceManager: ObservableObject {
             return
         }
 
-        // 首先检测 VPN
+        // 首先检测 VPN（虚拟网卡）；HTTP/HTTPS 代理在 shouldDisableGitHubHostsPinning 里单独检测
         let vpnEnabled = isVPNEnabled()
-        print("[WallpaperSourceManager] VPN detected: \(vpnEnabled)")
+        print("[WallpaperSourceManager] VPN (utun/ppp/…) detected: \(vpnEnabled)")
 
         if vpnEnabled {
             // 启用了 VPN，保持 Wallhaven
             print("[WallpaperSourceManager] VPN is enabled, keeping Wallhaven")
             await MainActor.run {
-                // GitHub Hosts 会把请求改成直连固定 IP，容易绕过系统 VPN（尤其分流）；走 VPN 时关闭
+                // GitHub Hosts 会把请求改成直连固定 IP，容易绕过系统 VPN（尤其分流）；走 VPN/代理时关闭
                 GitHubHosts.isEnabled = false
                 if activeSource != .wallhaven {
                     activeSource = .wallhaven
@@ -389,6 +391,8 @@ class WallpaperSourceManager: ObservableObject {
                         UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
                         UserDefaults.standard.set(false, forKey: autoSwitchedKey)
                     }
+                    // 系统代理下常见「只走 HTTP/HTTPS 代理、无 utun」：仍应关闭固定 IP
+                    GitHubHosts.isEnabled = !shouldDisableGitHubHostsPinning()
                     isInitialSourceSelectionComplete = true
                 }
             } else {
@@ -402,8 +406,8 @@ class WallpaperSourceManager: ObservableObject {
                     UserDefaults.standard.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
                     UserDefaults.standard.set(true, forKey: autoSwitchedKey)
 
-                    // 启用 GitHub Hosts 加速
-                    GitHubHosts.isEnabled = true
+                    // 启用 GitHub Hosts 加速（若当前走系统代理/VPN 栈则保持关闭）
+                    GitHubHosts.isEnabled = !shouldDisableGitHubHostsPinning()
 
                     isInitialSourceSelectionComplete = true
                 }
@@ -411,6 +415,11 @@ class WallpaperSourceManager: ObservableObject {
         }
 
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
+    }
+
+    /// 是否应关闭 GitHub 固定 IP 加速：虚拟网卡 VPN 或系统 HTTP(S)/SOCKS/PAC 代理开启时，应走系统解析与代理栈（与常见「只代理 443」工具一致）。
+    func shouldDisableGitHubHostsPinning() -> Bool {
+        isVPNEnabled() || isSystemProxyRoutingActive()
     }
 
     /// 检测是否启用了 VPN
@@ -443,6 +452,23 @@ class WallpaperSourceManager: ObservableObject {
         }
 
         return hasVPN
+    }
+
+    /// 系统网络设置里是否启用了会接管应用 HTTP(S) 流量的代理（含自动代理 PAC）。
+    func isSystemProxyRoutingActive() -> Bool {
+        guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] else {
+            return false
+        }
+        func proxyEnabled(_ key: String) -> Bool {
+            if let n = settings[key] as? NSNumber, n.intValue == 1 { return true }
+            if let i = settings[key] as? Int, i == 1 { return true }
+            return false
+        }
+        if proxyEnabled(kCFNetworkProxiesHTTPEnable as String) { return true }
+        if proxyEnabled(kCFNetworkProxiesHTTPSEnable as String) { return true }
+        if proxyEnabled(kCFNetworkProxiesSOCKSEnable as String) { return true }
+        if proxyEnabled(kCFNetworkProxiesProxyAutoConfigEnable as String) { return true }
+        return false
     }
 
     /// Ping Google 检测网络是否可达
