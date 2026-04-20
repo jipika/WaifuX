@@ -153,20 +153,6 @@ class WorkshopSourceManager: ObservableObject {
         steamCredentials != nil
     }
     
-    // MARK: - Wallpaper Engine 激活码
-    
-    private let wallpaperEngineActivationCodeKey = "wallpaper_engine_activation_code"
-    
-    var wallpaperEngineActivationCode: String {
-        get {
-            UserDefaults.standard.string(forKey: wallpaperEngineActivationCodeKey) ?? ""
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: wallpaperEngineActivationCodeKey)
-            objectWillChange.send()
-        }
-    }
-    
     func setSteamCredentials(username: String, password: String, guardCode: String? = nil) {
         steamCredentials = SteamCredentials(username: username, password: password, guardCode: guardCode)
     }
@@ -373,12 +359,6 @@ class WorkshopSourceManager: ObservableObject {
         guard let currentIndex = allSources.firstIndex(of: activeSource) else { return }
         let nextIndex = (currentIndex + 1) % allSources.count
         switchTo(allSources[nextIndex])
-    }
-    
-    /// SteamCMD 是否已配置/安装
-    var isSteamCMDConfigured: Bool {
-        // 检查 bundle 中是否包含 steamcmd 可执行文件
-        Bundle.main.url(forResource: "steamcmd", withExtension: nil, subdirectory: "steamcmd") != nil
     }
     
     /// 是否已通过 SteamCMD 凭证配置

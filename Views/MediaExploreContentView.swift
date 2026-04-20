@@ -29,10 +29,9 @@ struct MediaExploreContentView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
 
-    // Workshop 筛选
+    // Workshop 筛选（内容级别固定 SFW，不提供 UI）
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
     @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
-    @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
     @State private var workshopSearchQuery: String = ""
     private var workshopService: WorkshopService {
         WorkshopService.shared
@@ -57,7 +56,6 @@ struct MediaExploreContentView: View {
                         heroSection
                         categorySection
                         if workshopSourceManager.activeSource == .wallpaperEngine {
-                            filterSection
                             workshopTagsSection
                             activeFiltersSection
                         }
@@ -234,8 +232,7 @@ struct MediaExploreContentView: View {
         await viewModel.loadWorkshopWithFilters(
             query: workshopSearchQuery,
             tags: tags,
-            type: selectedWorkshopType,
-            contentLevel: selectedWorkshopContentLevel
+            type: selectedWorkshopType
         )
     }
 
@@ -310,40 +307,6 @@ struct MediaExploreContentView: View {
     }
 
     @ViewBuilder
-    private var filterSection: some View {
-        if workshopSourceManager.activeSource == .wallpaperEngine {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(t("contentLevel"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.46))
-                FlowLayout(spacing: 10) {
-                    ForEach(visibleWorkshopContentLevels) { level in
-                        FilterChip(
-                            title: level.title,
-                            subtitle: level.subtitle,
-                            isSelected: selectedWorkshopContentLevel?.id == level.id,
-                            tint: level.tint
-                        ) {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                if selectedWorkshopContentLevel?.id == level.id {
-                                    selectedWorkshopContentLevel = nil
-                                } else {
-                                    selectedWorkshopContentLevel = level
-                                }
-                                Task { await applyWorkshopFilters() }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
-        Array(WorkshopSourceManager.WorkshopContentLevel.allCases)
-    }
-
-    @ViewBuilder
     private var activeFiltersSection: some View {
         if workshopSourceManager.activeSource == .wallpaperEngine {
             let chips = workshopActiveFilterChips
@@ -356,7 +319,6 @@ struct MediaExploreContentView: View {
                         Button(t("clear")) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 selectedWorkshopTag = nil
-                                selectedWorkshopContentLevel = .everyone
                                 selectedWorkshopType = .all
                                 Task { await applyWorkshopFilters() }
                             }
@@ -387,7 +349,7 @@ struct MediaExploreContentView: View {
         let title: String
         let accentHex: String
         let kind: Kind
-        enum Kind { case type, tag, contentLevel }
+        enum Kind { case type, tag }
     }
 
     private var workshopActiveFilterChips: [WorkshopFilterChipData] {
@@ -408,14 +370,6 @@ struct MediaExploreContentView: View {
                 kind: .tag
             ))
         }
-        if let level = selectedWorkshopContentLevel {
-            chips.append(WorkshopFilterChipData(
-                id: "level_\(level.id)",
-                title: level.title,
-                accentHex: level.accentHex,
-                kind: .contentLevel
-            ))
-        }
         return chips
     }
 
@@ -425,8 +379,6 @@ struct MediaExploreContentView: View {
             selectedWorkshopType = .all
         case .tag:
             selectedWorkshopTag = nil
-        case .contentLevel:
-            selectedWorkshopContentLevel = .everyone
         }
         Task { await applyWorkshopFilters() }
     }
@@ -581,7 +533,6 @@ struct MediaExploreContentView: View {
             selectedHotTag = nil
             selectedWorkshopTag = nil
             selectedWorkshopType = .all
-            selectedWorkshopContentLevel = .everyone
             searchText = ""
         }
 
@@ -610,7 +561,6 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
-        selectedWorkshopContentLevel = .everyone
         displayedItems = []
         searchTask?.cancel()
         searchTask = Task {
@@ -768,7 +718,6 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
-        selectedWorkshopContentLevel = .everyone
         selectedCategory = .all
         selectedSort = .newest
         viewModel.clearItems()

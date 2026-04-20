@@ -1059,7 +1059,7 @@ struct SettingsUpdateSection: View {
             tagName: "v38.0.25",
             name: "WaifuX 38.0.25",
             body: "修复了一些问题",
-            htmlUrl: "https://github.com/jipika/waifuX-pro/releases/tag/v38.0.25",
+            htmlUrl: "https://github.com/jipika/WaifuX/releases/tag/v38.0.25",
             publishedAt: "2024-01-01T00:00:00Z",
             prerelease: false,
             draft: false,
@@ -1090,8 +1090,6 @@ private struct WorkshopSettingsTab: View {
     @State private var steamGuardCode = ""
     @State private var isVerifyingSteamLogin = false
     @State private var steamLoginStatusText: String?
-    @State private var activationCode = ""
-    @State private var activationCodeSaved = false
 
     var body: some View {
         ScrollView {
@@ -1112,9 +1110,6 @@ private struct WorkshopSettingsTab: View {
                 
                 // SteamCMD 登录
                 steamCMDLoginSection
-
-                // 壁纸引擎激活码
-                activationCodeSection
 
                 Spacer()
             }
@@ -1244,52 +1239,6 @@ private struct WorkshopSettingsTab: View {
         }
     }
 
-    private var activationCodeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.cyan)
-                Text(t("workshop.activationCode"))
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    TextField(t("workshop.activationCodePlaceholder"), text: $activationCode)
-                        .textFieldStyle(.roundedBorder)
-                    Button(t("workshop.saveActivationCode")) {
-                        sourceManager.wallpaperEngineActivationCode = activationCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            activationCodeSaved = true
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                activationCodeSaved = false
-                            }
-                        }
-                    }
-                    .controlSize(.small)
-                    .disabled(activationCode.isEmpty)
-                }
-
-                if activationCodeSaved {
-                    Text(t("workshop.activationCodeSaved"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.green)
-                        .transition(.opacity)
-                }
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(8)
-        }
-        .onAppear {
-            activationCode = sourceManager.wallpaperEngineActivationCode
-        }
-    }
-
     // MARK: - SteamCMD 状态
     private var steamCMDStatusSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1303,25 +1252,18 @@ private struct WorkshopSettingsTab: View {
             }
 
             HStack(spacing: 12) {
+                let status = workshopService.checkSteamCMDStatus()
                 Circle()
-                    .fill(statusColor)
+                    .fill(steamCMDStatusColor(status))
                     .frame(width: 8, height: 8)
 
-                Text(statusText)
+                Text(steamCMDStatusText(status))
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                if sourceManager.isSteamCMDConfigured {
-                    Label(t("steamCMDReady"), systemImage: "checkmark.circle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.green)
-                } else {
-                    Label(t("steamCMDNotInstalled"), systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.orange)
-                }
+                steamCMDStatusTrailingLabel(status)
             }
             .padding(12)
             .background(Color.white.opacity(0.03))
@@ -1329,8 +1271,8 @@ private struct WorkshopSettingsTab: View {
         }
     }
 
-    private var statusColor: Color {
-        switch workshopService.checkSteamCMDStatus() {
+    private func steamCMDStatusColor(_ status: SteamCMDStatus) -> Color {
+        switch status {
         case .ready: return .green
         case .notInstalled: return .orange
         case .error: return .red
@@ -1338,12 +1280,35 @@ private struct WorkshopSettingsTab: View {
         }
     }
 
-    private var statusText: String {
-        switch workshopService.checkSteamCMDStatus() {
+    private func steamCMDStatusText(_ status: SteamCMDStatus) -> String {
+        switch status {
         case .ready: return t("steamCMDReady")
         case .notInstalled: return t("steamCMDNotInstalled")
         case .error(let msg): return String(format: t("steamCMDError"), msg)
         case .downloading: return t("downloading")
+        }
+    }
+
+    @ViewBuilder
+    private func steamCMDStatusTrailingLabel(_ status: SteamCMDStatus) -> some View {
+        switch status {
+        case .ready:
+            Label(t("steamCMDReady"), systemImage: "checkmark.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(.green)
+        case .notInstalled:
+            Label(t("steamCMDNotInstalled"), systemImage: "exclamationmark.triangle")
+                .font(.system(size: 12))
+                .foregroundStyle(.orange)
+        case .error(let msg):
+            Label(String(format: t("steamCMDError"), msg), systemImage: "exclamationmark.triangle")
+                .font(.system(size: 12))
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        case .downloading:
+            Label(t("downloading"), systemImage: "arrow.down.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(.blue)
         }
     }
 }

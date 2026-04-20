@@ -47,8 +47,10 @@ final class MediaExploreViewModel: ObservableObject {
     private var workshopSearchQuery = ""
     private var workshopCurrentTags: [String] = []
     private var workshopCurrentType: WorkshopSourceManager.WorkshopTypeFilter = .all
-    /// 默认 SFW（Steam `requiredtags[]=Everyone`），避免未选级别时混入全年龄未分级内容
-    private var workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
+    /// 壁纸引擎内容级别固定为 SFW（`requiredtags[]=Everyone`），不在 UI 中暴露其它级别
+    private var workshopFixedContentLevelRaw: String {
+        WorkshopSourceManager.WorkshopContentLevel.everyone.rawValue
+    }
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -417,7 +419,7 @@ final class MediaExploreViewModel: ObservableObject {
                     pageSize: 10,
                     tags: workshopCurrentTags,
                     type: wallpaperType,
-                    contentLevel: workshopCurrentContentLevel?.rawValue
+                    contentLevel: workshopFixedContentLevelRaw
                 )
                 let response = try await workshopService.search(params: params)
                 homeItems = workshopService.convertToMediaItems(response.items)
@@ -968,30 +970,27 @@ final class MediaExploreViewModel: ObservableObject {
         workshopSourceManager.activeSource == .wallpaperEngine
     }
 
-    /// 加载 Workshop 首页/搜索内容（沿用当前类型 / 标签 / 内容级别，默认含 SFW）
+    /// 加载 Workshop 首页/搜索内容（沿用当前类型 / 标签；内容级别固定 SFW）
     func loadWorkshopFeed() async {
         await loadWorkshopFeedInternal(
             query: workshopSearchQuery,
             tags: workshopCurrentTags,
-            type: workshopCurrentType,
-            contentLevel: workshopCurrentContentLevel
+            type: workshopCurrentType
         )
     }
 
-    /// Workshop 搜索（与 Explore 搜索栏提交一致：清空标签/类型并回到默认 SFW）
+    /// Workshop 搜索（与 Explore 搜索栏提交一致：清空标签/类型）
     func searchWorkshop(query: String) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         workshopSearchQuery = trimmedQuery
         currentQuery = trimmedQuery
         workshopCurrentTags = []
         workshopCurrentType = .all
-        workshopCurrentContentLevel = .everyone
 
         await loadWorkshopFeedInternal(
             query: trimmedQuery,
             tags: [],
-            type: .all,
-            contentLevel: .everyone
+            type: .all
         )
     }
 
@@ -1001,26 +1000,23 @@ final class MediaExploreViewModel: ObservableObject {
         await loadWorkshopFeedInternal(query: "", tags: tags)
     }
 
-    /// 带完整筛选条件加载 Workshop 内容
+    /// 带完整筛选条件加载 Workshop 内容（内容级别固定 SFW）
     func loadWorkshopWithFilters(
         query: String = "",
         tags: [String] = [],
-        type: WorkshopSourceManager.WorkshopTypeFilter = .all,
-        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil
+        type: WorkshopSourceManager.WorkshopTypeFilter = .all
     ) async {
         workshopSearchQuery = query
         workshopCurrentTags = tags
         workshopCurrentType = type
-        workshopCurrentContentLevel = contentLevel
-        await loadWorkshopFeedInternal(query: query, tags: tags, type: type, contentLevel: contentLevel)
+        await loadWorkshopFeedInternal(query: query, tags: tags, type: type)
     }
 
     /// 内部方法：加载 Workshop 数据
     private func loadWorkshopFeedInternal(
         query: String,
         tags: [String],
-        type: WorkshopSourceManager.WorkshopTypeFilter = .all,
-        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil
+        type: WorkshopSourceManager.WorkshopTypeFilter = .all
     ) async {
         guard !isLoading else { return }
 
@@ -1043,8 +1039,6 @@ final class MediaExploreViewModel: ObservableObject {
             }
         }()
 
-        let resolvedContentLevel = contentLevel ?? workshopCurrentContentLevel
-
         let params = WorkshopSearchParams(
             query: query,
             sortBy: .ranked,
@@ -1052,7 +1046,7 @@ final class MediaExploreViewModel: ObservableObject {
             pageSize: 20,
             tags: tags,
             type: wallpaperType,
-            contentLevel: resolvedContentLevel?.rawValue
+            contentLevel: workshopFixedContentLevelRaw
         )
 
         do {
@@ -1096,7 +1090,7 @@ final class MediaExploreViewModel: ObservableObject {
             pageSize: 20,
             tags: workshopCurrentTags,
             type: wallpaperType,
-            contentLevel: workshopCurrentContentLevel?.rawValue
+            contentLevel: workshopFixedContentLevelRaw
         )
 
         do {

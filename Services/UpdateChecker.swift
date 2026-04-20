@@ -85,8 +85,8 @@ final class UpdateChecker: ObservableObject {
 
     // GitHub 仓库配置
     private let owner = "jipika"
-    private let repo = "waifuX-pro"
-    private let apiURL = "https://api.github.com/repos/jipika/waifuX-pro/releases/latest"
+    private let repo = "WaifuX"
+    private let apiURL = "https://api.github.com/repos/jipika/WaifuX/releases/latest"
 
     // UserDefaults keys
     private let lastCheckKey = "update_checker_last_check"
@@ -372,7 +372,7 @@ final class UpdateManager: ObservableObject {
     
     // MARK: - 配置
     private let owner = "jipika"
-    private let repo = "waifuX-pro"
+    private let repo = "WaifuX"
     
     private init() {}
     

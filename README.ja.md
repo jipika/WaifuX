@@ -17,22 +17,22 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/waifuX-pro/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/waifuX-pro?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/jipika/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/waifuX-pro/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/waifuX-pro?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/jipika/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/waifuX-pro/forks">
-    <img src="https://img.shields.io/github/forks/jipika/waifuX-pro?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/jipika/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/waifuX-pro/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/waifuX-pro/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/jipika/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/waifuX-pro">
+  <a href="https://jipika.github.io/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -84,11 +84,11 @@
 
 ### 方法1：公式ウェブサイト（推奨）
 
-👉 **[https://jipika.github.io/waifuX-pro](https://jipika.github.io/waifuX-pro)**
+👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
 
 ### 方法2：GitHub Releases
 
-👉 **[Releases](https://github.com/jipika/waifuX-pro/releases)**
+👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
 
 > ⚠️ 初回起動時、「システム設定 → プライバシーとセキュリティ」で実行許可が必要な場合があります。
 
@@ -200,7 +200,7 @@ WaifuX は **Wallpaper Engine の公式製品ではありません**。Valve Cor
 ## 🌟 Star 履歴
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/waifuX-pro&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
@@ -212,7 +212,7 @@ WaifuX は **Wallpaper Engine の公式製品ではありません**。Valve Cor
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/waifuX-pro/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/waifuX-pro?style=social" alt="Stars">
+  <a href="https://github.com/jipika/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
   </a>
 </p>

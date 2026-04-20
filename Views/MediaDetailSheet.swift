@@ -24,7 +24,6 @@ struct MediaDetailSheet: View {
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
     @State private var showWallpaperEngineInstallAlert = false
-    @State private var showWallpaperEngineActivationAlert = false
     @State private var showSteamGuardAlert = false
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
@@ -231,16 +230,6 @@ struct MediaDetailSheet: View {
         } message: {
             Text(t("wallpaperEngineRequiredMessage"))
         }
-        .alert("需要激活码", isPresented: $showWallpaperEngineActivationAlert) {
-            Button("取消", role: .cancel) {}
-            Button("去爱发电购买") {
-                if let url = URL(string: "https://afdian.net/a/your-shop") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        } message: {
-            Text("该功能需要 Wallpaper Engine X 激活码。请前往爱发电购买，然后在设置 → Wallpaper Engine 中输入。")
-        }
         .alert("Steam Guard 验证码", isPresented: $showSteamGuardAlert) {
             TextField("输入验证码", text: $pendingSteamGuardCode)
             Button("取消", role: .cancel) {}
@@ -385,23 +374,23 @@ struct MediaDetailSheet: View {
         .animation(.easeOut(duration: 0.15), value: scrollOffset)
     }
 
-    // MARK: - 顶部返回按钮（下载/设置壁纸中禁用）
+    // MARK: - 顶部返回按钮（设置壁纸 / 场景烘焙中仍禁止误触返回；下载中可返回）
     private var floatingBackButton: some View {
         Button(action: {
-            if isDownloading || isSettingWallpaper || isBakingScene {
-                AppLogger.warn(.ui, "Media 返回被阻止：下载/设置壁纸/烘焙进行中",
-                    metadata: ["isDownloading": isDownloading, "isSettingWallpaper": isSettingWallpaper, "isBakingScene": isBakingScene])
+            if isSettingWallpaper || isBakingScene {
+                AppLogger.warn(.ui, "Media 返回被阻止：设置壁纸/烘焙进行中",
+                    metadata: ["isSettingWallpaper": isSettingWallpaper, "isBakingScene": isBakingScene])
                 return
             }
             onClose()
         }) {
             Image(systemName: "chevron.left")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle((isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95))
+                .foregroundStyle(isSettingWallpaper ? .white.opacity(0.35) : .white.opacity(0.95))
                 .frame(width: 38, height: 38)
                 .contentShape(Circle())
                 .detailGlassCircleChrome()
-                .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
+                .opacity(isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -1080,11 +1069,6 @@ struct MediaDetailSheet: View {
 
             if !WorkshopService.isWallpaperEngineAppInstalled() {
                 showWallpaperEngineInstallAlert = true
-                return
-            }
-            let code = WorkshopSourceManager.shared.wallpaperEngineActivationCode
-            if code.isEmpty {
-                showWallpaperEngineActivationAlert = true
                 return
             }
 
