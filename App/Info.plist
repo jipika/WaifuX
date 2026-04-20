@@ -28,12 +28,6 @@
     <string>AppIcon</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2024 WaifuX. All rights reserved.</string>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>WaifuX需要访问下载文件夹来保存壁纸图片。</string>
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>WaifuX需要访问文档文件夹来保存壁纸图片。</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>WaifuX需要屏幕录制权限来检测其他窗口是否覆盖了动态壁纸，以便在壁纸被遮挡时自动暂停播放，节省电量。</string>
     <key>LSUIElement</key>
     <false/>
 </dict>

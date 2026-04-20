@@ -207,7 +207,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             // 第2帧：权限和库数据
             DispatchQueue.main.async {
-                DownloadPermissionManager.shared.restoreSavedPermission()
+                DownloadPathManager.shared.migrateLegacyCustomFolderPreferenceIfNeeded()
                 WallpaperLibraryService.shared.restoreSavedData()
                 
                 // 第3帧：媒体库

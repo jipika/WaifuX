@@ -2,7 +2,7 @@ import Foundation
 
 /// 下载路径管理器 - 统一管理壁纸和媒体的下载路径
 /// 支持路径迁移检测，当用户手动移动文件时能够自动找到
-/// 集成下载权限管理
+/// 存储根目录固定为 Application Support 下 `WaifuX`，不读写系统「下载」等用户目录，避免隐私弹窗。
 @MainActor
 final class DownloadPathManager {
     static let shared = DownloadPathManager()
@@ -10,18 +10,13 @@ final class DownloadPathManager {
     /// 与设置中的开关一致：是否写入应用内媒体库（Application Support 下 `WaifuX`）。与系统「下载」文件夹无关。
     static let persistDownloadsToAppLibraryDefaultsKey = "save_to_downloads"
 
-    // 权限管理器
-    private let permissionManager = DownloadPermissionManager.shared
+    private static let legacyCustomFolderPathKey = "download_folder_path"
+    private static let legacyPermissionRequestedKey = "download_permission_requested"
 
     // MARK: - 文件夹结构
-    /// 根目录: ~/Library/Application Support/WaifuX/ 或用户选择的目录
+    /// 根目录: ~/Library/Application Support/WaifuX/（仅此一处，不再支持自定义到下载/文稿等目录）
     var rootFolderURL: URL {
-        if let permittedURL = permissionManager.currentFolderURL,
-           permittedURL.path != legacyFolderURL.path,
-           !permittedURL.path.hasPrefix(legacyFolderURL.path) {
-            return permittedURL
-        }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("WaifuX", isDirectory: true)
     }
@@ -41,13 +36,15 @@ final class DownloadPathManager {
         rootFolderURL.appendingPathComponent("SceneBakes", isDirectory: true)
     }
 
-    /// 旧版目录占位（历史上曾为 `~/Downloads/WallHaven`）。仅用于路径比较，不访问「下载」文件夹 API，避免触发相关权限能力。
-    var legacyFolderURL: URL {
-        URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent("Downloads/WallHaven"), isDirectory: true)
-    }
+    private init() {}
 
-    private init() {
-        // 不在初始化时创建目录，等待权限确认后再创建
+    /// 清除旧版本写入的「自定义保存目录」键，避免曾指向「下载」等路径时触发系统访问提示。
+    func migrateLegacyCustomFolderPreferenceIfNeeded() {
+        let d = UserDefaults.standard
+        guard d.object(forKey: Self.legacyCustomFolderPathKey) != nil else { return }
+        d.removeObject(forKey: Self.legacyCustomFolderPathKey)
+        d.removeObject(forKey: Self.legacyPermissionRequestedKey)
+        print("[DownloadPathManager] Cleared legacy custom folder keys; storage is Application Support/WaifuX only.")
     }
 
     // MARK: - 权限管理
@@ -55,16 +52,15 @@ final class DownloadPathManager {
     func ensureDownloadPermission() async -> Bool {
         createDirectoryStructure()
     }
-    
-    /// 请求下载文件夹权限
-    /// - Returns: 授权的文件夹URL
-    func requestDownloadFolder() async -> URL? {
-        await permissionManager.getDownloadFolder(requestIfNeeded: true)
-    }
-    
-    /// 检查是否有有效权限
+
+    /// 应用库根目录是否可写（已创建或能创建）
     var hasValidPermission: Bool {
-        permissionManager.hasValidPermission
+        let root = rootFolderURL
+        let fm = FileManager.default
+        if fm.fileExists(atPath: root.path) {
+            return fm.isWritableFile(atPath: root.path)
+        }
+        return true
     }
 
     // MARK: - 目录创建
