@@ -1056,7 +1056,7 @@ struct MediaDetailSheet: View {
 
             if isVideoFile && !isDirectory.boolValue {
                 print("[MediaDetailSheet] WE video file, using VideoWallpaperManager: \(localURL.path)")
-                applyWorkshopVideoWallpaper(videoURL: localURL)
+                applyWorkshopVideoWallpaper(videoURL: localURL, preferPosterFrameFromVideo: true)
                 return
             }
 
@@ -1517,7 +1517,7 @@ struct MediaDetailSheet: View {
 
     /// 直接应用 Workshop / 烘焙 MP4 视频壁纸（须在主线程调用；内部 `Task` 使用 `@MainActor` 以匹配 `VideoWallpaperManager`）
     /// - Parameter preferPosterFrameFromVideo: 为 true 时从该 MP4 抽一帧作静态桌面/锁屏（与 Workshop 预览图逻辑一致，失败则回退 `preferredWorkshopPosterForVideo`）。
-    private func applyWorkshopVideoWallpaper(videoURL: URL, preferPosterFrameFromVideo: Bool = false) {
+    private func applyWorkshopVideoWallpaper(videoURL: URL, preferPosterFrameFromVideo: Bool = true) {
         let path = videoURL.path
         guard FileManager.default.fileExists(atPath: path) else {
             errorMessage = t("sceneBake.error.outputMissing")

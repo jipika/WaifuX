@@ -67,6 +67,13 @@ final class VideoThumbnailCache {
         return await generatePosterJPEGFile(from: fileURL, outputURL: outURL)
     }
 
+    /// 动态壁纸的锁屏/静态桌面底图：对 mp4/mov/webm/m4v 从片源抽高清帧，失败或未识别扩展名时回退为站点封面等。
+    func lockScreenPosterURL(forLocalVideo localVideoURL: URL, fallbackPosterURL: URL?) async -> URL? {
+        let ext = localVideoURL.pathExtension.lowercased()
+        guard ["mp4", "mov", "webm", "m4v"].contains(ext) else { return fallbackPosterURL }
+        return await posterJPEGFileURL(forLocalVideo: localVideoURL) ?? fallbackPosterURL
+    }
+
     private func posterCacheURL(forPathKey pathKey: String) -> URL {
         cacheDirectory.appendingPathComponent("poster_wallpaper_\(pathKey.md5).jpg")
     }
