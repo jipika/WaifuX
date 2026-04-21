@@ -61,8 +61,8 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.68
-        CURRENT_PROJECT_VERSION: 39
+        MARKETING_VERSION: 38.0.69
+        CURRENT_PROJECT_VERSION: 40
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
