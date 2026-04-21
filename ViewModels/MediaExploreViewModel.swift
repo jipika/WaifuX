@@ -49,6 +49,10 @@ final class MediaExploreViewModel: ObservableObject {
     private var workshopCurrentType: WorkshopSourceManager.WorkshopTypeFilter = .all
     /// 默认 SFW（Steam `requiredtags[]=Everyone`），避免未选级别时混入全年龄未分级内容
     private var workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
+    /// Workshop 排序方式
+    private(set) var workshopSortBy: WorkshopSearchParams.SortOption = .ranked
+    /// Workshop 热门趋势时间范围（仅对 trend 排序有效），nil = 全部时间
+    private(set) var workshopDays: Int? = nil
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -1020,6 +1024,18 @@ final class MediaExploreViewModel: ObservableObject {
         workshopCurrentContentLevel = contentLevel
         await loadWorkshopFeedInternal(query: query, tags: tags, type: type, contentLevel: contentLevel)
     }
+    
+    /// 设置 Workshop 排序方式
+    func setWorkshopSort(sortBy: WorkshopSearchParams.SortOption, days: Int? = nil) async {
+        workshopSortBy = sortBy
+        workshopDays = days
+        await loadWorkshopFeedInternal(
+            query: workshopSearchQuery,
+            tags: workshopCurrentTags,
+            type: workshopCurrentType,
+            contentLevel: workshopCurrentContentLevel
+        )
+    }
 
     /// 内部方法：加载 Workshop 数据
     private func loadWorkshopFeedInternal(
@@ -1053,12 +1069,13 @@ final class MediaExploreViewModel: ObservableObject {
 
         let params = WorkshopSearchParams(
             query: query,
-            sortBy: .ranked,
+            sortBy: workshopSortBy,
             page: 1,
             pageSize: 20,
             tags: tags,
             type: wallpaperType,
-            contentLevel: resolvedContentLevel?.rawValue
+            contentLevel: resolvedContentLevel?.rawValue,
+            days: workshopDays
         )
 
         do {
@@ -1067,7 +1084,7 @@ final class MediaExploreViewModel: ObservableObject {
             items = mediaItems
             workshopHasMore = response.hasMore
             currentTitle = query.isEmpty ? "Workshop" : "搜索: \(query)"
-            print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items")
+            print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items, sort=\(workshopSortBy.rawValue), days=\(workshopDays.map(String.init) ?? "all")")
         } catch {
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadWorkshopFeedInternal failed: \(error)")
@@ -1097,12 +1114,13 @@ final class MediaExploreViewModel: ObservableObject {
 
         let params = WorkshopSearchParams(
             query: workshopSearchQuery,
-            sortBy: .ranked,
+            sortBy: workshopSortBy,
             page: workshopCurrentPage,
             pageSize: 20,
             tags: workshopCurrentTags,
             type: wallpaperType,
-            contentLevel: workshopCurrentContentLevel?.rawValue
+            contentLevel: workshopCurrentContentLevel?.rawValue,
+            days: workshopDays
         )
 
         do {

@@ -147,9 +147,11 @@ struct WorkshopSearchParams {
     var tags: [String] = []
     var type: WorkshopWallpaper.WallpaperType?
     var contentLevel: String?
+    /// 时间范围（仅对 trend 排序有效），nil 表示全部时间
+    var days: Int?
     
     enum SortOption: String {
-        case ranked = "ranked"           // 综合排序
+        case ranked = "ranked"           // 综合排序（热门趋势）
         case subscriptions = "subscribed" // 订阅数
         case updated = "updated"         // 最近更新
         case created = "created"         // 最新发布
