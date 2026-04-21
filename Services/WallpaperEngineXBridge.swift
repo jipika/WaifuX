@@ -43,10 +43,6 @@ final class WallpaperEngineXBridge: ObservableObject {
     // MARK: - 控制接口
 
     func setWallpaper(path: String, posterURL: URL? = nil, targetScreens: [NSScreen]? = nil) throws {
-        guard isWallpaperEngineXInstalled else {
-            throw WallpaperEngineError.notInstalled
-        }
-
         // 只停本机视频层；切勿调用 VideoWallpaperManager.stopWallpaper()（会恢复静态桌面，干扰后续 CLI set）。
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
 

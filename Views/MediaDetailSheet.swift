@@ -23,10 +23,11 @@ struct MediaDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
-    @State private var showWallpaperEngineInstallAlert = false
     @State private var showSteamGuardAlert = false
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
+    /// 烘焙并应用 MP4 成功后短暂显示在底部状态行（约 4s）
+    @State private var sceneBakeStatusFlash: String?
     @State private var sharePickerAnchorView: NSView?
 
     // 挤压动画配置
@@ -67,11 +68,6 @@ struct MediaDetailSheet: View {
               let eligibility = record.sceneBakeEligibility,
               eligibility.isEligibleForOfflineBake else { return false }
         return true
-    }
-
-    /// 已展示「预渲染循环视频」且英雄区可见时，仅用按钮内进度即可，避免与全屏「正在烘焙…」重复。
-    private var sceneBakeUsesInlineProgressOnly: Bool {
-        sceneOfflineBakeButtonVisible && !isHeroContentHidden
     }
 
     var body: some View {
@@ -175,11 +171,6 @@ struct MediaDetailSheet: View {
                 )
                 .zIndex(100)
 
-                if isBakingScene, !sceneBakeUsesInlineProgressOnly {
-                    sceneBakeProgressOverlay(width: viewW, height: viewH)
-                        .zIndex(250)
-                }
-
                 // 下一张弹窗 - 固定在右下角，不覆盖全屏
                 VStack {
                     Spacer()
@@ -220,16 +211,6 @@ struct MediaDetailSheet: View {
             Button(t("ok"), role: .cancel) {}
         } message: {
             Text(errorMessage)
-        }
-        .alert(t("wallpaperEngineRequiredTitle"), isPresented: $showWallpaperEngineInstallAlert) {
-            Button(t("cancel"), role: .cancel) {}
-            Button(t("goToAppStore")) {
-                if let url = URL(string: "https://apps.apple.com/cn/app/wallpaper-engine/id1573093741") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        } message: {
-            Text(t("wallpaperEngineRequiredMessage"))
         }
         .alert("Steam Guard 验证码", isPresented: $showSteamGuardAlert) {
             TextField("输入验证码", text: $pendingSteamGuardCode)
@@ -387,12 +368,12 @@ struct MediaDetailSheet: View {
         }) {
             DetailSheetCircleIconLabel(
                 systemName: "chevron.left",
-                foreground: (isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95),
+                foreground: (isDownloading || isSettingWallpaper || isBakingScene) ? .white.opacity(0.35) : .white.opacity(0.95),
                 fontSize: 15,
                 frameSide: 38
             )
             .detailGlassCircleChrome()
-            .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
+            .opacity(isDownloading || isSettingWallpaper || isBakingScene ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -506,39 +487,6 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private func sceneBakeProgressOverlay(width: CGFloat, height: CGFloat) -> some View {
-        ZStack {
-            Color.black.opacity(0.5)
-                .ignoresSafeArea()
-            VStack(spacing: 18) {
-                CustomProgressView(tint: .white)
-                    .scaleEffect(1.35)
-                Text(t("sceneBake.progressTitle"))
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text(t("sceneBake.progressSubtitle"))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.72))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: min(360, width * 0.85))
-            }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 32)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                    )
-            )
-        }
-        .frame(width: width, height: height)
-        .contentShape(Rectangle())
-        .allowsHitTesting(true)
-    }
-
     private var sceneBakeActionRow: some View {
         VStack(spacing: 8) {
             Text(t("sceneBake.tierHint"))
@@ -577,6 +525,14 @@ struct MediaDetailSheet: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
+
+            if currentDownloadRecord?.sceneBakeEligibility?.flags.wallClockTime == true {
+                Text(t("sceneBake.wallClockHint"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+            }
         }
         .padding(.top, 4)
     }
@@ -597,7 +553,7 @@ struct MediaDetailSheet: View {
                 let videoURL = URL(fileURLWithPath: artifact.videoPath)
                 await MainActor.run {
                     isBakingScene = false
-                    // 烘焙目的即替代 Scene 实时渲染：直接走本机 MP4 壁纸
+                    scheduleSceneBakeSuccessFlash()
                     applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
                 }
             } catch {
@@ -637,7 +593,7 @@ struct MediaDetailSheet: View {
                 setAsDesktopWallpaper()
             } label: {
                 HStack(spacing: 10) {
-                    if isSettingWallpaper {
+                    if isSettingWallpaper || isBakingScene {
                         CustomProgressView(tint: .white)
                             .scaleEffect(0.8)
                     } else {
@@ -656,7 +612,7 @@ struct MediaDetailSheet: View {
                 .detailPrimaryGlassButtonChrome()
             }
             .buttonStyle(.plain)
-            .disabled(isSettingWallpaper)
+            .disabled(isSettingWallpaper || isBakingScene)
 
             HStack(spacing: 16) {
                 Button {
@@ -865,6 +821,12 @@ struct MediaDetailSheet: View {
     }
 
     private var statusText: String {
+        if isBakingScene {
+            return t("sceneBake.progressTitle")
+        }
+        if let flash = sceneBakeStatusFlash {
+            return flash
+        }
         if isSettingWallpaper {
             return t("applyingWallpaper")
         }
@@ -1079,11 +1041,6 @@ struct MediaDetailSheet: View {
                 return
             }
 
-            if !WorkshopService.isWallpaperEngineAppInstalled() {
-                showWallpaperEngineInstallAlert = true
-                return
-            }
-
             if contentType == .scene {
                 applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
             } else {
@@ -1265,14 +1222,6 @@ struct MediaDetailSheet: View {
                     )
                 }
 
-                guard eligibility.isEligibleForOfflineBake else {
-                    await MainActor.run {
-                        isBakingScene = false
-                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
-                    }
-                    return
-                }
-
                 if !SystemMemoryPressure.hasRoomForSceneOfflineBake() {
                     await MainActor.run {
                         isBakingScene = false
@@ -1293,11 +1242,13 @@ struct MediaDetailSheet: View {
                     eligibility: eligibility,
                     contentRoot: sceneContentRoot,
                     cacheItemID: cacheKey,
-                    persistArtifactToItemID: persistID
+                    persistArtifactToItemID: persistID,
+                    requireEligibility: false
                 )
                 let videoURL = URL(fileURLWithPath: artifact.videoPath)
                 await MainActor.run {
                     isBakingScene = false
+                    scheduleSceneBakeSuccessFlash()
                     applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
                 }
             } catch {
@@ -1311,7 +1262,8 @@ struct MediaDetailSheet: View {
                         let detail = Self.truncateErrorMessage(error.localizedDescription)
                         errorMessage = detail + "\n\n" + t("sceneBake.error.afterBakeFailureHint")
                         showError = true
-                        print("[SceneWallpaper] 离线烘焙/分析失败（未自动切换实时渲染）: \(error.localizedDescription)")
+                        applyWorkshopRendererWallpaper(path: cliPath, posterURL: preferredWorkshopPosterForVideo)
+                        print("[SceneWallpaper] 离线烘焙失败，已回退实时渲染: \(error.localizedDescription)")
                     }
                 }
             }
@@ -1552,9 +1504,22 @@ struct MediaDetailSheet: View {
         )
     }
 
+    private func scheduleSceneBakeSuccessFlash() {
+        sceneBakeStatusFlash = t("sceneBake.success")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            sceneBakeStatusFlash = nil
+        }
+    }
+
     /// 直接应用 Workshop / 烘焙 MP4 视频壁纸（须在主线程调用；内部 `Task` 使用 `@MainActor` 以匹配 `VideoWallpaperManager`）
     /// - Parameter preferPosterFrameFromVideo: 为 true 时从该 MP4 抽一帧作静态桌面/锁屏（与 Workshop 预览图逻辑一致，失败则回退 `preferredWorkshopPosterForVideo`）。
-    private func applyWorkshopVideoWallpaper(videoURL: URL, preferPosterFrameFromVideo: Bool = true) {
+    /// - Parameter onApplyFinished: 成功应用到桌面后回调（用于离线烘焙完成后的文案提示）。
+    private func applyWorkshopVideoWallpaper(
+        videoURL: URL,
+        preferPosterFrameFromVideo: Bool = true,
+        onApplyFinished: (() -> Void)? = nil
+    ) {
         let path = videoURL.path
         guard FileManager.default.fileExists(atPath: path) else {
             errorMessage = t("sceneBake.error.outputMissing")
@@ -1591,6 +1556,7 @@ struct MediaDetailSheet: View {
                             muted: isMuted,
                             targetScreens: selectedScreen.map { [$0] }
                         )
+                        onApplyFinished?()
                     } catch {
                         errorMessage = error.localizedDescription
                         showError = true
@@ -1613,6 +1579,7 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         muted: isMuted
                     )
+                    onApplyFinished?()
                 } catch {
                     errorMessage = error.localizedDescription
                     showError = true

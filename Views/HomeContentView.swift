@@ -48,11 +48,14 @@ struct HomeContentView: View {
     // 首页背景氛围控制器
     @StateObject private var atmosphereController = HomeAtmosphereController()
 
-    // 3:8 宽高比，按视口宽度自适应高度
+    // 更高更沉浸的轮播图，接近参考图比例
     private func heroHeight(for width: CGFloat) -> CGFloat {
-        guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 300 }
-        return max(300, width * 0.375)
+        guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 460 }
+        return max(460, width * 0.56)
     }
+
+    /// 横向内容区向上覆盖 hero 底部的高度（参考图中卡片覆盖很多）
+    private let heroContentOverlap: CGFloat = 205
 
 
 
@@ -72,14 +75,75 @@ struct HomeContentView: View {
             let heroH = heroHeight(for: containerProxy.size.width)
 
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
+                ZStack(alignment: .top) {
+                    // MARK: Hero（底层）
                     heroSection
-                        .zIndex(1)
                         .frame(height: heroH)
+                        .zIndex(0)
 
-                    contentSections
-                        .padding(.horizontal, contentHorizontalInset)
-                        .padding(.top, sectionTopSpacing)
+                    // MARK: 内容区（上浮覆盖 hero 底部）
+                    VStack(spacing: 0) {
+                        Color.clear
+                            .frame(height: heroH - heroContentOverlap)
+
+                        contentSections
+                            .padding(.horizontal, contentHorizontalInset)
+                            .padding(.top, sectionTopSpacing)
+                    }
+                    .zIndex(1)
+
+                    // MARK: 文案层（在可见区域中垂直居中）
+                    if let wallpaper = currentHeroWallpaper {
+                        HeroCaptionPanel(
+                            wallpaper: wallpaper,
+                            isFavorite: viewModel.isFavorite(wallpaper),
+                            onOpen: { selectedWallpaper = wallpaper },
+                            onFavorite: { viewModel.toggleFavorite(wallpaper) }
+                        )
+                        .frame(maxWidth: 520, alignment: .leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .padding(.leading, 112)
+                        .padding(.trailing, 96)
+                        .frame(height: heroH - heroContentOverlap)
+                        .zIndex(2)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                    }
+
+                    // MARK: 控制层（指示器 & 翻页按钮 —— 必须在内容区上方）
+                    VStack {
+                        Spacer()
+                        if heroWallpapers.count > 1 {
+                            HeroPaginationDots(
+                                count: heroWallpapers.count,
+                                currentIndex: currentCarouselIndex,
+                                onSelect: { index in
+                                    selectHero(at: index)
+                                }
+                            )
+                            .padding(.bottom, heroContentOverlap + 16)
+                        }
+                    }
+                    .frame(height: heroH)
+                    .zIndex(2)
+
+                    if heroWallpapers.count > 1 {
+                        HStack {
+                            HeroEdgeButton(direction: .previous) {
+                                showPreviousHero()
+                            }
+
+                            Spacer()
+
+                            HeroEdgeButton(direction: .next) {
+                                showNextHero()
+                            }
+                        }
+                        .padding(.horizontal, 26)
+                        .frame(height: heroH - heroContentOverlap)
+                        .zIndex(2)
+                    }
                 }
                 .padding(.bottom, 42)
                 .background(
@@ -158,65 +222,55 @@ struct HomeContentView: View {
                 } else {
                     heroCarousel(width: width, height: height, wallpapers: wallpapers)
 
-                    if let wallpaper = currentHeroWallpaper {
-                        HeroCaptionPanel(
-                            wallpaper: wallpaper,
-                            isFavorite: viewModel.isFavorite(wallpaper),
-                            onOpen: { selectedWallpaper = wallpaper },
-                            onFavorite: { viewModel.toggleFavorite(wallpaper) }
-                        )
-                        .frame(maxWidth: 520, alignment: .leading)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                        .padding(.leading, 112)
-                        .padding(.trailing, 96)
-                        .transaction { transaction in
-                            transaction.animation = nil
-                        }
-                    }
-
+                    // MARK: 底部过渡层 —— 多层叠加实现从 hero 到内容的自然融合
                     VStack {
                         Spacer()
-                        if wallpapers.count > 1 {
-                            HeroPaginationDots(
-                                count: wallpapers.count,
-                                currentIndex: currentCarouselIndex,
-                                onSelect: { index in
-                                    selectHero(at: index)
-                                }
+                        ZStack {
+                            // 第 1 层：从图片本身延伸的超长暗化渐变
+                            LinearGradient(
+                                colors: [
+                                    Color.clear,
+                                    Color.black.opacity(0.05),
+                                    Color.black.opacity(0.22),
+                                    Color.black.opacity(0.50),
+                                    Color.black.opacity(0.78),
+                                    Color.black.opacity(0.92)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
                             )
-                            .padding(.bottom, 24)
+
+                            // 第 2 层：轻微毛玻璃材质，让过渡更有"厚度"
+                            Rectangle()
+                                .fill(.ultraThinMaterial)
+                                .opacity(0.35)
+                                .mask(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.clear,
+                                            Color.white.opacity(0.3),
+                                            Color.white.opacity(0.9),
+                                            Color.white
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+
+                            // 第 3 层：底部压暗，确保卡片文字可读
+                            LinearGradient(
+                                colors: [
+                                    Color.clear,
+                                    Color.clear,
+                                    Color.black.opacity(0.30),
+                                    Color.black.opacity(0.65)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
                         }
-                    }
-
-                    if wallpapers.count > 1 {
-                        HStack {
-                            HeroEdgeButton(direction: .previous) {
-                                showPreviousHero()
-                            }
-
-                            Spacer()
-
-                            HeroEdgeButton(direction: .next) {
-                                showNextHero()
-                            }
-                        }
-                        .padding(.horizontal, 26)
-                    }
-                    
-                    // 底部渐变模糊层 - 让轮播图和背景自然融合
-                    VStack {
-                        Spacer()
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.black.opacity(0.15),
-                                Color.black.opacity(0.45)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 80)
-                        .blur(radius: 20)
+                        .frame(height: 220)
+                        .blur(radius: 18)
                     }
                 }
             }
