@@ -731,7 +731,7 @@
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.69;
+				MARKETING_VERSION = 38.0.70;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;
 				SDKROOT = macosx;
@@ -877,7 +877,7 @@
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.69;
+				MARKETING_VERSION = 38.0.70;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;
 				SDKROOT = macosx;
