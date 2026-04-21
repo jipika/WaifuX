@@ -1,6 +1,34 @@
 import SwiftUI
 import Kingfisher
 
+// MARK: - MediaItem 我的库列表封面
+
+extension MediaItem {
+    fileprivate static let libraryLocalRasterExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tiff", "tif"
+    ]
+
+    /// 「我的库」列表封面（仅静态 `KFImage`）：有本地文件时优先已缓存的截取帧，其次本地静图，再回退 `posterURL` / 站点 `coverImageURL`（下载与导入一致）。
+    @MainActor
+    func libraryGridThumbnailURL(localFileURL: URL?) -> URL {
+        if let local = localFileURL,
+           local.isFileURL,
+           FileManager.default.fileExists(atPath: local.path) {
+            if let extracted = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: local) {
+                return extracted
+            }
+            let ext = local.pathExtension.lowercased()
+            if Self.libraryLocalRasterExtensions.contains(ext) {
+                return local
+            }
+        }
+        if let poster = posterURL, poster.isFileURL, FileManager.default.fileExists(atPath: poster.path) {
+            return poster
+        }
+        return coverImageURL
+    }
+}
+
 // MARK: - Card Metrics
 
 public enum LibraryCardMetrics {
@@ -12,6 +40,8 @@ public enum LibraryCardMetrics {
 
 public struct MediaVideoCard: View {
     let item: MediaItem
+    /// 本地媒体文件路径（下载或导入）
+    var localMediaFileURL: URL? = nil
     var badgeText: String = ""
     var accent: Color = LiquidGlassColors.secondaryViolet
     let isEditing: Bool
@@ -23,41 +53,36 @@ public struct MediaVideoCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
-    @State private var isCardVisible = false
 
     private var thumbnailHeight: CGFloat {
         LibraryCardMetrics.thumbnailHeight
     }
 
+    private var listThumbnailURL: URL {
+        item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
+    }
+
+    private var targetImageSize: CGSize {
+        CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)
+    }
+
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 单独裁剪
+                // 图片区域 - 单独裁剪（仅静态，与壁纸库卡片一致；GIF 为降采样单帧）
                 ZStack {
-                    KFMediaCoverImage(
-                        url: item.coverImageURL,
-                        animated: item.shouldRenderThumbnailAsAnimatedImage,
-                        downsampleSize: CGSize(
-                            width: cardWidth * 2,
-                            height: thumbnailHeight * 2
-                        ),
-                        fadeDuration: 0.3,
-                        loadFinished: nil,
-                        layoutSize: CGSize(
-                            width: cardWidth,
-                            height: thumbnailHeight
-                        ),
-                        playAnimatedImage: true,
-                        isVisible: isCardVisible
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .frame(
-                        width: cardWidth,
-                        height: thumbnailHeight
-                    )
-                    .clipped()
-                    .onAppear { isCardVisible = true }
-                    .onDisappear { isCardVisible = false }
+                    KFImage(listThumbnailURL)
+                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                        .cacheMemoryOnly(false)
+                        .cancelOnDisappear(true)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(width: cardWidth, height: thumbnailHeight, cornerRadius: 0)
+                        }
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: cardWidth, height: thumbnailHeight)
+                        .clipped()
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {

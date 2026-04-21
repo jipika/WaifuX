@@ -153,20 +153,6 @@ class WorkshopSourceManager: ObservableObject {
         steamCredentials != nil
     }
     
-    // MARK: - Wallpaper Engine 激活码
-    
-    private let wallpaperEngineActivationCodeKey = "wallpaper_engine_activation_code"
-    
-    var wallpaperEngineActivationCode: String {
-        get {
-            UserDefaults.standard.string(forKey: wallpaperEngineActivationCodeKey) ?? ""
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: wallpaperEngineActivationCodeKey)
-            objectWillChange.send()
-        }
-    }
-    
     func setSteamCredentials(username: String, password: String, guardCode: String? = nil) {
         steamCredentials = SteamCredentials(username: username, password: password, guardCode: guardCode)
     }
@@ -189,7 +175,11 @@ class WorkshopSourceManager: ObservableObject {
     //
     // 开发侧：`Resources/steamcmd/` 已随仓库提交即可直接构建；更新二进制时运行 `scripts/sync-steamcmd-into-resources.sh`（默认拉官方包）。
 
-    /// 应用包内 `Resources/steamcmd/`（与 Valve 官方 macOS 解压目录一致，根目录须有 `steamcmd.sh`）。
+    /// 应用包内 `steamcmd/`（与 Valve 官方 macOS 解压目录一致，目录内须有 `steamcmd.sh`）。
+    ///
+    /// 注意：若 Xcode 将仓库根目录的 **`Resources` 文件夹整体**作为 folder reference 打进包内，
+    /// 实际路径为 `App.app/Contents/Resources/Resources/steamcmd/`，而不是 `.../Resources/steamcmd/`。
+    /// 这里同时兼容「扁平」与「多套一层 Resources」两种布局，避免误判为「内置组件缺失」。
     private static func bundledSteamCMDDirectoryURL() -> URL? {
         let fm = FileManager.default
         if let sh = Bundle.main.url(forResource: "steamcmd", withExtension: "sh", subdirectory: "steamcmd"),
@@ -200,8 +190,13 @@ class WorkshopSourceManager: ObservableObject {
            fm.fileExists(atPath: bin.path) {
             return bin.deletingLastPathComponent()
         }
-        if let resources = Bundle.main.resourceURL {
-            let dir = resources.appendingPathComponent("steamcmd", isDirectory: true)
+        guard let bundleResources = Bundle.main.resourceURL else { return nil }
+        let nestedBases = [
+            bundleResources,
+            bundleResources.appendingPathComponent("Resources", isDirectory: true)
+        ]
+        for base in nestedBases {
+            let dir = base.appendingPathComponent("steamcmd", isDirectory: true)
             var isDir: ObjCBool = false
             if fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
                fm.fileExists(atPath: dir.appendingPathComponent("steamcmd.sh").path) {

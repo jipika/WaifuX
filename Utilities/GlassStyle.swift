@@ -1016,3 +1016,61 @@ struct DetailGlassPopoverSectionTitle: View {
             .tracking(2)
     }
 }
+
+// MARK: - 详情页圆形工具栏图标（ZStack 几何居中，减轻 SF Symbol 视觉偏移）
+
+struct DetailSheetCircleIconLabel: View {
+    let systemName: String
+    var foreground: Color = .white
+    var fontSize: CGFloat = 18
+    var frameSide: CGFloat = 42
+
+    var body: some View {
+        ZStack {
+            Image(systemName: systemName)
+                .font(.system(size: fontSize, weight: .medium))
+                .foregroundStyle(foreground)
+        }
+        .frame(width: frameSide, height: frameSide)
+        .contentShape(Circle())
+    }
+}
+
+// MARK: - 系统分享面板锚定（`NSSharingServicePicker` 相对按钮定位）
+
+final class SharePickerAnchorNSView: NSView {
+    var onFrameReady: ((SharePickerAnchorNSView) -> Void)?
+
+    override func layout() {
+        super.layout()
+        notifyIfReady()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        notifyIfReady()
+    }
+
+    private func notifyIfReady() {
+        guard window != nil, bounds.width > 0.5, bounds.height > 0.5 else { return }
+        onFrameReady?(self)
+    }
+}
+
+struct SharePickerAnchorReader: NSViewRepresentable {
+    let onAttach: (NSView) -> Void
+
+    func makeNSView(context: Context) -> SharePickerAnchorNSView {
+        let v = SharePickerAnchorNSView()
+        v.onFrameReady = { anchor in
+            onAttach(anchor)
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: SharePickerAnchorNSView, context: Context) {
+        nsView.onFrameReady = { anchor in
+            onAttach(anchor)
+        }
+    }
+}

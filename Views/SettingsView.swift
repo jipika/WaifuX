@@ -1090,8 +1090,6 @@ private struct WorkshopSettingsTab: View {
     @State private var steamGuardCode = ""
     @State private var isVerifyingSteamLogin = false
     @State private var steamLoginStatusText: String?
-    @State private var activationCode = ""
-    @State private var activationCodeSaved = false
 
     var body: some View {
         ScrollView {
@@ -1112,9 +1110,6 @@ private struct WorkshopSettingsTab: View {
                 
                 // SteamCMD 登录
                 steamCMDLoginSection
-
-                // 壁纸引擎激活码
-                activationCodeSection
 
                 Spacer()
             }
@@ -1241,52 +1236,6 @@ private struct WorkshopSettingsTab: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
-        }
-    }
-
-    private var activationCodeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.cyan)
-                Text(t("workshop.activationCode"))
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    TextField(t("workshop.activationCodePlaceholder"), text: $activationCode)
-                        .textFieldStyle(.roundedBorder)
-                    Button(t("workshop.saveActivationCode")) {
-                        sourceManager.wallpaperEngineActivationCode = activationCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            activationCodeSaved = true
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                activationCodeSaved = false
-                            }
-                        }
-                    }
-                    .controlSize(.small)
-                    .disabled(activationCode.isEmpty)
-                }
-
-                if activationCodeSaved {
-                    Text(t("workshop.activationCodeSaved"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.green)
-                        .transition(.opacity)
-                }
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(8)
-        }
-        .onAppear {
-            activationCode = sourceManager.wallpaperEngineActivationCode
         }
     }
 

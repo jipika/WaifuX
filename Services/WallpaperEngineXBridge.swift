@@ -46,12 +46,18 @@ final class WallpaperEngineXBridge: ObservableObject {
         guard isWallpaperEngineXInstalled else {
             throw WallpaperEngineError.notInstalled
         }
-        lastWallpaperPath = path
-        isExternalPaused = false
 
-        // 只停本机视频层；切勿调用 VideoWallpaperManager.stopWallpaper()，否则其内会因 isControllingExternalEngine==true 而 stop CLI（见该文件注释）。
+        // 只停本机视频层；切勿调用 VideoWallpaperManager.stopWallpaper()（会恢复静态桌面，干扰后续 CLI set）。
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
 
+        // 每次应用 CLI 壁纸：先 stop 销毁上一轮 daemon/会话，再 set 重建，避免状态残留。
+        try? executeCLI(arguments: ["stop"])
+        isControllingExternalEngine = false
+        isExternalPaused = false
+        lastWallpaperPath = nil
+
+        lastWallpaperPath = path
+        isExternalPaused = false
         isControllingExternalEngine = true
 
         if let screens = targetScreens, !screens.isEmpty {
@@ -64,12 +70,16 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
-    func stopWallpaper() {
-        guard isControllingExternalEngine else { return }
+    /// 切换为**非 CLI**壁纸（静态 / 本机视频等）时必须调用：向 CLI 发 `stop` 并清空桥接状态；可重复调用。
+    func ensureStoppedForNonCLIWallpaper() {
+        try? executeCLI(arguments: ["stop"])
         isControllingExternalEngine = false
         isExternalPaused = false
         lastWallpaperPath = nil
-        try? executeCLI(arguments: ["stop"])
+    }
+
+    func stopWallpaper() {
+        ensureStoppedForNonCLIWallpaper()
     }
 
     func pauseWallpaper() {

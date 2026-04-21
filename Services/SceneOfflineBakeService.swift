@@ -162,9 +162,7 @@ enum SceneOfflineBakeService {
         }
 
         await MainActor.run {
-            if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-                WallpaperEngineXBridge.shared.stopWallpaper()
-            }
+            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
         }
 
         let task = Process()

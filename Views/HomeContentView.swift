@@ -68,63 +68,53 @@ struct HomeContentView: View {
     }
 
     var body: some View {
-        Group {
-            if isTabActive {
-                GeometryReader { containerProxy in
-                    let heroH = heroHeight(for: containerProxy.size.width)
+        GeometryReader { containerProxy in
+            let heroH = heroHeight(for: containerProxy.size.width)
 
-                    ScrollView(showsIndicators: false) {
-                        VStack(spacing: 0) {
-                            heroSection
-                                .zIndex(1)
-                                .frame(height: heroH)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    heroSection
+                        .zIndex(1)
+                        .frame(height: heroH)
 
-                            contentSections
-                                .padding(.horizontal, contentHorizontalInset)
-                                .padding(.top, sectionTopSpacing)
-                        }
-                        .padding(.bottom, 42)
-                        .background(
-                            GeometryReader { geometry in
-                                Color.clear
-                                    .preference(
-                                        key: ScrollOffsetPreferenceKey.self,
-                                        value: geometry.frame(in: .named("homeScrollView")).minY
-                                    )
-                            }
-                        )
-                    }
-                    .coordinateSpace(name: "homeScrollView")
-                    .scrollClipDisabled()
+                    contentSections
+                        .padding(.horizontal, contentHorizontalInset)
+                        .padding(.top, sectionTopSpacing)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.bottom, 42)
                 .background(
-                    homeBackground
-                        .ignoresSafeArea()
-                        .id(currentHeroID)
-                )
-                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                    handleScroll(offset: offset)
-                }
-                .onAppear {
-                    syncCarouselState(with: heroWallpapers)
-                    startCarouselAutoPlay()
-
-                    Task {
-                        try? await Task.sleep(nanoseconds: 500_000_000)
-                        await mediaViewModel.initialLoadIfNeeded()
-                        await mediaViewModel.refreshHomeItems()
+                    GeometryReader { geometry in
+                        Color.clear
+                            .preference(
+                                key: ScrollOffsetPreferenceKey.self,
+                                value: geometry.frame(in: .named("homeScrollView")).minY
+                            )
                     }
-                }
-                .onDisappear {
-                    stopCarouselAutoPlay()
-                    cancelCarouselLoopReset()
-                    cancelCarouselInteractionReset()
-                }
-            } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
+                )
+            }
+            .coordinateSpace(name: "homeScrollView")
+            .scrollClipDisabled()
+            .scrollDisabled(!isTabActive)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            homeBackground
+                .ignoresSafeArea()
+                .id(currentHeroID)
+        )
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
+            handleScroll(offset: offset)
+        }
+        .onAppear {
+            syncCarouselState(with: heroWallpapers)
+            if isTabActive {
+                startCarouselAutoPlay()
+            }
+
+            Task {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await mediaViewModel.initialLoadIfNeeded()
+                await mediaViewModel.refreshHomeItems()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
@@ -1041,12 +1031,13 @@ private struct HomeShelfSection: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
-                        ForEach(Array(wallpapers.enumerated()), id: \.element.id) { index, wallpaper in
+                        ForEach(wallpapers) { wallpaper in
                             HomeShelfCard(
                                 wallpaper: wallpaper,
                                 onTap: { onSelect(wallpaper) }
                             )
                             .onAppear {
+                                guard let index = wallpapers.firstIndex(where: { $0.id == wallpaper.id }) else { return }
                                 let urls = (index + 1..<(index + 4))
                                     .filter { $0 < wallpapers.count }
                                     .compactMap { wallpapers[$0].thumbURL }
@@ -1216,22 +1207,42 @@ private struct HeroEdgeButton: View {
     let direction: Direction
     let action: () -> Void
 
+    @State private var isHovered = false
+
     var body: some View {
         Button(action: action) {
             Image(systemName: direction.iconName)
                 .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(.white.opacity(isHovered ? 0.98 : 0.88))
                 .frame(width: 46, height: 46)
-                .background(
-                    Circle()
-                        .fill(Color.clear)
-                        .frame(width: 66, height: 66)
-                )
                 .contentShape(Circle())
+                .liquidGlassSurface(
+                    .max,
+                    tint: Color.white.opacity(isHovered ? 0.22 : 0.12),
+                    in: Circle()
+                )
+                .shadow(
+                    color: Color.black.opacity(isHovered ? 0.38 : 0.22),
+                    radius: isHovered ? 14 : 10,
+                    y: isHovered ? 8 : 5
+                )
         }
-        .buttonStyle(.plain)
-        .contentShape(Circle())
+        .buttonStyle(HeroEdgePressButtonStyle())
         .frame(width: 66, height: 66)
+        .contentShape(Circle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct HeroEdgePressButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -1319,12 +1330,13 @@ private struct HomeMediaSection: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
-                        ForEach(Array(mediaItems.enumerated()), id: \.element.id) { index, item in
+                        ForEach(mediaItems) { item in
                             HomeMediaCard(
                                 item: item,
                                 onTap: { onSelect(item) }
                             )
                             .onAppear {
+                                guard let index = mediaItems.firstIndex(where: { $0.id == item.id }) else { return }
                                 let urls = (index + 1..<(index + 4))
                                     .filter { $0 < mediaItems.count }
                                     .map { mediaItems[$0].coverImageURL }
@@ -1358,7 +1370,10 @@ private struct HomeMediaCard: View {
                     fadeDuration: 0.3,
                     loadFinished: nil,
                     layoutSize: cardSize,
-                    playAnimatedImage: true
+                    playAnimatedImage: true,
+                    isVisible: true,
+                    animateOnHoverOnly: true,
+                    isHovered: isHovered
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 

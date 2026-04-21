@@ -130,10 +130,8 @@ final class VideoWallpaperManager: ObservableObject {
             throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: "视频文件不存在。"])
         }
 
-        // 如果当前由外部 Wallpaper Engine X 接管，先停止外部引擎，避免两层壁纸重叠
-        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-            WallpaperEngineXBridge.shared.stopWallpaper()
-        }
+        // 本机视频不经过 CLI：切换前始终向 CLI 发 stop，避免叠层或桥接状态与进程不同步
+        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
         let isNewVideo = currentVideoURL != localFileURL
         let activeScreenIDs = Set(windows.keys)
@@ -286,10 +284,7 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     func stopWallpaper() {
-        // 如果当前由外部 Wallpaper Engine X 接管，同时停止外部引擎
-        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-            WallpaperEngineXBridge.shared.stopWallpaper()
-        }
+        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
         teardownAllWindows()
         currentVideoURL = nil
@@ -716,7 +711,7 @@ final class VideoWallpaperManager: ObservableObject {
         if videoTargetScreenIDs.isEmpty {
             return NSScreen.screens
         }
-        var matched = NSScreen.screens.filter { videoTargetScreenIDs.contains($0.wallpaperScreenIdentifier) }
+        let matched = NSScreen.screens.filter { videoTargetScreenIDs.contains($0.wallpaperScreenIdentifier) }
         if matched.isEmpty {
             // 睡眠唤醒后偶发 NSScreenNumber 变化，单屏目标退回到主屏；多屏则退回全部以免无窗口
             if videoTargetScreenIDs.count == 1, let main = NSScreen.main {

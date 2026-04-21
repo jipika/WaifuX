@@ -167,11 +167,7 @@ public struct ExploreSearchBar: View {
         .padding(.horizontal, 16)
         .frame(maxWidth: 460)
         .frame(height: 46)
-        .liquidGlassSurface(
-            .prominent,
-            tint: tint.opacity(0.1),
-            in: Capsule(style: .continuous)
-        )
+        .exploreFrostedCapsule(tint: tint, material: .thinMaterial, tintLayerOpacity: 0.04)
     }
 }
 
@@ -195,11 +191,7 @@ public struct ResetFiltersButton: View {
                 .foregroundStyle(.white.opacity(0.92))
                 .frame(width: 46, height: 46)
                 .contentShape(Circle())
-                .liquidGlassSurface(
-                    .prominent,
-                    tint: tint.opacity(0.12),
-                    in: Circle()
-                )
+                .exploreFrostedCircle(tint: tint)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.05 : 1.0)
@@ -238,11 +230,7 @@ public struct SortMenu<SortOption: SortOptionProtocol>: View {
             .foregroundStyle(.white.opacity(0.92))
             .padding(.horizontal, 16)
             .frame(height: 38)
-            .liquidGlassSurface(
-                .regular,
-                tint: tint.opacity(0.1),
-                in: Capsule(style: .continuous)
-            )
+            .exploreFrostedCapsule(tint: tint)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -300,4 +288,58 @@ public struct FilterChip: View {
 public protocol SortOptionProtocol: Identifiable, Hashable {
     var title: String { get }
     var menuTitle: String { get }
+}
+
+// MARK: - 探索页统一毛玻璃（系统 Material，不使用 Liquid Glass）
+
+public extension View {
+    /// 胶囊控件：源标签、排序菜单、比例菜单等
+    func exploreFrostedCapsule(
+        tint: Color,
+        material: Material = .thinMaterial,
+        tintLayerOpacity: Double = 0.04
+    ) -> some View {
+        background {
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(material)
+                Capsule(style: .continuous)
+                    .fill(tint.opacity(tintLayerOpacity))
+            }
+        }
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+        )
+    }
+
+    /// 圆形按钮：重置筛选等
+    func exploreFrostedCircle(tint: Color) -> some View {
+        background {
+            ZStack {
+                Circle()
+                    .fill(.thinMaterial)
+                Circle()
+                    .fill(tint.opacity(0.05))
+            }
+        }
+        .overlay(
+            Circle()
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+        )
+    }
+
+    /// 空状态等圆角面板
+    func exploreFrostedPanel(cornerRadius: CGFloat, tint: Color, material: Material = .thinMaterial) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return background {
+            ZStack {
+                shape.fill(material)
+                shape.fill(tint.opacity(0.05))
+            }
+        }
+        .overlay(
+            shape.stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+        )
+    }
 }

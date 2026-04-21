@@ -15,7 +15,6 @@ struct MediaExploreContentView: View {
     @State private var selectedHotTag: MediaHotTag?
     @State private var selectedSort: MediaSortOption = .newest
     @State private var searchText = ""
-    @State private var displayedItems: [MediaItem] = []
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var scrollOffset: CGFloat = 0
@@ -25,9 +24,14 @@ struct MediaExploreContentView: View {
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var gridImagePrefetcher: ImagePrefetcher?
+    @State private var lastPrefetchCenterIndex: Int = -1
+    @State private var lastSyncedFirstItemID: String?
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
+
+    /// 缓存筛选/排序后的列表，避免每次 body（含滚动、`isLoading` 等）都对 `items` 全表 filter/sort，减轻 AttributeGraph 压力。
+    @State private var visibleMediaItems: [MediaItem] = []
 
     // Workshop 筛选
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
@@ -39,20 +43,18 @@ struct MediaExploreContentView: View {
     }
 
     var body: some View {
-        Group {
-            if isVisible {
-                GeometryReader { geometry in
-                    let gridContentWidth = max(0, geometry.size.width - 56)
+        GeometryReader { geometry in
+            let gridContentWidth = max(0, geometry.size.width - 56)
 
-                    ZStack {
-                        ExploreDynamicAtmosphereBackground(
-                            tint: exploreAtmosphere.tint,
-                            referenceImage: exploreAtmosphere.referenceImage,
-                            lightweightBackdrop: false
-                        )
-                        .ignoresSafeArea()
+            ZStack {
+                ExploreDynamicAtmosphereBackground(
+                    tint: exploreAtmosphere.tint,
+                    referenceImage: exploreAtmosphere.referenceImage,
+                    lightweightBackdrop: true
+                )
+                .ignoresSafeArea()
 
-                        ScrollView(.vertical, showsIndicators: false) {
+                ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         heroSection
                         categorySection
@@ -73,6 +75,7 @@ struct MediaExploreContentView: View {
                 }
                 .coordinateSpace(name: "exploreScroll")
                 .iosSmoothScroll()
+                .scrollDisabled(!isVisible)
                 .modifier(ScrollLoadMoreModifier(
                     scrollOffset: $scrollOffset,
                     contentSize: $contentSize,
@@ -84,7 +87,6 @@ struct MediaExploreContentView: View {
                 ))
                 .disabled(isInitialLoading)
 
-                // 底部弹出加载卡片（解决列表高度抖动问题）
                 VStack {
                     Spacer()
                     if loadMoreFailed {
@@ -93,36 +95,41 @@ struct MediaExploreContentView: View {
                             Task { await viewModel.loadMore() }
                         }
                         .padding(.bottom, 60)
-                    } else if isLoadingMore || (viewModel.isLoading && !displayedItems.isEmpty) {
+                    } else if isLoadingMore || (viewModel.isLoading && !visibleMediaItems.isEmpty) {
                         BottomLoadingCard(isLoading: true)
                             .padding(.bottom, 60)
-                    } else if !isLoadingMore && !viewModel.hasMorePages && !displayedItems.isEmpty {
+                    } else if !isLoadingMore && !viewModel.hasMorePages && !visibleMediaItems.isEmpty {
                         BottomNoMoreCard()
                             .padding(.bottom, 60)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    }
-                }
-                .onAppear {
-                    if isFirstAppearance {
-                        resetAllFilters(reloadData: true)
-                        isFirstAppearance = false
-                    } else {
-                        Task { await handleInitialLoad() }
-                    }
-                }
-                .onDisappear { cancelTasks() }
+            }
+        }
+        .onAppear {
+            if isFirstAppearance {
+                resetAllFilters(reloadData: true)
+                isFirstAppearance = false
             } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
+                Task { await handleInitialLoad() }
+            }
+        }
+        .onChange(of: isVisible) { _, visible in
+            if !visible {
+                cancelTasks()
+                gridImagePrefetcher?.stop()
             }
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
         .onChange(of: selectedSort) { _, _ in handleFilterChange() }
         .onChange(of: searchText) { _, _ in handleFilterChange() }
-        .onChange(of: viewModel.items) { oldVal, newVal in handleItemsChange(old: oldVal, new: newVal) }
+        .onChange(of: viewModel.items) { _, _ in
+            recomputeVisibleMediaItems()
+            syncAtmosphereIfNeeded()
+        }
+        .onChange(of: viewModel.libraryContentRevision) { _, _ in
+            recomputeVisibleMediaItems()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
             handleSourceChange()
         }
@@ -154,10 +161,10 @@ struct MediaExploreContentView: View {
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.horizontal, 8)
                     .frame(height: 20)
-                    .liquidGlassSurface(
-                        .regular,
-                        tint: exploreAtmosphere.tint.primary.opacity(0.12),
-                        in: Capsule(style: .continuous)
+                    .exploreFrostedCapsule(
+                        tint: exploreAtmosphere.tint.primary,
+                        material: .ultraThinMaterial,
+                        tintLayerOpacity: 0.06
                     )
 
                 // 切换源按钮
@@ -168,10 +175,10 @@ struct MediaExploreContentView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.72))
                         .frame(width: 24, height: 20)
-                        .liquidGlassSurface(
-                            .regular,
-                            tint: exploreAtmosphere.tint.primary.opacity(0.12),
-                            in: Capsule(style: .continuous)
+                        .exploreFrostedCapsule(
+                            tint: exploreAtmosphere.tint.primary,
+                            material: .ultraThinMaterial,
+                            tintLayerOpacity: 0.06
                         )
                 }
                 .buttonStyle(.plain)
@@ -227,7 +234,6 @@ struct MediaExploreContentView: View {
     }
 
     private func applyWorkshopFilters() async {
-        displayedItems = []
         viewModel.clearItems()
 
         let tags = selectedWorkshopTag.map { [$0.name] } ?? []
@@ -435,10 +441,10 @@ struct MediaExploreContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             contentHeader
             
-            if viewModel.isLoading && displayedItems.isEmpty {
+            if viewModel.isLoading && visibleMediaItems.isEmpty {
                 MediaGridSkeleton(contentWidth: gridContentWidth)
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
-            } else if displayedItems.isEmpty {
+            } else if visibleMediaItems.isEmpty {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             } else {
@@ -449,7 +455,7 @@ struct MediaExploreContentView: View {
     
     private var contentHeader: some View {
         HStack(alignment: .center) {
-            Text("\(formattedCount(displayedItems.count)) \(t("media.count")) · \(t("media.loaded")) \(formattedCount(viewModel.items.count))")
+            Text("\(formattedCount(visibleMediaItems.count)) \(t("media.count")) · \(t("media.loaded")) \(formattedCount(viewModel.items.count))")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.64))
 
@@ -465,7 +471,7 @@ struct MediaExploreContentView: View {
         let config = GridConfig(contentWidth: contentWidth, columns: contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2), baseRatio: 0.6)
         
         return LazyVGrid(columns: config.columns, alignment: .leading, spacing: config.spacing) {
-            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, item in
+            ForEach(visibleMediaItems) { item in
                 SimpleMediaCard(
                     item: item,
                     cardWidth: config.cardWidth,
@@ -473,9 +479,8 @@ struct MediaExploreContentView: View {
                     onTap: { selectedMedia = item }
                 )
                 .onAppear {
-                    // 移除动画触发，直接显示
                     visibleCardIDs.insert(item.id)
-                    preloadNearbyImages(for: index, config: config)
+                    preloadNearbyImages(around: item, config: config)
                 }
                 // 移除入场动画和滚动效果，解决卡顿和空白问题
                 // .cardEntrance(...)
@@ -486,22 +491,26 @@ struct MediaExploreContentView: View {
         // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 40))
     }
     
-    /// 智能预加载附近图片（前后各 8 张）
-    private func preloadNearbyImages(for index: Int, config: GridConfig) {
-        // 使用固定比例计算高度 (16:10)
+    /// 智能预加载附近图片（前后各 8 张）；中心索引节流减少 Prefetcher 抖动
+    private func preloadNearbyImages(around item: MediaItem, config: GridConfig) {
+        let items = visibleMediaItems
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        if lastPrefetchCenterIndex >= 0, abs(index - lastPrefetchCenterIndex) < 4 { return }
+        lastPrefetchCenterIndex = index
+
         let imageHeight = config.cardWidth * 0.625
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
-        let count = displayedItems.count
+        let count = items.count
         guard count > 0 else { return }
         let clamped = min(max(0, index), count - 1)
         let lower = max(0, clamped - 8)
         let upper = min(count, clamped + 9)
         guard lower < upper else { return }
         let range = lower..<upper
+        // 列表封面统一为 KFImage + 降采样静态帧，GIF 可与静图一同预取
         let urls = range
             .filter { $0 != clamped }
-            .map { displayedItems[$0] }
-            .filter { !$0.shouldRenderThumbnailAsAnimatedImage }
+            .map { items[$0] }
             .map(\.coverImageURL)
 
         gridImagePrefetcher?.stop()
@@ -533,11 +542,7 @@ struct MediaExploreContentView: View {
             }
         }
         .frame(height: 220)
-        .liquidGlassSurface(
-            .prominent,
-            tint: exploreAtmosphere.tint.primary.opacity(0.12),
-            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-        )
+        .exploreFrostedPanel(cornerRadius: 28, tint: exploreAtmosphere.tint.primary)
     }
     
     private var scrollTrackingOverlay: some View {
@@ -570,8 +575,9 @@ struct MediaExploreContentView: View {
         if searchText.isEmpty {
             searchText = viewModel.currentQuery
         }
-        rebuildVisibleItems()
-        syncAtmosphere()
+        lastPrefetchCenterIndex = -1
+        recomputeVisibleMediaItems()
+        syncAtmosphereIfNeeded()
         isInitialLoading = false
     }
 
@@ -585,7 +591,8 @@ struct MediaExploreContentView: View {
             searchText = ""
         }
 
-        displayedItems = []
+        lastPrefetchCenterIndex = -1
+        lastSyncedFirstItemID = nil
         visibleCardIDs.removeAll()
         // 清空 ViewModel 数据避免显示旧数据
         viewModel.clearItems()
@@ -611,7 +618,7 @@ struct MediaExploreContentView: View {
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
         selectedWorkshopContentLevel = .everyone
-        displayedItems = []
+        lastPrefetchCenterIndex = -1
         searchTask?.cancel()
         searchTask = Task {
             if workshopSourceManager.activeSource == .wallpaperEngine {
@@ -628,16 +635,16 @@ struct MediaExploreContentView: View {
 
     private func handleFilterChange() {
         visibleCardIDs.removeAll()
+        recomputeVisibleMediaItems()
 
         // Workshop 模式下不支持标签过滤
         if workshopSourceManager.activeSource == .wallpaperEngine {
-            rebuildVisibleItems()
+            syncAtmosphereIfNeeded()
             return
         }
 
         if let hotTag = selectedHotTag, hotTag.isServerSide,
            let slug = hotTag.serverSlug {
-            displayedItems = []
             Task { await viewModel.loadTagFeed(slug: slug, title: hotTag.title) }
             return
         }
@@ -645,27 +652,17 @@ struct MediaExploreContentView: View {
         if selectedHotTag != nil && viewModel.items.isEmpty {
             Task {
                 await viewModel.loadHomeFeed()
-                rebuildVisibleItems()
+                syncAtmosphereIfNeeded()
             }
             return
         }
 
-        rebuildVisibleItems()
+        syncAtmosphereIfNeeded()
     }
 
     private func handleSourceChange() {
         // 数据源切换时重置并重新加载
         resetAllFilters(reloadData: true)
-    }
-
-    private func handleItemsChange(old: [MediaItem], new: [MediaItem]) {
-        if new.isEmpty || displayedItems.isEmpty {
-            rebuildVisibleItems()
-        } else if !old.isEmpty, new.count > old.count {
-            appendNewItems()
-        } else {
-            rebuildVisibleItems()
-        }
     }
 
     private func triggerLoadMore() {
@@ -684,8 +681,6 @@ struct MediaExploreContentView: View {
                 await viewModel.loadMore()
             }
             await MainActor.run {
-                appendNewItems()
-                // 检查是否加载失败
                 if viewModel.hasMorePages && viewModel.errorMessage != nil {
                     loadMoreFailed = true
                 }
@@ -722,8 +717,6 @@ struct MediaExploreContentView: View {
                 await viewModel.loadMore()
             }
             await MainActor.run {
-                appendNewItems()
-                // 检查是否加载失败
                 if viewModel.hasMorePages && viewModel.errorMessage != nil {
                     loadMoreFailed = true
                 }
@@ -732,35 +725,6 @@ struct MediaExploreContentView: View {
                 }
             }
         }
-    }
-
-    @State private var lastSyncedFirstItemID: String? = nil
-
-    private func rebuildVisibleItems() {
-        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
-
-        let filtered = viewModel.items.filter { item in
-            let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
-            let matchesHotTag = selectedHotTag?.matches(item) ?? true
-            return matchesSearch && matchesHotTag
-        }
-
-        displayedItems = selectedSort.sort(items: filtered, sourceOrder: sourceOrder)
-
-        // 只有首图真正变化时才更新氛围色，避免重复加载和重绘
-        let newFirstID = displayedItems.first?.id
-        if newFirstID != lastSyncedFirstItemID {
-            lastSyncedFirstItemID = newFirstID
-            syncAtmosphere()
-        }
-    }
-
-    private func appendNewItems() {
-        let existingIDs = Set(displayedItems.map(\.id))
-        let newItems = viewModel.items.filter { !existingIDs.contains($0.id) }
-        guard !newItems.isEmpty else { return }
-        displayedItems.append(contentsOf: newItems)
     }
 
     private func resetAllFilters(reloadData: Bool = false) {
@@ -772,10 +736,12 @@ struct MediaExploreContentView: View {
         selectedCategory = .all
         selectedSort = .newest
         viewModel.clearItems()
-        displayedItems = []
+        lastPrefetchCenterIndex = -1
+        lastSyncedFirstItemID = nil
         visibleCardIDs.removeAll()
         loadMoreFailed = false
         viewModel.errorMessage = nil
+        recomputeVisibleMediaItems()
 
         if reloadData {
             searchTask?.cancel()
@@ -797,8 +763,23 @@ struct MediaExploreContentView: View {
         loadMoreTask = nil
     }
 
-    private func syncAtmosphere() {
-        exploreAtmosphere.updateFirstMedia(displayedItems.first)
+    private func syncAtmosphereIfNeeded() {
+        let items = visibleMediaItems
+        let newFirstID = items.first?.id
+        guard newFirstID != lastSyncedFirstItemID else { return }
+        lastSyncedFirstItemID = newFirstID
+        exploreAtmosphere.updateFirstMedia(items.first)
+    }
+
+    private func recomputeVisibleMediaItems() {
+        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
+        let filtered = viewModel.items.filter { item in
+            let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
+            let matchesHotTag = selectedHotTag?.matches(item) ?? true
+            return matchesSearch && matchesHotTag
+        }
+        visibleMediaItems = selectedSort.sort(items: filtered, sourceOrder: sourceOrder)
     }
     
     private func animateCardAppearance(id: String, index: Int) {
@@ -1039,7 +1020,6 @@ private struct SimpleMediaCard: View {
     let onTap: () -> Void
 
     @State private var isHovered = false
-    @State private var isCardVisible = false
 
     private static let thumbShape = UnevenRoundedRectangle(
         topLeadingRadius: 14,
@@ -1077,23 +1057,17 @@ private struct SimpleMediaCard: View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
-                    KFMediaCoverImage(
-                        url: item.coverImageURL,
-                        animated: item.shouldRenderThumbnailAsAnimatedImage,
-                        downsampleSize: targetImageSize,
-                        fadeDuration: 0.25,
-                        loadFinished: nil,
-                        layoutSize: CGSize(width: cardWidth, height: imageHeight),
-                        playAnimatedImage: true,
-                        isVisible: isCardVisible
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // 与壁纸探索一致：仅静态缩略图（GIF 经降采样为单帧，不播放动画）
+                    KFImage(item.coverImageURL)
+                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                        .cacheMemoryOnly(false)
+                        .cancelOnDisappear(true)
+                        .placeholder { _ in placeholderGradient }
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
                 }
-                // 使用固定比例而非固定高度
                 .frame(width: cardWidth, height: imageHeight)
                 .clipShape(Self.thumbShape)
-                .onAppear { isCardVisible = true }
-                .onDisappear { isCardVisible = false }
                 .overlay(alignment: .topLeading) {
                     simplifiedMetadataRow
                         .padding(10)
@@ -1173,14 +1147,14 @@ private struct SimpleMediaCard: View {
             .clipShape(Capsule())
     }
 
-    private var fallbackArtwork: some View {
+    private var placeholderGradient: some View {
         LinearGradient(
             colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
         .overlay {
-            Image(systemName: "play.rectangle.fill")
+            Image(systemName: "photo.fill")
                 .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(.white.opacity(0.18))
         }

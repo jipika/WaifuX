@@ -28,7 +28,9 @@ struct WallpaperDetailSheet: View {
     @State private var currentWallpaperIndex: Int = 0
     @State private var isLoadingMore = false
     @State private var preloadTask: Task<Void, Never>?
-    
+    /// 分享面板相对定位用（与分享按钮同几何的锚定 `NSView`）
+    @State private var sharePickerAnchorView: NSView?
+
     // MARK: - 本地文件检测
     private var isLocalFile: Bool {
         wallpaper.id.hasPrefix("local_")
@@ -346,13 +348,14 @@ struct WallpaperDetailSheet: View {
             }
             onClose()
         } label: {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle((isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95))
-                .frame(width: 38, height: 38)
-                .contentShape(Circle())
-                .detailGlassCircleChrome()
-                .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
+            DetailSheetCircleIconLabel(
+                systemName: "chevron.left",
+                foreground: (isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95),
+                fontSize: 15,
+                frameSide: 38
+            )
+            .detailGlassCircleChrome()
+            .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -367,12 +370,13 @@ struct WallpaperDetailSheet: View {
                         showInfoBubble.toggle()
                     }
                 } label: {
-                    Image(systemName: showInfoBubble ? "info.circle.fill" : "info.circle")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .frame(width: 40, height: 40)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: showInfoBubble ? "info.circle.fill" : "info.circle",
+                        foreground: .white.opacity(0.95),
+                        fontSize: 16,
+                        frameSide: 40
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
 
@@ -381,12 +385,13 @@ struct WallpaperDetailSheet: View {
                         isHeroContentHidden.toggle()
                     }
                 } label: {
-                    Image(systemName: isHeroContentHidden ? "eye.slash" : "eye")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .frame(width: 40, height: 40)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: isHeroContentHidden ? "eye.slash" : "eye",
+                        foreground: .white.opacity(0.95),
+                        fontSize: 16,
+                        frameSide: 40
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
             }
@@ -479,12 +484,11 @@ struct WallpaperDetailSheet: View {
                 Button {
                     viewModel.toggleFavorite(wallpaper)
                 } label: {
-                    Image(systemName: viewModel.isFavorite(wallpaper) ? "heart.fill" : "heart")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(viewModel.isFavorite(wallpaper) ? Color(hex: "FF5A7D") : .white)
-                        .frame(width: 42, height: 42)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: viewModel.isFavorite(wallpaper) ? "heart.fill" : "heart",
+                        foreground: viewModel.isFavorite(wallpaper) ? Color(hex: "FF5A7D") : .white
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
             }
@@ -515,22 +519,32 @@ struct WallpaperDetailSheet: View {
             .buttonStyle(.plain)
             .disabled(isSettingWallpaper)
 
-            // 下载按钮 + 右侧横线
+            // 下载按钮 + 已下载时分享 + 右侧横线
             HStack(spacing: 16) {
                 Button {
                     if !isAlreadyDownloaded {
                         downloadWallpaper()
                     }
                 } label: {
-                    Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .contentShape(Circle())
+                    DetailSheetCircleIconLabel(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
                 .disabled(isDownloading || isAlreadyDownloaded)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        viewModel.shareDownloadedWallpaperIfAvailable(wallpaper, anchorView: sharePickerAnchorView)
+                    } label: {
+                        DetailSheetCircleIconLabel(systemName: "square.and.arrow.up")
+                            .detailGlassCircleChrome()
+                    }
+                    .buttonStyle(.plain)
+                    .help(t("shareLocalFile"))
+                    .background {
+                        SharePickerAnchorReader { sharePickerAnchorView = $0 }
+                    }
+                }
 
                 dividerLine
                     .frame(width: 80)

@@ -71,6 +71,16 @@ final class MediaLibraryService: ObservableObject {
         return fileExists
     }
 
+    /// 已下载媒体在磁盘上的文件 URL（存在且可读时）
+    func localFileURLIfAvailable(for item: MediaItem) -> URL? {
+        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: record.localFilePath)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
     func recordDownload(item: MediaItem, localFileURL: URL) {
         if let index = downloadRecords.firstIndex(where: { $0.item.id == item.id }) {
             downloadRecords[index].item = item
@@ -378,6 +388,22 @@ final class WallpaperLibraryService: ObservableObject {
             print("[WallpaperLibraryService] File not found for downloaded wallpaper: \(wallpaper.id) at \(record.localFilePath)")
         }
         return fileExists
+    }
+
+    /// 已下载或本地导入壁纸的可分享文件 URL（文件需在磁盘上存在）
+    func localFileURLIfAvailable(for wallpaper: Wallpaper) -> URL? {
+        if wallpaper.id.hasPrefix("local_"),
+           let u = wallpaper.fullImageURL,
+           u.isFileURL,
+           FileManager.default.fileExists(atPath: u.path) {
+            return u
+        }
+        guard let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: record.localFilePath)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
     }
 
     func recordDownload(_ wallpaper: Wallpaper, fileURL: URL) {

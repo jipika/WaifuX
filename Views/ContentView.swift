@@ -17,7 +17,9 @@ struct ContentView: View {
     @State private var librarySelectedAnime: AnimeSearchResult?
     @State private var librarySelectedWallpaper: Wallpaper?
     @State private var librarySelectedMedia: MediaItem?
-    
+    /// 类似 Vue `keep-alive`：除「我的库」外，Tab 至少访问过一次后保留子树；非当前页仅隐藏并暂停滚动/GIF
+    @State private var mountedTabs: Set<MainTab> = [.home]
+
     // 更新弹窗状态
     @State private var showUpdateSheet = false
     @State private var updateRelease: GitHubRelease?
@@ -33,52 +35,76 @@ struct ContentView: View {
                 .ignoresSafeArea()
                 .zIndex(0)
 
-            // Tab：各页在非选中时仅保留 Color.clear 占位，重 UI（ScrollView/网格）不挂载，避免五页同跑
+            // Tab：keep-alive（不含我的库）；非当前页 opacity 0 + 不响应点击；`coverGIFPlaybackHostActive` 停后台 GIF
             ZStack {
-                HomeContentView(
-                    viewModel: viewModel,
-                    mediaViewModel: mediaViewModel,
-                    selectedWallpaper: $selectedWallpaper,
-                    selectedMedia: $selectedMedia,
-                    isTabActive: selectedTab == .home
-                )
-                .zIndex(selectedTab == .home ? 1 : 0)
-                .allowsHitTesting(selectedTab == .home)
+                if mountedTabs.contains(.home) {
+                    HomeContentView(
+                        viewModel: viewModel,
+                        mediaViewModel: mediaViewModel,
+                        selectedWallpaper: $selectedWallpaper,
+                        selectedMedia: $selectedMedia,
+                        isTabActive: selectedTab == .home
+                    )
+                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .home)
+                    .opacity(selectedTab == .home ? 1 : 0)
+                    .zIndex(selectedTab == .home ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .home)
+                }
 
-                WallpaperExploreContentView(
-                    viewModel: viewModel,
-                    selectedWallpaper: $selectedWallpaper,
-                    isVisible: selectedTab == .wallpaperExplore
-                )
-                .zIndex(selectedTab == .wallpaperExplore ? 1 : 0)
-                .allowsHitTesting(selectedTab == .wallpaperExplore)
+                if mountedTabs.contains(.wallpaperExplore) {
+                    WallpaperExploreContentView(
+                        viewModel: viewModel,
+                        selectedWallpaper: $selectedWallpaper,
+                        isVisible: selectedTab == .wallpaperExplore
+                    )
+                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .wallpaperExplore)
+                    .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
+                    .zIndex(selectedTab == .wallpaperExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .wallpaperExplore)
+                }
 
-                AnimeExploreView(
-                    viewModel: animeViewModel,
-                    selectedAnime: $selectedAnime,
-                    isVisible: selectedTab == .animeExplore
-                )
-                .zIndex(selectedTab == .animeExplore ? 1 : 0)
-                .allowsHitTesting(selectedTab == .animeExplore)
+                if mountedTabs.contains(.animeExplore) {
+                    AnimeExploreView(
+                        viewModel: animeViewModel,
+                        selectedAnime: $selectedAnime,
+                        isVisible: selectedTab == .animeExplore
+                    )
+                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .animeExplore)
+                    .opacity(selectedTab == .animeExplore ? 1 : 0)
+                    .zIndex(selectedTab == .animeExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .animeExplore)
+                }
 
-                MediaExploreContentView(
-                    viewModel: mediaViewModel,
-                    selectedMedia: $selectedMedia,
-                    isVisible: selectedTab == .mediaExplore
-                )
-                .zIndex(selectedTab == .mediaExplore ? 1 : 0)
-                .allowsHitTesting(selectedTab == .mediaExplore)
+                if mountedTabs.contains(.mediaExplore) {
+                    MediaExploreContentView(
+                        viewModel: mediaViewModel,
+                        selectedMedia: $selectedMedia,
+                        isVisible: selectedTab == .mediaExplore
+                    )
+                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .mediaExplore)
+                    .opacity(selectedTab == .mediaExplore ? 1 : 0)
+                    .zIndex(selectedTab == .mediaExplore ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .mediaExplore)
+                }
 
-                MyLibraryContentView(
-                    selectedWallpaper: $librarySelectedWallpaper,
-                    selectedMedia: $librarySelectedMedia,
-                    selectedAnime: $librarySelectedAnime,
-                    isTabActive: selectedTab == .myMedia
-                )
-                .zIndex(selectedTab == .myMedia ? 1 : 0)
-                .allowsHitTesting(selectedTab == .myMedia)
+                // 我的库：不 keep-alive，仅选中时挂载；离开即销毁，`.task` 每次进入全量重载
+                if selectedTab == .myMedia {
+                    MyLibraryContentView(
+                        selectedWallpaper: $librarySelectedWallpaper,
+                        selectedMedia: $librarySelectedMedia,
+                        selectedAnime: $librarySelectedAnime
+                    )
+                    .environment(\.coverGIFPlaybackHostActive, true)
+                    .zIndex(1)
+                    .allowsHitTesting(true)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: selectedTab) { _, tab in
+                if tab != .myMedia {
+                    mountedTabs.insert(tab)
+                }
+            }
             .id(localization.currentLanguage)
 
             VStack {
@@ -392,7 +418,6 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .id(viewModel.libraryContentRevision)
                 }
             }
         }
@@ -423,6 +448,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.favoriteItems) { item in
                             MyMediaVideoCard(
                                 item: item,
+                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                 badgeText: t("badge.favorite"),
                                 accent: LiquidGlassColors.accentCyan,
                                 isEditing: isEditing && editingSection == .mediaFavorites,
@@ -433,7 +459,6 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
@@ -491,7 +516,6 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .id(viewModel.libraryContentRevision)
                 }
             }
         }
@@ -526,6 +550,7 @@ struct MyMediaContentView: View {
                             if let item = task.mediaItem {
                                 MyMediaVideoCard(
                                     item: item,
+                                    localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                     badgeText: task.badgeText,
                                     accent: LiquidGlassColors.tertiaryBlue,
                                     isEditing: isEditing && editingSection == .mediaDownloads,
@@ -542,6 +567,7 @@ struct MyMediaContentView: View {
                         ForEach(completedMediaDownloads) { record in
                             MyMediaVideoCard(
                                 item: record.item,
+                                localMediaFileURL: record.localFileURL,
                                 badgeText: record.item.resolutionLabel,
                                 accent: LiquidGlassColors.tertiaryBlue,
                                 isEditing: isEditing && editingSection == .mediaDownloads,
@@ -552,7 +578,6 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
@@ -583,6 +608,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.recentItems) { item in
                             MyMediaVideoCard(
                                 item: item,
+                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                 badgeText: t("badge.recent"),
                                 accent: LiquidGlassColors.warningOrange,
                                 isEditing: isEditing && editingSection == .history,
@@ -593,7 +619,6 @@ struct MyMediaContentView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .id(mediaViewModel.libraryContentRevision)
                 }
             }
         }
@@ -1371,6 +1396,7 @@ struct MyMediaContentView: View {
 
 private struct MyMediaVideoCard: View {
     let item: MediaItem
+    var localMediaFileURL: URL? = nil
     let badgeText: String
     let accent: Color
     let isEditing: Bool
@@ -1381,37 +1407,39 @@ private struct MyMediaVideoCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
-    @State private var isCardVisible = false
+
+    private var listThumbnailURL: URL {
+        item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
+    }
+
+    private var listThumbnailTargetSize: CGSize {
+        CGSize(
+            width: LibraryCardMetrics.cardWidth * 2,
+            height: LibraryCardMetrics.thumbnailHeight * 2
+        )
+    }
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 单独裁剪
+                // 图片区域 - 单独裁剪（仅静态；优先本地截取帧）
                 ZStack {
-                    KFMediaCoverImage(
-                        url: item.coverImageURL,
-                        animated: item.shouldRenderThumbnailAsAnimatedImage,
-                        downsampleSize: CGSize(
-                            width: LibraryCardMetrics.cardWidth * 2,
-                            height: LibraryCardMetrics.thumbnailHeight * 2
-                        ),
-                        fadeDuration: 0.3,
-                        loadFinished: nil,
-                        layoutSize: CGSize(
-                            width: LibraryCardMetrics.cardWidth,
-                            height: LibraryCardMetrics.thumbnailHeight
-                        ),
-                        playAnimatedImage: true,
-                        isVisible: isCardVisible
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .frame(
-                        width: LibraryCardMetrics.cardWidth,
-                        height: LibraryCardMetrics.thumbnailHeight
-                    )
-                    .clipped()
-                    .onAppear { isCardVisible = true }
-                    .onDisappear { isCardVisible = false }
+                    KFImage(listThumbnailURL)
+                        .setProcessor(DownsamplingImageProcessor(size: listThumbnailTargetSize))
+                        .cacheMemoryOnly(false)
+                        .cancelOnDisappear(true)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in
+                            SkeletonCard(
+                                width: LibraryCardMetrics.cardWidth,
+                                height: LibraryCardMetrics.thumbnailHeight,
+                                cornerRadius: 0
+                            )
+                        }
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: LibraryCardMetrics.cardWidth, height: LibraryCardMetrics.thumbnailHeight)
+                        .clipped()
 
                     // 左上角复选框（编辑模式下显示）
                     if isEditing {

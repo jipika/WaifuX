@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AppIntents
 import Kingfisher
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
