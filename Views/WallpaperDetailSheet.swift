@@ -997,7 +997,7 @@ struct WallpaperDetailSheet: View {
         }
     }
     
-    /// 获取壁纸图片 URL（本地文件直接返回，网络壁纸下载到临时目录）
+    /// 获取壁纸图片 URL（本地/已下载文件直接返回，未下载的网络壁纸才下载到临时目录）
     private func getWallpaperImageURL() async throws -> URL {
         // 本地壁纸：直接使用本地文件路径
         if wallpaper.id.hasPrefix("local_"),
@@ -1008,7 +1008,13 @@ struct WallpaperDetailSheet: View {
             return localURL
         }
         
-        // 网络壁纸：下载到临时目录
+        // 已下载的网络壁纸：直接使用本地已下载的文件，避免重复联网下载
+        if let downloadedURL = viewModel.localFileURLIfAvailable(for: wallpaper) {
+            print("[WallpaperDetailSheet] Using downloaded wallpaper file: \(downloadedURL.path)")
+            return downloadedURL
+        }
+        
+        // 未下载的网络壁纸：下载到临时目录
         let imageData = try await viewModel.downloadWallpaperData(wallpaper)
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(wallpaper.id).jpg")
         try imageData.write(to: tempURL)
