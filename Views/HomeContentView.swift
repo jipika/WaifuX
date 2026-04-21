@@ -304,21 +304,21 @@ struct HomeContentView: View {
 
     private var contentSections: some View {
         VStack(alignment: .leading, spacing: 38) {
-            // 热门动态壁纸（使用独立的首页数据，不跟随 Explore 列表变化）
-            HomeMediaSection(
-                title: t("hotDynamic"),
-                mediaItems: mediaViewModel.homeItems,
-                onSelect: { item in
-                    selectedMedia = item
-                }
-            )
-
             // 最新静态壁纸
             HomeShelfSection(
                 title: t("latestWallpaper"),
                 wallpapers: recentWallpapers,
                 onSelect: { wallpaper in
                     selectedWallpaper = wallpaper
+                }
+            )
+
+            // 热门动态壁纸（使用独立的首页数据，不跟随 Explore 列表变化）
+            HomeMediaSection(
+                title: t("hotDynamic"),
+                mediaItems: mediaViewModel.homeItems,
+                onSelect: { item in
+                    selectedMedia = item
                 }
             )
         }
