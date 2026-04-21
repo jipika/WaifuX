@@ -432,16 +432,39 @@ final class UpdateManager: ObservableObject {
         config.timeoutIntervalForResource = 600
         let session = URLSession(configuration: config)
         
-        var request = GitHubHosts.urlRequest(forGitHubURL: url)
-        request.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
-
-        let (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard case .downloading = self.state else { return }
-                guard p > self.progress else { return }
-                self.progress = p
-                self.state = .downloading(p)
+        // 优先使用原始 URL，让系统 DNS / VPN / 代理生效
+        // GitHubHosts 的固定 IP 在大文件下载时往往不如 VPN 隧道快，且会绕过代理规则
+        var originalRequest = URLRequest(url: url)
+        originalRequest.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
+        
+        let (downloadedFileURL, response): (URL, URLResponse)
+        do {
+            (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: originalRequest) { [weak self] p in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    guard case .downloading = self.state else { return }
+                    guard p > self.progress else { return }
+                    self.progress = p
+                    self.state = .downloading(p)
+                }
+            }
+        } catch {
+            // 原始 URL 失败，回退到 GitHub Hosts 加速（直连固定 IP）
+            if GitHubHosts.isEnabled && GitHubHosts.isGitHubURL(url.absoluteString) {
+                print("[UpdateManager] Original URL failed, falling back to GitHub Hosts: \(error)")
+                var hostsRequest = GitHubHosts.urlRequest(forGitHubURL: url)
+                hostsRequest.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
+                (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: hostsRequest) { [weak self] p in
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
+                        guard case .downloading = self.state else { return }
+                        guard p > self.progress else { return }
+                        self.progress = p
+                        self.state = .downloading(p)
+                    }
+                }
+            } else {
+                throw error
             }
         }
         
