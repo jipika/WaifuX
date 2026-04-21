@@ -1,5 +1,36 @@
 # Changelog
 
+## 38.0.68 — 2026-04-20
+
+### 版本与构建号（与 `VERSION`、`project.yml` 对齐）
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| 营销版本（`CFBundleShortVersionString` / `MARKETING_VERSION`） | **38.0.68** | 合并时以合并前 **`main`（`waifu/main`）顶端** 的营销版本为准，与 **`VERSION` 文件** 一致。 |
+| 构建号（`CFBundleVersion` / `CURRENT_PROJECT_VERSION`） | **39** | 取 **`feature/wallpaper-engine`** 侧已存在的更高构建号，**避免从 39 回退到 38**。 |
+
+相对 **`waifu/main` @ 8d03d9b** 的 Git 拓扑：
+
+1. **`560b19e`** — `chore: release 38.0.67 (build 39)`（壁纸引擎功能分支上的发行标记；合并后工程展示版本以 **38.0.68** 为准，见上表）。
+2. **`16a0f8c`** — `Merge branch 'feature/wallpaper-engine'`（将上述分支合入 **`main`**，第二父提交为 **`560b19e`**）。
+
+### 概要
+
+在已包含 **GitHub 更新 / `GitHubHosts` 在 VPN 与系统 HTTP(S)、SOCKS、PAC 代理下关闭固定 IP** 等网络修复的 `main` 基础上，将 **`feature/wallpaper-engine`** 的壁纸引擎与探索相关改动并入主线。
+
+### 主要带入内容（相对 8d03d9b 的文件级范围）
+
+- **壁纸与调度**：`VideoWallpaperManager`、`WallpaperEngineXBridge`、`WallpaperSchedulerService`、`VideoThumbnailCache` 等。
+- **工坊与探索**：`WorkshopSourceManager`、`MediaExploreViewModel`、`MediaExploreContentView`；**Workshop 媒体探索内容级别固定为 `Everyone`（SFW），不提供内容级别 UI**（与既有产品策略一致）。
+- **界面与体验**：`HomeContentView`、`WallpaperExploreContentView`、`AnimeExploreView`、`ContentView`、`MyLibraryContentView`、各 `DetailSheet`；`ExploreAtmosphere`、`GlassStyle` 等视觉与氛围组件。
+- **工程**：`project.yml` / `WaifuX.xcodeproj` 已与上述版本号、构建号对齐。
+
+### 升级注意
+
+- Workshop 与 SteamCMD 相关前提条件仍以设置页与 README 为准；大资源若被忽略需按仓库说明补齐。
+
+---
+
 ## 38.0.64 — 2026-04-20
 
 ### 概要
