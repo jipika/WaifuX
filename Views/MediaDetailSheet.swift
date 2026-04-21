@@ -27,6 +27,7 @@ struct MediaDetailSheet: View {
     @State private var showSteamGuardAlert = false
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
+    @State private var sharePickerAnchorView: NSView?
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -384,13 +385,14 @@ struct MediaDetailSheet: View {
             }
             onClose()
         }) {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(isSettingWallpaper ? .white.opacity(0.35) : .white.opacity(0.95))
-                .frame(width: 38, height: 38)
-                .contentShape(Circle())
-                .detailGlassCircleChrome()
-                .opacity(isSettingWallpaper ? 0.5 : 1)
+            DetailSheetCircleIconLabel(
+                systemName: "chevron.left",
+                foreground: (isDownloading || isSettingWallpaper) ? .white.opacity(0.35) : .white.opacity(0.95),
+                fontSize: 15,
+                frameSide: 38
+            )
+            .detailGlassCircleChrome()
+            .opacity(isDownloading || isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -405,12 +407,13 @@ struct MediaDetailSheet: View {
                         showInfoBubble.toggle()
                     }
                 } label: {
-                    Image(systemName: showInfoBubble ? "info.circle.fill" : "info.circle")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .frame(width: 40, height: 40)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: showInfoBubble ? "info.circle.fill" : "info.circle",
+                        foreground: .white.opacity(0.95),
+                        fontSize: 16,
+                        frameSide: 40
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
 
@@ -419,12 +422,13 @@ struct MediaDetailSheet: View {
                         isHeroContentHidden.toggle()
                     }
                 } label: {
-                    Image(systemName: isHeroContentHidden ? "eye.slash" : "eye")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .frame(width: 40, height: 40)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: isHeroContentHidden ? "eye.slash" : "eye",
+                        foreground: .white.opacity(0.95),
+                        fontSize: 16,
+                        frameSide: 40
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
             }
@@ -620,12 +624,11 @@ struct MediaDetailSheet: View {
                 Button {
                     viewModel.toggleFavorite(resolvedItem)
                 } label: {
-                    Image(systemName: viewModel.isFavorite(resolvedItem) ? "heart.fill" : "heart")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(viewModel.isFavorite(resolvedItem) ? Color(hex: "FF5A7D") : .white)
-                        .frame(width: 42, height: 42)
-                        .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: viewModel.isFavorite(resolvedItem) ? "heart.fill" : "heart",
+                        foreground: viewModel.isFavorite(resolvedItem) ? Color(hex: "FF5A7D") : .white
+                    )
+                    .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
             }
@@ -663,11 +666,7 @@ struct MediaDetailSheet: View {
                     }
                     wallpaperManager.setMuted(newMuted)
                 } label: {
-                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .contentShape(Circle())
+                    DetailSheetCircleIconLabel(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
@@ -682,9 +681,7 @@ struct MediaDetailSheet: View {
                             CustomProgressView(tint: .white)
                                 .scaleEffect(0.7)
                         }
-                        Image(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(.white)
+                        DetailSheetCircleIconLabel(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
                             .opacity(isDownloading ? 0 : 1)
                     }
                     .frame(width: 42, height: 42)
@@ -693,6 +690,20 @@ struct MediaDetailSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isDownloading || isAlreadyDownloaded)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        shareDownloadedMediaFile()
+                    } label: {
+                        DetailSheetCircleIconLabel(systemName: "square.and.arrow.up")
+                            .detailGlassCircleChrome()
+                    }
+                    .buttonStyle(.plain)
+                    .help(t("shareLocalFile"))
+                    .background {
+                        SharePickerAnchorReader { sharePickerAnchorView = $0 }
+                    }
+                }
 
                 dividerLine
                     .frame(width: 70)
@@ -1126,6 +1137,32 @@ struct MediaDetailSheet: View {
         }
     }
 
+    /// 系统分享：已下载的本地源文件（视频分享文件，常见静图分享 NSImage）
+    private func shareDownloadedMediaFile() {
+        guard isAlreadyDownloaded else { return }
+        let url = findLocalWorkshopFile() ?? resolvedShareableFileFromRecordOrCover()
+        guard let url else { return }
+        let items = SystemShareSupport.itemsForLocalFile(at: url)
+        SystemShareSupport.presentPicker(items: items, anchorView: sharePickerAnchorView)
+    }
+
+    private func resolvedShareableFileFromRecordOrCover() -> URL? {
+        if let record = currentDownloadRecord {
+            let u = record.localFileURL
+            guard FileManager.default.fileExists(atPath: u.path) else { return nil }
+            var isDir: ObjCBool = false
+            _ = FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir)
+            if isDir.boolValue { return pickWorkshopPlayableFile(from: u) }
+            return u
+        }
+        if isLocalFile,
+           resolvedItem.coverImageURL.isFileURL,
+           FileManager.default.fileExists(atPath: resolvedItem.coverImageURL.path) {
+            return resolvedItem.coverImageURL
+        }
+        return nil
+    }
+
     /// 查找本地已下载的 Workshop 文件
     private func findLocalWorkshopFile() -> URL? {
         findLocalWorkshopFile(for: resolvedItem)
@@ -1530,10 +1567,8 @@ struct MediaDetailSheet: View {
             showError = true
             return
         }
-        // 烘焙前可能停过 WE；应用本机 MP4 前再确保未处于 CLI 接管，避免又去跑 set / 与播放器叠层
-        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-            WallpaperEngineXBridge.shared.stopWallpaper()
-        }
+        // 应用本机 MP4 前始终停 CLI，避免与播放器叠层或桥接状态残留
+        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
         let screens = NSScreen.screens
         if screens.count > 1 {

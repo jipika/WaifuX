@@ -24,6 +24,22 @@ final class VideoThumbnailCache {
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50MB
     }
     
+    /// 若已为本地媒体生成过列表缩略图（`generateThumbnail`）或动态壁纸海报帧（`posterJPEGFileURL`），返回对应磁盘文件 URL。
+    /// 供「我的库」等场景优先于站点封面展示截取静帧。
+    func cachedStaticThumbnailFileURLIfExists(forLocalFile mediaURL: URL) -> URL? {
+        guard mediaURL.isFileURL else { return nil }
+        let path = mediaURL.standardizedFileURL.path
+        guard fileManager.fileExists(atPath: path) else { return nil }
+
+        let thumb = cacheURL(for: mediaURL)
+        if fileManager.fileExists(atPath: thumb.path) { return thumb }
+
+        let poster = posterCacheURL(forPathKey: path)
+        if fileManager.fileExists(atPath: poster.path) { return poster }
+
+        return nil
+    }
+
     /// 获取视频缩略图 URL
     /// - Parameter videoURL: 视频文件 URL
     /// - Returns: 缩略图 URL（可能是缓存的文件 URL，也可能是原始视频 URL）
@@ -53,7 +69,7 @@ final class VideoThumbnailCache {
     /// - Note: 输出在 `VideoThumbnails` 目录，文件名由视频路径哈希决定；失败时返回 `nil`。
     func posterJPEGFileURL(forLocalVideo videoURL: URL) async -> URL? {
         guard videoURL.isFileURL else { return nil }
-        let pathKey = (try? videoURL.standardizedFileURL.path) ?? videoURL.path
+        let pathKey = videoURL.standardizedFileURL.path
         guard fileManager.fileExists(atPath: pathKey) else { return nil }
 
         let outURL = posterCacheURL(forPathKey: pathKey)

@@ -14,7 +14,6 @@ struct MyLibraryContentView: View {
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
     @Binding var selectedAnime: AnimeSearchResult?
-    var isTabActive: Bool = true
     @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
@@ -60,68 +59,60 @@ struct MyLibraryContentView: View {
     }
 
     var body: some View {
-        Group {
-            if isTabActive {
-                ZStack(alignment: .topLeading) {
-                    if isEditing {
-                        Color.black.opacity(0.3)
-                            .ignoresSafeArea()
-                            .onTapGesture {
-                                withAnimation {
-                                    isEditing = false
-                                    selectedItems.removeAll()
-                                }
-                            }
-                            .allowsHitTesting(true)
-                    }
-
-                    SpotlightBackground(
-                        lightColor: Color.white.opacity(0.95),
-                        backgroundColor: Color.black,
-                        intensity: 0.9,
-                        spread: 0.4
-                    )
+        ZStack(alignment: .topLeading) {
+            if isEditing {
+                Color.black.opacity(0.3)
                     .ignoresSafeArea()
-
-                    GrainTextureOverlay()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .ignoresSafeArea()
-
-                    GeometryReader { geometry in
-                        let contentWidth = max(0, geometry.size.width - 56)
-                        let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
-
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 32) {
-                                mediaHero
-                                ContentTypePicker(selected: $selectedContentType)
-                                contentSections(config: gridConfig)
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 28)
-                            .padding(.top, 80)
-                            .padding(.bottom, 48)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .frame(minHeight: geometry.size.height)
+                    .onTapGesture {
+                        withAnimation {
+                            isEditing = false
+                            selectedItems.removeAll()
                         }
-                        .scrollClipDisabled()
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .task {
-                    await viewModel.initialLoad()
-                    await loadAnimeFavorites()
-                    Task {
-                        await LocalWallpaperScanner.shared.forceRescan()
-                    }
-                    updateWallpaperItems()
-                    updateMediaItems()
-                }
-            } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
+                    .allowsHitTesting(true)
             }
+
+            SpotlightBackground(
+                lightColor: Color.white.opacity(0.95),
+                backgroundColor: Color.black,
+                intensity: 0.9,
+                spread: 0.4
+            )
+            .ignoresSafeArea()
+
+            GrainTextureOverlay()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+
+            GeometryReader { geometry in
+                let contentWidth = max(0, geometry.size.width - 56)
+                let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 32) {
+                        mediaHero
+                        ContentTypePicker(selected: $selectedContentType)
+                        contentSections(config: gridConfig)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 80)
+                    .padding(.bottom, 48)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(minHeight: geometry.size.height)
+                }
+                .scrollClipDisabled()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            await viewModel.initialLoad()
+            await loadAnimeFavorites()
+            Task {
+                await LocalWallpaperScanner.shared.forceRescan()
+            }
+            updateWallpaperItems()
+            updateMediaItems()
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
@@ -242,10 +233,10 @@ struct MyLibraryContentView: View {
                 batchDeleteToolbar(count: wallpaperItems.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    ForEach(Array(wallpaperItems.enumerated()), id: \.element.id) { index, item in
+                    ForEach(wallpaperItems) { item in
                         wallpaperGridItem(item: item, config: config)
                             .onAppear {
-                                preloadNearbyWallpapers(for: index, config: config)
+                                preloadNearbyWallpapers(around: item, config: config)
                             }
                     }
                 }
@@ -274,7 +265,12 @@ struct MyLibraryContentView: View {
     private func updateMediaItems() {
         switch selectedSubTab {
         case .favorites:
-            mediaItems = mediaViewModel.favoriteItems.map { AnyMediaItem(item: $0) }
+            mediaItems = mediaViewModel.favoriteItems.map {
+                AnyMediaItem(
+                    mediaItem: $0,
+                    localFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: $0)
+                )
+            }
         case .downloads:
             mediaItems = mediaViewModel.allLocalMedia.map { AnyMediaItem(unified: $0) }
         }
@@ -316,10 +312,10 @@ struct MyLibraryContentView: View {
                 batchDeleteToolbar(count: mediaItems.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    ForEach(Array(mediaItems.enumerated()), id: \.element.id) { index, item in
+                    ForEach(mediaItems) { item in
                         mediaGridItem(item: item, config: config)
                             .onAppear {
-                                preloadNearbyMedia(for: index, config: config)
+                                preloadNearbyMedia(around: item, config: config)
                             }
                     }
                 }
@@ -335,6 +331,7 @@ struct MyLibraryContentView: View {
     private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
         MediaVideoCard(
             item: item.mediaItem,
+            localMediaFileURL: item.localFileURL,
             badgeText: selectedSubTab == .favorites ? t("badge.favorite") : item.mediaItem.resolutionLabel,
             accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
             isEditing: isEditing,
@@ -346,7 +343,8 @@ struct MyLibraryContentView: View {
     }
 
     // MARK: - Image Preloading
-    private func preloadNearbyWallpapers(for index: Int, config: LibraryGridConfig) {
+    private func preloadNearbyWallpapers(around item: AnyWallpaperItem, config: LibraryGridConfig) {
+        guard let index = wallpaperItems.firstIndex(where: { $0.id == item.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
         let range = max(0, index - 10)..<min(wallpaperItems.count, index + 11)
@@ -361,15 +359,15 @@ struct MyLibraryContentView: View {
         prefetcher.start()
     }
 
-    private func preloadNearbyMedia(for index: Int, config: LibraryGridConfig) {
+    private func preloadNearbyMedia(around item: AnyMediaItem, config: LibraryGridConfig) {
+        guard let index = currentMediaItems.firstIndex(where: { $0.id == item.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
         let range = max(0, index - 10)..<min(currentMediaItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
-            .map { currentMediaItems[$0].mediaItem }
-            .filter { !$0.shouldRenderThumbnailAsAnimatedImage }
-            .map(\.coverImageURL)
+            .map { currentMediaItems[$0] }
+            .map { $0.mediaItem.libraryGridThumbnailURL(localFileURL: $0.localFileURL) }
 
         let prefetcher = Kingfisher.ImagePrefetcher(
             urls: urls,
@@ -378,7 +376,8 @@ struct MyLibraryContentView: View {
         prefetcher.start()
     }
 
-    private func preloadNearbyAnime(for index: Int, config: LibraryGridConfig) {
+    private func preloadNearbyAnime(around anime: AnimeSearchResult, config: LibraryGridConfig) {
+        guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight + 72
         let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
         let range = max(0, index - 10)..<min(currentAnimeItems.count, index + 11)
@@ -414,7 +413,7 @@ struct MyLibraryContentView: View {
                 batchDeleteToolbar(count: currentAnimeItems.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    ForEach(Array(currentAnimeItems.enumerated()), id: \.element.id) { index, anime in
+                    ForEach(currentAnimeItems) { anime in
                         AnimeLibraryCard(
                             anime: anime,
                             isEditing: isEditing,
@@ -424,7 +423,7 @@ struct MyLibraryContentView: View {
                             handleAnimeTap(anime)
                         }
                         .onAppear {
-                            preloadNearbyAnime(for: index, config: config)
+                            preloadNearbyAnime(around: anime, config: config)
                         }
                     }
                 }
@@ -1365,15 +1364,18 @@ private struct AnyWallpaperItem: Identifiable {
 private struct AnyMediaItem: Identifiable {
     let id: String
     let mediaItem: MediaItem
+    let localFileURL: URL?
 
-    init(item: MediaItem) {
-        self.id = item.id
-        self.mediaItem = item
+    init(mediaItem: MediaItem, localFileURL: URL? = nil) {
+        self.id = mediaItem.id
+        self.mediaItem = mediaItem
+        self.localFileURL = localFileURL
     }
 
     init(unified: UnifiedLocalMedia) {
         self.id = unified.id
         self.mediaItem = unified.mediaItem
+        self.localFileURL = unified.fileURL
     }
 }
 

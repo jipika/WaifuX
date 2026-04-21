@@ -112,6 +112,9 @@ class WallpaperSchedulerService: ObservableObject {
 
         Task { @MainActor in
             do {
+                WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+                VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+
                 let tempURL = try await downloadImage(from: url)
                 try NSWorkspace.shared.setDesktopImageURL(tempURL, for: screen, options: [:])
                 lastChangedWallpaper = wallpaper

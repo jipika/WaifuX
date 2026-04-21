@@ -73,7 +73,7 @@ class WallpaperViewModel: ObservableObject {
     private let localScanner = LocalWallpaperScanner.shared
     private var cancellables = Set<AnyCancellable>()
 
-    /// 收藏/下载库变更时递增。探索页等仅依赖 `isFavorite`/`isDownloaded` 时，单靠转发 `objectWillChange` 在部分 SwiftUI 路径下不刷新。
+    /// 收藏/下载库变更时递增；与 `cachedAllLocalWallpapers` 一起驱动依赖 `isFavorite` / 列表的视图刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
 
     // MARK: - 调度器服务
@@ -195,8 +195,7 @@ class WallpaperViewModel: ObservableObject {
     @Published var cachedAllLocalWallpapers: [UnifiedLocalWallpaper] = []
 
     init() {
-        // 监听 Service 数据变化，转发 objectWillChange 通知视图更新
-        // 因为 favorites/allLocalWallpapers 是计算属性，需要手动转发变化通知
+        // 监听 Service 数据变化：重建缓存并递增 revision（@Published 会触发 ObservableObject 刷新）
         Publishers.Merge3(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
             wallpaperLibrary.$downloadRecords.map { _ in () },
@@ -206,8 +205,7 @@ class WallpaperViewModel: ObservableObject {
         .sink { [weak self] _ in
             self?.rebuildLocalWallpaperCache()
             self?.libraryContentRevision &+= 1
-            // 转发变化通知，让使用计算属性的视图自动更新
-            self?.objectWillChange.send()
+            // 不额外 `objectWillChange.send()`：`cachedAllLocalWallpapers` 与 `libraryContentRevision` 的 @Published 已会触发依赖视图更新
         }
         .store(in: &cancellables)
         
@@ -367,8 +365,6 @@ class WallpaperViewModel: ObservableObject {
     /// 刷新收藏和下载数据（删除操作后调用）
     func loadFavorites() {
         libraryContentRevision &+= 1
-        // 发送变化通知，确保计算属性（favorites/allLocalWallpapers）的依赖视图更新
-        objectWillChange.send()
     }
 
     // MARK: - 壁纸批量删除
@@ -397,6 +393,14 @@ class WallpaperViewModel: ObservableObject {
             pasteboard.clearContents()
             pasteboard.setString(wallpaper.url, forType: .string)
         }
+    }
+
+    /// 分享已下载到本地的壁纸文件（静图尽量用 `NSImage`，视频用文件 URL）
+    /// - Parameter anchorView: 传入时分享面板相对该视图定位（通常为按钮背后的锚定 `NSView`）
+    func shareDownloadedWallpaperIfAvailable(_ wallpaper: Wallpaper, anchorView: NSView? = nil) {
+        guard let fileURL = wallpaperLibrary.localFileURLIfAvailable(for: wallpaper) else { return }
+        let items = SystemShareSupport.itemsForLocalFile(at: fileURL)
+        SystemShareSupport.presentPicker(items: items, anchorView: anchorView)
     }
 
     // MARK: - 防抖搜索
@@ -924,6 +928,9 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 设置壁纸
     func setWallpaper(from imageURL: URL, option: WallpaperOption) async throws {
+        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+        VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+
         let workspace = NSWorkspace.shared
         let screens = NSScreen.screens
 
@@ -948,6 +955,8 @@ class WallpaperViewModel: ObservableObject {
         
         // 如果指定了特定屏幕，只设置到该屏幕
         if let targetScreen = targetScreen {
+            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
             switch option {
             case .desktop:
                 try workspace.setDesktopImageURL(imageURL, for: targetScreen, options: [:])
@@ -958,7 +967,6 @@ class WallpaperViewModel: ObservableObject {
                 try setLockScreenWallpaper(imageURL)
             }
         } else {
-            // 未指定屏幕，设置到所有屏幕
             try await setWallpaper(from: imageURL, option: option)
         }
     }
@@ -972,6 +980,9 @@ class WallpaperViewModel: ObservableObject {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
                 do {
+                    WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+                    VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+
                     let workspace = NSWorkspace.shared
                     guard let screen = NSScreen.main else {
                         continuation.resume(throwing: NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
@@ -1256,4 +1267,66 @@ private func formatDate(_ date: Date?) -> String? {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
     return formatter.localizedString(for: date, relativeTo: Date())
+}
+
+// MARK: - 系统分享（详情页：已下载的本地文件）
+
+@MainActor
+enum SystemShareSupport {
+    /// 统一使用本地文件 URL 作为分享项。
+    /// 若传入 `NSImage`，部分第三方分享扩展与 PlugInKit（pkd）组合在 macOS 上会出现 XPC 中断、面板长时间转圈；文件 URL 路径更稳定。
+    static func itemsForLocalFile(at url: URL) -> [Any] {
+        [url]
+    }
+
+    /// - Parameter anchorView: 与 `relativeRect` 同属该视图的坐标系；默认用 `anchorView.bounds`
+    static func presentPicker(items: [Any], anchorView: NSView? = nil, relativeRect: NSRect? = nil) {
+        guard !items.isEmpty else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        // 延后到下一 runloop，确保窗口已成为 key、布局完成；可降低偶发的分享服务枚举失败。
+        DispatchQueue.main.async {
+            Self.presentPickerOnMainNow(items: items, anchorView: anchorView, relativeRect: relativeRect)
+        }
+    }
+
+    private static func presentPickerOnMainNow(items: [Any], anchorView: NSView?, relativeRect: NSRect?) {
+        let picker = NSSharingServicePicker(items: items)
+        if let v = anchorView, v.window != nil {
+            let rect = relativeRect ?? v.bounds
+            guard rect.width > 0.5, rect.height > 0.5 else {
+                presentPickerCenteredFallback(picker: picker, items: items)
+                return
+            }
+            picker.show(relativeTo: rect, of: v, preferredEdge: .maxY)
+            return
+        }
+        presentPickerCenteredFallback(picker: picker, items: items)
+    }
+
+    private static func presentPickerCenteredFallback(picker: NSSharingServicePicker, items: [Any]) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+              let contentView = window.contentView else {
+            writeFallbackPasteboard(items: items)
+            return
+        }
+        let rect = NSRect(
+            x: contentView.bounds.midX - 80,
+            y: contentView.bounds.midY - 12,
+            width: 160,
+            height: 24
+        )
+        picker.show(relativeTo: rect, of: contentView, preferredEdge: .minY)
+    }
+
+    private static func writeFallbackPasteboard(items: [Any]) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        for item in items {
+            if let url = item as? URL {
+                _ = pb.writeObjects([url as NSURL])
+            } else if let image = item as? NSImage {
+                pb.writeObjects([image])
+            }
+        }
+    }
 }

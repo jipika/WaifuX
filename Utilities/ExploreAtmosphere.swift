@@ -11,27 +11,23 @@ final class ExploreListGIFPlaybackState: ObservableObject {
 
     /// true 时 `KFMediaCoverImage` 只显示首帧，不跑 `KFAnimatedImage` 动画
     @Published private(set) var shouldPauseListGIFs = false
-    private var idleTask: Task<Void, Never>?
+    /// 用 `DispatchWorkItem` 合并高频滚动回调，避免每帧 `Task` 创建/取消
+    private var resumeGIFsWorkItem: DispatchWorkItem?
 
-    /// 由 `ScrollLoadMoreModifier` 在滚动偏移变化时调用；仅在 false→true、停顿后 true→false 时发布，避免每帧刷新
+    /// 由 `ScrollLoadMoreModifier` 在滚动偏移变化时调用；滚动中仅第一次切到暂停态会触发刷新，恢复前用 debounce 合并
     func noteListScrolling() {
         if !shouldPauseListGIFs {
             shouldPauseListGIFs = true
         }
-        idleTask?.cancel()
-        idleTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(180))
-            } catch {
-                return
-            }
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                if self.shouldPauseListGIFs {
-                    self.shouldPauseListGIFs = false
-                }
+        resumeGIFsWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.shouldPauseListGIFs {
+                self.shouldPauseListGIFs = false
             }
         }
+        resumeGIFsWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
     }
 }
 
@@ -92,6 +88,21 @@ extension EnvironmentValues {
     var explorePageAtmosphereTint: ExploreAtmosphereTint {
         get { self[ExplorePageAtmosphereTintKey.self] }
         set { self[ExplorePageAtmosphereTintKey.self] = newValue }
+    }
+}
+
+// MARK: - Tab 后台时停列表 GIF（keep-alive 下 opacity=0 仍可能解码动画）
+
+private struct CoverGIFPlaybackHostActiveKey: EnvironmentKey {
+    /// 主窗口里当前 Tab 是否为该子树所属页（false 时 `KFMediaCoverImage` 强制不播 GIF）
+    static let defaultValue: Bool = true
+}
+
+extension EnvironmentValues {
+    /// 由 `ContentView` 按 `selectedTab` 注入；弹窗/详情未设置时默认为 `true`。
+    var coverGIFPlaybackHostActive: Bool {
+        get { self[CoverGIFPlaybackHostActiveKey.self] }
+        set { self[CoverGIFPlaybackHostActiveKey.self] = newValue }
     }
 }
 
@@ -553,6 +564,23 @@ struct ExploreDynamicAtmosphereBackground: View {
     }
 }
 
+// MARK: - Kingfisher 列表降采样
+
+extension KFImage {
+    /// 列表/卡片传入 `cardSize * 2` 等，避免 GIF/大图按全分辨率在主线程解码。
+    fileprivate func wh_optionalDownsample(_ size: CGSize?) -> KFImage {
+        guard let size else { return self }
+        return setProcessor(DownsamplingImageProcessor(size: size))
+    }
+}
+
+extension KFAnimatedImage {
+    fileprivate func wh_optionalDownsample(_ size: CGSize?) -> KFAnimatedImage {
+        guard let size else { return self }
+        return setProcessor(DownsamplingImageProcessor(size: size))
+    }
+}
+
 // MARK: - 媒体封面（静态 / GIF统一加载 + 失败占位）
 
 /// 列表/首页封面：底层始终有色块/渐变，避免加载失败时出现空白或系统错误图。
@@ -560,26 +588,44 @@ struct ExploreDynamicAtmosphereBackground: View {
 /// GIF 自动走动画管线，静态图则回退到普通 ImageView 行为，无需外部根据 URL 预判断。
 struct KFMediaCoverImage: View {
     @ObservedObject private var listGIFPlayback = ExploreListGIFPlaybackState.shared
+    @Environment(\.coverGIFPlaybackHostActive) private var coverGIFPlaybackHostActive
 
     let url: URL
     var animated: Bool
-    /// 非 nil 时对静态图做降采样（列表性能）；GIF 分支忽略。
+    /// 非 nil 时对 **KFImage / KFAnimatedImage** 解码做降采样（列表/卡片必传，显著减轻 Workshop GIF 全尺寸主线程解码）。
     var downsampleSize: CGSize? = nil
     var fadeDuration: Double = 0.25
     /// 任意一次加载结束（成功或失败）时调用，用于详情页淡入等。
     var loadFinished: (() -> Void)? = nil
     /// 列表/卡片必须传入，约束 `KFAnimatedImage`（AppKit）按 GIF 原始尺寸撑开父布局的问题。
     var layoutSize: CGSize? = nil
-    /// 是否允许播放 GIF 动画；详情页/首页建议 true，列表配合 `isVisible` 使用。
+    /// 是否允许播放 GIF 动画；详情页等大图建议 true。
     var playAnimatedImage: Bool = false
-    /// 当前卡片/视图是否在视口内；不在视口内时即使 `playAnimatedImage==true` 也切回静态首帧，降低滚动开销。
+    /// 当前卡片/视图是否在视口内；非「仅悬停播放」模式下，离屏时停动画。
     var isVisible: Bool = true
+    /// `true` 时仅在 `isHovered == true` 时解码播放 GIF（列表/网格推荐，显著减轻滚动时主线程压力）。
+    var animateOnHoverOnly: Bool = false
+    /// 配合 `animateOnHoverOnly`；由卡片 `onHover` / `throttledHover` 传入。
+    var isHovered: Bool = false
 
     @State private var detectedGIF = false
     @State private var loadFailed = false
 
     private var shouldAnimate: Bool {
-        playAnimatedImage && isVisible && !listGIFPlayback.shouldPauseListGIFs
+        guard playAnimatedImage, coverGIFPlaybackHostActive else { return false }
+        if animateOnHoverOnly {
+            return isHovered
+        }
+        return isVisible && !listGIFPlayback.shouldPauseListGIFs
+    }
+
+    /// `KFAnimatedImage` 的 `configure` 在 SwiftUI 更新时不一定会同步到已有 NSView；仅悬停播放时让 `id` 随悬停变化以强制重建并应用 `autoPlayAnimatedImage`。
+    private var kfAnimatedLayerIdentity: String {
+        if animateOnHoverOnly {
+            "\(url.absoluteString)|hover:\(isHovered)"
+        } else {
+            url.absoluteString
+        }
     }
 
     private var underlay: some View {
@@ -599,14 +645,19 @@ struct KFMediaCoverImage: View {
             underlay
             // 1. 底层始终用 KFImage 加载，保证静态图和 GIF 首帧都能显示
             KFImage(url)
+                .wh_optionalDownsample(downsampleSize)
                 .cacheMemoryOnly(false)
                 .cancelOnDisappear(true)
                 .fade(duration: fadeDuration)
                 .placeholder { _ in underlay }
                 .onSuccess { result in
-                    // 根据 Kingfisher 解码后的真实内容判断是否为 GIF（比 URL 后缀可靠）
-                    if !detectedGIF, result.image.kf.gifRepresentation() != nil {
-                        detectedGIF = true
+                    // GIF 判定：优先解码结果；降采样后静态图会丢失 `gifRepresentation`，回退到模型/URL 的 `animated` 提示
+                    if !detectedGIF {
+                        if result.image.kf.gifRepresentation() != nil {
+                            detectedGIF = true
+                        } else if animated {
+                            detectedGIF = true
+                        }
                     }
                     loadFinished?()
                 }
@@ -617,6 +668,7 @@ struct KFMediaCoverImage: View {
             // 2. 若真实格式为 GIF 且允许动画，叠加 KFAnimatedImage 播放动效
             if detectedGIF && !loadFailed {
                 KFAnimatedImage.url(url)
+                    .wh_optionalDownsample(downsampleSize)
                     .cacheMemoryOnly(false)
                     .cancelOnDisappear(true)
                     .configure { view in
@@ -636,8 +688,9 @@ struct KFMediaCoverImage: View {
                         loadFailed = true
                         loadFinished?()
                     }
-                    // 用 id 强制重建，确保 isVisible 变化时重新执行 configure，动画启停生效
-                    .id("kfai_\(url.absoluteString)_\(shouldAnimate)")
+                    // 非「仅悬停」模式：仅用 URL 稳定身份，滚动暂停 GIF 时靠 `@ObservedObject` + configure 更新。
+                    // 「仅悬停」模式：`id` 必须随 `isHovered` 变化，否则 AppKit 侧不会响应 `autoPlayAnimatedImage` 切换。
+                    .id(kfAnimatedLayerIdentity)
             }
         }
 
@@ -656,6 +709,17 @@ struct KingfisherGIFImage: View {
     let url: URL
 
     var body: some View {
-        KFMediaCoverImage(url: url, animated: true, downsampleSize: nil, fadeDuration: 0.2, loadFinished: nil, layoutSize: nil)
+        KFMediaCoverImage(
+            url: url,
+            animated: true,
+            downsampleSize: nil,
+            fadeDuration: 0.2,
+            loadFinished: nil,
+            layoutSize: nil,
+            playAnimatedImage: true,
+            isVisible: true,
+            animateOnHoverOnly: false,
+            isHovered: false
+        )
     }
 }
