@@ -357,6 +357,11 @@ class WallpaperViewModel: ObservableObject {
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
         wallpaperLibrary.isDownloaded(wallpaper)
     }
+    
+    /// 获取已下载壁纸的本地文件 URL（如果存在）
+    func localFileURLIfAvailable(for wallpaper: Wallpaper) -> URL? {
+        wallpaperLibrary.localFileURLIfAvailable(for: wallpaper)
+    }
 
     func toggleFavorite(_ wallpaper: Wallpaper) {
         wallpaperLibrary.toggleFavorite(wallpaper)

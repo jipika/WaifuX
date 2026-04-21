@@ -115,6 +115,12 @@ final class WallpaperEngineXBridge: ObservableObject {
         if FileManager.default.fileExists(atPath: bundleResources.path) {
             return bundleResources
         }
+        // 兼容 Xcode folder reference 导致 Resources 文件夹整体被打进 Contents/Resources/ 内，
+        // 实际路径为 Contents/Resources/Resources/wallpaperengine-cli（与 steamcmd 布局一致）
+        let nestedResources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Resources/wallpaperengine-cli")
+        if FileManager.default.fileExists(atPath: nestedResources.path) {
+            return nestedResources
+        }
         if let resourceURL = Bundle.main.resourceURL {
             let resourcePath = resourceURL.appendingPathComponent("wallpaperengine-cli")
             if FileManager.default.fileExists(atPath: resourcePath.path) {

@@ -37,6 +37,7 @@ struct MediaExploreContentView: View {
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
     @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
     @State private var workshopSearchQuery: String = ""
+    @State private var selectedWorkshopSort: WorkshopSortOption = .trendWeek
     private var workshopService: WorkshopService {
         WorkshopService.shared
     }
@@ -120,6 +121,7 @@ struct MediaExploreContentView: View {
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
         .onChange(of: selectedSort) { _, _ in handleFilterChange() }
+        .onChange(of: selectedWorkshopSort) { _, _ in handleWorkshopSortChange() }
         .onChange(of: searchText) { _, _ in handleFilterChange() }
         .onChange(of: viewModel.items) { _, _ in
             recomputeVisibleMediaItems()
@@ -392,6 +394,7 @@ struct MediaExploreContentView: View {
     private func contentSection(gridContentWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             contentHeader
+                .zIndex(1)
             
             if viewModel.isLoading && visibleMediaItems.isEmpty {
                 MediaGridSkeleton(contentWidth: gridContentWidth)
@@ -413,7 +416,11 @@ struct MediaExploreContentView: View {
 
             Spacer()
 
-            SortMenu(options: MediaSortOption.allCases, selected: $selectedSort, tint: exploreAtmosphere.tint.primary)
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                SortMenu(options: WorkshopSortOption.allCases, selected: $selectedWorkshopSort, tint: exploreAtmosphere.tint.primary)
+            } else {
+                SortMenu(options: MediaSortOption.allCases, selected: $selectedSort, tint: exploreAtmosphere.tint.primary)
+            }
         }
     }
 
@@ -610,6 +617,22 @@ struct MediaExploreContentView: View {
 
         syncAtmosphereIfNeeded()
     }
+    
+    private func handleWorkshopSortChange() {
+        AppLogger.info(.wallpaper, "Workshop 排序变化", metadata: ["排序": selectedWorkshopSort.rawValue])
+        visibleCardIDs.removeAll()
+        searchTask?.cancel()
+        searchTask = Task {
+            await viewModel.setWorkshopSort(
+                sortBy: selectedWorkshopSort.sortBy,
+                days: selectedWorkshopSort.days
+            )
+            await MainActor.run {
+                viewModel.items.forEach { visibleCardIDs.insert($0.id) }
+                searchTask = nil
+            }
+        }
+    }
 
     private func handleSourceChange() {
         // 数据源切换时重置并重新加载
@@ -683,6 +706,7 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
+        selectedWorkshopSort = .trendWeek
         selectedCategory = .all
         selectedSort = .newest
         viewModel.clearItems()
@@ -1004,68 +1028,67 @@ private struct SimpleMediaCard: View {
     }
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack {
-                    // 与壁纸探索一致：仅静态缩略图（GIF 经降采样为单帧，不播放动画）
-                    KFImage(item.coverImageURL)
-                        .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                        .cacheMemoryOnly(false)
-                        .cancelOnDisappear(true)
-                        .placeholder { _ in placeholderGradient }
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                }
-                .frame(width: cardWidth, height: imageHeight)
-                .clipShape(Self.thumbShape)
-                .overlay(alignment: .topLeading) {
-                    simplifiedMetadataRow
-                        .padding(10)
-                }
-                .overlay(alignment: .center) {
-                    if item.previewVideoURL != nil {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Color.black.opacity(0.45))
-                            .clipShape(Circle())
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Text(item.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(1)
-                    
-                    Spacer()
-                    
-                    Image(systemName: isFavorite ? "heart.fill" : "heart")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.36))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
-                .background(Color.black.opacity(0.46))
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                // 与壁纸探索一致：仅静态缩略图（GIF 经降采样为单帧，不播放动画）
+                KFImage(item.coverImageURL)
+                    .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
+                    .cacheMemoryOnly(false)
+                    .cancelOnDisappear(true)
+                    .placeholder { _ in placeholderGradient }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
             }
-            .background(
-                Self.cardShape
-                    .fill(Color.clear)
-                    .overlay(
-                        Self.cardShape
-                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                    )
-            )
-            // 移除强制宽度，让 VStack 自然布局
-            .clipShape(Self.cardShape)
+            .frame(width: cardWidth, height: imageHeight)
+            .clipShape(Self.thumbShape)
+            .overlay(alignment: .topLeading) {
+                simplifiedMetadataRow
+                    .padding(10)
+            }
+            .overlay(alignment: .center) {
+                if item.previewVideoURL != nil {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Color.black.opacity(0.45))
+                        .clipShape(Circle())
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text(item.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                Image(systemName: isFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.36))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
+            .background(Color.black.opacity(0.46))
         }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
+        .background(
+            Self.cardShape
+                .fill(Color.clear)
+                .overlay(
+                    Self.cardShape
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
+        .clipShape(Self.cardShape)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
+        }
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
+        .onTapGesture {
+            onTap()
         }
     }
     
@@ -1145,5 +1168,65 @@ private struct WorkshopActiveFilterChip: View {
         .scaleEffect(isHovered ? 1.02 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
         .onHover { isHovered = $0 }
+    }
+}
+
+
+// MARK: - Workshop 排序选项
+
+private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
+    case trendToday = "trend_1"
+    case trendWeek = "trend_7"
+    case trendMonth = "trend_30"
+    case trendQuarter = "trend_90"
+    case trendYear = "trend_365"
+    case trendAll = "trend"
+    case subscribed = "subscribed"
+    case updated = "updated"
+    case created = "created"
+    
+    var id: String { rawValue }
+    
+    var title: String {
+        switch self {
+        case .trendToday: return t("workshop.sort.trendToday")
+        case .trendWeek: return t("workshop.sort.trendWeek")
+        case .trendMonth: return t("workshop.sort.trendMonth")
+        case .trendQuarter: return t("workshop.sort.trendQuarter")
+        case .trendYear: return t("workshop.sort.trendYear")
+        case .trendAll: return t("workshop.sort.trendAll")
+        case .subscribed: return t("workshop.sort.subscribed")
+        case .updated: return t("workshop.sort.updated")
+        case .created: return t("workshop.sort.created")
+        }
+    }
+    
+    var menuTitle: String { title }
+    
+    /// 映射到 WorkshopSearchParams.SortOption
+    var sortBy: WorkshopSearchParams.SortOption {
+        switch self {
+        case .trendToday, .trendWeek, .trendMonth, .trendQuarter, .trendYear, .trendAll:
+            return .ranked
+        case .subscribed:
+            return .subscriptions
+        case .updated:
+            return .updated
+        case .created:
+            return .created
+        }
+    }
+    
+    /// 时间范围（仅对热门趋势有效），nil = 全部时间
+    var days: Int? {
+        switch self {
+        case .trendToday: return 1
+        case .trendWeek: return 7
+        case .trendMonth: return 30
+        case .trendQuarter: return 90
+        case .trendYear: return 365
+        case .trendAll, .subscribed, .updated, .created:
+            return nil
+        }
     }
 }

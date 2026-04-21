@@ -286,6 +286,9 @@ final class VideoWallpaperManager: ObservableObject {
     func stopWallpaper() {
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
+        // 只有真正在播放视频壁纸时才需要恢复原始桌面壁纸
+        let wasPlayingVideo = currentVideoURL != nil
+
         teardownAllWindows()
         currentVideoURL = nil
         currentPosterURL = nil
@@ -293,20 +296,28 @@ final class VideoWallpaperManager: ObservableObject {
         videoTargetScreenIDs = []
         // 不删除保存的状态，以便下次可以恢复
 
-        // 恢复用户原始桌面壁纸
-        restoreOriginalWallpaper()
+        // 恢复用户原始桌面壁纸（仅在之前播放过视频壁纸时）
+        if wasPlayingVideo {
+            restoreOriginalWallpaper()
+        }
     }
 
     /// 仅拆掉本机 AVPlayer 视频壁纸，**不**调用 `WallpaperEngineXBridge.stopWallpaper()`。
     /// 在即将通过 CLI 设置 scene / web 等 WE 壁纸前调用，否则会误停 CLI 且把 `isControllingExternalEngine` 清掉，菜单栏暂停恢复会走错视频分支。
     func stopNativeVideoWallpaperOnly() {
+        // 只有真正在播放视频壁纸时才需要恢复原始桌面壁纸
+        let wasPlayingVideo = currentVideoURL != nil
+
         teardownAllWindows()
         currentVideoURL = nil
         currentPosterURL = nil
         isPaused = false
         videoTargetScreenIDs = []
         defaults.removeObject(forKey: stateKey)
-        restoreOriginalWallpaper()
+
+        if wasPlayingVideo {
+            restoreOriginalWallpaper()
+        }
     }
     
     // MARK: - 锁屏壁纸管理

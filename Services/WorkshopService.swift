@@ -85,6 +85,11 @@ class WorkshopService: ObservableObject {
 
         queryItems.append(URLQueryItem(name: "p", value: String(params.page)))
         queryItems.append(URLQueryItem(name: "num_per_page", value: String(params.pageSize)))
+        
+        // 热门趋势排序支持时间范围（days 参数）
+        if params.sortBy == .ranked, let days = params.days {
+            queryItems.append(URLQueryItem(name: "days", value: String(days)))
+        }
 
         var components = URLComponents(string: workshopBrowseBase)
         components?.queryItems = queryItems

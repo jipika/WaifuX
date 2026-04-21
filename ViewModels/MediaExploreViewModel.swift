@@ -51,6 +51,10 @@ final class MediaExploreViewModel: ObservableObject {
     private var workshopFixedContentLevelRaw: String {
         WorkshopSourceManager.WorkshopContentLevel.everyone.rawValue
     }
+    /// Workshop 排序方式
+    private(set) var workshopSortBy: WorkshopSearchParams.SortOption = .ranked
+    /// Workshop 热门趋势时间范围（仅对 trend 排序有效），nil = 全部时间
+    private(set) var workshopDays: Int? = nil
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -1017,6 +1021,17 @@ final class MediaExploreViewModel: ObservableObject {
         workshopCurrentType = type
         await loadWorkshopFeedInternal(query: query, tags: tags, type: type)
     }
+    
+    /// 设置 Workshop 排序方式
+    func setWorkshopSort(sortBy: WorkshopSearchParams.SortOption, days: Int? = nil) async {
+        workshopSortBy = sortBy
+        workshopDays = days
+        await loadWorkshopFeedInternal(
+            query: workshopSearchQuery,
+            tags: workshopCurrentTags,
+            type: workshopCurrentType
+        )
+    }
 
     /// 内部方法：加载 Workshop 数据
     private func loadWorkshopFeedInternal(
@@ -1047,12 +1062,13 @@ final class MediaExploreViewModel: ObservableObject {
 
         let params = WorkshopSearchParams(
             query: query,
-            sortBy: .ranked,
+            sortBy: workshopSortBy,
             page: 1,
             pageSize: 20,
             tags: tags,
             type: wallpaperType,
-            contentLevel: workshopFixedContentLevelRaw
+            contentLevel: workshopFixedContentLevelRaw,
+            days: workshopDays
         )
 
         do {
@@ -1061,7 +1077,7 @@ final class MediaExploreViewModel: ObservableObject {
             items = mediaItems
             workshopHasMore = response.hasMore
             currentTitle = query.isEmpty ? "Workshop" : "搜索: \(query)"
-            print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items")
+            print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items, sort=\(workshopSortBy.rawValue), days=\(workshopDays.map(String.init) ?? "all")")
         } catch {
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadWorkshopFeedInternal failed: \(error)")
@@ -1091,12 +1107,13 @@ final class MediaExploreViewModel: ObservableObject {
 
         let params = WorkshopSearchParams(
             query: workshopSearchQuery,
-            sortBy: .ranked,
+            sortBy: workshopSortBy,
             page: workshopCurrentPage,
             pageSize: 20,
             tags: workshopCurrentTags,
             type: wallpaperType,
-            contentLevel: workshopFixedContentLevelRaw
+            contentLevel: workshopFixedContentLevelRaw,
+            days: workshopDays
         )
 
         do {
