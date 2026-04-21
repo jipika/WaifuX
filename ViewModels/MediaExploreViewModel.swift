@@ -106,16 +106,23 @@ final class MediaExploreViewModel: ObservableObject {
                 // 清空旧数据，避免切换时新旧内容混在一起
                 self.items.removeAll()
                 if source == .wallpaperEngine {
-                    // 切换到 Workshop 数据源
+                    // 切换到 Workshop 数据源，清空旧筛选避免残留
+                    self.workshopSearchQuery = ""
+                    self.workshopCurrentTags = []
+                    self.workshopCurrentType = .all
+                    self.workshopCurrentPage = 1
+                    self.workshopHasMore = true
                     Task {
                         await self.loadWorkshopFeed()
                         await self.refreshHomeItems()
                     }
                 } else {
-                    // 切换回 MotionBG 数据源，重置状态
+                    // 切换回 MotionBG 数据源，重置 Workshop 状态
+                    self.workshopSearchQuery = ""
+                    self.workshopCurrentTags = []
+                    self.workshopCurrentType = .all
                     self.workshopCurrentPage = 1
                     self.workshopHasMore = true
-                    self.workshopSearchQuery = ""
                     Task {
                         await self.loadHomeFeed()
                         await self.refreshHomeItems()
@@ -971,6 +978,12 @@ final class MediaExploreViewModel: ObservableObject {
     /// 清空所有项目（用于数据源切换时）
     func clearItems() {
         items.removeAll()
+        // 重置 Workshop 搜索/筛选状态，避免切换/重置后残留旧内容
+        workshopSearchQuery = ""
+        workshopCurrentTags = []
+        workshopCurrentType = .all
+        workshopCurrentPage = 1
+        workshopHasMore = true
     }
 
     // MARK: - Workshop 数据加载
