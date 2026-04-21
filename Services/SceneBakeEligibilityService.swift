@@ -8,6 +8,8 @@ struct SceneBakeEligibilityFlags: Codable, Hashable, Sendable {
     var audioReactive: Bool
     var waterripple: Bool
     var shake: Bool
+    /// 检测到 `os.time` / `os.date` 等墙钟 API 或强相关配置；预渲染 MP4 无法随真实时间更新。
+    var wallClockTime: Bool
 
     enum CodingKeys: String, CodingKey {
         case cursorRipple = "cursor_ripple"
@@ -15,6 +17,43 @@ struct SceneBakeEligibilityFlags: Codable, Hashable, Sendable {
         case audioReactive = "audio_reactive"
         case waterripple
         case shake
+        case wallClockTime = "wall_clock_time"
+    }
+
+    init(
+        cursorRipple: Bool,
+        iris: Bool,
+        audioReactive: Bool,
+        waterripple: Bool,
+        shake: Bool,
+        wallClockTime: Bool = false
+    ) {
+        self.cursorRipple = cursorRipple
+        self.iris = iris
+        self.audioReactive = audioReactive
+        self.waterripple = waterripple
+        self.shake = shake
+        self.wallClockTime = wallClockTime
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cursorRipple = try c.decode(Bool.self, forKey: .cursorRipple)
+        iris = try c.decode(Bool.self, forKey: .iris)
+        audioReactive = try c.decode(Bool.self, forKey: .audioReactive)
+        waterripple = try c.decode(Bool.self, forKey: .waterripple)
+        shake = try c.decode(Bool.self, forKey: .shake)
+        wallClockTime = try c.decodeIfPresent(Bool.self, forKey: .wallClockTime) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(cursorRipple, forKey: .cursorRipple)
+        try c.encode(iris, forKey: .iris)
+        try c.encode(audioReactive, forKey: .audioReactive)
+        try c.encode(waterripple, forKey: .waterripple)
+        try c.encode(shake, forKey: .shake)
+        try c.encode(wallClockTime, forKey: .wallClockTime)
     }
 }
 
@@ -47,7 +86,7 @@ struct SceneBakeEligibilitySnapshot: Codable, Hashable, Sendable {
     /// 分析时使用的内容根目录（Steam workshop content 路径）
     var contentRootPath: String
 
-    /// 是否值得走「预烘焙视频」策略（recommended / marginal）
+    /// 是否值得走「预烘焙视频」策略（仅看综合档位）。墙钟依赖见 `flags.wallClockTime`，不拦截烘焙（与手动 CLI 一致）。
     var isEligibleForOfflineBake: Bool {
         tier == .recommended || tier == .marginal
     }
@@ -198,6 +237,67 @@ enum SceneBakeEligibilityAnalyzer {
         return Set(props.keys.map { $0.lowercased() })
     }
 
+    /// 递归取出 JSON 中所有字符串，用于在 scene/project 内嵌脚本里匹配墙钟 API。
+    private static func jsonStringValues(_ value: Any) -> [String] {
+        switch value {
+        case let s as String:
+            return [s]
+        case let arr as [Any]:
+            return arr.flatMap { jsonStringValues($0) }
+        case let dict as [String: Any]:
+            return dict.values.flatMap { jsonStringValues($0) }
+        default:
+            return []
+        }
+    }
+
+    /// 扫描工程目录下文本（Lua / JSON，单文件 ≤2MB，总预算约 6MB），拼接后做墙钟检测。
+    private static func collectScriptTextForWallClockScan(contentRoot: URL) -> String {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: contentRoot.path, isDirectory: &isDir), isDir.boolValue else { return "" }
+        guard let enumerator = fm.enumerator(
+            at: contentRoot,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return ""
+        }
+        var parts: [String] = []
+        var budget = 6_000_000
+        while let url = enumerator.nextObject() as? URL {
+            if budget <= 0 { break }
+            let ext = url.pathExtension.lowercased()
+            guard ext == "lua" || ext == "json" else { continue }
+            guard let vals = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                  let sz = vals.fileSize, sz > 0, sz <= 2_000_000 else { continue }
+            guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]), data.count <= 2_000_000 else { continue }
+            guard let s = String(data: data, encoding: .utf8) else { continue }
+            parts.append(s)
+            budget -= data.count
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// Lua 墙钟 API（与 Wallpaper Engine 场景脚本一致）；预渲染 MP4 无法随真实时间更新。
+    private static func wallClockSignalsInText(_ text: String) -> Bool {
+        let opts: String.CompareOptions = [.regularExpression, .caseInsensitive]
+        if text.range(of: #"os\.time\s*\("#, options: opts) != nil { return true }
+        if text.range(of: #"os\.date\s*\("#, options: opts) != nil { return true }
+        return false
+    }
+
+    /// `project.json` user property 键名中的强提示（避免与单纯 `timeout` 等误判，仅取较长子串）。
+    private static func wallClockHintsInUserKeys(_ keys: Set<String>) -> Bool {
+        keys.contains { k in
+            k.contains("wallclock") || k.contains("wall_clock")
+                || k.contains("systemtime") || k.contains("system_time")
+                || k.contains("unixtimestamp") || k.contains("unix_time")
+                || k.contains("localetime") || k.contains("locale_time")
+                || k.contains("datetimepicker") || k.contains("digitalclock")
+        }
+    }
+
     private static func sceneParallaxMouse(scene: [String: Any]) -> (enabled: Bool, influence: Double) {
         guard let g = scene["general"] as? [String: Any] else {
             return (false, 0)
@@ -227,6 +327,16 @@ enum SceneBakeEligibilityAnalyzer {
         let effectFiles = collectEffectFiles(scene: scene)
         let blob = effectFiles.joined(separator: "\n").lowercased()
         let userKeys = collectUserPropertyKeys(project: project)
+
+        let contentRootURL = URL(fileURLWithPath: contentRootPath)
+        let diskScriptBlob = collectScriptTextForWallClockScan(contentRoot: contentRootURL)
+        let embeddedJSONBlob = jsonStringValues(scene).joined(separator: "\n")
+            + "\n"
+            + (project.map { jsonStringValues($0).joined(separator: "\n") } ?? "")
+        let wallClockBlob = diskScriptBlob + "\n" + embeddedJSONBlob
+        let hasWallClockAPI = wallClockSignalsInText(wallClockBlob)
+        let hasWallClockUserKeys = wallClockHintsInUserKeys(userKeys)
+        let hasWallClock = hasWallClockAPI || hasWallClockUserKeys
 
         let hasCursorRipple = blob.contains("cursorripple")
         let hasIris = blob.contains("iris_movement") || blob.contains("2973943998")
@@ -273,6 +383,11 @@ enum SceneBakeEligibilityAnalyzer {
             }
         }
 
+        if hasWallClock {
+            // 轻量扣分供档位参考；不禁止烘焙（用户可直接 CLI 烘焙时 App 也应允许）。
+            deductions.append((strict ? 12 : 8, "墙钟：含 os.time/os.date 等（成片内时间不会随真实时间更新）"))
+        }
+
         let totalDeduction = deductions.map(\.0).reduce(0, +)
         var score = max(0, 100 - totalDeduction)
         var notes: [String] = []
@@ -300,7 +415,8 @@ enum SceneBakeEligibilityAnalyzer {
             iris: hasIris,
             audioReactive: hasAudioRing || hasAudioUser,
             waterripple: hasWaterripple,
-            shake: hasShake
+            shake: hasShake,
+            wallClockTime: hasWallClock
         )
 
         return SceneBakeEligibilitySnapshot(

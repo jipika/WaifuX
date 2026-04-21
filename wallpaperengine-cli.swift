@@ -1,3 +1,4 @@
+import CoreFoundation
 import Darwin
 import Foundation
 import AppKit
@@ -2025,6 +2026,15 @@ private func sceneBakePixelBuffer(from image: CGImage) throws -> CVPixelBuffer {
     return px
 }
 
+/// GLFW/Cocoa 后端要求 `glfwDestroyWindow`、事件轮询等发生在主线程；`sceneBakePerform` 在后台队列执行以避免
+/// `AVAssetWriter.finishWriting` 与主线程 `semaphore.wait` 死锁，故此处将渲染器调用派回主线程。
+private func sceneBakeOnMain<T>(_ work: () throws -> T) rethrows -> T {
+    if Thread.isMainThread {
+        return try work()
+    }
+    return try DispatchQueue.main.sync(execute: work)
+}
+
 private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     let sceneRoot = resolveSteamWorkshopDirectoryIfNeeded(cfg.sceneRoot)
     var isDir: ObjCBool = false
@@ -2038,24 +2048,26 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
         try FileManager.default.removeItem(at: cfg.outputURL)
     }
 
-    RendererBridge.shared.destroy()
-    RendererBridge.shared.loadWallpaper(path: sceneRoot, width: cfg.width, height: cfg.height, autoStartTicking: false)
-    RendererBridge.shared.setDesktopWindow(false)
-    RendererBridge.shared.hideWindow()
-
-    let rw = RendererBridge.shared.renderWidth
-    let rh = RendererBridge.shared.renderHeight
-    guard rw > 0, rh > 0 else {
+    sceneBakeOnMain {
         RendererBridge.shared.destroy()
+        RendererBridge.shared.loadWallpaper(path: sceneRoot, width: cfg.width, height: cfg.height, autoStartTicking: false)
+        RendererBridge.shared.setDesktopWindow(false)
+        RendererBridge.shared.hideWindow()
+    }
+
+    let rw = sceneBakeOnMain { RendererBridge.shared.renderWidth }
+    let rh = sceneBakeOnMain { RendererBridge.shared.renderHeight }
+    guard rw > 0, rh > 0 else {
+        sceneBakeOnMain { RendererBridge.shared.destroy() }
         throw SceneOfflineBakeError.loadFailed
     }
 
     for _ in 0 ..< 120 {
         let ok: Bool = autoreleasepool {
-            RendererBridge.shared.tickOnce()
+            sceneBakeOnMain { RendererBridge.shared.tickOnce() }
         }
         if !ok {
-            RendererBridge.shared.destroy()
+            sceneBakeOnMain { RendererBridge.shared.destroy() }
             throw SceneOfflineBakeError.loadFailed
         }
     }
@@ -2081,28 +2093,28 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     ]
     let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: sourceAttrs)
     guard writer.canAdd(input) else {
-        RendererBridge.shared.destroy()
+        sceneBakeOnMain { RendererBridge.shared.destroy() }
         throw SceneOfflineBakeError.writerFailed("cannot add video input")
     }
     writer.add(input)
     guard writer.startWriting() else {
-        RendererBridge.shared.destroy()
+        sceneBakeOnMain { RendererBridge.shared.destroy() }
         throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "startWriting failed")
     }
     writer.startSession(atSourceTime: .zero)
 
     for i in 0 ..< frameCount {
         try autoreleasepool {
-            if !RendererBridge.shared.tickOnce() {
+            if !sceneBakeOnMain({ RendererBridge.shared.tickOnce() }) {
                 input.markAsFinished()
                 writer.cancelWriting()
-                RendererBridge.shared.destroy()
+                sceneBakeOnMain { RendererBridge.shared.destroy() }
                 throw SceneOfflineBakeError.captureFailed
             }
-            guard let cg = RendererBridge.shared.captureFrame() else {
+            guard let cg = sceneBakeOnMain({ RendererBridge.shared.captureFrame() }) else {
                 input.markAsFinished()
                 writer.cancelWriting()
-                RendererBridge.shared.destroy()
+                sceneBakeOnMain { RendererBridge.shared.destroy() }
                 throw SceneOfflineBakeError.captureFailed
             }
             let pb = try sceneBakePixelBuffer(from: cg)
@@ -2115,13 +2127,13 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
             guard input.isReadyForMoreMediaData else {
                 input.markAsFinished()
                 writer.cancelWriting()
-                RendererBridge.shared.destroy()
+                sceneBakeOnMain { RendererBridge.shared.destroy() }
                 throw SceneOfflineBakeError.writerFailed("writer not ready")
             }
             if !adaptor.append(pb, withPresentationTime: pts) {
                 input.markAsFinished()
                 writer.cancelWriting()
-                RendererBridge.shared.destroy()
+                sceneBakeOnMain { RendererBridge.shared.destroy() }
                 throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "append failed")
             }
         }
@@ -2137,7 +2149,7 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
         sem.signal()
     }
     sem.wait()
-    RendererBridge.shared.destroy()
+    sceneBakeOnMain { RendererBridge.shared.destroy() }
     if let finishErr {
         throw SceneOfflineBakeError.writerFailed(finishErr.localizedDescription)
     }
@@ -2162,8 +2174,17 @@ private final class SceneOfflineBakeAppDelegate: NSObject, NSApplicationDelegate
             var code: Int32 = 1
             defer {
                 sceneOfflineBakeExitCode = code
-                DispatchQueue.main.async {
+                // 烘焙线程结束后必须让主线程 run loop 立即处理 `stop`，否则常出现「需点一下 Dock 才退出」：
+                // 仅 `async` 可能排在默认 mode 之后迟迟不跑；仅 `sync` 在部分 run loop 状态下也可能卡住。
+                // `CFRunLoopPerformBlock` + `CFRunLoopWakeUp` 把 stop 投递到 CommonModes 并唤醒主循环。
+                if Thread.isMainThread {
                     NSApp.stop(nil)
+                } else {
+                    let rl = CFRunLoopGetMain()
+                    CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue as CFString) {
+                        NSApp.stop(nil)
+                    }
+                    CFRunLoopWakeUp(rl)
                 }
             }
             do {

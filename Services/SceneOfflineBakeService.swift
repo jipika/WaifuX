@@ -68,13 +68,15 @@ enum SceneOfflineBakeService {
 
     /// 与资格快照配套；`cacheItemID` 通常等于 `MediaItem.id`，无记录时用 `stableOrphanCacheItemID`。
     /// - Parameter persistArtifactToItemID: 非 nil 时将成品写回对应下载记录。
+    /// - Parameter requireEligibility: 为 `false` 时跳过 `isEligibleForOfflineBake`（与手动调用 `wallpaperengine-cli bake` 一致，「设为壁纸」路径使用）。
     static func bake(
         eligibility: SceneBakeEligibilitySnapshot,
         contentRoot: URL,
         cacheItemID: String,
         durationSeconds: Double = 8,
         fps: Int32 = 30,
-        persistArtifactToItemID: String? = nil
+        persistArtifactToItemID: String? = nil,
+        requireEligibility: Bool = true
     ) async throws -> SceneBakeArtifact {
         let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
         guard entered else {
@@ -87,7 +89,8 @@ enum SceneOfflineBakeService {
                 cacheItemID: cacheItemID,
                 durationSeconds: durationSeconds,
                 fps: fps,
-                persistArtifactToItemID: persistArtifactToItemID
+                persistArtifactToItemID: persistArtifactToItemID,
+                requireEligibility: requireEligibility
             )
             await SceneOfflineBakeConcurrencyGate.shared.leave()
             return result
@@ -103,10 +106,13 @@ enum SceneOfflineBakeService {
         cacheItemID: String,
         durationSeconds: Double,
         fps: Int32,
-        persistArtifactToItemID: String?
+        persistArtifactToItemID: String?,
+        requireEligibility: Bool
     ) async throws -> SceneBakeArtifact {
-        guard eligibility.isEligibleForOfflineBake else {
-            throw SceneOfflineBakeError.ineligible
+        if requireEligibility {
+            guard eligibility.isEligibleForOfflineBake else {
+                throw SceneOfflineBakeError.ineligible
+            }
         }
         guard FileManager.default.fileExists(atPath: contentRoot.path) else {
             throw SceneOfflineBakeError.contentRootMissing
@@ -164,6 +170,8 @@ enum SceneOfflineBakeService {
         await MainActor.run {
             WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
         }
+        // 与 stop 子进程错开，降低与即将启动的 bake 进程争抢 GPU/内存导致被系统 SIGKILL（退出码常表现为 9）。
+        try await Task.sleep(nanoseconds: 250_000_000)
 
         let task = Process()
         task.executableURL = cli
@@ -204,27 +212,68 @@ enum SceneOfflineBakeService {
         task.standardOutput = outPipe
         task.standardError = errPipe
 
-        let outTask = Task.detached {
-            outPipe.fileHandleForReading.readDataToEndOfFile()
+        // `waitUntilExit` 为阻塞调用：放在独立线程执行，避免占满 Swift 并发线程池导致
+        // `Task.detached` 管道读取任务无法推进，进而死锁或长时间不返回。
+        let processTask = Task.detached(priority: .userInitiated) { () throws -> (Int32, Process.TerminationReason?, String) in
+            let outTask = Task.detached {
+                outPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            let errTask = Task.detached {
+                errPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            try task.run()
+            task.waitUntilExit()
+            let stdout = await outTask.value
+            let stderr = await errTask.value
+            var pieces: [String] = []
+            if !stdout.isEmpty, let s = String(data: stdout, encoding: .utf8), !s.isEmpty { pieces.append(s) }
+            if !stderr.isEmpty, let s = String(data: stderr, encoding: .utf8), !s.isEmpty { pieces.append(s) }
+            let merged = pieces.joined(separator: "\n")
+            let reason: Process.TerminationReason?
+            if #available(macOS 10.15, *) {
+                reason = task.terminationReason
+            } else {
+                reason = nil
+            }
+            return (task.terminationStatus, reason, merged)
         }
-        let errTask = Task.detached {
-            errPipe.fileHandleForReading.readDataToEndOfFile()
-        }
-        try task.run()
-        task.waitUntilExit()
-        let stdout = await outTask.value
-        let stderr = await errTask.value
-        var pieces: [String] = []
-        if !stdout.isEmpty, let s = String(data: stdout, encoding: .utf8), !s.isEmpty { pieces.append(s) }
-        if !stderr.isEmpty, let s = String(data: stderr, encoding: .utf8), !s.isEmpty { pieces.append(s) }
-        let output = pieces.joined(separator: "\n")
 
-        guard task.terminationStatus == 0, FileManager.default.fileExists(atPath: outURL.path) else {
-            throw SceneOfflineBakeError.bakeProcessFailed(
-                output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "bake 退出码 \(task.terminationStatus)"
-                    : output
-            )
+        // 外部 Task 取消时（如用户关闭 Sheet）必须终止子进程，否则 bake CLI 会继续占用 GPU/内存。
+        let (termStatus, termReason, output) = try await withTaskCancellationHandler {
+            try await processTask.value
+        } onCancel: {
+            if task.isRunning {
+                task.terminate()
+            }
+            processTask.cancel()
+        }
+
+        // 子进程已退出后偶现文件系统尚未可见输出文件，短暂轮询避免误判失败。
+        if termStatus == 0 {
+            for attempt in 0 ..< 15 {
+                if FileManager.default.fileExists(atPath: outURL.path),
+                   let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path),
+                   let sz = attrs[.size] as? NSNumber, sz.intValue > 10_000 {
+                    break
+                }
+                if attempt == 14 { break }
+                try await Task.sleep(nanoseconds: 80_000_000)
+            }
+        }
+
+        guard termStatus == 0, FileManager.default.fileExists(atPath: outURL.path) else {
+            let status = termStatus
+            var hint = ""
+            if #available(macOS 10.15, *) {
+                if termReason == .uncaughtSignal, status == 9 {
+                    hint = "（退出码 9 多为 SIGKILL：内存压力或系统终止子进程；可关闭其它占用 GPU/内存的应用后重试）"
+                }
+            } else if status == 9 {
+                hint = "（若 stderr 无明确错误，退出码 9 常为 SIGKILL）"
+            }
+            let tail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = tail.isEmpty ? "bake 退出码 \(status)\(hint)" : tail + (hint.isEmpty ? "" : "\n\(hint)")
+            throw SceneOfflineBakeError.bakeProcessFailed(base)
         }
 
         let artifact = SceneBakeArtifact(
