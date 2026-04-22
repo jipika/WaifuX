@@ -328,6 +328,34 @@ class WorkshopSourceManager: ObservableObject {
     var availableTags: [WorkshopTag] {
         WorkshopTag.allTags
     }
+
+    // MARK: - Workshop 分辨率筛选
+    
+    /// Steam Workshop 分辨率选项（对应 requiredtags[] 标签格式）
+    struct WorkshopResolution: Identifiable, Hashable {
+        let id: String
+        /// 展示文本，如 "1920 × 1080"
+        let display: String
+        /// Steam Workshop 标签值，如 "1920 x 1080"
+        let tagValue: String
+        
+        static let all: [WorkshopResolution] = [
+            WorkshopResolution(id: "3840x2160", display: "3840 × 2160 (4K UHD)", tagValue: "3840 x 2160"),
+            WorkshopResolution(id: "2560x1440", display: "2560 × 1440 (2K QHD)", tagValue: "2560 x 1440"),
+            WorkshopResolution(id: "3440x1440", display: "3440 × 1440 (UW-QHD)", tagValue: "3440 x 1440"),
+            WorkshopResolution(id: "1920x1080", display: "1920 × 1080 (FHD)", tagValue: "1920 x 1080"),
+            WorkshopResolution(id: "2560x1080", display: "2560 × 1080 (UW-FHD)", tagValue: "2560 x 1080"),
+            WorkshopResolution(id: "1280x720",  display: "1280 × 720 (HD)",    tagValue: "1280 x 720"),
+            WorkshopResolution(id: "7680x4320", display: "7680 × 4320 (8K UHD)", tagValue: "7680 x 4320"),
+            WorkshopResolution(id: "5120x2880", display: "5120 × 2880 (5K)",     tagValue: "5120 x 2880"),
+            WorkshopResolution(id: "5120x1440", display: "5120 × 1440 (超宽)",    tagValue: "5120 x 1440"),
+        ]
+    }
+    
+    /// 获取所有可用分辨率
+    var availableResolutions: [WorkshopResolution] {
+        WorkshopResolution.all
+    }
     
     // MARK: - Published State
     

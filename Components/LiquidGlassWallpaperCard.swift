@@ -70,10 +70,19 @@ struct LiquidGlassWallpaperCard: View {
             )
             // 确保整个卡片区域可点击，而不仅仅是图片/文字
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .shadow(
-                color: isHovered ? LiquidGlassColors.primaryPink.opacity(0.3) : .black.opacity(0.25),
-                radius: isHovered ? 25 : 12,
-                y: isHovered ? 12 : 6
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(isHovered ? 0.35 : 0.15),
+                                Color.white.opacity(0.05)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: isHovered ? 1.5 : 0.5
+                    )
             )
             .scaleEffect(isHovered ? 1.03 : 1.0)
         }
@@ -220,10 +229,19 @@ struct LiquidGlassFeaturedCard: View {
             }
             // 确保整个精选卡片区域可点击
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .shadow(
-                color: isHovered ? LiquidGlassColors.primaryPink.opacity(0.3) : .black.opacity(0.3),
-                radius: isHovered ? 25 : 15,
-                y: isHovered ? 15 : 8
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(isHovered ? 0.35 : 0.15),
+                                Color.white.opacity(0.05)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: isHovered ? 1.5 : 0.5
+                    )
             )
         }
         .buttonStyle(.plain)
@@ -286,11 +304,6 @@ struct LiquidGlassCompactWallpaperCard: View {
                         ),
                         lineWidth: isHovered ? 1 : 0.5
                     )
-            )
-            .shadow(
-                color: isHovered ? LiquidGlassColors.glowPink : .black.opacity(0.2),
-                radius: isHovered ? 15 : 8,
-                y: isHovered ? 8 : 4
             )
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }

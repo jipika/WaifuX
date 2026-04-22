@@ -98,7 +98,7 @@ struct SpotlightBackground: View {
                             )
                         )
                         .frame(width: geometry.size.width * 0.5, height: 60)
-                        .blur(radius: 30)
+                        .blur(radius: 15)
                         .offset(y: -20)
                     
                     Spacer()
@@ -118,7 +118,7 @@ struct SpotlightBackground: View {
                     )
                     .frame(width: geometry.size.width * spread * 0.7)
                     .frame(maxWidth: .infinity)
-                    .blur(radius: 80)
+                    .blur(radius: 40)
                     
                     Spacer()
                 }
@@ -144,7 +144,7 @@ struct SpotlightBackground: View {
                                 )
                             )
                             .frame(width: geometry.size.width * spread * 1.5, height: 80)
-                            .blur(radius: 25)
+                            .blur(radius: 12)
                         
                         // 内层更亮的反光核心
                         Ellipse()
@@ -161,7 +161,7 @@ struct SpotlightBackground: View {
                                 )
                             )
                             .frame(width: geometry.size.width * spread * 0.8, height: 40)
-                            .blur(radius: 12)
+                            .blur(radius: 6)
                     }
                     .offset(y: -10)
                 }

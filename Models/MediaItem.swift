@@ -91,6 +91,16 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let downloadOptions: [MediaDownloadOption]
     let sourceName: String
     let isAnimatedImage: Bool?
+    
+    // Workshop-specific metadata (optional)
+    let subscriptionCount: Int?
+    let favoriteCount: Int?
+    let viewCount: Int?
+    let ratingScore: Double?
+    let authorName: String?
+    let fileSize: Int64?
+    let createdAt: Date?
+    let updatedAt: Date?
 
     init(
         slug: String,
@@ -107,7 +117,15 @@ struct MediaItem: Identifiable, Codable, Hashable {
         durationSeconds: Double? = nil,
         downloadOptions: [MediaDownloadOption] = [],
         sourceName: String = "MotionBGs",
-        isAnimatedImage: Bool? = nil
+        isAnimatedImage: Bool? = nil,
+        subscriptionCount: Int? = nil,
+        favoriteCount: Int? = nil,
+        viewCount: Int? = nil,
+        ratingScore: Double? = nil,
+        authorName: String? = nil,
+        fileSize: Int64? = nil,
+        createdAt: Date? = nil,
+        updatedAt: Date? = nil
     ) {
         self.id = slug
         self.slug = slug
@@ -125,6 +143,14 @@ struct MediaItem: Identifiable, Codable, Hashable {
         self.downloadOptions = downloadOptions
         self.sourceName = sourceName
         self.isAnimatedImage = isAnimatedImage
+        self.subscriptionCount = subscriptionCount
+        self.favoriteCount = favoriteCount
+        self.viewCount = viewCount
+        self.ratingScore = ratingScore
+        self.authorName = authorName
+        self.fileSize = fileSize
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
 
     var primaryBadgeText: String {

@@ -181,6 +181,15 @@ private final class RendererBridge {
     }
 
     func loadWallpaper(path: String, width: Int, height: Int, autoStartTicking: Bool = true) {
+        // 预检 Scene parent 循环引用，避免 C++ 渲染器陷入不可恢复的无限递归
+        if let validationError = validateSceneParentGraph(sceneRoot: path) {
+            dlog("[RendererBridge] Scene validation failed: \(validationError)")
+            rendererLock.lock()
+            isLoaded = false
+            rendererLock.unlock()
+            return
+        }
+
         rendererLock.lock()
         if isLoaded {
             rendererLock.unlock()
@@ -195,17 +204,22 @@ private final class RendererBridge {
         }
 
         let assets = lastAssetsPath ?? defaultAssetsPath()
+        dlog("[RendererBridge] Creating renderer assets=\(assets) ...")
         if !assets.isEmpty {
-            handle = lw_renderer_create_with_assets(assets)
+            handle = autoreleasepool { lw_renderer_create_with_assets(assets) }
         } else {
-            handle = lw_renderer_create()
+            handle = autoreleasepool { lw_renderer_create() }
         }
+        dlog("[RendererBridge] Renderer handle=\(String(describing: handle))")
 
         guard let h = handle else {
             rendererLock.unlock()
+            dlog("[RendererBridge] ERROR: lw_renderer_create returned nil")
             return
         }
-        lw_renderer_load(h, path, Int32(width), Int32(height))
+        dlog("[RendererBridge] Loading wallpaper: \(path) \(width)x\(height)")
+        autoreleasepool { lw_renderer_load(h, path, Int32(width), Int32(height)) }
+        dlog("[RendererBridge] lw_renderer_load returned")
         isLoaded = true
         rendererLock.unlock()
         if autoStartTicking {
@@ -576,6 +590,76 @@ private func resolveWEWorkshopNestedRoot(_ url: URL, depthLeft: UInt, fm: FileMa
         }
     }
     return url
+}
+
+/// 预检 Scene 壁纸的 objects parent 链，检测循环引用和过深层级。
+/// 返回 nil 表示通过预检；返回字符串表示错误原因（应拒绝加载）。
+private func validateSceneParentGraph(sceneRoot: String) -> String? {
+    let fm = FileManager.default
+    let rootURL = URL(fileURLWithPath: sceneRoot)
+
+    let projectJSON = rootURL.appendingPathComponent("project.json")
+    guard fm.fileExists(atPath: projectJSON.path),
+          let data = try? Data(contentsOf: projectJSON),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return nil
+    }
+
+    guard let type = json["type"] as? String, type.lowercased() == "scene" else {
+        return nil
+    }
+
+    let sceneFileName = json["file"] as? String ?? "scene.json"
+    let sceneURL = rootURL.appendingPathComponent(sceneFileName)
+
+    guard fm.fileExists(atPath: sceneURL.path),
+          let sceneData = try? Data(contentsOf: sceneURL),
+          let sceneJson = try? JSONSerialization.jsonObject(with: sceneData) as? [String: Any],
+          let objects = sceneJson["objects"] as? [[String: Any]] else {
+        return nil
+    }
+
+    var idToParent: [Int: Int] = [:]
+    var idToName: [Int: String] = [:]
+    for obj in objects {
+        guard let id = obj["id"] as? Int else { continue }
+        idToName[id] = obj["name"] as? String ?? "?"
+        if let parent = obj["parent"] as? Int {
+            idToParent[id] = parent
+        }
+    }
+
+    let maxDepth = 500
+
+    func detectCycle(from startId: Int, visited: inout Set<Int>, path: inout [Int], depth: Int) -> String? {
+        if depth > maxDepth {
+            return "Scene 对象层级过深（>\(maxDepth)），可能存在异常嵌套"
+        }
+        if let idx = path.firstIndex(of: startId) {
+            let cycle = path[idx...] + [startId]
+            let chain = cycle.map { "\($0)(\(idToName[$0] ?? "?"))" }.joined(separator: " -> ")
+            return "Scene 对象存在 parent 循环引用: \(chain)"
+        }
+        if visited.contains(startId) {
+            return nil
+        }
+        visited.insert(startId)
+        path.append(startId)
+        defer { path.removeLast() }
+
+        guard let parentId = idToParent[startId] else { return nil }
+        return detectCycle(from: parentId, visited: &visited, path: &path, depth: depth + 1)
+    }
+
+    var visited = Set<Int>()
+    for id in idToParent.keys {
+        var path = [Int]()
+        if let error = detectCycle(from: id, visited: &visited, path: &path, depth: 1) {
+            return error
+        }
+    }
+
+    return nil
 }
 
 /// Steam 布局：`.../steamapps/workshop/content/431960/<workshopId>/.../project.json`。
@@ -2037,6 +2121,11 @@ private func sceneBakeOnMain<T>(_ work: () throws -> T) rethrows -> T {
 
 private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
     let sceneRoot = resolveSteamWorkshopDirectoryIfNeeded(cfg.sceneRoot)
+
+    if let validationError = validateSceneParentGraph(sceneRoot: sceneRoot) {
+        throw SceneOfflineBakeError.writerFailed("Scene validation failed: \(validationError)")
+    }
+
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: sceneRoot, isDirectory: &isDir),
           isDir.boolValue,
@@ -2174,16 +2263,30 @@ private final class SceneOfflineBakeAppDelegate: NSObject, NSApplicationDelegate
             var code: Int32 = 1
             defer {
                 sceneOfflineBakeExitCode = code
-                // 烘焙线程结束后必须让主线程 run loop 立即处理 `stop`，否则常出现「需点一下 Dock 才退出」：
-                // 仅 `async` 可能排在默认 mode 之后迟迟不跑；仅 `sync` 在部分 run loop 状态下也可能卡住。
-                // `CFRunLoopPerformBlock` + `CFRunLoopWakeUp` 把 stop 投递到 CommonModes 并唤醒主循环。
-                if Thread.isMainThread {
+                // 结束 AppKit run loop：`stop` 只设标志位，不会立即返回；
+                // 必须再 post 一个虚拟 NSEvent 强制 `nextEventMatchingMask` 返回，
+                // 否则 run loop 会永远卡在等待事件上。
+                let stopBlock = {
                     NSApp.stop(nil)
+                    if let ev = NSEvent.otherEvent(
+                        with: .applicationDefined,
+                        location: .zero,
+                        modifierFlags: [],
+                        timestamp: 0,
+                        windowNumber: 0,
+                        context: nil,
+                        subtype: 0,
+                        data1: 0,
+                        data2: 0
+                    ) {
+                        NSApp.postEvent(ev, atStart: true)
+                    }
+                }
+                if Thread.isMainThread {
+                    stopBlock()
                 } else {
                     let rl = CFRunLoopGetMain()
-                    CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue as CFString) {
-                        NSApp.stop(nil)
-                    }
+                    CFRunLoopPerformBlock(rl, CFRunLoopMode.commonModes.rawValue as CFString, stopBlock)
                     CFRunLoopWakeUp(rl)
                 }
             }

@@ -20,7 +20,6 @@ struct MediaExploreContentView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var contentSize: CGFloat = 0
     @State private var containerSize: CGFloat = 0
-    @State private var visibleCardIDs: Set<String> = []
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var gridImagePrefetcher: ImagePrefetcher?
@@ -33,9 +32,11 @@ struct MediaExploreContentView: View {
     /// 缓存筛选/排序后的列表，避免每次 body（含滚动、`isLoading` 等）都对 `items` 全表 filter/sort，减轻 AttributeGraph 压力。
     @State private var visibleMediaItems: [MediaItem] = []
 
-    // Workshop 筛选（内容级别固定 SFW，不提供 UI）
+    // Workshop 筛选
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
     @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
+    @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
+    @State private var selectedWorkshopResolution: WorkshopSourceManager.WorkshopResolution? = nil
     @State private var workshopSearchQuery: String = ""
     @State private var selectedWorkshopSort: WorkshopSortOption = .trendWeek
     private var workshopService: WorkshopService {
@@ -59,6 +60,7 @@ struct MediaExploreContentView: View {
                         heroSection
                         categorySection
                         if workshopSourceManager.activeSource == .wallpaperEngine {
+                            filterSection
                             workshopTagsSection
                             activeFiltersSection
                         }
@@ -117,6 +119,7 @@ struct MediaExploreContentView: View {
             if !visible {
                 cancelTasks()
                 gridImagePrefetcher?.stop()
+                exploreAtmosphere.pause()
             }
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
@@ -183,6 +186,10 @@ struct MediaExploreContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("切换到 \(workshopSourceManager.activeSource == .motionBG ? t("wallpaperEngine") : "MotionBG")")
+                .sourceSwitchTooltip(
+                    key: "media_source_switch_tooltip_shown",
+                    message: "点击这里切换壁纸源"
+                )
             }
 
             Text(t("exploreMedia"))
@@ -202,7 +209,11 @@ struct MediaExploreContentView: View {
                 onSubmit: { submitSearch() },
                 onClear: { submitSearch(with: "") }
             )
-            
+
+            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+                randomizeAtmosphere()
+            }
+
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
                 resetAllFilters(reloadData: true)
             }
@@ -240,7 +251,9 @@ struct MediaExploreContentView: View {
         await viewModel.loadWorkshopWithFilters(
             query: workshopSearchQuery,
             tags: tags,
-            type: selectedWorkshopType
+            type: selectedWorkshopType,
+            contentLevel: selectedWorkshopContentLevel,
+            resolution: selectedWorkshopResolution?.tagValue
         )
     }
 
@@ -283,6 +296,7 @@ struct MediaExploreContentView: View {
                         }
                     }
                 }
+                workshopResolutionMenu
             }
         }
     }
@@ -315,6 +329,56 @@ struct MediaExploreContentView: View {
     }
 
     @ViewBuilder
+    private var filterSection: some View {
+        // [强制规则] 内容级别已写死为 SFW (Everyone)，不在 UI 中显示筛选
+        EmptyView()
+    }
+    
+    private var workshopResolutionMenu: some View {
+        Menu {
+            Button(t("allResolutions")) {
+                selectedWorkshopResolution = nil
+                Task { await applyWorkshopFilters() }
+            }
+            Divider()
+            ForEach(workshopSourceManager.availableResolutions) { res in
+                let isSelected = selectedWorkshopResolution?.id == res.id
+                Button {
+                    selectedWorkshopResolution = isSelected ? nil : res
+                    Task { await applyWorkshopFilters() }
+                } label: {
+                    HStack {
+                        Text(res.display)
+                        if isSelected { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            let hasResolution = selectedWorkshopResolution != nil
+            HStack(spacing: 6) {
+                Image(systemName: "aspectratio").font(.system(size: 11, weight: .semibold))
+                Text(hasResolution ? (selectedWorkshopResolution?.display ?? "") : t("resolution"))
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(hasResolution ? 0.95 : 0.7))
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .exploreFrostedCapsule(
+                tint: exploreAtmosphere.tint.primary,
+                material: hasResolution ? .regularMaterial : .ultraThinMaterial,
+                tintLayerOpacity: hasResolution ? 0.1 : 0.03
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .offset(y: 1)
+        .frame(height: 34)
+    }
+    
+    private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
+        Array(WorkshopSourceManager.WorkshopContentLevel.allCases)
+    }
+
+    @ViewBuilder
     private var activeFiltersSection: some View {
         if workshopSourceManager.activeSource == .wallpaperEngine {
             let chips = workshopActiveFilterChips
@@ -327,7 +391,9 @@ struct MediaExploreContentView: View {
                         Button(t("clear")) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 selectedWorkshopTag = nil
+                                selectedWorkshopContentLevel = .everyone
                                 selectedWorkshopType = .all
+                                selectedWorkshopResolution = nil
                                 Task { await applyWorkshopFilters() }
                             }
                         }
@@ -357,7 +423,7 @@ struct MediaExploreContentView: View {
         let title: String
         let accentHex: String
         let kind: Kind
-        enum Kind { case type, tag }
+        enum Kind { case type, tag, resolution }
     }
 
     private var workshopActiveFilterChips: [WorkshopFilterChipData] {
@@ -378,6 +444,15 @@ struct MediaExploreContentView: View {
                 kind: .tag
             ))
         }
+        // [强制规则] 内容级别已写死为 SFW (Everyone)，不在当前筛选中显示
+        if let res = selectedWorkshopResolution {
+            chips.append(WorkshopFilterChipData(
+                id: "res_\(res.id)",
+                title: res.display,
+                accentHex: "3A86FF",
+                kind: .resolution
+            ))
+        }
         return chips
     }
 
@@ -387,6 +462,8 @@ struct MediaExploreContentView: View {
             selectedWorkshopType = .all
         case .tag:
             selectedWorkshopTag = nil
+        case .resolution:
+            selectedWorkshopResolution = nil
         }
         Task { await applyWorkshopFilters() }
     }
@@ -438,8 +515,11 @@ struct MediaExploreContentView: View {
                     onTap: { selectedMedia = item }
                 )
                 .onAppear {
-                    visibleCardIDs.insert(item.id)
                     preloadNearbyImages(around: item, config: config)
+                    // 自动预加载 MotionBG 卡片详情（避免用户必须点进详情返回后才显示完整信息）
+                    if item.sourceName != t("wallpaperEngine") && !item.hasDetailPayload {
+                        Task(priority: .background) { await viewModel.ensureDetail(for: item) }
+                    }
                 }
                 // 移除入场动画和滚动效果，解决卡顿和空白问题
                 // .cardEntrance(...)
@@ -472,13 +552,20 @@ struct MediaExploreContentView: View {
             .map { items[$0] }
             .map(\.coverImageURL)
 
-        gridImagePrefetcher?.stop()
-        let prefetcher = ImagePrefetcher(
-            urls: urls,
-            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
-        )
-        gridImagePrefetcher = prefetcher
-        prefetcher.start()
+        // 放到后台线程执行，避免阻塞主线程滚动
+        Task(priority: .background) {
+            await MainActor.run {
+                self.gridImagePrefetcher?.stop()
+            }
+            let prefetcher = ImagePrefetcher(
+                urls: urls,
+                options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+            )
+            await MainActor.run {
+                self.gridImagePrefetcher = prefetcher
+            }
+            prefetcher.start()
+        }
     }
 
     // MARK: - UI Components
@@ -529,8 +616,6 @@ struct MediaExploreContentView: View {
             isInitialLoading = true
         }
         await viewModel.initialLoadIfNeeded()
-        // 请求完数据后重置 visibleCardIDs，避免脏数据
-        visibleCardIDs.removeAll()
         if searchText.isEmpty {
             searchText = viewModel.currentQuery
         }
@@ -546,12 +631,12 @@ struct MediaExploreContentView: View {
             selectedHotTag = nil
             selectedWorkshopTag = nil
             selectedWorkshopType = .all
+            selectedWorkshopContentLevel = .everyone
             searchText = ""
         }
 
         lastPrefetchCenterIndex = -1
         lastSyncedFirstItemID = nil
-        visibleCardIDs.removeAll()
         // 清空 ViewModel 数据避免显示旧数据
         viewModel.clearItems()
 
@@ -575,8 +660,9 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
+        selectedWorkshopContentLevel = .everyone
+        selectedWorkshopResolution = nil
         lastPrefetchCenterIndex = -1
-        visibleMediaItems = []
         searchTask?.cancel()
         searchTask = Task {
             if workshopSourceManager.activeSource == .wallpaperEngine {
@@ -584,15 +670,11 @@ struct MediaExploreContentView: View {
             } else {
                 await viewModel.search(query: searchQuery)
             }
-            await MainActor.run {
-                viewModel.items.forEach { visibleCardIDs.insert($0.id) }
-            }
             searchTask = nil
         }
     }
 
     private func handleFilterChange() {
-        visibleCardIDs.removeAll()
         recomputeVisibleMediaItems()
 
         // Workshop 模式下不支持标签过滤
@@ -620,7 +702,6 @@ struct MediaExploreContentView: View {
     
     private func handleWorkshopSortChange() {
         AppLogger.info(.wallpaper, "Workshop 排序变化", metadata: ["排序": selectedWorkshopSort.rawValue])
-        visibleCardIDs.removeAll()
         searchTask?.cancel()
         searchTask = Task {
             await viewModel.setWorkshopSort(
@@ -628,7 +709,6 @@ struct MediaExploreContentView: View {
                 days: selectedWorkshopSort.days
             )
             await MainActor.run {
-                viewModel.items.forEach { visibleCardIDs.insert($0.id) }
                 searchTask = nil
             }
         }
@@ -706,13 +786,14 @@ struct MediaExploreContentView: View {
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
+        selectedWorkshopContentLevel = .everyone
+        selectedWorkshopResolution = nil
         selectedWorkshopSort = .trendWeek
         selectedCategory = .all
         selectedSort = .newest
         viewModel.clearItems()
         lastPrefetchCenterIndex = -1
         lastSyncedFirstItemID = nil
-        visibleCardIDs.removeAll()
         loadMoreFailed = false
         viewModel.errorMessage = nil
         recomputeVisibleMediaItems()
@@ -745,6 +826,15 @@ struct MediaExploreContentView: View {
         exploreAtmosphere.updateFirstMedia(items.first)
     }
 
+    private func randomizeAtmosphere() {
+        guard !visibleMediaItems.isEmpty else { return }
+        let random = visibleMediaItems.randomElement()!
+        exploreAtmosphere.updateFromImageURL(
+            random.coverImageURL,
+            keyPrefix: "rand-media"
+        )
+    }
+
     private func recomputeVisibleMediaItems() {
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
@@ -757,13 +847,22 @@ struct MediaExploreContentView: View {
     }
     
     private func animateCardAppearance(id: String, index: Int) {
-        // 直接插入，不使用动画，避免 CPU 占用
-        visibleCardIDs.insert(id)
+        // 已移除 visibleCardIDs，避免滚动时触发 @State 更新导致卡顿
     }
     
     private func formattedCount(_ count: Int) -> String {
         NumberFormatter.localizedString(from: NSNumber(value: count), number: .decimal)
     }
+    
+}
+
+private func formatCompactCount(_ count: Int) -> String {
+    if count >= 1_000_000 {
+        return String(format: "%.1fM", Double(count) / 1_000_000)
+    } else if count >= 1_000 {
+        return String(format: "%.1fK", Double(count) / 1_000)
+    }
+    return "\(count)"
 }
 
 // MARK: - Grid Configuration
@@ -1018,7 +1117,18 @@ private struct SimpleMediaCard: View {
     }
 
     private var resolutionOverlayText: String {
-        item.resolutionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Workshop 源：右上角不重复显示类型（类型已在 tags 或详情中），改为显示文件大小
+        if item.sourceName == t("wallpaperEngine") {
+            if let fileSize = item.fileSize, fileSize > 0 {
+                let mb = Double(fileSize) / 1024 / 1024
+                if mb >= 1024 {
+                    return String(format: "%.1f GB", mb / 1024)
+                }
+                return String(format: "%.1f MB", mb)
+            }
+            return ""
+        }
+        return item.resolutionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var firstListTag: String? {
@@ -1057,12 +1167,25 @@ private struct SimpleMediaCard: View {
             }
 
             HStack(spacing: 8) {
-                Text(item.title)
+                // Workshop 源显示作者名（如壁纸探索页显示上传者），MotionBG 显示标题
+                Text(item.sourceName == t("wallpaperEngine") ? (item.authorName ?? item.title) : item.title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
                 
                 Spacer()
+                
+                // Workshop 源显示订阅数/浏览数统计（如壁纸探索页）
+                if item.sourceName == t("wallpaperEngine") {
+                    HStack(spacing: 10) {
+                        if let subs = item.subscriptionCount, subs > 0 {
+                            cardStatLabel(systemImage: "heart.fill", value: formatCompactCount(subs))
+                        }
+                        if let views = item.viewCount, views > 0 {
+                            cardStatLabel(systemImage: "eye.fill", value: formatCompactCount(views))
+                        }
+                    }
+                }
                 
                 Image(systemName: isFavorite ? "heart.fill" : "heart")
                     .font(.system(size: 11, weight: .bold))
@@ -1078,15 +1201,15 @@ private struct SimpleMediaCard: View {
                 .fill(Color.clear)
                 .overlay(
                     Self.cardShape
-                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                        .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
                 )
         )
         .clipShape(Self.cardShape)
+        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .animation(.easeOut(duration: 0.2), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(.spring(response: 0.20, dampingFraction: 0.85), value: isHovered)
         .onTapGesture {
             onTap()
         }
@@ -1103,6 +1226,12 @@ private struct SimpleMediaCard: View {
             if item.previewVideoURL != nil {
                 metaTag(text: "LIVE")
             }
+            if let rating = item.ratingScore {
+                metaTag(text: String(format: "★ %.1f", rating))
+            }
+            if let subs = item.subscriptionCount, subs > 0 {
+                metaTag(text: formatCompactCount(subs) + " subs")
+            }
             Spacer(minLength: 0)
             if !resolutionOverlayText.isEmpty {
                 metaTag(text: resolutionOverlayText)
@@ -1118,6 +1247,17 @@ private struct SimpleMediaCard: View {
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4))
             .clipShape(Capsule())
+    }
+    
+    private func cardStatLabel(systemImage: String, value: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white.opacity(0.5))
+            Text(value)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+        }
     }
 
     private var placeholderGradient: some View {
@@ -1181,9 +1321,9 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
     case trendQuarter = "trend_90"
     case trendYear = "trend_365"
     case trendAll = "trend"
-    case subscribed = "subscribed"
     case updated = "updated"
     case created = "created"
+    case topRated = "toprated"
     
     var id: String { rawValue }
     
@@ -1195,9 +1335,9 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
         case .trendQuarter: return t("workshop.sort.trendQuarter")
         case .trendYear: return t("workshop.sort.trendYear")
         case .trendAll: return t("workshop.sort.trendAll")
-        case .subscribed: return t("workshop.sort.subscribed")
         case .updated: return t("workshop.sort.updated")
         case .created: return t("workshop.sort.created")
+        case .topRated: return t("workshop.sort.topRated")
         }
     }
     
@@ -1208,12 +1348,12 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
         switch self {
         case .trendToday, .trendWeek, .trendMonth, .trendQuarter, .trendYear, .trendAll:
             return .ranked
-        case .subscribed:
-            return .subscriptions
         case .updated:
             return .updated
         case .created:
             return .created
+        case .topRated:
+            return .topRated
         }
     }
     
@@ -1225,7 +1365,7 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
         case .trendMonth: return 30
         case .trendQuarter: return 90
         case .trendYear: return 365
-        case .trendAll, .subscribed, .updated, .created:
+        case .trendAll, .updated, .created, .topRated:
             return nil
         }
     }

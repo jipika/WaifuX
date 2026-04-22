@@ -1328,7 +1328,10 @@ struct AnimeLibraryCard: View {
                     .fill(Color(hex: "1A1D24").opacity(0.6))
             )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .shadow(color: isHovered ? Color.black.opacity(0.3) : .clear, radius: isHovered ? 12 : 0, x: 0, y: isHovered ? 4 : 0)
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
+            )
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))

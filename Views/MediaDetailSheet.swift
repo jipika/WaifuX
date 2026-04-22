@@ -237,7 +237,12 @@ struct MediaDetailSheet: View {
     }
 
     private var previewVideoURL: URL? {
-        resolvedItem.previewVideoURL
+        // 优先使用已烘焙的 Scene MP4 作为背景视频
+        if let artifact = currentDownloadRecord?.sceneBakeArtifact,
+           FileManager.default.fileExists(atPath: artifact.videoPath) {
+            return URL(fileURLWithPath: artifact.videoPath)
+        }
+        return resolvedItem.previewVideoURL
     }
 
     private func detailScrollTopInset(viewportHeight: CGFloat, heroHidden: Bool) -> CGFloat {
@@ -356,24 +361,18 @@ struct MediaDetailSheet: View {
         .animation(.easeOut(duration: 0.15), value: scrollOffset)
     }
 
-    // MARK: - 顶部返回按钮（设置壁纸 / 场景烘焙中仍禁止误触返回；下载中可返回）
+    // MARK: - 顶部返回按钮
     private var floatingBackButton: some View {
         Button(action: {
-            if isSettingWallpaper || isBakingScene {
-                AppLogger.warn(.ui, "Media 返回被阻止：设置壁纸/烘焙进行中",
-                    metadata: ["isSettingWallpaper": isSettingWallpaper, "isBakingScene": isBakingScene])
-                return
-            }
             onClose()
         }) {
             DetailSheetCircleIconLabel(
                 systemName: "chevron.left",
-                foreground: (isDownloading || isSettingWallpaper || isBakingScene) ? .white.opacity(0.35) : .white.opacity(0.95),
+                foreground: .white.opacity(0.95),
                 fontSize: 15,
                 frameSide: 38
             )
             .detailGlassCircleChrome()
-            .opacity(isDownloading || isSettingWallpaper || isBakingScene ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -445,18 +444,34 @@ struct MediaDetailSheet: View {
             (t("source"), resolvedItem.sourceName)
         ]
 
-        if let exactResolution = resolvedItem.exactResolution, !exactResolution.isEmpty {
-            items.append((t("specs2"), exactResolution))
+        // Workshop 源显示丰富的元数据胶囊（订阅、浏览、评分、大小、类型）
+        if resolvedItem.sourceName == t("wallpaperEngine") {
+            items.append((t("fileType"), resolvedItem.resolutionLabel))
+            if let subs = resolvedItem.subscriptionCount, subs > 0 {
+                items.append((t("subscriptions"), formatCount(subs)))
+            }
+            if let views = resolvedItem.viewCount, views > 0 {
+                items.append((t("views"), formatCount(views)))
+            }
+            if let rating = resolvedItem.ratingScore {
+                items.append((t("rating"), String(format: "%.1f", rating)))
+            }
+            if let fileSize = resolvedItem.fileSize, fileSize > 0 {
+                items.append((t("size"), formatFileSize(fileSize)))
+            }
         } else {
-            items.append((t("specs2"), resolvedItem.resolutionLabel))
-        }
-
-        if let duration = resolvedItem.durationLabel {
-            items.append((t("duration"), duration))
-        }
-
-        if !resolvedItem.downloadOptions.isEmpty {
-            items.append((t("download2"), "\(resolvedItem.downloadOptions.count) \(t("items"))"))
+            // MotionBG / 其他源保持原有逻辑
+            if let exactResolution = resolvedItem.exactResolution, !exactResolution.isEmpty {
+                items.append((t("specs2"), exactResolution))
+            } else {
+                items.append((t("specs2"), resolvedItem.resolutionLabel))
+            }
+            if let duration = resolvedItem.durationLabel {
+                items.append((t("duration"), duration))
+            }
+            if !resolvedItem.downloadOptions.isEmpty {
+                items.append((t("download2"), "\(resolvedItem.downloadOptions.count) \(t("items"))"))
+            }
         }
 
         return items
@@ -587,6 +602,17 @@ struct MediaDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        previewWallpaper()
+                    } label: {
+                        DetailSheetCircleIconLabel(systemName: "arrow.up.backward.and.arrow.down.forward")
+                            .detailGlassCircleChrome()
+                    }
+                    .buttonStyle(.plain)
+                    .help(t("preview"))
+                }
             }
 
             Button {
@@ -737,6 +763,43 @@ struct MediaDetailSheet: View {
                 )
             }
 
+            // Workshop 社交统计
+            if resolvedItem.sourceName == t("wallpaperEngine"),
+               resolvedItem.subscriptionCount != nil || resolvedItem.favoriteCount != nil
+               || resolvedItem.viewCount != nil || resolvedItem.ratingScore != nil
+               || resolvedItem.authorName != nil || resolvedItem.fileSize != nil
+               || resolvedItem.createdAt != nil || resolvedItem.updatedAt != nil {
+                dividerLine.opacity(0.7)
+
+                infoSection(title: t("wallpaperEngine")) {
+                    if let author = resolvedItem.authorName {
+                        compactFact(label: t("author"), value: author)
+                    }
+                    compactFact(label: "ID", value: resolvedItem.slug.replacingOccurrences(of: "workshop_", with: ""))
+                    if let subs = resolvedItem.subscriptionCount {
+                        compactFact(label: t("subscriptions"), value: formatCount(subs))
+                    }
+                    if let favs = resolvedItem.favoriteCount {
+                        compactFact(label: t("favorites"), value: formatCount(favs))
+                    }
+                    if let views = resolvedItem.viewCount {
+                        compactFact(label: t("views"), value: formatCount(views))
+                    }
+                    if let rating = resolvedItem.ratingScore {
+                        compactFact(label: t("rating"), value: String(format: "%.1f / 5.0", rating))
+                    }
+                    if let fileSize = resolvedItem.fileSize, fileSize > 0 {
+                        compactFact(label: t("size"), value: formatFileSize(fileSize))
+                    }
+                    if let created = resolvedItem.createdAt {
+                        compactFact(label: t("created"), value: formatDate(created))
+                    }
+                    if let updated = resolvedItem.updatedAt {
+                        compactFact(label: t("updated"), value: formatDate(updated))
+                    }
+                }
+            }
+
             if !resolvedItem.downloadOptions.isEmpty {
                 dividerLine.opacity(0.7)
 
@@ -818,6 +881,35 @@ struct MediaDetailSheet: View {
 
     private var mediaTitle: String {
         resolvedItem.title
+    }
+    
+    private func formatCount(_ count: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 1
+        
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000)
+        }
+        return formatter.string(from: NSNumber(value: count)) ?? "\(count)"
+    }
+    
+    private func formatFileSize(_ bytes: Int64) -> String {
+        let mb = Double(bytes) / 1024 / 1024
+        if mb >= 1024 {
+            return String(format: "%.1f GB", mb / 1024)
+        }
+        return String(format: "%.1f MB", mb)
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        formatter.locale = Locale.current
+        return formatter.string(from: date)
     }
 
     private var statusText: String {
@@ -1159,6 +1251,33 @@ struct MediaDetailSheet: View {
             return pickWorkshopPlayableFile(from: recordedURL)
         }
         return nil
+    }
+
+    /// 预览设为壁纸的内容：优先已烘焙 MP4 → 本地视频文件 → 静态封面图
+    private func previewWallpaper() {
+        let targetURL: URL?
+
+        // 1. 已烘焙的 Scene MP4
+        if let artifact = currentDownloadRecord?.sceneBakeArtifact,
+           FileManager.default.fileExists(atPath: artifact.videoPath) {
+            targetURL = URL(fileURLWithPath: artifact.videoPath)
+        }
+        // 2. 本地视频文件
+        else if let localURL = findLocalWorkshopFile(),
+                ["mp4", "mov", "webm"].contains(localURL.pathExtension.lowercased()) {
+            targetURL = localURL
+        }
+        // 3. 静态图（封面或下载记录中的图片）
+        else if let imageURL = resolvedShareableFileFromRecordOrCover() {
+            targetURL = imageURL
+        }
+        // 4. 网络封面图兜底
+        else {
+            targetURL = resolvedItem.posterURL
+        }
+
+        guard let url = targetURL else { return }
+        PreviewWindowManager.shared.openPreview(url: url, isMuted: isMuted)
     }
 
     /// 含 `project.json` 的工程根（目录本身，或单文件的父目录）
@@ -1630,136 +1749,6 @@ struct MediaDetailSheet: View {
     }
 }
 
-private struct LoopingVideoBackgroundView: NSViewRepresentable {
-    let url: URL
-    let isMuted: Bool
-    let onReady: (@MainActor @Sendable () -> Void)?
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onReady: onReady)
-    }
-
-    func makeNSView(context: Context) -> PlayerContainerView {
-        let view = PlayerContainerView()
-        context.coordinator.attach(to: view)
-        context.coordinator.update(url: url, isMuted: isMuted, in: view)
-        return view
-    }
-
-    func updateNSView(_ nsView: PlayerContainerView, context: Context) {
-        context.coordinator.update(url: url, isMuted: isMuted, in: nsView)
-    }
-
-    static func dismantleNSView(_ nsView: PlayerContainerView, coordinator: Coordinator) {
-        coordinator.teardown()
-    }
-
-    @MainActor
-    final class Coordinator {
-        private weak var containerView: PlayerContainerView?
-        private var currentURL: URL?
-        private var player: AVQueuePlayer?
-        private var looper: AVPlayerLooper?
-        private var onReady: (@MainActor @Sendable () -> Void)?
-        private var readyObserver: NSObjectProtocol?
-
-        init(onReady: (@MainActor @Sendable () -> Void)?) {
-            self.onReady = onReady
-        }
-
-        func attach(to view: PlayerContainerView) {
-            containerView = view
-        }
-
-        func update(url: URL, isMuted: Bool, in view: PlayerContainerView) {
-            attach(to: view)
-
-            if currentURL != url {
-                configurePlayer(with: url, in: view)
-            }
-
-            player?.isMuted = isMuted
-            player?.volume = isMuted ? 0 : 1
-            player?.play()
-        }
-
-        func teardown() {
-            if let observer = readyObserver {
-                NotificationCenter.default.removeObserver(observer)
-                readyObserver = nil
-            }
-            looper?.disableLooping()
-            looper = nil
-            player?.pause()
-            player = nil
-            currentURL = nil
-            containerView?.playerLayer.player = nil
-        }
-
-        private func configurePlayer(with url: URL, in view: PlayerContainerView) {
-            teardown()
-
-            let item = AVPlayerItem(url: url)
-            let queuePlayer = AVQueuePlayer()
-            queuePlayer.actionAtItemEnd = .none
-            queuePlayer.automaticallyWaitsToMinimizeStalling = true
-
-            let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
-            view.playerLayer.player = queuePlayer
-            
-            // 监听视频准备好播放的状态
-            readyObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemNewAccessLogEntry,
-                object: item,
-                queue: .main
-            ) { @Sendable [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.onReady?()
-                }
-            }
-            
-            // 备选：使用短暂延迟确保视频已经开始加载
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.onReady?()
-            }
-            
-            queuePlayer.play()
-
-            self.player = queuePlayer
-            self.looper = looper
-            self.currentURL = url
-        }
-    }
-}
-
-private final class PlayerContainerView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer = AVPlayerLayer()
-        playerLayer.videoGravity = .resizeAspectFill
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    var playerLayer: AVPlayerLayer {
-        guard let layer = layer as? AVPlayerLayer else {
-            let newLayer = AVPlayerLayer()
-            newLayer.videoGravity = .resizeAspectFill
-            self.layer = newLayer
-            return newLayer
-        }
-        return layer
-    }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
-    }
-}
-
 // MARK: - 详情页加载动画
 private struct LoadingOverlayView: View {
     @State private var isAnimating = false
@@ -1871,6 +1860,60 @@ private struct SourceLoadingPlaceholder: View {
                         )
                         .pulseAnimation()
                 }
+            }
+        }
+    }
+}
+
+// MARK: - 壁纸预览 Sheet（视频/图片通用）
+struct WallpaperPreviewSheet: View {
+    let url: URL
+    @Binding var isMuted: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    private var isVideo: Bool {
+        ["mp4", "mov", "webm"].contains(url.pathExtension.lowercased())
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if isVideo {
+                LoopingVideoBackgroundView(
+                    url: url,
+                    isMuted: isMuted,
+                    onReady: nil
+                )
+                .ignoresSafeArea()
+            } else {
+                KFMediaCoverImage(
+                    url: url,
+                    animated: false,
+                    downsampleSize: nil
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+            }
+
+            // 关闭按钮
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.black.opacity(0.45)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 20)
+                    .padding(.trailing, 20)
+                }
+                Spacer()
             }
         }
     }

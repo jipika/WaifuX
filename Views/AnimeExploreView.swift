@@ -26,7 +26,6 @@ struct AnimeExploreView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var contentSize: CGFloat = 0
     @State private var containerSize: CGFloat = 0
-    @State private var visibleCardIDs: Set<String> = []
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var searchTask: Task<Void, Never>?
@@ -109,7 +108,10 @@ struct AnimeExploreView: View {
         }
         .onChange(of: isVisible) { _, visible in
             if !visible {
+                searchTask?.cancel()
+                searchTask = nil
                 gridImagePrefetcher?.stop()
+                exploreAtmosphere.pause()
             }
         }
         .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
@@ -169,6 +171,10 @@ struct AnimeExploreView: View {
                 onSubmit: performSearch,
                 onClear: clearSearch
             )
+
+            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+                randomizeAtmosphere()
+            }
 
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
                 resetAllFilters(reloadData: true)
@@ -260,7 +266,6 @@ struct AnimeExploreView: View {
                     }
                 )
                 .onAppear {
-                    visibleCardIDs.insert(anime.id)
                     preloadNearbyImages(around: anime, config: config)
                 }
             }
@@ -287,13 +292,20 @@ struct AnimeExploreView: View {
             .filter { $0 != clamped }
             .compactMap { items[$0].coverURL.flatMap { URL(string: $0) } }
 
-        gridImagePrefetcher?.stop()
-        let prefetcher = Kingfisher.ImagePrefetcher(
-            urls: urls,
-            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
-        )
-        gridImagePrefetcher = prefetcher
-        prefetcher.start()
+        // 放到后台线程执行，避免阻塞主线程滚动
+        Task(priority: .background) {
+            await MainActor.run {
+                self.gridImagePrefetcher?.stop()
+            }
+            let prefetcher = Kingfisher.ImagePrefetcher(
+                urls: urls,
+                options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+            )
+            await MainActor.run {
+                self.gridImagePrefetcher = prefetcher
+            }
+            prefetcher.start()
+        }
     }
 
     // MARK: - UI Components
@@ -349,7 +361,6 @@ struct AnimeExploreView: View {
                 let start = Date()
                 await viewModel.loadInitialData()
                 await MainActor.run {
-                    visibleCardIDs.removeAll()
                     lastPrefetchCenterIndex = -1
                     recomputeVisibleAnimeItems()
                     syncAtmosphereIfNeeded()
@@ -363,7 +374,6 @@ struct AnimeExploreView: View {
                     ])
             }
         } else {
-            visibleCardIDs.removeAll()
             lastPrefetchCenterIndex = -1
             recomputeVisibleAnimeItems()
             syncAtmosphereIfNeeded()
@@ -492,7 +502,6 @@ struct AnimeExploreView: View {
         selectedSort = .newest
         lastPrefetchCenterIndex = -1
         lastSyncedFirstAnimeID = nil
-        visibleCardIDs.removeAll()
         loadMoreFailed = false
         viewModel.searchText = ""
         viewModel.errorMessage = nil
@@ -509,7 +518,6 @@ struct AnimeExploreView: View {
         AppLogger.info(.anime, "重新搜索：用户操作触发")
         lastPrefetchCenterIndex = -1
         lastSyncedFirstAnimeID = nil
-        visibleCardIDs.removeAll()
         loadMoreFailed = false
         viewModel.errorMessage = nil
         viewModel.animeItems.removeAll()
@@ -534,6 +542,14 @@ struct AnimeExploreView: View {
         lastSyncedFirstAnimeID = fid
         if let first, let coverURL = first.coverURL {
             exploreAtmosphere.updateFirstAnime(coverURL: coverURL)
+        }
+    }
+
+    private func randomizeAtmosphere() {
+        guard !visibleAnimeItems.isEmpty else { return }
+        let random = visibleAnimeItems.randomElement()!
+        if let coverURL = random.coverURL.flatMap({ URL(string: $0) }) {
+            exploreAtmosphere.updateFromImageURL(coverURL, keyPrefix: "rand-anime")
         }
     }
 
@@ -687,13 +703,16 @@ private struct AnimeCard: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.clear)
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
+                    )
             )
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isHovered)
+        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .animation(.easeOut(duration: 0.2), value: isHovered)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }

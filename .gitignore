@@ -82,3 +82,8 @@ Resources/assets/
 # Resources/liblinux-wallpaperengine-renderer.dylib
 # Resources/CRenderer/
 # Resources/RendererAPI.h
+
+# Node (root level) — playwright 临时测试，不提交
+node_modules/
+package-lock.json
+package.json

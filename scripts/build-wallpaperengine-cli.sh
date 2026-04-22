@@ -30,8 +30,10 @@ echo "[build-wallpaperengine-cli] Zipping assets..."
 
 echo "[build-wallpaperengine-cli] swiftc..."
 swiftc -parse-as-library \
+  -target arm64-apple-macosx14.0 \
   -I Resources/CRenderer -I Resources -L Resources/lib \
   -llinux-wallpaperengine-renderer \
+  -Xlinker -stack_size -Xlinker 0x2000000 \
   -Xlinker -rpath -Xlinker @loader_path \
   -Xlinker -rpath -Xlinker @loader_path/Resources \
   -Xlinker -rpath -Xlinker @loader_path/../Resources \

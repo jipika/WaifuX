@@ -41,12 +41,12 @@ class WorkshopService: ObservableObject {
     }
     
     private func sortValue(for sort: WorkshopSearchParams.SortOption) -> String {
-        // 新版 Steam Workshop browse 使用字符串排序值（返回 React 页面）
+        // Steam Workshop 2026年4月改版后的 browsesort 参数值
         switch sort {
         case .ranked: return "trend"
-        case .subscriptions: return "subscribed"
-        case .updated: return "updated"
-        case .created: return "created"
+        case .updated: return "lastupdated"
+        case .created: return "mostrecent"
+        case .topRated: return "toprated"
         }
     }
 
@@ -76,8 +76,11 @@ class WorkshopService: ObservableObject {
             requiredTags.append(contentsOf: params.tags)
         }
         // 新版 browse 页面中内容级别通过 requiredtags[]=Mature/Questionable/Everyone 实现
-        if let contentLevel = params.contentLevel {
-            requiredTags.append(contentLevel)
+        // [强制规则] 仅允许 SFW 内容：硬编码 Everyone 标签，禁止传入其他内容级别
+        requiredTags.append("Everyone")
+        // 分辨率/比例筛选通过 requiredtags[] 发送（Steam Workshop 分辨率以标签形式存在）
+        if let resolution = params.resolution {
+            requiredTags.append(resolution)
         }
         for tag in requiredTags {
             queryItems.append(URLQueryItem(name: "requiredtags[]", value: tag))
@@ -106,15 +109,50 @@ class WorkshopService: ObservableObject {
             throw WorkshopError.apiError("无法解析 HTML 响应")
         }
 
-        // 优先从 SSR JSON 或内嵌 JSON 提取，现代 Steam 页面数据主要在 dehydrated JSON 里
-        let extracted = extractFromJSON(html)
-        let wallpapers: [WorkshopWallpaper]
-        if !extracted.isEmpty {
-            wallpapers = extracted
-            print("[WorkshopService] searchHTML used JSON/SSR extraction: \(extracted.count) items")
+        // 优先从 SSR JSON 或内嵌 JSON 提取（已含完整元数据）
+        var wallpapers = extractFromJSON(html)
+        if !wallpapers.isEmpty {
+            AppLogger.info(.media, "searchHTML used JSON/SSR extraction: \(wallpapers.count) items")
+            // JSON/SSR 提取的作者名通常是 Steam ID 或 Unknown，尝试从 HTML DOM 补充
+            let authorMap = extractAuthorMapFromHTML(html)
+            if !authorMap.isEmpty {
+                wallpapers = wallpapers.map { item in
+                    guard let authorName = authorMap[item.id], authorName != "Unknown" else { return item }
+                    return WorkshopWallpaper(
+                        id: item.id,
+                        title: item.title,
+                        description: item.description,
+                        previewURL: item.previewURL,
+                        author: WorkshopAuthor(steamID: item.author.steamID, name: authorName, avatarURL: item.author.avatarURL),
+                        fileSize: item.fileSize,
+                        fileURL: item.fileURL,
+                        steamAppID: item.steamAppID,
+                        subscriptions: item.subscriptions,
+                        favorites: item.favorites,
+                        views: item.views,
+                        rating: item.rating,
+                        type: item.type,
+                        tags: item.tags,
+                        isAnimatedImage: item.isAnimatedImage,
+                        createdAt: item.createdAt,
+                        updatedAt: item.updatedAt
+                    )
+                }
+            }
         } else {
             wallpapers = try parseWorkshopHTML(html, page: params.page)
-            print("[WorkshopService] searchHTML used HTML parsing: \(wallpapers.count) items")
+            AppLogger.info(.media, "searchHTML used HTML parsing: \(wallpapers.count) items")
+        }
+        
+        // 无论数据来源是 JSON/SSR 还是 HTML，都用 Steam Web API 批量补全
+        // （JSON 提取可能缺少 vote_data 等字段，API 补全可以兜底）
+        if !wallpapers.isEmpty {
+            do {
+                wallpapers = try await enrichWithAPIDetails(wallpapers)
+                AppLogger.info(.media, "API enrichment applied to \(wallpapers.count) items")
+            } catch {
+                AppLogger.error(.media, "API enrichment failed", metadata: ["error": "\(error)"])
+            }
         }
 
         // Steam Workshop browse 列表页不返回标签/类型，用请求参数做兜底注入
@@ -224,12 +262,23 @@ class WorkshopService: ObservableObject {
             let src = (try? img.attr("src")) ?? ""
             let previewURL = src.isEmpty ? nil : URL(string: src)
 
-            // 向上遍历祖先节点，找包含作者信息的文本
+            // 向上遍历祖先节点提取作者名（新版 Workshop 页面 class 为哈希，优先找用户资料链接）
             var authorName = "Unknown"
             var current: Element? = link
             for _ in 0..<5 {
                 guard let parent = current?.parent() else { break }
                 current = parent
+                // 策略1：找指向 /profiles/ 或 /id/ 的链接（作者个人页）
+                let profileLinks = try? parent.select("a[href*=/profiles/], a[href*=/id/]")
+                for profileLink in profileLinks ?? Elements() {
+                    let name = (try? profileLink.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !name.isEmpty && name != "Untitled" && !name.contains("http") {
+                        authorName = name
+                        break
+                    }
+                }
+                if authorName != "Unknown" { break }
+                // 策略2：fallback 到旧版文本匹配
                 let all = try? parent.select("*")
                 for el in all ?? Elements() {
                     let text = (try? el.text()) ?? ""
@@ -254,7 +303,7 @@ class WorkshopService: ObservableObject {
                 fileSize: nil,
                 fileURL: nil,
                 steamAppID: wallpaperEngineAppID,
-                subscriptions: 0,
+                subscriptions: nil,
                 favorites: nil,
                 views: nil,
                 rating: nil,
@@ -267,6 +316,44 @@ class WorkshopService: ObservableObject {
         }
 
         return wallpapers
+    }
+    
+    /// 从 HTML DOM 提取作者名映射（用于补充 JSON/SSR 提取缺失的作者显示名）
+    private func extractAuthorMapFromHTML(_ html: String) -> [String: String] {
+        guard let document = try? SwiftSoup.parse(html) else { return [:] }
+        let links = try? document.select("a[href*=/sharedfiles/filedetails/?id=]")
+        
+        var authorMap: [String: String] = [:]
+        var seenIDs = Set<String>()
+        
+        for link in links ?? Elements() {
+            let href = (try? link.attr("href")) ?? ""
+            guard let id = href.components(separatedBy: "id=").last?.components(separatedBy: "&").first, !id.isEmpty else { continue }
+            guard !seenIDs.contains(id) else { continue }
+            seenIDs.insert(id)
+            
+            var authorName = "Unknown"
+            var current: Element? = link
+            for _ in 0..<5 {
+                guard let parent = current?.parent() else { break }
+                current = parent
+                let profileLinks = try? parent.select("a[href*=/profiles/], a[href*=/id/]")
+                for profileLink in profileLinks ?? Elements() {
+                    let name = (try? profileLink.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !name.isEmpty && name != "Untitled" && !name.contains("http") {
+                        authorName = name
+                        break
+                    }
+                }
+                if authorName != "Unknown" { break }
+            }
+            
+            if authorName != "Unknown" {
+                authorMap[id] = authorName
+            }
+        }
+        
+        return authorMap
     }
     
     private func parseWorkshopItem(_ element: Element) throws -> WorkshopWallpaper? {
@@ -392,7 +479,7 @@ class WorkshopService: ObservableObject {
                 updatedAt: nil
             )
         } catch {
-            print("[WorkshopService] Error parsing item: \(error)")
+            AppLogger.error(.media, "Error parsing item", metadata: ["error": "\(error)"])
             return nil
         }
     }
@@ -402,7 +489,7 @@ class WorkshopService: ObservableObject {
 
         if let ssrItems = extractFromSSRJSON(html), !ssrItems.isEmpty {
             wallpapers = ssrItems
-            print("[WorkshopService] Extracted \(wallpapers.count) items from SSR dehydrated JSON")
+            AppLogger.info(.media, "Extracted \(wallpapers.count) items from SSR dehydrated JSON")
             return wallpapers
         }
 
@@ -431,7 +518,7 @@ class WorkshopService: ObservableObject {
                         title: item.title,
                         description: item.description,
                         previewURL: URL(string: item.preview_url ?? ""),
-                        author: WorkshopAuthor(steamID: "", name: item.creator ?? "Unknown", avatarURL: nil),
+                        author: WorkshopAuthor(steamID: item.creator ?? "", name: "Unknown", avatarURL: nil),
                         fileSize: nil,
                         fileURL: nil,
                         steamAppID: wallpaperEngineAppID,
@@ -448,7 +535,7 @@ class WorkshopService: ObservableObject {
                 }
                 if !wallpapers.isEmpty { break }
             } catch {
-                print("[WorkshopService] Failed to decode embedded JSON: \(error)")
+                AppLogger.error(.media, "Failed to decode embedded JSON", metadata: ["error": "\(error)"])
             }
         }
 
@@ -545,7 +632,7 @@ class WorkshopService: ObservableObject {
                 )
             }
         } catch {
-            print("[WorkshopService] Failed to decode SSR JSON: \(error)")
+            AppLogger.error(.media, "Failed to decode SSR JSON", metadata: ["error": "\(error)"])
             return nil
         }
     }
@@ -611,6 +698,56 @@ class WorkshopService: ObservableObject {
         return Int64(number)
     }
     
+    // MARK: - Steam Web API 批量补全
+    
+    /// 用 GetPublishedFileDetails 批量补全 Workshop 物品元数据
+    private func enrichWithAPIDetails(_ items: [WorkshopWallpaper]) async throws -> [WorkshopWallpaper] {
+        let ids = items.map(\.id)
+        let details = try await fetchPublishedFileDetails(ids: ids)
+        let detailMap = Dictionary(uniqueKeysWithValues: details.map { ($0.publishedfileid, $0) })
+        
+        return items.map { item in
+            guard let detail = detailMap[item.id] else { return item }
+            return WorkshopWallpaper(base: item, detail: detail)
+        }
+    }
+    
+    /// 批量查询 Steam Web API 获取文件详情
+    private func fetchPublishedFileDetails(ids: [String]) async throws -> [SteamPublishedFileDetail] {
+        guard !ids.isEmpty else { return [] }
+        
+        var request = URLRequest(url: URL(string: "\(steamAPIBase)/ISteamRemoteStorage/GetPublishedFileDetails/v1/")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        
+        var body = "itemcount=\(ids.count)"
+        for (index, id) in ids.enumerated() {
+            body += "&publishedfileids[\(index)]=\(id)"
+        }
+        request.httpBody = body.data(using: .utf8)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw WorkshopError.apiError("Steam API 返回非 200 状态码")
+        }
+        
+        do {
+            let result = try JSONDecoder().decode(SteamPublishedFileResponse.self, from: data)
+            let details = result.response.publishedfiledetails ?? []
+            if let first = details.first {
+                AppLogger.info(.media, "API detail sample", metadata: ["id": first.publishedfileid, "subs": first.subscriptions ?? -1, "fav": first.favorited ?? -1, "views": first.views ?? -1, "vote": first.vote_data?.score ?? first.score ?? -1])
+            }
+            return details
+        } catch {
+            AppLogger.error(.media, "Failed to decode API response", metadata: ["error": "\(error)"])
+            if let json = String(data: data, encoding: .utf8) {
+                AppLogger.info(.media, "Raw API response (first 500 chars)", metadata: ["response": json.prefix(500)])
+            }
+            throw WorkshopError.apiError("解析 Steam API 响应失败")
+        }
+    }
+    
     // MARK: - Type Detection
     
     private func detectType(from urlString: String) -> WorkshopWallpaper.WallpaperType {
@@ -674,26 +811,12 @@ class WorkshopService: ObservableObject {
         let contentPath = downloadDir
             .appendingPathComponent("steamapps/workshop/content/\(wallpaperEngineAppID)/\(workshopID)")
 
-        // 进度脉冲任务
-        let progressTask: Task<Void, Never>? = (progressHandler != nil) ? Task {
-            var progress: Double = 0.05
-            progressHandler?(progress)
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard !Task.isCancelled else { return }
-                progress = min(progress + 0.03, 0.90)
-                progressHandler?(progress)
-            }
-        } : nil
-
         defer {
-            progressTask?.cancel()
             try? FileManager.default.removeItem(at: scriptURL)
         }
 
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
-            // steamcmd.sh 是 shell 脚本，需要通过 bash 执行，不能直接作为 Process 的 executable
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
             task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
@@ -731,16 +854,36 @@ class WorkshopService: ObservableObject {
             }
             let outputBox = OutputBox()
 
+            // 实时解析 SteamCMD 输出中的下载进度 [xx%]
+            let parseProgress: @Sendable (String) -> Void = { str in
+                guard let handler = progressHandler else { return }
+                if let progress = Self.extractSteamCMDProgress(from: str) {
+                    handler(progress)
+                }
+            }
+
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 if let str = String(data: handle.availableData, encoding: .utf8) {
                     outputBox.appendOutput(str)
+                    parseProgress(str)
                 }
             }
             errorPipe.fileHandleForReading.readabilityHandler = { handle in
                 if let str = String(data: handle.availableData, encoding: .utf8) {
                     outputBox.appendError(str)
+                    parseProgress(str)
                 }
             }
+
+            final class TimeoutFlag: @unchecked Sendable {
+                private let lock = NSLock()
+                private var _value = false
+                var value: Bool {
+                    get { lock.lock(); defer { lock.unlock() }; return _value }
+                    set { lock.lock(); _value = newValue; lock.unlock() }
+                }
+            }
+            let timeoutFlag = TimeoutFlag()
 
             final class ResumeBox<T: Sendable>: @unchecked Sendable {
                 private var didResume = false
@@ -782,6 +925,7 @@ class WorkshopService: ObservableObject {
             let timeoutTask = Task {
                 try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
                 if task.isRunning {
+                    timeoutFlag.value = true
                     task.terminate()
                 }
             }
@@ -795,8 +939,14 @@ class WorkshopService: ObservableObject {
 
             task.terminationHandler = { _ in
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                    // 超时导致的终止，直接返回明确的超时错误
+                    if timeoutFlag.value {
+                        resumeBox.resume(throwing: WorkshopError.timeout)
+                        return
+                    }
+
                     let combinedOutput = outputBox.combined()
-                    print("[WorkshopService] downloadWorkshopItem steamcmd output:\n\(combinedOutput)")
+                    AppLogger.info(.media, "downloadWorkshopItem steamcmd output", metadata: ["output": combinedOutput])
 
                     // 检查是否需要用户通过手机 App 确认登录（移动验证器类型）
                     let needsMobileConfirmation = combinedOutput.localizedCaseInsensitiveContains("Please confirm the login")
@@ -834,7 +984,7 @@ class WorkshopService: ObservableObject {
                     if loginTimeoutIndicators.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
                         resumeBox.resume(throwing: WorkshopError.loginTimeout)
-                        print("[WorkshopService] downloadWorkshopItem login timeout detected: \(cleaned)")
+                        AppLogger.error(.media, "downloadWorkshopItem login timeout detected", metadata: ["detail": cleaned])
                         return
                     }
 
@@ -873,14 +1023,14 @@ class WorkshopService: ObservableObject {
                     if isSelfUpdate {
                         Task {
                             let pollTimeoutSeconds = 180
-                            print("[WorkshopService] SteamCMD self-update detected, polling up to \(pollTimeoutSeconds)s")
+                            AppLogger.info(.media, "SteamCMD self-update detected", metadata: ["timeout": pollTimeoutSeconds])
                             for elapsed in 1...pollTimeoutSeconds {
                                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                                 if elapsed % 10 == 0 || elapsed == 1 {
-                                    print("[WorkshopService] Polling... elapsed: \(elapsed)s")
+                                    AppLogger.info(.media, "Polling SteamCMD", metadata: ["elapsed": elapsed])
                                 }
                                 if FileManager.default.fileExists(atPath: contentPath.path) {
-                                    print("[WorkshopService] Workshop content detected after \(elapsed)s")
+                                    AppLogger.info(.media, "Workshop content detected", metadata: ["elapsed": elapsed])
                                     resumeBox.resume(returning: contentPath)
                                     return
                                 }
@@ -919,6 +1069,19 @@ class WorkshopService: ObservableObject {
                 resumeBox.resume(throwing: WorkshopError.executionFailed(error.localizedDescription))
             }
         }
+    }
+
+    /// 从 SteamCMD 输出中解析下载进度（格式如 "[ 10%] Downloading..."）
+    nonisolated private static func extractSteamCMDProgress(from output: String) -> Double? {
+        // SteamCMD 输出格式: "[  0%]", "[ 10%]", "[100%]" 等
+        let pattern = #"\[\s*(\d+)%\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(output.startIndex..., in: output)
+        // 取最后一处匹配（最新的进度）
+        guard let match = regex.matches(in: output, options: [], range: range).last else { return nil }
+        guard let numberRange = Range(match.range(at: 1), in: output) else { return nil }
+        guard let percent = Double(output[numberRange]) else { return nil }
+        return percent / 100.0
     }
 
     /// 清理 steamcmd 错误输出
@@ -963,7 +1126,7 @@ class WorkshopService: ObservableObject {
             throw WorkshopError.steamcmdNotFound
         }
 
-        print("[WorkshopService] verifySteamLogin using path: \(steamcmdPath.path)")
+        AppLogger.info(.media, "verifySteamLogin", metadata: ["path": steamcmdPath.path])
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steamcmd_verify_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -1091,7 +1254,7 @@ class WorkshopService: ObservableObject {
                 // 小延迟确保 readabilityHandler 处理完最后的数据
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                     let combinedOutput = outputBox.combined()
-                    print("[WorkshopService] verifySteamLogin steamcmd output:\n\(combinedOutput)")
+                    AppLogger.info(.media, "verifySteamLogin steamcmd output", metadata: ["output": combinedOutput])
 
                     let isSelfUpdate = combinedOutput.localizedCaseInsensitiveContains("Update complete, launching")
                     if isSelfUpdate {
@@ -1140,7 +1303,7 @@ class WorkshopService: ObservableObject {
                         "Could not connect to Steam network"
                     ]
                     if loginTimeoutIndicators.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
-                        print("[WorkshopService] verifySteamLogin login timeout detected")
+                        AppLogger.error(.media, "verifySteamLogin login timeout detected")
                         resumeBox.resume(throwing: WorkshopError.loginTimeout)
                         return
                     }
@@ -1249,7 +1412,15 @@ extension WorkshopService {
             durationSeconds: nil,
             downloadOptions: downloadOptions,
             sourceName: t("wallpaperEngine"),
-            isAnimatedImage: wallpaper.isAnimatedImage
+            isAnimatedImage: wallpaper.isAnimatedImage,
+            subscriptionCount: wallpaper.subscriptions,
+            favoriteCount: wallpaper.favorites,
+            viewCount: wallpaper.views,
+            ratingScore: wallpaper.rating,
+            authorName: wallpaper.author.name != "Unknown" ? wallpaper.author.name : nil,
+            fileSize: wallpaper.fileSize,
+            createdAt: wallpaper.createdAt,
+            updatedAt: wallpaper.updatedAt
         )
     }
 

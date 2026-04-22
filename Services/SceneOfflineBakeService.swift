@@ -21,6 +21,11 @@ enum SceneOfflineBakeError: LocalizedError {
     }
 }
 
+extension Notification.Name {
+    /// Scene 离线烘焙完成（成功或失败）。`object` 为 `SceneBakeArtifact?`，失败时为 `nil`。
+    static let sceneOfflineBakeDidComplete = Notification.Name("sceneOfflineBakeDidComplete")
+}
+
 /// 全局只允许一个 `wallpaperengine-cli bake` 子进程，避免重叠渲染导致内存成倍上涨。
 private actor SceneOfflineBakeConcurrencyGate {
     static let shared = SceneOfflineBakeConcurrencyGate()
@@ -93,9 +98,15 @@ enum SceneOfflineBakeService {
                 requireEligibility: requireEligibility
             )
             await SceneOfflineBakeConcurrencyGate.shared.leave()
+            await MainActor.run {
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: result)
+            }
             return result
         } catch {
             await SceneOfflineBakeConcurrencyGate.shared.leave()
+            await MainActor.run {
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: nil)
+            }
             throw error
         }
     }
@@ -303,14 +314,25 @@ enum SceneOfflineBakeService {
             throw SceneOfflineBakeError.ineligible
         }
         let contentRoot = URL(fileURLWithPath: eligibility.contentRootPath)
-        return try await bake(
-            eligibility: eligibility,
-            contentRoot: contentRoot,
-            cacheItemID: record.id,
-            durationSeconds: durationSeconds,
-            fps: fps,
-            persistArtifactToItemID: record.id
-        )
+        do {
+            let artifact = try await bake(
+                eligibility: eligibility,
+                contentRoot: contentRoot,
+                cacheItemID: record.id,
+                durationSeconds: durationSeconds,
+                fps: fps,
+                persistArtifactToItemID: record.id
+            )
+            await MainActor.run {
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: artifact)
+            }
+            return artifact
+        } catch {
+            await MainActor.run {
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: nil)
+            }
+            throw error
+        }
     }
 
     /// 资格写入后后台自动烘焙（推荐/边缘档位）；已有同 `analysisId` 成品则跳过。

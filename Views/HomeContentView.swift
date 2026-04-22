@@ -26,6 +26,84 @@ final class CarouselTimerManager: ObservableObject {
     }
 }
 
+// MARK: - HeroItem 联合类型（静态壁纸 / 动态 MotionBG）
+fileprivate enum HeroItem: Identifiable {
+    case wallpaper(Wallpaper)
+    case media(MediaItem)
+    
+    var id: String {
+        switch self {
+        case .wallpaper(let w): return "w-\(w.id)"
+        case .media(let m):     return "m-\(m.id)"
+        }
+    }
+    
+    var previewVideoURL: URL? {
+        switch self {
+        case .wallpaper: return nil
+        case .media(let m): return m.previewVideoURL
+        }
+    }
+    
+    var imageURL: URL? {
+        switch self {
+        case .wallpaper(let w): return w.fullImageURL ?? w.thumbURL
+        case .media(let m):     return m.coverImageURL
+        }
+    }
+    
+    var title: String {
+        switch self {
+        case .wallpaper(let w):
+            if let primary = w.tags?.first(where: { !$0.name.isEmpty })?.name {
+                return primary
+            }
+            return "Wallhaven \(w.id)"
+        case .media(let m):
+            return m.title
+        }
+    }
+    
+    var subtitle: String {
+        switch self {
+        case .wallpaper(let w):
+            return w.resolution
+        case .media(let m):
+            return m.resolutionLabel
+        }
+    }
+    
+    var sourceName: String {
+        switch self {
+        case .wallpaper(let w):
+            switch w.category.lowercased() {
+            case "general": return t("featured")
+            case "anime": return t("filter.anime")
+            case "people": return t("filter.people")
+            default: return w.category.capitalized
+            }
+        case .media(let m):
+            return m.sourceName
+        }
+    }
+    
+    var tagText: String? {
+        switch self {
+        case .wallpaper(let w):
+            return w.tags?.first(where: { !$0.name.isEmpty })?.name
+        case .media(let m):
+            return m.tags.first ?? m.collectionTitle
+        }
+    }
+    
+    var thumbnailURL: URL? {
+        switch self {
+        case .wallpaper(let w): return w.thumbURL ?? w.smallThumbURL
+        case .media(let m): return m.coverImageURL
+        }
+    }
+}
+
 struct HomeContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
     @ObservedObject var mediaViewModel: MediaExploreViewModel
@@ -47,6 +125,9 @@ struct HomeContentView: View {
 
     // 首页背景氛围控制器
     @StateObject private var atmosphereController = HomeAtmosphereController()
+    
+    // 轮播专用 MotionBG 数据（独立于 explore 列表）
+    @State private var heroMediaItems: [MediaItem] = []
 
     // 更高更沉浸的轮播图，接近参考图比例
     private func heroHeight(for width: CGFloat) -> CGFloat {
@@ -59,7 +140,7 @@ struct HomeContentView: View {
 
 
 
-    private let carouselAutoPlayInterval: TimeInterval = 6.0
+    private let carouselAutoPlayInterval: TimeInterval = 8.0
     private let carouselPageSnapDuration: TimeInterval = 0.32
     private let carouselDragThresholdRatio: CGFloat = 0.18
     private let contentHorizontalInset: CGFloat = 26
@@ -93,12 +174,12 @@ struct HomeContentView: View {
                     .zIndex(1)
 
                     // MARK: 文案层（在可见区域中垂直居中）
-                    if let wallpaper = currentHeroWallpaper {
+                    if let heroItem = currentHeroItem {
                         HeroCaptionPanel(
-                            wallpaper: wallpaper,
-                            isFavorite: viewModel.isFavorite(wallpaper),
-                            onOpen: { selectedWallpaper = wallpaper },
-                            onFavorite: { viewModel.toggleFavorite(wallpaper) }
+                            heroItem: heroItem,
+                            isFavorite: isCurrentHeroFavorite,
+                            onOpen: { openCurrentHeroItem() },
+                            onFavorite: { toggleCurrentHeroFavorite() }
                         )
                         .frame(maxWidth: 520, alignment: .leading)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -114,9 +195,9 @@ struct HomeContentView: View {
                     // MARK: 控制层（指示器 & 翻页按钮 —— 必须在内容区上方）
                     VStack {
                         Spacer()
-                        if heroWallpapers.count > 1 {
+                        if heroItems.count > 1 {
                             HeroPaginationDots(
-                                count: heroWallpapers.count,
+                                count: heroItems.count,
                                 currentIndex: currentCarouselIndex,
                                 onSelect: { index in
                                     selectHero(at: index)
@@ -128,7 +209,7 @@ struct HomeContentView: View {
                     .frame(height: heroH)
                     .zIndex(2)
 
-                    if heroWallpapers.count > 1 {
+                    if heroItems.count > 1 {
                         HStack {
                             HeroEdgeButton(direction: .previous) {
                                 showPreviousHero()
@@ -170,7 +251,7 @@ struct HomeContentView: View {
             handleScroll(offset: offset)
         }
         .onAppear {
-            syncCarouselState(with: heroWallpapers)
+            syncCarouselState(with: heroItems)
             if isTabActive {
                 startCarouselAutoPlay()
             }
@@ -179,6 +260,9 @@ struct HomeContentView: View {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 await mediaViewModel.initialLoadIfNeeded()
                 await mediaViewModel.refreshHomeItems()
+                
+                // 独立获取 MotionBG 轮播数据（固定源，不跟随 explore 列表变化）
+                await refreshHeroMediaItems()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
@@ -188,17 +272,18 @@ struct HomeContentView: View {
         }
         .onChange(of: isTabActive) { _, active in
             if active {
-                syncCarouselState(with: heroWallpapers)
+                syncCarouselState(with: heroItems)
                 startCarouselAutoPlay()
             } else {
                 stopCarouselAutoPlay()
                 cancelCarouselLoopReset()
                 cancelCarouselInteractionReset()
+                atmosphereController.pause()
             }
         }
-        .onChange(of: heroWallpaperIDs) { _, _ in
+        .onChange(of: heroItemIDs) { _, _ in
             guard isTabActive else { return }
-            syncCarouselState(with: heroWallpapers)
+            syncCarouselState(with: heroItems)
             stopCarouselAutoPlay()
             startCarouselAutoPlay()
         }
@@ -209,18 +294,42 @@ struct HomeContentView: View {
         // 滚动速度检测已移除（状态切换本身会导致卡顿）
     }
 
+    private var isCurrentHeroFavorite: Bool {
+        guard let item = currentHeroItem else { return false }
+        switch item {
+        case .wallpaper(let w): return viewModel.isFavorite(w)
+        case .media: return false
+        }
+    }
+    
+    private func openCurrentHeroItem() {
+        guard let item = currentHeroItem else { return }
+        switch item {
+        case .wallpaper(let w): selectedWallpaper = w
+        case .media(let m): selectedMedia = m
+        }
+    }
+    
+    private func toggleCurrentHeroFavorite() {
+        guard let item = currentHeroItem else { return }
+        switch item {
+        case .wallpaper(let w): viewModel.toggleFavorite(w)
+        case .media: break
+        }
+    }
+
     private var heroSection: some View {
-        let wallpapers = heroWallpapers
+        let items = heroItems
         
         return GeometryReader { geometry in
             let width = geometry.size.width
             let height = heroHeight(for: width)
             
             ZStack {
-                if wallpapers.isEmpty {
+                if items.isEmpty {
                     HeroSkeletonView(height: height)
                 } else {
-                    heroCarousel(width: width, height: height, wallpapers: wallpapers)
+                    heroCarousel(width: width, height: height, items: items)
 
                     // MARK: 底部过渡层 —— 多层叠加实现从 hero 到内容的自然融合
                     VStack {
@@ -279,15 +388,15 @@ struct HomeContentView: View {
         }
     }
 
-    private func heroCarousel(width: CGFloat, height: CGFloat, wallpapers: [Wallpaper]) -> some View {
-        let displayWallpapers = carouselDisplayWallpapers(from: wallpapers)
+    private func heroCarousel(width: CGFloat, height: CGFloat, items: [HeroItem]) -> some View {
+        let displayItems = carouselDisplayItems(from: items)
 
         return ZStack(alignment: .leading) {
             HStack(spacing: 0) {
-                ForEach(Array(displayWallpapers.enumerated()), id: \.offset) { _, wallpaper in
-                    HeroWallpaperImageSlide(
-                        wallpaper: wallpaper,
-                        isCurrent: wallpaper.id == currentHeroID
+                ForEach(Array(displayItems.enumerated()), id: \.offset) { _, item in
+                    HeroSlide(
+                        item: item,
+                        isCurrent: item.id == currentHeroID && isTabActive
                     )
                     .frame(width: width, height: height)
                 }
@@ -339,45 +448,49 @@ struct HomeContentView: View {
         .ignoresSafeArea()
     }
 
-    private var heroWallpapers: [Wallpaper] {
-        let featured = Array(viewModel.featuredWallpapers.prefix(8))
-        if !featured.isEmpty {
-            return featured
+    private var heroItems: [HeroItem] {
+        let wallpapers = viewModel.featuredWallpapers.filter { $0.dimensionX > $0.dimensionY }
+        let mediaItems = heroMediaItems
+        
+        var result: [HeroItem] = []
+        let maxCount = max(wallpapers.count, mediaItems.count)
+        for i in 0..<min(maxCount, 8) {
+            if i < wallpapers.count { result.append(.wallpaper(wallpapers[i])) }
+            if i < mediaItems.count  { result.append(.media(mediaItems[i])) }
         }
-
-        let top = Array(viewModel.topWallpapers.prefix(8))
-        if !top.isEmpty {
-            return top
-        }
-
-        return Array(viewModel.wallpapers.prefix(8))
+        return result
     }
 
-    private var heroWallpaperIDs: [String] {
-        heroWallpapers.map(\.id)
+    private var heroItemIDs: [String] {
+        heroItems.map(\.id)
     }
 
-    private func carouselDisplayWallpapers(from wallpapers: [Wallpaper]) -> [Wallpaper] {
+    private func carouselDisplayItems(from items: [HeroItem]) -> [HeroItem] {
         guard
-            wallpapers.count > 1,
-            let firstWallpaper = wallpapers.first,
-            let lastWallpaper = wallpapers.last
+            items.count > 1,
+            let firstItem = items.first,
+            let lastItem = items.last
         else {
-            return wallpapers
+            return items
         }
 
-        return [lastWallpaper] + wallpapers + [firstWallpaper]
+        return [lastItem] + items + [firstItem]
     }
 
-    private var currentHeroWallpaper: Wallpaper? {
-        guard !heroWallpapers.isEmpty else { return nil }
-        let clampedIndex = min(max(currentCarouselIndex, 0), heroWallpapers.count - 1)
-        return heroWallpapers[clampedIndex]
+    private var currentHeroItem: HeroItem? {
+        guard !heroItems.isEmpty else { return nil }
+        let clampedIndex = min(max(currentCarouselIndex, 0), heroItems.count - 1)
+        return heroItems[clampedIndex]
     }
     
     /// 更新缓存的调色板（只在壁纸变化时调用）
     private func updateCachedHeroPalette() {
-        let newPalette = HeroDrivenPalette(wallpaper: currentHeroWallpaper)
+        let wallpaper: Wallpaper?
+        switch currentHeroItem {
+        case .wallpaper(let w): wallpaper = w
+        default: wallpaper = nil
+        }
+        let newPalette = HeroDrivenPalette(wallpaper: wallpaper)
         // 只在颜色真正变化时才更新，避免不必要的刷新
         if newPalette.primary != cachedHeroPalette.primary ||
            newPalette.secondary != cachedHeroPalette.secondary ||
@@ -395,12 +508,43 @@ struct HomeContentView: View {
         }
         return Array(viewModel.wallpapers.suffix(10))
     }
+    
+    /// 独立刷新轮播专用的 MotionBG 数据（固定源，与 explore 列表解耦）
+    /// 列表页不包含 previewVideoURL，需要对前几个 item 请求详情页补充
+    private func refreshHeroMediaItems() async {
+        do {
+            let page = try await MediaService.shared.fetchPage(source: .home)
+            let listItems = Array(page.items.prefix(4))
+            
+            // 并行请求详情页获取 previewVideoURL（单个失败不影响其他）
+            let detailedItems = await withTaskGroup(of: MediaItem?.self) { group in
+                for item in listItems {
+                    group.addTask {
+                        try? await MediaService.shared.fetchDetail(slug: item.slug)
+                    }
+                }
+                var results: [MediaItem] = []
+                for await item in group {
+                    if let item = item {
+                        results.append(item)
+                    }
+                }
+                return results
+            }
+            
+            await MainActor.run {
+                heroMediaItems = detailedItems
+            }
+        } catch {
+            AppLogger.error(.general, "Failed to fetch hero media items: \(error.localizedDescription)")
+        }
+    }
 
-    private func syncCarouselState(with wallpapers: [Wallpaper]) {
+    private func syncCarouselState(with items: [HeroItem]) {
         cancelCarouselLoopReset()
         cancelCarouselInteractionReset()
 
-        guard !wallpapers.isEmpty else {
+        guard !items.isEmpty else {
             currentCarouselIndex = 0
             currentCarouselDisplayIndex = 0
             currentHeroID = nil
@@ -416,24 +560,24 @@ struct HomeContentView: View {
         let targetIndex: Int
         if
             let currentHeroID,
-            let existingIndex = wallpapers.firstIndex(where: { $0.id == currentHeroID })
+            let existingIndex = items.firstIndex(where: { $0.id == currentHeroID })
         {
             targetIndex = existingIndex
         } else {
             targetIndex = 0
         }
 
-        let displayIndex = carouselDisplayIndex(for: targetIndex, count: wallpapers.count)
+        let displayIndex = carouselDisplayIndex(for: targetIndex, count: items.count)
         var transaction = Transaction()
         transaction.disablesAnimations = true
 
         withTransaction(transaction) {
             currentCarouselIndex = targetIndex
             currentCarouselDisplayIndex = displayIndex
-            currentHeroID = wallpapers[targetIndex].id
+            currentHeroID = items[targetIndex].id
             isCarouselInteracting = false
             // 更新背景氛围色
-            atmosphereController.updateWallpaper(wallpapers[targetIndex])
+            atmosphereController.updateHeroItem(items[targetIndex])
             isCarouselAnimating = false
             carouselDragOffset = 0
         }
@@ -443,19 +587,21 @@ struct HomeContentView: View {
     }
 
     private func selectHero(at index: Int, animated: Bool = true) {
-        let wallpapers = heroWallpapers
-        guard wallpapers.indices.contains(index) else { return }
-        moveCarousel(toDisplayIndex: carouselDisplayIndex(for: index, count: wallpapers.count), animated: animated)
+        let items = heroItems
+        guard items.indices.contains(index) else { return }
+        // 用户手动切换，重置自动播放计时器
+        resetCarouselAutoPlayTimer()
+        moveCarousel(toDisplayIndex: carouselDisplayIndex(for: index, count: items.count), animated: animated)
     }
 
     private func startCarouselAutoPlay() {
-        guard timerManager.timer == nil, heroWallpapers.count > 1 else { return }
+        guard timerManager.timer == nil, heroItems.count > 1 else { return }
 
         Task { @MainActor in
             timerManager.timer = Timer.scheduledTimer(withTimeInterval: carouselAutoPlayInterval, repeats: true) { _ in
                 Task { @MainActor in
-                    guard !isCarouselInteracting, !isCarouselAnimating, heroWallpapers.count > 1 else { return }
-                    showNextHero()
+                    guard !isCarouselInteracting, !isCarouselAnimating, heroItems.count > 1 else { return }
+                    advanceCarousel(by: 1)
                 }
             }
         }
@@ -467,15 +613,23 @@ struct HomeContentView: View {
     }
 
     private func showPreviousHero() {
+        resetCarouselAutoPlayTimer()
         advanceCarousel(by: -1)
     }
 
     private func showNextHero() {
+        resetCarouselAutoPlayTimer()
         advanceCarousel(by: 1)
     }
 
+    /// 重置轮播自动播放计时器（用户手动切换时调用）
+    private func resetCarouselAutoPlayTimer() {
+        stopCarouselAutoPlay()
+        startCarouselAutoPlay()
+    }
+
     private func advanceCarousel(by step: Int, animated: Bool = true) {
-        let count = heroWallpapers.count
+        let count = heroItems.count
         guard count > 1, !isCarouselAnimating else { return }
         moveCarousel(toDisplayIndex: currentCarouselDisplayIndex + step, animated: animated)
     }
@@ -499,13 +653,13 @@ struct HomeContentView: View {
     }
 
     private func moveCarousel(toDisplayIndex targetDisplayIndex: Int, animated: Bool = true) {
-        let wallpapers = heroWallpapers
-        guard !wallpapers.isEmpty else { return }
+        let items = heroItems
+        guard !items.isEmpty else { return }
 
-        let maxDisplayIndex = wallpapers.count > 1 ? wallpapers.count + 1 : 0
+        let maxDisplayIndex = items.count > 1 ? items.count + 1 : 0
         let boundedDisplayIndex = min(max(targetDisplayIndex, 0), maxDisplayIndex)
-        let resolvedIndex = actualCarouselIndex(for: boundedDisplayIndex, count: wallpapers.count)
-        let resolvedHeroID = wallpapers[resolvedIndex].id
+        let resolvedIndex = actualCarouselIndex(for: boundedDisplayIndex, count: items.count)
+        let resolvedHeroID = items[resolvedIndex].id
 
         cancelCarouselLoopReset()
 
@@ -515,7 +669,7 @@ struct HomeContentView: View {
             currentHeroID = resolvedHeroID
             carouselDragOffset = 0
             // 更新背景氛围色
-            atmosphereController.updateWallpaper(wallpapers[resolvedIndex])
+            atmosphereController.updateHeroItem(items[resolvedIndex])
         }
 
         if animated {
@@ -523,14 +677,14 @@ struct HomeContentView: View {
             withAnimation(.easeInOut(duration: carouselPageSnapDuration)) {
                 update()
             }
-            scheduleCarouselLoopReset(for: boundedDisplayIndex, count: wallpapers.count)
+            scheduleCarouselLoopReset(for: boundedDisplayIndex, count: items.count)
         } else {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 update()
             }
-            completeCarouselLoopResetIfNeeded(for: boundedDisplayIndex, count: wallpapers.count)
+            completeCarouselLoopResetIfNeeded(for: boundedDisplayIndex, count: items.count)
         }
     }
 
@@ -568,7 +722,7 @@ struct HomeContentView: View {
             withTransaction(transaction) {
                 currentCarouselDisplayIndex = wrappedDisplayIndex
                 currentCarouselIndex = resolvedIndex
-                currentHeroID = heroWallpapers[resolvedIndex].id
+                currentHeroID = heroItems[resolvedIndex].id
                 carouselDragOffset = 0
             }
         }
@@ -601,7 +755,7 @@ struct HomeContentView: View {
     private func heroCarouselDragGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
-                guard heroWallpapers.count > 1, !isCarouselAnimating else { return }
+                guard heroItems.count > 1, !isCarouselAnimating else { return }
 
                 let horizontalTranslation = value.translation.width
                 let verticalTranslation = value.translation.height
@@ -616,7 +770,7 @@ struct HomeContentView: View {
                 carouselDragOffset = horizontalTranslation
             }
             .onEnded { value in
-                guard heroWallpapers.count > 1 else { return }
+                guard heroItems.count > 1 else { return }
 
                 let horizontalTranslation = value.translation.width
                 let verticalTranslation = value.translation.height
@@ -649,137 +803,57 @@ struct HomeContentView: View {
     }
 }
 
-private struct HeroWallpaperImageSlide: View {
-    let wallpaper: Wallpaper
+private struct HeroSlide: View {
+    let item: HeroItem
     let isCurrent: Bool
     
     private var palette: HeroDrivenPalette {
-        HeroDrivenPalette(wallpaper: wallpaper)
+        switch item {
+        case .wallpaper(let w): return HeroDrivenPalette(wallpaper: w)
+        case .media: return HeroDrivenPalette(wallpaper: nil)
+        }
     }
     
     private var imageURL: URL? {
-        wallpaper.fullImageURL ?? wallpaper.thumbURL
+        item.imageURL
     }
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-
-            KFImage(imageURL)
-                .setProcessor(DownsamplingImageProcessor(size: CGSize(width: size.width * 2, height: size.height * 2)))
-                .cacheOriginalImage()
-                .fade(duration: 0.25)
-                .placeholder { _ in
-                    heroPlaceholder(size: size, showsProgress: true)
-                }
-                .resizable()
-                .scaledToFill()
-                .frame(width: size.width, height: size.height)
-                .clipped()
-        }
-    }
-    
-    private func heroLoadedContent(image: Image, size: CGSize) -> some View {
-        ZStack {
-            heroBackdrop(image: image, size: size)
-            heroLightOverlay
-        }
-    }
-    
-    private func heroBackdrop(image: Image, size: CGSize) -> some View {
-        // 确保尺寸有效
-        let safeWidth = max(1, size.width)
-        let safeHeight = max(1, size.height)
-        
-        return ZStack {
-            // 备用背景色，防止图片加载前或加载失败时显示黑色
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            palette.backdropTop,
-                            palette.backdropMid,
-                            Color(hex: "1a1a2e")
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
             
-            image
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: safeWidth * 1.2, height: safeHeight * 1.2)
-                .position(x: safeWidth / 2, y: safeHeight / 2)
-                .clipped()
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.primary.opacity(0.22),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: max(1, safeWidth * 0.42)
+            ZStack {
+                // 底层：封面图始终存在（静态占位 + 调色板采样来源）
+                KFImage(imageURL)
+                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: size.width * 2, height: size.height * 2)))
+                    .cacheOriginalImage()
+                    .fade(duration: 0.25)
+                    .placeholder { _ in
+                        heroPlaceholder(size: size, showsProgress: true)
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+                
+                // 视频层：仅当前项挂载播放，切走后自动 dismantle 停止
+                if isCurrent, let videoURL = item.previewVideoURL {
+                    LoopingVideoBackgroundView(
+                        url: videoURL,
+                        isMuted: true,
+                        onReady: nil
                     )
-                )
-                .frame(width: max(1, safeWidth * 0.72), height: max(1, safeWidth * 0.72))
-                .blur(radius: 54)
-                .offset(x: -safeWidth * 0.18, y: -safeHeight * 0.22)
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            palette.secondary.opacity(0.18),
-                            .clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: max(1, safeWidth * 0.46)
-                    )
-                )
-                .frame(width: max(1, safeWidth * 0.78), height: max(1, safeWidth * 0.78))
-                .blur(radius: 60)
-                .offset(x: safeWidth * 0.2, y: -safeHeight * 0.08)
-
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            palette.heroCanvasTop.opacity(0.05),
-                            palette.heroCanvasMid.opacity(0.03),
-                            Color.clear
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.02),
-                            Color.clear,
-                            Color.black.opacity(0.06)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+                    .frame(width: size.width, height: size.height)
+                }
+            }
         }
     }
     
     private func heroPlaceholder(size: CGSize, showsProgress: Bool) -> some View {
-        // 确保尺寸有效
         let safeWidth = max(1, size.width)
         let safeHeight = max(1, size.height)
         
         return ZStack {
-            // 使用更亮的默认颜色，避免显示黑色
             Rectangle()
                 .fill(
                     LinearGradient(
@@ -848,7 +922,7 @@ private struct HeroWallpaperImageSlide: View {
 }
 
 private struct HeroCaptionPanel: View {
-    let wallpaper: Wallpaper
+    let heroItem: HeroItem
     let isFavorite: Bool
     let onOpen: () -> Void
     let onFavorite: () -> Void
@@ -875,59 +949,91 @@ private struct HeroCaptionPanel: View {
                     action: onOpen
                 )
 
-                HeroActionButton(
-                    title: "\(wallpaper.favorites)",
-                    systemImage: isFavorite ? "heart.fill" : "heart",
-                    iconColor: isFavorite ? Color(hex: "FF5A7D") : nil,
-                    prominence: .secondary,
-                    action: onFavorite
-                )
+                if case .wallpaper = heroItem {
+                    HeroActionButton(
+                        title: heroFavoriteCount,
+                        systemImage: isFavorite ? "heart.fill" : "heart",
+                        iconColor: isFavorite ? Color(hex: "FF5A7D") : nil,
+                        prominence: .secondary,
+                        action: onFavorite
+                    )
+                }
             }
             .glassContainer(spacing: 12)
         }
     }
 
     private var heroTitle: String {
-        if let primary = wallpaper.tags?.first(where: { !$0.name.isEmpty })?.name {
-            return beautifyTitle(primary)
+        switch heroItem {
+        case .wallpaper(let w):
+            if let primary = w.tags?.first(where: { !$0.name.isEmpty })?.name {
+                return beautifyTitle(primary)
+            }
+            if let secondary = w.tags?.dropFirst().first(where: { !$0.name.isEmpty })?.name {
+                return beautifyTitle(secondary)
+            }
+            return "Wallhaven \(w.id)"
+        case .media(let m):
+            return m.title
         }
-        if let secondary = wallpaper.tags?.dropFirst().first(where: { !$0.name.isEmpty })?.name {
-            return beautifyTitle(secondary)
-        }
-        return "Wallhaven \(wallpaper.id)"
     }
 
     private var heroEyebrow: String {
-        if let tag = wallpaper.tags?.first(where: { !$0.name.isEmpty })?.name {
-            return beautifyTitle(tag).uppercased()
+        switch heroItem {
+        case .wallpaper(let w):
+            if let tag = w.tags?.first(where: { !$0.name.isEmpty })?.name {
+                return beautifyTitle(tag).uppercased()
+            }
+            return categoryDisplayName.uppercased()
+        case .media(let m):
+            return (m.tags.first ?? m.sourceName).uppercased()
         }
-        return categoryDisplayName.uppercased()
     }
 
     private var heroMetadata: [String] {
-        [
-            wallpaper.resolution,
-            categoryDisplayName,
-            fileSizeText,
-            fileTypeText
-        ]
-        .filter { !$0.isEmpty }
+        switch heroItem {
+        case .wallpaper(let w):
+            return [
+                w.resolution,
+                categoryDisplayName,
+                fileSizeText(for: w),
+                fileTypeText(for: w)
+            ].filter { !$0.isEmpty }
+        case .media(let m):
+            return [
+                m.resolutionLabel,
+                m.sourceName,
+                m.durationLabel ?? ""
+            ].filter { !$0.isEmpty }
+        }
     }
-
-    private var categoryDisplayName: String {
-        switch wallpaper.category.lowercased() {
-        case "general":
-            return t("featured")
-        case "anime":
-            return t("filter.anime")
-        case "people":
-            return t("filter.people")
-        default:
-            return wallpaper.category.capitalized
+    
+    private var heroFavoriteCount: String {
+        switch heroItem {
+        case .wallpaper(let w): return "\(w.favorites)"
+        case .media: return "0"
         }
     }
 
-    private var fileSizeText: String {
+    private var categoryDisplayName: String {
+        switch heroItem {
+        case .wallpaper(let w):
+            switch w.category.lowercased() {
+            case "general":
+                return t("featured")
+            case "anime":
+                return t("filter.anime")
+            case "people":
+                return t("filter.people")
+            default:
+                return w.category.capitalized
+            }
+        case .media(let m):
+            return m.sourceName
+        }
+    }
+
+    private func fileSizeText(for wallpaper: Wallpaper) -> String {
         guard let fileSize = wallpaper.fileSize else { return "" }
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB]
@@ -935,7 +1041,7 @@ private struct HeroCaptionPanel: View {
         return formatter.string(fromByteCount: Int64(fileSize))
     }
 
-    private var fileTypeText: String {
+    private func fileTypeText(for wallpaper: Wallpaper) -> String {
         guard let fileType = wallpaper.fileType, !fileType.isEmpty else { return "" }
         return fileType.replacingOccurrences(of: "image/", with: "").uppercased()
     }
@@ -1181,7 +1287,6 @@ struct HomeShelfCard: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.white.opacity(isHovered ? 0.22 : 0.1), lineWidth: 1)
             )
-            .shadow(color: .black.opacity(isHovered ? 0.3 : 0.16), radius: isHovered ? 18 : 10, y: isHovered ? 12 : 6)
             .scaleEffect(isHovered ? 1.015 : 1.0)
         }
         .buttonStyle(.plain)
@@ -1274,11 +1379,6 @@ private struct HeroEdgeButton: View {
                     .max,
                     tint: Color.white.opacity(isHovered ? 0.22 : 0.12),
                     in: Circle()
-                )
-                .shadow(
-                    color: Color.black.opacity(isHovered ? 0.38 : 0.22),
-                    radius: isHovered ? 14 : 10,
-                    y: isHovered ? 8 : 5
                 )
         }
         .buttonStyle(HeroEdgePressButtonStyle())
@@ -1478,7 +1578,6 @@ private struct HomeMediaCard: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.white.opacity(isHovered ? 0.22 : 0.1), lineWidth: 1)
             )
-            .shadow(color: .black.opacity(isHovered ? 0.3 : 0.16), radius: isHovered ? 18 : 10, y: isHovered ? 12 : 6)
             .scaleEffect(isHovered ? 1.015 : 1.0)
         }
         .buttonStyle(.plain)
@@ -1506,12 +1605,16 @@ final class HomeAtmosphereController: ObservableObject {
     static let fallback = HomeAtmosphereController()
 
     func updateWallpaper(_ wallpaper: Wallpaper?) {
-        guard let wallpaper = wallpaper else {
+        updateHeroItem(wallpaper.map { .wallpaper($0) })
+    }
+    
+    fileprivate func updateHeroItem(_ item: HeroItem?) {
+        guard let item = item else {
             resetToFallback()
             return
         }
 
-        let key = wallpaper.id
+        let key = item.id
         if key == activeWallpaperID, referenceImage != nil {
             return
         }
@@ -1521,7 +1624,14 @@ final class HomeAtmosphereController: ObservableObject {
         loadTask = nil
         referenceImage = nil
 
-        guard let url = wallpaper.thumbURL ?? wallpaper.smallThumbURL else { return }
+        let url: URL?
+        switch item {
+        case .wallpaper(let w):
+            url = w.thumbURL ?? w.smallThumbURL
+        case .media(let m):
+            url = m.coverImageURL
+        }
+        guard let url = url else { return }
 
         loadTask = Task {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
@@ -1556,6 +1666,12 @@ final class HomeAtmosphereController: ObservableObject {
         primary = Color(hex: "5A7CFF")
         secondary = Color(hex: "8A5CFF")
         tertiary = Color(hex: "20C1FF")
+    }
+    
+    /// 切到其他 tab 时暂停后台任务（保留当前颜色，只取消未完成的加载）
+    func pause() {
+        loadTask?.cancel()
+        loadTask = nil
     }
 }
 
