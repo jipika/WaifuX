@@ -93,7 +93,7 @@ struct LiquidGlassBackground: View {
                     )
                 )
                 .frame(width: 600, height: 600)
-                .blur(radius: 80)
+                .blur(radius: 40)
                 .offset(x: -200, y: -150)
                 .offset(y: animateGlow ? -15 : 15)
 
@@ -111,7 +111,7 @@ struct LiquidGlassBackground: View {
                     )
                 )
                 .frame(width: 500, height: 500)
-                .blur(radius: 70)
+                .blur(radius: 35)
                 .offset(x: 250, y: 200)
                 .offset(y: animateGlow ? 20 : -20)
 
@@ -129,12 +129,9 @@ struct LiquidGlassBackground: View {
                     )
                 )
                 .frame(width: 400, height: 400)
-                .blur(radius: 60)
+                .blur(radius: 30)
                 .offset(x: 0, y: 100)
                 .offset(y: animateGlow ? -10 : 10)
-
-            // 顶层 - 微妙的扫描线纹理
-            ScanlineTexture()
         }
         .onAppear {
             withAnimation(
@@ -649,7 +646,6 @@ private struct DetailGlassChromeModifier<S: Shape>: ViewModifier {
                         lineWidth: 1
                     )
             }
-            .shadow(color: shadowColor, radius: shadowRadius, y: shadowYOffset)
     }
 }
 
@@ -794,7 +790,6 @@ private struct DetailGlassTitleModifier: ViewModifier {
                                 .foregroundStyle(.white)
                         }
                 )
-                .shadow(color: .black.opacity(0.35), radius: 28, x: 0, y: 14)
         } else {
             // Fallback: 使用 ultraThinMaterial 模拟透明玻璃文字
             ZStack {
@@ -852,7 +847,6 @@ private struct DetailGlassTitleModifier: ViewModifier {
                     }
             }
             .compositingGroup()
-            .shadow(color: .black.opacity(0.32), radius: 26, x: 0, y: 12)
         }
     }
 }

@@ -111,8 +111,15 @@ struct SteamPublishedFileResponse: Codable {
 }
 
 struct SteamPublishedFileQuery: Codable {
-    let total: Int
+    let result: Int?
+    let resultcount: Int?
     let publishedfiledetails: [SteamPublishedFileDetail]?
+}
+
+struct SteamPublishedFileVoteData: Codable {
+    let score: Double?
+    let votes_up: Int?
+    let votes_down: Int?
 }
 
 struct SteamPublishedFileDetail: Codable {
@@ -124,14 +131,19 @@ struct SteamPublishedFileDetail: Codable {
     let filename: String?
     let file_size: String?
     let creator: String
-    let subscriptions: String?
-    let favorited: String?
-    let views: String?
-    let score: String?           // 评分
-    let time_created: String?
-    let time_updated: String?
+    let creator_app_id: Int?
+    let consumer_app_id: Int?
+    let subscriptions: Int?
+    let favorited: Int?
+    let lifetime_subscriptions: Int?
+    let lifetime_favorited: Int?
+    let views: Int?
+    let score: Double?  // 旧版兼容，新版 API 使用 vote_data.score
+    let vote_data: SteamPublishedFileVoteData?
+    let time_created: Int?
+    let time_updated: Int?
     let tags: [SteamTag]?
-    let app_name: String?
+    let app_name: String?  // 旧版兼容，新版 API 不返回此字段
 }
 
 struct SteamTag: Codable {
@@ -147,14 +159,16 @@ struct WorkshopSearchParams {
     var tags: [String] = []
     var type: WorkshopWallpaper.WallpaperType?
     var contentLevel: String?
+    /// 分辨率/比例筛选（通过 requiredtags[] 发送，如 "1920 x 1080"）
+    var resolution: String?
     /// 时间范围（仅对 trend 排序有效），nil 表示全部时间
     var days: Int?
     
     enum SortOption: String {
-        case ranked = "ranked"           // 综合排序（热门趋势）
-        case subscriptions = "subscribed" // 订阅数
-        case updated = "updated"         // 最近更新
-        case created = "created"         // 最新发布
+        case ranked = "ranked"           // 热门趋势
+        case updated = "updated"         // 最新更新
+        case created = "created"         // 最近发布
+        case topRated = "toprated"       // 最受好评
     }
 }
 
@@ -211,19 +225,45 @@ extension WorkshopWallpaper {
             avatarURL: nil
         )
         
-        self.steamAppID = "431960"
-        self.subscriptions = Int(detail.subscriptions ?? "0")
-        self.favorites = Int(detail.favorited ?? "0")
-        self.views = Int(detail.views ?? "0")
-        self.rating = Double(detail.score ?? "0")
+        self.steamAppID = String(detail.consumer_app_id ?? 431960)
+        self.subscriptions = detail.subscriptions
+        self.favorites = detail.favorited
+        self.views = detail.views
+        self.rating = detail.vote_data?.score ?? detail.score
         
         self.type = Self.detectType(from: detail)
         self.tags = detail.tags?.map { $0.tag } ?? []
         self.isAnimatedImage = Self.detectAnimatedImage(from: detail.preview_url)
         
-        let formatter = ISO8601DateFormatter()
-        self.createdAt = detail.time_created.flatMap { formatter.date(from: $0) }
-        self.updatedAt = detail.time_updated.flatMap { formatter.date(from: $0) }
+        self.createdAt = detail.time_created.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) }
+        self.updatedAt = detail.time_updated.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+    
+    /// 合并 HTML 基础信息和 Steam Web API 详情
+    init(base: WorkshopWallpaper, detail: SteamPublishedFileDetail) {
+        self.id = detail.publishedfileid
+        self.title = detail.title.isEmpty ? base.title : detail.title
+        self.description = detail.description
+        self.previewURL = detail.preview_url.flatMap { URL(string: $0) } ?? base.previewURL
+        // API 返回 creator (Steam ID)，但不出作者显示名，保留 HTML 解析到的名字
+        self.author = WorkshopAuthor(
+            steamID: detail.creator,
+            name: base.author.name != "Unknown" ? base.author.name : "Unknown",
+            avatarURL: base.author.avatarURL
+        )
+        self.fileSize = Int64(detail.file_size ?? "0")
+        self.fileURL = detail.file_url.flatMap { URL(string: $0) }
+        self.steamAppID = String(detail.consumer_app_id ?? 431960)
+        // API 可能返回 nil，优先用 API 值，其次保留 HTML 解析值，再次用 lifetime 累计值
+        self.subscriptions = detail.subscriptions ?? base.subscriptions ?? detail.lifetime_subscriptions
+        self.favorites = detail.favorited ?? base.favorites ?? detail.lifetime_favorited
+        self.views = detail.views ?? base.views
+        self.rating = detail.vote_data?.score ?? detail.score ?? base.rating
+        self.type = WorkshopWallpaper.detectType(fromTags: detail.tags?.map(\.tag) ?? [])
+        self.tags = detail.tags?.map(\.tag) ?? []
+        self.isAnimatedImage = base.isAnimatedImage
+        self.createdAt = detail.time_created.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) }
+        self.updatedAt = detail.time_updated.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) }
     }
     
     /// 检测预览图是否为动态 GIF

@@ -183,18 +183,35 @@ enum ExploreImageColorSampler {
     private static func boost(_ rgb: (Double, Double, Double)) -> (Double, Double, Double) {
         let mx = max(rgb.0, rgb.1, rgb.2)
         let mn = min(rgb.0, rgb.1, rgb.2)
-        if mx - mn < 0.07 {
-            return (
-                min(1, rgb.0 * 0.55 + mx * 0.45),
-                min(1, rgb.1 * 0.55 + mx * 0.45),
-                min(1, rgb.2 * 0.55 + mx * 0.45)
-            )
+        let saturation = mx > 0 ? (mx - mn) / mx : 0
+
+        // 基础提亮：让整体更亮更通透
+        let brighten: (Double) -> Double = { c in
+            // 非线性提亮：暗部提升更多，亮部保持
+            let lifted = pow(c, 0.85)
+            // 整体提亮 15%
+            return min(1.0, lifted * 1.15 + 0.04)
         }
-        return (
-            min(1, rgb.0 * 0.85 + mx * 0.15),
-            min(1, rgb.1 * 0.85 + mx * 0.15),
-            min(1, rgb.2 * 0.85 + mx * 0.15)
-        )
+
+        var r = brighten(rgb.0)
+        var g = brighten(rgb.1)
+        var b = brighten(rgb.2)
+
+        // 低饱和度颜色（偏灰）：增加一点冷暖倾向，避免死灰
+        if saturation < 0.12 {
+            if mx == rgb.0 { r = min(1, r + 0.08) }
+            else if mx == rgb.2 { b = min(1, b + 0.08) }
+            else { g = min(1, g + 0.06); b = min(1, b + 0.04) }
+        }
+
+        // 增加饱和度：让颜色更鲜艳
+        let avg = (r + g + b) / 3
+        let satBoost: Double = saturation < 0.3 ? 1.25 : 1.1
+        r = min(1, avg + (r - avg) * satBoost)
+        g = min(1, avg + (g - avg) * satBoost)
+        b = min(1, avg + (b - avg) * satBoost)
+
+        return (r, g, b)
     }
 
     private static func color(from rgb: (Double, Double, Double)) -> Color {
@@ -278,6 +295,12 @@ final class ExploreAtmosphereController: ObservableObject {
         referenceImage = nil
         activeFirstItemKey = nil
         tint = wallpaperMode ? .wallpaperFallback : .mediaFallback
+    }
+    
+    /// 切到其他 tab 时暂停后台任务（保留当前颜色，只取消未完成的加载）
+    func pause() {
+        loadTask?.cancel()
+        loadTask = nil
     }
 
     func updateFirstWallpaper(_ wallpaper: Wallpaper?) {
@@ -379,6 +402,42 @@ final class ExploreAtmosphereController: ObservableObject {
         tint = .mediaFallback
 
         guard let url = URL(string: coverURL) else { return }
+
+        loadTask = Task {
+            let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+            guard !Task.isCancelled, let image = result?.image else { return }
+
+            let processed = await Task.detached(priority: .userInitiated) {
+                let small = image.constrainedForAtmosphereBackdrop()
+                let sampledColors = ExploreImageColorSampler.triplet(from: small)
+                return (small, sampledColors)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                self.referenceImage = processed.0
+                if let (c1, c2, c3) = processed.1 {
+                    self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
+                }
+            }
+        }
+    }
+
+    /// 从任意图片 URL 更新氛围背景（用于随机切换，不持久化）
+    func updateFromImageURL(_ url: URL?, keyPrefix: String = "rand") {
+        guard let url else {
+            resetToFallback()
+            return
+        }
+        let key = "\(keyPrefix):\(url.absoluteString)"
+        if key == activeFirstItemKey, referenceImage != nil {
+            return
+        }
+        activeFirstItemKey = key
+        loadTask?.cancel()
+        loadTask = nil
+        referenceImage = nil
 
         loadTask = Task {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
@@ -530,29 +589,57 @@ struct ExploreDynamicAtmosphereBackground: View {
                     .allowsHitTesting(false)
             }
 
-            // 简化：合并径向渐变效果
+            // 漫射光晕：分散到四个角落，避免只集中在中间
             RadialGradient(
                 colors: [
-                    primaryColor.opacity(lightweightBackdrop ? 0.06 : 0.08),
-                    secondaryColor.opacity(lightweightBackdrop ? 0.03 : 0.04),
+                    primaryColor.opacity(lightweightBackdrop ? 0.10 : 0.14),
                     Color.clear
                 ],
                 center: .topLeading,
-                startRadius: 20,
-                endRadius: lightweightBackdrop ? 200 : 300
+                startRadius: 40,
+                endRadius: lightweightBackdrop ? 400 : 600
             )
             .allowsHitTesting(false)
 
-            // 移除材质层，使用纯色替代
-            Rectangle()
-                .fill(baseTopColor.opacity(0.05))
-                .allowsHitTesting(false)
+            RadialGradient(
+                colors: [
+                    secondaryColor.opacity(lightweightBackdrop ? 0.08 : 0.12),
+                    Color.clear
+                ],
+                center: .bottomTrailing,
+                startRadius: 40,
+                endRadius: lightweightBackdrop ? 350 : 550
+            )
+            .allowsHitTesting(false)
 
-            // 底部渐变遮罩
+            RadialGradient(
+                colors: [
+                    tertiaryColor.opacity(lightweightBackdrop ? 0.06 : 0.10),
+                    Color.clear
+                ],
+                center: .bottomLeading,
+                startRadius: 30,
+                endRadius: lightweightBackdrop ? 300 : 450
+            )
+            .allowsHitTesting(false)
+
+            // 极淡的中心提亮，平衡四角
+            RadialGradient(
+                colors: [
+                    baseTopColor.opacity(0.04),
+                    Color.clear
+                ],
+                center: .center,
+                startRadius: 100,
+                endRadius: lightweightBackdrop ? 500 : 700
+            )
+            .allowsHitTesting(false)
+
+            // 底部极淡过渡（仅轻微压暗，避免底部过暗）
             LinearGradient(
                 colors: [
                     Color.clear,
-                    tint.baseBottom.opacity(0.3)
+                    tint.baseBottom.opacity(0.10)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -721,5 +808,49 @@ struct KingfisherGIFImage: View {
             animateOnHoverOnly: false,
             isHovered: false
         )
+    }
+}
+
+// MARK: - 预览窗口管理器
+@MainActor
+final class PreviewWindowManager: ObservableObject {
+    static let shared = PreviewWindowManager()
+
+    private var windowController: NSWindowController?
+
+    private init() {}
+
+    func openPreview(url: URL, isMuted: Bool) {
+        windowController?.close()
+        windowController = nil
+
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+
+        let width = max(1000, screenFrame.width * 0.85)
+        let height = max(700, screenFrame.height * 0.85)
+        let x = screenFrame.midX - width / 2
+        let y = screenFrame.midY - height / 2
+
+        let window = NSWindow(
+            contentRect: NSRect(x: x, y: y, width: width, height: height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "预览"
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .black
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 800, height: 600)
+
+        let hostingView = NSHostingView(
+            rootView: WallpaperPreviewSheet(url: url, isMuted: .constant(isMuted))
+        )
+        window.contentView = hostingView
+
+        windowController = NSWindowController(window: window)
+        windowController?.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
     }
 }

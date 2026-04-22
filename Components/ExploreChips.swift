@@ -200,6 +200,34 @@ public struct ResetFiltersButton: View {
     }
 }
 
+// MARK: - 随机氛围背景按钮
+public struct RandomAtmosphereButton: View {
+    let tint: Color
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    public init(tint: Color, action: @escaping () -> Void) {
+        self.tint = tint
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .frame(width: 46, height: 46)
+                .contentShape(Circle())
+                .exploreFrostedCircle(tint: tint)
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.05 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .onHover { isHovered = $0 }
+    }
+}
+
 // MARK: - 排序菜单
 
 public struct SortMenu<SortOption: SortOptionProtocol>: View {

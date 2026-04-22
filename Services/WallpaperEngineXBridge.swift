@@ -16,6 +16,9 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var lastWallpaperPath: String?
     private var cancellables = Set<AnyCancellable>()
 
+    private let lastWallpaperPathKey = "we_last_wallpaper_path_v1"
+    private let controllingExternalKey = "we_controlling_external_v1"
+
     private init() {
         // 监听 VideoWallpaperManager 恢复自己播放时，清空外部接管标记
         VideoWallpaperManager.shared.$currentVideoURL
@@ -55,6 +58,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         lastWallpaperPath = path
         isExternalPaused = false
         isControllingExternalEngine = true
+        persistState()
 
         if let screens = targetScreens, !screens.isEmpty {
             for screen in screens {
@@ -72,6 +76,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         isControllingExternalEngine = false
         isExternalPaused = false
         lastWallpaperPath = nil
+        clearPersistedState()
     }
 
     func stopWallpaper() {
@@ -100,8 +105,30 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     func restoreIfNeeded() {
+        // 从 UserDefaults 恢复上次状态（不在 init 中读取，避免 macOS 26+ _CFXPreferences 递归崩溃）
+        if !isControllingExternalEngine {
+            if let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) {
+                lastWallpaperPath = path
+                isControllingExternalEngine = UserDefaults.standard.bool(forKey: controllingExternalKey)
+            }
+        }
+
         guard isControllingExternalEngine, let path = lastWallpaperPath else { return }
         try? setWallpaper(path: path)
+    }
+
+    private func persistState() {
+        if let path = lastWallpaperPath {
+            UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
+            UserDefaults.standard.set(isControllingExternalEngine, forKey: controllingExternalKey)
+        } else {
+            clearPersistedState()
+        }
+    }
+
+    private func clearPersistedState() {
+        UserDefaults.standard.removeObject(forKey: lastWallpaperPathKey)
+        UserDefaults.standard.removeObject(forKey: controllingExternalKey)
     }
 
     // MARK: - 私有方法

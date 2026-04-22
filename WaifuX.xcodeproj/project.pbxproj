@@ -63,6 +63,8 @@
 		64B8046E4DA6E6D8BAF0171C /* MediaFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E863AB4B82C85983EF0D89 /* MediaFilters.swift */; };
 		6B639FEB8087BB15D26D3C52 /* FavoriteSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD0611483B37F2224A18BDDF /* FavoriteSource.swift */; };
 		6E73B225B2FD0E6943FB55FF /* TMDBService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B48D0B0A573FA14F04F81C6 /* TMDBService.swift */; };
+		6EA141BFB1E509643BB446FB /* LoopingVideoBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC91D92E22B64F6B7C3AAC94 /* LoopingVideoBackgroundView.swift */; };
+		6FB21D7AA05B18390DFAF54E /* SourceSwitchTooltip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D226CE6582E7150D0EAA0E6 /* SourceSwitchTooltip.swift */; };
 		71CA95FCFE98D1F5968921DE /* ViewExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19A8887CFC60BA0605B2EDBD /* ViewExtensions.swift */; };
 		749738A0B446DAC24558DE5B /* ExploreGridLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E59748FA75E24603AC8DF96 /* ExploreGridLayout.swift */; };
 		74F53BC54E220339B4BF073F /* DownloadPathManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E3DF54D73DDABA010A0185 /* DownloadPathManager.swift */; };
@@ -148,6 +150,7 @@
 		05A871A337E95110230471F2 /* TopNavigationBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopNavigationBar.swift; sourceTree = "<group>"; };
 		08BE43AC31F0C5EA01FDC4A1 /* SystemMemoryPressure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMemoryPressure.swift; sourceTree = "<group>"; };
 		0A5CE931C51165763414BC25 /* AnimeDetailViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeDetailViewModel.swift; sourceTree = "<group>"; };
+		0D226CE6582E7150D0EAA0E6 /* SourceSwitchTooltip.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SourceSwitchTooltip.swift; sourceTree = "<group>"; };
 		0EBC88522A42FB697047F0C4 /* AnimeRulesMarketView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeRulesMarketView.swift; sourceTree = "<group>"; };
 		1105A3D2BD988D514CE5D6F1 /* WallpaperSourceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperSourceManager.swift; sourceTree = "<group>"; };
 		14BB8E1BFAE51ADF8979365C /* DownloadTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadTask.swift; sourceTree = "<group>"; };
@@ -238,6 +241,7 @@
 		B5C2E52744F0A62D47BE4B8B /* LoadingAnimations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingAnimations.swift; sourceTree = "<group>"; };
 		B62335BD95ED53CAC70F686E /* CustomProgressView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomProgressView.swift; sourceTree = "<group>"; };
 		B8ABAC235052098531A787A3 /* NetworkError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkError.swift; sourceTree = "<group>"; };
+		BC91D92E22B64F6B7C3AAC94 /* LoopingVideoBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoopingVideoBackgroundView.swift; sourceTree = "<group>"; };
 		BCA535A536F34A83E3D67D5E /* AnimeExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeExploreView.swift; sourceTree = "<group>"; };
 		BD0611483B37F2224A18BDDF /* FavoriteSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteSource.swift; sourceTree = "<group>"; };
 		BDB6DD5A499E7BFC1DB6DB1B /* DanmakuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuView.swift; sourceTree = "<group>"; };
@@ -362,12 +366,14 @@
 				AC15DF5976DAADAFA1145BC7 /* LiquidGlassComponents.swift */,
 				D52E421AB7EE59F2ADC29ACA /* LiquidGlassNextItemToast.swift */,
 				BF7159115AD04C7CD5E4B85F /* LiquidGlassWallpaperCard.swift */,
+				BC91D92E22B64F6B7C3AAC94 /* LoopingVideoBackgroundView.swift */,
 				B5C2E52744F0A62D47BE4B8B /* LoadingAnimations.swift */,
 				639B58C37F12765D59215CD2 /* PerformanceModifiers.swift */,
 				90887F64FCF64F7B1EDB9EDD /* SearchOverlay.swift */,
 				822E5DF14D2A26714C4EA62C /* TabSearchField.swift */,
 				05A871A337E95110230471F2 /* TopNavigationBar.swift */,
 				66A188D7112EBBB2816A7B76 /* WallpaperPlayerBar.swift */,
+				0D226CE6582E7150D0EAA0E6 /* SourceSwitchTooltip.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -559,6 +565,7 @@
 				9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 			);
 			preferredProjectObjectVersion = 54;
+			productRefGroup = 346FAD1EEA2CE3D78685888C /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -649,6 +656,7 @@
 				D35A0942D440550F4240FCE8 /* LiquidGlassModifier.swift in Sources */,
 				2F8FAC5827D126A92C65B483 /* LiquidGlassNextItemToast.swift in Sources */,
 				7D439B9CC297E0893336CDFE /* LiquidGlassWallpaperCard.swift in Sources */,
+				6EA141BFB1E509643BB446FB /* LoopingVideoBackgroundView.swift in Sources */,
 				3D6E71D43DC0797D19DB4383 /* LoadingAnimations.swift in Sources */,
 				75C9299E784A6B2263F5C866 /* LocalWallpaperScanner.swift in Sources */,
 				61C6D6D4FD4D6C5953A70CA9 /* LocalizationService.swift in Sources */,
@@ -713,6 +721,7 @@
 				2D39DC04D432125CF0084687 /* WorkshopSourceManager.swift in Sources */,
 				A51B565E950C0AFDF87C8159 /* WorkshopViewModel.swift in Sources */,
 				A94EFF8A717771D2010002A7 /* WorkshopWallpaper.swift in Sources */,
+				6FB21D7AA05B18390DFAF54E /* SourceSwitchTooltip.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -729,7 +738,10 @@
 				CURRENT_PROJECT_VERSION = 39;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = App/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 38.0.70;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
@@ -875,7 +887,10 @@
 				CURRENT_PROJECT_VERSION = 39;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = App/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 38.0.70;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;

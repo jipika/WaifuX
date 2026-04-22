@@ -775,17 +775,26 @@ final class VideoWallpaperManager: ObservableObject {
             height: screenSize.height * screen.backingScaleFactor
         )
         
+        // 4. 优化循环播放：确保 seek 时等待视频合成渲染完成，避免跳帧
+        if #available(macOS 10.15, *) {
+            playerItem.seekingWaitsForVideoCompositionRendering = true
+        }
+        
+        // 5. 保持音画同步（即使壁纸静音也设置，避免有音轨时画面撕裂）
+        playerItem.audioTimePitchAlgorithm = .timeDomain
+        
+        // 6. 本地文件预缓冲，减少循环切换时的 IO 等待
+        if videoURL.isFileURL {
+            playerItem.preferredForwardBufferDuration = 5
+        }
+        
         let queuePlayer = AVQueuePlayer()
         queuePlayer.actionAtItemEnd = .none
         queuePlayer.isMuted = muted
         queuePlayer.volume = muted ? 0 : 1
-        queuePlayer.automaticallyWaitsToMinimizeStalling = false
+        // 设为 true：循环切换时若缓冲不足会等待而非强行播放，减少卡顿感
+        queuePlayer.automaticallyWaitsToMinimizeStalling = true
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
-        
-        // 4. 设置更高的视频输出质量
-        if #available(macOS 10.15, *) {
-            queuePlayer.currentItem?.seekingWaitsForVideoCompositionRendering = true
-        }
 
         let looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
         containerView.playerLayer.player = queuePlayer

@@ -1,6 +1,28 @@
 import Foundation
 import AppKit
 
+/// 线程安全的多线程下载进度跟踪
+private actor DownloadProgressTracker {
+    private var received: Int64 = 0
+    private var lastReported: Double = 0
+    private let total: Int64
+    private let handler: @Sendable (Double) -> Void
+    
+    init(total: Int64, handler: @escaping @Sendable (Double) -> Void) {
+        self.total = total
+        self.handler = handler
+    }
+    
+    func add(_ bytes: Int64) {
+        received += bytes
+        let progress = Double(received) / Double(total)
+        if progress - lastReported >= 0.01 || received >= total {
+            lastReported = progress
+            handler(min(progress, 1.0))
+        }
+    }
+}
+
 /// GitHub Commit 信息
 struct GitHubCommit: Codable {
     let sha: String
@@ -320,9 +342,6 @@ final class UpdateChecker: ObservableObject {
         return isVersion(release.version, newerThan: localVersion)
     }
 }
-import Foundation
-import AppKit
-
 /// 自动更新管理器 - 处理下载和安装（参考 AltTab 实现）
 @MainActor
 final class UpdateManager: ObservableObject {
@@ -437,13 +456,30 @@ final class UpdateManager: ObservableObject {
         var request = URLRequest(url: url)
         request.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
         
-        let (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard case .downloading = self.state else { return }
-                guard p > self.progress else { return }
-                self.progress = p
-                self.state = .downloading(p)
+        // 先尝试多线程并行下载，失败则回退到单线程
+        let (downloadedFileURL, response): (URL, URLResponse)
+        do {
+            print("[UpdateManager] Attempting parallel chunked download...")
+            (downloadedFileURL, response) = try await downloadParallelWithProgress(session: session, request: request) { [weak self] p in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    guard case .downloading = self.state else { return }
+                    guard p > self.progress else { return }
+                    self.progress = p
+                    self.state = .downloading(p)
+                }
+            }
+            print("[UpdateManager] Parallel download succeeded")
+        } catch {
+            print("[UpdateManager] Parallel download failed: \(error.localizedDescription), falling back to single connection")
+            (downloadedFileURL, response) = try await downloadWithProgress(session: session, request: request) { [weak self] p in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    guard case .downloading = self.state else { return }
+                    guard p > self.progress else { return }
+                    self.progress = p
+                    self.state = .downloading(p)
+                }
             }
         }
         
@@ -515,6 +551,124 @@ final class UpdateManager: ObservableObject {
     }
     
     // MARK: - 私有方法
+    
+    /// 多线程分片并行下载，利用 HTTP Range 请求加速
+    /// GitHub/S3 CDN 通常支持 Range，4-6 个并发可显著提升下载速度
+    private func downloadParallelWithProgress(
+        session: URLSession,
+        request: URLRequest,
+        progressHandler: @escaping @Sendable (Double) -> Void
+    ) async throws -> (URL, URLResponse) {
+        // 1. HEAD 请求获取文件大小并确认服务器支持 Range
+        var headRequest = request
+        headRequest.httpMethod = "HEAD"
+        let (_, headResponse) = try await session.data(for: headRequest)
+        
+        guard let httpResponse = headResponse as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        let totalSize = headResponse.expectedContentLength
+        guard totalSize > 0 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        let acceptRanges = httpResponse.value(forHTTPHeaderField: "Accept-Ranges")
+        guard acceptRanges?.lowercased() == "bytes" else {
+            throw URLError(.unsupportedURL)
+        }
+        
+        // 2. 分片配置：4 个并发，每个 chunk 至少 2MB
+        let minChunkSize: Int64 = 2 * 1024 * 1024
+        let preferredChunkCount = 4
+        let chunkCount = max(1, min(preferredChunkCount, Int(totalSize / minChunkSize)))
+        let chunkSize = Int(totalSize) / chunkCount
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let finalFile = tempDir.appendingPathComponent("WaifuX_update_\(UUID().uuidString).dmg")
+        FileManager.default.createFile(atPath: finalFile.path, contents: nil)
+        
+        let progress = DownloadProgressTracker(total: totalSize, handler: progressHandler)
+        
+        // 3. 并发下载每个 chunk 到独立临时文件
+        struct ChunkInfo {
+            let index: Int
+            let file: URL
+            let startOffset: Int64
+        }
+        
+        let chunks = try await withThrowingTaskGroup(of: ChunkInfo.self) { group -> [ChunkInfo] in
+            for i in 0..<chunkCount {
+                let start = Int64(i * chunkSize)
+                let end = (i == chunkCount - 1) ? (totalSize - 1) : (Int64((i + 1) * chunkSize - 1))
+                
+                group.addTask {
+                    var chunkRequest = request
+                    chunkRequest.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                    chunkRequest.timeoutInterval = 300
+                    
+                    let (asyncBytes, chunkResponse) = try await session.bytes(for: chunkRequest)
+                    guard let chunkHTTP = chunkResponse as? HTTPURLResponse,
+                          (chunkHTTP.statusCode == 200 || chunkHTTP.statusCode == 206) else {
+                        throw URLError(.badServerResponse)
+                    }
+                    
+                    // 写入独立临时文件
+                    let chunkFile = tempDir.appendingPathComponent("WaifuX_chunk_\(i)_\(UUID().uuidString).tmp")
+                    FileManager.default.createFile(atPath: chunkFile.path, contents: nil)
+                    let chunkHandle = try FileHandle(forWritingTo: chunkFile)
+                    defer { try? chunkHandle.close() }
+                    
+                    var buffer = Data(capacity: 256 * 1024)
+                    for try await byte in asyncBytes {
+                        buffer.append(byte)
+                        if buffer.count >= 256 * 1024 {
+                            chunkHandle.write(buffer)
+                            await progress.add(Int64(buffer.count))
+                            buffer.removeAll(keepingCapacity: true)
+                        }
+                    }
+                    if !buffer.isEmpty {
+                        chunkHandle.write(buffer)
+                        await progress.add(Int64(buffer.count))
+                    }
+                    
+                    return ChunkInfo(index: i, file: chunkFile, startOffset: start)
+                }
+            }
+            
+            var results: [ChunkInfo] = []
+            for try await result in group {
+                results.append(result)
+            }
+            return results
+        }
+        
+        // 4. 串行合并所有 chunk 到最终文件（单线程，避免多写竞态）
+        let finalHandle = try FileHandle(forWritingTo: finalFile)
+        defer { try? finalHandle.close() }
+        
+        for chunk in chunks.sorted(by: { $0.index < $1.index }) {
+            let readHandle = try FileHandle(forReadingFrom: chunk.file)
+            defer { try? readHandle.close() }
+            
+            finalHandle.seek(toFileOffset: UInt64(chunk.startOffset))
+            
+            // 流式读取 chunk 文件并写入最终文件，避免一次性读入内存
+            while true {
+                let data = readHandle.readData(ofLength: 256 * 1024)
+                if data.isEmpty { break }
+                finalHandle.write(data)
+            }
+            
+            // 清理 chunk 临时文件
+            try? FileManager.default.removeItem(at: chunk.file)
+        }
+        
+        progressHandler(1.0)
+        return (finalFile, headResponse)
+    }
     
     /// 使用 URLSession bytes API 精确跟踪下载进度
     /// 解决 downloadTask + KVO 在 GitHub 重定向时进度跳变的问题

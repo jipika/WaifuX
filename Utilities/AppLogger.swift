@@ -52,8 +52,7 @@ enum AppLogModule: String, CaseIterable {
 }
 
 // MARK: - Logger 入口
-@MainActor
-final class AppLogger {
+final class AppLogger: @unchecked Sendable {
 
     /// 单例
     static let shared = AppLogger()
@@ -137,7 +136,10 @@ final class AppLogger {
         os_log("%{public}@", log: Self.oslog, type: level.osLogType(), line)
 #endif
 
-        // 3. 文件持久化（始终写入，用于排查用户问题）
+        // 3. 文件持久化：Release 模式下只保留 error 级别，用于排查用户问题
+        #if !DEBUG
+        guard level == .error else { return }
+        #endif
         writeToFile(line)
     }
 

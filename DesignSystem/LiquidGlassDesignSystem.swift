@@ -380,7 +380,7 @@ public struct LiquidGlassAtmosphereBackground: View {
             Circle()
                 .fill(primary.opacity(lightweight ? 0.18 : 0.22))
                 .frame(width: lightweight ? 600 : 720, height: lightweight ? 600 : 720)
-                .blur(radius: lightweight ? 90 : 118)
+                .blur(radius: lightweight ? 45 : 60)
                 .offset(x: -180, y: -220)
 
             // 轻量模式下跳过次要光晕
@@ -388,24 +388,24 @@ public struct LiquidGlassAtmosphereBackground: View {
                 Circle()
                     .fill(secondary.opacity(0.18))
                     .frame(width: 640, height: 640)
-                    .blur(radius: 124)
+                    .blur(radius: 60)
                     .offset(x: 220, y: -120)
 
                 Circle()
                     .fill(tertiary.opacity(0.12))
                     .frame(width: 560, height: 560)
-                    .blur(radius: 108)
+                    .blur(radius: 50)
                     .offset(x: 60, y: 220)
             }
 
-            // 顶部渐变遮罩
+            // 顶部渐变遮罩（极轻微，避免整体过暗）
             Rectangle()
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.02),
+                            Color.white.opacity(0.03),
                             Color.clear,
-                            Color.black.opacity(0.18)
+                            Color.black.opacity(0.06)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
@@ -804,19 +804,6 @@ struct FallbackGlassModifier: ViewModifier {
                                     endPoint: .bottomTrailing
                                 )
                             )
-
-                        // 底部渐变 - 增强层次感
-                        AnyShape(shape)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.clear,
-                                        Color.black.opacity(0.05)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
                     }
                 }
             }
@@ -836,12 +823,6 @@ struct FallbackGlassModifier: ViewModifier {
                         lineWidth: lightweight ? 0.5 : 1
                     )
             }
-            // 优化：轻量模式减少阴影开销
-            .shadow(
-                color: .black.opacity(lightweight ? level.shadowOpacity * 0.5 : level.shadowOpacity * 1.2),
-                radius: lightweight ? min(level.shadowRadius * 0.5, 4) : level.shadowRadius,
-                y: lightweight ? max(level.shadowYOffset * 0.5, 1) : level.shadowYOffset
-            )
     }
 }
 

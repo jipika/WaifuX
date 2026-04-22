@@ -49,6 +49,8 @@ final class MediaExploreViewModel: ObservableObject {
     private var workshopCurrentType: WorkshopSourceManager.WorkshopTypeFilter = .all
     /// 默认 SFW（Steam `requiredtags[]=Everyone`），避免未选级别时混入全年龄未分级内容
     private var workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
+    /// Workshop 分辨率/比例筛选
+    private var workshopCurrentResolution: String? = nil
     /// Workshop 排序方式
     private(set) var workshopSortBy: WorkshopSearchParams.SortOption = .ranked
     /// Workshop 热门趋势时间范围（仅对 trend 排序有效），nil = 全部时间
@@ -984,7 +986,8 @@ final class MediaExploreViewModel: ObservableObject {
             query: workshopSearchQuery,
             tags: workshopCurrentTags,
             type: workshopCurrentType,
-            contentLevel: workshopCurrentContentLevel
+            contentLevel: workshopCurrentContentLevel,
+            resolution: workshopCurrentResolution
         )
     }
 
@@ -1001,14 +1004,15 @@ final class MediaExploreViewModel: ObservableObject {
             query: trimmedQuery,
             tags: [],
             type: .all,
-            contentLevel: .everyone
+            contentLevel: .everyone,
+            resolution: nil
         )
     }
 
     /// 按标签筛选 Workshop 内容
     func loadWorkshopWithTags(_ tags: [String]) async {
         workshopCurrentTags = tags
-        await loadWorkshopFeedInternal(query: "", tags: tags)
+        await loadWorkshopFeedInternal(query: "", tags: tags, resolution: workshopCurrentResolution)
     }
 
     /// 带完整筛选条件加载 Workshop 内容
@@ -1016,13 +1020,15 @@ final class MediaExploreViewModel: ObservableObject {
         query: String = "",
         tags: [String] = [],
         type: WorkshopSourceManager.WorkshopTypeFilter = .all,
-        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil
+        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil,
+        resolution: String? = nil
     ) async {
         workshopSearchQuery = query
         workshopCurrentTags = tags
         workshopCurrentType = type
         workshopCurrentContentLevel = contentLevel
-        await loadWorkshopFeedInternal(query: query, tags: tags, type: type, contentLevel: contentLevel)
+        workshopCurrentResolution = resolution
+        await loadWorkshopFeedInternal(query: query, tags: tags, type: type, contentLevel: contentLevel, resolution: resolution)
     }
     
     /// 设置 Workshop 排序方式
@@ -1033,7 +1039,8 @@ final class MediaExploreViewModel: ObservableObject {
             query: workshopSearchQuery,
             tags: workshopCurrentTags,
             type: workshopCurrentType,
-            contentLevel: workshopCurrentContentLevel
+            contentLevel: workshopCurrentContentLevel,
+            resolution: workshopCurrentResolution
         )
     }
 
@@ -1042,7 +1049,8 @@ final class MediaExploreViewModel: ObservableObject {
         query: String,
         tags: [String],
         type: WorkshopSourceManager.WorkshopTypeFilter = .all,
-        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil
+        contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil,
+        resolution: String? = nil
     ) async {
         guard !isLoading else { return }
 
@@ -1066,6 +1074,7 @@ final class MediaExploreViewModel: ObservableObject {
         }()
 
         let resolvedContentLevel = contentLevel ?? workshopCurrentContentLevel
+        let resolvedResolution = resolution ?? workshopCurrentResolution
 
         let params = WorkshopSearchParams(
             query: query,
@@ -1075,6 +1084,7 @@ final class MediaExploreViewModel: ObservableObject {
             tags: tags,
             type: wallpaperType,
             contentLevel: resolvedContentLevel?.rawValue,
+            resolution: resolvedResolution,
             days: workshopDays
         )
 
@@ -1120,6 +1130,7 @@ final class MediaExploreViewModel: ObservableObject {
             tags: workshopCurrentTags,
             type: wallpaperType,
             contentLevel: workshopCurrentContentLevel?.rawValue,
+            resolution: workshopCurrentResolution,
             days: workshopDays
         )
 

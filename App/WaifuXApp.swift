@@ -226,6 +226,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             DownloadTaskService.shared.restoreSavedTasks()
                             WallpaperSchedulerService.shared.restoreSavedConfig()
                             
+                            // 恢复动态壁纸（如果用户之前设置了）
+                            VideoWallpaperManager.shared.restoreIfNeeded()
+                            if VideoWallpaperManager.shared.currentVideoURL == nil {
+                                WallpaperEngineXBridge.shared.restoreIfNeeded()
+                            }
+                            
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                 Task { await GitHubHosts.refreshHosts() }

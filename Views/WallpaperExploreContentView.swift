@@ -26,7 +26,6 @@ struct WallpaperExploreContentView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var contentSize: CGFloat = 0
     @State private var containerSize: CGFloat = 0
-    @State private var visibleCardIDs: Set<String> = []
     @State private var showAPIKeyAlert = false
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
@@ -37,7 +36,7 @@ struct WallpaperExploreContentView: View {
     /// 氛围图仅在实际首张 id 变化时更新
     @State private var lastSyncedFirstWallpaperID: String?
 
-    private var loadMoreTask: Task<Void, Never>?
+    @State private var loadMoreTask: Task<Void, Never>?
 
     /// 缓存筛选后的列表，避免每次 body 重绘时对 `wallpapers` 全表过滤（Wallhaven 分类）
     @State private var visibleWallpapers: [Wallpaper] = []
@@ -55,54 +54,8 @@ struct WallpaperExploreContentView: View {
                 )
                 .ignoresSafeArea()
 
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        heroSection
-                        categorySection
-                        filterSection
-                        activeFiltersSection
-                        contentSection(config: gridConfig)
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 80)
-                    .padding(.bottom, 48)
-                    .frame(width: geometry.size.width, alignment: .center)
-                    .background(scrollTrackingOverlay)
-                    .background(contentSizeTrackingOverlay)
-                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                }
-                .coordinateSpace(name: "exploreScroll")
-                .iosSmoothScroll()
-                .scrollDisabled(!isVisible)
-                .modifier(ScrollLoadMoreModifier(
-                    scrollOffset: $scrollOffset,
-                    contentSize: $contentSize,
-                    containerSize: $containerSize,
-                    earlyThreshold: 800,
-                    bottomThreshold: 100,
-                    onLoadMore: triggerLoadMore,
-                    checkLoadMore: checkLoadMore
-                ))
-                .disabled(isInitialLoading)
-
-                // 底部弹出加载卡片（解决列表高度抖动问题）
-                VStack {
-                    Spacer()
-                    if loadMoreFailed {
-                        BottomLoadingFailedCard {
-                            loadMoreFailed = false
-                            Task { await viewModel.loadMore() }
-                        }
-                        .padding(.bottom, 60)
-                    } else if isLoadingMore || (viewModel.isLoading && !visibleWallpapers.isEmpty) {
-                        BottomLoadingCard(isLoading: true)
-                            .padding(.bottom, 60)
-                    } else if !isLoadingMore && !viewModel.hasMorePages && !visibleWallpapers.isEmpty {
-                        BottomNoMoreCard()
-                            .padding(.bottom, 60)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                scrollContent(width: geometry.size.width, gridConfig: gridConfig)
+                bottomLoadingOverlay
             }
         }
         .onAppear {
@@ -115,30 +68,80 @@ struct WallpaperExploreContentView: View {
         }
         .onChange(of: isVisible) { _, visible in
             if !visible {
-                gridImagePrefetcher?.stop()
+                pauseActivity()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
         }
-        .onChange(of: category) { _, _ in
-            handleCategoryChange()
-            recomputeVisibleWallpapers()
-            syncAtmosphereIfNeeded()
-        }
+        .onChange(of: category) { _, _ in handleCategoryChange(); recomputeVisibleWallpapers(); syncAtmosphereIfNeeded() }
         .onChange(of: fourKCategory) { _, _ in handle4KCategoryChange() }
         .onChange(of: hotTag) { _, _ in handleHotTagChange() }
         .onChange(of: viewModel.sortingOption) { _, _ in handleSortingChange() }
         .onChange(of: fourKSorting) { _, _ in handle4KSortingChange() }
-        .onChange(of: viewModel.wallpapers) { _, _ in
-            recomputeVisibleWallpapers()
-            syncAtmosphereIfNeeded()
+        .onChange(of: viewModel.wallpapers) { _, _ in recomputeVisibleWallpapers(); syncAtmosphereIfNeeded() }
+        .overlay(alertOverlay)
+    }
+    
+    private func scrollContent(width: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                heroSection
+                categorySection
+                filterSection
+                activeFiltersSection
+                contentSection(config: gridConfig)
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 80)
+            .padding(.bottom, 48)
+            .frame(width: width, alignment: .center)
+            .background(scrollTrackingOverlay)
+            .background(contentSizeTrackingOverlay)
+            .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
         }
-        .alert(t("apiKeyRequired"), isPresented: $showAPIKeyAlert) {
-            Button(t("ok"), role: .cancel) {}
-        } message: {
-            Text(t("apiKeyNeeded"))
+        .coordinateSpace(name: "exploreScroll")
+        .iosSmoothScroll()
+        .scrollDisabled(!isVisible)
+        .modifier(ScrollLoadMoreModifier(
+            scrollOffset: $scrollOffset,
+            contentSize: $contentSize,
+            containerSize: $containerSize,
+            earlyThreshold: 800,
+            bottomThreshold: 100,
+            onLoadMore: triggerLoadMore,
+            checkLoadMore: checkLoadMore
+        ))
+        .disabled(isInitialLoading)
+    }
+    
+    private var bottomLoadingOverlay: some View {
+        VStack {
+            Spacer()
+            if loadMoreFailed {
+                BottomLoadingFailedCard {
+                    loadMoreFailed = false
+                    Task { await viewModel.loadMore() }
+                }
+                .padding(.bottom, 60)
+            } else if isLoadingMore || (viewModel.isLoading && !visibleWallpapers.isEmpty) {
+                BottomLoadingCard(isLoading: true)
+                    .padding(.bottom, 60)
+            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleWallpapers.isEmpty {
+                BottomNoMoreCard()
+                    .padding(.bottom, 60)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+    }
+    
+    private var alertOverlay: some View {
+        EmptyView()
+            .alert(t("apiKeyRequired"), isPresented: $showAPIKeyAlert) {
+                Button(t("ok"), role: .cancel) {}
+            } message: {
+                Text(t("apiKeyNeeded"))
+            }
     }
 
     // MARK: - Sections
@@ -187,6 +190,10 @@ struct WallpaperExploreContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("切换到 \(WallpaperSourceManager.shared.activeSource == .wallhaven ? "4K Wallpapers" : "WallHaven")")
+                .sourceSwitchTooltip(
+                    key: "wallpaper_source_switch_tooltip_shown",
+                    message: "点击这里切换壁纸源"
+                )
             }
             
             Text(t("wallpaperLibrary"))
@@ -207,6 +214,10 @@ struct WallpaperExploreContentView: View {
                 onClear: { searchText = ""; submitSearch() }
             )
             
+            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+                randomizeAtmosphere()
+            }
+
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
                 resetAllFilters(reloadData: true)
             }
@@ -400,7 +411,6 @@ struct WallpaperExploreContentView: View {
                     }
                 }
                 .onAppear {
-                    visibleCardIDs.insert(wallpaper.id)
                     preloadNearbyImages(around: wallpaper, config: config)
                 }
                 // 移除入场动画和滚动效果
@@ -432,13 +442,20 @@ struct WallpaperExploreContentView: View {
             .filter { $0 != clamped }
             .compactMap { items[$0].thumbURL }
 
-        gridImagePrefetcher?.stop()
-        let prefetcher = Kingfisher.ImagePrefetcher(
-            urls: urls,
-            options: [.processor(DownsamplingImageProcessor(size: targetSize))]
-        )
-        gridImagePrefetcher = prefetcher
-        prefetcher.start()
+        // 放到后台线程执行，避免阻塞主线程滚动
+        Task(priority: .background) {
+            await MainActor.run {
+                self.gridImagePrefetcher?.stop()
+            }
+            let prefetcher = ImagePrefetcher(
+                urls: urls,
+                options: [.processor(DownsamplingImageProcessor(size: targetSize))]
+            )
+            await MainActor.run {
+                self.gridImagePrefetcher = prefetcher
+            }
+            prefetcher.start()
+        }
     }
 
     // MARK: - UI Components
@@ -531,9 +548,7 @@ struct WallpaperExploreContentView: View {
             Task {
                 let start = Date()
                 await viewModel.search()
-                // 请求完数据后重置 visibleCardIDs，避免脏数据
                 await MainActor.run {
-                    visibleCardIDs.removeAll()
                     lastPrefetchCenterIndex = -1
                     recomputeVisibleWallpapers()
                     syncAtmosphereIfNeeded()
@@ -547,7 +562,6 @@ struct WallpaperExploreContentView: View {
                     ])
             }
         } else {
-            visibleCardIDs.removeAll()
             lastPrefetchCenterIndex = -1
             recomputeVisibleWallpapers()
             syncAtmosphereIfNeeded()
@@ -668,7 +682,6 @@ struct WallpaperExploreContentView: View {
 
     private func reloadData() {
         AppLogger.info(.wallpaper, "重新搜索：用户操作触发")
-        visibleCardIDs.removeAll()
         lastPrefetchCenterIndex = -1
         lastSyncedFirstWallpaperID = nil
         loadMoreFailed = false
@@ -694,7 +707,6 @@ struct WallpaperExploreContentView: View {
         viewModel.selectedRatios = []
         viewModel.selectedResolutions = []
         viewModel.atleastResolution = nil
-        visibleCardIDs.removeAll()
         lastPrefetchCenterIndex = -1
         lastSyncedFirstWallpaperID = nil
         loadMoreFailed = false
@@ -724,9 +736,24 @@ struct WallpaperExploreContentView: View {
         exploreAtmosphere.updateFirstWallpaper(first)
     }
 
+    private func pauseActivity() {
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
+        gridImagePrefetcher?.stop()
+        exploreAtmosphere.pause()
+    }
+
+    private func randomizeAtmosphere() {
+        guard !visibleWallpapers.isEmpty else { return }
+        let random = visibleWallpapers.randomElement()!
+        exploreAtmosphere.updateFromImageURL(
+            random.thumbURL,
+            keyPrefix: "rand-wallpaper"
+        )
+    }
+
     private func animateCardAppearance(id: String, index: Int) {
-        // 直接插入，不使用动画
-        visibleCardIDs.insert(id)
+        // 已移除 visibleCardIDs，避免滚动时触发 @State 更新导致卡顿
     }
 
 

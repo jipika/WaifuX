@@ -476,7 +476,7 @@ struct WallpaperDetailSheet: View {
     // MARK: - 按钮行（带左右横线）
     private var buttonRowWithDividers: some View {
         HStack(spacing: 16) {
-            // 左侧横线 + 收藏按钮
+            // 左侧横线 + 收藏按钮 + 预览按钮
             HStack(spacing: 16) {
                 dividerLine
                     .frame(width: 80)
@@ -491,6 +491,17 @@ struct WallpaperDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        previewWallpaper()
+                    } label: {
+                        DetailSheetCircleIconLabel(systemName: "arrow.up.backward.and.arrow.down.forward")
+                            .detailGlassCircleChrome()
+                    }
+                    .buttonStyle(.plain)
+                    .help(t("preview"))
+                }
             }
 
             // 主按钮
@@ -1023,6 +1034,20 @@ struct WallpaperDetailSheet: View {
 
     private func shareWallpaper() {
         viewModel.shareWallpaper(wallpaper)
+    }
+
+    private func previewWallpaper() {
+        Task {
+            do {
+                let url = try await getWallpaperImageURL()
+                await MainActor.run {
+                    PreviewWindowManager.shared.openPreview(url: url, isMuted: true)
+                }
+            } catch {
+                errorMessage = "\(t("error")): \(error.localizedDescription)"
+                showError = true
+            }
+        }
     }
 
     // MARK: - 下一张弹窗相关方法
