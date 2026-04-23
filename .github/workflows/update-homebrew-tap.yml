@@ -35,43 +35,13 @@ jobs:
           echo "sha256=$SHA256" >> "$GITHUB_ENV"
 
       - name: Update Cask
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          SHA256: ${{ env.sha256 }}
         run: |
-          python3 << 'PYEOF'
-import os
-v = os.environ['VERSION']
-s = os.environ['SHA256']
-content = f'''cask "waifux" do
-  version "{v}"
-  sha256 "{s}"
-
-  url "https://github.com/jipika/WaifuX/releases/download/v{v}/WaifuX.dmg"
-  name "WaifuX"
-  desc "Beautiful anime wallpaper and content browser"
-  homepage "https://github.com/jipika/WaifuX"
-
-  livecheck do
-    url :url
-    regex(/^v?(\d+(?:\.\d+)+)$/i)
-  end
-
-  auto_updates true
-
-  app "WaifuX.app"
-
-  zap trash: [
-    "~/Library/Application Support/WaifuX",
-    "~/Library/Caches/com.waifux.app",
-    "~/Library/Preferences/com.waifux.app.plist",
-    "~/Library/Saved Application State/com.waifux.app.savedState",
-  ]
-end
-'''
-with open('tap/Casks/waifux.rb', 'w') as f:
-    f.write(content)
-PYEOF
+          VERSION=${{ steps.version.outputs.version }}
+          SHA256=${{ env.sha256 }}
+          # base64 编码避免所有 YAML / Shell 引号转义问题
+          echo "Y2FzayAid2FpZnV4IiBkbwogIHZlcnNpb24gIiN7VkVSU0lPTn0iCiAgc2hhMjU2ICIje1NIQTI1Nn0iCgogIHVybCAiaHR0cHM6Ly9naXRodWIuY29tL2ppcGlrYS9XYWlmdVgvcmVsZWFzZXMvZG93bmxvYWQvdiN7VkVSU0lPTn0vV2FpZnVYLmRtZyIKICBuYW1lICJXYWlmdVgiCiAgZGVzYyAiQmVhdXRpZnVsIGFuaW1lIHdhbGxwYXBlciBhbmQgY29udGVudCBicm93c2VyIgogIGhvbWVwYWdlICJodHRwczovL2dpdGh1Yi5jb20vamlwaWthL1dhaWZ1WCIKCiAgbGl2ZWNoZWNrIGRvCiAgICB1cmwgOnVybAogICAgcmVnZXgoL152PyhcZCsoPzpcLlxkKykrKSQvaSkKICBlbmQKCiAgYXV0b191cGRhdGVzIHRydWUKCiAgYXBwICJXYWlmdVguYXBwIgoKICB6YXAgdHJhc2g6IFsKICAgICJ+L0xpYnJhcnkvQXBwbGljYXRpb24gU3VwcG9ydC9XYWlmdVgiLAogICAgIn4vTGlicmFyeS9DYWNoZXMvY29tLndhaWZ1eC5hcHAiLAogICAgIn4vTGlicmFyeS9QcmVmZXJlbmNlcy9jb20ud2FpZnV4LmFwcC5wbGlzdCIsCiAgICAifi9MaWJyYXJ5L1NhdmVkIEFwcGxpY2F0aW9uIFN0YXRlL2NvbS53YWlmdXguYXBwLnNhdmVkU3RhdGUiLAogIF0KZW5kCg==" | base64 -d > tap/Casks/waifux.rb
+          # 替换模板变量
+          sed -i "s/#{VERSION}/$VERSION/g; s/#{SHA256}/$SHA256/" tap/Casks/waifux.rb
 
       - name: Push to Tap Repo
         working-directory: tap
