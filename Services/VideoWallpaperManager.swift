@@ -11,6 +11,7 @@ final class VideoWallpaperManager: ObservableObject {
     @Published private(set) var currentPosterURL: URL?
     @Published private(set) var isMuted = true
     @Published private(set) var isPaused = false
+    @Published private(set) var volume: Double = 1.0
 
     private var windows: [String: WallpaperVideoWindow] = [:]
     private var players: [String: AVQueuePlayer] = [:]
@@ -188,7 +189,16 @@ final class VideoWallpaperManager: ObservableObject {
         isMuted = muted
         for player in players.values {
             player.isMuted = muted
-            player.volume = muted ? 0 : 1
+            player.volume = muted ? 0 : Float(volume)
+        }
+        persistState()
+    }
+
+    func setVolume(_ newVolume: Double) {
+        let clamped = max(0, min(1, newVolume))
+        volume = clamped
+        for player in players.values {
+            player.volume = isMuted ? 0 : Float(clamped)
         }
         persistState()
     }
@@ -405,7 +415,7 @@ final class VideoWallpaperManager: ObservableObject {
                 }
                 
                 for screen in screensToSet {
-                    try workspace.setDesktopImageURL(persistentURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(persistentURL, for: screen)
                 }
                 print("[VideoWallpaperManager] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
             } catch {
@@ -471,7 +481,7 @@ final class VideoWallpaperManager: ObservableObject {
                let originalURL = URL(string: config.wallpaperURL),
                FileManager.default.fileExists(atPath: originalURL.path) {
                 do {
-                    try workspace.setDesktopImageURL(originalURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(originalURL, for: screen)
                     print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (exact match)")
                     restoredCount += 1
                 } catch {
@@ -490,7 +500,7 @@ final class VideoWallpaperManager: ObservableObject {
            FileManager.default.fileExists(atPath: mainURL.path) {
             for screen in unmatchedScreens {
                 do {
-                    try workspace.setDesktopImageURL(mainURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(mainURL, for: screen)
                     print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to main screen)")
                     restoredCount += 1
                 } catch {
@@ -506,7 +516,7 @@ final class VideoWallpaperManager: ObservableObject {
                    FileManager.default.fileExists(atPath: url.path) {
                     for screen in unmatchedScreens {
                         do {
-                            try workspace.setDesktopImageURL(url, for: screen, options: [:])
+                            try workspace.setDesktopImageURLForAllSpaces(url, for: screen)
                             print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to any available)")
                         } catch {
                             print("[VideoWallpaperManager] Failed to restore wallpaper: \(error)")
@@ -564,6 +574,7 @@ final class VideoWallpaperManager: ObservableObject {
                 currentVideoURL = url
                 currentPosterURL = posterURL
                 isMuted = savedState.isMuted
+                volume = savedState.volume ?? (savedState.isMuted ? 0 : 1)
                 isPaused = false
                 videoTargetScreenIDs = Set(ids)
                 if let posterURL {
@@ -578,6 +589,7 @@ final class VideoWallpaperManager: ObservableObject {
                 persistState()
             } else {
                 try applyVideoWallpaper(from: url, posterURL: posterURL, muted: savedState.isMuted)
+                setVolume(savedState.volume ?? (savedState.isMuted ? 0 : 1))
                 if savedState.isPaused {
                     pauseWallpaper()
                 }
@@ -790,8 +802,8 @@ final class VideoWallpaperManager: ObservableObject {
         
         let queuePlayer = AVQueuePlayer()
         queuePlayer.actionAtItemEnd = .none
-        queuePlayer.isMuted = muted
-        queuePlayer.volume = muted ? 0 : 1
+        queuePlayer.isMuted = isMuted
+        queuePlayer.volume = isMuted ? 0 : Float(volume)
         // 设为 true：循环切换时若缓冲不足会等待而非强行播放，减少卡顿感
         queuePlayer.automaticallyWaitsToMinimizeStalling = true
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
@@ -870,6 +882,7 @@ final class VideoWallpaperManager: ObservableObject {
             posterURL: currentPosterURL?.absoluteString,
             isMuted: isMuted,
             isPaused: isPaused,
+            volume: volume,
             videoScreenIDs: videoTargetScreenIDs.isEmpty ? nil : videoTargetScreenIDs.sorted()
         )
 
@@ -927,6 +940,7 @@ private struct SavedVideoWallpaperState: Codable {
     let posterURL: String?
     let isMuted: Bool
     let isPaused: Bool
+    let volume: Double?
     /// 应显示 MP4 的屏幕 ID；旧版持久化无此字段时表示「当时逻辑等价于全部屏幕」
     let videoScreenIDs: [String]?
 }
@@ -1011,5 +1025,27 @@ private extension NSScreen {
             return screenNumber.stringValue
         }
         return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
+    }
+}
+
+// MARK: - NSWorkspace 扩展：设置壁纸到所有 Spaces
+
+extension NSWorkspace {
+    /// 设置桌面壁纸到指定屏幕的**所有 Spaces**（而不仅是当前 active Space）。
+    /// 这是 `setDesktopImageURL(_:for:options:)` 的包装，自动注入半私有的 `allSpaces` 选项，
+    /// 并通过 DistributedNotificationCenter 触发系统壁纸刷新，使已有 Spaces 也能同步更新。
+    func setDesktopImageURLForAllSpaces(_ url: URL, for screen: NSScreen, options: [DesktopImageOptionKey: Any] = [:]) throws {
+        var merged = options
+        merged[DesktopImageOptionKey(rawValue: "allSpaces")] = NSNumber(value: true)
+        try setDesktopImageURL(url, for: screen, options: merged)
+
+        // 触发系统桌面壁纸刷新通知，促使所有已有 Spaces 同步新壁纸
+        // 同时帮助状态栏根据新壁纸重新计算深色/浅色外观
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.apple.desktop"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 }

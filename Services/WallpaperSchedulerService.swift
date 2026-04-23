@@ -116,7 +116,8 @@ class WallpaperSchedulerService: ObservableObject {
                 VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
 
                 let tempURL = try await downloadImage(from: url)
-                try NSWorkspace.shared.setDesktopImageURL(tempURL, for: screen, options: [:])
+                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(tempURL, for: screen)
+                DesktopWallpaperSyncManager.shared.registerWallpaperSet(tempURL)
                 lastChangedWallpaper = wallpaper
             } catch {
                 print("[WallpaperSchedulerService] Failed to set wallpaper: \(error)")

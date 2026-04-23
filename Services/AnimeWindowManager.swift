@@ -23,7 +23,12 @@ class AnimePlayerWindowController: NSWindowController {
         window.title = anime.title
         window.backgroundColor = NSColor(Color(hex: "0A0A0C"))
         
-        // 显示红绿灯按钮（用于关闭窗口）
+        // 隐藏原生标题栏，使用自定义标题栏
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         
         // 设置大小限制
         window.minSize = NSSize(width: 900, height: 500)

@@ -19,6 +19,8 @@ class SettingsViewModel: ObservableObject {
     @Published var grainTextureEnabled = true { didSet { UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled") } }
     @Published var grainTextureQuality = "high" { didSet { UserDefaults.standard.set(grainTextureQuality, forKey: "grain_texture_quality") } }
     @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
+    @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
+    @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
 
     @Published var cacheSize: String = "0 MB"
     @Published var cacheProgress: Double = 0.0
@@ -105,6 +107,8 @@ class SettingsViewModel: ObservableObject {
         grainTextureEnabled = defaults.object(forKey: "grain_texture_enabled") as? Bool ?? true
         grainTextureQuality = defaults.string(forKey: "grain_texture_quality") ?? "high"
         showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
+        pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
+        pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
 
         // 恢复 API Key 缓存
         Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
@@ -129,6 +133,12 @@ class SettingsViewModel: ObservableObject {
     /// 同步动态壁纸设置到 VideoWallpaperManager
     func syncVideoWallpaperSettings() {
         VideoWallpaperManager.shared.showPosterOnLock = showPosterOnLock
+    }
+
+    /// 同步自动暂停设置到 DynamicWallpaperAutoPauseManager
+    func syncAutoPauseSettings() {
+        DynamicWallpaperAutoPauseManager.shared.pauseWhenOtherAppForeground = pauseWhenOtherAppForeground
+        DynamicWallpaperAutoPauseManager.shared.pauseWhenFullscreenCovers = pauseWhenFullscreenCovers
     }
 
     // MARK: - 更新检测

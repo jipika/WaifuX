@@ -1,6 +1,76 @@
 import AppKit
 import Combine
 
+// MARK: - 菜单栏音量滑块自定义视图
+private final class WallpaperVolumeSliderView: NSView {
+    private let iconView = NSImageView()
+    private let slider = NSSlider()
+    private var cancellables = Set<AnyCancellable>()
+
+    var onVolumeChanged: ((Double) -> Void)?
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 200, height: 28))
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        // 图标
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconView)
+
+        // 滑块
+        slider.minValue = 0
+        slider.maxValue = 100
+        slider.isContinuous = true
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(slider)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+
+            slider.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            slider.heightAnchor.constraint(equalToConstant: 16)
+        ])
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let value = Double(sender.doubleValue) / 100.0
+        onVolumeChanged?(value)
+        updateIcon(volume: value)
+    }
+
+    func setVolume(_ volume: Double, isMuted: Bool) {
+        let effectiveVolume = isMuted ? 0 : volume
+        slider.doubleValue = effectiveVolume * 100
+        updateIcon(volume: effectiveVolume)
+    }
+
+    private func updateIcon(volume: Double) {
+        let name: String
+        if volume == 0 {
+            name = "speaker.slash.fill"
+        } else if volume < 0.35 {
+            name = "speaker.wave.1.fill"
+        } else if volume < 0.7 {
+            name = "speaker.wave.2.fill"
+        } else {
+            name = "speaker.wave.3.fill"
+        }
+        iconView.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    }
+}
+
 @MainActor
 final class StatusBarController: NSObject {
     // MARK: - 单例
@@ -20,6 +90,22 @@ final class StatusBarController: NSObject {
     private var showWindowHandler: (() -> Void)?
     private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
+    
+    // 音量滑块
+    private lazy var volumeSliderView = WallpaperVolumeSliderView()
+    private lazy var volumeSliderItem: NSMenuItem = {
+        let item = NSMenuItem()
+        item.view = volumeSliderView
+        volumeSliderView.onVolumeChanged = { [weak self] volume in
+            self?.videoWallpaperManager.setVolume(volume)
+            if volume > 0 && self?.videoWallpaperManager.isMuted == true {
+                self?.videoWallpaperManager.setMuted(false)
+            } else if volume == 0 && self?.videoWallpaperManager.isMuted == false {
+                self?.videoWallpaperManager.setMuted(true)
+            }
+        }
+        return item
+    }()
     
     // 标记是否已配置，防止重复配置
     private var isConfigured = false
@@ -92,9 +178,9 @@ final class StatusBarController: NSObject {
 
     private func bindWallpaperState() {
         videoWallpaperManager.$currentVideoURL
-            .combineLatest(videoWallpaperManager.$isPaused, videoWallpaperManager.$isMuted)
+            .combineLatest(videoWallpaperManager.$isPaused, videoWallpaperManager.$isMuted, videoWallpaperManager.$volume)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _, _ in
+            .sink { [weak self] _, _, _, _ in
                 self?.refreshMenuState()
             }
             .store(in: &cancellables)
@@ -125,6 +211,28 @@ final class StatusBarController: NSObject {
         // 静音只在本机视频壁纸时可用（外部引擎自行处理音频）
         muteItem.isEnabled = hasNativeWallpaper
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+
+        // 音量滑块：只在有本机视频动态壁纸时显示（CLI 暂不支持音量调节）
+        updateVolumeSliderVisibility()
+    }
+
+    private func updateVolumeSliderVisibility() {
+        let hasNativeWallpaper = videoWallpaperManager.currentVideoURL != nil
+
+        if hasNativeWallpaper {
+            if volumeSliderItem.menu == nil {
+                // 插入到 muteItem 后面
+                let muteIndex = menu.index(of: muteItem)
+                if muteIndex != -1 {
+                    menu.insertItem(volumeSliderItem, at: muteIndex + 1)
+                }
+            }
+            volumeSliderView.setVolume(videoWallpaperManager.volume, isMuted: videoWallpaperManager.isMuted)
+        } else {
+            if volumeSliderItem.menu != nil {
+                menu.removeItem(volumeSliderItem)
+            }
+        }
     }
 
     @objc private func showMainWindow() {

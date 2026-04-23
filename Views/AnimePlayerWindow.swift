@@ -127,6 +127,17 @@ private struct PlayerSection: View {
             if let error = viewModel.videoError {
                 ErrorOverlay(error: error)
             }
+            
+            // 自定义标题栏（播放器左上角，不遮挡主要内容）
+            VStack(spacing: 0) {
+                HStack {
+                    PlayerCustomTitleBar(title: viewModel.anime.title)
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                Spacer()
+            }
         }
     }
 }
@@ -418,6 +429,31 @@ private struct RightPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - 播放器自定义标题栏
+private struct PlayerCustomTitleBar: View {
+    let title: String
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // 左侧：自定义红绿灯按钮
+            CustomWindowControls(
+                onClose: { NSApp.keyWindow?.performClose(nil) },
+                onMinimize: { NSApp.keyWindow?.performMiniaturize(nil) },
+                onMaximize: { NSApp.keyWindow?.zoom(nil) }
+            )
+            
+            // 窗口标题
+            Text(title)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+            
+            Spacer()
+        }
+        .frame(height: 28)
     }
 }
 

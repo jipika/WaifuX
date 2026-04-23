@@ -1534,7 +1534,7 @@ private final class DesktopWallpaperManager {
 
         for targetScreen in targetScreens {
             do {
-                try workspace.setDesktopImageURL(dst, for: targetScreen, options: [
+                try workspace.setDesktopImageURLForAllSpaces(dst, for: targetScreen, options: [
                     .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue)
                 ])
             } catch {
@@ -1694,7 +1694,7 @@ private final class DesktopWallpaperManager {
                let originalURL = URL(string: config.wallpaperURL),
                FileManager.default.fileExists(atPath: originalURL.path) {
                 do {
-                    try workspace.setDesktopImageURL(originalURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(originalURL, for: screen)
                     print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (exact match)")
                     restoredCount += 1
                 } catch {
@@ -1712,7 +1712,7 @@ private final class DesktopWallpaperManager {
            FileManager.default.fileExists(atPath: mainURL.path) {
             for screen in unmatchedScreens {
                 do {
-                    try workspace.setDesktopImageURL(mainURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(mainURL, for: screen)
                     print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to main screen)")
                     restoredCount += 1
                 } catch {
@@ -1727,7 +1727,7 @@ private final class DesktopWallpaperManager {
                    FileManager.default.fileExists(atPath: url.path) {
                     for screen in unmatchedScreens {
                         do {
-                            try workspace.setDesktopImageURL(url, for: screen, options: [:])
+                            try workspace.setDesktopImageURLForAllSpaces(url, for: screen)
                             print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to any available)")
                         } catch {
                             print("[DesktopWallpaperManager] Failed to restore wallpaper: \(error)")

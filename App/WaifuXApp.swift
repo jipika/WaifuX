@@ -232,6 +232,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                 WallpaperEngineXBridge.shared.restoreIfNeeded()
                             }
                             
+                            // 恢复动态壁纸自动暂停设置
+                            DynamicWallpaperAutoPauseManager.shared.restoreSettings()
+                            
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                 // 尽早与启动源选择一致：开 VPN 时关闭 GitHub Hosts，避免检查更新/下载仍走固定 IP 绕开隧道
@@ -268,6 +271,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 当用户点击 Dock 图标时显示主窗口
         showMainWindow()
         return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // 备用同步：当应用重新变为活跃时，检查并同步跨 Space 壁纸
+        // 因为 activeSpaceDidChangeNotification 在应用后台时可能不可靠
+        DesktopWallpaperSyncManager.shared.syncOnAppActivation()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

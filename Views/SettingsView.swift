@@ -225,14 +225,9 @@ private struct GeneralSettingsTab: View {
                                 }
                             }
                         } label: {
-                            HStack(spacing: 4) {
-                                Text(LocalizationService.shared.currentLanguage.displayName)
-                                    .font(.system(size: 13, weight: .regular))
-                                    .foregroundStyle(Color.white.opacity(0.6))
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(Color.white.opacity(0.35))
-                            }
+                            Text(LocalizationService.shared.currentLanguage.displayName)
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(Color.white.opacity(0.6))
                         }
                         .menuStyle(.borderlessButton)
                     }
@@ -277,13 +272,41 @@ private struct GeneralSettingsTab: View {
                 MacSettingsRow(
                     title: t("showPosterOnLock"),
                     subtitle: t("showPosterOnLockDesc"),
-                    showDivider: false
+                    showDivider: true
                 ) {
                     MacToggle(isOn: Binding(
                         get: { viewModel.showPosterOnLock },
                         set: { newValue in
                             viewModel.showPosterOnLock = newValue
                             viewModel.syncVideoWallpaperSettings()
+                        }
+                    ))
+                }
+
+                MacSettingsRow(
+                    title: t("pauseWhenOtherAppForeground"),
+                    subtitle: t("pauseWhenOtherAppForegroundDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: Binding(
+                        get: { viewModel.pauseWhenOtherAppForeground },
+                        set: { newValue in
+                            viewModel.pauseWhenOtherAppForeground = newValue
+                            viewModel.syncAutoPauseSettings()
+                        }
+                    ))
+                }
+
+                MacSettingsRow(
+                    title: t("pauseWhenFullscreenCovers"),
+                    subtitle: t("pauseWhenFullscreenCoversDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: Binding(
+                        get: { viewModel.pauseWhenFullscreenCovers },
+                        set: { newValue in
+                            viewModel.pauseWhenFullscreenCovers = newValue
+                            viewModel.syncAutoPauseSettings()
                         }
                     ))
                 }

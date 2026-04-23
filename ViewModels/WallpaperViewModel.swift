@@ -942,16 +942,19 @@ class WallpaperViewModel: ObservableObject {
         for screen in screens {
             switch option {
             case .desktop:
-                try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
+                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
             case .lockScreen:
                 // macOS 锁屏壁纸设置需要更复杂的实现
                 // 这里使用简化版本
                 try setLockScreenWallpaper(imageURL)
             case .both:
-                try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
+                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
                 try setLockScreenWallpaper(imageURL)
             }
         }
+
+        // 注册壁纸以便跨 Space 同步
+        DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
     }
     
     // MARK: - 设置壁纸到指定屏幕
@@ -964,13 +967,14 @@ class WallpaperViewModel: ObservableObject {
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
             switch option {
             case .desktop:
-                try workspace.setDesktopImageURL(imageURL, for: targetScreen, options: [:])
+                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
             case .lockScreen:
                 try setLockScreenWallpaper(imageURL)
             case .both:
-                try workspace.setDesktopImageURL(imageURL, for: targetScreen, options: [:])
+                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
                 try setLockScreenWallpaper(imageURL)
             }
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
         } else {
             try await setWallpaper(from: imageURL, option: option)
         }
@@ -993,7 +997,8 @@ class WallpaperViewModel: ObservableObject {
                         continuation.resume(throwing: NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
                         return
                     }
-                    try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
+                    try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
+                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -1011,7 +1016,7 @@ class WallpaperViewModel: ObservableObject {
         // 方法1：尝试设置桌面壁纸（macOS 锁屏通常显示桌面壁纸）
         let workspace = NSWorkspace.shared
         for screen in NSScreen.screens {
-            try workspace.setDesktopImageURL(imageURL, for: screen, options: [:])
+            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
         }
 
         // 方法2：尝试通过 defaults 命令设置锁屏图片（仅适用于某些 macOS 版本）

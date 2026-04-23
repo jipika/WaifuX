@@ -361,18 +361,24 @@ struct MediaDetailSheet: View {
         .animation(.easeOut(duration: 0.15), value: scrollOffset)
     }
 
-    // MARK: - 顶部返回按钮
+    // MARK: - 顶部返回按钮（设置壁纸中禁用，下载时可返回）
     private var floatingBackButton: some View {
-        Button(action: {
+        Button {
+            if isSettingWallpaper {
+                AppLogger.warn(.ui, "返回被阻止：设置壁纸进行中",
+                    metadata: ["isSettingWallpaper": isSettingWallpaper])
+                return
+            }
             onClose()
-        }) {
+        } label: {
             DetailSheetCircleIconLabel(
                 systemName: "chevron.left",
-                foreground: .white.opacity(0.95),
+                foreground: isSettingWallpaper ? .white.opacity(0.35) : .white.opacity(0.95),
                 fontSize: 15,
                 frameSide: 38
             )
             .detailGlassCircleChrome()
+            .opacity(isSettingWallpaper ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
