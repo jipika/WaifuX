@@ -208,37 +208,50 @@ class WorkshopSourceManager: ObservableObject {
     
     /// 返回 SteamCMD 可执行文件路径
     /// 首次调用时会将 Bundle 中的 steamcmd 复制到 Application Support，
-    /// 避免重新编译 App 时覆盖掉 steamcmd 的自更新文件和登录缓存
+    /// 避免重新编译 App 时覆盖掉 steamcmd 的自更新文件和登录缓存。
+    /// 若已存在副本但缺少 steamcmd-pty（版本更新），增量补充缺失文件，保留 config/ 登录缓存。
     func steamCMDExecutableURL() -> URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
         let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
         let script = destDir.appendingPathComponent("steamcmd.sh")
-        
-        // 如果 Application Support 中已有副本，直接返回脚本路径
-        if FileManager.default.fileExists(atPath: script.path) {
+        let ptyBin = destDir.appendingPathComponent("steamcmd-pty")
+
+        // 如果 Application Support 中已有完整副本（包含 steamcmd-pty），直接返回
+        if FileManager.default.fileExists(atPath: script.path),
+           FileManager.default.fileExists(atPath: ptyBin.path) {
             return script
         }
-        
+
         // 从 Bundle 复制原始 steamcmd 目录
         guard let bundleSteamcmdDir = Self.bundledSteamCMDDirectoryURL() else {
             return nil
         }
-        
+
         do {
             try FileManager.default.createDirectory(at: destDir.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // 如果旧版本目录已存在（不含 steamcmd.sh 的情况），先删除
+
             if FileManager.default.fileExists(atPath: destDir.path) {
-                try FileManager.default.removeItem(at: destDir)
+                // 目录已存在但缺少 steamcmd-pty（版本更新），增量补充缺失文件，保留 config/ 登录缓存
+                let bundleContents = try FileManager.default.contentsOfDirectory(at: bundleSteamcmdDir, includingPropertiesForKeys: nil)
+                for item in bundleContents {
+                    let destItem = destDir.appendingPathComponent(item.lastPathComponent)
+                    if !FileManager.default.fileExists(atPath: destItem.path) {
+                        try FileManager.default.copyItem(at: item, to: destItem)
+                    }
+                }
+                print("[WorkshopSourceManager] 已增量补充 steamcmd 到 \(destDir.path)（保留现有登录缓存）")
+            } else {
+                // 首次安装，完整复制
+                try FileManager.default.copyItem(at: bundleSteamcmdDir, to: destDir)
+                print("[WorkshopSourceManager] 已将 steamcmd 复制到 \(destDir.path)")
             }
-            try FileManager.default.copyItem(at: bundleSteamcmdDir, to: destDir)
-            print("[WorkshopSourceManager] 已将 steamcmd 复制到 \(destDir.path)")
         } catch {
             print("[WorkshopSourceManager] 复制 steamcmd 失败: \(error)")
             return nil
         }
-        
+
         return script
     }
 

@@ -792,9 +792,20 @@ class WorkshopService: ObservableObject {
 
         try? FileManager.default.createDirectory(at: downloadDir, withIntermediateDirectories: true)
 
-        // SteamCMD 正确用法：登录时只传用户名，使用缓存的 session token（无需密码和验证码）
-        // session token 由 verifySteamLogin 成功后自动缓存在 steamcmd/config/ 目录下
-        // 只有 token 过期时才需要重新完整登录（此时用户应回到设置页重新验证）
+        // SteamCMD 不提供下载进度输出（+download_progress 是无效命令），
+        // 因此通过 Steam API 获取文件大小，再用轮询下载目录的方式估算进度。
+        let totalSize: Int64
+        do {
+            let details = try await fetchPublishedFileDetails(ids: [workshopID])
+            if let detail = details.first, let sizeStr = detail.file_size, let size = Int64(sizeStr), size > 0 {
+                totalSize = size
+            } else {
+                totalSize = 0  // 无法获取大小时，禁用百分比进度
+            }
+        } catch {
+            totalSize = 0
+        }
+
         let loginLine = "login \"\(credentials.username)\""
 
         let scriptContent = [
@@ -817,6 +828,8 @@ class WorkshopService: ObservableObject {
 
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
+            // 注意：steamcmd 没有提供有效的下载进度参数，+download_progress 会报 "Command not found"
+            // 进度通过轮询文件大小实现（见下方 pollingTask）
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
             task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
@@ -828,6 +841,28 @@ class WorkshopService: ObservableObject {
             let errorPipe = Pipe()
             task.standardOutput = outputPipe
             task.standardError = errorPipe
+
+            // steamcmd 创意工坊下载不创建中间文件，无法轮询字节数。
+            // 进度通过时间估算：假设下载速度不低于 200KB/s，按已耗时推算进度，上限 99%。
+            var lastReportedProgress: Double = 0
+            let startTime = Date()
+            let minSpeed: Double = 500 * 1024  // 500KB/s 最低预估速度
+            let pollingTask = Task { @MainActor in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                    guard totalSize > 0 else { continue }
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    // 基于时间的估算进度 = min(已下载估算 / 总大小, 0.99)
+                    // 已下载估算 = max(实际字节数, elapsed * minSpeed)
+                    let currentBytes = Self.dirSize(downloadDir.appendingPathComponent("steamapps"))
+                    let estimatedBytes = max(Double(currentBytes), elapsed * minSpeed)
+                    let progress = min(estimatedBytes / Double(totalSize), 0.99)
+                    if progress > lastReportedProgress + 0.001 {
+                        lastReportedProgress = progress
+                        progressHandler?(progress)
+                    }
+                }
+            }
 
             final class OutputBox: @unchecked Sendable {
                 var output = ""
@@ -854,24 +889,15 @@ class WorkshopService: ObservableObject {
             }
             let outputBox = OutputBox()
 
-            // 实时解析 SteamCMD 输出中的下载进度 [xx%]
-            let parseProgress: @Sendable (String) -> Void = { str in
-                guard let handler = progressHandler else { return }
-                if let progress = Self.extractSteamCMDProgress(from: str) {
-                    handler(progress)
-                }
-            }
-
+            // steamcmd 创意工坊下载不输出进度，所有输出仅用于最终错误判断
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 if let str = String(data: handle.availableData, encoding: .utf8) {
                     outputBox.appendOutput(str)
-                    parseProgress(str)
                 }
             }
             errorPipe.fileHandleForReading.readabilityHandler = { handle in
                 if let str = String(data: handle.availableData, encoding: .utf8) {
                     outputBox.appendError(str)
-                    parseProgress(str)
                 }
             }
 
@@ -892,14 +918,17 @@ class WorkshopService: ObservableObject {
                 private let outputPipe: Pipe?
                 private let errorPipe: Pipe?
                 private let timeoutTask: Task<Void, Never>?
-                init(continuation: CheckedContinuation<T, any Error>, outputPipe: Pipe? = nil, errorPipe: Pipe? = nil, timeoutTask: Task<Void, Never>? = nil) {
+                private let pollingTask: Task<Void, Never>?
+                init(continuation: CheckedContinuation<T, any Error>, outputPipe: Pipe? = nil, errorPipe: Pipe? = nil, timeoutTask: Task<Void, Never>? = nil, pollingTask: Task<Void, Never>? = nil) {
                     self.continuation = continuation
                     self.outputPipe = outputPipe
                     self.errorPipe = errorPipe
                     self.timeoutTask = timeoutTask
+                    self.pollingTask = pollingTask
                 }
                 private func cleanup() {
                     timeoutTask?.cancel()
+                    pollingTask?.cancel()
                     outputPipe?.fileHandleForReading.readabilityHandler = nil
                     errorPipe?.fileHandleForReading.readabilityHandler = nil
                 }
@@ -934,7 +963,8 @@ class WorkshopService: ObservableObject {
                 continuation: continuation,
                 outputPipe: outputPipe,
                 errorPipe: errorPipe,
-                timeoutTask: timeoutTask
+                timeoutTask: timeoutTask,
+                pollingTask: pollingTask
             )
 
             task.terminationHandler = { _ in
@@ -1071,17 +1101,49 @@ class WorkshopService: ObservableObject {
         }
     }
 
-    /// 从 SteamCMD 输出中解析下载进度（格式如 "[ 10%] Downloading..."）
+    /// 从 SteamCMD 输出中解析下载进度
+    /// 支持旧格式 "[ 10%]" 和新格式 "[Progress] X.X% (Y / Z bytes)"
     nonisolated private static func extractSteamCMDProgress(from output: String) -> Double? {
-        // SteamCMD 输出格式: "[  0%]", "[ 10%]", "[100%]" 等
-        let pattern = #"\[\s*(\d+)%\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(output.startIndex..., in: output)
-        // 取最后一处匹配（最新的进度）
-        guard let match = regex.matches(in: output, options: [], range: range).last else { return nil }
-        guard let numberRange = Range(match.range(at: 1), in: output) else { return nil }
-        guard let percent = Double(output[numberRange]) else { return nil }
-        return percent / 100.0
+        // 旧格式: "[  0%]", "[ 10%]", "[100%]" 等
+        let legacyPattern = #"\[\s*(\d+)%\]"#
+        // 新格式 (2023+): "[Progress] 45.2% (1024000 / 2270464 bytes)"
+        let progressPattern = #"\[Progress\]\s*(\d+(?:\.\d+)?)%"#
+
+        for pattern in [progressPattern, legacyPattern] {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..., in: output)
+            // 取最后一处匹配（最新的进度）
+            guard let match = regex.matches(in: output, options: [], range: range).last,
+                  let numberRange = Range(match.range(at: 1), in: output),
+                  let percent = Double(output[numberRange]) else { continue }
+            // 旧格式是 0-100，新格式可能是 0.0-100.0
+            return percent > 1 ? percent / 100.0 : percent
+        }
+        return nil
+    }
+
+    /// 递归计算目录下所有文件的总大小（字节），用于轮询下载进度
+    /// 注意：不跳过隐藏文件，因为 steamcmd 下载时可能创建隐藏临时文件
+    nonisolated private static func dirSize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+            return 0
+        }
+        var total: Int64 = 0
+        if let entries = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: []) {
+            for entry in entries {
+                var childIsDir: ObjCBool = false
+                if fm.fileExists(atPath: entry.path, isDirectory: &childIsDir), childIsDir.boolValue {
+                    total += dirSize(entry)
+                } else {
+                    if let size = try? entry.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        total += Int64(size)
+                    }
+                }
+            }
+        }
+        return total
     }
 
     /// 清理 steamcmd 错误输出
