@@ -38,19 +38,19 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.version }}
           SHA256=${{ env.sha256 }}
-          cat > tap/Casks/waifux.rb << EOF
+          cat > tap/Casks/waifux.rb << 'RUBY_EOF'
 cask "waifux" do
-  version "${VERSION}"
-  sha256 "${SHA256}"
+  version "#{VERSION}"
+  sha256 "#{SHA256}"
 
-  url "https://github.com/jipika/WaifuX/releases/download/v\#{version}/WaifuX.dmg"
+  url "https://github.com/jipika/WaifuX/releases/download/v#{VERSION}/WaifuX.dmg"
   name "WaifuX"
   desc "Beautiful anime wallpaper and content browser"
   homepage "https://github.com/jipika/WaifuX"
 
   livecheck do
     url :url
-    regex(/^v?(\\d+(?:\\.\\d+)+)$/i)
+    regex(/^v?(\d+(?:\.\d+)+)$/i)
   end
 
   auto_updates true
@@ -64,7 +64,7 @@ cask "waifux" do
     "~/Library/Saved Application State/com.waifux.app.savedState",
   ]
 end
-EOF
+RUBY_EOF
 
       - name: Push to Tap Repo
         working-directory: tap
