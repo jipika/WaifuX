@@ -1,0 +1,80 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Tap Repo
+        uses: actions/checkout@v4
+        with:
+          repository: jipika/homebrew-waifux
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap
+
+      - name: Extract Version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download DMG and Compute SHA256
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          DMG_URL="https://github.com/jipika/WaifuX/releases/download/v${VERSION}/WaifuX.dmg"
+          curl -sL -o /tmp/WaifuX.dmg "$DMG_URL"
+          SHA256=$(shasum -a 256 /tmp/WaifuX.dmg | cut -d ' ' -f 1)
+          echo "sha256=$SHA256" >> "$GITHUB_ENV"
+
+      - name: Update Cask
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SHA256=${{ env.sha256 }}
+          cat > tap/Casks/waifux.rb << EOF
+cask "waifux" do
+  version "${VERSION}"
+  sha256 "${SHA256}"
+
+  url "https://github.com/jipika/WaifuX/releases/download/v\#{version}/WaifuX.dmg"
+  name "WaifuX"
+  desc "Beautiful anime wallpaper and content browser"
+  homepage "https://github.com/jipika/WaifuX"
+
+  livecheck do
+    url :url
+    regex(/^v?(\\d+(?:\\.\\d+)+)$/i)
+  end
+
+  auto_updates true
+
+  app "WaifuX.app"
+
+  zap trash: [
+    "~/Library/Application Support/WaifuX",
+    "~/Library/Caches/com.waifux.app",
+    "~/Library/Preferences/com.waifux.app.plist",
+    "~/Library/Saved Application State/com.waifux.app.savedState",
+  ]
+end
+EOF
+
+      - name: Push to Tap Repo
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/waifux.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Bump waifux to v${{ steps.version.outputs.version }}"
+          git push
