@@ -38,33 +38,37 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.version }}
           SHA256=${{ env.sha256 }}
-          cat > tap/Casks/waifux.rb << 'RUBY_EOF'
-cask "waifux" do
-  version "#{VERSION}"
-  sha256 "#{SHA256}"
+          python3 -c "
+import os
+content = '''cask \"waifux\" do
+  version \"#{VERSION}\"
+  sha256 \"#{SHA256}\"
 
-  url "https://github.com/jipika/WaifuX/releases/download/v#{VERSION}/WaifuX.dmg"
-  name "WaifuX"
-  desc "Beautiful anime wallpaper and content browser"
-  homepage "https://github.com/jipika/WaifuX"
+  url \"https://github.com/jipika/WaifuX/releases/download/v#{VERSION}/WaifuX.dmg\"
+  name \"WaifuX\"
+  desc \"Beautiful anime wallpaper and content browser\"
+  homepage \"https://github.com/jipika/WaifuX\"
 
   livecheck do
     url :url
-    regex(/^v?(\d+(?:\.\d+)+)$/i)
+    regex(/^v?(\d+(?:\.\d+)+)\$/i)
   end
 
   auto_updates true
 
-  app "WaifuX.app"
+  app \"WaifuX.app\"
 
   zap trash: [
-    "~/Library/Application Support/WaifuX",
-    "~/Library/Caches/com.waifux.app",
-    "~/Library/Preferences/com.waifux.app.plist",
-    "~/Library/Saved Application State/com.waifux.app.savedState",
+    \"~/Library/Application Support/WaifuX\",
+    \"~/Library/Caches/com.waifux.app\",
+    \"~/Library/Preferences/com.waifux.app.plist\",
+    \"~/Library/Saved Application State/com.waifux.app.savedState\",
   ]
 end
-RUBY_EOF
+'''
+with open('tap/Casks/waifux.rb', 'w') as f:
+    f.write(content.replace('#{VERSION}', os.environ['VERSION']).replace('#{SHA256}', os.environ['SHA256']))
+"
 
       - name: Push to Tap Repo
         working-directory: tap
