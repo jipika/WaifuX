@@ -33,6 +33,7 @@ struct TopNavigationBar: View {
     let onClose: () -> Void
     let onMinimize: () -> Void
     let onMaximize: () -> Void
+    let onZoom: () -> Void
     
     private let controlHeight: CGFloat = 34
 
@@ -67,6 +68,9 @@ struct TopNavigationBar: View {
         .padding(.trailing, 12)
         .padding(.top, 12)
         .padding(.bottom, 10)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded { _ in onZoom() }
+        )
     }
 }
 

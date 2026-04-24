@@ -158,6 +158,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
 
+        window?.collectionBehavior = .fullScreenPrimary
+
         window?.title = "WaifuX"
         window?.titlebarAppearsTransparent = true
         window?.titleVisibility = .hidden

@@ -82,40 +82,34 @@ fi
 
 echo "✅ 导出成功"
 
-# 创建 DMG
-echo "💿 正在创建 DMG..."
+# 仅在非签名流程时创建 DMG（签名流程由 CI 另行处理）
+if [ "${WAIFUX_SKIP_DMG:-}" != "1" ]; then
+  echo "💿 正在创建 DMG..."
+  if command -v create-dmg &> /dev/null; then
+      create-dmg \
+        --volname "WaifuX" \
+        --window-size 540 400 \
+        --app-drop-link 400 185 \
+        --hide-extension "WaifuX.app" \
+        --no-internet-enable \
+        "$BUILD_DIR/$DMG_NAME" \
+        "$BUILD_DIR/$APP_NAME"
+  else
+      echo "⚠️ create-dmg 未安装，使用 hdiutil..."
+      hdiutil create -volname "WaifuX" \
+        -srcfolder "$BUILD_DIR/$APP_NAME" \
+        -ov -format UDZO \
+        -imagekey zlib-level=9 \
+        "$BUILD_DIR/$DMG_NAME"
+  fi
 
-# 尝试使用 create-dmg（如果可用）
-if command -v create-dmg &> /dev/null; then
-    create-dmg \
-      --volname "WaifuX" \
-      --window-size 540 400 \
-      --app-drop-link 400 185 \
-      --hide-extension "WaifuX.app" \
-      --no-internet-enable \
-      "$BUILD_DIR/$DMG_NAME" \
-      "$BUILD_DIR/$APP_NAME"
-else
-    # 使用 hdiutil 作为备选方案
-    echo "⚠️ create-dmg 未安装，使用 hdiutil..."
-    hdiutil create -volname "WaifuX" \
-      -srcfolder "$BUILD_DIR/$APP_NAME" \
-      -ov -format UDZO \
-      -imagekey zlib-level=9 \
-      "$BUILD_DIR/$DMG_NAME"
+  if [ ! -f "$BUILD_DIR/$DMG_NAME" ]; then
+      echo "❌ DMG 创建失败"
+      exit 1
+  fi
+  echo "📦 DMG 大小: $(ls -lh "$BUILD_DIR/$DMG_NAME" | awk '{print $5}')"
 fi
 
-# 验证 DMG 是否创建成功
-if [ ! -f "$BUILD_DIR/$DMG_NAME" ]; then
-    echo "❌ DMG 创建失败"
-    exit 1
-fi
-
-# 完成
 echo ""
 echo "✅ 打包完成！"
-echo "📍 文件位置: $BUILD_DIR/$DMG_NAME"
-echo "📦 DMG 大小: $(ls -lh "$BUILD_DIR/$DMG_NAME" | awk '{print $5}')"
-echo ""
-echo "提示: 打开 dmg 时如提示无法验证开发者，可运行:"
-echo "  xattr -d com.apple.quarantine $BUILD_DIR/$DMG_NAME"
+echo "📍 App 位置: $BUILD_DIR/$APP_NAME"

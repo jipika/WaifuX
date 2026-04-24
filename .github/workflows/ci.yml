@@ -80,9 +80,59 @@ jobs:
 
       - name: Build & Package
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        env:
+          WAIFUX_SKIP_DMG: "1"
         run: |
           chmod +x ./scripts/package.sh
           ./scripts/package.sh
+
+      - name: Sign & Notarize
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        env:
+          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          # 创建临时 keychain 并导入证书
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # 解码并导入 p12 证书
+          echo "$APPLE_SIGNING_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          # 签名 app
+          codesign --force --deep --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
+
+          # 重新打包进 DMG（包含已签名的 .app）
+          create-dmg \
+            --volname "WaifuX" \
+            --window-size 540 400 \
+            --app-drop-link 400 185 \
+            --hide-extension "WaifuX.app" \
+            --no-internet-enable \
+            build/WaifuX.dmg \
+            build/WaifuX.app
+
+          # 提交公证
+          xcrun notarytool submit build/WaifuX.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # 将公证票据 stapled 到 DMG
+          xcrun stapler staple build/WaifuX.dmg
+
+          echo "✅ 签名+公证完成"
 
       - name: Build (PRs)
         if: github.event_name == 'pull_request'

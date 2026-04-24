@@ -113,7 +113,8 @@ struct ContentView: View {
                     onOpenSettings: { openSettingsWindow() },
                     onClose: { hideMainWindow() },
                     onMinimize: { minimizeWindow() },
-                    onMaximize: { maximizeWindow() }
+                    onMaximize: { maximizeWindow() },
+                    onZoom: { zoomWindow() }
                 )
                 .zIndex(100)
 
@@ -261,11 +262,11 @@ struct ContentView: View {
 
     private func maximizeWindow() {
         guard let window = NSApp.mainWindow else { return }
-        if window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        } else {
-            window.zoom(nil)
-        }
+        window.toggleFullScreen(nil)
+    }
+
+    private func zoomWindow() {
+        NSApp.mainWindow?.zoom(nil)
     }
 
     private func openSettingsWindow() {
