@@ -159,8 +159,8 @@ jobs:
           SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep -m1 "id:" | awk '{print $2}' | tr -d '[:space:]')
           echo "Submission ID: $SUBMISSION_ID"
 
-          # 检查公证状态
-          STATUS=$(echo "$NOTARY_OUTPUT" | grep -i "status:" | awk '{print $2}' | tr -d '[:space:]')
+          # 检查公证状态（精确匹配 "  status: Accepted" 这一行）
+          STATUS=$(echo "$NOTARY_OUTPUT" | awk '/^  status:/{print $2; exit}' | tr -d '[:space:]')
           echo "Notarization status: $STATUS"
 
           # 如果状态不是 Accepted，打印日志并失败
