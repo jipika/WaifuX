@@ -139,10 +139,19 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --wait
 
-          # 将公证票据 stapled 到 DMG
-          xcrun stapler staple build/WaifuX.dmg
-
-          echo "✅ 签名+公证完成"
+          # 将公证票据 stapled 到 DMG（带重试，CloudKit 同步有时有延迟）
+          for i in {1..5}; do
+            echo "Attempt $i: stapling notarization ticket..."
+            if xcrun stapler staple build/WaifuX.dmg; then
+              echo "✅ 签名+公证完成"
+              break
+            fi
+            if [ $i -eq 5 ]; then
+              echo "❌ stapler failed after 5 attempts"
+              exit 1
+            fi
+            sleep 30
+          done
 
       - name: Build (PRs)
         if: github.event_name == 'pull_request'
