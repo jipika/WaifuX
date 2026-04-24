@@ -124,6 +124,8 @@ jobs:
           find build/WaifuX.app -type f | while read -r f; do
             # 只签名 Mach-O 二进制（dylib/so/无扩展名可执行文件）
             if file "$f" | grep -qE "Mach-O|ELF"; then
+              # 先移除可能存在的旧签名，再重新签名
+              codesign --remove-signature "$f" 2>/dev/null || true
               codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f"
             fi
           done
