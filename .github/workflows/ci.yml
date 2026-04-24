@@ -134,22 +134,33 @@ jobs:
             build/WaifuX.app
 
           # 提交公证
-          SUBMISSION_ID=$(xcrun notarytool submit build/WaifuX.dmg \
+          echo "Submitting for notarization..."
+          NOTARY_OUTPUT=$(xcrun notarytool submit build/WaifuX.dmg \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait \
-            | grep "id:" | awk '{print $2}')
+            --wait 2>&1)
+          echo "$NOTARY_OUTPUT"
 
+          # 提取 Submission ID（取第一行匹配）
+          SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep -m1 "id:" | awk '{print $2}' | tr -d '[:space:]')
           echo "Submission ID: $SUBMISSION_ID"
 
-          # 查看公证日志（如果失败能知道具体原因）
-          echo "=== Notarization Log ==="
-          xcrun notarytool log "$SUBMISSION_ID" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" 2>&1 || true
-          echo "========================"
+          # 检查公证状态
+          STATUS=$(echo "$NOTARY_OUTPUT" | grep -i "status:" | awk '{print $2}' | tr -d '[:space:]')
+          echo "Notarization status: $STATUS"
+
+          # 如果状态不是 Accepted，打印日志并失败
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "=== Notarization Log ==="
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" 2>&1 || true
+            echo "========================"
+            echo "❌ Notarization failed with status: $STATUS"
+            exit 1
+          fi
 
           # 将公证票据 stapled 到 DMG（带重试，CloudKit 同步有时有延迟）
           for i in {1..5}; do
