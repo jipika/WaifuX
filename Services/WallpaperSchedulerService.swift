@@ -112,12 +112,12 @@ class WallpaperSchedulerService: ObservableObject {
 
         Task { @MainActor in
             do {
-                WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
-                VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+                // 只停目标屏幕的动态壁纸，避免影响其他屏幕
+                VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
 
                 let tempURL = try await downloadImage(from: url)
                 try NSWorkspace.shared.setDesktopImageURLForAllSpaces(tempURL, for: screen)
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(tempURL)
+                DesktopWallpaperSyncManager.shared.registerWallpaperSet(tempURL, for: screen)
                 lastChangedWallpaper = wallpaper
             } catch {
                 print("[WallpaperSchedulerService] Failed to set wallpaper: \(error)")

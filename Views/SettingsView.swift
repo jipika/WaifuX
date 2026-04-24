@@ -485,6 +485,8 @@ private struct SourceCapsule: View {
 // MARK: - 下载设置标签
 private struct DownloadSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @State private var showMigrationSheet = false
+    @State private var pathRefreshID = UUID()
 
     var body: some View {
         MacSettingsForm {
@@ -500,12 +502,55 @@ private struct DownloadSettingsTab: View {
                 MacSettingsRow(
                     title: t("saveToDownloadsFolder"),
                     subtitle: t("saveToDownloadsDesc"),
-                    showDivider: false
+                    showDivider: true
                 ) {
                     MacToggle(isOn: $viewModel.saveToDownloads)
                 }
+
+                // 下载目录选择
+                MacSettingsRow(
+                    title: t("downloadDirectory"),
+                    subtitle: currentPathDisplay,
+                    showDivider: false
+                ) {
+                    Button {
+                        showMigrationSheet = true
+                    } label: {
+                        Text(t("change"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color.white.opacity(0.12))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
             }
         }
+        .id(pathRefreshID)
+        .sheet(isPresented: $showMigrationSheet) {
+            DirectoryMigrationSheet(isPresented: $showMigrationSheet)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .downloadPathChanged)) { _ in
+            pathRefreshID = UUID()
+        }
+    }
+
+    private var currentPathDisplay: String {
+        let path = DownloadPathManager.shared.currentRootPathDisplay
+        // 截断过长的路径
+        if path.count > 60 {
+            return "..." + String(path.suffix(57))
+        }
+        return path
     }
 }
 
@@ -1332,6 +1377,343 @@ private struct WorkshopSettingsTab: View {
             Label(t("downloading"), systemImage: "arrow.down.circle")
                 .font(.system(size: 12))
                 .foregroundStyle(.blue)
+        }
+    }
+}
+
+// MARK: - 目录迁移 Sheet
+private struct DirectoryMigrationSheet: View {
+    @Binding var isPresented: Bool
+    @State private var isMigrating = false
+    @State private var progress: MigrationProgress = MigrationProgress(
+        currentFileName: "",
+        processedCount: 0,
+        totalCount: 0,
+        fractionCompleted: 0
+    )
+    @State private var result: MigrationResult?
+    @State private var selectedDirectoryPath: String = ""
+
+    private let downloadPathManager = DownloadPathManager.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                Text(t("migrateDownloadDirectory"))
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text(t("migrateDownloadDirectoryDesc"))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+            }
+            .padding(.top, 24)
+            .padding(.horizontal, 24)
+
+            if let result = result {
+                resultView(result: result)
+            } else if isMigrating {
+                migrationProgressView
+            } else {
+                directorySelectionView
+            }
+
+            Spacer()
+        }
+        .frame(width: 480, height: 320)
+        .background(Color(hex: "0F1115"))
+    }
+
+    private var directorySelectionView: some View {
+        VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(t("currentPath"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+
+                Text(downloadPathManager.currentRootPathDisplay)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+            }
+            .padding(.horizontal, 24)
+
+            if !selectedDirectoryPath.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text(selectedDirectoryPath)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .padding(.horizontal, 24)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    isPresented = false
+                } label: {
+                    Text(t("cancel"))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    pickDirectory()
+                } label: {
+                    Text(t("selectDirectory"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(hex: "3B82F6"))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                if !selectedDirectoryPath.isEmpty {
+                    Button {
+                        startMigration()
+                    } label: {
+                        Text(t("migrate"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color(hex: "10B981"))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+        .padding(.top, 16)
+    }
+
+    private var migrationProgressView: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            Text(progress.currentFileName.isEmpty ? t("preparing") : progress.currentFileName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.8))
+                .lineLimit(1)
+                .frame(maxWidth: 360)
+
+            VStack(spacing: 6) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.white.opacity(0.1))
+                            .frame(height: 8)
+
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(hex: "3B82F6"), Color(hex: "60A5FA")],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(0, geo.size.width * CGFloat(progress.fractionCompleted)), height: 8)
+                    }
+                }
+                .frame(height: 8)
+
+                HStack {
+                    Text("\(progress.processedCount) / \(progress.totalCount)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.5))
+
+                    Spacer()
+
+                    Text("\(Int(progress.fractionCompleted * 100))%")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            .frame(maxWidth: 360)
+
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func resultView(result: MigrationResult) -> some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            switch result {
+            case .success(let movedFiles, _):
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color(hex: "10B981"))
+
+                Text(t("migrationSuccess"))
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text("\(t("migratedFiles")): \(movedFiles)")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.7))
+
+            case .partial(let successCount, let failCount, let errors):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color(hex: "F59E0B"))
+
+                Text(t("migrationPartial"))
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(t("success")): \(successCount)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(hex: "10B981"))
+                    Text("\(t("failed")): \(failCount)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(hex: "EF4444"))
+                }
+
+                if !errors.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(errors.prefix(5).enumerated()), id: \.offset) { _, error in
+                                Text(error)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.white.opacity(0.5))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 60)
+                }
+
+            case .failure(let error):
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color(hex: "EF4444"))
+
+                Text(t("migrationFailed"))
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text(error)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+
+            Button {
+                isPresented = false
+            } label: {
+                Text(t("done"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func pickDirectory() {
+        guard let selectedURL = downloadPathManager.showDirectoryPicker() else { return }
+        selectedDirectoryPath = selectedURL.path
+    }
+
+    private func startMigration() {
+        guard !selectedDirectoryPath.isEmpty else { return }
+
+        let oldRoot = downloadPathManager.rootFolderURL
+        let selectedURL = URL(fileURLWithPath: selectedDirectoryPath)
+
+        let oldPath = oldRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        let newParentPath = selectedURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let oldPathSlash = oldPath.hasSuffix("/") ? oldPath : oldPath + "/"
+        let newPathSlash = newParentPath.hasSuffix("/") ? newParentPath : newParentPath + "/"
+        if oldPath == newParentPath || newPathSlash.hasPrefix(oldPathSlash) || oldPathSlash.hasPrefix(newPathSlash) {
+            result = .failure(error: t("invalidDirectorySelection"))
+            return
+        }
+
+        isMigrating = true
+
+        guard downloadPathManager.setCustomRoot(parentURL: selectedURL) else {
+            isMigrating = false
+            result = .failure(error: t("failedToSetDirectory"))
+            return
+        }
+
+        let newRoot = downloadPathManager.rootFolderURL
+
+        Task {
+            let migrationResult = await DirectoryMigrationService.shared.migrate(
+                from: oldRoot,
+                to: newRoot
+            ) { progress in
+                self.progress = progress
+            }
+
+            self.result = migrationResult
+            self.isMigrating = false
+
+            NotificationCenter.default.post(name: .downloadPathChanged, object: nil)
+            await LocalWallpaperScanner.shared.forceRescan()
+        }
+    }
+}
+
+// MARK: - Cursor Extension
+private extension View {
+    func pointingHandCursor() -> some View {
+        self.onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
         }
     }
 }

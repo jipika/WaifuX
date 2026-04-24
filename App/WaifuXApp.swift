@@ -222,6 +222,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         AnimeFavoriteStore.shared.restoreSavedData()
                         AnimeProgressStore.shared.restoreSavedData()
                         
+                        // 第4.5帧：修复之前迁移代码有 bug 时遗留的孤儿路径
+                        DispatchQueue.main.async {
+                            Task {
+                                await DirectoryMigrationService.shared.repairOrphanedPathsIfNeeded()
+                            }
+                        }
+                        
                         // 第5帧：播放缓存和任务
                         DispatchQueue.main.async {
                             PlaybackProgressCache.shared.restoreSavedData()

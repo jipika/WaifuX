@@ -8,18 +8,18 @@ import AppKit
 ///
 /// 解决思路：
 /// 1. 监听 `activeSpaceDidChangeNotification`，当用户切换到另一个 Space 时，
-///    自动将最后设置的壁纸重新应用到新的 active Space。
+///    自动将每个屏幕最后设置的壁纸重新应用到新的 active Space。
 /// 2. 作为备用，在应用重新变为活跃时（applicationDidBecomeActive）也执行一次同步，
 ///    因为 `activeSpaceDidChangeNotification` 在应用后台时可能不可靠。
 @MainActor
 final class DesktopWallpaperSyncManager {
     static let shared = DesktopWallpaperSyncManager()
 
-    /// 最后通过 WaifuX 设置的静态壁纸 URL
-    private var lastSetImageURL: URL?
+    /// 每个屏幕最后通过 WaifuX 设置的静态壁纸 URL（key 为 screenID）
+    private var lastSetImageURLByScreen: [String: URL] = [:]
 
-    /// 最后设置的选项（用于恢复时保持一致）
-    private var lastOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [:]
+    /// 每个屏幕最后设置的选项
+    private var lastOptionsByScreen: [String: [NSWorkspace.DesktopImageOptionKey: Any]] = [:]
 
     /// 记录最后一次尝试同步的时间，避免过于频繁的重复同步
     private var lastSyncTime: Date?
@@ -35,15 +35,36 @@ final class DesktopWallpaperSyncManager {
     }
 
     /// 注册一次静态壁纸设置，后续 Space 切换时会自动同步
-    func registerWallpaperSet(_ url: URL, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]) {
-        lastSetImageURL = url
-        lastOptions = options
+    /// - Parameters:
+    ///   - url: 壁纸图片 URL
+    ///   - screen: 目标屏幕；nil 表示注册到所有当前屏幕
+    ///   - options: 设置选项
+    func registerWallpaperSet(_ url: URL, for screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]) {
+        let targetScreens: [NSScreen]
+        if let screen = screen {
+            targetScreens = [screen]
+        } else {
+            targetScreens = NSScreen.screens
+        }
+
+        for targetScreen in targetScreens {
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            lastSetImageURLByScreen[screenID] = url
+            lastOptionsByScreen[screenID] = options
+        }
     }
 
     /// 清除静态壁纸注册（例如用户手动在系统设置里改了壁纸）
-    func clearRegistration() {
-        lastSetImageURL = nil
-        lastOptions = [:]
+    /// - Parameter screen: 目标屏幕；nil 表示清除所有屏幕
+    func clearRegistration(for screen: NSScreen? = nil) {
+        if let screen = screen {
+            let screenID = screen.wallpaperScreenIdentifier
+            lastSetImageURLByScreen.removeValue(forKey: screenID)
+            lastOptionsByScreen.removeValue(forKey: screenID)
+        } else {
+            lastSetImageURLByScreen.removeAll()
+            lastOptionsByScreen.removeAll()
+        }
     }
 
     /// 应用变为活跃时的备用同步入口（处理 activeSpaceDidChangeNotification 丢失的情况）
@@ -69,39 +90,41 @@ final class DesktopWallpaperSyncManager {
         lastSyncTime = Date()
 
         let videoManager = VideoWallpaperManager.shared
+        let workspace = NSWorkspace.shared
+        let currentScreens = NSScreen.screens
 
-        // 优先同步动态壁纸的预览图（poster），因为动态壁纸有视频窗口覆盖，
-        // 但预览图作为桌面底图也需要在所有 Space 保持一致
-        if let posterURL = videoManager.currentPosterURL,
-           videoManager.currentVideoURL != nil {
-            print("[DesktopWallpaperSyncManager] [\(source)] Syncing video poster: \(posterURL.path)")
-            for screen in NSScreen.screens {
+        // 1. 对每个当前屏幕，优先同步该屏幕自己的壁纸状态
+        for screen in currentScreens {
+            let screenID = screen.wallpaperScreenIdentifier
+
+            // 如果该屏幕属于视频壁纸目标，同步其 poster
+            if videoManager.hasActiveWallpaper(on: screen),
+               let posterURL = videoManager.currentPosterURL,
+               videoManager.currentVideoURL != nil {
                 do {
-                    try NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen)
+                    try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen)
+                    print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
                 } catch {
                     print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync poster for screen \(screen.localizedName): \(error)")
                 }
+                continue
             }
-            triggerWallpaperAgentRefresh()
-            return
-        }
 
-        // 否则同步最后注册的静态壁纸
-        guard let url = lastSetImageURL else {
-            print("[DesktopWallpaperSyncManager] [\(source)] No wallpaper registered, skipping")
-            return
-        }
+            // 否则同步该屏幕最后注册的静态壁纸
+            guard let url = lastSetImageURLByScreen[screenID] else {
+                continue
+            }
 
-        print("[DesktopWallpaperSyncManager] [\(source)] Syncing static wallpaper: \(url.path)")
-        for screen in NSScreen.screens {
             do {
-                var merged = lastOptions
+                var merged = lastOptionsByScreen[screenID] ?? [:]
                 merged[NSWorkspace.DesktopImageOptionKey(rawValue: "allSpaces")] = NSNumber(value: true)
-                try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: merged)
+                try workspace.setDesktopImageURL(url, for: screen, options: merged)
+                print("[DesktopWallpaperSyncManager] [\(source)] Synced static wallpaper for screen \(screen.localizedName)")
             } catch {
                 print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync wallpaper for screen \(screen.localizedName): \(error)")
             }
         }
+
         triggerWallpaperAgentRefresh()
     }
 
@@ -112,5 +135,14 @@ final class DesktopWallpaperSyncManager {
             userInfo: nil,
             deliverImmediately: true
         )
+    }
+}
+
+private extension NSScreen {
+    var wallpaperScreenIdentifier: String {
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return screenNumber.stringValue
+        }
+        return localizedName
     }
 }

@@ -160,6 +160,72 @@ final class MediaLibraryService: ObservableObject {
         }
     }
 
+    /// 批量替换下载记录中的路径前缀（用于目录迁移）
+    func bulkUpdateDownloadPaths(oldPrefix: String, newPrefix: String) {
+        var changed = false
+        // 更新下载记录
+        for index in downloadRecords.indices {
+            let oldPath = downloadRecords[index].localFilePath
+            if oldPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(oldPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].localFilePath = newPath
+                changed = true
+            }
+            // 更新 item 内部的路径（详情页背景使用这些字段）
+            let itemPath = downloadRecords[index].item.pageURL.path
+            if itemPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(itemPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].item.pageURL = URL(fileURLWithPath: newPath)
+                changed = true
+            }
+            if let previewPath = downloadRecords[index].item.previewVideoURL?.path,
+               previewPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(previewPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].item.previewVideoURL = URL(fileURLWithPath: newPath)
+                changed = true
+            }
+            if var artifact = downloadRecords[index].sceneBakeArtifact,
+               artifact.videoPath.hasPrefix(oldPrefix) {
+                artifact.videoPath = newPrefix + String(artifact.videoPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].sceneBakeArtifact = artifact
+                changed = true
+            }
+            if var eligibility = downloadRecords[index].sceneBakeEligibility,
+               eligibility.contentRootPath.hasPrefix(oldPrefix) {
+                eligibility.contentRootPath = newPrefix + String(eligibility.contentRootPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].sceneBakeEligibility = eligibility
+                changed = true
+            }
+        }
+        // 更新收藏记录（详情页背景同样使用 item 内部路径）
+        var favoritesChanged = false
+        for index in favoriteRecords.indices {
+            let itemPath = favoriteRecords[index].item.pageURL.path
+            if itemPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(itemPath.dropFirst(oldPrefix.count))
+                favoriteRecords[index].item.pageURL = URL(fileURLWithPath: newPath)
+                favoritesChanged = true
+            }
+            if let previewPath = favoriteRecords[index].item.previewVideoURL?.path,
+               previewPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(previewPath.dropFirst(oldPrefix.count))
+                favoriteRecords[index].item.previewVideoURL = URL(fileURLWithPath: newPath)
+                favoritesChanged = true
+            }
+        }
+        if changed {
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
+        if favoritesChanged {
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        if changed || favoritesChanged {
+            print("[MediaLibraryService] Bulk updated paths from \(oldPrefix) to \(newPrefix)")
+        }
+    }
+
     func recordViewed(_ item: MediaItem) {
         recentItems.removeAll { $0.id == item.id }
         recentItems.insert(item, at: 0)
@@ -294,7 +360,7 @@ final class MediaLibraryService: ObservableObject {
         }
     }
 
-    private func persistDownloads() {
+    func persistDownloads() {
         if let data = try? JSONEncoder().encode(downloadRecords) {
             defaults.set(data, forKey: downloadRecordsKey)
         }
@@ -479,6 +545,84 @@ final class WallpaperLibraryService: ObservableObject {
         }
     }
 
+    /// 批量替换下载记录和收藏记录中的路径前缀（用于目录迁移）
+    func bulkUpdateDownloadPaths(oldPrefix: String, newPrefix: String) {
+        var changed = false
+        // 更新下载记录
+        for index in downloadRecords.indices {
+            let oldPath = downloadRecords[index].localFilePath
+            if oldPath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(oldPath.dropFirst(oldPrefix.count))
+                downloadRecords[index].localFilePath = newPath
+                changed = true
+            }
+            // 更新 wallpaper 内部的路径（详情页背景使用这些字段）
+            var wallpaper = downloadRecords[index].wallpaper
+            if updateWallpaperPaths(&wallpaper, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+                downloadRecords[index].wallpaper = wallpaper
+                changed = true
+            }
+        }
+        // 更新收藏记录（封面图和详情背景同样使用 wallpaper 内部路径）
+        var favoritesChanged = false
+        for index in favoriteRecords.indices {
+            var wallpaper = favoriteRecords[index].wallpaper
+            if updateWallpaperPaths(&wallpaper, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+                favoriteRecords[index].wallpaper = wallpaper
+                favoritesChanged = true
+            }
+        }
+        if changed {
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
+        if favoritesChanged {
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        if changed || favoritesChanged {
+            print("[WallpaperLibraryService] Bulk updated paths from \(oldPrefix) to \(newPrefix)")
+        }
+    }
+
+    /// 更新 Wallpaper 内部所有路径字段；支持 file:// 前缀和普通路径
+    private func updateWallpaperPaths(_ wallpaper: inout Wallpaper, oldPrefix: String, newPrefix: String) -> Bool {
+        var changed = false
+        if let newPath = Self.replacePathPrefix(wallpaper.url, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+            wallpaper.url = newPath; changed = true
+        }
+        if let newPath = Self.replacePathPrefix(wallpaper.path, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+            wallpaper.path = newPath; changed = true
+        }
+        if let newPath = Self.replacePathPrefix(wallpaper.thumbs.large, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+            wallpaper.thumbs.large = newPath; changed = true
+        }
+        if let newPath = Self.replacePathPrefix(wallpaper.thumbs.original, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+            wallpaper.thumbs.original = newPath; changed = true
+        }
+        if let newPath = Self.replacePathPrefix(wallpaper.thumbs.small, oldPrefix: oldPrefix, newPrefix: newPrefix) {
+            wallpaper.thumbs.small = newPath; changed = true
+        }
+        return changed
+    }
+
+    /// 替换路径前缀；支持 file:// 前缀和普通路径
+    private static func replacePathPrefix(_ path: String, oldPrefix: String, newPrefix: String) -> String? {
+        // 处理 file:// 前缀的路径
+        if let url = URL(string: path), url.isFileURL {
+            let filePath = url.path
+            if filePath.hasPrefix(oldPrefix) {
+                let newPath = newPrefix + String(filePath.dropFirst(oldPrefix.count))
+                return URL(fileURLWithPath: newPath).absoluteString
+            }
+        }
+        // 普通路径匹配
+        if path.hasPrefix(oldPrefix) {
+            return newPrefix + String(path.dropFirst(oldPrefix.count))
+        }
+        return nil
+    }
+
     // MARK: - 壁纸批量删除
 
     /// 批量删除壁纸收藏
@@ -593,7 +737,7 @@ final class WallpaperLibraryService: ObservableObject {
         }
     }
 
-    private func persistDownloads() {
+    func persistDownloads() {
         if let data = try? JSONEncoder().encode(downloadRecords) {
             defaults.set(data, forKey: downloadRecordsKey)
         }

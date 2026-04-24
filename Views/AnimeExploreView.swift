@@ -280,7 +280,7 @@ struct AnimeExploreView: View {
         lastPrefetchCenterIndex = index
 
         let imageHeight = config.cardWidth * 1.4
-        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let targetSize = CGSize(width: 512, height: 512)
         let count = items.count
         guard count > 0 else { return }
         let clamped = min(max(0, index), count - 1)
@@ -637,10 +637,8 @@ private struct AnimeCard: View {
     // 信息栏高度
     private var textAreaHeight: CGFloat { 44 }
 
-    // 降采样目标尺寸（Retina 2x）
-    private var targetImageSize: CGSize {
-        CGSize(width: cardWidth * 2, height: imageHeight * 2)
-    }
+    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
+    private let targetImageSize: CGSize = CGSize(width: 512, height: 512)
 
     var body: some View {
         Button(action: onTap) {

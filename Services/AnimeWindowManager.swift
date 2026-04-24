@@ -1,11 +1,13 @@
 import Foundation
 import SwiftUI
 import AppKit
+import AVFoundation
 
 // MARK: - 播放器窗口控制器
 class AnimePlayerWindowController: NSWindowController {
     let animeId: String
     let viewModel: AnimeDetailViewModel
+    private var keyboardMonitor: Any?
     
     init(anime: AnimeSearchResult, viewModel: AnimeDetailViewModel) {
         self.animeId = anime.id
@@ -44,10 +46,59 @@ class AnimePlayerWindowController: NSWindowController {
         
         // 设置代理
         window.delegate = self
+        
+        // 注册窗口级键盘事件（绕过 AVPlayerView 内部子视图的拦截）
+        setupKeyboardMonitor()
     }
     
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+    
+    private func setupKeyboardMonitor() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  self.window?.isKeyWindow == true,
+                  let player = self.viewModel.player else {
+                return event
+            }
+            
+            switch event.keyCode {
+            case 49: // 空格键：暂停/播放
+                if player.rate > 0 {
+                    player.pause()
+                } else {
+                    player.play()
+                }
+                return nil // 消费事件，不再向下传递
+            case 123: // 左方向键：后退 10 秒
+                self.seekPlayer(player, by: -10)
+                return nil
+            case 124: // 右方向键：前进 10 秒
+                self.seekPlayer(player, by: 10)
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+    
+    private func seekPlayer(_ player: AVPlayer, by seconds: Double) {
+        let current = player.currentTime()
+        let newTime = CMTimeAdd(current, CMTime(seconds: seconds, preferredTimescale: current.timescale))
+        let clamped = CMTimeMaximum(newTime, CMTime.zero)
+        player.seek(to: clamped, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+    
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+    }
+    
+    deinit {
+        removeKeyboardMonitor()
     }
     
     func showWindow() {
@@ -56,6 +107,7 @@ class AnimePlayerWindowController: NSWindowController {
     }
     
     func closeWindow() {
+        removeKeyboardMonitor()
         viewModel.stopPlayback()
         window?.close()
     }

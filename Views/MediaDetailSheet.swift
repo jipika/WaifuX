@@ -611,7 +611,7 @@ struct MediaDetailSheet: View {
 
                 if isAlreadyDownloaded {
                     Button {
-                        previewWallpaper()
+                        Task { await previewWallpaper() }
                     } label: {
                         DetailSheetCircleIconLabel(systemName: "arrow.up.backward.and.arrow.down.forward")
                             .detailGlassCircleChrome()
@@ -1260,7 +1260,7 @@ struct MediaDetailSheet: View {
     }
 
     /// 预览设为壁纸的内容：优先已烘焙 MP4 → 本地视频文件 → 静态封面图
-    private func previewWallpaper() {
+    private func previewWallpaper() async {
         let targetURL: URL?
 
         // 1. 已烘焙的 Scene MP4
@@ -1283,7 +1283,41 @@ struct MediaDetailSheet: View {
         }
 
         guard let url = targetURL else { return }
-        PreviewWindowManager.shared.openPreview(url: url, isMuted: isMuted)
+        var aspectRatio: Double? = parseAspectRatio(from: resolvedItem.exactResolution)
+        // 视频文件优先读取实际尺寸，更准确
+        if ["mp4", "mov", "webm"].contains(url.pathExtension.lowercased()) {
+            aspectRatio = await videoAspectRatio(of: url) ?? aspectRatio
+        }
+        PreviewWindowManager.shared.openPreview(url: url, isMuted: isMuted, aspectRatio: aspectRatio)
+    }
+
+    /// 从 "1920x1080" / "1920 x 1080" / "1080X1920" 这类分辨率字符串解析宽高比
+    private func parseAspectRatio(from resolution: String?) -> Double? {
+        guard let resolution = resolution else { return nil }
+        let trimmed = resolution
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "X", with: "x")
+        let parts = trimmed.split(separator: "x")
+        guard parts.count == 2,
+              let w = Double(parts[0]),
+              let h = Double(parts[1]),
+              h > 0 else { return nil }
+        return w / h
+    }
+
+    /// 读取本地视频文件的实际宽高比（支持竖屏视频的旋转信息）
+    private func videoAspectRatio(of url: URL) async -> Double? {
+        let asset = AVAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return nil }
+        let size = try? await track.load(.naturalSize)
+        guard let size = size, size.height > 0 else { return nil }
+        let transform = try? await track.load(.preferredTransform)
+        // 检查是否有 90 度旋转（竖屏视频）
+        let isPortrait = abs(transform?.b ?? 0) == 1.0 && abs(transform?.c ?? 0) == 1.0
+        if isPortrait {
+            return size.height / size.width
+        }
+        return size.width / size.height
     }
 
     /// 含 `project.json` 的工程根（目录本身，或单文件的父目录）
@@ -1657,9 +1691,6 @@ struct MediaDetailSheet: View {
             showError = true
             return
         }
-        // 应用本机 MP4 前始终停 CLI，避免与播放器叠层或桥接状态残留
-        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
-
         let screens = NSScreen.screens
         if screens.count > 1 {
             DisplaySelectorManager.shared.showSelector(
@@ -1889,17 +1920,20 @@ struct WallpaperPreviewSheet: View {
                 LoopingVideoBackgroundView(
                     url: url,
                     isMuted: isMuted,
+                    contentMode: .fit,
                     onReady: nil
                 )
                 .ignoresSafeArea()
             } else {
-                KFMediaCoverImage(
-                    url: url,
-                    animated: false,
-                    downsampleSize: nil
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .ignoresSafeArea()
+                KFImage(url)
+                    .cacheMemoryOnly(false)
+                    .cancelOnDisappear(true)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in Color.black }
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
             }
 
             // 关闭按钮

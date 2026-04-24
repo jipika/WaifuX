@@ -538,7 +538,7 @@ struct MediaExploreContentView: View {
         lastPrefetchCenterIndex = index
 
         let imageHeight = config.cardWidth * 0.625
-        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let targetSize = CGSize(width: 512, height: 512)
         let count = items.count
         guard count > 0 else { return }
         let clamped = min(max(0, index), count - 1)
@@ -1111,10 +1111,8 @@ private struct SimpleMediaCard: View {
     // 文字区域高度
     private var textAreaHeight: CGFloat { 44 }
 
-    // 降采样目标尺寸（Retina 2x）
-    private var targetImageSize: CGSize {
-        CGSize(width: cardWidth * 2, height: imageHeight * 2)
-    }
+    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
+    private let targetImageSize: CGSize = CGSize(width: 512, height: 512)
 
     private var resolutionOverlayText: String {
         // Workshop 源：右上角不重复显示类型（类型已在 tags 或详情中），改为显示文件大小
@@ -1155,16 +1153,7 @@ private struct SimpleMediaCard: View {
                 simplifiedMetadataRow
                     .padding(10)
             }
-            .overlay(alignment: .center) {
-                if item.previewVideoURL != nil {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.black.opacity(0.45))
-                        .clipShape(Circle())
-                }
-            }
+
 
             HStack(spacing: 8) {
                 // Workshop 源显示作者名（如壁纸探索页显示上传者），MotionBG 显示标题

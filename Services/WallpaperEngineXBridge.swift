@@ -131,6 +131,17 @@ final class WallpaperEngineXBridge: ObservableObject {
         UserDefaults.standard.removeObject(forKey: controllingExternalKey)
     }
 
+    /// 批量更新持久化状态中的壁纸路径（目录迁移后调用）
+    func bulkUpdatePaths(oldPrefix: String, newPrefix: String) {
+        guard let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) else { return }
+        if path.hasPrefix(oldPrefix) {
+            let newPath = newPrefix + String(path.dropFirst(oldPrefix.count))
+            UserDefaults.standard.set(newPath, forKey: lastWallpaperPathKey)
+            lastWallpaperPath = newPath
+            print("[WallpaperEngineXBridge] Updated persisted path from \(oldPrefix) to \(newPrefix)")
+        }
+    }
+
     // MARK: - 私有方法
 
     /// 与 `executeCLI` 相同规则解析 bundled `wallpaperengine-cli`（供离线烘焙子进程使用）。

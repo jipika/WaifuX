@@ -123,6 +123,11 @@ private struct PlayerSection: View {
                 }
             }
 
+            // 缓冲中覆盖层
+            if viewModel.isBuffering {
+                BufferingOverlay()
+            }
+            
             // 错误提示覆盖层
             if let error = viewModel.videoError {
                 ErrorOverlay(error: error)
@@ -211,6 +216,42 @@ private struct StandbyScreen: View {
 
             Spacer()
         }
+    }
+}
+
+// MARK: - 缓冲中覆盖层
+private struct BufferingOverlay: View {
+    @State private var isPulsing = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .stroke(LiquidGlassColors.primaryPink.opacity(0.3), lineWidth: 3)
+                    .frame(width: 50, height: 50)
+                    .scaleEffect(isPulsing ? 1.15 : 1.0)
+                    .opacity(isPulsing ? 0.6 : 1.0)
+
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .tint(LiquidGlassColors.primaryPink)
+            }
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                    isPulsing = true
+                }
+            }
+
+            Text(t("player.buffering"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.8))
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.35))
     }
 }
 
@@ -359,6 +400,7 @@ private class FullScreenAVPlayerView: AVPlayerView {
             }
         }
     }
+
 }
 
 // MARK: - 右侧面板（Bilibili 风格）

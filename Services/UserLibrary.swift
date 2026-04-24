@@ -185,6 +185,20 @@ actor UserLibrary {
         return downloads
     }
 
+    func bulkUpdatePaths(oldPrefix: String, newPrefix: String) async {
+        var changed = false
+        for index in downloads.indices {
+            if let localPath = downloads[index].localPath, localPath.hasPrefix(oldPrefix) {
+                downloads[index].localPath = newPrefix + String(localPath.dropFirst(oldPrefix.count))
+                changed = true
+            }
+        }
+        if changed {
+            try? saveItems(downloads, to: downloadsPath)
+            print("[UserLibrary] Bulk updated download paths from \(oldPrefix) to \(newPrefix)")
+        }
+    }
+
     // MARK: - 获取所有内容
 
     func getAllItems(for contentType: ContentType) async -> LibraryItems {
@@ -219,7 +233,7 @@ struct DownloadRecord: Identifiable, Codable {
     let title: String
     let thumbnailURL: String
     let downloadURL: String
-    let localPath: String?
+    var localPath: String?
     let fileSize: String?
     let downloadedAt: Date
     let status: DownloadRecordStatus

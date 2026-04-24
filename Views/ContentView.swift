@@ -1413,12 +1413,8 @@ private struct MyMediaVideoCard: View {
         item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
     }
 
-    private var listThumbnailTargetSize: CGSize {
-        CGSize(
-            width: LibraryCardMetrics.cardWidth * 2,
-            height: LibraryCardMetrics.thumbnailHeight * 2
-        )
-    }
+    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
+    private let listThumbnailTargetSize: CGSize = CGSize(width: 512, height: 512)
 
     var body: some View {
         Button(action: action) {

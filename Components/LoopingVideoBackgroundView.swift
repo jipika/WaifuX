@@ -4,8 +4,14 @@ import AVFoundation
 import AppKit
 
 struct LoopingVideoBackgroundView: NSViewRepresentable {
+    enum ContentMode {
+        case fill
+        case fit
+    }
+
     let url: URL
     let isMuted: Bool
+    var contentMode: ContentMode = .fill
     let onReady: (@MainActor @Sendable () -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -13,7 +19,7 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> LoopingVideoPlayerContainerView {
-        let view = LoopingVideoPlayerContainerView()
+        let view = LoopingVideoPlayerContainerView(contentMode: contentMode)
         context.coordinator.attach(to: view)
         context.coordinator.update(url: url, isMuted: isMuted, in: view)
         return view
@@ -109,21 +115,30 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
 }
 
 final class LoopingVideoPlayerContainerView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    private let contentMode: LoopingVideoBackgroundView.ContentMode
+
+    init(contentMode: LoopingVideoBackgroundView.ContentMode = .fill) {
+        self.contentMode = contentMode
+        super.init(frame: .zero)
         wantsLayer = true
-        layer = AVPlayerLayer()
-        playerLayer.videoGravity = .resizeAspectFill
+        let playerLayer = AVPlayerLayer()
+        playerLayer.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
+        layer = playerLayer
     }
 
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        self.contentMode = .fill
+        super.init(coder: coder)
+        wantsLayer = true
+        let playerLayer = AVPlayerLayer()
+        playerLayer.videoGravity = .resizeAspectFill
+        layer = playerLayer
     }
 
     var playerLayer: AVPlayerLayer {
         guard let layer = layer as? AVPlayerLayer else {
             let newLayer = AVPlayerLayer()
-            newLayer.videoGravity = .resizeAspectFill
+            newLayer.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
             self.layer = newLayer
             return newLayer
         }

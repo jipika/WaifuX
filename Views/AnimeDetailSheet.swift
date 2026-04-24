@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Kingfisher
 
 // MARK: - 动漫详情页 - 与 MediaDetailSheet 风格一致
 // 液态玻璃材质，沉浸式全屏设计，支持横屏背景
@@ -237,28 +238,27 @@ struct AnimeDetailSheet: View {
     
     /// 横图背景：铺满整屏
     private func landscapeBackground(width: CGFloat, height: CGFloat) -> some View {
-        AsyncImage(url: backdropURL.flatMap { URL(string: $0) }) { phase in
-            switch phase {
-            case .empty:
-                Color(hex: "0A0A0C").frame(width: width, height: height)
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: width, height: height)
-                    .clipped()
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            isImageLoaded = true
-                        }
+        ZStack {
+            Color(hex: "0A0A0C").frame(width: width, height: height)
+            KFImage(backdropURL.flatMap { URL(string: $0) })
+                .cacheMemoryOnly(false)
+                .fade(duration: 0.3)
+                .onSuccess { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isImageLoaded = true
                     }
-            case .failure:
-                Color(hex: "0A0A0C").frame(width: width, height: height)
-            @unknown default:
-                Color(hex: "0A0A0C").frame(width: width, height: height)
-            }
+                }
+                .onFailure { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        isImageLoaded = true
+                    }
+                }
+                .placeholder { _ in Color.clear }
+                .resizable()
+                .scaledToFill()
+                .frame(width: width, height: height)
+                .clipped()
         }
-        .frame(width: width, height: height)
     }
     
     /// 竖图背景：完整缩放+两侧模糊延伸（参考 WallpaperDetailSheet）
@@ -268,64 +268,53 @@ struct AnimeDetailSheet: View {
 
             // 左右延伸层：基于居中图做横向拉伸和模糊
             if let coverURL = coverImageURL {
-                AsyncImage(url: coverURL) { phase in
-                    switch phase {
-                    case .empty:
-                        Color.clear
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: width, height: height)
-                            .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                            .blur(radius: 84)
-                            .saturation(1.12)
-                            .brightness(-0.08)
-                    case .failure:
-                        Color.clear
-                    @unknown default:
-                        Color.clear
-                    }
-                }
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .white, location: 0.0),
-                            .init(color: .white, location: 0.22),
-                            .init(color: .clear, location: 0.38),
-                            .init(color: .clear, location: 0.62),
-                            .init(color: .white, location: 0.78),
-                            .init(color: .white, location: 1.0)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
+                KFImage(coverURL)
+                    .cacheMemoryOnly(false)
+                    .fade(duration: 0.3)
+                    .placeholder { _ in Color.clear }
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                    .blur(radius: 84)
+                    .saturation(1.12)
+                    .brightness(-0.08)
+                    .mask(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .white, location: 0.0),
+                                .init(color: .white, location: 0.22),
+                                .init(color: .clear, location: 0.38),
+                                .init(color: .clear, location: 0.62),
+                                .init(color: .white, location: 0.78),
+                                .init(color: .white, location: 1.0)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
                     )
-                )
             }
 
             // 主图：完整缩放展示
             if let coverURL = coverImageURL {
-                AsyncImage(url: coverURL) { phase in
-                    switch phase {
-                    case .empty:
-                        Color.clear.frame(width: width, height: height)
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: width, height: height)
-                            .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
-                            .onAppear {
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    isImageLoaded = true
-                                }
-                            }
-                    case .failure:
-                        Color.clear.frame(width: width, height: height)
-                    @unknown default:
-                        Color.clear.frame(width: width, height: height)
+                KFImage(coverURL)
+                    .cacheMemoryOnly(false)
+                    .fade(duration: 0.3)
+                    .onSuccess { _ in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isImageLoaded = true
+                        }
                     }
-                }
+                    .onFailure { _ in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isImageLoaded = true
+                        }
+                    }
+                    .placeholder { _ in Color.clear }
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .shadow(color: .black.opacity(0.32), radius: 42, y: 18)
             }
 
             // 左右暗角遮罩

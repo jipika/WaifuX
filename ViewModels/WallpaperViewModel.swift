@@ -963,8 +963,8 @@ class WallpaperViewModel: ObservableObject {
         
         // 如果指定了特定屏幕，只设置到该屏幕
         if let targetScreen = targetScreen {
-            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
-            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+            // 只停目标屏幕的动态壁纸，避免影响其他屏幕
+            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
             switch option {
             case .desktop:
                 try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
@@ -974,7 +974,7 @@ class WallpaperViewModel: ObservableObject {
                 try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
                 try setLockScreenWallpaper(imageURL)
             }
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: targetScreen)
         } else {
             try await setWallpaper(from: imageURL, option: option)
         }
@@ -989,16 +989,16 @@ class WallpaperViewModel: ObservableObject {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
                 do {
-                    WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
-                    VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
-
-                    let workspace = NSWorkspace.shared
                     guard let screen = NSScreen.main else {
                         continuation.resume(throwing: NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
                         return
                     }
+                    // 只停主屏幕的动态壁纸，避免影响其他屏幕
+                    VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
+
+                    let workspace = NSWorkspace.shared
                     try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
+                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)

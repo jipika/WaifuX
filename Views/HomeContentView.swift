@@ -825,7 +825,6 @@ private struct HeroSlide: View {
             ZStack {
                 // 底层：封面图始终存在（静态占位 + 调色板采样来源）
                 KFImage(imageURL)
-                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: size.width * 2, height: size.height * 2)))
                     .cacheOriginalImage()
                     .fade(duration: 0.25)
                     .placeholder { _ in

@@ -203,6 +203,71 @@ final class VideoThumbnailCache {
         return cacheDirectory.appendingPathComponent("\(hash).jpg")
     }
     
+    /// 迁移缓存键：将旧路径对应的缓存文件重命名为新路径对应的缓存文件名。
+    /// 遍历所有下载记录中的视频文件，计算旧/新 MD5 缓存键并执行重命名。
+    func migrateCacheKeys(fromOldPrefix oldPrefix: String, toNewPrefix newPrefix: String) {
+        Task.detached(priority: .utility) { [cacheDirectory = self.cacheDirectory] in
+            let fileManager = FileManager.default
+            var movedCount = 0
+
+            // 基于 media & wallpaper 下载记录重建映射
+            let mediaRecords = await MainActor.run { MediaLibraryService.shared.downloadRecords }
+            let wallpaperRecords = await MainActor.run { WallpaperLibraryService.shared.downloadRecords }
+
+            for record in mediaRecords {
+                let path = record.localFilePath
+                guard path.hasPrefix(newPrefix) else { continue }
+                let oldPath = oldPrefix + String(path.dropFirst(newPrefix.count))
+
+                let oldURL = URL(fileURLWithPath: oldPath)
+                let newURL = URL(fileURLWithPath: path)
+
+                // 缩略图缓存
+                let oldThumb = cacheDirectory.appendingPathComponent("\(oldURL.absoluteString.md5).jpg")
+                let newThumb = cacheDirectory.appendingPathComponent("\(newURL.absoluteString.md5).jpg")
+                if fileManager.fileExists(atPath: oldThumb.path), !fileManager.fileExists(atPath: newThumb.path) {
+                    try? fileManager.moveItem(at: oldThumb, to: newThumb)
+                    movedCount += 1
+                }
+
+                // 海报帧缓存
+                let oldPoster = cacheDirectory.appendingPathComponent("poster_wallpaper_\(oldPath.md5).jpg")
+                let newPoster = cacheDirectory.appendingPathComponent("poster_wallpaper_\(path.md5).jpg")
+                if fileManager.fileExists(atPath: oldPoster.path), !fileManager.fileExists(atPath: newPoster.path) {
+                    try? fileManager.moveItem(at: oldPoster, to: newPoster)
+                    movedCount += 1
+                }
+            }
+
+            for record in wallpaperRecords {
+                let path = record.localFilePath
+                guard path.hasPrefix(newPrefix) else { continue }
+                let oldPath = oldPrefix + String(path.dropFirst(newPrefix.count))
+
+                let oldURL = URL(fileURLWithPath: oldPath)
+                let newURL = URL(fileURLWithPath: path)
+
+                // 缩略图缓存
+                let oldThumb = cacheDirectory.appendingPathComponent("\(oldURL.absoluteString.md5).jpg")
+                let newThumb = cacheDirectory.appendingPathComponent("\(newURL.absoluteString.md5).jpg")
+                if fileManager.fileExists(atPath: oldThumb.path), !fileManager.fileExists(atPath: newThumb.path) {
+                    try? fileManager.moveItem(at: oldThumb, to: newThumb)
+                    movedCount += 1
+                }
+
+                // 海报帧缓存
+                let oldPoster = cacheDirectory.appendingPathComponent("poster_wallpaper_\(oldPath.md5).jpg")
+                let newPoster = cacheDirectory.appendingPathComponent("poster_wallpaper_\(path.md5).jpg")
+                if fileManager.fileExists(atPath: oldPoster.path), !fileManager.fileExists(atPath: newPoster.path) {
+                    try? fileManager.moveItem(at: oldPoster, to: newPoster)
+                    movedCount += 1
+                }
+            }
+
+            print("[VideoThumbnailCache] Migrated \(movedCount) cache files from old paths to new paths")
+        }
+    }
+
     /// 清理过期缓存
     func cleanupCache() {
         Task.detached(priority: .utility) { [cacheDirectory = self.cacheDirectory] in

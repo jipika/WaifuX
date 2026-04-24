@@ -2,7 +2,7 @@ import Foundation
 
 struct Wallpaper: Identifiable, Codable, Hashable {
     let id: String
-    let url: String
+    var url: String
     let shortUrl: String?
     let views: Int
     let favorites: Int
@@ -19,8 +19,8 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     let fileType: String?
     let createdAt: String?
     let colors: [String]
-    let path: String
-    let thumbs: Thumbs
+    var path: String
+    var thumbs: Thumbs
     let tags: [Tag]?
     let uploader: Uploader?
 
@@ -155,9 +155,9 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     }
 
     struct Thumbs: Codable, Hashable {
-        let large: String
-        let original: String
-        let small: String
+        var large: String
+        var original: String
+        var small: String
     }
 
     struct Uploader: Codable, Hashable {

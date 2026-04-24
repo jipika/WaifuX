@@ -27,6 +27,8 @@ struct MyLibraryContentView: View {
 
     // 壁纸比例筛选
     @State private var wallpaperRatioFilter: WallpaperRatioFilter = .all
+    // 媒体比例筛选
+    @State private var mediaRatioFilter: WallpaperRatioFilter = .all
 
     // 缓存壁纸和媒体列表，避免 computed property 在 body 重绘时反复 map/filter
     @State private var wallpaperItems: [AnyWallpaperItem] = []
@@ -131,6 +133,9 @@ struct MyLibraryContentView: View {
         }
         .onChange(of: wallpaperRatioFilter) { _, _ in
             updateWallpaperItems()
+        }
+        .onChange(of: mediaRatioFilter) { _, _ in
+            updateMediaItems()
         }
         .onChange(of: selectedContentType) { _, _ in
             // 切换内容类型时重置编辑状态
@@ -263,16 +268,33 @@ struct MyLibraryContentView: View {
     }
 
     private func updateMediaItems() {
+        let baseItems: [AnyMediaItem]
         switch selectedSubTab {
         case .favorites:
-            mediaItems = mediaViewModel.favoriteItems.map {
+            baseItems = mediaViewModel.favoriteItems.map {
                 AnyMediaItem(
                     mediaItem: $0,
                     localFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: $0)
                 )
             }
         case .downloads:
-            mediaItems = mediaViewModel.allLocalMedia.map { AnyMediaItem(unified: $0) }
+            baseItems = mediaViewModel.allLocalMedia.map { AnyMediaItem(unified: $0) }
+        }
+        switch mediaRatioFilter {
+        case .all:
+            mediaItems = baseItems
+        case .landscape:
+            mediaItems = baseItems.filter { item in
+                let portrait = item.isPortrait
+                // 无法判断时保守排除（只保留明确为横屏的）
+                return portrait == false
+            }
+        case .portrait:
+            mediaItems = baseItems.filter { item in
+                let portrait = item.isPortrait
+                // 无法判断时保守排除（只保留明确为竖屏的）
+                return portrait == true
+            }
         }
     }
 
@@ -327,6 +349,10 @@ struct MyLibraryContentView: View {
         mediaItems
     }
 
+    private var activeRatioFilter: WallpaperRatioFilter {
+        selectedContentType == .wallpaper ? wallpaperRatioFilter : mediaRatioFilter
+    }
+
     @ViewBuilder
     private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
         MediaVideoCard(
@@ -346,7 +372,7 @@ struct MyLibraryContentView: View {
     private func preloadNearbyWallpapers(around item: AnyWallpaperItem, config: LibraryGridConfig) {
         guard let index = wallpaperItems.firstIndex(where: { $0.id == item.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight
-        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(wallpaperItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
@@ -362,7 +388,7 @@ struct MyLibraryContentView: View {
     private func preloadNearbyMedia(around item: AnyMediaItem, config: LibraryGridConfig) {
         guard let index = currentMediaItems.firstIndex(where: { $0.id == item.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight
-        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(currentMediaItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
@@ -379,7 +405,7 @@ struct MyLibraryContentView: View {
     private func preloadNearbyAnime(around anime: AnimeSearchResult, config: LibraryGridConfig) {
         guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
         let imageHeight = LibraryCardMetrics.thumbnailHeight + 72
-        let targetSize = CGSize(width: config.cardWidth * 2, height: imageHeight * 2)
+        let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(currentAnimeItems.count, index + 11)
         let urls = range
             .filter { $0 != index }
@@ -485,23 +511,27 @@ struct MyLibraryContentView: View {
                         .foregroundStyle(.white.opacity(0.95))
                 }
 
-                // 壁纸比例筛选（仅壁纸类型）
-                if selectedContentType == .wallpaper {
+                // 壁纸/媒体比例筛选
+                if selectedContentType == .wallpaper || selectedContentType == .video {
                     HStack(spacing: 0) {
                         ForEach(WallpaperRatioFilter.allCases, id: \.self) { filter in
                             Button {
-                                wallpaperRatioFilter = filter
+                                if selectedContentType == .wallpaper {
+                                    wallpaperRatioFilter = filter
+                                } else {
+                                    mediaRatioFilter = filter
+                                }
                                 isEditing = false
                                 selectedItems.removeAll()
                             } label: {
                                 Text(filter.title)
-                                    .font(.system(size: 12, weight: wallpaperRatioFilter == filter ? .semibold : .medium))
-                                    .foregroundStyle(wallpaperRatioFilter == filter ? .white : .white.opacity(0.7))
+                                    .font(.system(size: 12, weight: activeRatioFilter == filter ? .semibold : .medium))
+                                    .foregroundStyle(activeRatioFilter == filter ? .white : .white.opacity(0.7))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
                                     .background(
                                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .fill(wallpaperRatioFilter == filter ? color.opacity(0.35) : Color.clear)
+                                            .fill(activeRatioFilter == filter ? color.opacity(0.35) : Color.clear)
                                     )
                             }
                             .buttonStyle(.plain)
@@ -1220,7 +1250,7 @@ struct AnimeLibraryCard: View {
                 // 图片区域 - 单独裁剪顶部圆角
                 ZStack {
                     KFImage(URL(string: anime.coverURL ?? ""))
-                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)))
+                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
                         .cacheMemoryOnly(false)
                         .fade(duration: 0.3)
                         .placeholder { _ in
@@ -1368,17 +1398,25 @@ private struct AnyMediaItem: Identifiable {
     let id: String
     let mediaItem: MediaItem
     let localFileURL: URL?
+    private let unifiedLocalMedia: UnifiedLocalMedia?
 
     init(mediaItem: MediaItem, localFileURL: URL? = nil) {
         self.id = mediaItem.id
         self.mediaItem = mediaItem
         self.localFileURL = localFileURL
+        self.unifiedLocalMedia = nil
     }
 
     init(unified: UnifiedLocalMedia) {
         self.id = unified.id
         self.mediaItem = unified.mediaItem
         self.localFileURL = unified.fileURL
+        self.unifiedLocalMedia = unified
+    }
+
+    /// 是否为竖屏；优先使用 UnifiedLocalMedia 的解析（包含烘焙产物信息），其次 MediaItem
+    var isPortrait: Bool? {
+        unifiedLocalMedia?.isPortrait ?? mediaItem.isPortrait
     }
 }
 

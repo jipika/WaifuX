@@ -968,11 +968,9 @@ struct WallpaperDetailSheet: View {
                 errorMessage = ""
                 Task {
                     do {
-                        // 先停止动态壁纸播放器
-                        VideoWallpaperManager.shared.stopWallpaper()
-
                         let imageURL = try await getWallpaperImageURL()
                         // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
+                        // viewModel 内部会按需停止对应屏幕的动态壁纸
                         try await viewModel.setWallpaper(from: imageURL, option: .desktop, for: selectedScreen)
                     } catch {
                         await MainActor.run {
@@ -993,10 +991,8 @@ struct WallpaperDetailSheet: View {
             errorMessage = ""
             Task {
                 do {
-                    // 先停止动态壁纸播放器
-                    VideoWallpaperManager.shared.stopWallpaper()
-
                     let imageURL = try await getWallpaperImageURL()
+                    // viewModel 内部会按需停止动态壁纸
                     try await viewModel.setWallpaper(from: imageURL, option: .desktop)
                 } catch {
                     errorMessage = "\(t("error")): \(error.localizedDescription)"
@@ -1041,7 +1037,11 @@ struct WallpaperDetailSheet: View {
             do {
                 let url = try await getWallpaperImageURL()
                 await MainActor.run {
-                    PreviewWindowManager.shared.openPreview(url: url, isMuted: true)
+                    PreviewWindowManager.shared.openPreview(
+                        url: url,
+                        isMuted: true,
+                        aspectRatio: wallpaper.aspectRatioValue
+                    )
                 }
             } catch {
                 errorMessage = "\(t("error")): \(error.localizedDescription)"

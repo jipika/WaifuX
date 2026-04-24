@@ -78,12 +78,12 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let id: String
     let slug: String
     let title: String
-    let pageURL: URL
+    var pageURL: URL
     let thumbnailURL: URL
     let resolutionLabel: String
     let collectionTitle: String?
     let summary: String?
-    let previewVideoURL: URL?
+    var previewVideoURL: URL?
     let posterURL: URL?
     let tags: [String]
     let exactResolution: String?
@@ -266,6 +266,21 @@ extension MediaItem {
     var hasDetailPayload: Bool {
         // 如果有下载选项或预览视频，说明已经有详细数据
         !downloadOptions.isEmpty || previewVideoURL != nil
+    }
+
+    /// 从 `exactResolution` 或 `resolutionLabel` 解析是否为竖屏（如 "1080x1920" → true）；无法判断时返回 nil
+    var isPortrait: Bool? {
+        // 优先使用 exactResolution
+        let resolutionSource = exactResolution ?? resolutionLabel
+        let trimmed = resolutionSource
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "X", with: "x")
+        let parts = trimmed.split(separator: "x")
+        guard parts.count == 2,
+              let w = Double(parts[0]),
+              let h = Double(parts[1]),
+              h > 0 else { return nil }
+        return h > w
     }
 }
 

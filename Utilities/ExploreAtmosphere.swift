@@ -820,15 +820,33 @@ final class PreviewWindowManager: ObservableObject {
 
     private init() {}
 
-    func openPreview(url: URL, isMuted: Bool) {
+    func openPreview(url: URL, isMuted: Bool, aspectRatio: Double? = nil) {
         windowController?.close()
         windowController = nil
 
         let screen = NSScreen.main ?? NSScreen.screens.first
         let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
 
-        let width = max(1000, screenFrame.width * 0.85)
-        let height = max(700, screenFrame.height * 0.85)
+        let maxWidth = max(1000, screenFrame.width * 0.85)
+        let maxHeight = max(700, screenFrame.height * 0.85)
+
+        var width = maxWidth
+        var height = maxHeight
+
+        // 根据图片实际比例计算窗口尺寸，竖图窗口也保持竖比例
+        if let ratio = aspectRatio, ratio > 0 {
+            let containerAspect = maxWidth / maxHeight
+            if ratio > containerAspect {
+                // 图片比容器更宽：宽度撑满，高度按比例
+                width = maxWidth
+                height = maxWidth / ratio
+            } else {
+                // 图片比容器更高（含竖图）：高度撑满，宽度按比例
+                height = maxHeight
+                width = maxHeight * ratio
+            }
+        }
+
         let x = screenFrame.midX - width / 2
         let y = screenFrame.midY - height / 2
 
@@ -842,7 +860,7 @@ final class PreviewWindowManager: ObservableObject {
         window.titlebarAppearsTransparent = true
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 800, height: 600)
+        window.minSize = NSSize(width: 400, height: 400)
 
         let hostingView = NSHostingView(
             rootView: WallpaperPreviewSheet(url: url, isMuted: .constant(isMuted))

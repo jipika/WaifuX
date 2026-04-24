@@ -62,9 +62,8 @@ public struct MediaVideoCard: View {
         item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
     }
 
-    private var targetImageSize: CGSize {
-        CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)
-    }
+    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
+    private let targetImageSize: CGSize = CGSize(width: 512, height: 512)
 
     public var body: some View {
         Button(action: action) {
@@ -207,7 +206,7 @@ public struct WallpaperEditCard: View {
                 // 图片区域
                 ZStack {
                     KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
-                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: cardWidth * 2, height: thumbnailHeight * 2)))
+                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
                         .cacheMemoryOnly(false)
                         .fade(duration: 0.3)
                         .placeholder { _ in

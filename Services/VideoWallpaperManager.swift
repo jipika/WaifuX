@@ -13,6 +13,9 @@ final class VideoWallpaperManager: ObservableObject {
     @Published private(set) var isPaused = false
     @Published private(set) var volume: Double = 1.0
 
+    /// 每个屏幕的独立音量（key 为 screenID），未设置时回退到全局 `volume`
+    private var volumeByScreen: [String: Double] = [:]
+
     private var windows: [String: WallpaperVideoWindow] = [:]
     private var players: [String: AVQueuePlayer] = [:]
     private var loopers: [String: AVPlayerLooper] = [:]
@@ -187,20 +190,34 @@ final class VideoWallpaperManager: ObservableObject {
 
     func setMuted(_ muted: Bool) {
         isMuted = muted
-        for player in players.values {
+        for (screenID, player) in players {
             player.isMuted = muted
-            player.volume = muted ? 0 : Float(volume)
+            let screenVolume = volumeByScreen[screenID] ?? volume
+            player.volume = muted ? 0 : Float(screenVolume)
         }
         persistState()
     }
 
-    func setVolume(_ newVolume: Double) {
+    func setVolume(_ newVolume: Double, for targetScreen: NSScreen? = nil) {
         let clamped = max(0, min(1, newVolume))
-        volume = clamped
-        for player in players.values {
-            player.volume = isMuted ? 0 : Float(clamped)
+        if let targetScreen = targetScreen {
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            volumeByScreen[screenID] = clamped
+            players[screenID]?.volume = isMuted ? 0 : Float(clamped)
+        } else {
+            volume = clamped
+            volumeByScreen.removeAll()
+            for player in players.values {
+                player.volume = isMuted ? 0 : Float(clamped)
+            }
         }
         persistState()
+    }
+
+    /// 获取指定屏幕的音量（优先使用独立设置，否则回退全局）
+    func volume(for screen: NSScreen) -> Double {
+        let screenID = screen.wallpaperScreenIdentifier
+        return volumeByScreen[screenID] ?? volume
     }
 
     func pauseWallpaper(for targetScreen: NSScreen? = nil) {
@@ -293,40 +310,108 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
 
-    func stopWallpaper() {
-        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+    func stopWallpaper(for targetScreen: NSScreen? = nil) {
+        guard let targetScreen = targetScreen else {
+            // 全局停止（原有逻辑）
+            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
-        // 只有真正在播放视频壁纸时才需要恢复原始桌面壁纸
-        let wasPlayingVideo = currentVideoURL != nil
+            let wasPlayingVideo = currentVideoURL != nil
+            teardownAllWindows()
+            currentVideoURL = nil
+            currentPosterURL = nil
+            isPaused = false
+            videoTargetScreenIDs = []
+            // 不删除保存的状态，以便下次可以恢复
 
-        teardownAllWindows()
-        currentVideoURL = nil
-        currentPosterURL = nil
-        isPaused = false
-        videoTargetScreenIDs = []
-        // 不删除保存的状态，以便下次可以恢复
+            if wasPlayingVideo {
+                restoreOriginalWallpaper()
+            }
+            return
+        }
 
-        // 恢复用户原始桌面壁纸（仅在之前播放过视频壁纸时）
-        if wasPlayingVideo {
-            restoreOriginalWallpaper()
+        // 单屏停止
+        let screenID = targetScreen.wallpaperScreenIdentifier
+        guard windows[screenID] != nil || players[screenID] != nil else {
+            restoreOriginalWallpaper(for: targetScreen)
+            return
+        }
+
+        teardownWindow(for: screenID)
+        videoTargetScreenIDs.remove(screenID)
+        restoreOriginalWallpaper(for: targetScreen)
+
+        if players.isEmpty {
+            currentVideoURL = nil
+            currentPosterURL = nil
+            isPaused = false
+            videoTargetScreenIDs = []
+            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
         }
     }
 
     /// 仅拆掉本机 AVPlayer 视频壁纸，**不**调用 `WallpaperEngineXBridge.stopWallpaper()`。
     /// 在即将通过 CLI 设置 scene / web 等 WE 壁纸前调用，否则会误停 CLI 且把 `isControllingExternalEngine` 清掉，菜单栏暂停恢复会走错视频分支。
-    func stopNativeVideoWallpaperOnly() {
-        // 只有真正在播放视频壁纸时才需要恢复原始桌面壁纸
-        let wasPlayingVideo = currentVideoURL != nil
+    func stopNativeVideoWallpaperOnly(for targetScreen: NSScreen? = nil) {
+        guard let targetScreen = targetScreen else {
+            // 全局停止（原有逻辑）
+            let wasPlayingVideo = currentVideoURL != nil
+            teardownAllWindows()
+            currentVideoURL = nil
+            currentPosterURL = nil
+            isPaused = false
+            videoTargetScreenIDs = []
+            defaults.removeObject(forKey: stateKey)
 
-        teardownAllWindows()
-        currentVideoURL = nil
-        currentPosterURL = nil
-        isPaused = false
-        videoTargetScreenIDs = []
-        defaults.removeObject(forKey: stateKey)
+            if wasPlayingVideo {
+                restoreOriginalWallpaper()
+            }
+            return
+        }
 
-        if wasPlayingVideo {
-            restoreOriginalWallpaper()
+        // 单屏停止
+        let screenID = targetScreen.wallpaperScreenIdentifier
+        guard windows[screenID] != nil || players[screenID] != nil else {
+            restoreOriginalWallpaper(for: targetScreen)
+            return
+        }
+
+        teardownWindow(for: screenID)
+        videoTargetScreenIDs.remove(screenID)
+        restoreOriginalWallpaper(for: targetScreen)
+
+        if players.isEmpty {
+            currentVideoURL = nil
+            currentPosterURL = nil
+            isPaused = false
+            videoTargetScreenIDs = []
+            defaults.removeObject(forKey: stateKey)
+        }
+    }
+
+    /// 拆除单个屏幕的视频窗口、player 和 looper
+    private func teardownWindow(for screenID: String) {
+        if let window = windows[screenID] {
+            if let contentView = window.contentView as? WallpaperVideoContainerView {
+                contentView.playerLayer.player = nil
+            }
+            window.contentView = nil
+            window.orderOut(nil)
+            windows.removeValue(forKey: screenID)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                _ = window
+            }
+        }
+        if let player = players[screenID] {
+            player.pause()
+            player.removeAllItems()
+            players.removeValue(forKey: screenID)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                _ = player
+            }
+        }
+        if let looper = loopers[screenID] {
+            looper.disableLooping()
+            loopers.removeValue(forKey: screenID)
         }
     }
     
@@ -534,7 +619,59 @@ final class VideoWallpaperManager: ObservableObject {
         defaults.removeObject(forKey: originalWallpaperKey)
         print("[VideoWallpaperManager] Original wallpaper restore completed")
     }
-    
+
+    /// 恢复单个屏幕的原始桌面壁纸
+    private func restoreOriginalWallpaper(for screen: NSScreen) {
+        guard let data = defaults.data(forKey: originalWallpaperKey),
+              let savedState = try? JSONDecoder().decode(SavedOriginalWallpaperState.self, from: data) else {
+            print("[VideoWallpaperManager] No original wallpaper to restore for screen \(screen.localizedName)")
+            return
+        }
+
+        let screenID = screen.wallpaperScreenIdentifier
+        let workspace = NSWorkspace.shared
+
+        // 1. 尝试精确匹配
+        if let config = savedState.configs.first(where: { $0.screenID == screenID }),
+           let originalURL = URL(string: config.wallpaperURL),
+           FileManager.default.fileExists(atPath: originalURL.path) {
+            do {
+                try workspace.setDesktopImageURLForAllSpaces(originalURL, for: screen)
+                print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (exact match)")
+            } catch {
+                print("[VideoWallpaperManager] Failed to restore wallpaper for screen \(screenID): \(error)")
+            }
+            return
+        }
+
+        // 2. fallback 到主屏幕配置
+        if let mainConfig = savedState.configs.first(where: { $0.isMainScreen }),
+           let mainURL = URL(string: mainConfig.wallpaperURL),
+           FileManager.default.fileExists(atPath: mainURL.path) {
+            do {
+                try workspace.setDesktopImageURLForAllSpaces(mainURL, for: screen)
+                print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to main screen)")
+            } catch {
+                print("[VideoWallpaperManager] Failed to restore wallpaper for screen \(screen.localizedName): \(error)")
+            }
+            return
+        }
+
+        // 3. fallback 到任意可用配置
+        if let config = savedState.configs.first(where: {
+            guard let url = URL(string: $0.wallpaperURL) else { return false }
+            return FileManager.default.fileExists(atPath: url.path)
+        }),
+           let url = URL(string: config.wallpaperURL) {
+            do {
+                try workspace.setDesktopImageURLForAllSpaces(url, for: screen)
+                print("[VideoWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to any available)")
+            } catch {
+                print("[VideoWallpaperManager] Failed to restore wallpaper for screen \(screen.localizedName): \(error)")
+            }
+        }
+    }
+
     /// 清理所有持久化的预览图文件
     private func cleanupPersistedPosters() {
         do {
@@ -575,6 +712,7 @@ final class VideoWallpaperManager: ObservableObject {
                 currentPosterURL = posterURL
                 isMuted = savedState.isMuted
                 volume = savedState.volume ?? (savedState.isMuted ? 0 : 1)
+                volumeByScreen = savedState.volumeByScreen ?? [:]
                 isPaused = false
                 videoTargetScreenIDs = Set(ids)
                 if let posterURL {
@@ -589,13 +727,46 @@ final class VideoWallpaperManager: ObservableObject {
                 persistState()
             } else {
                 try applyVideoWallpaper(from: url, posterURL: posterURL, muted: savedState.isMuted)
-                setVolume(savedState.volume ?? (savedState.isMuted ? 0 : 1))
+                volume = savedState.volume ?? (savedState.isMuted ? 0 : 1)
+                volumeByScreen = savedState.volumeByScreen ?? [:]
+                for screen in NSScreen.screens {
+                    let screenVolume = volume(for: screen)
+                    let screenID = screen.wallpaperScreenIdentifier
+                    players[screenID]?.volume = isMuted ? 0 : Float(screenVolume)
+                }
                 if savedState.isPaused {
                     pauseWallpaper()
                 }
             }
         } catch {
             defaults.removeObject(forKey: stateKey)
+        }
+    }
+
+    /// 批量更新持久化状态中的文件路径（目录迁移后调用）
+    func bulkUpdatePaths(oldPrefix: String, newPrefix: String) {
+        guard let data = defaults.data(forKey: stateKey),
+              var savedState = try? JSONDecoder().decode(SavedVideoWallpaperState.self, from: data) else {
+            return
+        }
+        var changed = false
+        if savedState.fileURL.hasPrefix(oldPrefix) {
+            savedState = SavedVideoWallpaperState(
+                fileURL: newPrefix + String(savedState.fileURL.dropFirst(oldPrefix.count)),
+                posterURL: savedState.posterURL.flatMap { url in
+                    url.hasPrefix(oldPrefix) ? newPrefix + String(url.dropFirst(oldPrefix.count)) : url
+                },
+                isMuted: savedState.isMuted,
+                isPaused: savedState.isPaused,
+                volume: savedState.volume,
+                volumeByScreen: savedState.volumeByScreen,
+                videoScreenIDs: savedState.videoScreenIDs
+            )
+            changed = true
+        }
+        if changed, let encoded = try? JSONEncoder().encode(savedState) {
+            defaults.set(encoded, forKey: stateKey)
+            print("[VideoWallpaperManager] Updated persisted paths from \(oldPrefix) to \(newPrefix)")
         }
     }
 
@@ -787,25 +958,26 @@ final class VideoWallpaperManager: ObservableObject {
             height: screenSize.height * screen.backingScaleFactor
         )
         
-        // 4. 优化循环播放：确保 seek 时等待视频合成渲染完成，避免跳帧
+        // 4. 循环播放优化：不等待视频合成渲染，避免 looper 切换副本时卡顿
         if #available(macOS 10.15, *) {
-            playerItem.seekingWaitsForVideoCompositionRendering = true
+            playerItem.seekingWaitsForVideoCompositionRendering = false
         }
         
         // 5. 保持音画同步（即使壁纸静音也设置，避免有音轨时画面撕裂）
         playerItem.audioTimePitchAlgorithm = .timeDomain
         
-        // 6. 本地文件预缓冲，减少循环切换时的 IO 等待
+        // 6. 本地文件尽可能预缓冲，减少循环切换时的 IO 等待
         if videoURL.isFileURL {
-            playerItem.preferredForwardBufferDuration = 5
+            playerItem.preferredForwardBufferDuration = Double.greatestFiniteMagnitude
         }
         
         let queuePlayer = AVQueuePlayer()
         queuePlayer.actionAtItemEnd = .none
+        let screenVolume = volume(for: screen)
         queuePlayer.isMuted = isMuted
-        queuePlayer.volume = isMuted ? 0 : Float(volume)
-        // 设为 true：循环切换时若缓冲不足会等待而非强行播放，减少卡顿感
-        queuePlayer.automaticallyWaitsToMinimizeStalling = true
+        queuePlayer.volume = isMuted ? 0 : Float(screenVolume)
+        // 本地文件设为 false：循环切换时不等待缓冲，立即切到下一副本，减少停顿感
+        queuePlayer.automaticallyWaitsToMinimizeStalling = !videoURL.isFileURL
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
 
         let looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
@@ -883,6 +1055,7 @@ final class VideoWallpaperManager: ObservableObject {
             isMuted: isMuted,
             isPaused: isPaused,
             volume: volume,
+            volumeByScreen: volumeByScreen.isEmpty ? nil : volumeByScreen,
             videoScreenIDs: videoTargetScreenIDs.isEmpty ? nil : videoTargetScreenIDs.sorted()
         )
 
@@ -941,6 +1114,8 @@ private struct SavedVideoWallpaperState: Codable {
     let isMuted: Bool
     let isPaused: Bool
     let volume: Double?
+    /// 每个屏幕的独立音量；旧版持久化无此字段
+    let volumeByScreen: [String: Double]?
     /// 应显示 MP4 的屏幕 ID；旧版持久化无此字段时表示「当时逻辑等价于全部屏幕」
     let videoScreenIDs: [String]?
 }

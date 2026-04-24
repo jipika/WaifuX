@@ -10,7 +10,7 @@ private final class WallpaperVolumeSliderView: NSView {
     var onVolumeChanged: ((Double) -> Void)?
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 200, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
         setupUI()
     }
 
@@ -32,13 +32,13 @@ private final class WallpaperVolumeSliderView: NSView {
         addSubview(slider)
 
         NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 16),
             iconView.heightAnchor.constraint(equalToConstant: 16),
 
-            slider.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 6),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.heightAnchor.constraint(equalToConstant: 16)
         ])
@@ -71,6 +71,53 @@ private final class WallpaperVolumeSliderView: NSView {
     }
 }
 
+// MARK: - 单屏幕音量控制（名称 + 滑块）
+private final class ScreenVolumeControlView: NSView {
+    private let nameLabel = NSTextField()
+    private let sliderView = WallpaperVolumeSliderView()
+
+    var onVolumeChanged: ((Double) -> Void)? {
+        didSet { sliderView.onVolumeChanged = onVolumeChanged }
+    }
+
+    init(screenName: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 40))
+        setupUI(screenName: screenName)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI(screenName: String) {
+        nameLabel.stringValue = screenName
+        nameLabel.isEditable = false
+        nameLabel.isBordered = false
+        nameLabel.backgroundColor = .clear
+        nameLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        nameLabel.textColor = .secondaryLabelColor
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        sliderView.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(nameLabel)
+        addSubview(sliderView)
+
+        NSLayoutConstraint.activate([
+            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            nameLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+
+            sliderView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            sliderView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            sliderView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            sliderView.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    func setVolume(_ volume: Double, isMuted: Bool) {
+        sliderView.setVolume(volume, isMuted: isMuted)
+    }
+}
+
 @MainActor
 final class StatusBarController: NSObject {
     // MARK: - 单例
@@ -91,21 +138,8 @@ final class StatusBarController: NSObject {
     private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
     
-    // 音量滑块
-    private lazy var volumeSliderView = WallpaperVolumeSliderView()
-    private lazy var volumeSliderItem: NSMenuItem = {
-        let item = NSMenuItem()
-        item.view = volumeSliderView
-        volumeSliderView.onVolumeChanged = { [weak self] volume in
-            self?.videoWallpaperManager.setVolume(volume)
-            if volume > 0 && self?.videoWallpaperManager.isMuted == true {
-                self?.videoWallpaperManager.setMuted(false)
-            } else if volume == 0 && self?.videoWallpaperManager.isMuted == false {
-                self?.videoWallpaperManager.setMuted(true)
-            }
-        }
-        return item
-    }()
+    // 各屏幕独立音量条
+    private var screenVolumeItems: [NSMenuItem] = []
     
     // 标记是否已配置，防止重复配置
     private var isConfigured = false
@@ -174,6 +208,7 @@ final class StatusBarController: NSObject {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        menu.delegate = self
     }
 
     private func bindWallpaperState() {
@@ -219,19 +254,43 @@ final class StatusBarController: NSObject {
     private func updateVolumeSliderVisibility() {
         let hasNativeWallpaper = videoWallpaperManager.currentVideoURL != nil
 
-        if hasNativeWallpaper {
-            if volumeSliderItem.menu == nil {
-                // 插入到 muteItem 后面
-                let muteIndex = menu.index(of: muteItem)
-                if muteIndex != -1 {
-                    menu.insertItem(volumeSliderItem, at: muteIndex + 1)
+        // 先移除所有现有的屏幕音量 items
+        for item in screenVolumeItems {
+            if item.menu != nil {
+                menu.removeItem(item)
+            }
+        }
+        screenVolumeItems.removeAll()
+
+        guard hasNativeWallpaper else { return }
+
+        let activeScreens = videoWallpaperManager.activeScreens
+        guard !activeScreens.isEmpty else { return }
+
+        let muteIndex = menu.index(of: muteItem)
+        guard muteIndex != -1 else { return }
+        var insertIndex = muteIndex + 1
+
+        for screen in activeScreens {
+            let controlView = ScreenVolumeControlView(screenName: screen.localizedName)
+            controlView.onVolumeChanged = { [weak self] volume in
+                guard let self = self else { return }
+                self.videoWallpaperManager.setVolume(volume, for: screen)
+                if volume > 0 && self.videoWallpaperManager.isMuted == true {
+                    self.videoWallpaperManager.setMuted(false)
+                } else if volume == 0 && self.videoWallpaperManager.isMuted == false {
+                    self.videoWallpaperManager.setMuted(true)
                 }
             }
-            volumeSliderView.setVolume(videoWallpaperManager.volume, isMuted: videoWallpaperManager.isMuted)
-        } else {
-            if volumeSliderItem.menu != nil {
-                menu.removeItem(volumeSliderItem)
-            }
+
+            let item = NSMenuItem()
+            item.view = controlView
+            let volume = videoWallpaperManager.volume(for: screen)
+            controlView.setVolume(volume, isMuted: videoWallpaperManager.isMuted)
+
+            menu.insertItem(item, at: insertIndex)
+            screenVolumeItems.append(item)
+            insertIndex += 1
         }
     }
 
@@ -304,5 +363,12 @@ final class StatusBarController: NSObject {
 
     @objc private func quitApplication() {
         quitHandler?()
+    }
+}
+
+// MARK: - NSMenuDelegate
+extension StatusBarController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshMenuState()
     }
 }

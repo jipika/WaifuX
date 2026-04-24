@@ -1248,6 +1248,28 @@ struct UnifiedLocalMedia: Identifiable {
         }
         return nil
     }
+
+    /// 是否为竖屏；优先使用烘焙产物尺寸，其次 exactResolution，再次本地文件分辨率
+    var isPortrait: Bool? {
+        if let artifact = downloadRecord?.sceneBakeArtifact {
+            return artifact.height > artifact.width
+        }
+        if let portrait = mediaItem.isPortrait {
+            return portrait
+        }
+        if let resolution = localItem?.resolution {
+            let trimmed = resolution
+                .replacingOccurrences(of: " ", with: "")
+                .replacingOccurrences(of: "X", with: "x")
+            let parts = trimmed.split(separator: "x")
+            guard parts.count == 2,
+                  let w = Double(parts[0]),
+                  let h = Double(parts[1]),
+                  h > 0 else { return nil }
+            return h > w
+        }
+        return nil
+    }
 }
 
 // MARK: - 辅助函数

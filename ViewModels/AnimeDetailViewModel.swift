@@ -80,6 +80,7 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var currentEpisode: AnimeDetail.AnimeEpisodeItem?
     @Published var videoSources: [VideoSource] = []
     @Published var isLoadingVideo: Bool = false
+    @Published var isBuffering: Bool = false
     @Published var videoError: String?
     @Published var showPlayerWindow: Bool = false
 
@@ -763,6 +764,11 @@ class AnimeDetailViewModel: ObservableObject {
         player?.pause()
         player = nil
         isPlaying = false
+        isBuffering = false
+        // 恢复系统息屏/休眠
+        SleepPreventer.shared.stopPreventingSleep()
+        // 清理所有播放器相关的 Combine 订阅，防止切换剧集时堆积
+        cancellables.removeAll()
         // 注意：不重置 currentEpisode，保留当前播放的剧集信息
         
         // 取消弹幕加载
@@ -879,9 +885,48 @@ class AnimeDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // 监听播放停滞（缓冲不足导致卡住）
+        NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled, object: playerItem)
+            .sink { [weak self] _ in
+                self?.isBuffering = true
+                print("[AnimeDetailViewModel] ⏳ 播放停滞，显示缓冲指示")
+            }
+            .store(in: &cancellables)
+
+        // 监听缓冲恢复：isPlaybackLikelyToKeepUp 变为 true 时关闭缓冲提示
+        playerItem.publisher(for: \.isPlaybackLikelyToKeepUp)
+            .sink { [weak self] canKeepUp in
+                Task { @MainActor in
+                    if canKeepUp {
+                        self?.isBuffering = false
+                        print("[AnimeDetailViewModel] ✅ 缓冲充足，隐藏缓冲指示")
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
         // 开始播放（不在这里恢复进度，等待 readyToPlay）
         self.player?.play()
         print("[AnimeDetailViewModel] 开始播放: \(url.absoluteString)")
+
+        // 监听播放/暂停状态：播放时阻止休眠，暂停/结束时恢复
+        if let player = self.player {
+            player.publisher(for: \.rate)
+                .removeDuplicates()
+                .sink { [weak self] rate in
+                    Task { @MainActor in
+                        if rate > 0 {
+                            SleepPreventer.shared.startPreventingSleep()
+                            print("[AnimeDetailViewModel] ▶️ 播放中，阻止系统休眠")
+                        } else {
+                            SleepPreventer.shared.stopPreventingSleep()
+                            self?.isBuffering = false
+                            print("[AnimeDetailViewModel] ⏸️ 已暂停/结束，恢复系统休眠")
+                        }
+                    }
+                }
+                .store(in: &cancellables)
+        }
 
         // 加载弹幕
         loadDanmaku(for: episode)
@@ -943,6 +988,11 @@ class AnimeDetailViewModel: ObservableObject {
         player?.pause()
         player = nil
         isPlaying = false
+        isBuffering = false
+        // 恢复系统息屏/休眠
+        SleepPreventer.shared.stopPreventingSleep()
+        // 清理所有播放器相关的 Combine 订阅
+        cancellables.removeAll()
         currentEpisode = nil
 
         // 取消弹幕加载
