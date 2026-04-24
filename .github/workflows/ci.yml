@@ -119,14 +119,39 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo ""
 
-          # 先签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
-          echo "Signing embedded binaries..."
+          # 先处理 wallpaperengine-cli：截断到原始 Mach-O 大小 → 签名 → 重新追加 zip
+          CLI_PATH="build/WaifuX.app/Contents/Resources/Resources/wallpaperengine-cli"
+          if [ -f "$CLI_PATH" ]; then
+            echo "Processing wallpaperengine-cli..."
+            python3 -c "
+import struct, sys
+with open('$CLI_PATH', 'rb') as f:
+    f.seek(-8, 2)
+    orig_size = struct.unpack('<Q', f.read(8))[0]
+    f.seek(0)
+    data = f.read()
+macho = data[:orig_size]
+zipdata = data[orig_size:]
+with open('$CLI_PATH.macho', 'wb') as f:
+    f.write(macho)
+with open('$CLI_PATH.zipdata', 'wb') as f:
+    f.write(zipdata)
+"
+            mv "$CLI_PATH.macho" "$CLI_PATH"
+            codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$CLI_PATH"
+            cat "$CLI_PATH.zipdata" >> "$CLI_PATH"
+            rm -f "$CLI_PATH.zipdata"
+            echo "  ✅ wallpaperengine-cli"
+          fi
+
+          # 再签名 app 内部其他二进制（dylib 等）
+          echo "Signing embedded dylibs..."
           find build/WaifuX.app -type f | while read -r f; do
+            # 跳过 wallpaperengine-cli（已处理）和主可执行文件
+            if [[ "$f" == *"/wallpaperengine-cli" ]] || [[ "$f" == *"/Contents/MacOS/WaifuX" ]]; then
+              continue
+            fi
             if file "$f" | grep -qE "Mach-O|ELF"; then
-              # 跳过 app 主可执行文件（后面会签整个 bundle）
-              if [[ "$f" == *"/Contents/MacOS/WaifuX" ]]; then
-                continue
-              fi
               if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" 2>&1; then
                 echo "  ✅ $(basename "$f")"
               else
@@ -135,7 +160,7 @@ jobs:
             fi
           done
 
-          # 再签名 app 本身
+          # 最后签名整个 app bundle
           echo "Signing app bundle..."
           codesign --force --deep --options=runtime --timestamp \
             --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
