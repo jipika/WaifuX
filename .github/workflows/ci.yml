@@ -119,8 +119,9 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo ""
 
-          # 签名 app
-          codesign --force --deep --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
+          # 签名 app（必须加 --options=runtime 和 --timestamp 才能公证通过）
+          codesign --force --deep --options=runtime --timestamp \
+            --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
 
           # 重新打包进 DMG
           create-dmg \
@@ -133,11 +134,22 @@ jobs:
             build/WaifuX.app
 
           # 提交公证
-          xcrun notarytool submit build/WaifuX.dmg \
+          SUBMISSION_ID=$(xcrun notarytool submit build/WaifuX.dmg \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --wait \
+            | grep "id:" | awk '{print $2}')
+
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # 查看公证日志（如果失败能知道具体原因）
+          echo "=== Notarization Log ==="
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" 2>&1 || true
+          echo "========================"
 
           # 将公证票据 stapled 到 DMG（带重试，CloudKit 同步有时有延迟）
           for i in {1..5}; do
