@@ -119,7 +119,17 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo ""
 
-          # 签名 app（必须加 --options=runtime 和 --timestamp 才能公证通过）
+          # 先签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
+          echo "Signing embedded binaries..."
+          find build/WaifuX.app -type f | while read -r f; do
+            # 只签名 Mach-O 二进制（dylib/so/无扩展名可执行文件）
+            if file "$f" | grep -qE "Mach-O|ELF"; then
+              codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f"
+            fi
+          done
+
+          # 再签名 app 本身
+          echo "Signing app bundle..."
           codesign --force --deep --options=runtime --timestamp \
             --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
 
