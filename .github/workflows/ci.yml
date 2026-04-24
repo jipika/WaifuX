@@ -123,20 +123,7 @@ jobs:
           CLI_PATH="build/WaifuX.app/Contents/Resources/Resources/wallpaperengine-cli"
           if [ -f "$CLI_PATH" ]; then
             echo "Processing wallpaperengine-cli..."
-            python3 -c "
-import struct, sys
-with open('$CLI_PATH', 'rb') as f:
-    f.seek(-8, 2)
-    orig_size = struct.unpack('<Q', f.read(8))[0]
-    f.seek(0)
-    data = f.read()
-macho = data[:orig_size]
-zipdata = data[orig_size:]
-with open('$CLI_PATH.macho', 'wb') as f:
-    f.write(macho)
-with open('$CLI_PATH.zipdata', 'wb') as f:
-    f.write(zipdata)
-"
+            python3 -c "import struct; f=open('$CLI_PATH','rb'); f.seek(-8,2); sz=struct.unpack('<Q',f.read(8))[0]; f.seek(0); d=f.read(); open('$CLI_PATH.macho','wb').write(d[:sz]); open('$CLI_PATH.zipdata','wb').write(d[sz:])"
             mv "$CLI_PATH.macho" "$CLI_PATH"
             codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$CLI_PATH"
             cat "$CLI_PATH.zipdata" >> "$CLI_PATH"
