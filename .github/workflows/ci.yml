@@ -122,11 +122,16 @@ jobs:
           # 先签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
           echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
-            # 只签名 Mach-O 二进制（dylib/so/无扩展名可执行文件）
             if file "$f" | grep -qE "Mach-O|ELF"; then
-              # 先移除可能存在的旧签名，再重新签名
-              codesign --remove-signature "$f" 2>/dev/null || true
-              codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f"
+              # 跳过 app 主可执行文件（后面会签整个 bundle）
+              if [[ "$f" == *"/Contents/MacOS/WaifuX" ]]; then
+                continue
+              fi
+              if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" 2>&1; then
+                echo "  ✅ $(basename "$f")"
+              else
+                echo "  ⚠️ Failed to sign: $f"
+              fi
             fi
           done
 
