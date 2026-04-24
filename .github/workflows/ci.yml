@@ -78,13 +78,6 @@ jobs:
             echo "Tag ${{ steps.version.outputs.tag }} does not exist"
           fi
 
-      - name: Import Apple Signing Certificate
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
-        uses: apple-actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          p12-password: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
-
       - name: Build & Package
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         env:
@@ -96,30 +89,35 @@ jobs:
       - name: Sign & Notarize
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         env:
+          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          # 调试：查看 keychain 状态
-          echo "=== 当前 keychain 列表 ==="
-          security list-keychains
-          echo ""
-          echo "=== 默认 keychain ==="
-          security default-keychain
-          echo ""
-          echo "=== 证书列表 ==="
-          security find-identity -v
-          echo ""
+          # 创建专用 keychain
+          KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # 解锁 keychain（如果需要）
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
-          security set-keychain-settings -t 3600 -u ~/Library/Keychains/login.keychain-db
+          # 解码并导入 p12（导入完整身份包括私钥）
+          echo "$APPLE_SIGNING_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -k "$KEYCHAIN_PATH" -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/products
+
+          # 设置信任让 codesign 可用
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PATH" -P "" "$KEYCHAIN_PATH" 2>/dev/null || true
+
+          # 验证证书
+          echo "=== 证书列表 ==="
+          security find-identity -v "$KEYCHAIN_PATH"
+          echo ""
 
           # 签名 app
           codesign --force --deep --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
 
-          # 重新打包进 DMG（包含已签名的 .app）
+          # 重新打包进 DMG
           create-dmg \
             --volname "WaifuX" \
             --window-size 540 400 \
