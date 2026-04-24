@@ -101,7 +101,18 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          # 解锁默认 keychain
+          # 调试：查看 keychain 状态
+          echo "=== 当前 keychain 列表 ==="
+          security list-keychains
+          echo ""
+          echo "=== 默认 keychain ==="
+          security default-keychain
+          echo ""
+          echo "=== 证书列表 ==="
+          security find-identity -v
+          echo ""
+
+          # 解锁 keychain（如果需要）
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
           security set-keychain-settings -t 3600 -u ~/Library/Keychains/login.keychain-db
 
