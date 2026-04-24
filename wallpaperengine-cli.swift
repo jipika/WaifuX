@@ -2538,3 +2538,20 @@ struct WallpaperEngineCLI {
         """)
     }
 }
+
+
+// MARK: - NSWorkspace 扩展：设置壁纸到所有 Spaces
+
+extension NSWorkspace {
+    func setDesktopImageURLForAllSpaces(_ url: URL, for screen: NSScreen, options: [DesktopImageOptionKey: Any] = [:]) throws {
+        var merged = options
+        merged[DesktopImageOptionKey(rawValue: "allSpaces")] = NSNumber(value: true)
+        try setDesktopImageURL(url, for: screen, options: merged)
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.apple.desktop"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+}

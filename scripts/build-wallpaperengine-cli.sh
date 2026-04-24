@@ -1,6 +1,5 @@
 #!/bin/bash
-# 将 Resources/assets 打成 zip，链接 wallpaperengine-cli + WallpaperEngineEmbeddedAssets.swift，
-# 再把 zip 与 8 字节 little-endian 偏移追加到二进制末尾（材质不再进入 WaifuX.app Resources）。
+# 将 Resources/assets 打成 zip，编译进 wallpaperengine-cli（通过汇编 .incbin 嵌入 Mach-O）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,20 +12,51 @@ OUT_CLI="$ROOT/Resources/wallpaperengine-cli"
 TMP_ZIP="/tmp/waifux-we-assets-$$.zip"
 rm -f "$TMP_ZIP"
 
-cleanup() { rm -f "$TMP_ZIP"; }
+cleanup() { rm -f "$TMP_ZIP" "$ROOT/Resources/zip_data.s" "$ROOT/Resources/zip_data.o" "$ROOT/Resources/zip_accessor.c" "$ROOT/Resources/zip_accessor.o"; }
 trap cleanup EXIT
 
-if [[ ! -d "$ASSETS_DIR" ]]; then
-  echo "error: missing $ASSETS_DIR" >&2
-  exit 1
-fi
 if [[ ! -f "$SRC_MAIN" || ! -f "$SRC_EMBED" ]]; then
   echo "error: missing Swift sources" >&2
   exit 1
 fi
 
-echo "[build-wallpaperengine-cli] Zipping assets..."
-( cd "$ROOT/Resources" && zip -r -q "$TMP_ZIP" assets )
+HAS_ASSETS=false
+if [[ -d "$ASSETS_DIR" ]] && [[ -n "$(ls -A "$ASSETS_DIR" 2>/dev/null)" ]]; then
+  HAS_ASSETS=true
+fi
+
+if [[ "$HAS_ASSETS" == true ]]; then
+  echo "[build-wallpaperengine-cli] Zipping assets..."
+  ( cd "$ROOT/Resources" && zip -r -q "$TMP_ZIP" assets )
+else
+  echo "[build-wallpaperengine-cli] 无 assets，构建空资源占位"
+  echo -n "" > "$TMP_ZIP"
+fi
+
+echo "[build-wallpaperengine-cli] 生成汇编文件嵌入 zip..."
+cat > "$ROOT/Resources/zip_data.s" << EOF
+	.globl _zip_data_start
+	.globl _zip_data_end
+_zip_data_start:
+	.incbin "$TMP_ZIP"
+_zip_data_end:
+EOF
+
+as -arch arm64 "$ROOT/Resources/zip_data.s" -o "$ROOT/Resources/zip_data.o"
+
+echo "[build-wallpaperengine-cli] 生成 C bridge..."
+cat > "$ROOT/Resources/zip_accessor.c" << 'EOF'
+#include <stdint.h>
+#include <stddef.h>
+
+extern uint8_t zip_data_start[];
+extern uint8_t zip_data_end[];
+
+uint8_t* get_zip_data_ptr(void) { return zip_data_start; }
+size_t get_zip_data_size(void) { return (size_t)(zip_data_end - zip_data_start); }
+EOF
+
+clang -c "$ROOT/Resources/zip_accessor.c" -o "$ROOT/Resources/zip_accessor.o"
 
 echo "[build-wallpaperengine-cli] swiftc..."
 swiftc -parse-as-library \
@@ -42,12 +72,8 @@ swiftc -parse-as-library \
   -Xlinker -rpath -Xlinker @loader_path/lib \
   -framework AppKit -framework AVFoundation -framework IOKit -framework WebKit -framework Combine \
   -o "$OUT_CLI" \
-  "$SRC_MAIN" "$SRC_EMBED"
-
-ORIG_SIZE="$(stat -f%z "$OUT_CLI")"
-echo "[build-wallpaperengine-cli] Appending zip (Mach-O size=$ORIG_SIZE)..."
-cat "$TMP_ZIP" >> "$OUT_CLI"
-python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', $ORIG_SIZE))" >> "$OUT_CLI"
+  "$SRC_MAIN" "$SRC_EMBED" \
+  "$ROOT/Resources/zip_data.o" "$ROOT/Resources/zip_accessor.o"
 
 if command -v codesign >/dev/null 2>&1; then
   echo "[build-wallpaperengine-cli] codesign (ad hoc)..."

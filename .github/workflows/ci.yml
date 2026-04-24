@@ -119,25 +119,9 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo ""
 
-          # 先处理 wallpaperengine-cli：截断到原始 Mach-O 大小 → 签名 → 重新追加 zip
-          CLI_PATH="build/WaifuX.app/Contents/Resources/Resources/wallpaperengine-cli"
-          if [ -f "$CLI_PATH" ]; then
-            echo "Processing wallpaperengine-cli..."
-            python3 -c "import struct; f=open('$CLI_PATH','rb'); f.seek(-8,2); sz=struct.unpack('<Q',f.read(8))[0]; f.seek(0); d=f.read(); open('$CLI_PATH.macho','wb').write(d[:sz]); open('$CLI_PATH.zipdata','wb').write(d[sz:])"
-            mv "$CLI_PATH.macho" "$CLI_PATH"
-            codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$CLI_PATH"
-            cat "$CLI_PATH.zipdata" >> "$CLI_PATH"
-            rm -f "$CLI_PATH.zipdata"
-            echo "  ✅ wallpaperengine-cli"
-          fi
-
-          # 再签名 app 内部其他二进制（dylib 等）
-          echo "Signing embedded dylibs..."
+          # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
+          echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
-            # 跳过 wallpaperengine-cli（已处理）和主可执行文件
-            if [[ "$f" == *"/wallpaperengine-cli" ]] || [[ "$f" == *"/Contents/MacOS/WaifuX" ]]; then
-              continue
-            fi
             if file "$f" | grep -qE "Mach-O|ELF"; then
               if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" 2>&1; then
                 echo "  ✅ $(basename "$f")"
