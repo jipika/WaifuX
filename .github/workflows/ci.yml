@@ -78,6 +78,13 @@ jobs:
             echo "Tag ${{ steps.version.outputs.tag }} does not exist"
           fi
 
+      - name: Import Apple Signing Certificate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
+
       - name: Build & Package
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         env:
@@ -89,25 +96,14 @@ jobs:
       - name: Sign & Notarize
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
         env:
-          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          # 创建临时 keychain 并导入证书
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # 解码并导入 p12 证书
-          echo "$APPLE_SIGNING_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -s "$KEYCHAIN_PATH"
-          security default-keychain -s "$KEYCHAIN_PATH"
+          # 解锁默认 keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
+          security set-keychain-settings -t 3600 -u ~/Library/Keychains/login.keychain-db
 
           # 签名 app
           codesign --force --deep --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
