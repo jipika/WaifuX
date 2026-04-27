@@ -151,6 +151,17 @@ jobs:
             fi
           done
 
+          # 诊断：检查 Libavfilter 可执行文件类型
+          echo "=== Libavfilter executable type ==="
+          file build/WaifuX.app/Contents/Frameworks/Libavfilter.framework/Versions/A/Libavfilter
+          otool -h build/WaifuX.app/Contents/Frameworks/Libavfilter.framework/Versions/A/Libavfilter 2>/dev/null | head -10 || true
+
+          # 尝试用详细模式签名单个 framework
+          echo "=== Testing Libavfilter codesign ==="
+          codesign --verbose=4 --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" \
+            --options=runtime --timestamp \
+            build/WaifuX.app/Contents/Frameworks/Libavfilter.framework 2>&1 || true
+
           # 签名 Resources 里的 dylib/可执行文件（--deep 不递归处理 Resources）
           echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
