@@ -108,6 +108,12 @@ targets:
                   mv "$framework/Modules" "$framework/Versions/Current/Modules"
                   ln -sf "Versions/Current/Modules" "$framework/Modules"
                 fi
+                # 移除旧的 CodeSignature（结构已被修改，旧签名失效，且根目录不能有 _CodeSignature）
+                if [ -d "$framework/_CodeSignature" ]; then
+                  rm -rf "$framework/_CodeSignature"
+                fi
+                # 清理 .DS_Store
+                find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
               fi
             done
           fi

@@ -119,6 +119,36 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo ""
 
+          # 诊断：列出所有框架根目录内容，定位 unsealed contents
+          echo "=== Frameworks 根目录诊断 ==="
+          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            echo "--- $(basename "$fw") ---"
+            ls -la "$fw" || true
+          done
+          echo "=============================="
+
+          # 保险修复：再次确保 FFmpeg 框架结构正确（exportArchive 可能还原结构）
+          echo "Applying framework fix before signing..."
+          for framework in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            if [ -f "$framework/Info.plist" ] && [ ! -L "$framework/Info.plist" ]; then
+              mkdir -p "$framework/Versions/Current/Resources"
+              mv "$framework/Info.plist" "$framework/Versions/Current/Resources/Info.plist"
+              ln -sf "Versions/Current/Resources/Info.plist" "$framework/Info.plist"
+            fi
+            if [ -d "$framework/Headers" ] && [ ! -L "$framework/Headers" ]; then
+              mv "$framework/Headers" "$framework/Versions/Current/Headers"
+              ln -sf "Versions/Current/Headers" "$framework/Headers"
+            fi
+            if [ -d "$framework/Modules" ] && [ ! -L "$framework/Modules" ]; then
+              mv "$framework/Modules" "$framework/Versions/Current/Modules"
+              ln -sf "Versions/Current/Modules" "$framework/Modules"
+            fi
+            if [ -d "$framework/_CodeSignature" ]; then
+              rm -rf "$framework/_CodeSignature"
+            fi
+            find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
+          done
+
           # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
           echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
