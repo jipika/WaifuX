@@ -163,10 +163,28 @@ jobs:
             fi
           done
 
-          # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
-          echo "Signing embedded binaries..."
+          # 逐个签名所有 framework（先 framework 后 dylib，避免 --deep 递归时冲突）
+          echo "Signing frameworks..."
+          find build/WaifuX.app -path "*/Frameworks/*.framework" -maxdepth 4 -type d | while read -r fw; do
+            echo "  Signing $(basename "$fw")..."
+            if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$fw" 2>&1; then
+              echo "    ✅ $(basename "$fw")"
+            else
+              echo "    ❌ Failed to sign framework: $fw"
+              echo "    Structure:"
+              ls -la "$fw" || true
+              find "$fw" -maxdepth 2 | sort || true
+            fi
+          done
+
+          # 签名其他 Mach-O 文件（排除已签名的 framework 内部文件）
+          echo "Signing other binaries..."
           find build/WaifuX.app -type f | while read -r f; do
             if file "$f" | grep -qE "Mach-O|ELF"; then
+              # 跳过 framework 内部的文件（已由 framework 签名覆盖）
+              case "$f" in
+                */*.framework/*) continue ;;
+              esac
               if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" 2>&1; then
                 echo "  ✅ $(basename "$f")"
               else
@@ -175,10 +193,27 @@ jobs:
             fi
           done
 
+          # 验证每个 framework
+          echo "Verifying frameworks..."
+          find build/WaifuX.app -path "*/Frameworks/*.framework" -maxdepth 4 -type d | while read -r fw; do
+            echo "  Verify $(basename "$fw"):"
+            codesign --verify --verbose=4 "$fw" 2>&1 || true
+          done
+
           # 最后签名整个 app bundle
           echo "Signing app bundle..."
-          codesign --force --deep --options=runtime --timestamp \
-            --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
+          codesign --force --deep --options=runtime --timestamp --verbose=4 \
+            --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app 2>&1 | tee /tmp/codesign.log || {
+              echo "=== codesign --deep failed ==="
+              echo "App structure:"
+              find build/WaifuX.app -maxdepth 3 | sort || true
+              echo "All frameworks:"
+              find build/WaifuX.app -name "*.framework" -type d | while read -r fw; do
+                echo "--- $(basename "$fw") ---"
+                ls -la "$fw" || true
+              done
+              exit 1
+            }
 
           # 重新打包进 DMG
           create-dmg \
