@@ -898,7 +898,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
         // 配置 WKWebView
         let config = WKWebViewConfiguration()
-        config.preferences.javaScriptEnabled = true
         // 允许本地 HTML 引用同目录资源（Workshop web 壁纸依赖）
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         let ucc = WKUserContentController()
@@ -1591,7 +1590,7 @@ private final class DesktopWallpaperManager {
                 let id = window.hashValue
                 if !processedIDs.contains(id) {
                     processedIDs.insert(id)
-                    print("[DesktopWallpaperManager] Found candidate window: \(window.className) frame=\(window.frame) title='\(window.title ?? "")'")
+                    print("[DesktopWallpaperManager] Found candidate window: \(window.className) frame=\(window.frame) title='\(window.title)'")
                 }
 
                 let desktopLevel = CGWindowLevelForKey(.desktopWindow)
@@ -1826,7 +1825,7 @@ private enum Client {
 
         guard let data = try? JSONEncoder().encode(message) else { return false }
         var length = UInt32(data.count)
-        var payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
+        let payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
         let sent = payload.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, payload.count, 0) }
         return sent == payload.count
     }
@@ -1850,7 +1849,7 @@ private enum Client {
 
         guard let data = try? JSONEncoder().encode(message) else { return "Encode failed" }
         var length = UInt32(data.count)
-        var payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
+        let payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
         let sent = payload.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, payload.count, 0) }
         guard sent == payload.count else { return "Send failed" }
 

@@ -9,8 +9,8 @@ class AnimePlayerWindowController: NSWindowController {
     let viewModel: AnimeDetailViewModel
     let coordinator = KSVideoPlayer.Coordinator()
     
-    private var keyMonitor: Any?
-    private var mouseMonitor: Any?
+    nonisolated(unsafe) private var keyMonitor: Any?
+    nonisolated(unsafe) private var mouseMonitor: Any?
     
     init(anime: AnimeSearchResult, viewModel: AnimeDetailViewModel) {
         self.animeId = anime.id
@@ -110,7 +110,7 @@ class AnimePlayerWindowController: NSWindowController {
         }
     }
     
-    private func removeEventMonitors() {
+    nonisolated private func removeEventMonitors() {
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil

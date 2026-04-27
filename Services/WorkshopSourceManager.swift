@@ -216,7 +216,6 @@ class WorkshopSourceManager: ObservableObject {
         }
         let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
         let script = destDir.appendingPathComponent("steamcmd.sh")
-        let steamBin = destDir.appendingPathComponent("steamcmd")
 
         // 如果 Application Support 中已有可工作的副本，直接返回
         if Self.isValidSteamCMDInstallation(at: destDir) {

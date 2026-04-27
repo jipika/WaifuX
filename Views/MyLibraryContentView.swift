@@ -620,7 +620,6 @@ struct MyLibraryContentView: View {
     // MARK: - Image Preloading
     private func preloadNearbyWallpapers(around item: AnyWallpaperItem, config: LibraryGridConfig) {
         guard let index = wallpaperItems.firstIndex(where: { $0.id == item.id }) else { return }
-        let imageHeight = LibraryCardMetrics.thumbnailHeight
         let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(wallpaperItems.count, index + 11)
         let urls = range
@@ -636,7 +635,6 @@ struct MyLibraryContentView: View {
 
     private func preloadNearbyMedia(around item: AnyMediaItem, config: LibraryGridConfig) {
         guard let index = currentMediaItems.firstIndex(where: { $0.id == item.id }) else { return }
-        let imageHeight = LibraryCardMetrics.thumbnailHeight
         let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(currentMediaItems.count, index + 11)
         let urls = range
@@ -653,7 +651,6 @@ struct MyLibraryContentView: View {
 
     private func preloadNearbyAnime(around anime: AnimeSearchResult, config: LibraryGridConfig) {
         guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
-        let imageHeight = LibraryCardMetrics.thumbnailHeight + 72
         let targetSize = CGSize(width: 512, height: 512)
         let range = max(0, index - 10)..<min(currentAnimeItems.count, index + 11)
         let urls = range

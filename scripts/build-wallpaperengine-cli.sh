@@ -42,7 +42,7 @@ _zip_data_start:
 _zip_data_end:
 EOF
 
-as -arch arm64 "$ROOT/Resources/zip_data.s" -o "$ROOT/Resources/zip_data.o"
+as -arch arm64 -mmacosx-version-min=14.0 "$ROOT/Resources/zip_data.s" -o "$ROOT/Resources/zip_data.o"
 
 echo "[build-wallpaperengine-cli] 生成 C bridge..."
 cat > "$ROOT/Resources/zip_accessor.c" << 'EOF'
@@ -56,7 +56,7 @@ uint8_t* get_zip_data_ptr(void) { return zip_data_start; }
 size_t get_zip_data_size(void) { return (size_t)(zip_data_end - zip_data_start); }
 EOF
 
-clang -c "$ROOT/Resources/zip_accessor.c" -o "$ROOT/Resources/zip_accessor.o"
+clang -c -mmacosx-version-min=14.0 "$ROOT/Resources/zip_accessor.c" -o "$ROOT/Resources/zip_accessor.o"
 
 echo "[build-wallpaperengine-cli] swiftc..."
 swiftc -parse-as-library \

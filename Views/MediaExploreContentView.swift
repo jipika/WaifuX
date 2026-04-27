@@ -537,7 +537,6 @@ struct MediaExploreContentView: View {
         if lastPrefetchCenterIndex >= 0, abs(index - lastPrefetchCenterIndex) < 4 { return }
         lastPrefetchCenterIndex = index
 
-        let imageHeight = config.cardWidth * 0.625
         let targetSize = CGSize(width: 512, height: 512)
         let count = items.count
         guard count > 0 else { return }

@@ -853,6 +853,15 @@ class AnimeDetailViewModel: ObservableObject {
             isBuffering = false
             isPlaying = false
             SleepPreventer.shared.stopPreventingSleep()
+        case .initialized:
+            break
+        case .preparing:
+            isBuffering = true
+        case .bufferFinished:
+            isBuffering = false
+        case .playedToTheEnd:
+            isPlaying = false
+            SleepPreventer.shared.stopPreventingSleep()
         @unknown default:
             break
         }

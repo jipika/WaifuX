@@ -26,6 +26,9 @@ packages:
   Kingfisher:
     url: https://github.com/onevcat/Kingfisher.git
     from: "8.8.0"
+  KSPlayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    from: "2.3.0"
 
 settings:
   base:
@@ -75,6 +78,31 @@ targets:
       - package: SwiftSoup
       - package: Kanna
       - package: Kingfisher
+      - package: KSPlayer
+    postBuildScripts:
+      - name: Fix FFmpeg Framework Bundles
+        basedOnDependencyAnalysis: false
+        script: |
+          FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          if [ -d "$FRAMEWORKS_DIR" ]; then
+            for framework in "$FRAMEWORKS_DIR"/*.framework; do
+              if [ -f "$framework/Info.plist" ]; then
+                mkdir -p "$framework/Versions/Current/Resources"
+                if [ ! -f "$framework/Versions/Current/Resources/Info.plist" ]; then
+                  mv "$framework/Info.plist" "$framework/Versions/Current/Resources/Info.plist"
+                  ln -sf "Versions/Current/Resources/Info.plist" "$framework/Info.plist"
+                fi
+                if [ ! -L "$framework/Resources" ]; then
+                  ln -sf "Versions/Current/Resources" "$framework/Resources"
+                fi
+                execName=$(basename "$framework" .framework)
+                if [ -f "$framework/$execName" ] && [ ! -L "$framework/$execName" ]; then
+                  mv "$framework/$execName" "$framework/Versions/Current/$execName"
+                  ln -sf "Versions/Current/$execName" "$framework/$execName"
+                fi
+              fi
+            done
+          fi
     entitlements:
       path: WaifuX.entitlements
       properties:
