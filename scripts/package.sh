@@ -82,19 +82,17 @@ fi
 
 echo "✅ 导出成功"
 
-# 删除静态库 framework（FFmpegKit 的 macOS "framework" 实际是静态库归档，
-# 编译时已链接到主可执行文件，嵌入 app bundle 会导致 codesign 失败）
-echo "🧹 清理静态库 framework..."
+# 修复 framework 结构：codesign 要求 Versions/Current 必须是 symlink 指向 A
+echo "🔧 修复 framework 版本化结构..."
 for fw in "$BUILD_DIR/$APP_NAME/Contents/Frameworks/"*.framework; do
   if [ -d "$fw" ]; then
-    execName=$(basename "$fw" .framework)
-    execPath="$fw/Versions/Current/$execName"
-    if [ ! -f "$execPath" ]; then
-      execPath="$fw/$execName"
-    fi
-    if [ -f "$execPath" ] && file "$execPath" | grep -q "ar archive"; then
-      echo "  🗑️  $(basename "$fw") (static library)"
-      rm -rf "$fw"
+    # 删除多余目录
+    rm -rf "$fw/Headers" "$fw/Modules" "$fw/PrivateHeaders" "$fw/_CodeSignature"
+    # 转换 Versions/Current 实体目录为 symlink
+    if [ -d "$fw/Versions/Current" ] && [ ! -L "$fw/Versions/Current" ]; then
+      echo "  $(basename "$fw"): Versions/Current → Versions/A + symlink"
+      mv "$fw/Versions/Current" "$fw/Versions/A"
+      ln -sf A "$fw/Versions/Current"
     fi
   fi
 done
