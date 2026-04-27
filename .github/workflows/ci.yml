@@ -131,24 +131,36 @@ jobs:
           done
           echo "=============================="
 
-          # 保险修复：清理会导致 codesign 失败的目录/文件，保持扁平结构
-          echo "Applying framework cleanup before signing..."
+          # 保险修复：删除静态库 framework（FFmpegKit 的 macOS "framework" 实际是静态库归档）
+          echo "Removing static frameworks..."
           for framework in build/WaifuX.app/Contents/Frameworks/*.framework; do
-            if [ -d "$framework/Headers" ]; then
-              rm -rf "$framework/Headers"
+            if [ -d "$framework" ]; then
+              execName=$(basename "$framework" .framework)
+              execPath="$framework/Versions/Current/$execName"
+              if [ ! -f "$execPath" ]; then
+                execPath="$framework/$execName"
+              fi
+              if [ -f "$execPath" ] && file "$execPath" | grep -q "ar archive"; then
+                echo "  🗑️ $(basename "$framework") (static library)"
+                rm -rf "$framework"
+              else
+                # 清理其他可能导致 codesign 失败的文件
+                if [ -d "$framework/Headers" ]; then
+                  rm -rf "$framework/Headers"
+                fi
+                if [ -d "$framework/Modules" ]; then
+                  rm -rf "$framework/Modules"
+                fi
+                if [ -d "$framework/PrivateHeaders" ]; then
+                  rm -rf "$framework/PrivateHeaders"
+                fi
+                if [ -d "$framework/_CodeSignature" ]; then
+                  rm -rf "$framework/_CodeSignature"
+                fi
+                find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
+                chmod -R u+w "$framework" 2>/dev/null || true
+              fi
             fi
-            if [ -d "$framework/Modules" ]; then
-              rm -rf "$framework/Modules"
-            fi
-            if [ -d "$framework/PrivateHeaders" ]; then
-              rm -rf "$framework/PrivateHeaders"
-            fi
-            if [ -d "$framework/_CodeSignature" ]; then
-              rm -rf "$framework/_CodeSignature"
-            fi
-            find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
-            # 修复只读权限（Xcode copy 可能保留只读）
-            chmod -R u+w "$framework" 2>/dev/null || true
           done
 
           # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
@@ -160,16 +172,6 @@ jobs:
               else
                 echo "  ⚠️ Failed to sign: $f"
               fi
-            fi
-          done
-
-          # 签名所有 framework bundle（先单独签名，避免 --deep 的结构验证问题）
-          echo "Signing frameworks..."
-          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
-            if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$fw" 2>&1; then
-              echo "  ✅ $(basename "$fw")"
-            else
-              echo "  ⚠️ Failed to sign framework: $fw"
             fi
           done
 

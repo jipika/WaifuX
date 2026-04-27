@@ -82,6 +82,23 @@ fi
 
 echo "✅ 导出成功"
 
+# 删除静态库 framework（FFmpegKit 的 macOS "framework" 实际是静态库归档，
+# 编译时已链接到主可执行文件，嵌入 app bundle 会导致 codesign 失败）
+echo "🧹 清理静态库 framework..."
+for fw in "$BUILD_DIR/$APP_NAME/Contents/Frameworks/"*.framework; do
+  if [ -d "$fw" ]; then
+    execName=$(basename "$fw" .framework)
+    execPath="$fw/Versions/Current/$execName"
+    if [ ! -f "$execPath" ]; then
+      execPath="$fw/$execName"
+    fi
+    if [ -f "$execPath" ] && file "$execPath" | grep -q "ar archive"; then
+      echo "  🗑️  $(basename "$fw") (static library)"
+      rm -rf "$fw"
+    fi
+  fi
+done
+
 # 仅在非签名流程时创建 DMG（签名流程由 CI 另行处理）
 if [ "${WAIFUX_SKIP_DMG:-}" != "1" ]; then
   echo "💿 正在创建 DMG..."
