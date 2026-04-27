@@ -132,18 +132,53 @@ jobs:
 
               # 确保 Versions/Current 是 symlink 指向 A
               if [ -d "$framework/Versions/Current" ] && [ ! -L "$framework/Versions/Current" ]; then
-                mv "$framework/Versions/Current" "$framework/Versions/A"
+                if [ -d "$framework/Versions/A" ]; then
+                  # Versions/A 已存在，合并 Current 到 A（Xcode 可能同时创建了两个目录）
+                  cp -R "$framework/Versions/Current/"* "$framework/Versions/A/" 2>/dev/null || true
+                  rm -rf "$framework/Versions/Current"
+                else
+                  mv "$framework/Versions/Current" "$framework/Versions/A"
+                fi
               fi
               if [ -d "$framework/Versions/A" ] && [ ! -L "$framework/Versions/Current" ]; then
                 ln -sf A "$framework/Versions/Current"
               fi
 
               # 关键修复：根目录 symlinks 直接指向 Versions/A，绕过 Current
+              # 注意：FFmpegKit 的 xcframework 中 macOS framework 是扁平结构（无 Versions 目录），
+              # Xcode 嵌入时可能部分转换。必须先检查目标存在，避免创建 broken symlink。
               execName=$(basename "$framework" .framework)
-              rm -f "$framework/$execName" "$framework/Info.plist" "$framework/Resources"
-              ln -sf "Versions/A/$execName" "$framework/$execName"
-              ln -sf "Versions/A/Resources/Info.plist" "$framework/Info.plist"
-              ln -sf "Versions/A/Resources" "$framework/Resources"
+
+              # 确保可执行文件在 Versions/A/ 中
+              if [ ! -e "$framework/Versions/A/$execName" ] && [ -f "$framework/$execName" ]; then
+                mv "$framework/$execName" "$framework/Versions/A/$execName"
+              fi
+              if [ -e "$framework/Versions/A/$execName" ]; then
+                rm -f "$framework/$execName"
+                ln -sf "Versions/A/$execName" "$framework/$execName"
+              fi
+
+              # 确保 Resources 在 Versions/A/ 中
+              if [ ! -d "$framework/Versions/A/Resources" ] && [ -d "$framework/Resources" ]; then
+                mv "$framework/Resources" "$framework/Versions/A/Resources"
+              fi
+              if [ -d "$framework/Versions/A/Resources" ]; then
+                rm -f "$framework/Resources"
+                ln -sf "Versions/A/Resources" "$framework/Resources"
+              fi
+
+              # 确保 Info.plist 在 Versions/A/Resources/ 中
+              if [ ! -f "$framework/Versions/A/Resources/Info.plist" ] && [ -f "$framework/Info.plist" ]; then
+                mkdir -p "$framework/Versions/A/Resources"
+                cp "$framework/Info.plist" "$framework/Versions/A/Resources/Info.plist"
+              fi
+              if [ -f "$framework/Versions/A/Resources/Info.plist" ]; then
+                rm -f "$framework/Info.plist"
+                ln -sf "Versions/A/Resources/Info.plist" "$framework/Info.plist"
+              elif [ -f "$framework/Versions/A/Info.plist" ]; then
+                rm -f "$framework/Info.plist"
+                ln -sf "Versions/A/Info.plist" "$framework/Info.plist"
+              fi
             fi
           done
 
