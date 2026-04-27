@@ -128,39 +128,24 @@ jobs:
                      "$framework/PrivateHeaders" "$framework/_CodeSignature"
               find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
               chmod -R u+w "$framework" 2>/dev/null || true
-              # 删除扩展属性（残留属性会导致 unsealed contents）
               xattr -cr "$framework" 2>/dev/null || true
 
               # 确保 Versions/Current 是 symlink 指向 A
               if [ -d "$framework/Versions/Current" ] && [ ! -L "$framework/Versions/Current" ]; then
-                echo "  🔧 $(basename "$framework"): converting Versions/Current to symlink"
                 mv "$framework/Versions/Current" "$framework/Versions/A"
+              fi
+              if [ -d "$framework/Versions/A" ] && [ ! -L "$framework/Versions/Current" ]; then
                 ln -sf A "$framework/Versions/Current"
               fi
+
+              # 关键修复：根目录 symlinks 直接指向 Versions/A，绕过 Current
+              execName=$(basename "$framework" .framework)
+              rm -f "$framework/$execName" "$framework/Info.plist" "$framework/Resources"
+              ln -sf "Versions/A/$execName" "$framework/$execName"
+              ln -sf "Versions/A/Resources/Info.plist" "$framework/Info.plist"
+              ln -sf "Versions/A/Resources" "$framework/Resources"
             fi
           done
-
-          # 诊断：确认 Versions 结构
-          echo "=== Framework Versions 诊断 ==="
-          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
-            echo "$(basename "$fw"):"
-            ls -la "$fw/Versions/" 2>/dev/null || true
-            if [ -L "$fw/Versions/Current" ]; then
-              echo "  Current -> $(readlink "$fw/Versions/Current")"
-              ls -la "$fw/Versions/Current/" 2>/dev/null | head -5 || true
-            fi
-          done
-
-          # 诊断：检查 Libavfilter 可执行文件类型
-          echo "=== Libavfilter executable type ==="
-          file build/WaifuX.app/Contents/Frameworks/Libavfilter.framework/Versions/A/Libavfilter
-          otool -h build/WaifuX.app/Contents/Frameworks/Libavfilter.framework/Versions/A/Libavfilter 2>/dev/null | head -10 || true
-
-          # 尝试用详细模式签名单个 framework
-          echo "=== Testing Libavfilter codesign ==="
-          codesign --verbose=4 --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" \
-            --options=runtime --timestamp \
-            build/WaifuX.app/Contents/Frameworks/Libavfilter.framework 2>&1 || true
 
           # 签名 Resources 里的 dylib/可执行文件（--deep 不递归处理 Resources）
           echo "Signing embedded binaries..."
