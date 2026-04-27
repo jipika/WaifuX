@@ -198,7 +198,17 @@ jobs:
             echo ""
           done
 
-          # 签名 Resources 里的 dylib/可执行文件（--deep 不递归处理 Resources）
+          # 逐个签名每个 framework（先处理最深层级的，避免 --deep 的递归问题）
+          echo "Signing frameworks individually..."
+          for framework in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            if [ -d "$framework" ]; then
+              echo "  Signing $(basename "$framework")..."
+              codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" \
+                --options=runtime --timestamp "$framework" 2>&1 || true
+            fi
+          done
+
+          # 签名 Resources 里的 dylib/可执行文件
           echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
             if file "$f" | grep -qE "Mach-O|ELF"; then
@@ -210,9 +220,9 @@ jobs:
             fi
           done
 
-          # 签名整个 app bundle（--deep 递归签名所有 framework）
+          # 签名整个 app bundle（不带 --deep，因为 framework 已经单独签过）
           echo "Signing app bundle..."
-          codesign --force --deep --options=runtime --timestamp \
+          codesign --force --options=runtime --timestamp \
             --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
 
           # 重新打包进 DMG
