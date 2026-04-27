@@ -48,6 +48,16 @@ struct FullScreenWallpaperView: View {
     // 用于强制刷新图片加载的状态
     @State private var imageLoadId = UUID()
 
+    // MARK: - 键盘快捷键与滑动动画
+    @State private var keyboardMonitor: Any?
+    @State private var slideIncomingOffset: CGFloat = 0
+    @State private var slideOutgoingOffset: CGFloat = 0
+    @State private var isNavigating = false
+
+    private enum SlideDirection {
+        case up, down
+    }
+
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
     
@@ -75,6 +85,14 @@ struct FullScreenWallpaperView: View {
 
                 // 壁纸图片 - 带懒加载和内存管理
                 wallpaperImageView
+                    .id("fullscreen-bg-\(wallpaper.id)")
+                    .transition(
+                        AnyTransition.asymmetric(
+                            insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
+                            removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
+                        )
+                        .animation(.easeInOut(duration: 0.3))
+                    )
                     .scaleEffect(imageScale)
                     .gesture(
                         MagnificationGesture()
@@ -173,9 +191,11 @@ struct FullScreenWallpaperView: View {
             setupWindow()
             startControlsTimer()
             setupNextItemDataSource()
+            setupKeyboardMonitor()
         }
         .onDisappear {
             cleanup()
+            removeKeyboardMonitor()
         }
         .onChange(of: viewModel.wallpapers) { _, newWallpapers in
             // 当列表数据更新时，同步更新数据源
@@ -441,10 +461,12 @@ struct FullScreenWallpaperView: View {
     }
 
     private func navigateToNextWallpaper() {
+        guard !isNavigating else { return }
         let nextIndex = currentWallpaperIndex + 1
         
         // 情况1：下一张已经在当前列表中
         if nextIndex < viewModel.wallpapers.count {
+            prepareSlideTransition(direction: .down)
             navigateToIndex(nextIndex)
             // 导航后检查是否需要预加载
             triggerPreloadIfNeeded()
@@ -462,7 +484,10 @@ struct FullScreenWallpaperView: View {
                 
                 // 加载完成后，尝试导航到下一张
                 if nextIndex < viewModel.wallpapers.count {
-                    navigateToIndex(nextIndex)
+                    await MainActor.run {
+                        self.prepareSlideTransition(direction: .down)
+                        self.navigateToIndex(nextIndex)
+                    }
                 }
             }
             return
@@ -470,21 +495,25 @@ struct FullScreenWallpaperView: View {
         
         // 情况3：没有更多数据了，循环到第一张
         if !viewModel.wallpapers.isEmpty && nextIndex >= viewModel.wallpapers.count {
+            prepareSlideTransition(direction: .down)
             navigateToIndex(0)
         }
     }
 
     private func navigateToPreviousWallpaper() {
+        guard !isNavigating else { return }
         let prevIndex = currentWallpaperIndex - 1
         
         // 情况1：上一张在列表中
         if prevIndex >= 0 {
+            prepareSlideTransition(direction: .up)
             navigateToIndex(prevIndex)
             return
         }
         
         // 情况2：已经是第一张，循环到最后一张
         if !viewModel.wallpapers.isEmpty {
+            prepareSlideTransition(direction: .up)
             navigateToIndex(viewModel.wallpapers.count - 1)
         }
     }
@@ -507,6 +536,58 @@ struct FullScreenWallpaperView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             // 更新当前壁纸
             currentWallpaper = newWallpaper
+        }
+    }
+
+    // MARK: - 键盘快捷键
+
+    private func setupKeyboardMonitor() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            switch event.keyCode {
+            case 49: // 空格键：显示/隐藏控制栏和信息区域
+                self.toggleControls()
+                return nil
+            case 126: // 上方向键：上一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToPreviousWallpaper()
+                return nil
+            case 125: // 下方向键：下一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToNextWallpaper()
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+    }
+
+    // MARK: - 滑动动画
+
+    private func prepareSlideTransition(direction: SlideDirection) {
+        isNavigating = true
+        let distance: CGFloat = 600
+        switch direction {
+        case .up:
+            // 上一张：新图从上方滑入，当前图向下滑出
+            slideIncomingOffset = -distance
+            slideOutgoingOffset = distance
+        case .down:
+            // 下一张：新图从下方滑入，当前图向上滑出
+            slideIncomingOffset = distance
+            slideOutgoingOffset = -distance
+        }
+        // 动画结束后重置
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.isNavigating = false
+            self.slideIncomingOffset = 0
+            self.slideOutgoingOffset = 0
         }
     }
 

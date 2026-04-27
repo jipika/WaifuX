@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-import AVKit
+import KSPlayer
 import Combine
 
 // MARK: - 源搜索状态 (简化版，与 Kazumi 对齐)
@@ -43,6 +43,7 @@ struct SourceSearchResult: Identifiable {
     var status: SourceQueryStatus = .idle
     var selectedItem: SourceSearchItem?  // 用户选择的结果
     var detail: AnimeDetail?             // 解析后的剧集列表
+    var searchItems: [SourceSearchItem]? // 搜索结果列表（用于返回重新选择）
 }
 
 // MARK: - 应用内验证码（WebView 会话）
@@ -75,7 +76,8 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var selectedSourceIndex: Int = 0
 
     // MARK: - 播放器状态
-    @Published var player: AVPlayer?
+    @Published var currentPlayURL: URL?
+    @Published var ksOptions: KSOptions = KSOptions()
     @Published var isPlaying: Bool = false
     @Published var currentEpisode: AnimeDetail.AnimeEpisodeItem?
     @Published var videoSources: [VideoSource] = []
@@ -88,8 +90,6 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var currentProgress: Double = 0
     @Published var currentTime: Double = 0
     @Published var totalDuration: Double = 0
-    private var progressTracker: PlaybackProgressTracker?
-    private var progressObserver: AnyCancellable?
 
     // MARK: - 弹幕功能（参考 Kazumi）
     @Published var danmakuList: [Danmaku] = []
@@ -301,6 +301,7 @@ class AnimeDetailViewModel: ObservableObject {
                 } else {
                     // 多个结果，需要用户选择
                     updatedResult.status = .needsSelection(items)
+                    updatedResult.searchItems = items
                     sourceResults[index] = updatedResult
                 }
             }
@@ -454,6 +455,22 @@ class AnimeDetailViewModel: ObservableObject {
     /// 用户选择搜索结果后调用 (Kazumi 风格)
     func selectSearchItem(_ item: SourceSearchItem, for rule: AnimeRule) async {
         await queryEpisodes(for: item, in: rule)
+    }
+
+    /// 重置源选择，返回到搜索结果列表
+    func resetSourceSelection(for rule: AnimeRule) {
+        guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+        var updatedResult = sourceResults[index]
+        // 如果有保存的搜索结果，恢复到 needsSelection 状态
+        if let items = updatedResult.searchItems, !items.isEmpty {
+            updatedResult.status = .needsSelection(items)
+        } else {
+            // 没有保存的搜索结果，恢复到 idle 状态并重新搜索
+            updatedResult.status = .idle
+            updatedResult.selectedItem = nil
+            updatedResult.detail = nil
+        }
+        sourceResults[index] = updatedResult
     }
 
     // MARK: - 初始排序冻结机制
@@ -757,12 +774,8 @@ class AnimeDetailViewModel: ObservableObject {
     /// 设置播放器并恢复进度
     /// 清理播放器但不重置 currentEpisode（用于切换剧集时）
     private func cleanupPlayerOnly() {
-        progressObserver?.cancel()
-        progressTracker?.detach()
-        progressTracker = nil
         PlaybackProgressCache.shared.stopTracking()
-        player?.pause()
-        player = nil
+        currentPlayURL = nil
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠
@@ -777,31 +790,33 @@ class AnimeDetailViewModel: ObservableObject {
         danmakuList = []
     }
 
-    /// 修复：简化 Headers 设置（AVURLAssetHTTPHeaderFieldsKey 对 M3U8 无效），延迟恢复播放进度
+    /// 使用 KSPlayer 设置播放器
     private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
         let rule = sourceResults[sourceIndex].rule
         
         // 使用 cleanupPlayerOnly 而不是 stopPlayback，避免 currentEpisode 被清空
         cleanupPlayerOnly()
         
-        // 创建播放器项目
-        // 注意：AVURLAssetHTTPHeaderFieldsKey 对 M3U8 流无效，使用标准 AVPlayerItem
-        let playerItem = AVPlayerItem(url: url)
+        // 创建 KSPlayer 选项
+        let options = KSOptions()
+        options.hardwareDecode = true
         
-        // 配置高质量播放设置
-        // 1. 不限制码率，使用视频原始码率
-        playerItem.preferredPeakBitRate = 0
-        
-        // 2. 启用 HDR 元数据（如果视频支持）
-        if #available(macOS 10.15, *) {
-            playerItem.appliesPerFrameHDRDisplayMetadata = true
+        // 恢复播放进度（通过 startPlayTime）
+        if let savedProgress = PlaybackProgressCache.shared.getProgress(
+            sourceId: rule.id,
+            episodeId: episode.id
+        ), savedProgress.currentTime > 10,
+           savedProgress.currentTime < (savedProgress.duration > 0 ? savedProgress.duration * 0.9 : Double.infinity) {
+            options.startPlayTime = savedProgress.currentTime
+            print("[AnimeDetailViewModel] 将从 \(savedProgress.formattedProgress) 恢复播放")
         }
         
-        // 设置 HTTP 头信息（通过 AVPlayerItem 的 asset 选项对 M3U8 无效，依赖系统 Cookie 管理）
-        // 大部分视频源会通过 HTTPCookieStorage 自动获得必要的 Cookie
-        
-        self.player = AVPlayer(playerItem: playerItem)
+        self.ksOptions = options
+        self.currentPlayURL = url
         self.isPlaying = true
+        self.isBuffering = true
+        
+        print("[AnimeDetailViewModel] 开始播放: \(url.absoluteString)")
 
         // 开始跟踪播放进度
         PlaybackProgressCache.shared.startTracking(
@@ -813,154 +828,71 @@ class AnimeDetailViewModel: ObservableObject {
             coverURL: anime.coverURL
         )
 
-        // 附加进度跟踪器
-        progressTracker = PlaybackProgressTracker()
-        progressTracker?.attach(to: self.player!)
-
-        // 监听进度更新
-        progressObserver = progressTracker?.$currentTime
-            .sink { [weak self] time in
-                self?.currentTime = time
-            }
-
-        progressTracker?.$duration
-            .sink { [weak self] duration in
-                self?.totalDuration = duration
-            }
-            .store(in: &cancellables)
-
-        progressTracker?.$progress
-            .sink { [weak self] progress in
-                self?.currentProgress = progress
-                
-                // 同时更新 AnimeProgressStore（每5%或每30秒保存一次）
-                if let self = self, let currentEpisode = self.currentEpisode {
-                    let shouldSave = Int(progress * 20) > Int(self.currentProgress * 20) || progress >= 0.95
-                    if shouldSave {
-                        AnimeProgressStore.shared.updateProgress(
-                            animeId: self.anime.id,
-                            animeTitle: self.anime.title,
-                            coverURL: self.anime.coverURL,
-                            episodeId: currentEpisode.id,
-                            episodeNumber: "\(currentEpisode.episodeNumber)",
-                            currentTime: self.currentTime,
-                            totalDuration: self.totalDuration
-                        )
-                    }
-                }
-            }
-            .store(in: &cancellables)
-
-        // 监听播放器错误和状态
-        playerItem.publisher(for: \.status)
-            .sink { [weak self] status in
-                Task { @MainActor in
-                    guard let self = self else { return }
-                    switch status {
-                    case .failed:
-                        let error = self.player?.currentItem?.error
-                        self.videoError = "视频加载失败: \(error?.localizedDescription ?? "无法播放该视频源")"
-                        print("[AnimeDetailViewModel] ❌ 播放器状态: failed - \(error?.localizedDescription ?? "Unknown error")")
-                    case .readyToPlay:
-                        print("[AnimeDetailViewModel] ✅ 播放器状态: readyToPlay")
-                        // 播放器准备好后再恢复进度（避免 seek 失败）
-                        self.restorePlaybackProgress(for: episode, rule: rule)
-                    case .unknown:
-                        print("[AnimeDetailViewModel] ⏳ 播放器状态: unknown")
-                    @unknown default:
-                        break
-                    }
-                }
-            }
-            .store(in: &cancellables)
-
-        // 监听播放失败通知
-        NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: playerItem)
-            .sink { [weak self] notification in
-                Task { @MainActor in
-                    let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
-                    self?.videoError = "播放失败: \(error?.localizedDescription ?? "未知错误")"
-                    print("[AnimeDetailViewModel] ❌ 播放失败: \(error?.localizedDescription ?? "Unknown")")
-                }
-            }
-            .store(in: &cancellables)
-
-        // 监听播放停滞（缓冲不足导致卡住）
-        NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled, object: playerItem)
-            .sink { [weak self] _ in
-                self?.isBuffering = true
-                print("[AnimeDetailViewModel] ⏳ 播放停滞，显示缓冲指示")
-            }
-            .store(in: &cancellables)
-
-        // 监听缓冲恢复：isPlaybackLikelyToKeepUp 变为 true 时关闭缓冲提示
-        playerItem.publisher(for: \.isPlaybackLikelyToKeepUp)
-            .sink { [weak self] canKeepUp in
-                Task { @MainActor in
-                    if canKeepUp {
-                        self?.isBuffering = false
-                        print("[AnimeDetailViewModel] ✅ 缓冲充足，隐藏缓冲指示")
-                    }
-                }
-            }
-            .store(in: &cancellables)
-
-        // 开始播放（不在这里恢复进度，等待 readyToPlay）
-        self.player?.play()
-        print("[AnimeDetailViewModel] 开始播放: \(url.absoluteString)")
-
-        // 监听播放/暂停状态：播放时阻止休眠，暂停/结束时恢复
-        if let player = self.player {
-            player.publisher(for: \.rate)
-                .removeDuplicates()
-                .sink { [weak self] rate in
-                    Task { @MainActor in
-                        if rate > 0 {
-                            SleepPreventer.shared.startPreventingSleep()
-                            print("[AnimeDetailViewModel] ▶️ 播放中，阻止系统休眠")
-                        } else {
-                            SleepPreventer.shared.stopPreventingSleep()
-                            self?.isBuffering = false
-                            print("[AnimeDetailViewModel] ⏸️ 已暂停/结束，恢复系统休眠")
-                        }
-                    }
-                }
-                .store(in: &cancellables)
-        }
-
         // 加载弹幕
         loadDanmaku(for: episode)
     }
-    
-    /// 恢复播放进度（在播放器 readyToPlay 后调用）
-    private func restorePlaybackProgress(for episode: AnimeDetail.AnimeEpisodeItem, rule: AnimeRule) {
-        guard let savedProgress = PlaybackProgressCache.shared.getProgress(
-            sourceId: rule.id,
-            episodeId: episode.id
-        ), savedProgress.currentTime > 10 else { // 至少10秒才恢复
-            return
+
+    // MARK: - KSPlayer 状态回调（由 View 调用）
+
+    func handlePlayerState(_ state: KSPlayerState) {
+        switch state {
+        case .readyToPlay:
+            print("[AnimeDetailViewModel] ✅ KSPlayer 状态: readyToPlay")
+            isBuffering = false
+            SleepPreventer.shared.startPreventingSleep()
+        case .buffering:
+            print("[AnimeDetailViewModel] ⏳ KSPlayer 状态: buffering")
+            isBuffering = true
+        case .paused:
+            print("[AnimeDetailViewModel] ⏸️ KSPlayer 状态: paused")
+            isPlaying = false
+            SleepPreventer.shared.stopPreventingSleep()
+        case .error:
+            print("[AnimeDetailViewModel] ❌ KSPlayer 状态: error")
+            videoError = "视频播放失败，请尝试切换其他视频源"
+            isBuffering = false
+            isPlaying = false
+            SleepPreventer.shared.stopPreventingSleep()
+        @unknown default:
+            break
         }
+    }
+
+    func handlePlayerProgress(currentTime: TimeInterval, totalTime: TimeInterval) {
+        self.currentTime = currentTime
+        self.totalDuration = totalTime
+        let progress = totalTime > 0 ? currentTime / totalTime : 0
+        self.currentProgress = progress
         
-        // 检查视频时长是否有效
-        let duration = player?.currentItem?.duration.seconds ?? 0
-        guard duration.isFinite && duration > 0 else {
-            print("[AnimeDetailViewModel] 视频时长无效，跳过进度恢复")
-            return
-        }
+        // 更新进度缓存
+        PlaybackProgressCache.shared.updateProgress(currentTime: currentTime, duration: totalTime)
         
-        // 如果保存的进度接近结束（>90%），从头开始播放
-        guard savedProgress.currentTime < duration * 0.9 else {
-            print("[AnimeDetailViewModel] 之前已播放完成，从头开始")
-            return
-        }
-        
-        let seekTime = CMTime(seconds: savedProgress.currentTime, preferredTimescale: 600)
-        player?.seek(to: seekTime, toleranceBefore: CMTime(seconds: 1, preferredTimescale: 1), toleranceAfter: CMTime(seconds: 1, preferredTimescale: 1)) { finished in
-            if finished {
-                print("[AnimeDetailViewModel] 恢复播放进度成功: \(savedProgress.formattedProgress)")
-            } else {
-                print("[AnimeDetailViewModel] 恢复播放进度失败")
+        // 同时更新 AnimeProgressStore（每5%或每30秒保存一次）
+        if let currentEpisode = currentEpisode {
+            let shouldSave = Int(progress * 20) > Int(self.currentProgress * 20) || progress >= 0.95
+            if shouldSave {
+                AnimeProgressStore.shared.updateProgress(
+                    animeId: anime.id,
+                    animeTitle: anime.title,
+                    coverURL: anime.coverURL,
+                    episodeId: currentEpisode.id,
+                    episodeNumber: "\(currentEpisode.episodeNumber)",
+                    currentTime: currentTime,
+                    totalDuration: totalTime
+                )
             }
+        }
+    }
+
+    func handlePlayerFinish(error: Error?) {
+        isPlaying = false
+        isBuffering = false
+        SleepPreventer.shared.stopPreventingSleep()
+        if let error = error {
+            videoError = "播放失败: \(error.localizedDescription)"
+            print("[AnimeDetailViewModel] ❌ 播放完成(出错): \(error.localizedDescription)")
+        } else {
+            print("[AnimeDetailViewModel] ✅ 播放正常完成")
         }
     }
 
@@ -981,12 +913,8 @@ class AnimeDetailViewModel: ObservableObject {
             )
         }
         
-        progressObserver?.cancel()
-        progressTracker?.detach()
-        progressTracker = nil
         PlaybackProgressCache.shared.stopTracking()
-        player?.pause()
-        player = nil
+        currentPlayURL = nil
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠

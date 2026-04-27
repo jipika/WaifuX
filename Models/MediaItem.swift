@@ -289,14 +289,16 @@ struct MediaFavoriteRecord: Identifiable, Codable, Hashable {
     let id: String
     var item: MediaItem
     var metadata: SyncMetadata
+    var folderID: String?
 
-    init(item: MediaItem, metadata: SyncMetadata? = nil) {
+    init(item: MediaItem, metadata: SyncMetadata? = nil, folderID: String? = nil) {
         self.id = item.id
         self.item = item
         self.metadata = metadata ?? SyncMetadata(
             recordID: "media.favorite.\(item.id)",
             entityType: "media.favorite"
         )
+        self.folderID = folderID
     }
 
     var isActive: Bool {
@@ -304,7 +306,7 @@ struct MediaFavoriteRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, item, metadata
+        case id, item, metadata, folderID
     }
 
     init(from decoder: Decoder) throws {
@@ -313,6 +315,7 @@ struct MediaFavoriteRecord: Identifiable, Codable, Hashable {
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? item.id
         metadata = try container.decodeIfPresent(SyncMetadata.self, forKey: .metadata)
             ?? SyncMetadata(recordID: "media.favorite.\(item.id)", entityType: "media.favorite")
+        folderID = try container.decodeIfPresent(String.self, forKey: .folderID)
     }
 }
 
@@ -333,18 +336,23 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     var localFilePath: String
     var downloadedAt: Date
     var metadata: SyncMetadata
+    var folderID: String?
     /// Workshop scene 离线烘焙资格（下载入库后异步写入；`analysisId` 用于后续缓存键）
     var sceneBakeEligibility: SceneBakeEligibilitySnapshot?
     /// 已成功烘焙的循环视频路径（与下载库 `DownloadPathManager.rootFolderURL` 下同级的 `SceneBakes/...`；默认即 Application Support 下 WaifuX）；与 eligibility 的 analysisId 一致时视为命中缓存
     var sceneBakeArtifact: SceneBakeArtifact?
+    /// 是否已完成 crossfade 循环预处理（替换原始文件后标记为 true）
+    var isLooped: Bool?
 
     init(
         item: MediaItem,
         localFilePath: String,
         downloadedAt: Date = .now,
         metadata: SyncMetadata? = nil,
+        folderID: String? = nil,
         sceneBakeEligibility: SceneBakeEligibilitySnapshot? = nil,
-        sceneBakeArtifact: SceneBakeArtifact? = nil
+        sceneBakeArtifact: SceneBakeArtifact? = nil,
+        isLooped: Bool? = nil
     ) {
         self.id = item.id
         self.item = item
@@ -354,8 +362,10 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
             recordID: "media.download.\(item.id)",
             entityType: "media.download"
         )
+        self.folderID = folderID
         self.sceneBakeEligibility = sceneBakeEligibility
         self.sceneBakeArtifact = sceneBakeArtifact
+        self.isLooped = isLooped
     }
 
     var localFileURL: URL {
@@ -367,7 +377,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, item, localFilePath, downloadedAt, metadata, sceneBakeEligibility, sceneBakeArtifact
+        case id, item, localFilePath, downloadedAt, metadata, folderID, sceneBakeEligibility, sceneBakeArtifact, isLooped
     }
 
     init(from decoder: Decoder) throws {
@@ -378,10 +388,12 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         downloadedAt = try container.decodeIfPresent(Date.self, forKey: .downloadedAt) ?? .now
         metadata = try container.decodeIfPresent(SyncMetadata.self, forKey: .metadata)
             ?? SyncMetadata(recordID: "media.download.\(item.id)", entityType: "media.download")
+        folderID = try container.decodeIfPresent(String.self, forKey: .folderID)
         sceneBakeEligibility = try container.decodeIfPresent(
             SceneBakeEligibilitySnapshot.self,
             forKey: .sceneBakeEligibility
         )
         sceneBakeArtifact = try container.decodeIfPresent(SceneBakeArtifact.self, forKey: .sceneBakeArtifact)
+        isLooped = try container.decodeIfPresent(Bool.self, forKey: .isLooped)
     }
 }

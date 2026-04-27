@@ -78,7 +78,7 @@ enum SceneOfflineBakeService {
         eligibility: SceneBakeEligibilitySnapshot,
         contentRoot: URL,
         cacheItemID: String,
-        durationSeconds: Double = 8,
+        durationSeconds: Double = 15,
         fps: Int32 = 30,
         persistArtifactToItemID: String? = nil,
         requireEligibility: Bool = true
@@ -307,7 +307,7 @@ enum SceneOfflineBakeService {
     /// 与 `MediaDownloadRecord.sceneBakeEligibility` 配套；默认主屏逻辑分辨率 × scale、8s、30fps。
     static func bake(
         record: MediaDownloadRecord,
-        durationSeconds: Double = 8,
+        durationSeconds: Double = 15,
         fps: Int32 = 30
     ) async throws -> SceneBakeArtifact {
         guard let eligibility = record.sceneBakeEligibility, eligibility.isEligibleForOfflineBake else {

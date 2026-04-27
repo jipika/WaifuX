@@ -2,7 +2,13 @@ name: Update Homebrew Tap
 
 on:
   release:
-    types: [published]
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 38.0.82)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,7 +29,11 @@ jobs:
       - name: Extract Version
         id: version
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=${GITHUB_REF_NAME#v}
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download DMG and Compute SHA256

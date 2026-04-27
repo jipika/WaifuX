@@ -447,10 +447,11 @@ final class UpdateManager: ObservableObject {
             try? FileManager.default.removeItem(at: tempFile)
         }
         
-        // 配置 URLSession
+        // 配置 URLSession：提高并发连接数以充分利用多线程下载
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 600
+        config.httpMaximumConnectionsPerHost = 8
         let session = URLSession(configuration: config)
         
         var request = URLRequest(url: url)
@@ -552,8 +553,12 @@ final class UpdateManager: ObservableObject {
     
     // MARK: - 私有方法
     
+    /// 小文件阈值：小于此值的文件直接走单线程，避免分片 overhead
+    private static let parallelDownloadMinSize: Int64 = 20 * 1024 * 1024 // 20MB
+    
     /// 多线程分片并行下载，利用 HTTP Range 请求加速
-    /// GitHub/S3 CDN 通常支持 Range，4-6 个并发可显著提升下载速度
+    /// GitHub/S3 CDN 通常支持 Range，6-8 个并发可显著提升下载速度
+    /// ⚠️ 小文件（< 20MB）直接 throw 回退到单线程，避免分片 overhead 反而更慢
     private func downloadParallelWithProgress(
         session: URLSession,
         request: URLRequest,
@@ -579,9 +584,16 @@ final class UpdateManager: ObservableObject {
             throw URLError(.unsupportedURL)
         }
         
-        // 2. 分片配置：4 个并发，每个 chunk 至少 2MB
+        // ⚡ 关键优化：小文件直接回退单线程，避免分片 overhead
+        guard totalSize >= Self.parallelDownloadMinSize else {
+            print("[UpdateManager] File size \(String(format: "%.1f", Double(totalSize) / (1024 * 1024)))MB < 20MB, skipping parallel download")
+            throw URLError(.unsupportedURL)
+        }
+        
+        // 2. 分片配置：最多 6 个并发，每个 chunk 至少 2MB
+        // 提高 minChunkSize 避免小文件产生过多分片
         let minChunkSize: Int64 = 2 * 1024 * 1024
-        let preferredChunkCount = 4
+        let preferredChunkCount = 6
         let chunkCount = max(1, min(preferredChunkCount, Int(totalSize / minChunkSize)))
         let chunkSize = Int(totalSize) / chunkCount
         
@@ -591,10 +603,14 @@ final class UpdateManager: ObservableObject {
         
         let progress = DownloadProgressTracker(total: totalSize, handler: progressHandler)
         
-        // 3. 并发下载每个 chunk 到独立临时文件
+        // 3. 并发下载每个 chunk
+        // ⚡ 优化：小 chunk（< 10MB）直接下载到内存，避免临时文件 I/O
+        let memoryChunkThreshold: Int64 = 10 * 1024 * 1024
+        
         struct ChunkInfo {
             let index: Int
-            let file: URL
+            let data: Data?       // 内存中的数据（小 chunk）
+            let file: URL?        // 临时文件（大 chunk）
             let startOffset: Int64
         }
         
@@ -602,6 +618,8 @@ final class UpdateManager: ObservableObject {
             for i in 0..<chunkCount {
                 let start = Int64(i * chunkSize)
                 let end = (i == chunkCount - 1) ? (totalSize - 1) : (Int64((i + 1) * chunkSize - 1))
+                let chunkByteSize = end - start + 1
+                let useMemory = chunkByteSize < memoryChunkThreshold
                 
                 group.addTask {
                     var chunkRequest = request
@@ -614,27 +632,76 @@ final class UpdateManager: ObservableObject {
                         throw URLError(.badServerResponse)
                     }
                     
-                    // 写入独立临时文件
-                    let chunkFile = tempDir.appendingPathComponent("WaifuX_chunk_\(i)_\(UUID().uuidString).tmp")
-                    FileManager.default.createFile(atPath: chunkFile.path, contents: nil)
-                    let chunkHandle = try FileHandle(forWritingTo: chunkFile)
-                    defer { try? chunkHandle.close() }
-                    
-                    var buffer = Data(capacity: 256 * 1024)
-                    for try await byte in asyncBytes {
-                        buffer.append(byte)
-                        if buffer.count >= 256 * 1024 {
-                            chunkHandle.write(buffer)
-                            await progress.add(Int64(buffer.count))
-                            buffer.removeAll(keepingCapacity: true)
+                    if useMemory {
+                        // ⚡ 小 chunk 直接下载到内存，避免临时文件 I/O
+                        var chunkData = Data()
+                        chunkData.reserveCapacity(Int(chunkByteSize))
+                        
+                        let readBufferSize = 512 * 1024
+                        var buffer = Data(capacity: readBufferSize)
+                        var pendingProgress: Int64 = 0
+                        let progressBatchSize: Int64 = 1024 * 1024
+                        
+                        for try await byte in asyncBytes {
+                            buffer.append(byte)
+                            if buffer.count >= readBufferSize {
+                                chunkData.append(buffer)
+                                pendingProgress += Int64(buffer.count)
+                                buffer.removeAll(keepingCapacity: true)
+                                
+                                if pendingProgress >= progressBatchSize {
+                                    await progress.add(pendingProgress)
+                                    pendingProgress = 0
+                                }
+                            }
                         }
+                        
+                        if !buffer.isEmpty {
+                            chunkData.append(buffer)
+                            pendingProgress += Int64(buffer.count)
+                        }
+                        if pendingProgress > 0 {
+                            await progress.add(pendingProgress)
+                        }
+                        
+                        return ChunkInfo(index: i, data: chunkData, file: nil, startOffset: start)
+                    } else {
+                        // 大 chunk 使用临时文件，避免内存占用过高
+                        let chunkFile = tempDir.appendingPathComponent("WaifuX_chunk_\(i)_\(UUID().uuidString).tmp")
+                        FileManager.default.createFile(atPath: chunkFile.path, contents: nil)
+                        let chunkHandle = try FileHandle(forWritingTo: chunkFile)
+                        defer { try? chunkHandle.close() }
+                        
+                        let writeBufferSize = 1024 * 1024
+                        let progressBatchSize: Int64 = 1024 * 1024
+                        
+                        var buffer = Data(capacity: writeBufferSize)
+                        var pendingProgress: Int64 = 0
+                        
+                        for try await byte in asyncBytes {
+                            buffer.append(byte)
+                            if buffer.count >= writeBufferSize {
+                                chunkHandle.write(buffer)
+                                pendingProgress += Int64(buffer.count)
+                                buffer.removeAll(keepingCapacity: true)
+                                
+                                if pendingProgress >= progressBatchSize {
+                                    await progress.add(pendingProgress)
+                                    pendingProgress = 0
+                                }
+                            }
+                        }
+                        
+                        if !buffer.isEmpty {
+                            chunkHandle.write(buffer)
+                            pendingProgress += Int64(buffer.count)
+                        }
+                        if pendingProgress > 0 {
+                            await progress.add(pendingProgress)
+                        }
+                        
+                        return ChunkInfo(index: i, data: nil, file: chunkFile, startOffset: start)
                     }
-                    if !buffer.isEmpty {
-                        chunkHandle.write(buffer)
-                        await progress.add(Int64(buffer.count))
-                    }
-                    
-                    return ChunkInfo(index: i, file: chunkFile, startOffset: start)
                 }
             }
             
@@ -650,20 +717,25 @@ final class UpdateManager: ObservableObject {
         defer { try? finalHandle.close() }
         
         for chunk in chunks.sorted(by: { $0.index < $1.index }) {
-            let readHandle = try FileHandle(forReadingFrom: chunk.file)
-            defer { try? readHandle.close() }
-            
             finalHandle.seek(toFileOffset: UInt64(chunk.startOffset))
             
-            // 流式读取 chunk 文件并写入最终文件，避免一次性读入内存
-            while true {
-                let data = readHandle.readData(ofLength: 256 * 1024)
-                if data.isEmpty { break }
+            if let data = chunk.data {
+                // 内存中的数据直接写入
                 finalHandle.write(data)
+            } else if let file = chunk.file {
+                // 临时文件流式读取写入
+                let readHandle = try FileHandle(forReadingFrom: file)
+                defer { try? readHandle.close() }
+                
+                while true {
+                    let data = readHandle.readData(ofLength: 512 * 1024)
+                    if data.isEmpty { break }
+                    finalHandle.write(data)
+                }
+                
+                // 清理 chunk 临时文件
+                try? FileManager.default.removeItem(at: file)
             }
-            
-            // 清理 chunk 临时文件
-            try? FileManager.default.removeItem(at: chunk.file)
         }
         
         progressHandler(1.0)
@@ -717,15 +789,15 @@ final class UpdateManager: ObservableObject {
         
         var receivedBytes: Int64 = 0
         var lastReportedProgress: Double = 0
-        let bufferSize = 64 * 1024 // 64KB 缓冲区
         
+        // 流式下载：增大缓冲区到 512KB，减少写入频率
+        let bufferSize = 512 * 1024
         var buffer = Data(capacity: bufferSize)
         
         for try await byte in asyncBytes {
             buffer.append(byte)
             receivedBytes += 1
             
-            // 缓冲区满了才写入磁盘
             if buffer.count >= bufferSize {
                 fileHandle.write(buffer)
                 buffer.removeAll(keepingCapacity: true)
@@ -733,7 +805,7 @@ final class UpdateManager: ObservableObject {
             
             // 每 1% 更新一次进度，减少 UI 更新频率
             let currentProgress = Double(receivedBytes) / Double(expectedLength)
-            if currentProgress - lastReportedProgress >= 0.01 || receivedBytes == expectedLength {
+            if currentProgress - lastReportedProgress >= 0.01 || receivedBytes >= expectedLength {
                 lastReportedProgress = currentProgress
                 progressHandler(min(currentProgress, 1.0))
             }

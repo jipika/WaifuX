@@ -6,6 +6,7 @@ import Kingfisher
 struct WallpaperDetailSheet: View {
     let initialWallpaper: Wallpaper
     @ObservedObject var viewModel: WallpaperViewModel
+    let contextWallpapers: [Wallpaper]?
     let onClose: () -> Void
 
     @State private var resolvedWallpaper: Wallpaper
@@ -18,6 +19,17 @@ struct WallpaperDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
+    @State private var showDeleteConfirm = false
+
+    // MARK: - 键盘快捷键与滑动动画
+    @State private var keyboardMonitor: Any?
+    @State private var slideIncomingOffset: CGFloat = 0
+    @State private var slideOutgoingOffset: CGFloat = 0
+    @State private var isNavigating = false
+
+    private enum SlideDirection {
+        case up, down
+    }
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -61,10 +73,18 @@ struct WallpaperDetailSheet: View {
                 // 固定背景：宽 100% 高度按比例 + 不足处模糊渐变，不随 ScrollView 滚动
                 if isVisible {
                     fixedWallpaperBackground(width: viewW, height: viewH)
+                        .id("wallpaper-bg-\(wallpaper.id)")
+                        .transition(
+                            AnyTransition.asymmetric(
+                                insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
+                                removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
+                            )
+                            .animation(.easeInOut(duration: 0.3))
+                        )
                 }
                 
                 // 图片加载动画
-                if !isImageLoaded {
+                if !isImageLoaded && !isNavigating {
                     LoadingOverlayView()
                         .frame(width: viewW, height: viewH)
                         .transition(.opacity.animation(.easeInOut(duration: 0.3)))
@@ -183,6 +203,15 @@ struct WallpaperDetailSheet: View {
         } message: {
             Text(errorMessage)
         }
+        .alert(t("delete"), isPresented: $showDeleteConfirm) {
+            Button(t("delete"), role: .destructive) {
+                viewModel.removeWallpaperDownloads(withIDs: [wallpaper.id])
+                onClose()
+            }
+            Button(t("cancel"), role: .cancel) {}
+        } message: {
+            Text(t("deleteConfirmMessage"))
+        }
         .navigationBarBackButtonHidden(true)
         .onAppear {
             AppLogger.info(.wallpaper, "详情页 onAppear",
@@ -192,24 +221,35 @@ struct WallpaperDetailSheet: View {
                 isVisible = true
             }
             setupNextItemDataSource()
+            setupKeyboardMonitor()
         }
         .onChange(of: viewModel.wallpapers) { _, newWallpapers in
+            // 本地上下文模式下不跟随线上列表变化
+            guard contextWallpapers == nil else { return }
             // 当列表数据更新时，同步更新数据源
             nextItemDataSource.setItems(newWallpapers, currentIndex: currentWallpaperIndex)
             // 检查是否需要预加载
             triggerPreloadIfNeeded()
         }
         .onDisappear {
+            isVisible = false
             // 清理预加载任务
             preloadTask?.cancel()
+            removeKeyboardMonitor()
         }
     }
 
-    init(wallpaper: Wallpaper, viewModel: WallpaperViewModel, onClose: @escaping () -> Void) {
+    init(wallpaper: Wallpaper, viewModel: WallpaperViewModel, contextWallpapers: [Wallpaper]? = nil, onClose: @escaping () -> Void) {
         self.initialWallpaper = wallpaper
         self.viewModel = viewModel
+        self.contextWallpapers = contextWallpapers
         self.onClose = onClose
         _resolvedWallpaper = State(initialValue: wallpaper)
+    }
+
+    /// 当前导航使用的壁纸列表（本地上下文优先，否则使用线上列表）
+    private var navigationItems: [Wallpaper] {
+        contextWallpapers ?? viewModel.wallpapers
     }
 
     /// 主壁纸 URL（原图优先）
@@ -394,6 +434,21 @@ struct WallpaperDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        showDeleteConfirm = true
+                    } label: {
+                        DetailSheetCircleIconLabel(
+                            systemName: "trash",
+                            foreground: Color(hex: "FF5A7D"),
+                            fontSize: 16,
+                            frameSide: 40
+                        )
+                        .detailGlassCircleChrome(tint: Color(hex: "FF5A7D").opacity(0.25))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
             if showInfoBubble {
@@ -1053,23 +1108,27 @@ struct WallpaperDetailSheet: View {
     // MARK: - 下一张弹窗相关方法
 
     private func setupNextItemDataSource() {
+        let items = navigationItems
         // 找到当前壁纸在列表中的索引
-        if let index = viewModel.wallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
+        if let index = items.firstIndex(where: { $0.id == wallpaper.id }) {
             currentWallpaperIndex = index
         }
 
         // 设置数据源
-        nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
-        
-        // 初始预加载检查
-        triggerPreloadIfNeeded()
+        nextItemDataSource.setItems(items, currentIndex: currentWallpaperIndex)
+
+        // 初始预加载检查（仅线上模式）
+        if contextWallpapers == nil {
+            triggerPreloadIfNeeded()
+        }
     }
 
-    /// 当浏览到倒数第3张时触发预加载
+    /// 当浏览到倒数第3张时触发预加载（仅线上模式）
     private func triggerPreloadIfNeeded() {
+        guard contextWallpapers == nil else { return }
         let threshold = 3 // 倒数第3张时开始预加载
         let remainingItems = viewModel.wallpapers.count - (currentWallpaperIndex + 1)
-        
+
         // 如果剩余项目少于阈值，且有更多页面，则触发预加载
         if remainingItems < threshold && viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
             preloadTask?.cancel()
@@ -1085,60 +1144,74 @@ struct WallpaperDetailSheet: View {
     }
 
     private func navigateToNextWallpaper() {
+        guard !isNavigating else { return }
+        let items = navigationItems
         let nextIndex = currentWallpaperIndex + 1
-        
+
         // 情况1：下一张已经在当前列表中
-        if nextIndex < viewModel.wallpapers.count {
+        if nextIndex < items.count {
+            prepareSlideTransition(direction: .down)
             navigateToIndex(nextIndex)
-            // 导航后检查是否需要预加载
-            triggerPreloadIfNeeded()
+            // 导航后检查是否需要预加载（仅线上模式）
+            if contextWallpapers == nil {
+                triggerPreloadIfNeeded()
+            }
             return
         }
-        
-        // 情况2：到达列表末尾，但有更多页面可加载
-        if viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
+
+        // 情况2：到达列表末尾，但有更多页面可加载（仅线上模式）
+        if contextWallpapers == nil, viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
             Task {
                 isLoadingMore = true
                 defer { isLoadingMore = false }
-                
+
                 print("[WallpaperDetailSheet] 加载更多壁纸...")
                 await viewModel.loadMore()
-                
+
                 // 加载完成后，尝试导航到下一张
                 if nextIndex < viewModel.wallpapers.count {
-                    navigateToIndex(nextIndex)
+                    await MainActor.run {
+                        self.prepareSlideTransition(direction: .down)
+                        self.navigateToIndex(nextIndex)
+                    }
                 }
             }
             return
         }
-        
+
         // 情况3：没有更多数据了，循环到第一张
-        if !viewModel.wallpapers.isEmpty && nextIndex >= viewModel.wallpapers.count {
+        if !items.isEmpty && nextIndex >= items.count {
+            prepareSlideTransition(direction: .down)
             navigateToIndex(0)
         }
     }
 
     private func navigateToPreviousWallpaper() {
+        guard !isNavigating else { return }
+        let items = navigationItems
         let prevIndex = currentWallpaperIndex - 1
-        
+
         // 情况1：上一张在列表中
         if prevIndex >= 0 {
+            prepareSlideTransition(direction: .up)
             navigateToIndex(prevIndex)
             return
         }
-        
+
         // 情况2：已经是第一张，循环到最后一张
-        if !viewModel.wallpapers.isEmpty {
-            navigateToIndex(viewModel.wallpapers.count - 1)
+        if !items.isEmpty {
+            prepareSlideTransition(direction: .up)
+            navigateToIndex(items.count - 1)
         }
     }
 
     private func navigateToIndex(_ index: Int) {
-        guard index >= 0, index < viewModel.wallpapers.count else { return }
-        
+        let items = navigationItems
+        guard index >= 0, index < items.count else { return }
+
         currentWallpaperIndex = index
         nextItemDataSource.moveToIndex(index)
-        reloadWallpaper(viewModel.wallpapers[index])
+        reloadWallpaper(items[index])
     }
 
     private func reloadWallpaper(_ newWallpaper: Wallpaper) {
@@ -1150,6 +1223,65 @@ struct WallpaperDetailSheet: View {
             // 重置状态来触发重新加载
             isImageLoaded = false
             showInfoBubble = false
+        }
+    }
+
+    // MARK: - 键盘快捷键
+
+    private func setupKeyboardMonitor() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            guard NSApp.isActive, let window = event.window, window.isKeyWindow else { return event }
+            guard self.isVisible else { return event }
+            switch event.keyCode {
+            case 49: // 空格键：显示/隐藏信息区域
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
+                    self.isHeroContentHidden.toggle()
+                }
+                return nil
+            case 126: // 上方向键：上一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToPreviousWallpaper()
+                return nil
+            case 125: // 下方向键：下一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToNextWallpaper()
+                return nil
+            case 53: // ESC：返回
+                self.onClose()
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+    }
+
+    // MARK: - 滑动动画
+
+    private func prepareSlideTransition(direction: SlideDirection) {
+        isNavigating = true
+        let distance: CGFloat = 600
+        switch direction {
+        case .up:
+            // 上一张：新图从上方滑入，当前图向下滑出
+            slideIncomingOffset = -distance
+            slideOutgoingOffset = distance
+        case .down:
+            // 下一张：新图从下方滑入，当前图向上滑出
+            slideIncomingOffset = distance
+            slideOutgoingOffset = -distance
+        }
+        // 动画结束后重置，避免影响后续普通切换
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.isNavigating = false
+            self.slideIncomingOffset = 0
+            self.slideOutgoingOffset = 0
         }
     }
 }

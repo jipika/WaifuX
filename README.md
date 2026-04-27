@@ -74,7 +74,7 @@
 | ⚡️ **一键设为桌面** | ✅ | 浏览中即可快速设置为桌面壁纸或动态桌面 |
 | 🖥️ **多显示器支持** | ✅ | 支持为每个显示器分别设置不同壁纸，多屏用户福音 |
 | 📥 **本地数据导入** | ✅ | 支持导入本地壁纸文件夹，统一管理个人壁纸收藏 |
-| 🧊 **Wallpaper Engine 渲染 (Beta)** | ✅ | 实验性兼容 Wallpaper Engine 动态壁纸：**场景（Scene）** 与 **Web**（HTML/JS）类型均由内置渲染管线呈现；**不是**「任意网站一键当壁纸」 |
+| 🧊 **Wallpaper Engine 渲染 (Beta)** | ✅ | 实验性兼容 Wallpaper Engine 动态壁纸：**场景（Scene）** 与 **Web**（HTML/JS）类型均由内置渲染管线呈现；**不是**「任意网站一键当壁纸」<br>⚠️ **仅支持 Apple Silicon（arm64），Intel 芯片暂不支持** |
 | 🔄 **规则自动更新** | ✅ | 通过 GitHub 远程加载规则配置，源站改版可快速适配 |
 | 📱 **跨设备同步** | 🚧 | 收藏夹云端同步（开发中）|
 
@@ -89,6 +89,13 @@
 ### 方式二：GitHub Releases
 
 👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
+
+### 方式三：Homebrew
+
+```bash
+brew tap jipika/waifux
+brew install --cask waifux
+```
 
 > ⚠️ 首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行。
 

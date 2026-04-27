@@ -2056,7 +2056,7 @@ private func sceneBakeParseConfig(_ arguments: [String]) throws -> SceneOfflineB
         w = max(32, Int(arguments[2]) ?? 1920)
         h = max(32, Int(arguments[3]) ?? 1080)
         fps = Int32(max(1, min(60, Int(arguments[4]) ?? 30)))
-        seconds = max(0.5, Double(arguments[5]) ?? 8.0)
+        seconds = max(0.5, Double(arguments[5]) ?? 15.0)
     }
     w = (w / 2) * 2
     h = (h / 2) * 2

@@ -212,6 +212,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 DownloadPathManager.shared.migrateLegacyCustomFolderPreferenceIfNeeded()
                 WallpaperLibraryService.shared.restoreSavedData()
+                LibraryFolderStore.shared.restoreSavedData()
                 
                 // 第3帧：媒体库
                 DispatchQueue.main.async {
@@ -246,11 +247,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                // 尽早与启动源选择一致：开 VPN 时关闭 GitHub Hosts，避免检查更新/下载仍走固定 IP 绕开隧道
-                                if WallpaperSourceManager.shared.shouldDisableGitHubHostsPinning() {
-                                    GitHubHosts.isEnabled = false
-                                }
-                                Task { await GitHubHosts.refreshHosts() }
                                 UpdateChecker.shared.restoreCachedState()
                                 
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

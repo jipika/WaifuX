@@ -626,14 +626,9 @@ private struct SchedulerSettingsTab: View {
                                         }
                                     }
                                 } label: {
-                                    HStack(spacing: 4) {
-                                        Text(intervalLabel(for: displayConfig.intervalMinutes))
-                                            .font(.system(size: 12, weight: .regular))
-                                            .foregroundStyle(Color.white.opacity(0.6))
-                                        Image(systemName: "chevron.down")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundStyle(Color.white.opacity(0.35))
-                                    }
+                                    Text(intervalLabel(for: displayConfig.intervalMinutes))
+                                        .font(.system(size: 12, weight: .regular))
+                                        .foregroundStyle(Color.white.opacity(0.6))
                                 }
                                 .menuStyle(.borderlessButton)
                             }
@@ -665,24 +660,35 @@ private struct SchedulerSettingsTab: View {
                             
                             dividerLine
                             
-                            // 来源选择
+                            // 内容类型选择
                             HStack(spacing: 12) {
-                                Text(t("wallpaperSource"))
+                                Text(t("contentTypes"))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(Color.white.opacity(0.9))
                                 
                                 Spacer()
                                 
-                                Picker("", selection: Binding(
-                                    get: { displayConfig.source },
-                                    set: { viewModel.schedulerViewModel.updateDisplaySource($0, for: screenID) }
-                                )) {
-                                    Text(t("online")).tag(WallpaperSource.online)
-                                    Text(t("local")).tag(WallpaperSource.local)
-                                    Text(t("favorites")).tag(WallpaperSource.favorites)
+                                HStack(spacing: 16) {
+                                    Toggle(isOn: Binding(
+                                        get: { displayConfig.includeWallpapers },
+                                        set: { viewModel.schedulerViewModel.updateDisplayIncludeWallpapers($0, for: screenID) }
+                                    )) {
+                                        Text(t("wallpapers"))
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Color.white.opacity(0.8))
+                                    }
+                                    .toggleStyle(.checkbox)
+                                    
+                                    Toggle(isOn: Binding(
+                                        get: { displayConfig.includeMedia },
+                                        set: { viewModel.schedulerViewModel.updateDisplayIncludeMedia($0, for: screenID) }
+                                    )) {
+                                        Text(t("media"))
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Color.white.opacity(0.8))
+                                    }
+                                    .toggleStyle(.checkbox)
                                 }
-                                .pickerStyle(.segmented)
-                                .frame(width: 170, alignment: .trailing)
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 12)
@@ -705,6 +711,7 @@ private struct SchedulerSettingsTab: View {
 
     private func intervalLabel(for minutes: Int) -> String {
         switch minutes {
+        case 1: return "1 \(t("minutes"))"
         case 5: return "5 \(t("minutes"))"
         case 15: return "15 \(t("minutes"))"
         case 30: return "30 \(t("minutes"))"

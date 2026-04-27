@@ -30,9 +30,26 @@ final class MediaLibraryService: ObservableObject {
             .filter(\.isActive)
             .map(\.item)
     }
+    
+    /// 获取指定文件夹内的收藏项目
+    func favoriteItems(inFolder folderID: String?) -> [MediaItem] {
+        favoriteRecords
+            .filter { $0.isActive && $0.folderID == folderID }
+            .map(\.item)
+    }
+    
+    /// 获取指定文件夹内的下载项目
+    func downloadedItems(inFolder folderID: String?) -> [MediaDownloadRecord] {
+        downloadRecords.filter { $0.isActive && $0.folderID == folderID }
+    }
 
     var downloadedItems: [MediaDownloadRecord] {
         downloadRecords.filter(\.isActive)
+    }
+    
+    /// 根目录下载项目（无 folderID）
+    var rootDownloadedItems: [MediaDownloadRecord] {
+        downloadRecords.filter { $0.isActive && $0.folderID == nil }
     }
 
     var pendingSyncFavorites: [MediaFavoriteRecord] {
@@ -57,6 +74,24 @@ final class MediaLibraryService: ObservableObject {
 
     func isFavorite(_ item: MediaItem) -> Bool {
         favoriteRecords.contains { $0.item.id == item.id && $0.isActive }
+    }
+    
+    func favoriteRecord(for itemID: String) -> MediaFavoriteRecord? {
+        favoriteRecords.first { $0.item.id == itemID && $0.isActive }
+    }
+    
+    func downloadRecord(for itemID: String) -> MediaDownloadRecord? {
+        downloadRecords.first { $0.item.id == itemID && $0.isActive }
+    }
+
+    func downloadRecord(forLocalFilePath path: String) -> MediaDownloadRecord? {
+        downloadRecords.first { $0.localFilePath == path && $0.isActive }
+    }
+
+    func markAsLooped(localFilePath path: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
+        downloadRecords[index].isLooped = true
+        persistDownloads()
     }
 
     func isDownloaded(_ item: MediaItem) -> Bool {
@@ -284,6 +319,17 @@ final class MediaLibraryService: ObservableObject {
     private func deletePhysicalFile(at path: String) {
         guard !path.isEmpty else { return }
         let fm = FileManager.default
+        // 如果是 SteamCMD Workshop 下载的内容，删除整个 workshop_xxx 文件夹
+        if let workshopRoot = workshopRootDirectory(for: path),
+           fm.fileExists(atPath: workshopRoot) {
+            do {
+                try fm.removeItem(atPath: workshopRoot)
+                print("[MediaLibraryService] ✅ Deleted workshop folder: \(workshopRoot)")
+            } catch {
+                print("[MediaLibraryService] ⚠️ Failed to delete workshop folder \(workshopRoot): \(error)")
+            }
+            return
+        }
         if fm.fileExists(atPath: path) {
             do {
                 try fm.removeItem(atPath: path)
@@ -294,11 +340,63 @@ final class MediaLibraryService: ObservableObject {
         }
     }
 
+    /// 检测并返回 SteamCMD Workshop 下载的根文件夹路径
+    private func workshopRootDirectory(for path: String) -> String? {
+        let components = path.components(separatedBy: "/")
+        if let steamappsIndex = components.firstIndex(of: "steamapps"),
+           steamappsIndex > 0 {
+            let workshopRoot = components[0..<steamappsIndex].joined(separator: "/")
+            let folderName = components[steamappsIndex - 1]
+            if folderName.hasPrefix("workshop_") {
+                return workshopRoot
+            }
+        }
+        return nil
+    }
+
     /// 批量删除最近播放记录
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeRecentItems(withIDs ids: Set<String>) {
         recentItems.removeAll { ids.contains($0.id) }
         persistRecents()
+    }
+    
+    // MARK: - 文件夹移动
+    
+    func moveMediaToFolder(mediaID: String, folderID: String?) {
+        // 更新收藏记录
+        if let index = favoriteRecords.firstIndex(where: { $0.item.id == mediaID }) {
+            favoriteRecords[index].folderID = folderID
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        // 更新下载记录
+        if let index = downloadRecords.firstIndex(where: { $0.item.id == mediaID }) {
+            downloadRecords[index].folderID = folderID
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
+    }
+    
+    func moveItemsToRoot(fromFolder folderID: String) {
+        var favoritesChanged = false
+        for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
+            favoriteRecords[index].folderID = nil
+            favoritesChanged = true
+        }
+        var downloadsChanged = false
+        for index in downloadRecords.indices where downloadRecords[index].folderID == folderID {
+            downloadRecords[index].folderID = nil
+            downloadsChanged = true
+        }
+        if favoritesChanged {
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        if downloadsChanged {
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
     }
 
     /// 清理无效下载记录（文件不存在的记录）
@@ -415,6 +513,18 @@ final class WallpaperLibraryService: ObservableObject {
             .filter(\.isActive)
             .map(\.wallpaper)
     }
+    
+    /// 获取指定文件夹内的收藏壁纸
+    func favoriteWallpapers(inFolder folderID: String?) -> [Wallpaper] {
+        favoriteRecords
+            .filter { $0.isActive && $0.folderID == folderID }
+            .map(\.wallpaper)
+    }
+    
+    /// 获取指定文件夹内的下载壁纸
+    func downloadedWallpapers(inFolder folderID: String?) -> [WallpaperDownloadRecord] {
+        downloadRecords.filter { $0.isActive && $0.folderID == folderID }
+    }
 
     var downloadedWallpapers: [WallpaperDownloadRecord] {
         downloadRecords.filter(\.isActive)
@@ -442,6 +552,24 @@ final class WallpaperLibraryService: ObservableObject {
 
     func isFavorite(_ wallpaper: Wallpaper) -> Bool {
         favoriteRecords.contains { $0.wallpaper.id == wallpaper.id && $0.isActive }
+    }
+    
+    func favoriteRecord(for wallpaperID: String) -> WallpaperFavoriteRecord? {
+        favoriteRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
+    }
+    
+    func downloadRecord(for wallpaperID: String) -> WallpaperDownloadRecord? {
+        downloadRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
+    }
+
+    func downloadRecord(forLocalFilePath path: String) -> WallpaperDownloadRecord? {
+        downloadRecords.first { $0.localFilePath == path && $0.isActive }
+    }
+
+    func markAsLooped(localFilePath path: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
+        downloadRecords[index].isLooped = true
+        persistDownloads()
     }
 
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
@@ -659,6 +787,17 @@ final class WallpaperLibraryService: ObservableObject {
     private func wallpaperDeletePhysicalFile(at path: String) {
         guard !path.isEmpty else { return }
         let fm = FileManager.default
+        // 如果是 SteamCMD Workshop 下载的内容，删除整个 workshop_xxx 文件夹
+        if let workshopRoot = wallpaperWorkshopRootDirectory(for: path),
+           fm.fileExists(atPath: workshopRoot) {
+            do {
+                try fm.removeItem(atPath: workshopRoot)
+                print("[WallpaperLibraryService] ✅ Deleted workshop folder: \(workshopRoot)")
+            } catch {
+                print("[WallpaperLibraryService] ⚠️ Failed to delete workshop folder \(workshopRoot): \(error)")
+            }
+            return
+        }
         if fm.fileExists(atPath: path) {
             do {
                 try fm.removeItem(atPath: path)
@@ -667,6 +806,20 @@ final class WallpaperLibraryService: ObservableObject {
                 print("[WallpaperLibraryService] ⚠️ Failed to delete file \(path): \(error)")
             }
         }
+    }
+
+    /// 检测并返回 SteamCMD Workshop 下载的根文件夹路径
+    private func wallpaperWorkshopRootDirectory(for path: String) -> String? {
+        let components = path.components(separatedBy: "/")
+        if let steamappsIndex = components.firstIndex(of: "steamapps"),
+           steamappsIndex > 0 {
+            let workshopRoot = components[0..<steamappsIndex].joined(separator: "/")
+            let folderName = components[steamappsIndex - 1]
+            if folderName.hasPrefix("workshop_") {
+                return workshopRoot
+            }
+        }
+        return nil
     }
 
     /// 清理无效下载记录（文件不存在的记录）
@@ -691,6 +844,44 @@ final class WallpaperLibraryService: ObservableObject {
         }
         
         return cleanedCount
+    }
+    
+    // MARK: - 文件夹移动
+    
+    func moveWallpaperToFolder(wallpaperID: String, folderID: String?) {
+        // 更新收藏记录
+        if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
+            favoriteRecords[index].folderID = folderID
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        // 更新下载记录
+        if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
+            downloadRecords[index].folderID = folderID
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
+    }
+    
+    func moveItemsToRoot(fromFolder folderID: String) {
+        var favoritesChanged = false
+        for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
+            favoriteRecords[index].folderID = nil
+            favoritesChanged = true
+        }
+        var downloadsChanged = false
+        for index in downloadRecords.indices where downloadRecords[index].folderID == folderID {
+            downloadRecords[index].folderID = nil
+            downloadsChanged = true
+        }
+        if favoritesChanged {
+            persistFavorites()
+            favoriteRecords = favoriteRecords
+        }
+        if downloadsChanged {
+            persistDownloads()
+            downloadRecords = downloadRecords
+        }
     }
 
     private func loadPersistedState() {

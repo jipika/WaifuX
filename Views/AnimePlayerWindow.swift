@@ -1,18 +1,25 @@
 import SwiftUI
-import AVKit
+import KSPlayer
 import QuartzCore
 import Kingfisher
 
 // MARK: - 通知名称
 extension Notification.Name {
     static let togglePlayerFullScreen = Notification.Name("togglePlayerFullScreen")
+    static let playerDidEnterFullScreen = Notification.Name("playerDidEnterFullScreen")
+    static let playerDidExitFullScreen = Notification.Name("playerDidExitFullScreen")
+    static let playerShowControlBar = Notification.Name("playerShowControlBar")
+    static let playerHideControlBar = Notification.Name("playerHideControlBar")
 }
 
 // MARK: - AnimePlayerWindow - 现代视频播放器风格
 struct AnimePlayerWindow: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
+    let coordinator: KSVideoPlayer.Coordinator
     @State private var selectedTab: Tab = .sources
     @State private var isHovering = false
+    @State private var isRightPanelCollapsed = false
+    @State private var isPlayerFullscreen = false
 
     enum Tab: String, CaseIterable {
         case sources = "选集"
@@ -35,13 +42,29 @@ struct AnimePlayerWindow: View {
                 AnimeCoverBackground(viewModel: viewModel)
                 
                 HStack(alignment: .top, spacing: 0) {
-                    // 左侧播放器区域 (70%)
-                    PlayerSection(viewModel: viewModel)
-                        .frame(width: geometry.size.width * 0.7, height: geometry.size.height)
+                    // 左侧播放器区域 (动态宽度)
+                    PlayerSection(
+                        viewModel: viewModel,
+                        isRightPanelCollapsed: $isRightPanelCollapsed,
+                        isPlayerFullscreen: $isPlayerFullscreen,
+                        coordinator: coordinator
+                    )
+                        .frame(
+                            width: isPlayerFullscreen || isRightPanelCollapsed ? geometry.size.width : geometry.size.width * 0.7,
+                            height: geometry.size.height
+                        )
+                        .zIndex(1)
                     
-                    // 右侧面板 (30%)
-                    RightPanel(viewModel: viewModel, selectedTab: $selectedTab)
-                        .frame(width: geometry.size.width * 0.3, height: geometry.size.height)
+                    // 右侧面板 (动态宽度)
+                    if !isPlayerFullscreen {
+                        RightPanel(viewModel: viewModel, selectedTab: $selectedTab)
+                            .frame(
+                                width: isRightPanelCollapsed ? 0 : geometry.size.width * 0.3,
+                                height: geometry.size.height
+                            )
+                            .opacity(isRightPanelCollapsed ? 0 : 1)
+                            .clipped()
+                    }
                 }
                 .clipped()
             }
@@ -53,6 +76,12 @@ struct AnimePlayerWindow: View {
             }
         }
         .ignoresSafeArea()
+        .onReceive(NotificationCenter.default.publisher(for: .playerDidEnterFullScreen)) { _ in
+            isPlayerFullscreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerDidExitFullScreen)) { _ in
+            isPlayerFullscreen = false
+        }
         // 验证码 WebView Sheet
         .sheet(item: $viewModel.captchaVerificationSession) { session in
             LiquidGlassCaptchaSheet(
@@ -108,6 +137,16 @@ private struct AnimeCoverBackground: View {
 // MARK: - 播放器区域（现代化设计）
 private struct PlayerSection: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
+    @Binding var isRightPanelCollapsed: Bool
+    @Binding var isPlayerFullscreen: Bool
+    @StateObject var coordinator: KSVideoPlayer.Coordinator
+    @State private var isControlBarVisible = true
+    @State private var hideControlBarWorkItem: DispatchWorkItem?
+    
+    /// 是否需要自动隐藏控制栏：全屏 或 侧边栏收起时，播放器占满窗口，控件会挡视频
+    private var shouldAutoHideControlBar: Bool {
+        isPlayerFullscreen || isRightPanelCollapsed
+    }
 
     var body: some View {
         ZStack {
@@ -115,15 +154,49 @@ private struct PlayerSection: View {
             Group {
                 if viewModel.isLoadingVideo {
                     LoadingScreen()
-                } else if let player = viewModel.player {
-                    PlayerContainerView(player: player)
+                } else if let url = viewModel.currentPlayURL {
+                    KSVideoPlayer(coordinator: coordinator, url: url, options: viewModel.ksOptions)
+                        .onStateChanged { playerLayer, state in
+                            // 避免在 SwiftUI 视图更新过程中发布状态变更
+                            DispatchQueue.main.async {
+                                viewModel.handlePlayerState(state)
+                                // 播放时阻止系统休眠
+                                if state == .readyToPlay {
+                                    SleepPreventer.shared.startPreventingSleep()
+                                }
+                            }
+                        }
+                        .onBufferChanged { bufferedCount, consumeTime in
+                            DispatchQueue.main.async {
+                                print("[AnimePlayerWindow] 缓冲 #\(bufferedCount), 耗时 \(consumeTime)s")
+                            }
+                        }
+                        .onFinish { playerLayer, error in
+                            DispatchQueue.main.async {
+                                viewModel.handlePlayerFinish(error: error)
+                            }
+                        }
+                        .overlay(alignment: .bottom) {
+                            // 播放控制栏直接覆盖在播放器上，确保在 AppKit 视图之上渲染
+                            PlayerControlOverlay(
+                                coordinator: coordinator,
+                                isPlayerFullscreen: isPlayerFullscreen,
+                                isControlBarVisible: isControlBarVisible
+                            )
+                        }
+                        .overlay(alignment: .trailing) {
+                            // 右侧面板折叠/展开按钮（仅占据右侧边缘，不拦截播放器鼠标事件）
+                            if !isPlayerFullscreen {
+                                PanelToggleButton(isCollapsed: $isRightPanelCollapsed)
+                            }
+                        }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     StandbyScreen(viewModel: viewModel)
                 }
             }
 
-            // 缓冲中覆盖层
+            // 缓冲中覆盖层（KSPlayer 自带，但保留我们自己的风格化覆盖层）
             if viewModel.isBuffering {
                 BufferingOverlay()
             }
@@ -134,16 +207,269 @@ private struct PlayerSection: View {
             }
             
             // 自定义标题栏（播放器左上角，不遮挡主要内容）
-            VStack(spacing: 0) {
-                HStack {
-                    PlayerCustomTitleBar(title: viewModel.anime.title)
+            if !isPlayerFullscreen {
+                VStack(spacing: 0) {
+                    HStack {
+                        PlayerCustomTitleBar(title: viewModel.anime.title)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
                     Spacer()
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                Spacer()
             }
         }
+        // 鼠标在播放器上移动时显示控制栏，根据当前状态决定是否自动隐藏
+        .onHover { hovering in
+            if hovering {
+                showControlBar()
+            } else if shouldAutoHideControlBar {
+                hideControlBar()
+            }
+        }
+        // 由 NSWindowController 级别的事件监听驱动显示控制栏
+        .onReceive(NotificationCenter.default.publisher(for: .playerShowControlBar)) { notification in
+            guard notification.object as? String == viewModel.anime.id else { return }
+            showControlBar()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerHideControlBar)) { notification in
+            guard notification.object as? String == viewModel.anime.id else { return }
+            hideControlBar()
+        }
+        // 状态变化时同步控制栏显隐模式
+        .onChange(of: isPlayerFullscreen) { _, _ in syncControlBarMode() }
+        .onChange(of: isRightPanelCollapsed) { _, _ in syncControlBarMode() }
+    }
+    
+    private func showControlBar() {
+        isControlBarVisible = true
+        // 取消之前的隐藏任务
+        hideControlBarWorkItem?.cancel()
+        // 只有在需要自动隐藏的模式下才启动计时器
+        guard shouldAutoHideControlBar else { return }
+        hideControlBarWorkItem = DispatchWorkItem { [self] in
+            isControlBarVisible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: hideControlBarWorkItem!)
+    }
+    
+    private func hideControlBar() {
+        isControlBarVisible = false
+        hideControlBarWorkItem?.cancel()
+    }
+    
+    private func syncControlBarMode() {
+        if shouldAutoHideControlBar {
+            // 切换到自动隐藏模式：立即隐藏，等鼠标移动再显示
+            hideControlBar()
+        } else {
+            // 切换到始终显示模式
+            hideControlBarWorkItem?.cancel()
+            isControlBarVisible = true
+        }
+    }
+}
+
+// MARK: - 播放控制栏覆盖层（为 KSVideoPlayer 提供控制 UI）
+private struct PlayerControlOverlay: View {
+    @ObservedObject var coordinator: KSVideoPlayer.Coordinator
+    @ObservedObject var timemodel: ControllerTimeModel
+    let isPlayerFullscreen: Bool
+    let isControlBarVisible: Bool
+    @State private var currentState: KSPlayerState = .initialized
+    @State private var sliderValue: Float = 0
+    
+    init(coordinator: KSVideoPlayer.Coordinator, isPlayerFullscreen: Bool, isControlBarVisible: Bool) {
+        self.coordinator = coordinator
+        self.timemodel = coordinator.timemodel
+        self.isPlayerFullscreen = isPlayerFullscreen
+        self.isControlBarVisible = isControlBarVisible
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            VStack(spacing: 12) {
+                // 时间滑块
+                HStack(spacing: 12) {
+                    Text(formatPlayerTime(timemodel.currentTime))
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.9))
+                    
+                    Slider(
+                        value: $sliderValue,
+                        in: 0...Float(max(timemodel.totalTime, 1))
+                    ) { editing in
+                        if editing {
+                            coordinator.playerLayer?.pause()
+                        } else {
+                            coordinator.seek(time: TimeInterval(sliderValue))
+                        }
+                    }
+                    .tint(.white)
+                    .frame(height: 16)
+                    .onChange(of: timemodel.currentTime) { _, newValue in
+                        sliderValue = Float(newValue)
+                    }
+                    
+                    Text(formatPlayerTime(timemodel.totalTime))
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                
+                // 控制按钮行（播放控制绝对居中）
+                ZStack {
+                    // 播放控制绝对居中
+                    HStack(spacing: 20) {
+                        Button {
+                            coordinator.skip(interval: -15)
+                        } label: {
+                            Image(systemName: "gobackward.15")
+                                .font(.system(size: 18, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        
+                        Button {
+                            togglePlayPause()
+                        } label: {
+                            Image(systemName: playPauseIconName)
+                                .font(.system(size: 36, weight: .light))
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        
+                        Button {
+                            coordinator.skip(interval: 15)
+                        } label: {
+                            Image(systemName: "goforward.15")
+                                .font(.system(size: 18, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                    }
+                    
+                    // 右侧控件
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 16) {
+                            // 倍速菜单
+                            Menu {
+                                Button("0.5x") { coordinator.playbackRate = 0.5 }
+                                Button("1.0x") { coordinator.playbackRate = 1.0 }
+                                Button("1.25x") { coordinator.playbackRate = 1.25 }
+                                Button("1.5x") { coordinator.playbackRate = 1.5 }
+                                Button("2.0x") { coordinator.playbackRate = 2.0 }
+                            } label: {
+                                Text("\(String(format: "%.1f", coordinator.playbackRate))x")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 38, height: 22)
+                                    .background(Color.white.opacity(0.15))
+                                    .cornerRadius(4)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 38, height: 22)
+                            .focusable(false)
+                            
+                            // 音量控制（滑块始终显示）
+                            HStack(spacing: 6) {
+                                Button {
+                                    coordinator.isMuted.toggle()
+                                } label: {
+                                    Image(systemName: volumeIconName)
+                                        .font(.system(size: 15))
+                                }
+                                .buttonStyle(.plain)
+                                .focusable(false)
+                                
+                                Slider(value: $coordinator.playbackVolume, in: 0...1)
+                                    .tint(.white)
+                                    .frame(width: 70)
+                            }
+                            .frame(height: 22)
+                            
+                            // 全屏（系统全屏）
+                            Button {
+                                NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil)
+                            } label: {
+                                Image(systemName: isPlayerFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 15))
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                        }
+                    }
+                }
+                .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .background(
+                LinearGradient(
+                    colors: [.black.opacity(0.65), .black.opacity(0.2), .clear],
+                    startPoint: .bottom,
+                    endPoint: .top
+                )
+            )
+        }
+        // 传统播放器逻辑：鼠标移动时显示，3秒后自动隐藏
+        .opacity(isControlBarVisible ? 1 : 0)
+        .animation(.easeOut(duration: 0.25), value: isControlBarVisible)
+        .allowsHitTesting(isControlBarVisible)
+        .onAppear {
+            currentState = coordinator.state
+            sliderValue = Float(timemodel.currentTime)
+        }
+        .task {
+            // 轮询播放状态，因为 coordinator.state 不是 @Published
+            while !Task.isCancelled {
+                let newState = coordinator.state
+                if newState != currentState {
+                    currentState = newState
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+    }
+    
+    private func togglePlayPause() {
+        if currentState.isPlaying {
+            coordinator.playerLayer?.pause()
+        } else {
+            coordinator.playerLayer?.play()
+        }
+    }
+    
+    private var playPauseIconName: String {
+        if currentState == .error {
+            return "play.slash.fill"
+        }
+        return currentState.isPlaying ? "pause.circle.fill" : "play.circle.fill"
+    }
+    
+    private var volumeIconName: String {
+        if coordinator.isMuted || coordinator.playbackVolume == 0 {
+            return "speaker.slash.fill"
+        } else if coordinator.playbackVolume < 0.3 {
+            return "speaker.fill"
+        } else if coordinator.playbackVolume < 0.7 {
+            return "speaker.wave.1.fill"
+        } else {
+            return "speaker.wave.3.fill"
+        }
+    }
+}
+
+// MARK: - 时间格式化辅助函数
+private func formatPlayerTime(_ seconds: Int) -> String {
+    let hours = seconds / 3600
+    let minutes = (seconds % 3600) / 60
+    let secs = seconds % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, secs)
+    } else {
+        return String(format: "%02d:%02d", minutes, secs)
     }
 }
 
@@ -156,7 +482,7 @@ private struct LoadingScreen: View {
             // 现代化加载动画
             ProgressView()
                 .scaleEffect(1.5)
-                .tint(LiquidGlassColors.primaryPink)
+                .tint(.white)
 
             Text(t("player.loadingVideo"))
                 .font(.system(size: 14, weight: .medium))
@@ -181,8 +507,8 @@ private struct StandbyScreen: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                LiquidGlassColors.primaryPink.opacity(0.2),
-                                LiquidGlassColors.secondaryViolet.opacity(0.15)
+                                Color.white.opacity(0.2),
+                                Color.white.opacity(0.15)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -194,13 +520,13 @@ private struct StandbyScreen: View {
                     .font(.system(size: 36, weight: .semibold))
                     .foregroundStyle(
                         LinearGradient(
-                            colors: [LiquidGlassColors.primaryPink, LiquidGlassColors.secondaryViolet],
+                            colors: [.white, .white.opacity(0.8)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
             }
-            .shadow(color: LiquidGlassColors.primaryPink.opacity(0.3), radius: 20, y: 8)
+            .shadow(color: Color.white.opacity(0.3), radius: 20, y: 8)
 
             VStack(spacing: 8) {
                 Text(viewModel.anime.title)
@@ -221,28 +547,13 @@ private struct StandbyScreen: View {
 
 // MARK: - 缓冲中覆盖层
 private struct BufferingOverlay: View {
-    @State private var isPulsing = false
-
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
 
-            ZStack {
-                Circle()
-                    .stroke(LiquidGlassColors.primaryPink.opacity(0.3), lineWidth: 3)
-                    .frame(width: 50, height: 50)
-                    .scaleEffect(isPulsing ? 1.15 : 1.0)
-                    .opacity(isPulsing ? 0.6 : 1.0)
-
-                ProgressView()
-                    .scaleEffect(1.2)
-                    .tint(LiquidGlassColors.primaryPink)
-            }
-            .onAppear {
-                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                    isPulsing = true
-                }
-            }
+            ProgressView()
+                .scaleEffect(1.5)
+                .tint(.white)
 
             Text(t("player.buffering"))
                 .font(.system(size: 13, weight: .medium))
@@ -321,87 +632,41 @@ private struct ModernIconButton: View {
     }
 }
 
-// MARK: - 播放器容器
-private struct PlayerContainerView: NSViewRepresentable {
-    let player: AVPlayer
+// MARK: - 面板折叠/展开按钮
+private struct PanelToggleButton: View {
+    @Binding var isCollapsed: Bool
+    @State private var isHovered = false
 
-    func makeNSView(context: Context) -> AVPlayerView {
-        let playerView = FullScreenAVPlayerView()
-        playerView.player = player
-        playerView.controlsStyle = .floating
-        playerView.showsSharingServiceButton = false
-        playerView.allowsPictureInPicturePlayback = true
-        playerView.updatesNowPlayingInfoCenter = true
-        playerView.showsFullScreenToggleButton = true
-        // 使用 resizeAspect 保持视频比例，完整显示
-        playerView.videoGravity = .resizeAspect
-        // 确保视频居中显示
-        playerView.allowsMagnification = false
-        return playerView
-    }
-
-    func updateNSView(_ nsView: AVPlayerView, context: Context) {
-        nsView.player = player
-        nsView.videoGravity = .resizeAspect
-    }
-}
-
-// MARK: - 支持全屏的 AVPlayerView
-private class FullScreenAVPlayerView: AVPlayerView {
-    private var fullScreenObserver: NSObjectProtocol?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-    
-    private func setup() {
-        // 确保视频层正确配置
-        self.wantsLayer = true
-        // 透明背景，让毛玻璃背景穿透
-        self.layer?.backgroundColor = NSColor.clear.cgColor
-    }
-    
-    override func layout() {
-        super.layout()
-        // 确保视频层填满整个视图
-        if let playerLayer = self.layer?.sublayers?.first as? AVPlayerLayer {
-            playerLayer.frame = self.bounds
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isCollapsed.toggle()
+            }
+        } label: {
+            ZStack {
+                // 背景
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.black.opacity(isHovered ? 0.5 : 0.35))
+                    .frame(width: 28, height: 56)
+                
+                // 箭头图标
+                Image(systemName: isCollapsed ? "chevron.left" : "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.7))
+            }
         }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-
-        if let observer = fullScreenObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-
-        fullScreenObserver = NotificationCenter.default.addObserver(
-            forName: .togglePlayerFullScreen,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.window?.toggleFullScreen(nil)
+        .buttonStyle(.plain)
+        .focusable(false)
+        .padding(.trailing, isCollapsed ? 12 : 4)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovered = hovering
             }
         }
     }
-
-    deinit {
-        MainActor.assumeIsolated {
-            if let observer = fullScreenObserver {
-                NotificationCenter.default.removeObserver(observer)
-            }
-        }
-    }
-
 }
+
+
 
 // MARK: - 右侧面板（Bilibili 风格）
 private struct RightPanel: View {
@@ -484,7 +749,7 @@ private struct PlayerCustomTitleBar: View {
             CustomWindowControls(
                 onClose: { NSApp.keyWindow?.performClose(nil) },
                 onMinimize: { NSApp.keyWindow?.performMiniaturize(nil) },
-                onMaximize: { NSApp.keyWindow?.zoom(nil) }
+                onMaximize: { NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil) }
             )
             
             // 窗口标题
@@ -773,6 +1038,7 @@ private struct SourceTabSelector: View {
                         .id(index)
                     }
                 }
+                .padding(.horizontal, 4)
                 .offset(x: dragOffset)
             }
             .contentMargins(0, for: .scrollContent)
@@ -880,6 +1146,42 @@ private struct SourceStatusIndicator: View {
     }
 }
 
+// MARK: - 源返回按钮
+private struct SourceBackButton: View {
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.left")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(t("player.backToSearch"))
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(isHovered ? Color(hex: "00AEEC") : .white.opacity(0.7))
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.white.opacity(isHovered ? 0.1 : 0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
 // MARK: - 源详情视图
 private struct SourceDetailView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
@@ -896,15 +1198,26 @@ private struct SourceDetailView: View {
 
         case .success:
             if let episodes = source.detail?.episodes, !episodes.isEmpty {
-                EpisodeListView(
-                    episodes: episodes,
-                    viewModel: viewModel,
-                    onSelect: { episode in
-                        Task {
-                            await viewModel.playEpisode(episode, from: sourceIndex)
+                VStack(spacing: 0) {
+                    // 返回按钮（如果有搜索结果可返回）
+                    if source.searchItems != nil {
+                        SourceBackButton {
+                            viewModel.resetSourceSelection(for: source.rule)
                         }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
                     }
-                )
+                    
+                    EpisodeListView(
+                        episodes: episodes,
+                        viewModel: viewModel,
+                        onSelect: { episode in
+                            Task {
+                                await viewModel.playEpisode(episode, from: sourceIndex)
+                            }
+                        }
+                    )
+                }
             } else {
                 EmptyStateView(
                     icon: "film.fill",

@@ -83,7 +83,7 @@ public struct MediaVideoCard: View {
                         .frame(width: cardWidth, height: thumbnailHeight)
                         .clipped()
 
-                    // 左上角复选框（编辑模式下显示）
+                    // 左上角：编辑模式显示复选框，非编辑模式显示 subtitle tag
                     if isEditing {
                         VStack {
                             HStack {
@@ -101,6 +101,26 @@ public struct MediaVideoCard: View {
                             }
                             Spacer()
                         }
+                    } else {
+                        VStack {
+                            HStack(spacing: 8) {
+                                Text(item.subtitle)
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 20)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(Color.black.opacity(0.3))
+                                    )
+
+                                Spacer()
+                            }
+                            Spacer()
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
                     // 右上角标签（非编辑模式下显示）
@@ -136,11 +156,6 @@ public struct MediaVideoCard: View {
                     Text(item.title)
                         .font(.system(size: 14.5, weight: .bold))
                         .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-
-                    Text(item.subtitle)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.56))
                         .lineLimit(1)
 
                     // 未完成时显示进度块

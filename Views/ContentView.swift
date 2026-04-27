@@ -17,6 +17,8 @@ struct ContentView: View {
     @State private var librarySelectedAnime: AnimeSearchResult?
     @State private var librarySelectedWallpaper: Wallpaper?
     @State private var librarySelectedMedia: MediaItem?
+    @State private var libraryWallpaperContext: [Wallpaper] = []
+    @State private var libraryMediaContext: [MediaItem] = []
     /// 类似 Vue `keep-alive`：除「我的库」外，Tab 至少访问过一次后保留子树；非当前页仅隐藏并暂停滚动/GIF
     @State private var mountedTabs: Set<MainTab> = [.home]
 
@@ -92,7 +94,9 @@ struct ContentView: View {
                     MyLibraryContentView(
                         selectedWallpaper: $librarySelectedWallpaper,
                         selectedMedia: $librarySelectedMedia,
-                        selectedAnime: $librarySelectedAnime
+                        selectedAnime: $librarySelectedAnime,
+                        wallpaperContext: $libraryWallpaperContext,
+                        mediaContext: $libraryMediaContext
                     )
                     .environment(\.coverGIFPlaybackHostActive, true)
                     .zIndex(1)
@@ -157,7 +161,11 @@ struct ContentView: View {
             
             // 我的库中的详情页（在 ContentView 层级显示，确保覆盖 TopNavigationBar）
             if let wallpaper = librarySelectedWallpaper {
-                WallpaperDetailSheet(wallpaper: wallpaper, viewModel: viewModel) {
+                WallpaperDetailSheet(
+                    wallpaper: wallpaper,
+                    viewModel: viewModel,
+                    contextWallpapers: libraryWallpaperContext.isEmpty ? nil : libraryWallpaperContext
+                ) {
                     librarySelectedWallpaper = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -169,7 +177,11 @@ struct ContentView: View {
             }
             
             if let item = librarySelectedMedia {
-                MediaDetailSheet(item: item, viewModel: mediaViewModel) {
+                MediaDetailSheet(
+                    item: item,
+                    viewModel: mediaViewModel,
+                    contextItems: libraryMediaContext.isEmpty ? nil : libraryMediaContext
+                ) {
                     librarySelectedMedia = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

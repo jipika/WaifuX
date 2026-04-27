@@ -8,12 +8,15 @@ struct MyLibraryContentView: View {
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @StateObject private var animeFavoriteStore = AnimeFavoriteStore.shared
+    @StateObject private var folderStore = LibraryFolderStore.shared
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
     @Binding var selectedAnime: AnimeSearchResult?
+    @Binding var wallpaperContext: [Wallpaper]
+    @Binding var mediaContext: [MediaItem]
     @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
@@ -33,6 +36,16 @@ struct MyLibraryContentView: View {
     // 缓存壁纸和媒体列表，避免 computed property 在 body 重绘时反复 map/filter
     @State private var wallpaperItems: [AnyWallpaperItem] = []
     @State private var mediaItems: [AnyMediaItem] = []
+    
+    // 文件夹导航
+    @State private var currentWallpaperFolderID: String? = nil
+    @State private var currentMediaFolderID: String? = nil
+    @State private var wallpaperFolderStack: [String] = []  // 面包屑栈
+    @State private var mediaFolderStack: [String] = []  // 面包屑栈
+    
+    // 新建文件夹
+    @State private var showNewFolderSheet = false
+    @State private var newFolderName = ""
 
     enum WallpaperRatioFilter: String, CaseIterable {
         case all = "all"
@@ -128,6 +141,13 @@ struct MyLibraryContentView: View {
             updateMediaItems()
         }
         .onChange(of: selectedSubTab) { _, _ in
+            // 切换子标签时重置文件夹导航
+            currentWallpaperFolderID = nil
+            currentMediaFolderID = nil
+            wallpaperFolderStack.removeAll()
+            mediaFolderStack.removeAll()
+            isEditing = false
+            selectedItems.removeAll()
             updateWallpaperItems()
             updateMediaItems()
         }
@@ -137,10 +157,42 @@ struct MyLibraryContentView: View {
         .onChange(of: mediaRatioFilter) { _, _ in
             updateMediaItems()
         }
+        .onReceive(folderStore.$wallpaperFolders) { _ in
+            updateWallpaperItems()
+        }
+        .onReceive(folderStore.$mediaFolders) { _ in
+            updateMediaItems()
+        }
         .onChange(of: selectedContentType) { _, _ in
-            // 切换内容类型时重置编辑状态
+            // 切换内容类型时重置编辑状态和文件夹导航
             isEditing = false
             selectedItems.removeAll()
+            currentWallpaperFolderID = nil
+            currentMediaFolderID = nil
+            wallpaperFolderStack.removeAll()
+            mediaFolderStack.removeAll()
+            updateWallpaperItems()
+            updateMediaItems()
+        }
+        .sheet(isPresented: $showNewFolderSheet) {
+            NewFolderSheet(
+                folderName: $newFolderName,
+                onConfirm: {
+                    let name = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    let contentType: LibraryFolder.FolderContentType = selectedContentType == .wallpaper ? .wallpaper : .media
+                    let parentID = selectedContentType == .wallpaper ? currentWallpaperFolderID : currentMediaFolderID
+                    folderStore.createFolder(name: name, contentType: contentType, parentID: parentID)
+                    newFolderName = ""
+                    showNewFolderSheet = false
+                    updateWallpaperItems()
+                    updateMediaItems()
+                },
+                onCancel: {
+                    newFolderName = ""
+                    showNewFolderSheet = false
+                }
+            )
         }
     }
 
@@ -226,8 +278,16 @@ struct MyLibraryContentView: View {
                 importAction: importWallpapers,
                 folderURL: DownloadPathManager.shared.wallpapersFolderURL
             )
+            
+            // 文件夹导航面包屑
+            folderBreadcrumb(
+                folderStack: wallpaperFolderStack,
+                isInFolder: currentWallpaperFolderID != nil,
+                onBack: popWallpaperFolder,
+                onRoot: { navigateToWallpaperFolder(nil) }
+            )
 
-            if wallpaperItems.isEmpty {
+            if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
                 emptyMediaSurface(
                     title: selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads"),
                     subtitle: selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint"),
@@ -235,9 +295,14 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.primaryPink
                 )
             } else {
-                batchDeleteToolbar(count: wallpaperItems.count)
+                batchDeleteToolbar(count: wallpaperItems.count + currentWallpaperFolders.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+                    // 文件夹
+                    ForEach(currentWallpaperFolders) { folder in
+                        wallpaperFolderCard(folder: folder, config: config)
+                    }
+                    // 壁纸卡片
                     ForEach(wallpaperItems) { item in
                         wallpaperGridItem(item: item, config: config)
                             .onAppear {
@@ -248,14 +313,85 @@ struct MyLibraryContentView: View {
             }
         }
     }
+    
+    private func wallpaperFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
+        let previewURLs = wallpaperPreviewURLs(for: folder)
+        let count = wallpaperCount(in: folder)
+        return LibraryFolderCard(
+            folder: folder,
+            previewURLs: previewURLs,
+            itemCount: count,
+            cardWidth: config.cardWidth,
+            onTap: { navigateToWallpaperFolder(folder.id) },
+            onDrop: { ids in moveWallpapersToFolder(ids: ids, folderID: folder.id) },
+            onDisband: {
+                folderStore.deleteFolder(id: folder.id, contentType: .wallpaper)
+                updateWallpaperItems()
+            }
+        )
+        .draggable("waifux:folder:\(folder.id)")
+    }
+    
+    private func wallpaperPreviewURLs(for folder: LibraryFolder) -> [URL] {
+        // 获取文件夹内的壁纸缩略图
+        let wallpapers = WallpaperLibraryService.shared.favoriteWallpapers(inFolder: folder.id)
+            + WallpaperLibraryService.shared.downloadedWallpapers(inFolder: folder.id).map(\.wallpaper)
+        return wallpapers.prefix(3).compactMap(\.thumbURL)
+    }
+    
+    private func wallpaperCount(in folder: LibraryFolder) -> Int {
+        let favCount = WallpaperLibraryService.shared.favoriteWallpapers(inFolder: folder.id).count
+        let dlCount = WallpaperLibraryService.shared.downloadedWallpapers(inFolder: folder.id).count
+        return favCount + dlCount
+    }
+    
+    private func navigateToWallpaperFolder(_ folderID: String?) {
+        if let current = currentWallpaperFolderID, folderID != nil {
+            wallpaperFolderStack.append(current)
+        }
+        currentWallpaperFolderID = folderID
+        updateWallpaperItems()
+    }
+    
+    private func popWallpaperFolder() {
+        guard !wallpaperFolderStack.isEmpty else {
+            currentWallpaperFolderID = nil
+            updateWallpaperItems()
+            return
+        }
+        currentWallpaperFolderID = wallpaperFolderStack.popLast()
+        updateWallpaperItems()
+    }
+    
+    private func moveWallpapersToFolder(ids: [String], folderID: String) {
+        for id in ids {
+            folderStore.moveWallpaperToFolder(wallpaperID: id, folderID: folderID)
+        }
+        updateWallpaperItems()
+    }
 
     private func updateWallpaperItems() {
         let baseItems: [AnyWallpaperItem]
         switch selectedSubTab {
         case .favorites:
-            baseItems = viewModel.favorites.map { AnyWallpaperItem(wallpaper: $0) }
+            let allFavorites = viewModel.favorites
+            let folderID = currentWallpaperFolderID
+            let filtered = allFavorites.filter { wallpaper in
+                guard let record = WallpaperLibraryService.shared.favoriteRecord(for: wallpaper.id) else { return false }
+                return record.folderID == folderID
+            }
+            baseItems = filtered.map { AnyWallpaperItem(wallpaper: $0) }
         case .downloads:
-            baseItems = viewModel.allLocalWallpapers.map { AnyWallpaperItem(unified: $0) }
+            let allLocal = viewModel.allLocalWallpapers
+            let folderID = currentWallpaperFolderID
+            let filtered = allLocal.filter { unified in
+                if let record = unified.downloadRecord {
+                    return record.folderID == folderID
+                }
+                // 扫描到的本地文件只在根目录显示
+                return folderID == nil
+            }
+            baseItems = filtered.map { AnyWallpaperItem(unified: $0) }
         }
         switch wallpaperRatioFilter {
         case .all:
@@ -266,19 +402,42 @@ struct MyLibraryContentView: View {
             wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX < $0.wallpaper.dimensionY }
         }
     }
+    
+    private var currentWallpaperFolders: [LibraryFolder] {
+        folderStore.folders(for: .wallpaper, parentID: currentWallpaperFolderID)
+    }
+    
+    private var currentMediaFolders: [LibraryFolder] {
+        folderStore.folders(for: .media, parentID: currentMediaFolderID)
+    }
 
     private func updateMediaItems() {
         let baseItems: [AnyMediaItem]
         switch selectedSubTab {
         case .favorites:
-            baseItems = mediaViewModel.favoriteItems.map {
+            let allFavorites = mediaViewModel.favoriteItems
+            let folderID = currentMediaFolderID
+            let filtered = allFavorites.filter { item in
+                guard let record = MediaLibraryService.shared.favoriteRecord(for: item.id) else { return false }
+                return record.folderID == folderID
+            }
+            baseItems = filtered.map {
                 AnyMediaItem(
                     mediaItem: $0,
                     localFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: $0)
                 )
             }
         case .downloads:
-            baseItems = mediaViewModel.allLocalMedia.map { AnyMediaItem(unified: $0) }
+            let allLocal = mediaViewModel.allLocalMedia
+            let folderID = currentMediaFolderID
+            let filtered = allLocal.filter { unified in
+                if let record = unified.downloadRecord {
+                    return record.folderID == folderID
+                }
+                // 扫描到的本地文件只在根目录显示
+                return folderID == nil
+            }
+            baseItems = filtered.map { AnyMediaItem(unified: $0) }
         }
         switch mediaRatioFilter {
         case .all:
@@ -310,6 +469,17 @@ struct MyLibraryContentView: View {
         ) {
             handleWallpaperTap(item.wallpaper)
         }
+        .draggable("waifux:item:\(item.id)")
+        .contextMenu {
+            if currentWallpaperFolderID != nil {
+                Button {
+                    folderStore.moveWallpaperToFolder(wallpaperID: item.id, folderID: nil)
+                    updateWallpaperItems()
+                } label: {
+                    Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
+                }
+            }
+        }
     }
 
     // MARK: - Media Section
@@ -322,8 +492,16 @@ struct MyLibraryContentView: View {
                 workshopImportAction: importWorkshop,
                 folderURL: DownloadPathManager.shared.mediaFolderURL
             )
+            
+            // 文件夹导航面包屑
+            folderBreadcrumb(
+                folderStack: mediaFolderStack,
+                isInFolder: currentMediaFolderID != nil,
+                onBack: popMediaFolder,
+                onRoot: { navigateToMediaFolder(nil) }
+            )
 
-            if mediaItems.isEmpty {
+            if mediaItems.isEmpty && currentMediaFolders.isEmpty {
                 emptyMediaSurface(
                     title: selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads"),
                     subtitle: selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint"),
@@ -331,9 +509,14 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.secondaryViolet
                 )
             } else {
-                batchDeleteToolbar(count: mediaItems.count)
+                batchDeleteToolbar(count: mediaItems.count + currentMediaFolders.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+                    // 文件夹
+                    ForEach(currentMediaFolders) { folder in
+                        mediaFolderCard(folder: folder, config: config)
+                    }
+                    // 媒体卡片
                     ForEach(mediaItems) { item in
                         mediaGridItem(item: item, config: config)
                             .onAppear {
@@ -343,6 +526,61 @@ struct MyLibraryContentView: View {
                 }
             }
         }
+    }
+    
+    private func mediaFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
+        let previewURLs = mediaPreviewURLs(for: folder)
+        let count = mediaCount(in: folder)
+        return LibraryFolderCard(
+            folder: folder,
+            previewURLs: previewURLs,
+            itemCount: count,
+            cardWidth: config.cardWidth,
+            onTap: { navigateToMediaFolder(folder.id) },
+            onDrop: { ids in moveMediasToFolder(ids: ids, folderID: folder.id) },
+            onDisband: {
+                folderStore.deleteFolder(id: folder.id, contentType: .media)
+                updateMediaItems()
+            }
+        )
+        .draggable("waifux:folder:\(folder.id)")
+    }
+    
+    private func mediaPreviewURLs(for folder: LibraryFolder) -> [URL] {
+        let items = MediaLibraryService.shared.favoriteItems(inFolder: folder.id)
+            + MediaLibraryService.shared.downloadedItems(inFolder: folder.id).map(\.item)
+        return items.prefix(3).map(\.coverImageURL)
+    }
+    
+    private func mediaCount(in folder: LibraryFolder) -> Int {
+        let favCount = MediaLibraryService.shared.favoriteItems(inFolder: folder.id).count
+        let dlCount = MediaLibraryService.shared.downloadedItems(inFolder: folder.id).count
+        return favCount + dlCount
+    }
+    
+    private func navigateToMediaFolder(_ folderID: String?) {
+        if let current = currentMediaFolderID, folderID != nil {
+            mediaFolderStack.append(current)
+        }
+        currentMediaFolderID = folderID
+        updateMediaItems()
+    }
+    
+    private func popMediaFolder() {
+        guard !mediaFolderStack.isEmpty else {
+            currentMediaFolderID = nil
+            updateMediaItems()
+            return
+        }
+        currentMediaFolderID = mediaFolderStack.popLast()
+        updateMediaItems()
+    }
+    
+    private func moveMediasToFolder(ids: [String], folderID: String) {
+        for id in ids {
+            folderStore.moveMediaToFolder(mediaID: id, folderID: folderID)
+        }
+        updateMediaItems()
     }
 
     private var currentMediaItems: [AnyMediaItem] {
@@ -365,6 +603,17 @@ struct MyLibraryContentView: View {
             cardWidth: config.cardWidth
         ) {
             handleMediaTap(item.mediaItem)
+        }
+        .draggable("waifux:item:\(item.id)")
+        .contextMenu {
+            if currentMediaFolderID != nil {
+                Button {
+                    folderStore.moveMediaToFolder(mediaID: item.id, folderID: nil)
+                    updateMediaItems()
+                } label: {
+                    Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
+                }
+            }
         }
     }
 
@@ -555,6 +804,33 @@ struct MyLibraryContentView: View {
 
             // 右侧：按钮组
             HStack(spacing: 8) {
+                // 新建文件夹
+                if selectedContentType != .anime {
+                    Button {
+                        showNewFolderSheet = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.system(size: 12))
+                            Text(t("new.folder"))
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+                
                 // 编辑 / 完成
                 Button {
                     withAnimation {
@@ -646,6 +922,62 @@ struct MyLibraryContentView: View {
             }
         }
     }
+    
+    // MARK: - 文件夹面包屑
+    @ViewBuilder
+    private func folderBreadcrumb(
+        folderStack: [String],
+        isInFolder: Bool,
+        onBack: @escaping () -> Void,
+        onRoot: @escaping () -> Void
+    ) -> some View {
+        if isInFolder {
+            HStack(spacing: 6) {
+                Button(action: onRoot) {
+                    Image(systemName: "house")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                
+                if !folderStack.isEmpty {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.3))
+                    
+                    Text("...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.5))
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.3))
+                }
+                
+                Button(action: onBack) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 10))
+                        Text(t("back"))
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+        }
+    }
 
     // MARK: - Batch Delete Toolbar
     private func batchDeleteToolbar(count: Int) -> some View {
@@ -722,7 +1054,21 @@ struct MyLibraryContentView: View {
         if isEditing {
             toggleSelection(wallpaper.id)
         } else {
+            wallpaperContext = wallpaperItems.map(\.wallpaper)
             selectedWallpaper = wallpaper
+        }
+    }
+    
+    private func handleFolderTap(_ folder: LibraryFolder) {
+        if isEditing {
+            toggleSelection("folder_\(folder.id)")
+        } else {
+            switch folder.contentType {
+            case .wallpaper:
+                navigateToWallpaperFolder(folder.id)
+            case .media:
+                navigateToMediaFolder(folder.id)
+            }
         }
     }
 
@@ -730,6 +1076,7 @@ struct MyLibraryContentView: View {
         if isEditing {
             toggleSelection(item.id)
         } else {
+            mediaContext = mediaItems.map(\.mediaItem)
             selectedMedia = item
         }
     }
@@ -758,26 +1105,48 @@ struct MyLibraryContentView: View {
     private var currentItemIDs: [String] {
         switch selectedContentType {
         case .wallpaper:
-            return wallpaperItems.map(\.id)
+            let folderIDs = currentWallpaperFolders.map { "folder_\($0.id)" }
+            let itemIDs = wallpaperItems.map(\.id)
+            return folderIDs + itemIDs
         case .video:
-            return currentMediaItems.map(\.id)
+            let folderIDs = currentMediaFolders.map { "folder_\($0.id)" }
+            let itemIDs = currentMediaItems.map(\.id)
+            return folderIDs + itemIDs
         case .anime:
             return currentAnimeItems.map(\.id)
         }
     }
 
     private func deleteSelectedItems() {
+        // 分离文件夹 ID 和普通项目 ID
+        let folderIDs = selectedItems.filter { $0.hasPrefix("folder_") }
+        let itemIDs = selectedItems.filter { !$0.hasPrefix("folder_") }
+        
+        // 先删除文件夹
+        for folderID in folderIDs {
+            let realID = String(folderID.dropFirst(7))
+            switch selectedContentType {
+            case .wallpaper:
+                folderStore.deleteFolder(id: realID, contentType: .wallpaper)
+            case .video:
+                folderStore.deleteFolder(id: realID, contentType: .media)
+            case .anime:
+                break
+            }
+        }
+        
+        // 再删除普通项目
         switch selectedContentType {
         case .wallpaper:
             if selectedSubTab == .favorites {
                 let favoriteIDs = Set(viewModel.favorites.map(\.id))
-                let ids = selectedItems.intersection(favoriteIDs)
+                let ids = itemIDs.intersection(favoriteIDs)
                 if !ids.isEmpty {
                     viewModel.removeWallpaperFavorites(withIDs: ids)
                 }
             } else {
                 let allLocal = viewModel.allLocalWallpapers
-                let ids = selectedItems.intersection(Set(allLocal.map(\.id)))
+                let ids = itemIDs.intersection(Set(allLocal.map(\.id)))
                 if !ids.isEmpty {
                     deleteLocalWallpapers(allLocal.filter { ids.contains($0.id) })
                 }
@@ -786,20 +1155,20 @@ struct MyLibraryContentView: View {
         case .video:
             if selectedSubTab == .favorites {
                 let favoriteIDs = Set(mediaViewModel.favoriteItems.map(\.id))
-                let ids = selectedItems.intersection(favoriteIDs)
+                let ids = itemIDs.intersection(favoriteIDs)
                 if !ids.isEmpty {
                     mediaViewModel.removeFavorites(withIDs: ids)
                 }
             } else {
                 let allLocal = mediaViewModel.allLocalMedia
-                let ids = selectedItems.intersection(Set(allLocal.map(\.id)))
+                let ids = itemIDs.intersection(Set(allLocal.map(\.id)))
                 if !ids.isEmpty {
                     deleteLocalMedias(allLocal.filter { ids.contains($0.id) })
                 }
             }
 
         case .anime:
-            for id in selectedItems {
+            for id in itemIDs {
                 AnimeFavoriteStore.shared.removeFavorite(animeId: id)
             }
             Task {
@@ -808,6 +1177,8 @@ struct MyLibraryContentView: View {
         }
         selectedItems.removeAll()
         isEditing = false
+        updateWallpaperItems()
+        updateMediaItems()
     }
 
     /// 删除本地壁纸（含物理文件删除）

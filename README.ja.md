@@ -74,7 +74,7 @@
 | ⚡️ **ワンクリック適用** | ✅ | 閲覧中にそのままデスクトップ壁紙やダイナミック壁紙に設定可能 |
 | 🖥️ **マルチディスプレイ対応** | ✅ | 各ディスプレイに異なる壁紙を設定可能 — マルチモニターユーザーに最適 |
 | 📥 **ローカルデータインポート** | ✅ | ローカルの壁紙フォルダをインポートして個人コレクションを一元管理 |
-| 🧊 **Wallpaper Engine レンダリング (Beta)** | ✅ | Wallpaper Engine 動的壁紙を実験対応：**シーン（Scene）** と **Web**（HTML/JS）タイプを内蔵レンダラーで表示（任意の Web サイトを壁紙にする機能ではありません） |
+| 🧊 **Wallpaper Engine レンダリング (Beta)** | ✅ | Wallpaper Engine 動的壁紙を実験対応：**シーン（Scene）** と **Web**（HTML/JS）タイプを内蔵レンダラーで表示（任意の Web サイトを壁紙にする機能ではありません）<br>⚠️ **Apple Silicon（arm64）のみ対応。Intel チップは現在未対応** |
 | 🔄 **自動更新ルール** | ✅ | GitHub 経由でリモート読み込み、ソースサイトの変更にも迅速対応 |
 | ☁️ **クロスデバイス同期** | 🚧 | お気に入りのクラウド同期（開発中）|
 
@@ -89,6 +89,13 @@
 ### 方法2：GitHub Releases
 
 👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
+
+### 方法3：Homebrew
+
+```bash
+brew tap jipika/waifux
+brew install --cask waifux
+```
 
 > ⚠️ 初回起動時、「システム設定 → プライバシーとセキュリティ」で実行許可が必要な場合があります。
 

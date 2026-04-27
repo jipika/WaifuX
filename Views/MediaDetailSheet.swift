@@ -7,10 +7,12 @@ import Kingfisher
 struct MediaDetailSheet: View {
     let initialItem: MediaItem
     @ObservedObject var viewModel: MediaExploreViewModel
+    let contextItems: [MediaItem]?
     let onClose: () -> Void
 
     @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var mediaLibrary = MediaLibraryService.shared
+    @ObservedObject private var loopService = VideoLoopPreprocessingService.shared
     @State private var resolvedItem: MediaItem
     @State private var isDownloading = false
     @State private var isSettingWallpaper = false
@@ -23,9 +25,20 @@ struct MediaDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
+    @State private var showDeleteConfirm = false
     @State private var showSteamGuardAlert = false
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
+
+    // MARK: - 键盘快捷键与滑动动画
+    @State private var keyboardMonitor: Any?
+    @State private var slideIncomingOffset: CGFloat = 0
+    @State private var slideOutgoingOffset: CGFloat = 0
+    @State private var isNavigating = false
+
+    private enum SlideDirection {
+        case up, down
+    }
     /// 烘焙并应用 MP4 成功后短暂显示在底部状态行（约 4s）
     @State private var sceneBakeStatusFlash: String?
     @State private var sharePickerAnchorView: NSView?
@@ -41,11 +54,17 @@ struct MediaDetailSheet: View {
     // 计算属性：当前媒体项
     var item: MediaItem { resolvedItem }
 
-    init(item: MediaItem, viewModel: MediaExploreViewModel, onClose: @escaping () -> Void) {
+    init(item: MediaItem, viewModel: MediaExploreViewModel, contextItems: [MediaItem]? = nil, onClose: @escaping () -> Void) {
         self.initialItem = item
         self.viewModel = viewModel
+        self.contextItems = contextItems
         self.onClose = onClose
         _resolvedItem = State(initialValue: item)
+    }
+
+    /// 当前导航使用的媒体列表（本地上下文优先，否则使用线上列表）
+    private var navigationItems: [MediaItem] {
+        contextItems ?? viewModel.items
     }
     
     // MARK: - 本地文件检测
@@ -86,10 +105,18 @@ struct MediaDetailSheet: View {
 
                 if isVisible {
                     fixedMediaBackground(width: viewW, height: viewH)
+                        .id("media-bg-\(resolvedItem.id)")
+                        .transition(
+                            AnyTransition.asymmetric(
+                                insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
+                                removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
+                            )
+                            .animation(.easeInOut(duration: 0.3))
+                        )
                 }
                 
                 // 媒体加载动画
-                if !isMediaLoaded {
+                if !isMediaLoaded && !isNavigating {
                     LoadingOverlayView()
                         .frame(width: viewW, height: viewH)
                         .transition(.opacity.animation(.easeInOut(duration: 0.3)))
@@ -222,13 +249,27 @@ struct MediaDetailSheet: View {
         } message: {
             Text("当前账号启用了 Steam Guard，请输入 Authenticator 应用中的验证码以继续下载。")
         }
+        .alert(t("delete"), isPresented: $showDeleteConfirm) {
+            Button(t("delete"), role: .destructive) {
+                viewModel.removeDownloads(withIDs: [resolvedItem.id])
+                onClose()
+            }
+            Button(t("cancel"), role: .cancel) {}
+        } message: {
+            Text(t("deleteConfirmMessage"))
+        }
         .navigationBarBackButtonHidden(true)
         .task {
             AppLogger.info(.media, "媒体详情页 onAppear",
                 metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
             setupNextItemDataSource()
+            setupKeyboardMonitor()
             await loadDetailIfNeeded()
+        }
+        .onDisappear {
+            isVisible = false
+            removeKeyboardMonitor()
         }
     }
 
@@ -417,6 +458,21 @@ struct MediaDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+
+                if isAlreadyDownloaded {
+                    Button {
+                        showDeleteConfirm = true
+                    } label: {
+                        DetailSheetCircleIconLabel(
+                            systemName: "trash",
+                            foreground: Color(hex: "FF5A7D"),
+                            fontSize: 16,
+                            frameSide: 40
+                        )
+                        .detailGlassCircleChrome(tint: Color(hex: "FF5A7D").opacity(0.25))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
             if showInfoBubble {
@@ -645,6 +701,18 @@ struct MediaDetailSheet: View {
             }
             .buttonStyle(.plain)
             .disabled(isSettingWallpaper || isBakingScene)
+
+            // 循环视频预处理提示（已临时关闭自动预处理，待后续增加手动开关后恢复）
+            // if loopService.isProcessing {
+            //     HStack(spacing: 6) {
+            //         CustomProgressView(tint: .white.opacity(0.7))
+            //             .scaleEffect(0.6)
+            //         Text(t("loopProcessing"))
+            //             .font(.system(size: 11))
+            //             .foregroundStyle(.white.opacity(0.6))
+            //     }
+            //     .padding(.top, 4)
+            // }
 
             HStack(spacing: 16) {
                 Button {
@@ -953,49 +1021,66 @@ struct MediaDetailSheet: View {
     // MARK: - 下一张弹窗相关方法
 
     private func setupNextItemDataSource() {
+        let items = navigationItems
         // 找到当前媒体项在列表中的索引
-        let allItems = viewModel.items
-        if let index = allItems.firstIndex(where: { $0.id == initialItem.id }) {
+        if let index = items.firstIndex(where: { $0.id == initialItem.id }) {
             currentItemIndex = index
         }
 
         // 设置数据源
-        nextItemDataSource.setItems(allItems, currentIndex: currentItemIndex)
+        nextItemDataSource.setItems(items, currentIndex: currentItemIndex)
     }
 
     private func navigateToNextMedia() {
-        guard nextItemDataSource.hasNext else { return }
-
-        // 获取下一个媒体项
+        guard !isNavigating else { return }
+        let items = navigationItems
         let nextIndex = currentItemIndex + 1
-        let allItems = viewModel.items
-        guard nextIndex < allItems.count else { return }
-
-        let nextItem = allItems[nextIndex]
+        guard nextIndex < items.count else {
+            // 本地模式下循环到第一张
+            if contextItems != nil, !items.isEmpty {
+                prepareSlideTransition(direction: .down)
+                navigateToIndex(0)
+            }
+            return
+        }
 
         // 更新索引和数据源
         currentItemIndex = nextIndex
         nextItemDataSource.moveToNext()
 
-        // 重新加载媒体
-        reloadMedia(nextItem)
+        // 滑动切换
+        prepareSlideTransition(direction: .down)
+        reloadMedia(items[nextIndex])
     }
 
     private func navigateToPreviousMedia() {
-        guard nextItemDataSource.hasPrevious else { return }
-
-        // 获取上一个媒体项
+        guard !isNavigating else { return }
+        let items = navigationItems
         let prevIndex = currentItemIndex - 1
-        guard prevIndex >= 0 else { return }
-
-        let prevItem = viewModel.items[prevIndex]
+        guard prevIndex >= 0 else {
+            // 本地模式下循环到最后一张
+            if contextItems != nil, !items.isEmpty {
+                prepareSlideTransition(direction: .up)
+                navigateToIndex(items.count - 1)
+            }
+            return
+        }
 
         // 更新索引和数据源
         currentItemIndex = prevIndex
         nextItemDataSource.moveToPrevious()
 
-        // 重新加载媒体
-        reloadMedia(prevItem)
+        // 滑动切换
+        prepareSlideTransition(direction: .up)
+        reloadMedia(items[prevIndex])
+    }
+
+    private func navigateToIndex(_ index: Int) {
+        let items = navigationItems
+        guard index >= 0, index < items.count else { return }
+        currentItemIndex = index
+        nextItemDataSource.moveToIndex(index)
+        reloadMedia(items[index])
     }
 
     private func reloadMedia(_ newItem: MediaItem) {
@@ -1013,6 +1098,65 @@ struct MediaDetailSheet: View {
         // 异步加载详情
         Task {
             await loadDetailIfNeededFor(newItem)
+        }
+    }
+
+    // MARK: - 键盘快捷键
+
+    private func setupKeyboardMonitor() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            guard NSApp.isActive, let window = event.window, window.isKeyWindow else { return event }
+            guard self.isVisible else { return event }
+            switch event.keyCode {
+            case 49: // 空格键：显示/隐藏信息区域
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
+                    self.isHeroContentHidden.toggle()
+                }
+                return nil
+            case 126: // 上方向键：上一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToPreviousMedia()
+                return nil
+            case 125: // 下方向键：下一张
+                guard !self.isNavigating else { return nil }
+                self.navigateToNextMedia()
+                return nil
+            case 53: // ESC：返回
+                self.onClose()
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+    }
+
+    // MARK: - 滑动动画
+
+    private func prepareSlideTransition(direction: SlideDirection) {
+        isNavigating = true
+        let distance: CGFloat = 600
+        switch direction {
+        case .up:
+            // 上一张：新图从上方滑入，当前图向下滑出
+            slideIncomingOffset = -distance
+            slideOutgoingOffset = distance
+        case .down:
+            // 下一张：新图从下方滑入，当前图向上滑出
+            slideIncomingOffset = distance
+            slideOutgoingOffset = -distance
+        }
+        // 动画结束后重置
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.isNavigating = false
+            self.slideIncomingOffset = 0
+            self.slideOutgoingOffset = 0
         }
     }
 

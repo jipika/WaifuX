@@ -1,13 +1,16 @@
 import Foundation
 import SwiftUI
 import AppKit
-import AVFoundation
+import KSPlayer
 
 // MARK: - 播放器窗口控制器
 class AnimePlayerWindowController: NSWindowController {
     let animeId: String
     let viewModel: AnimeDetailViewModel
-    private var keyboardMonitor: Any?
+    let coordinator = KSVideoPlayer.Coordinator()
+    
+    private var keyMonitor: Any?
+    private var mouseMonitor: Any?
     
     init(anime: AnimeSearchResult, viewModel: AnimeDetailViewModel) {
         self.animeId = anime.id
@@ -38,8 +41,8 @@ class AnimePlayerWindowController: NSWindowController {
         window.tabbingMode = .disallowed
         window.center()
         
-        // 设置内容视图
-        let contentView = AnimePlayerWindow(viewModel: viewModel)
+        // 设置内容视图（传入 coordinator）
+        let contentView = AnimePlayerWindow(viewModel: viewModel, coordinator: coordinator)
         window.contentView = NSHostingView(rootView: contentView)
         
         super.init(window: window)
@@ -47,58 +50,97 @@ class AnimePlayerWindowController: NSWindowController {
         // 设置代理
         window.delegate = self
         
-        // 注册窗口级键盘事件（绕过 AVPlayerView 内部子视图的拦截）
-        setupKeyboardMonitor()
+        // 监听全屏切换通知
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleToggleFullScreen),
+            name: .togglePlayerFullScreen,
+            object: nil
+        )
+        
+        // 设置键盘和鼠标事件监听
+        setupEventMonitors()
     }
     
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    @objc private func handleToggleFullScreen() {
+        window?.toggleFullScreen(nil)
     }
     
-    private func setupKeyboardMonitor() {
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self,
-                  self.window?.isKeyWindow == true,
-                  let player = self.viewModel.player else {
-                return event
-            }
+    private func setupEventMonitors() {
+        // 键盘事件监听
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.window else { return event }
             
             switch event.keyCode {
-            case 49: // 空格键：暂停/播放
-                if player.rate > 0 {
-                    player.pause()
-                } else {
-                    player.play()
+            case 49: // 空格键
+                self.togglePlayPause()
+                return nil
+            case 123: // 左方向键
+                self.coordinator.skip(interval: -15)
+                return nil
+            case 124: // 右方向键
+                self.coordinator.skip(interval: 15)
+                return nil
+            case 126: // 上方向键
+                let newVolume = min(self.coordinator.playbackVolume + 0.1, 1.0)
+                self.coordinator.playbackVolume = newVolume
+                self.coordinator.isMuted = false
+                return nil
+            case 125: // 下方向键
+                let newVolume = max(self.coordinator.playbackVolume - 0.1, 0.0)
+                self.coordinator.playbackVolume = newVolume
+                if newVolume == 0 { self.coordinator.isMuted = true }
+                return nil
+            case 53: // ESC 键
+                if self.window?.styleMask.contains(.fullScreen) == true {
+                    self.window?.toggleFullScreen(nil)
+                    return nil
                 }
-                return nil // 消费事件，不再向下传递
-            case 123: // 左方向键：后退 10 秒
-                self.seekPlayer(player, by: -10)
-                return nil
-            case 124: // 右方向键：前进 10 秒
-                self.seekPlayer(player, by: 10)
-                return nil
+                return event
             default:
                 return event
             }
         }
-    }
-    
-    private func seekPlayer(_ player: AVPlayer, by seconds: Double) {
-        let current = player.currentTime()
-        let newTime = CMTimeAdd(current, CMTime(seconds: seconds, preferredTimescale: current.timescale))
-        let clamped = CMTimeMaximum(newTime, CMTime.zero)
-        player.seek(to: clamped, toleranceBefore: .zero, toleranceAfter: .zero)
-    }
-    
-    private func removeKeyboardMonitor() {
-        if let monitor = keyboardMonitor {
-            NSEvent.removeMonitor(monitor)
-            keyboardMonitor = nil
+        
+        // 鼠标移动监听（用于控制栏显隐）
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .mouseEntered, .leftMouseDragged]) { [weak self] event in
+            guard let self, event.window === self.window else { return event }
+            self.showControlBar()
+            return event
         }
     }
     
+    private func removeEventMonitors() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
+    }
+    
+    private func togglePlayPause() {
+        if coordinator.state.isPlaying {
+            coordinator.playerLayer?.pause()
+        } else {
+            coordinator.playerLayer?.play()
+        }
+    }
+    
+    private func showControlBar() {
+        // 只负责通知 SwiftUI 显示控制栏，是否自动隐藏由 SwiftUI 根据当前状态决定
+        NotificationCenter.default.post(name: .playerShowControlBar, object: animeId)
+    }
+    
     deinit {
-        removeKeyboardMonitor()
+        NotificationCenter.default.removeObserver(self)
+        removeEventMonitors()
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
     
     func showWindow() {
@@ -107,7 +149,6 @@ class AnimePlayerWindowController: NSWindowController {
     }
     
     func closeWindow() {
-        removeKeyboardMonitor()
         viewModel.stopPlayback()
         window?.close()
     }
@@ -117,6 +158,14 @@ class AnimePlayerWindowController: NSWindowController {
 extension AnimePlayerWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         AnimeWindowManager.shared.windowWillClose(animeId: animeId)
+    }
+    
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        NotificationCenter.default.post(name: .playerDidEnterFullScreen, object: animeId)
+    }
+    
+    func windowDidExitFullScreen(_ notification: Notification) {
+        NotificationCenter.default.post(name: .playerDidExitFullScreen, object: animeId)
     }
 }
 

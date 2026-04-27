@@ -330,57 +330,57 @@ struct HomeContentView: View {
                     HeroSkeletonView(height: height)
                 } else {
                     heroCarousel(width: width, height: height, items: items)
+                }
 
-                    // MARK: 底部过渡层 —— 多层叠加实现从 hero 到内容的自然融合
-                    VStack {
-                        Spacer()
-                        ZStack {
-                            // 第 1 层：从图片本身延伸的超长暗化渐变
-                            LinearGradient(
-                                colors: [
-                                    Color.clear,
-                                    Color.black.opacity(0.05),
-                                    Color.black.opacity(0.22),
-                                    Color.black.opacity(0.50),
-                                    Color.black.opacity(0.78),
-                                    Color.black.opacity(0.92)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
+                // MARK: 底部过渡层 —— 多层叠加实现从 hero 到内容的自然融合
+                VStack {
+                    Spacer()
+                    ZStack {
+                        // 第 1 层：从图片本身延伸的超长暗化渐变
+                        LinearGradient(
+                            colors: [
+                                Color.clear,
+                                Color.black.opacity(0.05),
+                                Color.black.opacity(0.22),
+                                Color.black.opacity(0.50),
+                                Color.black.opacity(0.78),
+                                Color.black.opacity(0.92)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
 
-                            // 第 2 层：轻微毛玻璃材质，让过渡更有"厚度"
-                            Rectangle()
-                                .fill(.ultraThinMaterial)
-                                .opacity(0.35)
-                                .mask(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.clear,
-                                            Color.white.opacity(0.3),
-                                            Color.white.opacity(0.9),
-                                            Color.white
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
+                        // 第 2 层：轻微毛玻璃材质，让过渡更有"厚度"
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.35)
+                            .mask(
+                                LinearGradient(
+                                    colors: [
+                                        Color.clear,
+                                        Color.white.opacity(0.3),
+                                        Color.white.opacity(0.9),
+                                        Color.white
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
                                 )
-
-                            // 第 3 层：底部压暗，确保卡片文字可读
-                            LinearGradient(
-                                colors: [
-                                    Color.clear,
-                                    Color.clear,
-                                    Color.black.opacity(0.30),
-                                    Color.black.opacity(0.65)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
                             )
-                        }
-                        .frame(height: 220)
-                        .blur(radius: 18)
+
+                        // 第 3 层：底部压暗，确保卡片文字可读
+                        LinearGradient(
+                            colors: [
+                                Color.clear,
+                                Color.clear,
+                                Color.black.opacity(0.30),
+                                Color.black.opacity(0.65)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
                     }
+                    .frame(height: 220)
+                    .blur(radius: 18)
                 }
             }
             .frame(width: width, height: height)

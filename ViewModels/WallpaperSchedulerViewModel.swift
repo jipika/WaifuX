@@ -5,7 +5,6 @@ import Combine
 class WallpaperSchedulerViewModel: ObservableObject {
     @Published var config: SchedulerConfig = .default
     @Published var isRunning: Bool = false
-    @Published var lastChangedWallpaper: Wallpaper?
 
     private let schedulerService = WallpaperSchedulerService.shared
     private var cancellables = Set<AnyCancellable>()
@@ -18,10 +17,6 @@ class WallpaperSchedulerViewModel: ObservableObject {
         schedulerService.$isRunning
             .receive(on: DispatchQueue.main)
             .assign(to: &$isRunning)
-
-        schedulerService.$lastChangedWallpaper
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$lastChangedWallpaper)
     }
 
     // MARK: - Control Actions
@@ -48,7 +43,8 @@ class WallpaperSchedulerViewModel: ObservableObject {
                 isEnabled: config.isEnabled,
                 intervalMinutes: minutes,
                 order: config.order,
-                source: config.source,
+                includeWallpapers: config.includeWallpapers,
+                includeMedia: config.includeMedia,
                 displayConfigs: config.displayConfigs
             )
         )
@@ -60,19 +56,34 @@ class WallpaperSchedulerViewModel: ObservableObject {
                 isEnabled: config.isEnabled,
                 intervalMinutes: config.intervalMinutes,
                 order: order,
-                source: config.source,
+                includeWallpapers: config.includeWallpapers,
+                includeMedia: config.includeMedia,
                 displayConfigs: config.displayConfigs
             )
         )
     }
 
-    func updateSource(_ source: WallpaperSource) {
+    func updateIncludeWallpapers(_ include: Bool) {
         schedulerService.updateConfig(
             SchedulerConfig(
                 isEnabled: config.isEnabled,
                 intervalMinutes: config.intervalMinutes,
                 order: config.order,
-                source: source,
+                includeWallpapers: include,
+                includeMedia: config.includeMedia,
+                displayConfigs: config.displayConfigs
+            )
+        )
+    }
+
+    func updateIncludeMedia(_ include: Bool) {
+        schedulerService.updateConfig(
+            SchedulerConfig(
+                isEnabled: config.isEnabled,
+                intervalMinutes: config.intervalMinutes,
+                order: config.order,
+                includeWallpapers: config.includeWallpapers,
+                includeMedia: include,
                 displayConfigs: config.displayConfigs
             )
         )
@@ -96,8 +107,12 @@ class WallpaperSchedulerViewModel: ObservableObject {
         schedulerService.updateDisplayOrder(order, for: screenID)
     }
 
-    func updateDisplaySource(_ source: WallpaperSource, for screenID: String) {
-        schedulerService.updateDisplaySource(source, for: screenID)
+    func updateDisplayIncludeWallpapers(_ include: Bool, for screenID: String) {
+        schedulerService.updateDisplayIncludeWallpapers(include, for: screenID)
+    }
+
+    func updateDisplayIncludeMedia(_ include: Bool, for screenID: String) {
+        schedulerService.updateDisplayIncludeMedia(include, for: screenID)
     }
 
     // MARK: - Computed Properties
@@ -108,6 +123,7 @@ class WallpaperSchedulerViewModel: ObservableObject {
 
     func intervalLabel(for minutes: Int) -> String {
         switch minutes {
+        case 1: return "1 min"
         case 5: return "5 min"
         case 15: return "15 min"
         case 30: return "30 min"
@@ -122,14 +138,6 @@ class WallpaperSchedulerViewModel: ObservableObject {
         switch config.order {
         case .sequential: return "Sequential"
         case .random: return "Random"
-        }
-    }
-
-    var sourceLabel: String {
-        switch config.source {
-        case .online: return "Online"
-        case .local: return "Local"
-        case .favorites: return "Favorites"
         }
     }
 }

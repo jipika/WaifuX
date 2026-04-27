@@ -32,6 +32,9 @@ struct AnimeDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
+
+    // MARK: - 键盘快捷键
+    @State private var keyboardMonitor: Any?
     
     // 背景图状态管理
     @State private var backdropURL: String?
@@ -162,14 +165,47 @@ struct AnimeDetailSheet: View {
                 isVisible = true
             }
             loadBackdrop()
+            setupKeyboardMonitor()
 
             // 加载规则数据
             Task {
                 await viewModel.loadData()
             }
         }
+        .onDisappear {
+            isVisible = false
+            removeKeyboardMonitor()
+        }
     }
     
+    // MARK: - 键盘快捷键
+
+    private func setupKeyboardMonitor() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            guard NSApp.isActive, let window = event.window, window.isKeyWindow else { return event }
+            guard self.isVisible else { return event }
+            switch event.keyCode {
+            case 49: // 空格键：显示/隐藏信息区域
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
+                    self.isHeroContentHidden.toggle()
+                }
+                return nil
+            case 53: // ESC：返回
+                self.isPresented = false
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyboardMonitor = nil
+        }
+    }
+
     // MARK: - 加载横屏背景
     private func loadBackdrop() {
         isLoadingBackdrop = true

@@ -97,6 +97,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "reset.all": "RESET ALL",
         "apply.filters": "APPLY FILTERS",
         "cancel": "CANCEL",
+        "create": "CREATE",
+        "folder.name.placeholder": "Enter folder name",
         // Sections
         "featured": "FEATURED",
         "view.all": "VIEW ALL",
@@ -305,6 +307,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.insufficientMemory.bake": "Not enough free memory to bake video offline. Close other apps and try again. Using real-time rendering for now.",
         "sceneBake.error.afterBakeFailureHint": "Tap \"Set as wallpaper\" again to use real-time rendering, or fix the issue above and retry baking.",
         "sceneBake.error.outputMissing": "The baked MP4 was not found or is too small. Wait a moment and try setting wallpaper again.",
+        "loopProcessing": "Generating seamless loop video…",
         "sceneBake.error.concurrent": "Another bake is already running. Wait for it to finish before starting a new one.",
         "sceneBake.success": "Offline bake finished — wallpaper applied.",
         "sceneBake.wallClockHint": "This scene uses system wall-clock time (e.g. os.time/os.date). Offline bake is disabled — use real-time rendering so clocks and dates stay correct.",
@@ -622,6 +625,16 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Editor
         "edit": "EDIT",
         "done": "DONE",
+        "new.folder": "NEW FOLDER",
+        "folder.name": "Folder Name",
+        "create.folder": "CREATE FOLDER",
+        "folder.empty": "EMPTY FOLDER",
+        "folder.items.count": "%d ITEMS",
+        "folder.items.count.one": "1 ITEM",
+        "move.to.folder": "MOVE TO FOLDER",
+        "remove.from.folder": "REMOVE FROM FOLDER",
+        "disband.folder": "DISBAND FOLDER",
+        "back.to.root": "BACK",
         "import": "IMPORT",
         "import.workshop": "IMPORT WORKSHOP",
         "open.in.finder": "OPEN IN FINDER",
@@ -914,6 +927,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.selectMatch": "Select Match",
         "player.options": "Options",
         "player.clickToSelect": "Click to Select",
+        "player.backToSearch": "Back",
         "player.episodeNumber": "Episode",
         "player.episodes": "Episodes",
         "player.episodeList": "Episodes",
@@ -1041,7 +1055,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "4k.category.space": "Space",
         "4k.category.sports": "Sports",
         "4k.category.technology": "Technology",
-        "4k.category.world": "World"
+        "4k.category.world": "World",
+        "deleteConfirmMessage": "Are you sure you want to delete this downloaded file?",
+        "contentTypes": "CONTENT TYPES",
+        "wallpapers": "Wallpapers",
+        "media": "Media"
     ],
     .chinese: [
         // Launch at Login
@@ -1060,6 +1078,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "reset.all": "重置全部",
         "apply.filters": "应用筛选",
         "cancel": "取消",
+        "create": "创建",
+        "folder.name.placeholder": "输入文件夹名称",
         // Sections
         "featured": "精选",
         "view.all": "查看全部",
@@ -1268,6 +1288,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.insufficientMemory.bake": "可用内存不足，无法安全进行视频烘焙。请关闭其他应用后重试；本次将先使用实时渲染。",
         "sceneBake.error.afterBakeFailureHint": "可再次点击「设为壁纸」改用实时渲染，或根据上方说明排除问题后重试烘焙。",
         "sceneBake.error.outputMissing": "未找到烘焙生成的视频，或文件过小尚未写完。请稍候再点「设为壁纸」。",
+        "loopProcessing": "正在生成循环过渡视频…",
         "sceneBake.error.concurrent": "已有烘焙任务在进行，请等待结束后再试。",
         "sceneBake.success": "离线烘焙已完成，壁纸已应用。",
         "sceneBake.wallClockHint": "该场景依赖系统墙钟时间（如 os.time / os.date）。已禁用离线预渲染，请使用实时渲染以保持时钟/日期正确。",
@@ -1585,6 +1606,16 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Editor
         "edit": "编辑",
         "done": "完成",
+        "new.folder": "新建文件夹",
+        "folder.name": "文件夹名称",
+        "create.folder": "创建文件夹",
+        "folder.empty": "空文件夹",
+        "folder.items.count": "%d 个项目",
+        "folder.items.count.one": "1 个项目",
+        "move.to.folder": "移动到文件夹",
+        "remove.from.folder": "从文件夹移除",
+        "disband.folder": "解散文件夹",
+        "back.to.root": "返回",
         "import": "导入",
         "import.workshop": "导入 Workshop",
         "open.in.finder": "打开文件夹",
@@ -1877,6 +1908,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.selectMatch": "选择匹配项",
         "player.options": "个选项",
         "player.clickToSelect": "点击选择",
+        "player.backToSearch": "返回上一级",
         "player.episodeNumber": "第",
         "player.episodes": "选集",
         "player.episodeList": "选集",
@@ -2004,7 +2036,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "4k.category.space": "太空",
         "4k.category.sports": "运动",
         "4k.category.technology": "科技",
-        "4k.category.world": "世界"
+        "4k.category.world": "世界",
+        "deleteConfirmMessage": "确认删除这个已下载的文件吗？",
+        "contentTypes": "内容类型",
+        "wallpapers": "壁纸",
+        "media": "媒体"
     ],
     .japanese: [
         // Launch at Login
@@ -2023,6 +2059,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "reset.all": "すべてリセット",
         "apply.filters": "フィルターを適用",
         "cancel": "キャンセル",
+        "create": "作成",
+        "folder.name.placeholder": "フォルダ名を入力",
         // Sections
         "featured": "注目",
         "view.all": "すべて表示",
@@ -2232,6 +2270,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.insufficientMemory.bake": "オフラインベイクに十分な空きメモリがありません。他のアプリを閉じてから再試行してください。今回はリアルタイム描画を使います。",
         "sceneBake.error.afterBakeFailureHint": "「壁紙に設定」をもう一度タップしてリアルタイム描画に切り替えるか、上記を解消してからベイクを再試行してください。",
         "sceneBake.error.outputMissing": "ベイク済み動画が見つからないか、書き込み未完了の可能性があります。少し待ってからもう一度お試しください。",
+        "loopProcessing": "シームレスループ動画を生成中…",
         "sceneBake.error.concurrent": "別のベイクが実行中です。終了してから再度お試しください。",
         "sceneBake.success": "ベイク完了 — 壁紙を適用しました。",
         "sceneBake.wallClockHint": "このシーンはシステム時刻（os.time/os.date など）に依存しています。オフラインベイクは無効です。時計を正しく保つにはリアルタイム描画を使ってください。",
@@ -2548,6 +2587,16 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Editor
         "edit": "編集",
         "done": "完了",
+        "new.folder": "新規フォルダ",
+        "folder.name": "フォルダ名",
+        "create.folder": "フォルダを作成",
+        "folder.empty": "空のフォルダ",
+        "folder.items.count": "%d 項目",
+        "folder.items.count.one": "1 項目",
+        "move.to.folder": "フォルダに移動",
+        "remove.from.folder": "フォルダから削除",
+        "disband.folder": "フォルダを解散",
+        "back.to.root": "戻る",
         "import": "インポート",
         "import.workshop": "ワークショップをインポート",
         "open.in.finder": "Finder で開く",
@@ -2967,7 +3016,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "4k.category.space": "宇宙",
         "4k.category.sports": "スポーツ",
         "4k.category.technology": "テクノロジー",
-        "4k.category.world": "世界"
+        "4k.category.world": "世界",
+        "deleteConfirmMessage": "このダウンロード済みファイルを削除してもよろしいですか？",
+        "contentTypes": "コンテンツタイプ",
+        "wallpapers": "壁紙",
+        "media": "メディア"
     ]
 ]
 

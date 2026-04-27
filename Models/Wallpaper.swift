@@ -320,14 +320,16 @@ struct WallpaperFavoriteRecord: Identifiable, Codable, Hashable {
     let id: String
     var wallpaper: Wallpaper
     var metadata: SyncMetadata
+    var folderID: String?
 
-    init(wallpaper: Wallpaper, metadata: SyncMetadata? = nil) {
+    init(wallpaper: Wallpaper, metadata: SyncMetadata? = nil, folderID: String? = nil) {
         self.id = wallpaper.id
         self.wallpaper = wallpaper
         self.metadata = metadata ?? SyncMetadata(
             recordID: "wallpaper.favorite.\(wallpaper.id)",
             entityType: "wallpaper.favorite"
         )
+        self.folderID = folderID
     }
 
     var isActive: Bool {
@@ -335,7 +337,7 @@ struct WallpaperFavoriteRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, wallpaper, metadata
+        case id, wallpaper, metadata, folderID
     }
 
     init(from decoder: Decoder) throws {
@@ -344,6 +346,7 @@ struct WallpaperFavoriteRecord: Identifiable, Codable, Hashable {
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? wallpaper.id
         metadata = try container.decodeIfPresent(SyncMetadata.self, forKey: .metadata)
             ?? SyncMetadata(recordID: "wallpaper.favorite.\(wallpaper.id)", entityType: "wallpaper.favorite")
+        folderID = try container.decodeIfPresent(String.self, forKey: .folderID)
     }
 }
 
@@ -353,12 +356,17 @@ struct WallpaperDownloadRecord: Identifiable, Codable, Hashable {
     var localFilePath: String
     var downloadedAt: Date
     var metadata: SyncMetadata
+    var folderID: String?
+    /// 是否已完成 crossfade 循环预处理（替换原始文件后标记为 true）
+    var isLooped: Bool?
 
     init(
         wallpaper: Wallpaper,
         localFilePath: String,
         downloadedAt: Date = .now,
-        metadata: SyncMetadata? = nil
+        metadata: SyncMetadata? = nil,
+        folderID: String? = nil,
+        isLooped: Bool? = nil
     ) {
         self.id = wallpaper.id
         self.wallpaper = wallpaper
@@ -368,6 +376,8 @@ struct WallpaperDownloadRecord: Identifiable, Codable, Hashable {
             recordID: "wallpaper.download.\(wallpaper.id)",
             entityType: "wallpaper.download"
         )
+        self.folderID = folderID
+        self.isLooped = isLooped
     }
 
     var localFileURL: URL {
@@ -379,7 +389,7 @@ struct WallpaperDownloadRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, wallpaper, localFilePath, downloadedAt, metadata
+        case id, wallpaper, localFilePath, downloadedAt, metadata, folderID, isLooped
     }
 
     init(from decoder: Decoder) throws {
@@ -390,5 +400,7 @@ struct WallpaperDownloadRecord: Identifiable, Codable, Hashable {
         downloadedAt = try container.decodeIfPresent(Date.self, forKey: .downloadedAt) ?? .now
         metadata = try container.decodeIfPresent(SyncMetadata.self, forKey: .metadata)
             ?? SyncMetadata(recordID: "wallpaper.download.\(wallpaper.id)", entityType: "wallpaper.download")
+        folderID = try container.decodeIfPresent(String.self, forKey: .folderID)
+        isLooped = try container.decodeIfPresent(Bool.self, forKey: .isLooped)
     }
 }

@@ -209,18 +209,17 @@ class WorkshopSourceManager: ObservableObject {
     /// 返回 SteamCMD 可执行文件路径
     /// 首次调用时会将 Bundle 中的 steamcmd 复制到 Application Support，
     /// 避免重新编译 App 时覆盖掉 steamcmd 的自更新文件和登录缓存。
-    /// 若已存在副本但缺少 steamcmd-pty（版本更新），增量补充缺失文件，保留 config/ 登录缓存。
+    /// 若已存在副本但缺少 Bundle 中新增的文件（版本更新），增量补充缺失文件，保留 config/ 登录缓存。
     func steamCMDExecutableURL() -> URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
         let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
         let script = destDir.appendingPathComponent("steamcmd.sh")
-        let ptyBin = destDir.appendingPathComponent("steamcmd-pty")
+        let steamBin = destDir.appendingPathComponent("steamcmd")
 
-        // 如果 Application Support 中已有完整副本（包含 steamcmd-pty），直接返回
-        if FileManager.default.fileExists(atPath: script.path),
-           FileManager.default.fileExists(atPath: ptyBin.path) {
+        // 如果 Application Support 中已有可工作的副本，直接返回
+        if Self.isValidSteamCMDInstallation(at: destDir) {
             return script
         }
 
@@ -233,7 +232,7 @@ class WorkshopSourceManager: ObservableObject {
             try FileManager.default.createDirectory(at: destDir.deletingLastPathComponent(), withIntermediateDirectories: true)
 
             if FileManager.default.fileExists(atPath: destDir.path) {
-                // 目录已存在但缺少 steamcmd-pty（版本更新），增量补充缺失文件，保留 config/ 登录缓存
+                // 目录已存在但缺少关键文件（版本更新），增量补充缺失文件，保留 config/ 登录缓存
                 let bundleContents = try FileManager.default.contentsOfDirectory(at: bundleSteamcmdDir, includingPropertiesForKeys: nil)
                 for item in bundleContents {
                     let destItem = destDir.appendingPathComponent(item.lastPathComponent)
@@ -253,6 +252,33 @@ class WorkshopSourceManager: ObservableObject {
         }
 
         return script
+    }
+
+    /// 验证 Application Support 中的 steamcmd 是否是可工作的安装
+    /// 新版 SteamCMD 不再生成 steamcmd-pty，因此只检查核心必需文件的可执行性
+    private static func isValidSteamCMDInstallation(at dir: URL) -> Bool {
+        let fm = FileManager.default
+        let script = dir.appendingPathComponent("steamcmd.sh")
+        let steamBin = dir.appendingPathComponent("steamcmd")
+
+        // 核心文件必须存在且可执行
+        guard fm.fileExists(atPath: script.path),
+              fm.isExecutableFile(atPath: script.path),
+              fm.fileExists(atPath: steamBin.path),
+              fm.isExecutableFile(atPath: steamBin.path) else {
+            return false
+        }
+
+        // 关键 dylib 必须存在
+        let requiredDylibs = ["steamclient.dylib", "libtier0_s.dylib", "libvstdlib_s.dylib"]
+        for name in requiredDylibs {
+            let dylibPath = dir.appendingPathComponent(name)
+            if !fm.fileExists(atPath: dylibPath.path) {
+                return false
+            }
+        }
+
+        return true
     }
 
     // MARK: - Workshop 内容级别（与壁纸列表 Purity 对齐）

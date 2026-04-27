@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BCC303506F9D43ECAC1ED693 /* KSPlayer in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = AA6CE3EC7D844D51BE29669D /* KSPlayer */;
+		};
+
 		00789A48296E22343CD1FCC3 /* AnimeDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE340CF2EF289C67261EF588 /* AnimeDetailSheet.swift */; };
 		16eec53216d94c9c886d25c73a2f4fec /* SleepPreventer.swift in Sources */ = {isa = PBXBuildFile; fileRef = b703dfbefead413aa263415011009fbe /* SleepPreventer.swift */; };
 		028A4B3B320CDBDEED28EC8C /* AnimeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F408E90D551BB1E10440130C /* AnimeViewModel.swift */; };
@@ -148,6 +153,10 @@
 		FE7918F419971479AD53A5DD /* ExploreComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88C460F3033A25320800D73A /* ExploreComponents.swift */; };
 		0EDDE8FF6FC5415181213F16 /* DynamicWallpaperAutoPauseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC4C4D6EC654A0EB3211BBE /* DynamicWallpaperAutoPauseManager.swift */; };
 		14A06B647CD54E2FA8ED5C1A /* DesktopWallpaperSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D498C549E67B4369BD6C3B3D /* DesktopWallpaperSyncManager.swift */; };
+		24B83F80D1E5473DB0132264 /* LibraryFolderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54F080F375664123966AD837 /* LibraryFolderStore.swift */; };
+		BB3E98F4AC1B494B98DDE595 /* LibraryFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 475A90C97B0B44888C2762DE /* LibraryFolder.swift */; };
+		2F651147877140D6B56B5742 /* FolderStackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8AB8FDAB1A34CD0B3A2E60F /* FolderStackView.swift */; };
+		98E4813E23894933BD4984EB /* NewFolderSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42253AEA173246E3989B3053 /* NewFolderSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -291,6 +300,10 @@
 		FEEBA93D7CC0380CF9E1693B /* MediaDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaDetailSheet.swift; sourceTree = "<group>"; };
 		BEC4C4D6EC654A0EB3211BBE /* DynamicWallpaperAutoPauseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicWallpaperAutoPauseManager.swift; sourceTree = "<group>"; };
 		D498C549E67B4369BD6C3B3D /* DesktopWallpaperSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopWallpaperSyncManager.swift; sourceTree = "<group>"; };
+		54F080F375664123966AD837 /* LibraryFolderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFolderStore.swift; sourceTree = "<group>"; };
+		475A90C97B0B44888C2762DE /* LibraryFolder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFolder.swift; sourceTree = "<group>"; };
+		F8AB8FDAB1A34CD0B3A2E60F /* FolderStackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderStackView.swift; sourceTree = "<group>"; };
+		42253AEA173246E3989B3053 /* NewFolderSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewFolderSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -301,6 +314,7 @@
 				AB787E2492A95DF53571E00E /* SwiftSoup in Frameworks */,
 				8A3EDCCC779455C4CF13E9C3 /* Kanna in Frameworks */,
 				1E47B8BBAE80FE7CCAD4381E /* Kingfisher in Frameworks */,
+				BCC303506F9D43ECAC1ED693 /* KSPlayer in Frameworks */,
 				9a600ff1922342b0a73310b44a9cfb8c /* IOKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -385,7 +399,9 @@
 				05A871A337E95110230471F2 /* TopNavigationBar.swift */,
 				66A188D7112EBBB2816A7B76 /* WallpaperPlayerBar.swift */,
 				0D226CE6582E7150D0EAA0E6 /* SourceSwitchTooltip.swift */,
-			);
+							F8AB8FDAB1A34CD0B3A2E60F /* FolderStackView.swift */,
+				42253AEA173246E3989B3053 /* NewFolderSheet.swift */,
+);
 			path = Components;
 			sourceTree = "<group>";
 		};
@@ -439,7 +455,8 @@
 				D498C549E67B4369BD6C3B3D /* DesktopWallpaperSyncManager.swift */,
 				BEC4C4D6EC654A0EB3211BBE /* DynamicWallpaperAutoPauseManager.swift */,
 				b703dfbefead413aa263415011009fbe /* SleepPreventer.swift */,
-			);
+							54F080F375664123966AD837 /* LibraryFolderStore.swift */,
+);
 			path = Services;
 			sourceTree = "<group>";
 		};
@@ -521,7 +538,8 @@
 				EE9C4EA78094E6C55FED9BED /* WallpaperCategory.swift */,
 				D8ECA0848CB3A1A6723C3F6F /* WallpaperOption.swift */,
 				C0D92ABFFA9F5E05DBC00891 /* WorkshopWallpaper.swift */,
-			);
+							475A90C97B0B44888C2762DE /* LibraryFolder.swift */,
+);
 			path = Models;
 			sourceTree = "<group>";
 		};
@@ -535,6 +553,7 @@
 				BF6D7513FD89DF02986D7B89 /* Sources */,
 				B24F8C7D3052659AE1256B1A /* Resources */,
 				6E67BB0461444CCD9FB48619 /* Frameworks */,
+				16765BA591744640B46A4CDF /* Fix FFmpeg Framework Bundles */,
 			);
 			buildRules = (
 			);
@@ -543,6 +562,7 @@
 			name = WaifuX;
 			packageProductDependencies = (
 				36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */,
+				AA6CE3EC7D844D51BE29669D /* KSPlayer */,
 				BC19BD96AF0FA90F9C5AEE8E /* Kanna */,
 				7406A65B952FEC95D5076CEB /* Kingfisher */,
 			);
@@ -575,6 +595,7 @@
 			mainGroup = D6FF1EC5D41114D6C78BF662;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				6C15B8942EFE4DBE95543DFC /* XCRemoteSwiftPackageReference "KSPlayer" */,
 				9239DF85518FA3A295D3B163 /* XCRemoteSwiftPackageReference "Kanna" */,
 				CF90BE4B76A6DBEDBB2A4DFF /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
@@ -601,6 +622,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		16765BA591744640B46A4CDF /* Fix FFmpeg Framework Bundles */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Fix FFmpeg Framework Bundles";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Fix shallow framework bundles for macOS validation\nFRAMEWORKS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks\"\nif [ -d \"$FRAMEWORKS_DIR\" ]; then\n  for framework in \"$FRAMEWORKS_DIR\"/*.framework; do\n    if [ -f \"$framework/Info.plist\" ]; then\n      mkdir -p \"$framework/Versions/Current/Resources\"\n      if [ ! -f \"$framework/Versions/Current/Resources/Info.plist\" ]; then\n        mv \"$framework/Info.plist\" \"$framework/Versions/Current/Resources/Info.plist\"\n        ln -s \"Versions/Current/Resources/Info.plist\" \"$framework/Info.plist\"\n      fi\n      execName=$(basename \"$framework\" .framework)\n      if [ -f \"$framework/$execName\" ] && [ ! -L \"$framework/$execName\" ]; then\n        mv \"$framework/$execName\" \"$framework/Versions/Current/$execName\"\n        ln -s \"Versions/Current/$execName\" \"$framework/$execName\"\n      fi\n    fi\n  done\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		BF6D7513FD89DF02986D7B89 /* Sources */ = {
@@ -740,7 +783,11 @@
 				6FB21D7AA05B18390DFAF54E /* SourceSwitchTooltip.swift in Sources */,
 				0EDDE8FF6FC5415181213F16 /* DynamicWallpaperAutoPauseManager.swift in Sources */,
 				14A06B647CD54E2FA8ED5C1A /* DesktopWallpaperSyncManager.swift in Sources */,
-				16eec53216d94c9c886d25c73a2f4fec /* SleepPreventer.swift in Sources */,
+				16eec53216d94c9c886d25c73a2f4fec /* SleepPreventer.swift in Sources */,				24B83F80D1E5473DB0132264 /* LibraryFolderStore.swift in Sources */,
+				BB3E98F4AC1B494B98DDE595 /* LibraryFolder.swift in Sources */,
+				2F651147877140D6B56B5742 /* FolderStackView.swift in Sources */,
+				98E4813E23894933BD4984EB /* NewFolderSheet.swift in Sources */,
+
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -915,6 +962,8 @@
 				PRODUCT_NAME = WaifuX;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
+				VALIDATE_WORKSPACE = NO;
+				VALIDATE_PRODUCT = NO;
 			};
 			name = Debug;
 		};
@@ -942,6 +991,15 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+	6C15B8942EFE4DBE95543DFC /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.3.0;
+			};
+		};
+
 		9239DF85518FA3A295D3B163 /* XCRemoteSwiftPackageReference "Kanna" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/tid-kijyun/Kanna.git";
@@ -969,6 +1027,12 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+	AA6CE3EC7D844D51BE29669D /* KSPlayer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6C15B8942EFE4DBE95543DFC /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			productName = KSPlayer;
+		};
+
 		36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */;

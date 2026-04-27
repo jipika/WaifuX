@@ -894,7 +894,13 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         for screen in screensToRebuild {
-            try createWindow(for: screen, videoURL: currentVideoURL, muted: isMuted)
+            Task { @MainActor in
+                do {
+                    try await createWindow(for: screen, videoURL: currentVideoURL, muted: isMuted)
+                } catch {
+                    NSLog("[VideoWallpaperManager] Failed to create window: \(error.localizedDescription)")
+                }
+            }
         }
 
         NSLog("[VideoWallpaperManager] Windows rebuilt successfully")
@@ -916,7 +922,98 @@ final class VideoWallpaperManager: ObservableObject {
         return matched
     }
 
-    private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) throws {
+    /// 创建一个带首尾 crossfade dissolve 的 composition player item。
+    /// 播放结束后需 seek 到 fadeDuration 处继续循环，实现首尾帧无缝衔接。
+    private func makeLoopingCompositionItem(videoURL: URL, fadeDuration: Double = 1.0) async throws -> AVPlayerItem {
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+
+        guard let videoTrack = videoTracks.first else {
+            throw NSError(domain: "VideoWallpaper", code: 2001, userInfo: [NSLocalizedDescriptionKey: "No video track"])
+        }
+
+        let fadeCMTime = CMTime(seconds: fadeDuration, preferredTimescale: 600)
+
+        // 视频太短无法做 crossfade，直接返回原始 item
+        guard duration > CMTimeMultiply(fadeCMTime, multiplier: 2) else {
+            return AVPlayerItem(url: videoURL)
+        }
+
+        let composition = AVMutableComposition()
+
+        // Track 1: 原视频完整播放（底层）
+        guard let track1 = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw NSError(domain: "VideoWallpaper", code: 2002)
+        }
+        try track1.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+
+        // Track 2: 原视频开头 fadeDuration 秒，插入到 (duration - fadeDuration) 处（上层）
+        guard let track2 = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw NSError(domain: "VideoWallpaper", code: 2003)
+        }
+        let track2InsertTime = duration - fadeCMTime
+        try track2.insertTimeRange(CMTimeRange(start: .zero, duration: fadeCMTime), of: videoTrack, at: track2InsertTime)
+
+        // 音频：简单复制完整音频（不做 crossfade，壁纸通常静音）
+        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+           let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? compositionAudioTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+        }
+
+        // Video composition: opacity ramps
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
+        let frameRate = nominalFrameRate > 0 ? nominalFrameRate : 30
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = naturalSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+        let layerInstruction1 = AVMutableVideoCompositionLayerInstruction(assetTrack: track1)
+        let layerInstruction2 = AVMutableVideoCompositionLayerInstruction(assetTrack: track2)
+
+        let fadeStart = duration - fadeCMTime
+
+        // Track 1: 在结尾 fadeDuration 区间从 opacity 1→0（淡出）
+        layerInstruction1.setOpacityRamp(
+            fromStartOpacity: 1.0,
+            toEndOpacity: 0.0,
+            timeRange: CMTimeRange(start: fadeStart, duration: fadeCMTime)
+        )
+
+        // Track 2: 在结尾 fadeDuration 区间从 opacity 0→1（淡入）
+        layerInstruction2.setOpacityRamp(
+            fromStartOpacity: 0.0,
+            toEndOpacity: 1.0,
+            timeRange: CMTimeRange(start: fadeStart, duration: fadeCMTime)
+        )
+
+        // layerInstructions 从下到上
+        instruction.layerInstructions = [layerInstruction1, layerInstruction2]
+        videoComposition.instructions = [instruction]
+
+        let playerItem = AVPlayerItem(asset: composition)
+        playerItem.videoComposition = videoComposition
+        return playerItem
+    }
+
+    @objc private func handleCompositionLoop(_ notification: Notification) {
+        guard let item = notification.object as? AVPlayerItem else { return }
+        let fadeDuration = CMTime(seconds: 1.0, preferredTimescale: 600)
+        for (_, player) in players {
+            if player.currentItem === item {
+                player.seek(to: fadeDuration, toleranceBefore: .zero, toleranceAfter: .zero)
+                player.play()
+                return
+            }
+        }
+    }
+
+    private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) async throws {
         let screenID = screen.wallpaperScreenIdentifier
         let frame = screen.frame
 
@@ -940,37 +1037,29 @@ final class VideoWallpaperManager: ObservableObject {
         containerView.autoresizingMask = [.width, .height]
         window.contentView = containerView
 
+        // 统一使用 AVPlayerLooper 简单循环播放原视频，不做 crossfade composition。
+        // 复杂的首尾帧 crossfade 渲染逻辑已保留在 makeLoopingCompositionItem / exportLoopedVideo 中，
+        // 待后续增加用户手动开关后再决定是否恢复调用。
         let playerItem = AVPlayerItem(url: videoURL)
-        
+
         // 配置高质量播放设置
-        // 1. 不限制码率，使用视频原始码率
         playerItem.preferredPeakBitRate = 0
-        
-        // 2. 启用 HDR 元数据（如果视频支持）
         if #available(macOS 10.15, *) {
             playerItem.appliesPerFrameHDRDisplayMetadata = true
         }
-        
-        // 3. 设置首选渲染尺寸为屏幕尺寸，避免降采样
         let screenSize = screen.frame.size
         playerItem.preferredMaximumResolution = CGSize(
             width: screenSize.width * screen.backingScaleFactor,
             height: screenSize.height * screen.backingScaleFactor
         )
-        
-        // 4. 循环播放优化：不等待视频合成渲染，避免 looper 切换副本时卡顿
         if #available(macOS 10.15, *) {
             playerItem.seekingWaitsForVideoCompositionRendering = false
         }
-        
-        // 5. 保持音画同步（即使壁纸静音也设置，避免有音轨时画面撕裂）
         playerItem.audioTimePitchAlgorithm = .timeDomain
-        
-        // 6. 本地文件尽可能预缓冲，减少循环切换时的 IO 等待
         if videoURL.isFileURL {
             playerItem.preferredForwardBufferDuration = Double.greatestFiniteMagnitude
         }
-        
+
         let queuePlayer = AVQueuePlayer()
         queuePlayer.actionAtItemEnd = .none
         let screenVolume = volume(for: screen)
@@ -981,6 +1070,9 @@ final class VideoWallpaperManager: ObservableObject {
         queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
 
         let looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
+        self.loopers[screenID] = looper
+        queuePlayer.insert(playerItem, after: nil)
+
         containerView.playerLayer.player = queuePlayer
         containerView.playerLayer.videoGravity = .resizeAspectFill
 
@@ -989,7 +1081,6 @@ final class VideoWallpaperManager: ObservableObject {
 
         windows[screenID] = window
         players[screenID] = queuePlayer
-        self.loopers[screenID] = looper
     }
 
     private func teardownAllWindows() {
@@ -1222,5 +1313,171 @@ extension NSWorkspace {
             userInfo: nil,
             deliverImmediately: true
         )
+    }
+}
+
+
+// MARK: - Video Loop Preprocessing Service
+
+/// 负责视频壁纸的离线 crossfade 预处理。
+/// 只在用户**设置壁纸时**触发，不会在下载时自动处理，也不做批量扫描。
+/// 处理完成后直接替换原始文件，并在对应下载记录中标记 `isLooped = true`。
+@MainActor
+final class VideoLoopPreprocessingService: ObservableObject {
+    static let shared = VideoLoopPreprocessingService()
+
+    @Published private(set) var isProcessing = false
+    @Published private(set) var currentProcessingFile: String?
+
+    private let tempDirectory: URL
+
+    private init() {
+        tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WaifuXLoopExport", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    }
+
+    // MARK: - Query
+
+    /// 通过下载记录判断指定路径的视频是否已做 loop 预处理
+    func isProcessed(_ fileURL: URL) -> Bool {
+        let path = fileURL.path
+        if let record = WallpaperLibraryService.shared.downloadRecord(forLocalFilePath: path) {
+            return record.isLooped == true
+        }
+        if let record = MediaLibraryService.shared.downloadRecord(forLocalFilePath: path) {
+            return record.isLooped == true
+        }
+        return false
+    }
+
+    // MARK: - Preprocessing
+
+    /// 异步预处理指定视频。如果已处理则直接返回。
+    /// 处理完成后替换原始文件，并更新对应下载记录的 `isLooped` 标记。
+    func preprocessIfNeeded(_ originalURL: URL) async {
+        guard !isProcessed(originalURL) else { return }
+
+        isProcessing = true
+        currentProcessingFile = originalURL.lastPathComponent
+        defer {
+            isProcessing = false
+            currentProcessingFile = nil
+        }
+
+        do {
+            let tempURL = tempDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+            try await exportLoopedVideo(from: originalURL, to: tempURL)
+
+            guard FileManager.default.fileExists(atPath: tempURL.path) else {
+                throw NSError(domain: "VideoLoop", code: 6, userInfo: [NSLocalizedDescriptionKey: "Exported file not found"])
+            }
+
+            // 原子替换原始文件
+            _ = try FileManager.default.replaceItemAt(originalURL, withItemAt: tempURL)
+
+            // 更新下载记录标记
+            let path = originalURL.path
+            WallpaperLibraryService.shared.markAsLooped(localFilePath: path)
+            MediaLibraryService.shared.markAsLooped(localFilePath: path)
+
+            print("[VideoLoopPreprocessing] Replaced original with looped version: \(originalURL.lastPathComponent)")
+        } catch {
+            print("[VideoLoopPreprocessing] Failed for \(originalURL.lastPathComponent): \(error)")
+            let tempURL = tempDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+    }
+
+    // MARK: - Export
+
+    private func exportLoopedVideo(from originalURL: URL, to outputURL: URL) async throws {
+        let asset = AVURLAsset(url: originalURL)
+        let duration = try await asset.load(.duration)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+
+        guard let videoTrack = videoTracks.first else {
+            throw NSError(domain: "VideoLoop", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track"])
+        }
+
+        let fadeDuration: Double = 1.0
+        let fadeCMTime = CMTime(seconds: fadeDuration, preferredTimescale: 600)
+
+        // 视频太短不做 crossfade，直接复制原文件
+        guard duration > CMTimeMultiply(fadeCMTime, multiplier: 2) else {
+            try? FileManager.default.copyItem(at: originalURL, to: outputURL)
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let composition = AVMutableComposition()
+
+        // Track 1: 原视频完整播放（底层）
+        guard let track1 = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw NSError(domain: "VideoLoop", code: 2)
+        }
+        try track1.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+
+        // Track 2: 原视频开头 fadeDuration 秒，插入到 (duration - fadeDuration) 处（上层）
+        guard let track2 = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw NSError(domain: "VideoLoop", code: 3)
+        }
+        let track2InsertTime = duration - fadeCMTime
+        try track2.insertTimeRange(CMTimeRange(start: .zero, duration: fadeCMTime), of: videoTrack, at: track2InsertTime)
+
+        // 音频：简单复制完整音频
+        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+           let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? compositionAudioTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+        }
+
+        // Video composition: opacity ramps
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
+        let frameRate = nominalFrameRate > 0 ? nominalFrameRate : 30
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = naturalSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+        let layerInstruction1 = AVMutableVideoCompositionLayerInstruction(assetTrack: track1)
+        let layerInstruction2 = AVMutableVideoCompositionLayerInstruction(assetTrack: track2)
+
+        let fadeStart = duration - fadeCMTime
+        layerInstruction1.setOpacityRamp(
+            fromStartOpacity: 1.0, toEndOpacity: 0.0,
+            timeRange: CMTimeRange(start: fadeStart, duration: fadeCMTime)
+        )
+        layerInstruction2.setOpacityRamp(
+            fromStartOpacity: 0.0, toEndOpacity: 1.0,
+            timeRange: CMTimeRange(start: fadeStart, duration: fadeCMTime)
+        )
+
+        instruction.layerInstructions = [layerInstruction1, layerInstruction2]
+        videoComposition.instructions = [instruction]
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            throw NSError(domain: "VideoLoop", code: 4, userInfo: [NSLocalizedDescriptionKey: "Export session creation failed"])
+        }
+
+        exportSession.videoComposition = videoComposition
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.shouldOptimizeForNetworkUse = false
+
+        await exportSession.export()
+
+        if let error = exportSession.error {
+            throw error
+        }
+        guard exportSession.status == .completed else {
+            throw NSError(domain: "VideoLoop", code: 5, userInfo: [NSLocalizedDescriptionKey: "Export status: \(exportSession.status.rawValue)"])
+        }
     }
 }
