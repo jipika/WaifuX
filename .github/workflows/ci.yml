@@ -120,33 +120,35 @@ jobs:
           echo ""
 
           # 诊断：列出所有框架根目录内容，定位 unsealed contents
-          echo "=== Frameworks 根目录诊断 ==="
+          echo "=== Frameworks 诊断 ==="
           for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
             echo "--- $(basename "$fw") ---"
             ls -la "$fw" || true
+            echo "--- $(basename "$fw") 完整树 ---"
+            find "$fw" | sort || true
+            echo "--- $(basename "$fw") Info.plist ---"
+            plutil -p "$fw/Info.plist" 2>/dev/null || true
           done
           echo "=============================="
 
-          # 保险修复：再次确保 FFmpeg 框架结构正确（exportArchive 可能还原结构）
-          echo "Applying framework fix before signing..."
+          # 保险修复：清理会导致 codesign 失败的目录/文件，保持扁平结构
+          echo "Applying framework cleanup before signing..."
           for framework in build/WaifuX.app/Contents/Frameworks/*.framework; do
-            if [ -f "$framework/Info.plist" ] && [ ! -L "$framework/Info.plist" ]; then
-              mkdir -p "$framework/Versions/Current/Resources"
-              mv "$framework/Info.plist" "$framework/Versions/Current/Resources/Info.plist"
-              ln -sf "Versions/Current/Resources/Info.plist" "$framework/Info.plist"
+            if [ -d "$framework/Headers" ]; then
+              rm -rf "$framework/Headers"
             fi
-            if [ -d "$framework/Headers" ] && [ ! -L "$framework/Headers" ]; then
-              mv "$framework/Headers" "$framework/Versions/Current/Headers"
-              ln -sf "Versions/Current/Headers" "$framework/Headers"
+            if [ -d "$framework/Modules" ]; then
+              rm -rf "$framework/Modules"
             fi
-            if [ -d "$framework/Modules" ] && [ ! -L "$framework/Modules" ]; then
-              mv "$framework/Modules" "$framework/Versions/Current/Modules"
-              ln -sf "Versions/Current/Modules" "$framework/Modules"
+            if [ -d "$framework/PrivateHeaders" ]; then
+              rm -rf "$framework/PrivateHeaders"
             fi
             if [ -d "$framework/_CodeSignature" ]; then
               rm -rf "$framework/_CodeSignature"
             fi
             find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
+            # 修复只读权限（Xcode copy 可能保留只读）
+            chmod -R u+w "$framework" 2>/dev/null || true
           done
 
           # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
@@ -158,6 +160,16 @@ jobs:
               else
                 echo "  ⚠️ Failed to sign: $f"
               fi
+            fi
+          done
+
+          # 签名所有 framework bundle（先单独签名，避免 --deep 的结构验证问题）
+          echo "Signing frameworks..."
+          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$fw" 2>&1; then
+              echo "  ✅ $(basename "$fw")"
+            else
+              echo "  ⚠️ Failed to sign framework: $fw"
             fi
           done
 

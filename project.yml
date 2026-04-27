@@ -86,35 +86,20 @@ targets:
           FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
           if [ -d "$FRAMEWORKS_DIR" ]; then
             for framework in "$FRAMEWORKS_DIR"/*.framework; do
-              if [ -f "$framework/Info.plist" ]; then
-                mkdir -p "$framework/Versions/Current/Resources"
-                if [ ! -f "$framework/Versions/Current/Resources/Info.plist" ]; then
-                  mv "$framework/Info.plist" "$framework/Versions/Current/Resources/Info.plist"
-                  ln -sf "Versions/Current/Resources/Info.plist" "$framework/Info.plist"
-                fi
-                if [ ! -L "$framework/Resources" ]; then
-                  ln -sf "Versions/Current/Resources" "$framework/Resources"
-                fi
-                execName=$(basename "$framework" .framework)
-                if [ -f "$framework/$execName" ] && [ ! -L "$framework/$execName" ]; then
-                  mv "$framework/$execName" "$framework/Versions/Current/$execName"
-                  ln -sf "Versions/Current/$execName" "$framework/$execName"
-                fi
-                if [ -d "$framework/Headers" ] && [ ! -L "$framework/Headers" ]; then
-                  mv "$framework/Headers" "$framework/Versions/Current/Headers"
-                  ln -sf "Versions/Current/Headers" "$framework/Headers"
-                fi
-                if [ -d "$framework/Modules" ] && [ ! -L "$framework/Modules" ]; then
-                  mv "$framework/Modules" "$framework/Versions/Current/Modules"
-                  ln -sf "Versions/Current/Modules" "$framework/Modules"
-                fi
-                # 移除旧的 CodeSignature（结构已被修改，旧签名失效，且根目录不能有 _CodeSignature）
-                if [ -d "$framework/_CodeSignature" ]; then
-                  rm -rf "$framework/_CodeSignature"
-                fi
-                # 清理 .DS_Store
-                find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
+              # 清理会导致 codesign 失败的目录/文件，保持原始扁平结构
+              if [ -d "$framework/Headers" ]; then
+                rm -rf "$framework/Headers"
               fi
+              if [ -d "$framework/Modules" ]; then
+                rm -rf "$framework/Modules"
+              fi
+              if [ -d "$framework/PrivateHeaders" ]; then
+                rm -rf "$framework/PrivateHeaders"
+              fi
+              if [ -d "$framework/_CodeSignature" ]; then
+                rm -rf "$framework/_CodeSignature"
+              fi
+              find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
             done
           fi
     entitlements:
