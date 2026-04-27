@@ -182,6 +182,22 @@ jobs:
             fi
           done
 
+          # 诊断：显示所有 framework 修复后的结构
+          echo "=== Framework structures after fix ==="
+          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            echo "--- $(basename "$fw") ---"
+            ls -la "$fw" 2>/dev/null || true
+            echo "Versions/"
+            ls -la "$fw/Versions/" 2>/dev/null || true
+            echo "Versions/A/"
+            ls -la "$fw/Versions/A/" 2>/dev/null || true
+            if [ -d "$fw/Versions/A/Resources" ]; then
+              echo "Versions/A/Resources/"
+              ls -la "$fw/Versions/A/Resources/" 2>/dev/null || true
+            fi
+            echo ""
+          done
+
           # 签名 Resources 里的 dylib/可执行文件（--deep 不递归处理 Resources）
           echo "Signing embedded binaries..."
           find build/WaifuX.app -type f | while read -r f; do
