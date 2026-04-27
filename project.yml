@@ -100,6 +100,14 @@ targets:
                   mv "$framework/$execName" "$framework/Versions/Current/$execName"
                   ln -sf "Versions/Current/$execName" "$framework/$execName"
                 fi
+                if [ -d "$framework/Headers" ] && [ ! -L "$framework/Headers" ]; then
+                  mv "$framework/Headers" "$framework/Versions/Current/Headers"
+                  ln -sf "Versions/Current/Headers" "$framework/Headers"
+                fi
+                if [ -d "$framework/Modules" ] && [ ! -L "$framework/Modules" ]; then
+                  mv "$framework/Modules" "$framework/Versions/Current/Modules"
+                  ln -sf "Versions/Current/Modules" "$framework/Modules"
+                fi
               fi
             done
           fi
