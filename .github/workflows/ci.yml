@@ -123,18 +123,31 @@ jobs:
           echo "Fixing frameworks..."
           for framework in build/WaifuX.app/Contents/Frameworks/*.framework; do
             if [ -d "$framework" ]; then
-              # 删除多余目录
+              # 删除多余目录和文件
               rm -rf "$framework/Headers" "$framework/Modules" \
                      "$framework/PrivateHeaders" "$framework/_CodeSignature"
               find "$framework" -name ".DS_Store" -delete 2>/dev/null || true
               chmod -R u+w "$framework" 2>/dev/null || true
+              # 删除扩展属性（残留属性会导致 unsealed contents）
+              xattr -cr "$framework" 2>/dev/null || true
 
-              # 关键修复：codesign 要求 Versions/Current 必须是 symlink 指向 A
+              # 确保 Versions/Current 是 symlink 指向 A
               if [ -d "$framework/Versions/Current" ] && [ ! -L "$framework/Versions/Current" ]; then
                 echo "  🔧 $(basename "$framework"): converting Versions/Current to symlink"
                 mv "$framework/Versions/Current" "$framework/Versions/A"
                 ln -sf A "$framework/Versions/Current"
               fi
+            fi
+          done
+
+          # 诊断：确认 Versions 结构
+          echo "=== Framework Versions 诊断 ==="
+          for fw in build/WaifuX.app/Contents/Frameworks/*.framework; do
+            echo "$(basename "$fw"):"
+            ls -la "$fw/Versions/" 2>/dev/null || true
+            if [ -L "$fw/Versions/Current" ]; then
+              echo "  Current -> $(readlink "$fw/Versions/Current")"
+              ls -la "$fw/Versions/Current/" 2>/dev/null | head -5 || true
             fi
           done
 
