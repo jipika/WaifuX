@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import KSPlayer
 import Combine
 
 // MARK: - 源搜索状态 (简化版，与 Kazumi 对齐)
@@ -77,7 +76,7 @@ class AnimeDetailViewModel: ObservableObject {
 
     // MARK: - 播放器状态
     @Published var currentPlayURL: URL?
-    @Published var ksOptions: KSOptions = KSOptions()
+    @Published var currentStartTime: TimeInterval = 0
     @Published var isPlaying: Bool = false
     @Published var currentEpisode: AnimeDetail.AnimeEpisodeItem?
     @Published var videoSources: [VideoSource] = []
@@ -776,6 +775,7 @@ class AnimeDetailViewModel: ObservableObject {
     private func cleanupPlayerOnly() {
         PlaybackProgressCache.shared.stopTracking()
         currentPlayURL = nil
+        currentStartTime = 0
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠
@@ -790,28 +790,25 @@ class AnimeDetailViewModel: ObservableObject {
         danmakuList = []
     }
 
-    /// 使用 KSPlayer 设置播放器
+    /// 使用原生播放器设置播放器
     private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
         let rule = sourceResults[sourceIndex].rule
         
         // 使用 cleanupPlayerOnly 而不是 stopPlayback，避免 currentEpisode 被清空
         cleanupPlayerOnly()
         
-        // 创建 KSPlayer 选项
-        let options = KSOptions()
-        options.hardwareDecode = true
-        
-        // 恢复播放进度（通过 startPlayTime）
+        // 恢复播放进度
+        var startTime: TimeInterval = 0
         if let savedProgress = PlaybackProgressCache.shared.getProgress(
             sourceId: rule.id,
             episodeId: episode.id
         ), savedProgress.currentTime > 10,
            savedProgress.currentTime < (savedProgress.duration > 0 ? savedProgress.duration * 0.9 : Double.infinity) {
-            options.startPlayTime = savedProgress.currentTime
+            startTime = savedProgress.currentTime
             print("[AnimeDetailViewModel] 将从 \(savedProgress.formattedProgress) 恢复播放")
         }
         
-        self.ksOptions = options
+        self.currentStartTime = startTime
         self.currentPlayURL = url
         self.isPlaying = true
         self.isBuffering = true
@@ -832,38 +829,38 @@ class AnimeDetailViewModel: ObservableObject {
         loadDanmaku(for: episode)
     }
 
-    // MARK: - KSPlayer 状态回调（由 View 调用）
+    // MARK: - 播放器状态回调（由 View 调用）
 
-    func handlePlayerState(_ state: KSPlayerState) {
+    func handlePlayerState(_ state: PlaybackState) {
         switch state {
         case .readyToPlay:
-            print("[AnimeDetailViewModel] ✅ KSPlayer 状态: readyToPlay")
+            print("[AnimeDetailViewModel] ✅ 播放器状态: readyToPlay")
             isBuffering = false
+            videoError = nil // 播放成功时清除之前的错误提示
             SleepPreventer.shared.startPreventingSleep()
         case .buffering:
-            print("[AnimeDetailViewModel] ⏳ KSPlayer 状态: buffering")
+            print("[AnimeDetailViewModel] ⏳ 播放器状态: buffering")
             isBuffering = true
         case .paused:
-            print("[AnimeDetailViewModel] ⏸️ KSPlayer 状态: paused")
+            print("[AnimeDetailViewModel] ⏸️ 播放器状态: paused")
             isPlaying = false
             SleepPreventer.shared.stopPreventingSleep()
-        case .error:
-            print("[AnimeDetailViewModel] ❌ KSPlayer 状态: error")
+        case .failed(let msg):
+            print("[AnimeDetailViewModel] ❌ 播放器状态: error - \(msg)")
             videoError = "视频播放失败，请尝试切换其他视频源"
             isBuffering = false
             isPlaying = false
             SleepPreventer.shared.stopPreventingSleep()
-        case .initialized:
+        case .idle, .loading:
             break
-        case .preparing:
-            isBuffering = true
-        case .bufferFinished:
+        case .playing:
+            isPlaying = true
             isBuffering = false
-        case .playedToTheEnd:
+            videoError = nil // 播放成功时清除之前的错误提示
+            SleepPreventer.shared.startPreventingSleep()
+        case .finished:
             isPlaying = false
             SleepPreventer.shared.stopPreventingSleep()
-        @unknown default:
-            break
         }
     }
 
@@ -871,12 +868,8 @@ class AnimeDetailViewModel: ObservableObject {
         self.currentTime = currentTime
         self.totalDuration = totalTime
         let progress = totalTime > 0 ? currentTime / totalTime : 0
-        self.currentProgress = progress
         
-        // 更新进度缓存
-        PlaybackProgressCache.shared.updateProgress(currentTime: currentTime, duration: totalTime)
-        
-        // 同时更新 AnimeProgressStore（每5%或每30秒保存一次）
+        // 同时更新 AnimeProgressStore（每5%或完成时保存一次）
         if let currentEpisode = currentEpisode {
             let shouldSave = Int(progress * 20) > Int(self.currentProgress * 20) || progress >= 0.95
             if shouldSave {
@@ -891,6 +884,11 @@ class AnimeDetailViewModel: ObservableObject {
                 )
             }
         }
+        
+        self.currentProgress = progress
+        
+        // 更新进度缓存
+        PlaybackProgressCache.shared.updateProgress(currentTime: currentTime, duration: totalTime)
     }
 
     func handlePlayerFinish(error: Error?) {
@@ -924,6 +922,7 @@ class AnimeDetailViewModel: ObservableObject {
         
         PlaybackProgressCache.shared.stopTracking()
         currentPlayURL = nil
+        currentStartTime = 0
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠

@@ -96,7 +96,6 @@
 		9A8CE8280B51BC6555B59123 /* LoopingVideoBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E219ECEDE83361BD4C64D581 /* LoopingVideoBackgroundView.swift */; };
 		9B0765A8A225A37AD48E1EAA /* DanmakuService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34F29B38A70207EFD930D71B /* DanmakuService.swift */; };
 		9C99399DC5F0B0993EC7DE28 /* MyLibraryContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D600194FF5989B7E11C9E138 /* MyLibraryContentView.swift */; };
-		9FA8D3A6E830E708050ED3CB /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = 150CC6F6B4CD933E3FC647F4 /* KSPlayer */; };
 		A3232F4E31A4E64C6122925B /* WallpaperCategory.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE9C4EA78094E6C55FED9BED /* WallpaperCategory.swift */; };
 		A3A3F41F4607385F40147A9C /* DownloadError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92360DB7D61D511F712E8CC6 /* DownloadError.swift */; };
 		A4949135BDE7BF0CFC36DD08 /* LiquidGlassControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87E68CA08ADF011DD5C78A6B /* LiquidGlassControls.swift */; };
@@ -121,6 +120,7 @@
 		C9C1BC2D8BED4E561C43534F /* PerformanceModifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 639B58C37F12765D59215CD2 /* PerformanceModifiers.swift */; };
 		CAEFCE3DBC5C878CA3763FD2 /* WallpaperPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66A188D7112EBBB2816A7B76 /* WallpaperPlayerBar.swift */; };
 		CC45C217C242AAC9FCC2AFDF /* UserLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A66BCEAF473D8316F61C67BB /* UserLibrary.swift */; };
+		CE10A5CA697B738B1BE66B59 /* NativeVideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */; };
 		CFF0E5F948CE5A59467B7434 /* AnimeVideoEnhancer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21A497376B55EB752EAE4F33 /* AnimeVideoEnhancer.swift */; };
 		D079F55C53B04DBD501EB28A /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA8936453E84AC7E20735973 /* SearchView.swift */; };
 		D273450E2C0CA247F58DA1C2 /* MediaExploreContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229CDC52631E90C60BE30BEE /* MediaExploreContentView.swift */; };
@@ -222,6 +222,7 @@
 		6E21497D08143F54A2DF436D /* DownloadTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadTaskService.swift; sourceTree = "<group>"; };
 		6F629610BC109E8BDF65491C /* SceneOfflineBakeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneOfflineBakeService.swift; sourceTree = "<group>"; };
 		6F9A4187FED2F381BE10E4B5 /* WorkshopSourceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopSourceManager.swift; sourceTree = "<group>"; };
+		71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVideoPlayer.swift; sourceTree = "<group>"; };
 		767CAF3A84C77A18E7DED0F0 /* AnimeWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeWindowManager.swift; sourceTree = "<group>"; };
 		7CF588585C18394E4A84E4F3 /* RuleLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleLoader.swift; sourceTree = "<group>"; };
 		822E5DF14D2A26714C4EA62C /* TabSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabSearchField.swift; sourceTree = "<group>"; };
@@ -308,7 +309,6 @@
 				AB787E2492A95DF53571E00E /* SwiftSoup in Frameworks */,
 				8A3EDCCC779455C4CF13E9C3 /* Kanna in Frameworks */,
 				1E47B8BBAE80FE7CCAD4381E /* Kingfisher in Frameworks */,
-				9FA8D3A6E830E708050ED3CB /* KSPlayer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -387,6 +387,7 @@
 				BF7159115AD04C7CD5E4B85F /* LiquidGlassWallpaperCard.swift */,
 				B5C2E52744F0A62D47BE4B8B /* LoadingAnimations.swift */,
 				E219ECEDE83361BD4C64D581 /* LoopingVideoBackgroundView.swift */,
+				71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */,
 				296C346479FC6B9A4434C1AD /* NewFolderSheet.swift */,
 				639B58C37F12765D59215CD2 /* PerformanceModifiers.swift */,
 				90887F64FCF64F7B1EDB9EDD /* SearchOverlay.swift */,
@@ -546,7 +547,6 @@
 				BF6D7513FD89DF02986D7B89 /* Sources */,
 				B24F8C7D3052659AE1256B1A /* Resources */,
 				6E67BB0461444CCD9FB48619 /* Frameworks */,
-				E1E7F22BB3E8EE47A6BAC01B /* Fix FFmpeg Framework Bundles */,
 			);
 			buildRules = (
 			);
@@ -557,7 +557,6 @@
 				36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */,
 				BC19BD96AF0FA90F9C5AEE8E /* Kanna */,
 				7406A65B952FEC95D5076CEB /* Kingfisher */,
-				150CC6F6B4CD933E3FC647F4 /* KSPlayer */,
 			);
 			productName = WaifuX;
 			productReference = F8F5AC79AF32CB408870B4A5 /* WaifuX.app */;
@@ -588,7 +587,6 @@
 			mainGroup = D6FF1EC5D41114D6C78BF662;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				1E1349ACB975A922E435C26C /* XCRemoteSwiftPackageReference "KSPlayer" */,
 				9239DF85518FA3A295D3B163 /* XCRemoteSwiftPackageReference "Kanna" */,
 				CF90BE4B76A6DBEDBB2A4DFF /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
@@ -614,28 +612,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		E1E7F22BB3E8EE47A6BAC01B /* Fix FFmpeg Framework Bundles */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Fix FFmpeg Framework Bundles";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "FRAMEWORKS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks\"\nif [ -d \"$FRAMEWORKS_DIR\" ]; then\n  for framework in \"$FRAMEWORKS_DIR\"/*.framework; do\n    if [ -f \"$framework/Info.plist\" ]; then\n      mkdir -p \"$framework/Versions/Current/Resources\"\n      if [ ! -f \"$framework/Versions/Current/Resources/Info.plist\" ]; then\n        mv \"$framework/Info.plist\" \"$framework/Versions/Current/Resources/Info.plist\"\n        ln -sf \"Versions/Current/Resources/Info.plist\" \"$framework/Info.plist\"\n      fi\n      if [ ! -L \"$framework/Resources\" ]; then\n        ln -sf \"Versions/Current/Resources\" \"$framework/Resources\"\n      fi\n      execName=$(basename \"$framework\" .framework)\n      if [ -f \"$framework/$execName\" ] && [ ! -L \"$framework/$execName\" ]; then\n        mv \"$framework/$execName\" \"$framework/Versions/Current/$execName\"\n        ln -sf \"Versions/Current/$execName\" \"$framework/$execName\"\n      fi\n      if [ -d \"$framework/Headers\" ] && [ ! -L \"$framework/Headers\" ]; then\n        mv \"$framework/Headers\" \"$framework/Versions/Current/Headers\"\n        ln -sf \"Versions/Current/Headers\" \"$framework/Headers\"\n      fi\n      if [ -d \"$framework/Modules\" ] && [ ! -L \"$framework/Modules\" ]; then\n        mv \"$framework/Modules\" \"$framework/Versions/Current/Modules\"\n        ln -sf \"Versions/Current/Modules\" \"$framework/Modules\"\n      fi\n      if [ -d \"$framework/_CodeSignature\" ]; then\n        rm -rf \"$framework/_CodeSignature\"\n      fi\n      find \"$framework\" -name \".DS_Store\" -delete 2>/dev/null || true\n    fi\n  done\nfi\n";
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		BF6D7513FD89DF02986D7B89 /* Sources */ = {
@@ -725,6 +701,7 @@
 				35A192A50C85395F3510784E /* MediaService.swift in Sources */,
 				2B3DCCC8D22D833DC8EA4E02 /* MessagesContentView.swift in Sources */,
 				9C99399DC5F0B0993EC7DE28 /* MyLibraryContentView.swift in Sources */,
+				CE10A5CA697B738B1BE66B59 /* NativeVideoPlayer.swift in Sources */,
 				A51C716521AB526405F4B510 /* NetworkError.swift in Sources */,
 				F71F39A8F22032C0EF88CE16 /* NetworkMonitor.swift in Sources */,
 				C1E663481A90097506194277 /* NetworkService.swift in Sources */,
@@ -975,14 +952,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		1E1349ACB975A922E435C26C /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.3.0;
-			};
-		};
 		9239DF85518FA3A295D3B163 /* XCRemoteSwiftPackageReference "Kanna" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/tid-kijyun/Kanna.git";
@@ -1010,11 +979,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		150CC6F6B4CD933E3FC647F4 /* KSPlayer */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 1E1349ACB975A922E435C26C /* XCRemoteSwiftPackageReference "KSPlayer" */;
-			productName = KSPlayer;
-		};
 		36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */;

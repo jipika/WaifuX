@@ -50,52 +50,82 @@ struct AnimeExploreView: View {
                 )
                 .ignoresSafeArea()
 
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        heroSection
-                        categorySection
-                        hotTagsSection
-                        contentSection(config: gridConfig)
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 80)
-                    .padding(.bottom, 48)
-                    .frame(width: geometry.size.width, alignment: .center)
-                    .background(scrollTrackingOverlay)
-                    .background(contentSizeTrackingOverlay)
-                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                }
-                .coordinateSpace(name: "exploreScroll")
-                .iosSmoothScroll()
-                .scrollDisabled(!isVisible)
-                .modifier(ScrollLoadMoreModifier(
-                    scrollOffset: $scrollOffset,
-                    contentSize: $contentSize,
-                    containerSize: $containerSize,
-                    earlyThreshold: 800,
-                    bottomThreshold: 100,
-                    onLoadMore: triggerLoadMore,
-                    checkLoadMore: checkLoadMore
-                ))
-                .disabled(isInitialLoading)
-
-                VStack {
-                    Spacer()
-                    if loadMoreFailed {
-                        BottomLoadingFailedCard {
-                            loadMoreFailed = false
-                            Task { await viewModel.loadMore() }
+                ScrollViewReader { proxy in
+                    ZStack {
+                        ScrollView(.vertical, showsIndicators: false) {
+                            LazyVStack(alignment: .leading, spacing: 16) {
+                                heroSection
+                                categorySection
+                                hotTagsSection
+                                contentSection(config: gridConfig)
+                            }
+                            .padding(.horizontal, 28)
+                            .padding(.top, 80)
+                            .padding(.bottom, 48)
+                            .frame(width: geometry.size.width, alignment: .center)
+                            .background(scrollTrackingOverlay)
+                            .background(contentSizeTrackingOverlay)
+                            .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                            .id("exploreTop")
                         }
-                        .padding(.bottom, 60)
-                    } else if isLoadingMore || (viewModel.isLoading && !visibleAnimeItems.isEmpty) {
-                        BottomLoadingCard(isLoading: true)
-                            .padding(.bottom, 60)
-                    } else if !isLoadingMore && !viewModel.hasMorePages && !visibleAnimeItems.isEmpty {
-                        BottomNoMoreCard()
-                            .padding(.bottom, 60)
+                        .coordinateSpace(name: "exploreScroll")
+                        .iosSmoothScroll()
+                        .scrollDisabled(!isVisible)
+                        .modifier(ScrollLoadMoreModifier(
+                            scrollOffset: $scrollOffset,
+                            contentSize: $contentSize,
+                            containerSize: $containerSize,
+                            earlyThreshold: 800,
+                            bottomThreshold: 100,
+                            onLoadMore: triggerLoadMore,
+                            checkLoadMore: checkLoadMore
+                        ))
+                        .disabled(isInitialLoading)
+
+                        VStack {
+                            Spacer()
+                            if loadMoreFailed {
+                                BottomLoadingFailedCard {
+                                    loadMoreFailed = false
+                                    Task { await viewModel.loadMore() }
+                                }
+                                .padding(.bottom, 60)
+                            } else if isLoadingMore || (viewModel.isLoading && !visibleAnimeItems.isEmpty) {
+                                BottomLoadingCard(isLoading: true)
+                                    .padding(.bottom, 60)
+                            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleAnimeItems.isEmpty {
+                                BottomNoMoreCard()
+                                    .padding(.bottom, 60)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+
+                        // 浮动返回顶部按钮（独立定位，不与其他内容耦合）
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                if scrollOffset > 300 {
+                                    Button {
+                                        withAnimation {
+                                            proxy.scrollTo("exploreTop", anchor: .top)
+                                        }
+                                    } label: {
+                                        Image(systemName: "arrow.up")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.92))
+                                            .frame(width: 44, height: 44)
+                                            .liquidGlassSurface(.regular, in: Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.trailing, 28)
+                                    .padding(.bottom, 100)
+                                    .transition(.scale.combined(with: .opacity))
+                                }
+                            }
+                        }
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
         }
         .onAppear {

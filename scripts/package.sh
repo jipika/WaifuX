@@ -82,21 +82,6 @@ fi
 
 echo "✅ 导出成功"
 
-# 修复 framework 结构：codesign 要求 Versions/Current 必须是 symlink 指向 A
-echo "🔧 修复 framework 版本化结构..."
-for fw in "$BUILD_DIR/$APP_NAME/Contents/Frameworks/"*.framework; do
-  if [ -d "$fw" ]; then
-    # 删除多余目录
-    rm -rf "$fw/Headers" "$fw/Modules" "$fw/PrivateHeaders" "$fw/_CodeSignature"
-    # 转换 Versions/Current 实体目录为 symlink
-    if [ -d "$fw/Versions/Current" ] && [ ! -L "$fw/Versions/Current" ]; then
-      echo "  $(basename "$fw"): Versions/Current → Versions/A + symlink"
-      mv "$fw/Versions/Current" "$fw/Versions/A"
-      ln -sf A "$fw/Versions/Current"
-    fi
-  fi
-done
-
 # 仅在非签名流程时创建 DMG（签名流程由 CI 另行处理）
 if [ "${WAIFUX_SKIP_DMG:-}" != "1" ]; then
   echo "💿 正在创建 DMG..."

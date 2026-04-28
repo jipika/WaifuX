@@ -124,6 +124,7 @@ struct WindowControlButton: View {
                 .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.14)) {
                 isHovered = hovering

@@ -113,10 +113,11 @@ public struct ScrollLoadMoreModifier: ViewModifier {
                         isLoadingTriggered = false
                     }
                 }
-                // 滚动中暂停列表 GIF 动画（仅更新 ExploreListGIFPlaybackState，不驱动背景）
+                // 滚动中暂停列表 GIF 动画（同时更新 scrollOffset 供返回顶部按钮使用）
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     geometry.contentOffset.y
-                } action: { _, _ in
+                } action: { _, newValue in
+                    scrollOffset = newValue
                     ExploreListGIFPlaybackState.shared.noteListScrolling()
                 }
         } else {

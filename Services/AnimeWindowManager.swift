@@ -1,13 +1,12 @@
 import Foundation
 import SwiftUI
 import AppKit
-import KSPlayer
 
 // MARK: - 播放器窗口控制器
 class AnimePlayerWindowController: NSWindowController {
     let animeId: String
     let viewModel: AnimeDetailViewModel
-    let coordinator = KSVideoPlayer.Coordinator()
+    let player = NativeVideoPlayer()
     
     nonisolated(unsafe) private var keyMonitor: Any?
     nonisolated(unsafe) private var mouseMonitor: Any?
@@ -41,10 +40,6 @@ class AnimePlayerWindowController: NSWindowController {
         window.tabbingMode = .disallowed
         window.center()
         
-        // 设置内容视图（传入 coordinator）
-        let contentView = AnimePlayerWindow(viewModel: viewModel, coordinator: coordinator)
-        window.contentView = NSHostingView(rootView: contentView)
-        
         super.init(window: window)
         
         // 设置代理
@@ -58,8 +53,13 @@ class AnimePlayerWindowController: NSWindowController {
             object: nil
         )
         
-        // 设置键盘和鼠标事件监听
+        // 设置键盘和鼠标事件监听（在 NSHostingView 创建之前注册，
+        // 确保优先级高于 SwiftUI 内部事件 monitor，避免空格键被 SwiftUI 焦点系统拦截）
         setupEventMonitors()
+        
+        // 设置内容视图（传入 player）
+        let contentView = AnimePlayerWindow(viewModel: viewModel, player: player)
+        window.contentView = NSHostingView(rootView: contentView)
     }
     
     @objc private func handleToggleFullScreen() {
@@ -69,27 +69,27 @@ class AnimePlayerWindowController: NSWindowController {
     private func setupEventMonitors() {
         // 键盘事件监听
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, event.window === self.window else { return event }
+            guard let self, event.window?.isKeyWindow == true else { return event }
             
             switch event.keyCode {
             case 49: // 空格键
                 self.togglePlayPause()
                 return nil
             case 123: // 左方向键
-                self.coordinator.skip(interval: -15)
+                self.player.skip(by: -15)
                 return nil
             case 124: // 右方向键
-                self.coordinator.skip(interval: 15)
+                self.player.skip(by: 15)
                 return nil
             case 126: // 上方向键
-                let newVolume = min(self.coordinator.playbackVolume + 0.1, 1.0)
-                self.coordinator.playbackVolume = newVolume
-                self.coordinator.isMuted = false
+                let newVolume = min(self.player.playbackVolume + 0.1, 1.0)
+                self.player.playbackVolume = newVolume
+                self.player.isMuted = false
                 return nil
             case 125: // 下方向键
-                let newVolume = max(self.coordinator.playbackVolume - 0.1, 0.0)
-                self.coordinator.playbackVolume = newVolume
-                if newVolume == 0 { self.coordinator.isMuted = true }
+                let newVolume = max(self.player.playbackVolume - 0.1, 0.0)
+                self.player.playbackVolume = newVolume
+                if newVolume == 0 { self.player.isMuted = true }
                 return nil
             case 53: // ESC 键
                 if self.window?.styleMask.contains(.fullScreen) == true {
@@ -104,7 +104,7 @@ class AnimePlayerWindowController: NSWindowController {
         
         // 鼠标移动监听（用于控制栏显隐）
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .mouseEntered, .leftMouseDragged]) { [weak self] event in
-            guard let self, event.window === self.window else { return event }
+            guard let self, event.window?.isKeyWindow == true else { return event }
             self.showControlBar()
             return event
         }
@@ -122,10 +122,10 @@ class AnimePlayerWindowController: NSWindowController {
     }
     
     private func togglePlayPause() {
-        if coordinator.state.isPlaying {
-            coordinator.playerLayer?.pause()
+        if player.state.isPlaying {
+            player.pause()
         } else {
-            coordinator.playerLayer?.play()
+            player.play()
         }
     }
     

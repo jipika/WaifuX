@@ -1,5 +1,5 @@
 import SwiftUI
-import KSPlayer
+import AVFoundation
 import QuartzCore
 import Kingfisher
 
@@ -15,7 +15,7 @@ extension Notification.Name {
 // MARK: - AnimePlayerWindow - 现代视频播放器风格
 struct AnimePlayerWindow: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
-    let coordinator: KSVideoPlayer.Coordinator
+    let player: NativeVideoPlayer
     @State private var selectedTab: Tab = .sources
     @State private var isHovering = false
     @State private var isRightPanelCollapsed = false
@@ -47,7 +47,7 @@ struct AnimePlayerWindow: View {
                         viewModel: viewModel,
                         isRightPanelCollapsed: $isRightPanelCollapsed,
                         isPlayerFullscreen: $isPlayerFullscreen,
-                        coordinator: coordinator
+                        player: player
                     )
                         .frame(
                             width: isPlayerFullscreen || isRightPanelCollapsed ? geometry.size.width : geometry.size.width * 0.7,
@@ -81,6 +81,9 @@ struct AnimePlayerWindow: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .playerDidExitFullScreen)) { _ in
             isPlayerFullscreen = false
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isRightPanelCollapsed = false
+            }
         }
         // 验证码 WebView Sheet
         .sheet(item: $viewModel.captchaVerificationSession) { session in
@@ -139,7 +142,7 @@ private struct PlayerSection: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @Binding var isRightPanelCollapsed: Bool
     @Binding var isPlayerFullscreen: Bool
-    @StateObject var coordinator: KSVideoPlayer.Coordinator
+    @StateObject var player: NativeVideoPlayer
     @State private var isControlBarVisible = true
     @State private var hideControlBarWorkItem: DispatchWorkItem?
     
@@ -155,31 +158,34 @@ private struct PlayerSection: View {
                 if viewModel.isLoadingVideo {
                     LoadingScreen()
                 } else if let url = viewModel.currentPlayURL {
-                    KSVideoPlayer(coordinator: coordinator, url: url, options: viewModel.ksOptions)
-                        .onStateChanged { playerLayer, state in
-                            // 避免在 SwiftUI 视图更新过程中发布状态变更
-                            DispatchQueue.main.async {
-                                viewModel.handlePlayerState(state)
-                                // 播放时阻止系统休眠
-                                if state == .readyToPlay {
-                                    SleepPreventer.shared.startPreventingSleep()
+                    NativeVideoPlayerView(player: player)
+                        .onAppear {
+                            player.load(url: url, startTime: viewModel.currentStartTime)
+                        }
+                        .onChange(of: viewModel.currentPlayURL) { oldValue, newURL in
+                            if let newURL {
+                                player.load(url: newURL, startTime: viewModel.currentStartTime)
+                                // 新视频开始播放时自动展开侧边栏
+                                if oldValue == nil && isRightPanelCollapsed {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                        isRightPanelCollapsed = false
+                                    }
                                 }
                             }
                         }
-                        .onBufferChanged { bufferedCount, consumeTime in
-                            DispatchQueue.main.async {
-                                print("[AnimePlayerWindow] 缓冲 #\(bufferedCount), 耗时 \(consumeTime)s")
+                        .onReceive(player.$state) { state in
+                            viewModel.handlePlayerState(state)
+                            if state == .readyToPlay {
+                                SleepPreventer.shared.startPreventingSleep()
                             }
                         }
-                        .onFinish { playerLayer, error in
-                            DispatchQueue.main.async {
-                                viewModel.handlePlayerFinish(error: error)
-                            }
+                        .onReceive(player.$currentTime) { newTime in
+                            viewModel.handlePlayerProgress(currentTime: newTime, totalTime: player.totalDuration)
                         }
                         .overlay(alignment: .bottom) {
                             // 播放控制栏直接覆盖在播放器上，确保在 AppKit 视图之上渲染
                             PlayerControlOverlay(
-                                coordinator: coordinator,
+                                player: player,
                                 isPlayerFullscreen: isPlayerFullscreen,
                                 isControlBarVisible: isControlBarVisible
                             )
@@ -196,7 +202,7 @@ private struct PlayerSection: View {
                 }
             }
 
-            // 缓冲中覆盖层（KSPlayer 自带，但保留我们自己的风格化覆盖层）
+            // 缓冲中覆盖层
             if viewModel.isBuffering {
                 BufferingOverlay()
             }
@@ -270,18 +276,17 @@ private struct PlayerSection: View {
     }
 }
 
-// MARK: - 播放控制栏覆盖层（为 KSVideoPlayer 提供控制 UI）
+// MARK: - 播放控制栏覆盖层
 private struct PlayerControlOverlay: View {
-    @ObservedObject var coordinator: KSVideoPlayer.Coordinator
-    @ObservedObject var timemodel: ControllerTimeModel
+    @ObservedObject var player: NativeVideoPlayer
     let isPlayerFullscreen: Bool
     let isControlBarVisible: Bool
-    @State private var currentState: KSPlayerState = .initialized
+    @State private var currentState: PlaybackState = .idle
     @State private var sliderValue: Float = 0
+    @State private var wasPlayingBeforeDrag = false
     
-    init(coordinator: KSVideoPlayer.Coordinator, isPlayerFullscreen: Bool, isControlBarVisible: Bool) {
-        self.coordinator = coordinator
-        self.timemodel = coordinator.timemodel
+    init(player: NativeVideoPlayer, isPlayerFullscreen: Bool, isControlBarVisible: Bool) {
+        self.player = player
         self.isPlayerFullscreen = isPlayerFullscreen
         self.isControlBarVisible = isControlBarVisible
     }
@@ -292,27 +297,30 @@ private struct PlayerControlOverlay: View {
             VStack(spacing: 12) {
                 // 时间滑块
                 HStack(spacing: 12) {
-                    Text(formatPlayerTime(timemodel.currentTime))
+                    Text(formatPlayerTime(player.currentTime))
                         .font(.system(size: 12, weight: .medium).monospacedDigit())
                         .foregroundStyle(.white.opacity(0.9))
                     
                     Slider(
                         value: $sliderValue,
-                        in: 0...Float(max(timemodel.totalTime, 1))
+                        in: 0...Float(max(player.totalDuration, 1))
                     ) { editing in
                         if editing {
-                            coordinator.playerLayer?.pause()
+                            wasPlayingBeforeDrag = player.state.isPlaying
+                            player.pause()
                         } else {
-                            coordinator.seek(time: TimeInterval(sliderValue))
+                            let shouldResume = wasPlayingBeforeDrag
+                            player.seek(to: TimeInterval(sliderValue), resumeAfterSeek: shouldResume)
                         }
                     }
                     .tint(.white)
                     .frame(height: 16)
-                    .onChange(of: timemodel.currentTime) { _, newValue in
+                    .focusable(false)
+                    .onChange(of: player.currentTime) { _, newValue in
                         sliderValue = Float(newValue)
                     }
                     
-                    Text(formatPlayerTime(timemodel.totalTime))
+                    Text(formatPlayerTime(player.totalDuration))
                         .font(.system(size: 12, weight: .medium).monospacedDigit())
                         .foregroundStyle(.white.opacity(0.9))
                 }
@@ -322,7 +330,7 @@ private struct PlayerControlOverlay: View {
                     // 播放控制绝对居中
                     HStack(spacing: 20) {
                         Button {
-                            coordinator.skip(interval: -15)
+                            player.skip(by: -15)
                         } label: {
                             Image(systemName: "gobackward.15")
                                 .font(.system(size: 18, weight: .semibold))
@@ -340,7 +348,7 @@ private struct PlayerControlOverlay: View {
                         .focusable(false)
                         
                         Button {
-                            coordinator.skip(interval: 15)
+                            player.skip(by: 15)
                         } label: {
                             Image(systemName: "goforward.15")
                                 .font(.system(size: 18, weight: .semibold))
@@ -355,13 +363,13 @@ private struct PlayerControlOverlay: View {
                         HStack(spacing: 16) {
                             // 倍速菜单
                             Menu {
-                                Button("0.5x") { coordinator.playbackRate = 0.5 }
-                                Button("1.0x") { coordinator.playbackRate = 1.0 }
-                                Button("1.25x") { coordinator.playbackRate = 1.25 }
-                                Button("1.5x") { coordinator.playbackRate = 1.5 }
-                                Button("2.0x") { coordinator.playbackRate = 2.0 }
+                                Button("0.5x") { player.playbackRate = 0.5 }
+                                Button("1.0x") { player.playbackRate = 1.0 }
+                                Button("1.25x") { player.playbackRate = 1.25 }
+                                Button("1.5x") { player.playbackRate = 1.5 }
+                                Button("2.0x") { player.playbackRate = 2.0 }
                             } label: {
-                                Text("\(String(format: "%.1f", coordinator.playbackRate))x")
+                                Text("\(String(format: "%.1f", player.playbackRate))x")
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(.white)
                                     .frame(width: 38, height: 22)
@@ -375,7 +383,7 @@ private struct PlayerControlOverlay: View {
                             // 音量控制（滑块始终显示）
                             HStack(spacing: 6) {
                                 Button {
-                                    coordinator.isMuted.toggle()
+                                    player.isMuted.toggle()
                                 } label: {
                                     Image(systemName: volumeIconName)
                                         .font(.system(size: 15))
@@ -383,9 +391,10 @@ private struct PlayerControlOverlay: View {
                                 .buttonStyle(.plain)
                                 .focusable(false)
                                 
-                                Slider(value: $coordinator.playbackVolume, in: 0...1)
+                                Slider(value: $player.playbackVolume, in: 0...1)
                                     .tint(.white)
                                     .frame(width: 70)
+                                    .focusable(false)
                             }
                             .frame(height: 22)
                             
@@ -418,42 +427,35 @@ private struct PlayerControlOverlay: View {
         .animation(.easeOut(duration: 0.25), value: isControlBarVisible)
         .allowsHitTesting(isControlBarVisible)
         .onAppear {
-            currentState = coordinator.state
-            sliderValue = Float(timemodel.currentTime)
+            currentState = player.state
+            sliderValue = Float(player.currentTime)
         }
-        .task {
-            // 轮询播放状态，因为 coordinator.state 不是 @Published
-            while !Task.isCancelled {
-                let newState = coordinator.state
-                if newState != currentState {
-                    currentState = newState
-                }
-                try? await Task.sleep(nanoseconds: 500_000_000)
-            }
+        .onReceive(player.$state) { newState in
+            currentState = newState
         }
     }
     
     private func togglePlayPause() {
         if currentState.isPlaying {
-            coordinator.playerLayer?.pause()
+            player.pause()
         } else {
-            coordinator.playerLayer?.play()
+            player.play()
         }
     }
     
     private var playPauseIconName: String {
-        if currentState == .error {
+        if case .failed = currentState {
             return "play.slash.fill"
         }
         return currentState.isPlaying ? "pause.circle.fill" : "play.circle.fill"
     }
     
     private var volumeIconName: String {
-        if coordinator.isMuted || coordinator.playbackVolume == 0 {
+        if player.isMuted || player.playbackVolume == 0 {
             return "speaker.slash.fill"
-        } else if coordinator.playbackVolume < 0.3 {
+        } else if player.playbackVolume < 0.3 {
             return "speaker.fill"
-        } else if coordinator.playbackVolume < 0.7 {
+        } else if player.playbackVolume < 0.7 {
             return "speaker.wave.1.fill"
         } else {
             return "speaker.wave.3.fill"
@@ -462,10 +464,11 @@ private struct PlayerControlOverlay: View {
 }
 
 // MARK: - 时间格式化辅助函数
-private func formatPlayerTime(_ seconds: Int) -> String {
-    let hours = seconds / 3600
-    let minutes = (seconds % 3600) / 60
-    let secs = seconds % 60
+private func formatPlayerTime(_ seconds: TimeInterval) -> String {
+    let secsInt = Int(seconds)
+    let hours = secsInt / 3600
+    let minutes = (secsInt % 3600) / 60
+    let secs = secsInt % 60
     if hours > 0 {
         return String(format: "%d:%02d:%02d", hours, minutes, secs)
     } else {
@@ -1676,6 +1679,7 @@ private struct BilibiliSliderRow: View {
             
             Slider(value: $value, in: range)
                 .tint(Color(hex: "00AEEC"))
+                .focusable(false)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -1810,6 +1814,7 @@ private struct ModernSlider: View {
     var body: some View {
         Slider(value: $value, in: range)
             .tint(LiquidGlassColors.primaryPink)
+            .focusable(false)
     }
 }
 

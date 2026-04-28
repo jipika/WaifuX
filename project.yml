@@ -26,9 +26,6 @@ packages:
   Kingfisher:
     url: https://github.com/onevcat/Kingfisher.git
     from: "8.8.0"
-  KSPlayer:
-    url: https://github.com/kingslay/KSPlayer.git
-    from: "2.3.0"
 
 settings:
   base:
@@ -64,7 +61,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.83
+        MARKETING_VERSION: 38.0.84
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -78,9 +75,7 @@ targets:
       - package: SwiftSoup
       - package: Kanna
       - package: Kingfisher
-      - package: KSPlayer
     postBuildScripts:
-      - name: Fix FFmpeg Framework Bundles
         basedOnDependencyAnalysis: false
         script: |
           FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
