@@ -3,250 +3,262 @@ name: CI
 # 本仓库（WaifuX main 线）默认集成分支为 main。
 # 若另有 fork/仓库以 feature/wallpaper-engine 为默认分支，应在那个仓库里单独维护 workflow，勿与这里混用。
 on:
-  # 每次推 main 都跑 CI（纯文档/Markdown 变更不触发，见 paths-ignore）；发版逻辑见下方 if
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+    # 每次推 main 都跑 CI（纯文档/Markdown 变更不触发，见 paths-ignore）；发版逻辑见下方 if
+    push:
+        branches: [main]
+        paths-ignore:
+            - "**.md"
+            - "docs/**"
+    pull_request:
+        branches: [main]
+        paths-ignore:
+            - "**.md"
+            - "docs/**"
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  contents: write
+    contents: write
 
 jobs:
-  build:
-    runs-on: macos-26
+    build:
+        runs-on: macos-26
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
 
-      - name: Select Xcode 26.4
-        run: |
-          sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
-          echo "Xcode Path: $(xcode-select -p)"
-          xcodebuild -version
-          swift --version
+            - name: Select Xcode 26.4
+              run: |
+                  sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
+                  echo "Xcode Path: $(xcode-select -p)"
+                  xcodebuild -version
+                  swift --version
 
-      - name: Check XcodeGen
-        run: which xcodegen || brew install xcodegen
+            - name: Check XcodeGen
+              run: which xcodegen || brew install xcodegen
 
-      - name: Install create-dmg
-        run: brew install create-dmg || true
+            - name: Install create-dmg
+              run: brew install create-dmg || true
 
-      - name: Sync VERSION to project.yml
-        run: bash scripts/sync-version.sh && grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
+            - name: Sync VERSION to project.yml
+              run: bash scripts/sync-version.sh && grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
 
-      - name: Generate Xcode Project
-        run: xcodegen generate
+            - name: Generate Xcode Project
+              run: xcodegen generate
 
-      - name: Cache SPM Dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/Library/Caches/org.swift.swiftpm
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+            - name: Cache SPM Dependencies
+              uses: actions/cache@v5
+              with:
+                  path: |
+                      ~/Library/Caches/org.swift.swiftpm
+                  key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-spm-
 
-      - name: Read Version
-        id: version
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
+            - name: Read Version
+              id: version
+              run: |
+                  VERSION=$(cat VERSION | tr -d '[:space:]')
+                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+                  echo "Building version: $VERSION"
 
-      - name: Check if Tag Exists
-        id: check_tag
-        run: |
-          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag ${{ steps.version.outputs.tag }} already exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag ${{ steps.version.outputs.tag }} does not exist"
-          fi
+            - name: Check if Tag Exists
+              id: check_tag
+              run: |
+                  if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+                    echo "exists=true" >> $GITHUB_OUTPUT
+                    echo "Tag ${{ steps.version.outputs.tag }} already exists"
+                  else
+                    echo "exists=false" >> $GITHUB_OUTPUT
+                    echo "Tag ${{ steps.version.outputs.tag }} does not exist"
+                  fi
 
-      - name: Build & Package
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
-        env:
-          WAIFUX_SKIP_DMG: "1"
-        run: |
-          chmod +x ./scripts/package.sh
-          ./scripts/package.sh
+            - name: Build & Package
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              env:
+                  WAIFUX_SKIP_DMG: "1"
+              run: |
+                  chmod +x ./scripts/package.sh
+                  ./scripts/package.sh
 
-      - name: Sign & Notarize
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
-        env:
-          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-        run: |
-          # 创建专用 keychain
-          KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            - name: Sign & Notarize
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              env:
+                  APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+                  APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
+                  KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+                  APPLE_ID: ${{ secrets.APPLE_ID }}
+                  APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+                  APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+              run: |
+                  # 创建专用 keychain
+                  KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
+                  security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+                  security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
+                  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # 加入系统搜索路径（关键）
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-          security default-keychain -s "$KEYCHAIN_PATH"
+                  # 加入系统搜索路径（关键）
+                  security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+                  security default-keychain -s "$KEYCHAIN_PATH"
 
-          # 解码并导入 p12（导入完整身份包括私钥）
-          echo "$APPLE_SIGNING_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -k "$KEYCHAIN_PATH" -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
+                  # 解码并导入 p12（导入完整身份包括私钥）
+                  echo "$APPLE_SIGNING_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
+                  security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -k "$KEYCHAIN_PATH" -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
 
-          # 设置信任让 codesign 可用（-k 后面是 keychain 密码）
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+                  # 设置信任让 codesign 可用（-k 后面是 keychain 密码）
+                  security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
 
-          # 验证证书
-          echo "=== 证书列表 ==="
-          security find-identity -v "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-          echo ""
+                  # 验证证书
+                  echo "=== 证书列表 ==="
+                  security find-identity -v "$KEYCHAIN_PATH"
+                  security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+                  echo ""
 
-          # 签名整个 app bundle（使用 --deep 递归签名所有嵌入内容）
-          echo "Signing app bundle..."
-          codesign --force --deep --options=runtime --timestamp \
-            --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
+                  # 签名 app 内部所有二进制（--deep 不会递归处理 Resources 里的 dylib/可执行文件）
+                  echo "Signing embedded binaries..."
+                  find build/WaifuX.app -type f | while read -r f; do
+                    if file "$f" | grep -qE "Mach-O|ELF"; then
+                      if codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" 2>&1; then
+                        echo "  ✅ $(basename "$f")"
+                      else
+                        echo "  ⚠️ Failed to sign: $f"
+                      fi
+                    fi
+                  done
 
-          # 重新打包进 DMG
-          create-dmg \
-            --volname "WaifuX" \
-            --window-size 540 400 \
-            --app-drop-link 400 185 \
-            --hide-extension "WaifuX.app" \
-            --no-internet-enable \
-            build/WaifuX.dmg \
-            build/WaifuX.app
+                  # 最后签名整个 app bundle
+                  echo "Signing app bundle..."
+                  codesign --force --deep --options=runtime --timestamp \
+                    --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" build/WaifuX.app
 
-          # 提交公证
-          echo "Submitting for notarization..."
-          NOTARY_OUTPUT=$(xcrun notarytool submit build/WaifuX.dmg \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait 2>&1)
-          echo "$NOTARY_OUTPUT"
+                  # 重新打包进 DMG
+                  create-dmg \
+                    --volname "WaifuX" \
+                    --window-size 540 400 \
+                    --app-drop-link 400 185 \
+                    --hide-extension "WaifuX.app" \
+                    --no-internet-enable \
+                    build/WaifuX.dmg \
+                    build/WaifuX.app
 
-          # 提取 Submission ID（取第一行匹配）
-          SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep -m1 "id:" | awk '{print $2}' | tr -d '[:space:]')
-          echo "Submission ID: $SUBMISSION_ID"
+                  # 提交公证
+                  echo "Submitting for notarization..."
+                  NOTARY_OUTPUT=$(xcrun notarytool submit build/WaifuX.dmg \
+                    --apple-id "$APPLE_ID" \
+                    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+                    --team-id "$APPLE_TEAM_ID" \
+                    --wait 2>&1)
+                  echo "$NOTARY_OUTPUT"
 
-          # 检查公证状态（精确匹配 "  status: Accepted" 这一行）
-          STATUS=$(echo "$NOTARY_OUTPUT" | awk '/^  status:/{print $2; exit}' | tr -d '[:space:]')
-          echo "Notarization status: $STATUS"
+                  # 提取 Submission ID（取第一行匹配）
+                  SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep -m1 "id:" | awk '{print $2}' | tr -d '[:space:]')
+                  echo "Submission ID: $SUBMISSION_ID"
 
-          # 如果状态不是 Accepted，打印日志并失败
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "=== Notarization Log ==="
-            xcrun notarytool log "$SUBMISSION_ID" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" 2>&1 || true
-            echo "========================"
-            echo "❌ Notarization failed with status: $STATUS"
-            exit 1
-          fi
+                  # 检查公证状态（精确匹配 "  status: Accepted" 这一行）
+                  STATUS=$(echo "$NOTARY_OUTPUT" | awk '/^  status:/{print $2; exit}' | tr -d '[:space:]')
+                  echo "Notarization status: $STATUS"
 
-          # 将公证票据 stapled 到 DMG（带重试，CloudKit 同步有时有延迟）
-          for i in {1..5}; do
-            echo "Attempt $i: stapling notarization ticket..."
-            if xcrun stapler staple build/WaifuX.dmg; then
-              echo "✅ 签名+公证完成"
-              break
-            fi
-            if [ $i -eq 5 ]; then
-              echo "❌ stapler failed after 5 attempts"
-              exit 1
-            fi
-            sleep 30
-          done
+                  # 如果状态不是 Accepted，打印日志并失败
+                  if [ "$STATUS" != "Accepted" ]; then
+                    echo "=== Notarization Log ==="
+                    xcrun notarytool log "$SUBMISSION_ID" \
+                      --apple-id "$APPLE_ID" \
+                      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+                      --team-id "$APPLE_TEAM_ID" 2>&1 || true
+                    echo "========================"
+                    echo "❌ Notarization failed with status: $STATUS"
+                    exit 1
+                  fi
 
-      - name: Build (PRs)
-        if: github.event_name == 'pull_request'
-        run: |
-          mkdir -p build
-          xcodebuild -project WaifuX.xcodeproj \
-            -scheme WaifuX \
-            -destination 'platform=macOS' \
-            -configuration Release \
-            -derivedDataPath build \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            clean build
+                  # 将公证票据 stapled 到 DMG（带重试，CloudKit 同步有时有延迟）
+                  for i in {1..5}; do
+                    echo "Attempt $i: stapling notarization ticket..."
+                    if xcrun stapler staple build/WaifuX.dmg; then
+                      echo "✅ 签名+公证完成"
+                      break
+                    fi
+                    if [ $i -eq 5 ]; then
+                      echo "❌ stapler failed after 5 attempts"
+                      exit 1
+                    fi
+                    sleep 30
+                  done
 
-      # push 且当前 VERSION 已有 tag 时不会跑「Build & Package」，此处补一次编译校验
-      - name: Build (verify push to main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'true'
-        run: |
-          mkdir -p build
-          xcodebuild -project WaifuX.xcodeproj \
-            -scheme WaifuX \
-            -destination 'platform=macOS' \
-            -configuration Release \
-            -derivedDataPath build \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            clean build
+            - name: Build (PRs)
+              if: github.event_name == 'pull_request'
+              run: |
+                  mkdir -p build
+                  xcodebuild -project WaifuX.xcodeproj \
+                    -scheme WaifuX \
+                    -destination 'platform=macOS' \
+                    -configuration Release \
+                    -derivedDataPath build \
+                    SWIFT_STRICT_CONCURRENCY=minimal \
+                    CODE_SIGNING_REQUIRED=NO \
+                    CODE_SIGNING_ALLOWED=NO \
+                    clean build
 
-      - name: Generate Changelog
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
-        id: changelog
-        run: |
-          # 获取上一个 tag（用于生成变更日志）
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            # push 且当前 VERSION 已有 tag 时不会跑「Build & Package」，此处补一次编译校验
+            - name: Build (verify push to main)
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'true'
+              run: |
+                  mkdir -p build
+                  xcodebuild -project WaifuX.xcodeproj \
+                    -scheme WaifuX \
+                    -destination 'platform=macOS' \
+                    -configuration Release \
+                    -derivedDataPath build \
+                    SWIFT_STRICT_CONCURRENCY=minimal \
+                    CODE_SIGNING_REQUIRED=NO \
+                    CODE_SIGNING_ALLOWED=NO \
+                    clean build
 
-          if [ -n "$PREV_TAG" ]; then
-            # 从上一个 tag 到当前提交的 commit messages 生成日志
-            CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
-            echo "Generated changelog from $PREV_TAG to HEAD:"
-            echo "$CHANGELOG"
-          else
-            CHANGELOG="- Initial release"
-            echo "No previous tag found, using default changelog"
-          fi
+            - name: Generate Changelog
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              id: changelog
+              run: |
+                  # 获取上一个 tag（用于生成变更日志）
+                  PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
-          # 写入 GITHUB_OUTPUT 供后续 step 使用
-          {
-            echo "changelog<<EOF"
-            echo "$CHANGELOG"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+                  if [ -n "$PREV_TAG" ]; then
+                    # 从上一个 tag 到当前提交的 commit messages 生成日志
+                    CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
+                    echo "Generated changelog from $PREV_TAG to HEAD:"
+                    echo "$CHANGELOG"
+                  else
+                    CHANGELOG="- Initial release"
+                    echo "No previous tag found, using default changelog"
+                  fi
 
-      - name: Create Release & Upload Asset
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: WaifuX ${{ steps.version.outputs.version }}
-          body: |
-            ## 更新内容
+                  # 写入 GITHUB_OUTPUT 供后续 step 使用
+                  {
+                    echo "changelog<<EOF"
+                    echo "$CHANGELOG"
+                    echo "EOF"
+                  } >> "$GITHUB_OUTPUT"
 
-            ${{ steps.changelog.outputs.changelog }}
+            - name: Create Release & Upload Asset
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.version.outputs.tag }}
+                  name: WaifuX ${{ steps.version.outputs.version }}
+                  body: |
+                      ## 更新内容
 
-            ## 版本信息
+                      ${{ steps.changelog.outputs.changelog }}
 
-            - 版本号: ${{ steps.version.outputs.version }}
-            - Commit: ${{ github.sha }}
-          files: build/WaifuX.dmg
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                      ## 版本信息
+
+                      - 版本号: ${{ steps.version.outputs.version }}
+                      - Commit: ${{ github.sha }}
+                  files: build/WaifuX.dmg
+                  draft: false
+                  prerelease: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
