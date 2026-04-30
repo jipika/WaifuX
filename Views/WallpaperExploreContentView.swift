@@ -55,7 +55,6 @@ struct WallpaperExploreContentView: View {
                 .ignoresSafeArea()
 
                 scrollContent(width: geometry.size.width, gridConfig: gridConfig)
-                bottomLoadingOverlay
             }
         }
         .onAppear {
@@ -117,6 +116,9 @@ struct WallpaperExploreContentView: View {
                 ))
                 .disabled(isInitialLoading)
 
+                // 底部加载状态卡片
+                bottomLoadingOverlay
+
                 // 浮动返回顶部按钮（独立定位，不与其他内容耦合）
                 VStack {
                     Spacer()
@@ -136,11 +138,14 @@ struct WallpaperExploreContentView: View {
                             }
                             .buttonStyle(.plain)
                             .padding(.trailing, 28)
-                            .padding(.bottom, 100)
+                            .padding(.bottom, 120)
+                            .contentShape(Rectangle())
+                            .zIndex(100)
                             .transition(.scale.combined(with: .opacity))
                         }
                     }
                 }
+                .zIndex(100)
             }
         }
     }

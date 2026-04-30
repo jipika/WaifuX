@@ -21,6 +21,10 @@ class SettingsViewModel: ObservableObject {
     @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
     @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
+    @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
+    @Published var proxyEnabled = false { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled"); syncProxySettings() } }
+    @Published var proxyHost: String = "" { didSet { UserDefaults.standard.set(proxyHost, forKey: "proxy_host"); syncProxySettings() } }
+    @Published var proxyPort: String = "" { didSet { UserDefaults.standard.set(proxyPort, forKey: "proxy_port"); syncProxySettings() } }
 
     @Published var cacheSize: String = "0 MB"
     @Published var cacheProgress: Double = 0.0
@@ -109,6 +113,10 @@ class SettingsViewModel: ObservableObject {
         showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
         pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
         pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
+        pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
+        proxyEnabled = defaults.bool(forKey: "proxy_enabled")
+        proxyHost = defaults.string(forKey: "proxy_host") ?? ""
+        proxyPort = defaults.string(forKey: "proxy_port") ?? ""
 
         // 恢复 API Key 缓存
         Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
@@ -139,6 +147,18 @@ class SettingsViewModel: ObservableObject {
     func syncAutoPauseSettings() {
         DynamicWallpaperAutoPauseManager.shared.pauseWhenOtherAppForeground = pauseWhenOtherAppForeground
         DynamicWallpaperAutoPauseManager.shared.pauseWhenFullscreenCovers = pauseWhenFullscreenCovers
+        DynamicWallpaperAutoPauseManager.shared.pauseOnBatteryPower = pauseOnBatteryPower
+    }
+
+    /// 同步代理设置到 NetworkService
+    func syncProxySettings() {
+        Task {
+            await NetworkService.shared.updateProxyConfiguration(
+                enabled: proxyEnabled,
+                host: proxyHost,
+                port: proxyPort
+            )
+        }
     }
 
     // MARK: - 更新检测

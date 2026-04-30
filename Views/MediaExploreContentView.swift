@@ -128,11 +128,14 @@ struct MediaExploreContentView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .padding(.trailing, 28)
-                                    .padding(.bottom, 100)
+                                    .padding(.bottom, 120)
+                                    .contentShape(Rectangle())
+                                    .zIndex(100)
                                     .transition(.scale.combined(with: .opacity))
                                 }
                             }
                         }
+                        .zIndex(100)
                     }
                 }
             }
@@ -541,9 +544,13 @@ struct MediaExploreContentView: View {
                 SimpleMediaCard(
                     item: item,
                     cardWidth: config.cardWidth,
-                    isFavorite: viewModel.isFavorite(item),
-                    onTap: { selectedMedia = item }
+                    isFavorite: viewModel.isFavorite(item)
                 )
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        selectedMedia = item
+                    }
+                }
                 .onAppear {
                     preloadNearbyImages(around: item, config: config)
                     // 自动预加载 MotionBG 卡片详情（避免用户必须点进详情返回后才显示完整信息）
@@ -1119,7 +1126,6 @@ private struct SimpleMediaCard: View {
     let item: MediaItem
     var cardWidth: CGFloat
     let isFavorite: Bool
-    let onTap: () -> Void
 
     @State private var isHovered = false
 
@@ -1223,14 +1229,10 @@ private struct SimpleMediaCard: View {
                 )
         )
         .clipShape(Self.cardShape)
-        .scaleEffect(isHovered ? 1.01 : 1.0)
-        .animation(.easeOut(duration: 0.2), value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
-            isHovered = hovering
-        }
-        .onTapGesture {
-            onTap()
-        }
+        .contentShape(Self.cardShape)
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isHovered)
+        .onHover { isHovered = $0 }
     }
     
     private var simplifiedMetadataRow: some View {

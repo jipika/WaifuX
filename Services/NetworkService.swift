@@ -3,7 +3,7 @@ import Foundation
 actor NetworkService {
     static let shared = NetworkService()
 
-    private let session: URLSession
+    private var session: URLSession
     private let cache: URLCache
     
     // MARK: - Retry Configuration
@@ -31,6 +31,32 @@ actor NetworkService {
         config.waitsForConnectivity = true
         // 启用后台会话
         config.isDiscretionary = false
+
+        self.session = URLSession(configuration: config)
+    }
+
+    // MARK: - Proxy Configuration
+
+    func updateProxyConfiguration(enabled: Bool, host: String, port: String) {
+        let config = URLSessionConfiguration.default
+        config.requestCachePolicy = .returnCacheDataElseLoad
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        config.urlCache = cache
+        config.allowsCellularAccess = true
+        config.waitsForConnectivity = true
+        config.isDiscretionary = false
+
+        if enabled, !host.isEmpty, let portInt = Int(port), portInt > 0 {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true,
+                kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: portInt,
+                kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host,
+                kCFNetworkProxiesHTTPSPort: portInt
+            ]
+        }
 
         self.session = URLSession(configuration: config)
     }
@@ -84,7 +110,7 @@ actor NetworkService {
     }
 
     // MARK: - Data Fetching with Retry
-    
+
     /// 获取数据（⚠️ 禁用缓存，每次重新请求）
     func fetchData(
         from url: URL,
@@ -93,10 +119,21 @@ actor NetworkService {
         retryConfig: RetryConfiguration? = nil
     ) async throws -> Data {
         let config = effectiveRetryConfiguration(retryConfig)
-        
+
         return try await executeWithRetry(config: config) { attempt in
             // ⚠️ 数据请求禁用缓存
             try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt, progressHandler: progressHandler, useCache: false)
+        }
+    }
+
+    /// 使用自定义 URLRequest 获取数据（支持 POST body、自定义 method 等）
+    func fetchData(
+        request: URLRequest,
+        retryConfig: RetryConfiguration? = nil
+    ) async throws -> Data {
+        let config = effectiveRetryConfiguration(retryConfig)
+        return try await executeWithRetry(config: config) { _ in
+            try await self.performRequest(request: request, progressHandler: nil)
         }
     }
     

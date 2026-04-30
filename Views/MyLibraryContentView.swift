@@ -439,22 +439,8 @@ struct MyLibraryContentView: View {
             }
             baseItems = filtered.map { AnyMediaItem(unified: $0) }
         }
-        switch mediaRatioFilter {
-        case .all:
-            mediaItems = baseItems
-        case .landscape:
-            mediaItems = baseItems.filter { item in
-                let portrait = item.isPortrait
-                // 无法判断时保守排除（只保留明确为横屏的）
-                return portrait == false
-            }
-        case .portrait:
-            mediaItems = baseItems.filter { item in
-                let portrait = item.isPortrait
-                // 无法判断时保守排除（只保留明确为竖屏的）
-                return portrait == true
-            }
-        }
+        // 媒体库不再做横屏/竖屏筛选
+        mediaItems = baseItems
     }
 
     @ViewBuilder
@@ -757,8 +743,8 @@ struct MyLibraryContentView: View {
                         .foregroundStyle(.white.opacity(0.95))
                 }
 
-                // 壁纸/媒体比例筛选
-                if selectedContentType == .wallpaper || selectedContentType == .video {
+                // 壁纸比例筛选（媒体库不显示）
+                if selectedContentType == .wallpaper {
                     HStack(spacing: 0) {
                         ForEach(WallpaperRatioFilter.allCases, id: \.self) { filter in
                             Button {

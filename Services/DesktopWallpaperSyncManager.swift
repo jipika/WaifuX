@@ -97,10 +97,16 @@ final class DesktopWallpaperSyncManager {
         for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
 
-            // 如果该屏幕属于视频壁纸目标，同步其 poster
+            // 如果该屏幕属于视频壁纸目标，同步其 poster（仅在需要时）
             if videoManager.hasActiveWallpaper(on: screen),
                let posterURL = videoManager.currentPosterURL,
                videoManager.currentVideoURL != nil {
+                // 避免不必要的重设：如果当前桌面已经是该 poster，跳过
+                if let currentURL = workspace.desktopImageURL(for: screen),
+                   currentURL == posterURL {
+                    print("[DesktopWallpaperSyncManager] [\(source)] Video poster already set for screen \(screen.localizedName), skipping")
+                    continue
+                }
                 do {
                     try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen)
                     print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
@@ -110,8 +116,15 @@ final class DesktopWallpaperSyncManager {
                 continue
             }
 
-            // 否则同步该屏幕最后注册的静态壁纸
+            // 否则同步该屏幕最后注册的静态壁纸（仅在需要时）
             guard let url = lastSetImageURLByScreen[screenID] else {
+                continue
+            }
+
+            // 避免不必要的重设：如果当前桌面已经是该壁纸，跳过
+            if let currentURL = workspace.desktopImageURL(for: screen),
+               currentURL == url {
+                print("[DesktopWallpaperSyncManager] [\(source)] Static wallpaper already set for screen \(screen.localizedName), skipping")
                 continue
             }
 

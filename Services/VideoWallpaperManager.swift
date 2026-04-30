@@ -329,10 +329,10 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        // 单屏停止
+        // 单屏停止：只有该屏幕确实有视频在播放时才恢复原始壁纸
         let screenID = targetScreen.wallpaperScreenIdentifier
         guard windows[screenID] != nil || players[screenID] != nil else {
-            restoreOriginalWallpaper(for: targetScreen)
+            // 该屏幕没有视频壁纸在播放，无需操作
             return
         }
 
@@ -368,10 +368,10 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        // 单屏停止
+        // 单屏停止：只有该屏幕确实有视频在播放时才恢复原始壁纸
         let screenID = targetScreen.wallpaperScreenIdentifier
         guard windows[screenID] != nil || players[screenID] != nil else {
-            restoreOriginalWallpaper(for: targetScreen)
+            // 该屏幕没有视频壁纸在播放，无需操作（避免自动切换时误恢复旧壁纸导致闪烁）
             return
         }
 

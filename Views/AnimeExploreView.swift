@@ -119,11 +119,14 @@ struct AnimeExploreView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .padding(.trailing, 28)
-                                    .padding(.bottom, 100)
+                                    .padding(.bottom, 120)
+                                    .contentShape(Rectangle())
+                                    .zIndex(100)
                                     .transition(.scale.combined(with: .opacity))
                                 }
                             }
                         }
+                        .zIndex(100)
                     }
                 }
             }

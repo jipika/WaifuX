@@ -192,25 +192,10 @@ final class UpdateChecker: ObservableObject {
         request.timeoutInterval = 30
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let data = try await NetworkService.shared.fetchData(request: request)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return .error("无效的服务器响应")
-            }
-
-            if httpResponse.statusCode == 403 {
-                // API 速率限制 - 设置冷却期
-                let cooldownUntil = Date().addingTimeInterval(rateLimitCooldown)
-                UserDefaults.standard.set(cooldownUntil, forKey: rateLimitUntilKey)
-                return .error("GitHub API 速率限制，请15分钟后重试")
-            }
-            
             // 清除冷却期
             UserDefaults.standard.removeObject(forKey: rateLimitUntilKey)
-
-            guard httpResponse.statusCode == 200 else {
-                return .error("服务器返回错误 (\(httpResponse.statusCode))")
-            }
 
             let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
 
@@ -237,6 +222,14 @@ final class UpdateChecker: ObservableObject {
 
         } catch let decodingError as DecodingError {
             return .error("解析响应失败: \(decodingError.localizedDescription)")
+        } catch let error as NetworkError {
+            // 处理 403 速率限制
+            if case .httpError(403) = error {
+                let cooldownUntil = Date().addingTimeInterval(rateLimitCooldown)
+                UserDefaults.standard.set(cooldownUntil, forKey: rateLimitUntilKey)
+                return .error("GitHub API 速率限制，请15分钟后重试")
+            }
+            return .error("检查失败: \(error.localizedDescription)")
         } catch {
             return .error("检查失败: \(error.localizedDescription)")
         }
@@ -255,13 +248,7 @@ final class UpdateChecker: ObservableObject {
         request.timeoutInterval = 30
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                return nil
-            }
-
+            let data = try await NetworkService.shared.fetchData(request: request)
             return try JSONDecoder().decode(GitHubCommit.self, from: data)
         } catch {
             print("[UpdateChecker] Failed to fetch commit: \(error)")
@@ -452,6 +439,21 @@ final class UpdateManager: ObservableObject {
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 600
         config.httpMaximumConnectionsPerHost = 8
+        // 应用用户代理配置
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "proxy_enabled"),
+           let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
+           let portStr = defaults.string(forKey: "proxy_port"),
+           let port = Int(portStr), port > 0 {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true,
+                kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: port,
+                kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host,
+                kCFNetworkProxiesHTTPSPort: port
+            ]
+        }
         let session = URLSession(configuration: config)
         
         var request = URLRequest(url: url)

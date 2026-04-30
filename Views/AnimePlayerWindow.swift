@@ -284,6 +284,7 @@ private struct PlayerControlOverlay: View {
     @State private var currentState: PlaybackState = .idle
     @State private var sliderValue: Float = 0
     @State private var wasPlayingBeforeDrag = false
+    @State private var isDraggingSlider = false
     
     init(player: NativeVideoPlayer, isPlayerFullscreen: Bool, isControlBarVisible: Bool) {
         self.player = player
@@ -305,6 +306,7 @@ private struct PlayerControlOverlay: View {
                         value: $sliderValue,
                         in: 0...Float(max(player.totalDuration, 1))
                     ) { editing in
+                        isDraggingSlider = editing
                         if editing {
                             wasPlayingBeforeDrag = player.state.isPlaying
                             player.pause()
@@ -317,7 +319,20 @@ private struct PlayerControlOverlay: View {
                     .frame(height: 16)
                     .focusable(false)
                     .onChange(of: player.currentTime) { _, newValue in
-                        sliderValue = Float(newValue)
+                        if !isDraggingSlider && !player.isSeeking {
+                            sliderValue = Float(newValue)
+                        }
+                    }
+                    .onChange(of: sliderValue) { _, newValue in
+                        // macOS 点击 Slider 轨道不会触发 onEditingChanged，
+                        // 因此通过值变化来检测点击并执行 seek
+                        if !isDraggingSlider && !player.isSeeking {
+                            let diff = abs(newValue - Float(player.currentTime))
+                            if diff > 0.5 {
+                                wasPlayingBeforeDrag = player.state.isPlaying
+                                player.seek(to: TimeInterval(newValue), resumeAfterSeek: wasPlayingBeforeDrag)
+                            }
+                        }
                     }
                     
                     Text(formatPlayerTime(player.totalDuration))

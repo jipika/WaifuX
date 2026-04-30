@@ -73,15 +73,13 @@ enum SceneOfflineBakeService {
 
     /// 与资格快照配套；`cacheItemID` 通常等于 `MediaItem.id`，无记录时用 `stableOrphanCacheItemID`。
     /// - Parameter persistArtifactToItemID: 非 nil 时将成品写回对应下载记录。
-    /// - Parameter requireEligibility: 为 `false` 时跳过 `isEligibleForOfflineBake`（与手动调用 `wallpaperengine-cli bake` 一致，「设为壁纸」路径使用）。
     static func bake(
         eligibility: SceneBakeEligibilitySnapshot,
         contentRoot: URL,
         cacheItemID: String,
         durationSeconds: Double = 15,
         fps: Int32 = 30,
-        persistArtifactToItemID: String? = nil,
-        requireEligibility: Bool = true
+        persistArtifactToItemID: String? = nil
     ) async throws -> SceneBakeArtifact {
         let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
         guard entered else {
@@ -94,8 +92,7 @@ enum SceneOfflineBakeService {
                 cacheItemID: cacheItemID,
                 durationSeconds: durationSeconds,
                 fps: fps,
-                persistArtifactToItemID: persistArtifactToItemID,
-                requireEligibility: requireEligibility
+                persistArtifactToItemID: persistArtifactToItemID
             )
             await SceneOfflineBakeConcurrencyGate.shared.leave()
             await MainActor.run {
@@ -117,14 +114,8 @@ enum SceneOfflineBakeService {
         cacheItemID: String,
         durationSeconds: Double,
         fps: Int32,
-        persistArtifactToItemID: String?,
-        requireEligibility: Bool
+        persistArtifactToItemID: String?
     ) async throws -> SceneBakeArtifact {
-        if requireEligibility {
-            guard eligibility.isEligibleForOfflineBake else {
-                throw SceneOfflineBakeError.ineligible
-            }
-        }
         guard FileManager.default.fileExists(atPath: contentRoot.path) else {
             throw SceneOfflineBakeError.contentRootMissing
         }
@@ -287,6 +278,14 @@ enum SceneOfflineBakeService {
             throw SceneOfflineBakeError.bakeProcessFailed(base)
         }
 
+        // 生成 Web 叠加层（视频背景 + 动态元素 overlay）
+        generateWebOverlayDirectory(
+            contentRoot: contentRoot,
+            videoPath: outURL.path,
+            sceneWidth: evenW,
+            sceneHeight: evenH
+        )
+
         let artifact = SceneBakeArtifact(
             analysisId: eligibility.analysisId,
             videoPath: outURL.path,
@@ -310,7 +309,7 @@ enum SceneOfflineBakeService {
         durationSeconds: Double = 15,
         fps: Int32 = 30
     ) async throws -> SceneBakeArtifact {
-        guard let eligibility = record.sceneBakeEligibility, eligibility.isEligibleForOfflineBake else {
+        guard let eligibility = record.sceneBakeEligibility else {
             throw SceneOfflineBakeError.ineligible
         }
         let contentRoot = URL(fileURLWithPath: eligibility.contentRootPath)
@@ -343,8 +342,7 @@ enum SceneOfflineBakeService {
                 MediaLibraryService.shared.downloadedItems.first { $0.item.id == itemID }
             }
             guard let record,
-                  let eligibility = record.sceneBakeEligibility,
-                  eligibility.isEligibleForOfflineBake else { return }
+                  let eligibility = record.sceneBakeEligibility else { return }
             guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
                 print("[SceneOfflineBake] auto-bake skipped: insufficient reclaimable memory")
                 return
@@ -363,6 +361,381 @@ enum SceneOfflineBakeService {
                 } else {
                     print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
                 }
+            }
+        }
+    }
+
+    // MARK: - Web Overlay Generation
+
+    /// 生成 Scene 烘焙后的 Web 叠加层目录（.web），包含视频 + index.html + project.json + 字体
+    /// 将动态元素（时钟、日期、音频可视化、视差等）从 scene.json 提取出来，
+    /// 通过 scene-bake-web-template 在烘焙视频之上叠加渲染。
+    private static func generateWebOverlayDirectory(
+        contentRoot: URL,
+        videoPath: String,
+        sceneWidth: Int,
+        sceneHeight: Int
+    ) {
+        let webDirPath = videoPath.replacingOccurrences(of: ".mp4", with: ".web")
+        let webDir = URL(fileURLWithPath: webDirPath)
+        let fm = FileManager.default
+
+        do {
+            if fm.fileExists(atPath: webDirPath) {
+                try fm.removeItem(at: webDir)
+            }
+            try fm.createDirectory(at: webDir, withIntermediateDirectories: true)
+        } catch {
+            print("[WebOverlay] Failed to create web directory: \(error)")
+            return
+        }
+
+        // 1. 读取 scene.json
+        guard let sceneDict = loadSceneDictionary(from: contentRoot) else {
+            print("[WebOverlay] Failed to load scene.json from \(contentRoot.path)")
+            return
+        }
+
+        // 2. 解析动态元素（文本、效果、视差等已烘焙排除的内容）
+        let elements = parseSceneObjectsForOverlay(sceneDict: sceneDict)
+
+        // 没有真正需要动态 overlay 的元素时，跳过生成 .web 目录（纯静态场景已完整烘焙进视频）
+        guard !elements.isEmpty else {
+            print("[WebOverlay] No dynamic overlay elements found, skipping .web generation")
+            return
+        }
+
+        // 3. 从 scene.json 读取场景设计分辨率（orthogonalprojection 优先）
+        let designWidth: Int
+        let designHeight: Int
+        if let general = sceneDict["general"] as? [String: Any],
+           let ortho = general["orthogonalprojection"] as? [String: Any],
+           let ow = ortho["width"] as? Int,
+           let oh = ortho["height"] as? Int {
+            designWidth = ow
+            designHeight = oh
+        } else {
+            designWidth = sceneWidth
+            designHeight = sceneHeight
+        }
+
+        // 4. 构建 __SCENE_BAKE_CONFIG__ 配置
+        let config: [String: Any] = [
+            "sceneWidth": designWidth,
+            "sceneHeight": designHeight,
+            "videoSrc": "baked.mp4",
+            "elements": elements
+        ]
+
+        // 4. 复制模板并注入配置
+        guard let templateURL = resolveWebTemplateURL() else {
+            print("[WebOverlay] Template not found")
+            return
+        }
+        guard var templateHTML = try? String(contentsOf: templateURL) else {
+            print("[WebOverlay] Failed to read template")
+            return
+        }
+
+        guard let configData = try? JSONSerialization.data(withJSONObject: config, options: []),
+              let configJSON = String(data: configData, encoding: .utf8) else {
+            print("[WebOverlay] Failed to encode config")
+            return
+        }
+
+        let configScript = "<script>window.__SCENE_BAKE_CONFIG__ = \(configJSON);</script>"
+        if let range = templateHTML.range(of: "</head>") {
+            templateHTML.replaceSubrange(range, with: configScript + "\n</head>")
+        }
+
+        let indexURL = webDir.appendingPathComponent("index.html")
+        do {
+            try templateHTML.write(to: indexURL, atomically: true, encoding: .utf8)
+        } catch {
+            print("[WebOverlay] Failed to write index.html: \(error)")
+            return
+        }
+
+        // 5. 创建 project.json（CLI Web 渲染器需要）
+        let projectJSON: [String: Any] = [
+            "type": "web",
+            "file": "index.html"
+        ]
+        if let projectData = try? JSONSerialization.data(withJSONObject: projectJSON, options: [.prettyPrinted]) {
+            let projectURL = webDir.appendingPathComponent("project.json")
+            try? projectData.write(to: projectURL)
+        }
+
+        // 6. 复制烘焙视频到 .web 目录
+        let videoURL = URL(fileURLWithPath: videoPath)
+        let destVideoURL = webDir.appendingPathComponent("baked.mp4")
+        do {
+            try fm.copyItem(at: videoURL, to: destVideoURL)
+        } catch {
+            print("[WebOverlay] Failed to copy video: \(error)")
+        }
+
+        // 7. 复制引用的字体文件
+        copyReferencedFonts(elements: elements, from: contentRoot, to: webDir)
+
+        print("[WebOverlay] Generated overlay at \(webDirPath) with \(elements.count) elements")
+    }
+
+    /// 查找 scene-bake-web-template/index.html 模板路径
+    private static func resolveWebTemplateURL() -> URL? {
+        if let url = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "scene-bake-web-template") {
+            return url
+        }
+        let candidates = [
+            URL(fileURLWithPath: "/Volumes/mac/CodeLibrary/Claude/WallHaven/Resources/scene-bake-web-template/index.html"),
+            URL(fileURLWithPath: "/Volumes/mac/CodeLibrary/Claude/WallHaven/build/WaifuX.app/Contents/Resources/scene-bake-web-template/index.html")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// 从 Scene 内容根目录加载 scene.json（支持 scene.pkg 和普通文件）
+    private static func loadSceneDictionary(from contentRoot: URL) -> [String: Any]? {
+        let fm = FileManager.default
+        let pkgURL = contentRoot.appendingPathComponent("scene.pkg")
+
+        if fm.fileExists(atPath: pkgURL.path) {
+            guard let data = extractSceneJSONFromPKG(pkgURL) else { return nil }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+
+        let sceneJSON = contentRoot.appendingPathComponent("scene.json")
+        if fm.fileExists(atPath: sceneJSON.path),
+           let data = try? Data(contentsOf: sceneJSON),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return json
+        }
+
+        return nil
+    }
+
+    /// 从 scene.pkg 中提取 scene.json 数据（简化版，与 SceneBakeEligibilityAnalyzer 对齐）
+    private static func extractSceneJSONFromPKG(_ pkgURL: URL) -> Data? {
+        extractFileFromPKG(pkgURL, fileName: "scene.json")
+    }
+
+    /// 从 scene.pkg 中提取指定文件（通用方法）
+    private static func extractFileFromPKG(_ pkgURL: URL, fileName: String) -> Data? {
+        guard let data = try? Data(contentsOf: pkgURL) else { return nil }
+        var offset = 0
+
+        guard offset + 4 <= data.count else { return nil }
+        let slen = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+        offset += 4 + Int(slen)
+
+        guard offset + 4 <= data.count else { return nil }
+        let nfiles = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+        offset += 4
+
+        var entries: [(name: String, offset: UInt32, length: UInt32)] = []
+        for _ in 0..<Int(nfiles) {
+            guard offset + 4 <= data.count else { return nil }
+            let es = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8)
+                | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            guard offset + Int(es) <= data.count else { return nil }
+            let nameData = data.subdata(in: offset..<offset + Int(es))
+            guard let name = String(data: nameData, encoding: .utf8) else { return nil }
+            offset += Int(es)
+            guard offset + 8 <= data.count else { return nil }
+            let fileOff = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8)
+                | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            let fileLen = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8)
+                | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            entries.append((name, fileOff, fileLen))
+        }
+
+        let base = offset
+        for e in entries {
+            if e.name == fileName || e.name.hasSuffix("/\(fileName)") {
+                let start = base + Int(e.offset)
+                let end = start + Int(e.length)
+                guard end <= data.count else { return nil }
+                return data.subdata(in: start..<end)
+            }
+        }
+        return nil
+    }
+
+    /// 解析 scene.json objects，提取需要在 Web 叠加层上渲染的动态元素
+    private static func parseSceneObjectsForOverlay(sceneDict: [String: Any]) -> [[String: Any]] {
+        guard let objects = sceneDict["objects"] as? [[String: Any]] else { return [] }
+
+        var elements: [[String: Any]] = []
+
+        for obj in objects {
+            let isVisible = obj["visible"] as? Bool ?? true
+            guard isVisible else { continue }
+
+            let textDict = obj["text"] as? [String: Any]
+            let hasTextValue = (textDict?["value"] as? String)?.isEmpty == false
+            let hasTextScript = (textDict?["script"] as? String)?.isEmpty == false
+            let hasText = hasTextValue || hasTextScript
+            let hasParallax = obj["mouseparallax"] as? Bool == true
+
+            // 只保留真正需要动态 overlay 的元素：有实际内容的文本、视差
+            // effects（blur/glow/xray 等）已烘焙进视频，不单独保留；
+            // 仅当文本/视差对象附带 effects 时才作为附加属性保留
+            guard hasText || hasParallax else { continue }
+
+            var element: [String: Any] = [:]
+            element["name"] = obj["name"] as? String ?? ""
+            element["origin"] = obj["origin"] as? String ?? "0 0 0"
+            element["scale"] = obj["scale"] as? String ?? "1 1 1"
+            element["angle"] = obj["angles"] as? String ?? obj["angle"] as? String ?? "0 0 0"
+            element["size"] = obj["size"] as? String ?? "0 0 0"
+            element["visible"] = isVisible
+
+            if let alpha = obj["alpha"] as? Double {
+                element["opacity"] = alpha
+            } else if let alpha = obj["alpha"] as? String, let val = Double(alpha) {
+                element["opacity"] = val
+            }
+
+            if let color = obj["color"] as? String {
+                element["color"] = color
+            }
+
+            if let brightness = obj["brightness"] as? Double {
+                element["brightness"] = brightness
+            } else if let brightness = obj["brightness"] as? String, let val = Double(brightness) {
+                element["brightness"] = val
+            }
+
+            // 文本属性
+            if let text = obj["text"] as? [String: Any] {
+                var tp: [String: Any] = [:]
+                tp["value"] = text["value"] as? String ?? ""
+                tp["script"] = text["script"] as? String ?? ""
+
+                if let font = obj["font"] as? String {
+                    tp["font"] = font
+                    element["font"] = font
+                }
+                if let pointsize = obj["pointsize"] as? Double {
+                    tp["pointSize"] = pointsize
+                } else if let pointsize = obj["pointsize"] as? String, let val = Double(pointsize) {
+                    tp["pointSize"] = val
+                }
+                if let hAlign = obj["horizontalalign"] as? String {
+                    tp["horizontalAlign"] = hAlign
+                }
+                if let vAlign = obj["verticalalign"] as? String {
+                    tp["verticalAlign"] = vAlign
+                }
+                if let bold = obj["bold"] as? Bool {
+                    tp["bold"] = bold
+                }
+                if let bgColor = obj["backgroundcolor"] as? String {
+                    tp["backgroundColor"] = bgColor
+                }
+                if let opaqueBg = obj["opaquebackground"] as? Bool {
+                    tp["opaquebackground"] = opaqueBg
+                }
+                if let padding = obj["padding"] as? Int {
+                    tp["padding"] = padding
+                } else if let padding = obj["padding"] as? String, let val = Int(padding) {
+                    tp["padding"] = val
+                }
+                if let letterSpacing = obj["letterspacing"] as? Double {
+                    tp["letterSpacing"] = letterSpacing
+                } else if let letterSpacing = obj["letterspacing"] as? String, let val = Double(letterSpacing) {
+                    tp["letterSpacing"] = val
+                }
+                if let textCase = obj["textcase"] as? String {
+                    tp["textCase"] = textCase
+                } else if let textCase = obj["texttransform"] as? String {
+                    tp["textCase"] = textCase
+                }
+
+                element["textProperties"] = tp
+                element["type"] = "text"
+            }
+
+            // 效果（blur、glow 等）
+            if let effects = obj["effects"] as? [[String: Any]], !effects.isEmpty {
+                var mappedEffects: [[String: Any]] = []
+                for eff in effects {
+                    var mapped: [String: Any] = [:]
+                    if let file = eff["file"] as? String {
+                        mapped["name"] = file
+                    }
+                    if let passes = eff["passes"] as? [[String: Any]] {
+                        var mappedPasses: [[String: Any]] = []
+                        for pass in passes {
+                            var mappedPass: [String: Any] = [:]
+                            if let cshaders = pass["constantshadervalues"] as? [String: Any] {
+                                mappedPass["constantshadervalues"] = cshaders
+                            }
+                            mappedPasses.append(mappedPass)
+                        }
+                        mapped["passes"] = mappedPasses
+                    }
+                    mappedEffects.append(mapped)
+                }
+                element["effects"] = mappedEffects
+            }
+
+            // 鼠标视差
+            if hasParallax {
+                element["mouseParallax"] = true
+                if let amount = obj["mouseparallaxamount"] as? String {
+                    element["mouseParallaxAmount"] = amount
+                }
+            }
+
+            elements.append(element)
+        }
+
+        return elements
+    }
+
+    /// 将 scene.json 中引用的字体文件复制到 .web 目录（优先从文件系统复制， fallback 从 scene.pkg 提取）
+    private static func copyReferencedFonts(elements: [[String: Any]], from contentRoot: URL, to webDir: URL) {
+        let fm = FileManager.default
+        var fontPaths = Set<String>()
+
+        for el in elements {
+            if let font = el["font"] as? String {
+                fontPaths.insert(font)
+            }
+            if let tp = el["textProperties"] as? [String: Any], let font = tp["font"] as? String {
+                fontPaths.insert(font)
+            }
+        }
+
+        let pkgURL = contentRoot.appendingPathComponent("scene.pkg")
+        let hasPkg = fm.fileExists(atPath: pkgURL.path)
+
+        for fontPath in fontPaths {
+            let src = contentRoot.appendingPathComponent(fontPath)
+            let dest = webDir.appendingPathComponent(fontPath)
+
+            if fm.fileExists(atPath: src.path) {
+                do {
+                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.copyItem(at: src, to: dest)
+                } catch {
+                    print("[WebOverlay] Failed to copy font \(fontPath): \(error)")
+                }
+            } else if hasPkg, let fontData = extractFileFromPKG(pkgURL, fileName: fontPath) {
+                do {
+                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fontData.write(to: dest)
+                    print("[WebOverlay] Extracted font \(fontPath) from scene.pkg")
+                } catch {
+                    print("[WebOverlay] Failed to write extracted font \(fontPath): \(error)")
+                }
+            } else {
+                print("[WebOverlay] Font not found, will use system fallback: \(fontPath)")
             }
         }
     }

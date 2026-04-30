@@ -86,9 +86,11 @@ struct SceneBakeEligibilitySnapshot: Codable, Hashable, Sendable {
     /// 分析时使用的内容根目录（Steam workshop content 路径）
     var contentRootPath: String
 
-    /// 是否值得走「预烘焙视频」策略（仅看综合档位）。墙钟依赖见 `flags.wallClockTime`，不拦截烘焙（与手动 CLI 一致）。
+    /// 是否值得走「预烘焙视频」策略。当前策略：所有 Scene 都允许烘焙，
+    /// 动态元素（时钟、日期、音频可视化等）在烘焙前会被预处理排除，仅保留背景；
+    /// 被排除的元素由 App 侧 Web 叠加层复现。
     var isEligibleForOfflineBake: Bool {
-        tier == .recommended || tier == .marginal
+        true
     }
 }
 

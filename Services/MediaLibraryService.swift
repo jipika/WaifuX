@@ -287,31 +287,35 @@ final class MediaLibraryService: ObservableObject {
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecord(withID id: String) {
         if let index = downloadRecords.firstIndex(where: { $0.item.id == id }) {
-            let filePath = downloadRecords[index].localFilePath
+            let record = downloadRecords[index]
+            let filePath = record.localFilePath
             // 标记软删除
             downloadRecords[index].metadata.markLocalMutation(deleted: true)
             persistDownloads()
             downloadRecords = downloadRecords
             // 删除物理文件
             deletePhysicalFile(at: filePath)
+            // 删除对应的烘焙产物
+            deleteSceneBakeArtifacts(for: record)
         }
     }
 
     /// 批量删除下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecords(withIDs ids: Set<String>) {
-        var filesToDelete: [String] = []
+        var recordsToDelete: [MediaDownloadRecord] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.item.id) {
-                filesToDelete.append(record.localFilePath)
+                recordsToDelete.append(record)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
             }
         }
         persistDownloads()
         downloadRecords = downloadRecords
-        // 删除所有对应的物理文件
-        for path in filesToDelete {
-            deletePhysicalFile(at: path)
+        // 删除所有对应的物理文件及烘焙产物
+        for record in recordsToDelete {
+            deletePhysicalFile(at: record.localFilePath)
+            deleteSceneBakeArtifacts(for: record)
         }
     }
 
@@ -336,6 +340,36 @@ final class MediaLibraryService: ObservableObject {
                 print("[MediaLibraryService] ✅ Deleted physical file: \(path)")
             } catch {
                 print("[MediaLibraryService] ⚠️ Failed to delete file \(path): \(error)")
+            }
+        }
+    }
+
+    /// 删除与下载记录关联的 Scene 烘焙产物
+    private func deleteSceneBakeArtifacts(for record: MediaDownloadRecord) {
+        let fm = FileManager.default
+
+        // 1. 删除烘焙视频文件（如果存在）
+        if let artifact = record.sceneBakeArtifact,
+           !artifact.videoPath.isEmpty,
+           fm.fileExists(atPath: artifact.videoPath) {
+            do {
+                try fm.removeItem(atPath: artifact.videoPath)
+                print("[MediaLibraryService] ✅ Deleted scene bake video: \(artifact.videoPath)")
+            } catch {
+                print("[MediaLibraryService] ⚠️ Failed to delete scene bake video \(artifact.videoPath): \(error)")
+            }
+        }
+
+        // 2. 删除该 item 对应的烘焙目录（清理空目录或残留文件）
+        let safeID = record.item.id.replacingOccurrences(of: "/", with: "_")
+        let bakeDir = DownloadPathManager.shared.sceneBakesFolderURL
+            .appendingPathComponent(safeID, isDirectory: true)
+        if fm.fileExists(atPath: bakeDir.path) {
+            do {
+                try fm.removeItem(at: bakeDir)
+                print("[MediaLibraryService] ✅ Deleted scene bake directory: \(bakeDir.path)")
+            } catch {
+                print("[MediaLibraryService] ⚠️ Failed to delete scene bake directory \(bakeDir.path): \(error)")
             }
         }
     }

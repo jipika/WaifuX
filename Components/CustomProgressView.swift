@@ -6,6 +6,7 @@ struct CustomProgressView: View {
     var scale: CGFloat = 1.0
     
     @State private var rotation: Double = 0
+    @State private var timer: Timer?
     
     var body: some View {
         ZStack {
@@ -20,13 +21,14 @@ struct CustomProgressView: View {
                 .rotationEffect(Angle(degrees: rotation))
         }
         .onAppear {
-            rotation = 360
+            timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
+                rotation += 6
+            }
         }
-        .animation(
-            .linear(duration: 1)
-                .repeatForever(autoreverses: false),
-            value: rotation
-        )
+        .onDisappear {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 }
 

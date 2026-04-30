@@ -3,17 +3,21 @@ import AppKit
 import CoreGraphics
 
 /// 动态壁纸自动暂停管理器
-/// 根据用户设置，在以下场景自动暂停/恢复动态壁纸：/// 1. 前台存在其他应用时（排除 Finder）
+/// 根据用户设置，在以下场景自动暂停/恢复动态壁纸：
+/// 1. 前台存在其他应用时（排除 Finder）
 /// 2. 检测到有全屏窗口覆盖桌面时
+/// 3. 切换到电池供电时
 @MainActor
 final class DynamicWallpaperAutoPauseManager {
     static let shared = DynamicWallpaperAutoPauseManager()
 
     private var checkTimer: Timer?
     private var wasAutoPaused = false
+    private var batteryAutoPaused = false
 
     private let pauseWhenOtherAppKey = "pause_when_other_app_foreground"
     private let pauseWhenFullscreenKey = "pause_when_fullscreen_covers"
+    private let pauseOnBatteryKey = "pause_on_battery_power"
 
     /// 前台存在其他应用时自动暂停动态壁纸（排除 Finder）
     var pauseWhenOtherAppForeground: Bool {
@@ -32,15 +36,37 @@ final class DynamicWallpaperAutoPauseManager {
             updateTimer()
         }
     }
+    
+    /// 切换到电池供电时自动暂停动态壁纸
+    var pauseOnBatteryPower: Bool {
+        get { UserDefaults.standard.bool(forKey: pauseOnBatteryKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: pauseOnBatteryKey)
+            handleBatterySettingChange()
+        }
+    }
 
-    private init() {}
+    private init() {
+        // 监听电源状态变化通知
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePowerSourceChange(_:)),
+            name: .powerSourceDidChange,
+            object: nil
+        )
+    }
 
     func restoreSettings() {
         updateTimer()
+        // 如果电池暂停设置已开启，启动电源监控
+        if pauseOnBatteryPower {
+            PowerSourceMonitor.shared.startMonitoring()
+        }
     }
 
     private func updateTimer() {
-        if pauseWhenOtherAppForeground || pauseWhenFullscreenCovers {
+        let needsTimer = pauseWhenOtherAppForeground || pauseWhenFullscreenCovers
+        if needsTimer {
             startTimer()
         } else {
             stopTimer()
@@ -88,6 +114,56 @@ final class DynamicWallpaperAutoPauseManager {
             }
             wasAutoPaused = false
         }
+    }
+    
+    // MARK: - 电池供电处理
+    
+    private func handleBatterySettingChange() {
+        if pauseOnBatteryPower {
+            PowerSourceMonitor.shared.startMonitoring()
+            // 如果当前已在电池上且壁纸在播放，立即暂停
+            if PowerSourceMonitor.shared.isOnBatteryPower {
+                handleBatterySwitchedToBattery()
+            }
+        } else {
+            // 关闭设置时，如果之前是电池自动暂停的，恢复播放
+            if batteryAutoPaused {
+                resumeIfNeeded()
+                batteryAutoPaused = false
+            }
+        }
+    }
+    
+    @objc private func handlePowerSourceChange(_ notification: Notification) {
+        guard pauseOnBatteryPower else { return }
+        guard let userInfo = notification.userInfo,
+              let isOnBattery = userInfo["isOnBatteryPower"] as? Bool else { return }
+        
+        if isOnBattery {
+            handleBatterySwitchedToBattery()
+        } else {
+            handleBatterySwitchedToAC()
+        }
+    }
+    
+    /// 切换到电池供电：自动暂停壁纸（如果正在播放）
+    private func handleBatterySwitchedToBattery() {
+        let hasNative = VideoWallpaperManager.shared.currentVideoURL != nil
+        let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
+        guard hasNative || hasExternal else { return }
+        
+        if !isCurrentlyPaused() {
+            pauseAll()
+            batteryAutoPaused = true
+        }
+    }
+    
+    /// 切换回 AC 电源：如果之前是电池自动暂停的，恢复播放
+    private func handleBatterySwitchedToAC() {
+        if batteryAutoPaused && isCurrentlyPaused() {
+            resumeAll()
+        }
+        batteryAutoPaused = false
     }
 
     // MARK: - 检测逻辑

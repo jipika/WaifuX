@@ -52,6 +52,7 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
         }
     }
     @Published var isLoading: Bool = false
+    @Published var isSeeking: Bool = false
     
     // 保持与 KSPlayer Coordinator 兼容的属性名
     var timemodel: PlayerTimeModel { timeModel }
@@ -220,12 +221,17 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     }
     
     func seek(to time: TimeInterval, resumeAfterSeek: Bool = false, completion: (@Sendable () -> Void)? = nil) {
+        isSeeking = true
         let cmTime = CMTime(seconds: time, preferredTimescale: 600)
         avPlayer.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-            guard let self else { return }
+            guard let self else {
+                completion?()
+                return
+            }
             let actualTime = self.avPlayer.currentTime().seconds.isFinite ? self.avPlayer.currentTime().seconds : time
             self.currentTime = actualTime
             self.timeModel.currentTime = actualTime
+            self.isSeeking = false
             if resumeAfterSeek && self.state != .playing {
                 self.avPlayer.play()
                 self.avPlayer.rate = Float(self.playbackRate)

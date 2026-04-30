@@ -84,8 +84,7 @@ struct MediaDetailSheet: View {
     private var sceneOfflineBakeButtonVisible: Bool {
         guard isAlreadyDownloaded,
               let record = currentDownloadRecord,
-              let eligibility = record.sceneBakeEligibility,
-              eligibility.isEligibleForOfflineBake else { return false }
+              record.sceneBakeEligibility != nil else { return false }
         return true
     }
 
@@ -1264,30 +1263,52 @@ struct MediaDetailSheet: View {
     private func setAsDesktopWallpaper() {
         // Wallpaper Engine 类内容：Workshop 与本地入库（同一套路径解析）
         if let localURL = findLocalWorkshopFile(for: resolvedItem) {
-            let ext = localURL.pathExtension.lowercased()
-            let isVideoFile = ["mp4", "mov", "webm"].contains(ext)
-            var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
-
-            if isVideoFile && !isDirectory.boolValue {
-                print("[MediaDetailSheet] WE video file, using VideoWallpaperManager: \(localURL.path)")
-                applyWorkshopVideoWallpaper(videoURL: localURL, preferPosterFrameFromVideo: true)
-                return
-            }
-
             let contentRoot = sceneEngineContentRoot(for: localURL)
-            let contentType = determineWorkshopContentType(at: contentRoot)
-            if case .unsupported(let detectedType) = contentType {
-                errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
-                showError = true
+            
+            // 检查并自动下载 Workshop 依赖项（预设壁纸的母壁纸）
+            if let dependencyID = readWorkshopDependencyID(from: contentRoot),
+               !isWorkshopDependencyDownloaded(dependencyID: dependencyID) {
+                isSettingWallpaper = true
+                errorMessage = ""
+                Task {
+                    do {
+                        print("[MediaDetailSheet] Downloading dependency \(dependencyID) for \(resolvedItem.id)...")
+                        try await downloadWorkshopDependency(dependencyID: dependencyID)
+                        print("[MediaDetailSheet] Dependency \(dependencyID) downloaded, proceeding to set wallpaper")
+                        await MainActor.run {
+                            self.isSettingWallpaper = false
+                            self.applyWorkshopWallpaperFromLocalURL(localURL)
+                        }
+                    } catch let error as WorkshopError {
+                        await MainActor.run {
+                            let msg: String
+                            switch error {
+                            case .guardCodeRequired:
+                                msg = "依赖项需要 Steam Guard 验证码，请先在下载列表中单独下载母壁纸后再试"
+                            case .credentialsRequired:
+                                msg = "下载依赖项需要 Steam 登录凭证"
+                            case .steamcmdNotFound:
+                                msg = "SteamCMD 未找到，无法下载依赖项"
+                            default:
+                                msg = "依赖项下载失败: \(error.localizedDescription)"
+                            }
+                            self.errorMessage = msg
+                            self.showError = true
+                            self.isSettingWallpaper = false
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.errorMessage = "依赖项下载失败: \(error.localizedDescription)"
+                            self.showError = true
+                            self.isSettingWallpaper = false
+                        }
+                    }
+                }
                 return
             }
-
-            if contentType == .scene {
-                applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
-            } else {
-                applyWorkshopRendererWallpaper(path: localURL.path, posterURL: preferredWorkshopPosterForVideo)
-            }
+            
+            // 没有依赖或已下载，直接设置
+            applyWorkshopWallpaperFromLocalURL(localURL)
             return
         }
 
@@ -1333,6 +1354,104 @@ struct MediaDetailSheet: View {
                 }
                 isSettingWallpaper = false
             }
+        }
+    }
+
+    // MARK: - Workshop 依赖处理
+    
+    /// 从 project.json 读取 dependency ID
+    private func readWorkshopDependencyID(from contentDir: URL) -> String? {
+        let projectURL = contentDir.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["dependency"] as? String
+    }
+    
+    /// 检查 Workshop 依赖项是否已下载到本地
+    private func isWorkshopDependencyDownloaded(dependencyID: String) -> Bool {
+        let fm = FileManager.default
+        let mediaFolder = DownloadPathManager.shared.mediaFolderURL
+        
+        // 1. 检查 MediaLibrary 中是否有记录
+        let depItemID = "workshop_\(dependencyID)"
+        if MediaLibraryService.shared.downloadedItems.contains(where: { $0.item.id == depItemID }) {
+            return true
+        }
+        
+        // 2. 检查本地目录是否存在（包括嵌套路径）
+        let depPaths = [
+            mediaFolder.appendingPathComponent("workshop_\(dependencyID)/steamapps/workshop/content/431960/\(dependencyID)"),
+            mediaFolder.appendingPathComponent("workshop_\(dependencyID)")
+        ]
+        for path in depPaths {
+            if fm.fileExists(atPath: path.path) {
+                // 进一步检查目录下是否有实质内容（project.json 或文件）
+                let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: path)
+                if fm.fileExists(atPath: resolved.appendingPathComponent("project.json").path) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+    
+    /// 下载 Workshop 依赖项
+    private func downloadWorkshopDependency(dependencyID: String) async throws {
+        let localURL = try await WorkshopService.shared.downloadWorkshopItem(
+            workshopID: dependencyID,
+            guardCode: nil,
+            progressHandler: { progress in
+                print("[DependencyDownload] \(dependencyID) progress: \(String(format: "%.1f", progress * 100))%")
+            }
+        )
+        print("[DependencyDownload] \(dependencyID) completed at \(localURL.path)")
+    }
+    
+    /// 从本地 URL 设置 Workshop 壁纸（提取原 setAsDesktopWallpaper 中的设置逻辑）
+    private func applyWorkshopWallpaperFromLocalURL(_ localURL: URL) {
+        let ext = localURL.pathExtension.lowercased()
+        let isVideoFile = ["mp4", "mov", "webm"].contains(ext)
+        let isImageFile = ["jpg", "jpeg", "png", "bmp", "gif", "webp"].contains(ext)
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
+        
+        if isVideoFile && !isDirectory.boolValue {
+            print("[MediaDetailSheet] WE video file, using VideoWallpaperManager: \(localURL.path)")
+            applyWorkshopVideoWallpaper(videoURL: localURL, preferPosterFrameFromVideo: true)
+            return
+        }
+        
+        // pickWorkshopPlayableFile 已识别为 .image 并返回了图片文件路径 → 直接处理，不走 sceneEngineContentRoot
+        if isImageFile && !isDirectory.boolValue {
+            applyWorkshopImageWallpaper(imageURL: localURL)
+            return
+        }
+        
+        let contentRoot = sceneEngineContentRoot(for: localURL)
+        let contentType = determineWorkshopContentType(at: contentRoot)
+        if case .unsupported(let detectedType) = contentType {
+            errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
+            showError = true
+            return
+        }
+        
+        switch contentType {
+        case .scene:
+            applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
+        case .image:
+            applyWorkshopImageWallpaper(imageURL: localURL)
+        case .video:
+            // localURL 本身是视频文件的情况已在开头拦截；
+            // 这里处理目录型 video workshop（background/file 指向子目录中的视频）
+            if let videoURL = findVideoFile(in: contentRoot) {
+                applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+            } else {
+                applyWorkshopRendererWallpaper(path: localURL.path, posterURL: preferredWorkshopPosterForVideo)
+            }
+        default:
+            applyWorkshopRendererWallpaper(path: localURL.path, posterURL: preferredWorkshopPosterForVideo)
         }
     }
 
@@ -1471,18 +1590,28 @@ struct MediaDetailSheet: View {
         return isDir.boolValue ? localURL : localURL.deletingLastPathComponent()
     }
 
-    /// Scene：优先已烘焙 MP4 → 无则现场资格分析 + 烘焙 MP4（无媒体库记录也可）→ 不合格或失败再 CLI
+    /// Scene：优先已烘焙的组合 Web 目录（video + overlay）→ 无则现场烘焙 → 失败再回退 CLI 实时渲染
     private func applySceneWallpaperPreferringBake(sceneContentRoot: URL, cliPath: String) {
         let itemID = resolvedItem.id
+        let fm = FileManager.default
+
+        // 1. 已有烘焙产物：优先使用 .web 组合目录（视频背景 + Web overlay）
         if let record = currentDownloadRecord,
            let art = record.sceneBakeArtifact,
-           art.analysisId == record.sceneBakeEligibility?.analysisId,
-           FileManager.default.fileExists(atPath: art.videoPath) {
-            applyWorkshopVideoWallpaper(
-                videoURL: URL(fileURLWithPath: art.videoPath),
-                preferPosterFrameFromVideo: true
-            )
-            return
+           art.analysisId == record.sceneBakeEligibility?.analysisId {
+            let webDirPath = art.videoPath.replacingOccurrences(of: ".mp4", with: ".web")
+            if fm.fileExists(atPath: webDirPath) {
+                applyWorkshopWebWallpaper(webDirPath: webDirPath, posterURL: preferredWorkshopPosterForVideo)
+                return
+            }
+            // _fallback_：无 .web 目录但视频存在，直接播放视频
+            if fm.fileExists(atPath: art.videoPath) {
+                applyWorkshopVideoWallpaper(
+                    videoURL: URL(fileURLWithPath: art.videoPath),
+                    preferPosterFrameFromVideo: true
+                )
+                return
+            }
         }
 
         if isBakingScene { return }
@@ -1545,14 +1674,17 @@ struct MediaDetailSheet: View {
                     eligibility: eligibility,
                     contentRoot: sceneContentRoot,
                     cacheItemID: cacheKey,
-                    persistArtifactToItemID: persistID,
-                    requireEligibility: false
+                    persistArtifactToItemID: persistID
                 )
-                let videoURL = URL(fileURLWithPath: artifact.videoPath)
+                let webDirPath = artifact.videoPath.replacingOccurrences(of: ".mp4", with: ".web")
                 await MainActor.run {
                     isBakingScene = false
                     scheduleSceneBakeSuccessFlash()
-                    applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+                    if fm.fileExists(atPath: webDirPath) {
+                        applyWorkshopWebWallpaper(webDirPath: webDirPath, posterURL: preferredWorkshopPosterForVideo)
+                    } else {
+                        applyWorkshopVideoWallpaper(videoURL: URL(fileURLWithPath: artifact.videoPath), preferPosterFrameFromVideo: true)
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -1608,6 +1740,7 @@ struct MediaDetailSheet: View {
         case video        // 纯视频类型，WaifuX 可直接播放
         case scene        // 场景类型，需要 Wallpaper Engine CLI 渲染
         case web          // Web 类型，需要 Wallpaper Engine CLI 渲染
+        case image        // 静态图片壁纸（无 type/file，有 background 图片）
         case unsupported(String) // 不支持的类型（如 application、游戏等）
         case unknown
     }
@@ -1616,17 +1749,66 @@ struct MediaDetailSheet: View {
     private func determineWorkshopContentType(at contentDir: URL) -> WorkshopContentType {
         let projectURL = contentDir.appendingPathComponent("project.json")
         guard let data = try? Data(contentsOf: projectURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let typeString = json["type"] as? String else {
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .unknown
         }
-        let type = typeString.lowercased()
-        switch type {
-        case "video": return .video
-        case "scene": return .scene
-        case "web": return .web
-        default: return .unsupported(typeString)
+        
+        // 1. 优先读取明确的 type 字段
+        if let typeString = json["type"] as? String {
+            let type = typeString.lowercased()
+            switch type {
+            case "video": return .video
+            case "scene": return .scene
+            case "web": return .web
+            default: return .unsupported(typeString)
+            }
         }
+        
+        // 2. 启发式推断（type 缺失时常见于预设包/依赖型壁纸）
+        return inferWorkshopContentType(from: json, contentDir: contentDir)
+    }
+    
+    /// 当 project.json 缺少 type 字段时的启发式类型推断
+    private func inferWorkshopContentType(from json: [String: Any], contentDir: URL) -> WorkshopContentType {
+        let fm = FileManager.default
+        
+        // 1. 有 background 指向明确的媒体文件 → 优先按实际媒体类型识别（不应被 dependency/preset 覆盖为 web）
+        if let background = json["background"] as? String {
+            let bgPath = contentDir.appendingPathComponent(background).path
+            if fm.fileExists(atPath: bgPath) {
+                let ext = (background as NSString).pathExtension.lowercased()
+                if ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"].contains(ext) {
+                    return .image
+                }
+                if ["mp4", "mov", "webm"].contains(ext) {
+                    return .video
+                }
+            }
+        }
+        
+        // 2. 有 dependency + preset → Web 预设
+        if json["dependency"] != nil && json["preset"] != nil {
+            return .web
+        }
+        
+        // 目录下有 scene.pkg 或 scene.json → scene
+        if fm.fileExists(atPath: contentDir.appendingPathComponent("scene.pkg").path) ||
+           fm.fileExists(atPath: contentDir.appendingPathComponent("scene.json").path) {
+            return .scene
+        }
+        
+        // 目录下有视频文件 → video
+        let rootContents = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil)
+        if rootContents?.contains(where: { ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased()) }) == true {
+            return .video
+        }
+        
+        // 有 dependency → 尝试 web
+        if json["dependency"] != nil {
+            return .web
+        }
+        
+        return .unknown
     }
 
     private func pickWorkshopPlayableFile(from contentPath: URL) -> URL {
@@ -1656,9 +1838,21 @@ struct MediaDetailSheet: View {
         // 1. 先检查 project.json 确定内容类型
         let contentType = determineWorkshopContentType(at: contentPath)
 
-        // 2. 纯视频类型或有 .mp4 文件的情况 → 返回视频文件
+        // 2. 纯视频类型 → 优先用 project.json 中 background/file 字段的明确路径，其次递归查找
         if contentType == .video {
-            // 递归查找视频文件
+            if let projectData = try? Data(contentsOf: contentPath.appendingPathComponent("project.json")),
+               let projectJson = try? JSONSerialization.jsonObject(with: projectData) as? [String: Any] {
+                for key in ["background", "file"] {
+                    if let path = projectJson[key] as? String {
+                        let candidate = contentPath.appendingPathComponent(path)
+                        let ext = candidate.pathExtension.lowercased()
+                        if ["mp4", "mov", "webm"].contains(ext), fm.fileExists(atPath: candidate.path) {
+                            return candidate
+                        }
+                    }
+                }
+            }
+            // 字段未命中时递归查找视频文件
             if let videoURL = findVideoFile(in: contentPath) {
                 return videoURL
             }
@@ -1683,6 +1877,19 @@ struct MediaDetailSheet: View {
             if let pkgURL = findPkgFile(in: contentPath) {
                 return pkgURL
             }
+        }
+
+        // 静态图片壁纸：返回 background 图片路径（不走 CLI）
+        if contentType == .image {
+            if let projectData = try? Data(contentsOf: contentPath.appendingPathComponent("project.json")),
+               let projectJson = try? JSONSerialization.jsonObject(with: projectData) as? [String: Any],
+               let background = projectJson["background"] as? String {
+                let imagePath = contentPath.appendingPathComponent(background)
+                if fm.fileExists(atPath: imagePath.path) {
+                    return imagePath
+                }
+            }
+            return contentPath
         }
 
         // 6. 如果有 project.json 但不是 video 类型，返回目录让 CLI 处理
@@ -1889,6 +2096,10 @@ struct MediaDetailSheet: View {
         }
     }
 
+    private func applyWorkshopWebWallpaper(webDirPath: String, posterURL: URL?) {
+        applyWorkshopRendererWallpaper(path: webDirPath, posterURL: posterURL)
+    }
+
     private func applyWorkshopRendererWallpaper(path: String, posterURL: URL?) {
         let screens = NSScreen.screens
         if screens.count > 1 {
@@ -1920,6 +2131,56 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         targetScreens: nil
                     )
+                } catch {
+                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                    showError = true
+                }
+                isSettingWallpaper = false
+            }
+        }
+    }
+
+    /// 应用 Workshop 静态图片壁纸：无 type/file、有 background 指向图片的资源，不走 CLI，直接设静态桌面。
+    private func applyWorkshopImageWallpaper(imageURL: URL) {
+        guard FileManager.default.fileExists(atPath: imageURL.path) else {
+            errorMessage = "图片文件不存在"
+            showError = true
+            return
+        }
+
+        // 停止视频层和 CLI，避免冲突
+        VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
+        WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+
+        let screens = NSScreen.screens
+        if screens.count > 1 {
+            DisplaySelectorManager.shared.showSelector(
+                title: t("setWallpaper"),
+                message: t("multiDisplayDetected")
+            ) { [self] selectedScreen in
+                isSettingWallpaper = true
+                Task { @MainActor in
+                    do {
+                        let targetScreens = selectedScreen.map { [$0] } ?? screens
+                        for screen in targetScreens {
+                            try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: screen)
+                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
+                        }
+                    } catch {
+                        errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                        showError = true
+                    }
+                    isSettingWallpaper = false
+                }
+            }
+        } else {
+            isSettingWallpaper = true
+            Task { @MainActor in
+                do {
+                    if let mainScreen = screens.first {
+                        try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: mainScreen)
+                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: mainScreen)
+                    }
                 } catch {
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true

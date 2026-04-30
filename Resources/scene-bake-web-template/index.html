@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scene Bake Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    #video-bg {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+    #video-fallback {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 0;
+      background: #000;
+      display: none;
+    }
+    #scene-overlay {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .scene-object {
+      position: absolute;
+      pointer-events: none;
+      display: flex;
+      transform-origin: center center;
+    }
+    .scene-object-text {
+      white-space: pre-wrap;
+      line-height: 1;
+      overflow: hidden;
+    }
+    /* blurprecise 效果暂不在 Web 叠加层中模拟（行为与 CSS backdrop-filter 不同） */
+    .effect-glow {
+      text-shadow: 0 0 var(--glow-spread, 12px) rgba(255, 255, 255, var(--glow-alpha, 0.4));
+    }
+  </style>
+</head>
+<body>
+  <video id="video-bg" autoplay muted loop playsinline></video>
+  <div id="video-fallback"></div>
+  <div id="scene-overlay"></div>
+
+  <script>
+    // ============================================================
+    // Scene → Web 等价转译引擎 v3
+    // 改进：正确颜色/brightness映射、blur参数、scriptProperties支持
+    // ============================================================
+
+    const config = window.__SCENE_BAKE_CONFIG__ || {};
+    const sceneW = config.sceneWidth || 3840;
+    const sceneH = config.sceneHeight || 2160;
+    const elements = config.elements || [];
+
+    // --- 视频初始化 ---
+    const video = document.getElementById('video-bg');
+    const videoFallback = document.getElementById('video-fallback');
+    const videoSrc = config.videoSrc || 'baked.mp4';
+
+    video.src = videoSrc;
+    video.play().catch(() => showVideoFallback());
+    video.addEventListener('error', () => showVideoFallback());
+    function showVideoFallback() {
+      video.style.display = 'none';
+      videoFallback.style.display = 'block';
+    }
+
+    // --- Web Audio API ---
+    let webAudioAnalyser = null;
+    let webAudioDataArray = null;
+    video.addEventListener('canplay', () => {
+      try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioContext();
+        const source = ctx.createMediaElementSource(video);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.8;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        webAudioAnalyser = analyser;
+        webAudioDataArray = new Uint8Array(analyser.frequencyBinCount);
+      } catch(e) {}
+    }, { once: true });
+
+    // --- 工具函数 ---
+    function parseVec3(str) {
+      if (!str) return [0, 0, 0];
+      const parts = String(str).trim().split(/\s+/).map(Number);
+      return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+    }
+
+    function parseColor(colorStr) {
+      const c = parseVec3(colorStr);
+      return `rgb(${Math.floor(c[0]*255)}, ${Math.floor(c[1]*255)}, ${Math.floor(c[2]*255)})`;
+    }
+
+    function getFontName(fontPath) {
+      if (!fontPath) return null;
+      return fontPath.split('/').pop().replace(/\.(otf|ttf|woff2?)$/i, '');
+    }
+
+    // 从字体文件名提取字体家族名（去掉 weight 后缀并在 CamelCase 中插入空格）
+    function extractFontFamily(fontPath) {
+      if (!fontPath) return null;
+      const fileName = fontPath.split('/').pop().replace(/\.(otf|ttf|woff2?)$/i, '');
+      // 去掉常见的 weight 后缀 (-Bold, -Regular, -Light, -Medium 等)
+      const withoutWeight = fileName.replace(/-(Bold|Regular|Light|Medium|SemiBold|Black|Thin|ExtraBold|Heavy|Italic|Oblique)$/i, '');
+      // 在 CamelCase / PascalCase 中插入空格（如 AgencyFB → Agency FB）
+      const withSpaces = withoutWeight.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+      return withSpaces || fileName;
+    }
+
+    // --- 颜色处理：WE brightness 语义 ---
+    // WE 中 brightness 是发光强度（emissive），不是颜色乘法
+    // 基础颜色保持不变，brightness > 1 时添加发光效果
+    function computeColor(colorStr, brightness) {
+      const c = parseVec3(colorStr);
+      const b = brightness || 1;
+      // 颜色直接使用原始值（不乘 brightness）
+      const r = Math.min(1, c[0]);
+      const g = Math.min(1, c[1]);
+      const blue = Math.min(1, c[2]);
+      return {
+        css: `rgb(${Math.floor(r*255)}, ${Math.floor(g*255)}, ${Math.floor(blue*255)})`,
+        hasGlow: b > 1,
+        glowSpread: (b - 1) * 6,
+        glowAlpha: Math.min(0.5, (b - 1) * 0.12)
+      };
+    }
+
+    // --- 字体注册 ---
+    const fontsToLoad = new Set();
+    elements.forEach(el => {
+      const font = el.font || (el.textProperties && el.textProperties.font);
+      if (font) fontsToLoad.add(font);
+    });
+    const fontPromises = [];
+    fontsToLoad.forEach(fontPath => {
+      const fontFamily = extractFontFamily(fontPath);
+      if (!fontFamily) return;
+      const style = document.createElement('style');
+      style.textContent = `@font-face { font-family: "${fontFamily}"; src: url("${fontPath}"); font-display: swap; }`;
+      document.head.appendChild(style);
+      fontPromises.push(document.fonts.load(`1em "${fontFamily}"`).catch(() => {}));
+    });
+
+    // --- 场景元素管理 ---
+    const sceneElements = [];
+
+    function computeScreenScale() {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      return { vw, vh, scaleX: vw / sceneW, scaleY: vh / sceneH, fontScale: Math.min(vw / sceneW, vh / sceneH) };
+    }
+
+    // --- 样式映射 ---
+    function applyBaseStyles(el, div, screen) {
+      const { vw, vh, scaleX, scaleY } = screen;
+      const origin = parseVec3(el.origin);
+      const scale = parseVec3(el.scale);
+      const size = parseVec3(el.size);
+      const angle = parseVec3(el.angle);
+      const tp = el.textProperties || {};
+      const hAlign = tp.horizontalAlign || 'center';
+      const vAlign = tp.verticalAlign || 'center';
+
+      // OpenGL → CSS 坐标（使用 vw/vh，跨分辨率更可靠）
+      // origin 是锚点，hAlign/vAlign 定义文本相对锚点的对齐
+      const leftPct = (origin[0] / sceneW) * 100;
+      const topPct = ((sceneH - origin[1]) / sceneH) * 100;
+      div.style.left = leftPct + 'vw';
+      div.style.top = topPct + 'vh';
+
+      // 尺寸：文本对象不强制设死宽高，让内容自然撑开
+      // 只对非文本对象或明确需要框的元素设置 size
+      const isText = el.type === 'text' || el.textProperties;
+      if (!isText && size[0] > 0) {
+        div.style.width = (size[0] * scale[0] * scaleX) + 'px';
+      } else {
+        div.style.width = '';
+      }
+      if (!isText && size[1] > 0) {
+        div.style.height = (size[1] * scale[1] * scaleY) + 'px';
+      } else {
+        div.style.height = '';
+      }
+
+      // transform：根据 horizontalalign/verticalalign 决定 translate
+      // 这和 Scene 中的对齐语义一致：origin 是锚点，对齐方式决定文本相对锚点的位置
+      let tx = '-50%';
+      if (hAlign === 'left') tx = '0%';
+      else if (hAlign === 'right') tx = '-100%';
+
+      let ty = '-50%';
+      if (vAlign === 'top') ty = '0%';
+      else if (vAlign === 'bottom') ty = '-100%';
+
+      let tf = `translate(${tx}, ${ty})`;
+      if (angle[2] !== 0) tf += ` rotate(${angle[2]}deg)`;
+      div.style.transform = tf;
+      div.dataset.baseTransform = tf;
+
+      // 透明度
+      if (el.opacity !== undefined && el.opacity !== null) {
+        div.style.opacity = el.opacity;
+      }
+
+      // 背景色（只有 opaquebackground=true 时才显示）
+      if (tp.opaquebackground) {
+        const bgColor = tp.backgroundColor || '#000';
+        div.style.backgroundColor = parseColor(bgColor) || bgColor;
+      } else {
+        div.style.backgroundColor = 'transparent';
+      }
+
+      // padding
+      if (tp.padding) {
+        div.style.padding = tp.padding + 'px';
+      }
+
+      // 可见性/透明度
+      div.style.display = el.visible === false ? 'none' : 'flex';
+      div.style.opacity = (el.opacity !== undefined && el.opacity !== null) ? el.opacity : '';
+
+      // 颜色和 brightness（关键修复）
+      const colorStr = el.color || (el.textProperties && el.textProperties.color);
+      const brightness = el.brightness || (el.textProperties && el.textProperties.brightness) || 1;
+      const colorResult = computeColor(colorStr, brightness);
+      div.style.color = colorResult.css;
+
+      // 清除旧效果
+      div.classList.remove('effect-glow');
+      div.style.removeProperty('--glow-spread');
+      div.style.removeProperty('--glow-alpha');
+
+      // 发光效果（brightness > 1.5）
+      if (colorResult.hasGlow) {
+        div.classList.add('effect-glow');
+        div.style.setProperty('--glow-spread', colorResult.glowSpread + 'px');
+        div.style.setProperty('--glow-alpha', colorResult.glowAlpha);
+        div.style.setProperty('--glow-color', colorResult.css);
+      }
+
+      // 效果映射：blurprecise 等模糊效果暂不在 Web 叠加层中模拟
+      // （WE 中的后期处理模糊与 CSS backdrop-filter 行为不同）
+    }
+
+    function applyTextStyles(el, div, screen) {
+      const tp = el.textProperties || {};
+
+      // 字体家族名（从文件名提取并修正，如 AgencyFB-Bold → Agency FB）
+      const fontPath = el.font || tp.font;
+      const fontFamily = extractFontFamily(fontPath);
+      div.style.fontFamily = fontFamily ? `"${fontFamily}", sans-serif` : 'sans-serif';
+
+      // 字体大小：WE 的 pointsize 单位就是 pt，直接用 pt 单位
+      // 浏览器会自动根据屏幕 DPI 等比放大（Retina 上 1pt = 2.67px，非 Retina 上 1pt = 1.33px）
+      const pointSize = tp.pointSize || 32;
+      div.style.fontSize = pointSize + 'pt';
+
+      // 字间距（letterSpacing）
+      if (tp.letterSpacing !== undefined && tp.letterSpacing !== null) {
+        div.style.letterSpacing = tp.letterSpacing + 'px';
+      }
+
+      // 文本大小写转换（textCase）
+      if (tp.textCase === 'uppercase' || tp.textCase === 'upper') {
+        div.style.textTransform = 'uppercase';
+      } else if (tp.textCase === 'lowercase' || tp.textCase === 'lower') {
+        div.style.textTransform = 'lowercase';
+      } else if (tp.textCase === 'capitalize') {
+        div.style.textTransform = 'capitalize';
+      }
+
+      // 对齐
+      const hAlign = tp.horizontalAlign || 'center';
+      const vAlign = tp.verticalAlign || 'center';
+      div.style.justifyContent = hAlign === 'center' ? 'center' : (hAlign === 'right' ? 'flex-end' : 'flex-start');
+      div.style.alignItems = vAlign === 'center' ? 'center' : (vAlign === 'bottom' ? 'flex-end' : 'flex-start');
+      div.style.textAlign = hAlign;
+
+      // 字体粗细（WE textProperties.bold）
+      if (tp.bold) div.style.fontWeight = 'bold';
+      else div.style.fontWeight = '';
+    }
+
+    // --- 直接执行 WE JavaScript script ---
+    function executeJSScript(script) {
+      try {
+        const createScriptProperties = function() {
+          const props = {};
+          return {
+            addCheckbox: function(c) { props[c.name] = c.value; return this; },
+            addText: function(c) { props[c.name] = c.value; return this; },
+            addCombo: function(c) { props[c.name] = c.value; return this; },
+            finish: function() { return props; }
+          };
+        };
+        const code = script
+          .replace(/export\s+(var|let|const|function)\s+/g, '$1 ')
+          .replace(/export\s+default\s+/, '');
+        const fn = new Function('createScriptProperties', code);
+        return fn(createScriptProperties);
+      } catch (e) {
+        console.error('[Script] Execution failed:', e);
+        return null;
+      }
+    }
+
+    // --- 脚本解析：只解析 Lua (string.format/os.date)，JS 由 behavior 直接执行 ---
+    function parseScriptFormat(script) {
+      if (!script) return null;
+      const scriptWithoutComments = script
+        .replace(/--\[\[[\s\S]*?\]\]/g, '')
+        .replace(/--[^\n]*/g, '');
+      const s = scriptWithoutComments.toLowerCase();
+      const isLua = s.includes('os.date') || s.includes('string.format');
+
+      const fmt = {
+        isLua: isLua,
+        isJavaScript: !isLua && script.includes('export function update'),
+        hasHours: s.includes('gethours') || s.includes('hour'),
+        hasMinutes: s.includes('getminutes') || s.includes('minute'),
+        hasSeconds: s.includes('getseconds') || s.includes('second'),
+        hasDate: s.includes('getdate') || s.includes('%e') || s.includes('%d'),
+        hasDay: (s.includes('getday') && !s.includes('getdate')) || s.includes('%a') || s.includes('%w'),
+        hasMonth: s.includes('getmonth') || s.includes('%b') || s.includes('%m') || s.includes('%B'),
+        hasYear: s.includes('getfullyear') || s.includes('%y') || s.includes('%Y'),
+        padZero: s.includes('slice(-2)') || s.includes('padstart') || s.includes('%02d'),
+        use12h: s.includes('hours %= 12') || s.includes('h-12') || s.includes('h=h-12') || s.includes('use12hformat'),
+        prefix: '',
+        suffix: '',
+        delimiter: ':',
+        dateFormat: null
+      };
+
+      if (fmt.isJavaScript) {
+        // JavaScript 格式由 behavior 直接执行，这里只标记类型
+        return fmt;
+      }
+
+      // Lua string.format 解析
+      const stringFormatMatch = scriptWithoutComments.match(/string\.format\s*\(\s*(["'])(.+?)\1/);
+      if (stringFormatMatch) {
+        const formatStr = stringFormatMatch[2];
+        const tokens = [];
+        const regex = /([^%]*)%([0-9]*)\.?([0-9]*)([dfisggeExXo])/g;
+        let m;
+        while ((m = regex.exec(formatStr)) !== null) {
+          tokens.push({ prefix: m[1], width: m[2] ? parseInt(m[2]) : 0, precision: m[3] ? parseInt(m[3]) : 0, type: m[4] });
+        }
+        if (tokens.length > 0) {
+          fmt.prefix = tokens[0].prefix || '';
+          fmt.delimiters = tokens.slice(1).map(t => t.prefix || '');
+          const lastToken = tokens[tokens.length - 1];
+          const lastIdx = formatStr.lastIndexOf('%' + (lastToken.width || '') + (lastToken.precision ? '.' + lastToken.precision : '') + lastToken.type);
+          if (lastIdx >= 0) {
+            fmt.suffix = formatStr.slice(lastIdx + 1 + (lastToken.width ? String(lastToken.width).length : 0) + (lastToken.precision ? String(lastToken.precision).length + 1 : 0));
+          }
+          fmt.padZero = tokens.some(t => t.width >= 2);
+          fmt.formatTokens = tokens;
+        }
+      }
+
+      // Lua os.date 解析
+      const osDateMatch = scriptWithoutComments.match(/os\.date\s*\(\s*(["'])(.+?)\1/);
+      if (osDateMatch) {
+        fmt.dateFormat = osDateMatch[2];
+      }
+
+      return fmt;
+    }
+
+    // Lua os.date 格式映射到 JavaScript
+    function formatLuaDate(date, format) {
+      const monthsShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const daysFull = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+      const daysShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+      return format
+        .replace(/%e/g, String(date.getDate()))
+        .replace(/%d/g, String(date.getDate()).padStart(2, '0'))
+        .replace(/%B/g, monthsFull[date.getMonth()])
+        .replace(/%b/g, monthsShort[date.getMonth()].toUpperCase())
+        .replace(/%m/g, String(date.getMonth() + 1).padStart(2, '0'))
+        .replace(/%Y/g, String(date.getFullYear()))
+        .replace(/%y/g, String(date.getFullYear()).slice(-2))
+        .replace(/%A/g, daysFull[date.getDay()])
+        .replace(/%a/g, daysShort[date.getDay()])
+        .replace(/%H/g, String(date.getHours()).padStart(2, '0'))
+        .replace(/%I/g, String(date.getHours() % 12 || 12).padStart(2, '0'))
+        .replace(/%M/g, String(date.getMinutes()).padStart(2, '0'))
+        .replace(/%S/g, String(date.getSeconds()).padStart(2, '0'))
+        .replace(/%p/g, date.getHours() >= 12 ? 'PM' : 'AM');
+    }
+
+    // --- 行为绑定 ---
+    const behaviorRegistry = {};
+    const cleanupFns = [];
+
+    function registerBehavior(name, factory) {
+      behaviorRegistry[name] = factory;
+    }
+
+    registerBehavior('clock', function(el, div) {
+      const tp = el.textProperties || {};
+
+      // JavaScript 格式：直接执行 WE script
+      if (tp.script && tp.script.includes('export function update')) {
+        const result = executeJSScript(tp.script);
+        if (result && result.update) {
+          function update() {
+            try { div.textContent = result.update(''); } catch (e) { console.error('[Clock] JS update failed:', e); }
+          }
+          update();
+          const timer = setInterval(update, 1000);
+          return () => clearInterval(timer);
+        }
+      }
+
+      const fmt = parseScriptFormat(tp.script);
+
+      function update() {
+        const now = new Date();
+        let hours = now.getHours();
+        let ampm = '';
+
+        if (fmt && fmt.use12h) {
+          ampm = hours >= 12 ? ' PM' : ' AM';
+          hours = hours % 12;
+          if (hours === 0) hours = 12;
+        }
+
+        if (fmt && fmt.formatTokens && fmt.formatTokens.length > 0) {
+          const tokens = fmt.formatTokens;
+          const parts = [fmt.prefix || ''];
+          const values = [];
+          tokens.forEach((tok, i) => {
+            if (tok.type === 'd' || tok.type === 'f' || tok.type === 'i') {
+              if (i === 0) values.push(fmt.padZero ? String(hours).padStart(2, '0') : String(hours));
+              else if (i === 1) values.push(String(now.getMinutes()).padStart(2, '0'));
+              else if (i === 2) values.push(String(now.getSeconds()).padStart(2, '0'));
+              else values.push('');
+            } else {
+              values.push('');
+            }
+          });
+          let text = parts[0];
+          for (let i = 0; i < values.length; i++) {
+            text += values[i];
+            if (i < values.length - 1) text += fmt.delimiters[i] || ':';
+          }
+          text += fmt.suffix || '';
+          text += ampm;
+          div.textContent = text;
+          return;
+        }
+
+        const hh = (fmt && fmt.padZero) ? String(hours).padStart(2, '0') : String(hours);
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        let text = (fmt && fmt.prefix) || '';
+        text += hh + ((fmt && fmt.delimiter) || ':') + mm;
+        text += (fmt && fmt.suffix) || '';
+        if (fmt && fmt.hasSeconds) {
+          text += ((fmt && fmt.delimiter) || ':') + String(now.getSeconds()).padStart(2, '0');
+        }
+        text += ampm;
+        div.textContent = text;
+      }
+
+      update();
+      const timer = setInterval(update, 1000);
+      return () => clearInterval(timer);
+    });
+
+    registerBehavior('date', function(el, div) {
+      const tp = el.textProperties || {};
+      let liveUpdate = null;
+      let fmt = null;
+
+      // 优先直接执行 JS script
+      if (tp.script && !tp.script.includes('string.format') && !tp.script.includes('os.date')) {
+        const exports = executeScript(tp.script);
+        if (exports && typeof exports.update === 'function') {
+          liveUpdate = () => {
+            div.textContent = exports.update(tp.value || '');
+          };
+        }
+      }
+
+      if (!liveUpdate) {
+        fmt = parseScriptFormat(tp.script);
+      }
+
+      function update() {
+        if (liveUpdate) { liveUpdate(); return; }
+
+        const now = new Date();
+        if (fmt && fmt.dateFormat) {
+          div.textContent = formatLuaDate(now, fmt.dateFormat);
+        } else {
+          const monthNames = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+          const month = monthNames[now.getMonth()];
+          const date = String(now.getDate());
+          const year = now.getFullYear();
+          let text = '';
+          if (fmt && fmt.hasDate) text += date + ' ';
+          if (fmt && fmt.hasMonth) text += month + ' ';
+          if (fmt && fmt.hasYear) text += year;
+          if (!text.trim()) text = date + ' ' + month + ' ' + year;
+          div.textContent = text;
+        }
+      }
+
+      update();
+      const timer = setInterval(update, 60000);
+      return () => clearInterval(timer);
+    });
+
+    registerBehavior('weekday', function(el, div) {
+      const tp = el.textProperties || {};
+      let liveUpdate = null;
+      let fmt = null;
+      const script = (tp.script || '').toLowerCase();
+
+      // 优先直接执行 JS script
+      if (tp.script && !tp.script.includes('string.format') && !tp.script.includes('os.date')) {
+        const exports = executeScript(tp.script);
+        if (exports && typeof exports.update === 'function') {
+          liveUpdate = () => {
+            div.textContent = exports.update(tp.value || '');
+          };
+        }
+      }
+
+      if (!liveUpdate) {
+        fmt = parseScriptFormat(tp.script);
+      }
+
+      // 解析脚本后缀操作，如 :sub(1,3)..'DAY' / :upper() 等
+      const subMatch = script.match(/:sub\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+      const suffixMatch = script.match(/\.\.['"]([a-z]+)['"]/i);
+      const hasUpper = script.includes(':upper()');
+      const prefixMatch = script.match(/['"]([a-z]+)['"]\.\./i);
+
+      function update() {
+        if (liveUpdate) { liveUpdate(); return; }
+
+        const now = new Date();
+        let dayName;
+
+        if (fmt && fmt.dateFormat === '%a') {
+          const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+          dayName = days[now.getDay()];
+        } else {
+          const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+          dayName = days[now.getDay()];
+        }
+
+        if (hasUpper) dayName = dayName.toUpperCase();
+        if (prefixMatch) dayName = prefixMatch[1] + dayName;
+        if (subMatch) {
+          const start = parseInt(subMatch[1]) - 1;
+          const end = parseInt(subMatch[2]);
+          dayName = dayName.slice(start, end);
+        }
+        if (suffixMatch) dayName = dayName + suffixMatch[1];
+
+        div.textContent = dayName;
+      }
+
+      update();
+      const timer = setInterval(() => { update(); }, 60000);
+      return () => clearInterval(timer);
+    });
+
+    registerBehavior('audio', function(el, div) {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      div.appendChild(canvas);
+      const ctx = canvas.getContext('2d');
+      let weAudioData = new Float32Array(128);
+
+      if (window.wallpaperRegisterAudioListener) {
+        window.wallpaperRegisterAudioListener(arr => { if (arr && arr.length) weAudioData = arr; });
+      }
+
+      function getAudioData() {
+        if (webAudioAnalyser && webAudioDataArray) {
+          webAudioAnalyser.getByteFrequencyData(webAudioDataArray);
+          const floatArr = new Float32Array(webAudioDataArray.length);
+          for (let i = 0; i < webAudioDataArray.length; i++) floatArr[i] = webAudioDataArray[i] / 255;
+          return floatArr;
+        }
+        if (window.__wxAudioBuf && window.__wxAudioBuf.length) return window.__wxAudioBuf;
+        return weAudioData;
+      }
+
+      let animId;
+      function draw() {
+        const w = canvas.width = canvas.offsetWidth || 256;
+        const h = canvas.height = canvas.offsetHeight || 64;
+        ctx.clearRect(0, 0, w, h);
+        const data = getAudioData();
+        if (!data || !data.length) { animId = requestAnimationFrame(draw); return; }
+        const bars = Math.min(Math.floor(w / 4), data.length);
+        const barW = w / bars;
+        for (let i = 0; i < bars; i++) {
+          const idx = Math.floor((i / bars) * data.length);
+          const val = Math.abs(data[idx] || 0);
+          const barH = Math.min(h, val * h * 3);
+          ctx.fillStyle = 'rgba(255,255,255,0.85)';
+          ctx.fillRect(i * barW, h - barH, Math.max(1, barW - 1), barH);
+        }
+        animId = requestAnimationFrame(draw);
+      }
+      draw();
+      return () => { if (animId) cancelAnimationFrame(animId); };
+    });
+
+    registerBehavior('parallax', function(el, div) {
+      const amount = parseVec3(el.mouseParallaxAmount || '0.05 0.05 0');
+      function onMouseMove(e) {
+        const baseTf = div.dataset.baseTransform || 'translate(-50%, -50%)';
+        const dx = (e.clientX / window.innerWidth - 0.5) * amount[0] * window.innerWidth;
+        const dy = (e.clientY / window.innerHeight - 0.5) * amount[1] * window.innerHeight;
+        div.style.transform = `${baseTf} translate(${dx}px, ${dy}px)`;
+      }
+      document.addEventListener('mousemove', onMouseMove);
+      return () => document.removeEventListener('mousemove', onMouseMove);
+    });
+
+    function detectBehavior(el) {
+      const name = (el.name || '').toLowerCase().replace(/\s+/g, '');
+      const script = ((el.textProperties && el.textProperties.script) || '').toLowerCase();
+
+      // 音频可视化器（最明确的特征）
+      if (name.includes('audio') || name.includes('spectrum') || name.includes('visualizer') ||
+          name.includes('bar') || name.includes('equalizer')) {
+        return 'audio';
+      }
+
+      // 时钟：script 中有小时/分钟相关操作，或名称暗示
+      const isClock = script.includes('hour') || script.includes('minute') || script.includes('second') ||
+                       script.includes('%h') || script.includes('%m') || script.includes('%s') ||
+                       script.includes('gethours') || script.includes('getminutes') || script.includes('getseconds') ||
+                       name.includes('clock') || name.includes('time');
+      if (isClock) return 'clock';
+
+      // 名称优先判断（避免 script 里的 getdate/getday 干扰）
+      if (name === 'day' || name.includes('weekday') || name.includes('week')) return 'weekday';
+      if (name.includes('day') && !name.includes('date')) return 'weekday';
+      if (name.includes('date')) return 'date';
+
+      // script 内容判断（fallback）
+      const hasWeekday = script.includes('%a') || script.includes('%a') || script.includes('%w') ||
+                         (script.includes('getday') && !script.includes('getdate'));
+      const hasDate = script.includes('%e') || script.includes('%d') || script.includes('%b') || script.includes('%m') ||
+                      script.includes('getdate') || script.includes('getmonth') || script.includes('getfullyear');
+      if (hasWeekday && !hasDate) return 'weekday';
+      if (hasDate) return 'date';
+
+      if (el.mouseParallax) return 'parallax';
+      return null;
+    }
+
+    // --- 初始化 ---
+    async function initScene() {
+      if (fontPromises.length > 0) await Promise.all(fontPromises);
+
+      const overlay = document.getElementById('scene-overlay');
+      const screen = computeScreenScale();
+
+      elements.forEach(el => {
+        const div = document.createElement('div');
+        div.className = 'scene-object scene-object-text';
+        overlay.appendChild(div);
+
+        applyBaseStyles(el, div, screen);
+        if (el.type === 'text' || el.textProperties) {
+          applyTextStyles(el, div, screen);
+        }
+
+        let cleanup = null;
+        const behaviorName = detectBehavior(el);
+        if (behaviorName && behaviorRegistry[behaviorName]) {
+          cleanup = behaviorRegistry[behaviorName](el, div);
+        } else {
+          const tp = el.textProperties || {};
+          if (tp.value) {
+            div.textContent = tp.value;
+          } else {
+            div.style.display = 'none';
+          }
+        }
+        sceneElements.push({ el, div, cleanup });
+      });
+    }
+
+    function updateSceneStyles() {
+      const screen = computeScreenScale();
+      sceneElements.forEach(({ el, div }) => {
+        applyBaseStyles(el, div, screen);
+        if (el.type === 'text' || el.textProperties) {
+          applyTextStyles(el, div, screen);
+        }
+      });
+    }
+
+    initScene().catch(err => console.error('[SceneBake] Init failed:', err));
+
+    let resizeTimeout;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(updateSceneStyles, 100);
+    });
+  </script>
+</body>
+</html>

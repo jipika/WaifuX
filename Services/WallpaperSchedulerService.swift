@@ -30,6 +30,7 @@ class WallpaperSchedulerService: ObservableObject {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        config.isEnabled = true
         scheduleNextChange()
         saveConfig()
         print("\(logTag) Started. Check interval: \(effectiveCheckInterval())s")
@@ -39,6 +40,7 @@ class WallpaperSchedulerService: ObservableObject {
         timer?.invalidate()
         timer = nil
         isRunning = false
+        config.isEnabled = false
         saveConfig()
         print("\(logTag) Stopped.")
     }

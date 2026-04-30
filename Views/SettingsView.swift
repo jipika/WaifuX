@@ -300,7 +300,7 @@ private struct GeneralSettingsTab: View {
                 MacSettingsRow(
                     title: t("pauseWhenFullscreenCovers"),
                     subtitle: t("pauseWhenFullscreenCoversDesc"),
-                    showDivider: false
+                    showDivider: true
                 ) {
                     MacToggle(isOn: Binding(
                         get: { viewModel.pauseWhenFullscreenCovers },
@@ -309,6 +309,89 @@ private struct GeneralSettingsTab: View {
                             viewModel.syncAutoPauseSettings()
                         }
                     ))
+                }
+
+                MacSettingsRow(
+                    title: t("pauseOnBatteryPower"),
+                    subtitle: t("pauseOnBatteryPowerDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: Binding(
+                        get: { viewModel.pauseOnBatteryPower },
+                        set: { newValue in
+                            viewModel.pauseOnBatteryPower = newValue
+                            viewModel.syncAutoPauseSettings()
+                        }
+                    ))
+                }
+            }
+
+            // 代理设置组
+            MacSettingsSection(header: t("proxySettings")) {
+                MacSettingsRow(
+                    title: t("proxyEnabled"),
+                    subtitle: t("proxyEnabledDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.proxyEnabled)
+                }
+
+                if viewModel.proxyEnabled {
+                    Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
+
+                    HStack(spacing: 12) {
+                        Text(t("proxyHost"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.9))
+
+                        Spacer()
+
+                        TextField(t("proxyHostPlaceholder"), text: $viewModel.proxyHost)
+                            .font(.system(size: 12, weight: .regular))
+                            .textFieldStyle(.plain)
+                            .frame(width: 140)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color.white.opacity(0.07))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                                    )
+                            )
+                            .foregroundStyle(Color.white.opacity(0.85))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+
+                    Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
+
+                    HStack(spacing: 12) {
+                        Text(t("proxyPort"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.9))
+
+                        Spacer()
+
+                        TextField(t("proxyPortPlaceholder"), text: $viewModel.proxyPort)
+                            .font(.system(size: 12, weight: .regular))
+                            .textFieldStyle(.plain)
+                            .frame(width: 80)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color.white.opacity(0.07))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                                    )
+                            )
+                            .foregroundStyle(Color.white.opacity(0.85))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
             }
 

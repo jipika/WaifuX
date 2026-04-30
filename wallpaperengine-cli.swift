@@ -517,13 +517,57 @@ private func detectWallpaperProjectType(path: String) -> String? {
         contentDir = URL(fileURLWithPath: resolveSteamWorkshopDirectoryIfNeeded(path))
     }
 
+    // 2. 读取 project.json
     let projectJSON = contentDir.appendingPathComponent("project.json")
-    guard fm.fileExists(atPath: projectJSON.path),
-          let data = try? Data(contentsOf: projectJSON),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    if fm.fileExists(atPath: projectJSON.path),
+       let data = try? Data(contentsOf: projectJSON),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        // 优先使用显式 type
+        if let type = json["type"] as? String, !type.isEmpty {
+            return type
+        }
+        // 启发式推断：通过 file 字段扩展名
+        if let file = json["file"] as? String {
+            let ext = (file as NSString).pathExtension.lowercased()
+            if ext == "html" || ext == "htm" { return "web" }
+            if ext == "json" {
+                let lower = file.lowercased()
+                if lower.contains("scene") { return "scene" }
+            }
+            if ["mp4", "mov", "webm", "avi"].contains(ext) { return "video" }
+        }
+        // 有 project.json 但无明确 type/file → 按目录内容推断
+        if let entries = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil) {
+            let names = entries.map { $0.lastPathComponent.lowercased() }
+            let exts = entries.map { $0.pathExtension.lowercased() }
+            if exts.contains("html") || exts.contains("htm") { return "web" }
+            if names.contains(where: { $0.hasSuffix(".scene.pkg") || $0 == "scene.pkg" }) { return "scene" }
+            if exts.contains("mp4") || exts.contains("mov") || exts.contains("webm") { return "video" }
+            if exts.contains("pkg") {
+                // 进一步检查 pkg 内容（不解压，只看文件名是否含 scene）
+                if let pkgEntry = entries.first(where: { $0.pathExtension.lowercased() == "pkg" }),
+                   let pkgEntries = try? fm.contentsOfDirectory(at: pkgEntry, includingPropertiesForKeys: nil) {
+                    let pkgNames = pkgEntries.map { $0.lastPathComponent.lowercased() }
+                    if pkgNames.contains(where: { $0.contains("scene") }) { return "scene" }
+                }
+            }
+        }
         return nil
     }
-    return json["type"] as? String
+
+    // 3. 无 project.json：按目录内容推断
+    if let entries = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil) {
+        let exts = entries.map { $0.pathExtension.lowercased() }
+        if exts.contains("html") || exts.contains("htm") { return "web" }
+        if exts.contains("mp4") || exts.contains("mov") || exts.contains("webm") { return "video" }
+        if exts.contains("pkg") { return "scene" }
+        if exts.contains("json") {
+            if entries.contains(where: { $0.lastPathComponent.lowercased().contains("scene") }) {
+                return "scene"
+            }
+        }
+    }
+    return nil
 }
 
 private func extractPKG(at url: URL) -> URL? {
@@ -688,6 +732,58 @@ private func webWallpaperFileReadAccessURL(projectContentDir: URL, cliWallpaperP
     return projectContentDir
 }
 
+/// 解析 Workshop Web 壁纸的依赖路径。支持同级 workshop 目录与向上回溯 steamapps/workshop/content/431960。
+private func resolveWallpaperDependencyPath(from contentDir: URL, dependencyID: String) -> URL? {
+    let fm = FileManager.default
+    // 1. 同级 workshop 目录（如 .../431960/<id>/ 的同级）
+    let candidate1 = contentDir.deletingLastPathComponent().appendingPathComponent(dependencyID)
+    if fm.fileExists(atPath: candidate1.path) { return candidate1 }
+
+    // 2. 向上回溯寻找 steamapps/workshop/content/431960/<dependencyID>
+    var current = contentDir
+    for _ in 0..<6 {
+        current = current.deletingLastPathComponent()
+        let candidate = current.appendingPathComponent("steamapps/workshop/content/431960/\(dependencyID)")
+        if fm.fileExists(atPath: candidate.path) { return candidate }
+    }
+    return nil
+}
+
+/// 将主壁纸目录与依赖目录合并到临时目录（主壁纸文件覆盖依赖）。
+/// 返回临时目录 URL；失败时返回 nil。
+private func mergeWallpaperWithDependency(contentDir: URL, dependencyDir: URL) -> URL? {
+    let fm = FileManager.default
+    let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("wallpaperengine_merged_\(contentDir.lastPathComponent)_\(dependencyDir.lastPathComponent)_\(UUID().uuidString.prefix(8))")
+    do {
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        // 先复制依赖内容
+        if let depEntries = try? fm.contentsOfDirectory(at: dependencyDir, includingPropertiesForKeys: nil) {
+            for entry in depEntries {
+                let dest = tempDir.appendingPathComponent(entry.lastPathComponent)
+                if !fm.fileExists(atPath: dest.path) {
+                    try? fm.copyItem(at: entry, to: dest)
+                }
+            }
+        }
+        // 再复制主壁纸内容（覆盖依赖同名文件）
+        if let entries = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil) {
+            for entry in entries {
+                let dest = tempDir.appendingPathComponent(entry.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) {
+                    try? fm.removeItem(at: dest)
+                }
+                try? fm.copyItem(at: entry, to: dest)
+            }
+        }
+        dlog("[mergeWallpaperWithDependency] Merged to \(tempDir.path)")
+        return tempDir
+    } catch {
+        dlog("[mergeWallpaperWithDependency] Failed: \(error)")
+        return nil
+    }
+}
+
 private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile: String)? {
     let url = URL(fileURLWithPath: path)
     var contentDir = url
@@ -704,6 +800,29 @@ private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile:
         return nil
     }
     let file = json["file"] as? String ?? "index.html"
+
+    // 处理依赖：Web 预设（preset）常引用另一个壁纸作为依赖
+    if let dependency = json["dependency"] as? String, !dependency.isEmpty {
+        if let depDir = resolveWallpaperDependencyPath(from: contentDir, dependencyID: dependency) {
+            if let merged = mergeWallpaperWithDependency(contentDir: contentDir, dependencyDir: depDir) {
+                let mergedIndex = merged.appendingPathComponent(file)
+                if FileManager.default.fileExists(atPath: mergedIndex.path) {
+                    return (merged, file)
+                }
+                // 若指定文件不存在，尝试 fallback 到 index.html
+                let fallbackIndex = merged.appendingPathComponent("index.html")
+                if FileManager.default.fileExists(atPath: fallbackIndex.path) {
+                    return (merged, "index.html")
+                }
+                // fallback 失败，返回原始目录（至少主壁纸自己的文件存在）
+                dlog("[resolveWebWallpaperEntry] Merged dir missing \(file) and index.html, falling back to original dir")
+                try? FileManager.default.removeItem(at: merged)
+            }
+        } else {
+            dlog("[resolveWebWallpaperEntry] Dependency \(dependency) not found for \(contentDir.path)")
+        }
+    }
+
     return (contentDir, file)
 }
 
@@ -738,11 +857,27 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             };
             var __wxAudioCbs = [];
             var __wxAudioBuf = new Float32Array(128);
+            var __wxAudioEnabled = false;
             window.wallpaperRegisterAudioListener = function(cb) {
               if (typeof cb === 'function') __wxAudioCbs.push(cb);
             };
+            // 暴露给 Swift 侧注入真实音频 FFT 数据
+            window.__wxUpdateAudioBuf = function(arr) {
+              if (arr && arr.length) {
+                __wxAudioEnabled = true;
+                for (var i = 0; i < __wxAudioBuf.length && i < arr.length; i++) {
+                  __wxAudioBuf[i] = arr[i];
+                }
+                for (var j = 0; j < __wxAudioCbs.length; j++) {
+                  try { __wxAudioCbs[j](__wxAudioBuf); } catch (e) {}
+                }
+              }
+            };
+            // Fallback：无真实音频时维持旧行为（全零），或做 idle 动画
             setInterval(function() {
-              for (var i = 0; i < __wxAudioBuf.length; i++) __wxAudioBuf[i] = 0;
+              if (!__wxAudioEnabled) {
+                for (var i = 0; i < __wxAudioBuf.length; i++) __wxAudioBuf[i] = 0;
+              }
               for (var j = 0; j < __wxAudioCbs.length; j++) {
                 try { __wxAudioCbs[j](__wxAudioBuf); } catch (e) {}
               }
@@ -821,16 +956,68 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         forMainFrameOnly: false
     )
 
+    /// 鼠标事件桥：Swift 侧通过全局事件监听捕获鼠标，再经 JS 注入模拟进 WebView。
+    /// 解决 macOS Finder 桌面图标层遮挡 desktopWindow 层级窗口导致点击/移动无法到达 WKWebView 的问题。
+    private static let mouseEventBridgeScript = WKUserScript(
+        source: """
+        (function() {
+          if (window.__wxMouseBridge) return;
+          window.__wxMouseBridge = {
+            lastDownTarget: null,
+            dispatch: function(type, x, y, button, deltaX, deltaY) {
+              var el = document.elementFromPoint(x, y);
+              if (!el) el = document.documentElement;
+              if (type === 'wheel') {
+                var event = new WheelEvent('wheel', {
+                  clientX: x, clientY: y,
+                  deltaX: deltaX || 0, deltaY: deltaY || 0,
+                  bubbles: true, cancelable: true, view: window
+                });
+                el.dispatchEvent(event);
+                return;
+              }
+              var event = new MouseEvent(type, {
+                clientX: x, clientY: y,
+                screenX: x, screenY: y,
+                bubbles: true, cancelable: true,
+                button: button || 0,
+                buttons: type === 'mouseup' ? 0 : 1,
+                view: window
+              });
+              el.dispatchEvent(event);
+              if (type === 'mousedown') { this.lastDownTarget = el; }
+              if (type === 'mouseup' && this.lastDownTarget) {
+                var clickEvent = new MouseEvent('click', {
+                  clientX: x, clientY: y,
+                  bubbles: true, cancelable: true,
+                  button: button || 0, view: window
+                });
+                this.lastDownTarget.dispatchEvent(clickEvent);
+                this.lastDownTarget = null;
+              }
+            }
+          };
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
+
     private var window: NSWindow?
     private var webView: WKWebView?
-    private var captureTimer: Timer?
     private var pendingCompletion: ((Bool) -> Void)?
     private var extractedPKGDir: URL?
+    /// 依赖合并产生的临时目录，stop 时需清理
+    private var mergedDependencyDir: URL?
     /// `project.json` → `general.properties` 的 JSON 文本，加载完成后注入 JS
     private var injectedPropertiesJSON: String?
     /// 递增以取消进行中的首帧采样（stop / 重新加载）
     private var firstFrameSettleGeneration: UInt64 = 0
     private(set) var isLoaded = false
+    /// 全局鼠标事件监听器句柄（事件桥）
+    private var mouseEventMonitors: [Any] = []
+    private var lastMouseMoveTime: TimeInterval = 0
+    private let mouseMoveThrottle: TimeInterval = 1.0 / 30.0
 
     private enum FirstFramePolicy {
         /// 至少经历此时长后才允许「稳定」判真，避免白屏/首帧未绘制误判
@@ -861,9 +1048,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             dlog("[WebRendererBridge] Loaded user properties from project.json for injection")
         }
 
-        // 记录 .pkg 解压目录以便 stop 时清理
+        // 记录临时目录以便 stop 时清理
         if URL(fileURLWithPath: path).pathExtension.lowercased() == "pkg" {
             extractedPKGDir = baseURL
+        } else if baseURL.path.contains("wallpaperengine_merged_") {
+            mergedDependencyDir = baseURL
         }
 
         let screens = NSScreen.screens
@@ -903,6 +1092,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         let ucc = WKUserContentController()
         ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
+        ucc.addUserScript(Self.mouseEventBridgeScript)
         config.userContentController = ucc
         if #available(macOS 14.0, *) {
             config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -927,10 +1117,57 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         if readAccessURL.path != baseURL.path {
             dlog("[WebRendererBridge] file read access expanded to workshop root: \(readAccessURL.path)")
         }
+        autoFixSpineConfigIfNeeded(projectContentDir: baseURL)
         web.loadFileURL(fileURL, allowingReadAccessTo: readAccessURL)
         w.orderBack(nil)
 
         dlog("[WebRendererBridge] Loading web wallpaper: \(fileURL.path) on screen \(targetScreen.localizedName)")
+    }
+
+    /// 自动检测并修复 Spine 动画壁纸缺失的 .config.json。
+    /// 部分 Workshop 作者本地有配置文件，打包时遗漏，导致 JS fallback 到不存在的 hardcode 文件名。
+    private func autoFixSpineConfigIfNeeded(projectContentDir: URL) {
+        let fm = FileManager.default
+        let imageDir = projectContentDir.appendingPathComponent("image")
+        let configURL = imageDir.appendingPathComponent(".config.json")
+
+        // 已有配置则跳过
+        guard fm.fileExists(atPath: imageDir.path),
+              !fm.fileExists(atPath: configURL.path) else { return }
+
+        // 查找 .skel 文件
+        let skelFiles: [URL]
+        do {
+            skelFiles = try fm.contentsOfDirectory(at: imageDir, includingPropertiesForKeys: [.fileSizeKey])
+                .filter { $0.pathExtension.lowercased() == "skel" }
+        } catch {
+            return
+        }
+
+        guard !skelFiles.isEmpty else { return }
+
+        // 多个 skel 时选最大的（通常是最完整的角色模型）
+        let targetSkel: URL
+        if skelFiles.count == 1 {
+            targetSkel = skelFiles[0]
+        } else {
+            targetSkel = skelFiles.max { a, b in
+                let sizeA = (try? fm.attributesOfItem(atPath: a.path)[.size] as? Int) ?? 0
+                let sizeB = (try? fm.attributesOfItem(atPath: b.path)[.size] as? Int) ?? 0
+                return sizeA < sizeB
+            } ?? skelFiles[0]
+        }
+
+        let skelName = targetSkel.lastPathComponent
+        let config: [String: String] = ["skeleton": skelName]
+        guard let data = try? JSONSerialization.data(withJSONObject: config, options: []) else { return }
+
+        do {
+            try data.write(to: configURL, options: .atomic)
+            dlog("[WebRendererBridge] Auto-created Spine config: \(skelName)")
+        } catch {
+            dlog("[WebRendererBridge] Failed to auto-create Spine config: \(error)")
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -940,6 +1177,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         runWebWallpaperBootstrap { [weak self] in
             guard let self = self else { return }
             self.beginSettlingFirstFrame()
+            // 首帧就绪后启动鼠标事件桥（桌面图标层会吃掉事件，需全局监听转发）
+            self.startMouseEventBridge()
         }
         NSApp.setActivationPolicy(.prohibited)
     }
@@ -968,8 +1207,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     func pause() {
         window?.orderOut(nil)
-        captureTimer?.invalidate()
-        captureTimer = nil
+        stopMouseEventBridge()
         // 暂停页面内所有媒体与 CSS 动画，避免后台继续消耗资源
         webView?.evaluateJavaScript("""
             document.querySelectorAll('video, audio').forEach(m => m.pause());
@@ -991,14 +1229,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             });
             window.dispatchEvent(new Event('resize'));
         """) { _, _ in }
-        startCaptureTimer()
+        startMouseEventBridge()
         NSApp.setActivationPolicy(.prohibited)
     }
 
     func stop() {
         firstFrameSettleGeneration += 1
-        captureTimer?.invalidate()
-        captureTimer = nil
+        stopMouseEventBridge()
         // 中断可能还在等待的 completion
         pendingCompletion = nil
         webView?.stopLoading()
@@ -1008,12 +1245,91 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         window?.close()
         window = nil
         isLoaded = false
-        // 清理 .pkg 解压产生的临时目录
+        // 清理 .pkg 解压与依赖合并产生的临时目录
         if let dir = extractedPKGDir {
             try? FileManager.default.removeItem(at: dir)
             extractedPKGDir = nil
         }
+        if let dir = mergedDependencyDir {
+            try? FileManager.default.removeItem(at: dir)
+            mergedDependencyDir = nil
+        }
         injectedPropertiesJSON = nil
+    }
+
+    // MARK: - Mouse Event Bridge
+
+    /// 启动全局鼠标事件监听，将事件转发给 WebView。
+    /// macOS Finder 桌面图标层位于 desktopWindow 之上，会拦截鼠标事件，因此需要全局监听 + JS 注入。
+    private func startMouseEventBridge() {
+        stopMouseEventBridge()
+        guard window != nil, webView != nil else { return }
+
+        // 左键按下
+        let downMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.handleGlobalMouseEvent(event, type: "mousedown")
+        }
+        if let m = downMonitor { mouseEventMonitors.append(m) }
+        // 左键抬起
+        let upMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            self?.handleGlobalMouseEvent(event, type: "mouseup")
+        }
+        if let m = upMonitor { mouseEventMonitors.append(m) }
+        // 鼠标移动（节流到 30fps 避免过度 evaluateJavaScript）
+        let moveMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            guard let self = self else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - self.lastMouseMoveTime < self.mouseMoveThrottle { return }
+            self.lastMouseMoveTime = now
+            self.handleGlobalMouseEvent(event, type: "mousemove")
+        }
+        if let m = moveMonitor { mouseEventMonitors.append(m) }
+        // 滚轮
+        let wheelMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.handleGlobalMouseEvent(event, type: "wheel")
+        }
+        if let m = wheelMonitor { mouseEventMonitors.append(m) }
+
+        dlog("[WebRendererBridge] Mouse event bridge started with \(mouseEventMonitors.count) monitors")
+    }
+
+    private func stopMouseEventBridge() {
+        for monitor in mouseEventMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        mouseEventMonitors.removeAll()
+        lastMouseMoveTime = 0
+    }
+
+    private func handleGlobalMouseEvent(_ event: NSEvent, type: String) {
+        guard let window = self.window, let webView = self.webView else { return }
+
+        let mouseLocation = NSEvent.mouseLocation
+        // 检查鼠标是否在 WebView 窗口范围内
+        guard window.frame.contains(mouseLocation) else { return }
+
+        // 转换为 WebView 内部坐标（macOS 屏幕坐标原点在左下角，Web/CSS 原点在左上角）
+        let relX = mouseLocation.x - window.frame.origin.x
+        let relY = mouseLocation.y - window.frame.origin.y
+        let webViewX = relX
+        let webViewY = window.frame.height - relY
+
+        // 边界检查
+        guard webViewX >= 0, webViewX <= webView.bounds.width,
+              webViewY >= 0, webViewY <= webView.bounds.height else { return }
+
+        var script = "if(window.__wxMouseBridge){window.__wxMouseBridge.dispatch('\(type)',\(webViewX),\(webViewY),0"
+        if type == "wheel" {
+            script += ",\(event.scrollingDeltaX),\(event.scrollingDeltaY)"
+        } else {
+            script += ",0,0"
+        }
+        script += ");}"
+
+        DispatchQueue.main.async { [weak self] in
+            guard self?.webView != nil else { return }
+            webView.evaluateJavaScript(script) { _, _ in }
+        }
     }
 
     /// 注入 WE 用户属性、去掉常见坏掉的 `background.png`、铺满视口并触发 resize（供 Spine/Canvas 重算）
@@ -1081,7 +1397,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             dlog("[WebRendererBridge] First frame settle: \(reason), saveOk=\(ok)")
             pendingCompletion?(ok)
             pendingCompletion = nil
-            startCaptureTimer()
+            // 不再持续截图：首帧已保存到 PRIMARY_CAPTURE_PATH，由 DesktopWallpaperManager 负责推系统桌面
         }
 
         func scheduleStep() {
@@ -1210,24 +1526,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         return Double(sum) / Double(a.count * 255)
     }
 
-    private func startCaptureTimer() {
-        captureTimer?.invalidate()
-        captureTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.captureFrame()
-        }
-    }
-
-    private func captureFrame(completion: ((Bool) -> Void)? = nil) {
-        snapshotWebView { [weak self] image in
-            guard let image = image else {
-                completion?(false)
-                return
-            }
-            let success = self?.saveImage(image) ?? false
-            completion?(success)
-        }
-    }
-
     private func saveImage(_ image: NSImage) -> Bool {
         guard let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
@@ -1248,6 +1546,18 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             return true
         } catch {
             return false
+        }
+    }
+
+    /// 截图一帧并保存到 PRIMARY_CAPTURE_PATH（供 DesktopWallpaperManager 在暂停时推送桌面）
+    func captureFrame(completion: ((Bool) -> Void)? = nil) {
+        snapshotWebView { [weak self] image in
+            guard let image = image else {
+                completion?(false)
+                return
+            }
+            let success = self?.saveImage(image) ?? false
+            completion?(success)
         }
     }
 }
@@ -1281,8 +1591,8 @@ private final class DesktopWallpaperManager {
     }
 
     private let originalWallpaperKey = "renderer_original_wallpaper_v1"
-    private var captureUpdateTimer: Timer?
     private(set) var lastErrorMessage: String?
+    private var currentScreen: Int? = nil
 
     private init() {}
 
@@ -1291,9 +1601,6 @@ private final class DesktopWallpaperManager {
         dlog("[DesktopWallpaperManager] setWallpaper path=\(path) width=\(width) height=\(height) screen=\(screen ?? -1)")
 
         lastErrorMessage = nil
-
-        captureUpdateTimer?.invalidate()
-        captureUpdateTimer = nil
 
         // 提前检测并拦截不支持的类型
         isWebMode = isWebWallpaper(path: path)
@@ -1322,6 +1629,7 @@ private final class DesktopWallpaperManager {
         desktopCaptureSlot = 0
 
         currentWallpaperPath = path
+        currentScreen = screen
         isRunning = true
         isPaused = false
 
@@ -1333,11 +1641,11 @@ private final class DesktopWallpaperManager {
                     self.isRunning = false
                     self.isWebMode = false
                     self.currentWallpaperPath = nil
+                    self.currentScreen = nil
                     self.restoreOriginalWallpaper()
                 } else {
-                    // 与 Scene 一致：把快照同步到系统桌面（锁屏/调度中心等），并定时刷新实现「动态壁纸」
+                    // 首帧截图推送系统桌面（锁屏/调度中心等），之后由 desktopWindow 层级的动态窗口直接渲染
                     self.applyCaptureAsDesktopWallpaper(screen: screen)
-                    self.startPeriodicCapture(screen: screen)
                 }
                 NSApp.setActivationPolicy(.prohibited)
                 completion?(success)
@@ -1377,11 +1685,12 @@ private final class DesktopWallpaperManager {
             if success {
                 print("[DesktopWallpaperManager] Scene first capture OK → \(PRIMARY_CAPTURE_PATH)")
                 applyCaptureAsDesktopWallpaper(screen: screen)
-                startPeriodicCapture(screen: screen)
+                // 不再持续推送：scene 由 OpenGL 窗口直接渲染，锁屏/静态桌面只保留首帧
             } else {
                 isRunning = false
                 isWebMode = false
                 currentWallpaperPath = nil
+                currentScreen = nil
                 restoreOriginalWallpaper()
             }
             NSApp.setActivationPolicy(.prohibited)
@@ -1467,8 +1776,18 @@ private final class DesktopWallpaperManager {
         guard isRunning, !isPaused else { return }
         if isWebMode {
             WebRendererBridge.shared.pause()
+            // 暂停后截取一帧推送系统桌面（动态窗口已隐藏，桌面需要静态图兜底）
+            WebRendererBridge.shared.captureFrame { [weak self] success in
+                if success {
+                    self?.applyCaptureAsDesktopWallpaper(screen: self?.currentScreen)
+                }
+            }
         } else {
             RendererBridge.shared.pauseSceneRendering()
+            let url = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
+            if RendererBridge.shared.saveCapture(to: url) {
+                applyCaptureAsDesktopWallpaper(screen: currentScreen)
+            }
         }
         isPaused = true
     }
@@ -1485,8 +1804,6 @@ private final class DesktopWallpaperManager {
     }
 
     func stopWallpaper() {
-        captureUpdateTimer?.invalidate()
-        captureUpdateTimer = nil
         if isWebMode {
             WebRendererBridge.shared.stop()
         } else {
@@ -1499,6 +1816,7 @@ private final class DesktopWallpaperManager {
         try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_0)
         try? FileManager.default.removeItem(atPath: DESK_CAPTURE_PATH_1)
         currentWallpaperPath = nil
+        currentScreen = nil
         isRunning = false
         isPaused = false
         restoreOriginalWallpaper()
@@ -1543,25 +1861,7 @@ private final class DesktopWallpaperManager {
         dlog("[DesktopWallpaperManager] Applied capture as desktop wallpaper for \(targetScreens.count) screen(s) via \(dstPath)")
     }
 
-    /// Periodically re-capture and update desktop wallpaper to reflect animation
-    private func startPeriodicCapture(screen: Int? = nil) {
-        captureUpdateTimer?.invalidate()
-        // 使用 500ms 间隔（2fps）在性能与流畅度之间取得平衡
-        // 注意：saveCapture 依赖 OpenGL 上下文，必须在主线程执行
-        captureUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self, self.isRunning, !self.isPaused else { return }
-            if self.isWebMode {
-                // Web：由 WebRendererBridge 定时写入主截图文件，这里只负责推到系统桌面
-                guard FileManager.default.fileExists(atPath: PRIMARY_CAPTURE_PATH) else { return }
-                self.applyCaptureAsDesktopWallpaper(screen: screen)
-            } else {
-                let url = URL(fileURLWithPath: PRIMARY_CAPTURE_PATH)
-                let success = RendererBridge.shared.saveCapture(to: url)
-                guard success else { return }
-                self.applyCaptureAsDesktopWallpaper(screen: screen)
-            }
-        }
-    }
+    // （已移除 startPeriodicCapture：不再持续截图推送系统桌面）
 
     // MARK: - Renderer Window Fixup
     // C++ renderer 创建的窗口可能缺少桌面壁纸所需的 NSWindow 属性，这里手动补齐。

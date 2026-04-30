@@ -75,8 +75,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         try? executeCLI(arguments: ["stop"])
         isControllingExternalEngine = false
         isExternalPaused = false
-        lastWallpaperPath = nil
-        clearPersistedState()
+        // 保留 lastWallpaperPath 与持久化路径，以便「关闭后再启用」时能恢复
+        UserDefaults.standard.removeObject(forKey: controllingExternalKey)
     }
 
     func stopWallpaper() {
@@ -109,11 +109,12 @@ final class WallpaperEngineXBridge: ObservableObject {
         if !isControllingExternalEngine {
             if let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) {
                 lastWallpaperPath = path
-                isControllingExternalEngine = UserDefaults.standard.bool(forKey: controllingExternalKey)
             }
         }
 
-        guard isControllingExternalEngine, let path = lastWallpaperPath else { return }
+        guard let path = lastWallpaperPath else { return }
+        isControllingExternalEngine = true
+        isExternalPaused = false
         try? setWallpaper(path: path)
     }
 

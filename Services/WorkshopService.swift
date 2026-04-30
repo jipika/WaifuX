@@ -104,7 +104,7 @@ class WorkshopService: ObservableObject {
         var request = URLRequest(url: url)
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let data = try await NetworkService.shared.fetchData(request: request)
         guard let html = String(data: data, encoding: .utf8) else {
             throw WorkshopError.apiError("无法解析 HTML 响应")
         }
@@ -726,12 +726,8 @@ class WorkshopService: ObservableObject {
         }
         request.httpBody = body.data(using: .utf8)
         
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw WorkshopError.apiError("Steam API 返回非 200 状态码")
-        }
-        
+        let data = try await NetworkService.shared.fetchData(request: request)
+
         do {
             let result = try JSONDecoder().decode(SteamPublishedFileResponse.self, from: data)
             let details = result.response.publishedfiledetails ?? []
@@ -835,6 +831,17 @@ class WorkshopService: ObservableObject {
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
             var environment = ProcessInfo.processInfo.environment
             environment["DYLD_LIBRARY_PATH"] = steamcmdPath.deletingLastPathComponent().path
+            // 注入 HTTP 代理配置（steamcmd 支持 HTTP_PROXY 环境变量）
+            // 仅在用户于 App 设置中显式开启代理时才注入；关闭时不做任何操作，完全保持原有行为
+            let defaults = UserDefaults.standard
+            if defaults.bool(forKey: "proxy_enabled"),
+               let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
+               let portStr = defaults.string(forKey: "proxy_port"),
+               let port = Int(portStr), port > 0 {
+                let proxyURL = "http://\(host):\(port)"
+                environment["HTTP_PROXY"] = proxyURL
+                environment["HTTPS_PROXY"] = proxyURL
+            }
             task.environment = environment
 
             let outputPipe = Pipe()
@@ -1218,6 +1225,17 @@ class WorkshopService: ObservableObject {
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
             var environment = ProcessInfo.processInfo.environment
             environment["DYLD_LIBRARY_PATH"] = steamcmdPath.deletingLastPathComponent().path
+            // 注入 HTTP 代理配置（steamcmd 支持 HTTP_PROXY 环境变量）
+            // 仅在用户于 App 设置中显式开启代理时才注入；关闭时不做任何操作，完全保持原有行为
+            let defaults = UserDefaults.standard
+            if defaults.bool(forKey: "proxy_enabled"),
+               let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
+               let portStr = defaults.string(forKey: "proxy_port"),
+               let port = Int(portStr), port > 0 {
+                let proxyURL = "http://\(host):\(port)"
+                environment["HTTP_PROXY"] = proxyURL
+                environment["HTTPS_PROXY"] = proxyURL
+            }
             task.environment = environment
 
             let outputPipe = Pipe()
