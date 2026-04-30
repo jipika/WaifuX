@@ -376,6 +376,21 @@ enum SceneOfflineBakeService {
         sceneWidth: Int,
         sceneHeight: Int
     ) {
+        // 1. 读取 scene.json
+        guard let sceneDict = loadSceneDictionary(from: contentRoot) else {
+            print("[WebOverlay] Failed to load scene.json from \(contentRoot.path)")
+            return
+        }
+
+        // 2. 解析动态元素（文本、效果、视差等已烘焙排除的内容）
+        let elements = parseSceneObjectsForOverlay(sceneDict: sceneDict)
+
+        // 没有真正需要动态 overlay 的元素时，直接跳过（不生成 .web 目录，纯静态场景已完整烘焙进视频）
+        guard !elements.isEmpty else {
+            print("[WebOverlay] No dynamic overlay elements found, skipping .web generation")
+            return
+        }
+
         let webDirPath = videoPath.replacingOccurrences(of: ".mp4", with: ".web")
         let webDir = URL(fileURLWithPath: webDirPath)
         let fm = FileManager.default
@@ -387,21 +402,6 @@ enum SceneOfflineBakeService {
             try fm.createDirectory(at: webDir, withIntermediateDirectories: true)
         } catch {
             print("[WebOverlay] Failed to create web directory: \(error)")
-            return
-        }
-
-        // 1. 读取 scene.json
-        guard let sceneDict = loadSceneDictionary(from: contentRoot) else {
-            print("[WebOverlay] Failed to load scene.json from \(contentRoot.path)")
-            return
-        }
-
-        // 2. 解析动态元素（文本、效果、视差等已烘焙排除的内容）
-        let elements = parseSceneObjectsForOverlay(sceneDict: sceneDict)
-
-        // 没有真正需要动态 overlay 的元素时，跳过生成 .web 目录（纯静态场景已完整烘焙进视频）
-        guard !elements.isEmpty else {
-            print("[WebOverlay] No dynamic overlay elements found, skipping .web generation")
             return
         }
 
