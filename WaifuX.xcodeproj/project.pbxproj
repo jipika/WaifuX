@@ -153,6 +153,8 @@
 		FD1B442F09B4C2465EEA06DF /* DataSourceRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CC2118DE38E9FCFA19956D /* DataSourceRule.swift */; };
 		FD8C69180BB22EF12B34A40B /* GitHubDNSResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 193203C5461256F1DA85FA07 /* GitHubDNSResolver.swift */; };
 		FE7918F419971479AD53A5DD /* ExploreComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88C460F3033A25320800D73A /* ExploreComponents.swift */; };
+
+		0B50E4D3572B498CAF69A8D8 /* NSScreen+Wallpaper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11800CE9CADA490EA16CBB47 /* NSScreen+Wallpaper.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -301,6 +303,8 @@
 		F8F5AC79AF32CB408870B4A5 /* WaifuX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WaifuX.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FC5EF18290E78CAC93FAF3FA /* HTMLParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLParser.swift; sourceTree = "<group>"; };
 		FEEBA93D7CC0380CF9E1693B /* MediaDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaDetailSheet.swift; sourceTree = "<group>"; };
+
+		11800CE9CADA490EA16CBB47 /* NSScreen+Wallpaper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSScreen+Wallpaper.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -335,6 +339,7 @@
 		02DFB6F0BBFB387E0D4FFBE1 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				11800CE9CADA490EA16CBB47 /* NSScreen+Wallpaper.swift */,
 				F811DCEB4E7240A71F2AFC97 /* AnimeSearchHeuristics.swift */,
 				5A081A86646C339D74FD8840 /* AppFluidMotion.swift */,
 				B4386E83412A24DCFF565BFC /* AppLogger.swift */,
@@ -621,6 +626,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0B50E4D3572B498CAF69A8D8 /* NSScreen+Wallpaper.swift in Sources */,
 				E3103B14290C2916CC737246 /* AnimeContentView.swift in Sources */,
 				00789A48296E22343CD1FCC3 /* AnimeDetailSheet.swift in Sources */,
 				C8F352B191441BEC7566A299 /* AnimeDetailView.swift in Sources */,

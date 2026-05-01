@@ -817,10 +817,28 @@ final class PreviewWindowManager: ObservableObject {
     static let shared = PreviewWindowManager()
 
     private var windowController: NSWindowController?
+    private var closeObserver: NSObjectProtocol?
+    @Published private(set) var isPresented = false
 
     private init() {}
 
+    func closePreview() {
+        guard isPresented else { return }
+        removeCloseObserver()
+        windowController?.close()
+        windowController = nil
+        isPresented = false
+    }
+
+    private func removeCloseObserver() {
+        if let observer = closeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            closeObserver = nil
+        }
+    }
+
     func openPreview(url: URL, isMuted: Bool, aspectRatio: Double? = nil) {
+        removeCloseObserver()
         windowController?.close()
         windowController = nil
 
@@ -870,5 +888,18 @@ final class PreviewWindowManager: ObservableObject {
         windowController = NSWindowController(window: window)
         windowController?.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
+        isPresented = true
+
+        // 监听窗口关闭（用户点击关闭按钮时同步状态）
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.isPresented = false
+                self?.closeObserver = nil
+            }
+        }
     }
 }

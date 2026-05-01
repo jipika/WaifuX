@@ -23,7 +23,9 @@ final class DesktopWallpaperSyncManager {
 
     /// 记录最后一次尝试同步的时间，避免过于频繁的重复同步
     private var lastSyncTime: Date?
-    private let minimumSyncInterval: TimeInterval = 1.0
+    private let minimumSyncInterval: TimeInterval = 0.1
+    /// 用于 Space 切换的 debounce，快速连续切换时只保留最后一次
+    private var pendingSyncWorkItem: DispatchWorkItem?
 
     private init() {
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -73,16 +75,19 @@ final class DesktopWallpaperSyncManager {
     }
 
     @objc private func handleActiveSpaceChanged() {
-        // 延迟再同步，确保 Space 切换动画完全结束、系统桌面状态稳定后再执行
-        // 0.3s 不够可靠，实测在 Sonoma+ 上需要 1.0s 左右
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // Debounce：快速连续切换 Space 时，取消之前的延迟任务，只保留最后一次
+        pendingSyncWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
             self?.performSync(source: "spaceChange")
         }
+        pendingSyncWorkItem = workItem
+        // 延迟再同步，确保 Space 切换动画完全结束、系统桌面状态稳定后再执行
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
     }
 
     /// 执行实际同步逻辑
     private func performSync(source: String) {
-        // 防抖动：避免短时间内多次同步
+        // 防抖动：避免短时间内多次同步（Space 切换通常不会连续触发）
         if let last = lastSyncTime, Date().timeIntervalSince(last) < minimumSyncInterval {
             print("[DesktopWallpaperSyncManager] Skipping sync from '\(source)' (too soon)")
             return
@@ -97,16 +102,10 @@ final class DesktopWallpaperSyncManager {
         for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
 
-            // 如果该屏幕属于视频壁纸目标，同步其 poster（仅在需要时）
+            // 如果该屏幕属于视频壁纸目标，同步其 poster（不再跳过，确保所有 Spaces 都正确）
             if videoManager.hasActiveWallpaper(on: screen),
-               let posterURL = videoManager.currentPosterURL,
+               let posterURL = videoManager.posterURL(for: screen),
                videoManager.currentVideoURL != nil {
-                // 避免不必要的重设：如果当前桌面已经是该 poster，跳过
-                if let currentURL = workspace.desktopImageURL(for: screen),
-                   currentURL == posterURL {
-                    print("[DesktopWallpaperSyncManager] [\(source)] Video poster already set for screen \(screen.localizedName), skipping")
-                    continue
-                }
                 do {
                     try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen)
                     print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
@@ -116,15 +115,8 @@ final class DesktopWallpaperSyncManager {
                 continue
             }
 
-            // 否则同步该屏幕最后注册的静态壁纸（仅在需要时）
+            // 否则同步该屏幕最后注册的静态壁纸
             guard let url = lastSetImageURLByScreen[screenID] else {
-                continue
-            }
-
-            // 避免不必要的重设：如果当前桌面已经是该壁纸，跳过
-            if let currentURL = workspace.desktopImageURL(for: screen),
-               currentURL == url {
-                print("[DesktopWallpaperSyncManager] [\(source)] Static wallpaper already set for screen \(screen.localizedName), skipping")
                 continue
             }
 
@@ -151,11 +143,4 @@ final class DesktopWallpaperSyncManager {
     }
 }
 
-private extension NSScreen {
-    var wallpaperScreenIdentifier: String {
-        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-            return screenNumber.stringValue
-        }
-        return localizedName
-    }
-}
+

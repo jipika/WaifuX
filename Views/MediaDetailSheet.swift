@@ -1103,6 +1103,7 @@ struct MediaDetailSheet: View {
     // MARK: - 键盘快捷键
 
     private func setupKeyboardMonitor() {
+        removeKeyboardMonitor()
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
             guard NSApp.isActive, let window = event.window, window.isKeyWindow else { return event }
             guard self.isVisible else { return event }
@@ -1120,8 +1121,12 @@ struct MediaDetailSheet: View {
                 guard !self.isNavigating else { return nil }
                 self.navigateToNextMedia()
                 return nil
-            case 53: // ESC：返回
-                self.onClose()
+            case 53: // ESC：优先关闭预览弹窗，否则关闭详情页
+                if PreviewWindowManager.shared.isPresented {
+                    PreviewWindowManager.shared.closePreview()
+                } else {
+                    self.onClose()
+                }
                 return nil
             default:
                 return event
@@ -1330,6 +1335,7 @@ struct MediaDetailSheet: View {
                 Task {
                     do {
                         try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted, targetScreen: selectedScreen)
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                     } catch {
                         await MainActor.run {
                             errorMessage = Self.truncateErrorMessage(error.localizedDescription)
@@ -1348,6 +1354,7 @@ struct MediaDetailSheet: View {
             Task {
                 do {
                     try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
                 } catch {
                     errorMessage = error.localizedDescription
                     showError = true
@@ -2063,6 +2070,7 @@ struct MediaDetailSheet: View {
                             muted: isMuted,
                             targetScreens: selectedScreen.map { [$0] }
                         )
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                         onApplyFinished?()
                     } catch {
                         errorMessage = error.localizedDescription
@@ -2086,6 +2094,7 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         muted: isMuted
                     )
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
                     onApplyFinished?()
                 } catch {
                     errorMessage = error.localizedDescription
@@ -2115,6 +2124,7 @@ struct MediaDetailSheet: View {
                             posterURL: posterURL,
                             targetScreens: selectedScreen.map { [$0] }
                         )
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                     } catch {
                         errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                         showError = true
@@ -2131,6 +2141,7 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         targetScreens: nil
                     )
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
                 } catch {
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
@@ -2166,6 +2177,7 @@ struct MediaDetailSheet: View {
                             try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: screen)
                             DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
                         }
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                     } catch {
                         errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                         showError = true
@@ -2181,6 +2193,7 @@ struct MediaDetailSheet: View {
                         try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: mainScreen)
                         DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: mainScreen)
                     }
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
                 } catch {
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true

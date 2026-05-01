@@ -100,6 +100,9 @@ final class DynamicWallpaperAutoPauseManager {
             return
         }
 
+        // 锁屏/解锁期间由 VideoWallpaperManager 自行管理播放状态，AutoPause 不介入，避免竞态
+        guard !VideoWallpaperManager.shared.isScreenLocked else { return }
+
         let shouldPause = (pauseWhenOtherAppForeground && isOtherAppInForeground()) ||
                           (pauseWhenFullscreenCovers && isFullscreenCovering())
 

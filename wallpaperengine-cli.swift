@@ -489,15 +489,6 @@ private struct ScreenWallpaperConfig: Codable {
     let isMainScreen: Bool
 }
 
-private extension NSScreen {
-    var wallpaperScreenIdentifier: String {
-        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-            return screenNumber.stringValue
-        }
-        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
-    }
-}
-
 // MARK: - Wallpaper Type Detection & PKG Extraction
 private func isWebWallpaper(path: String) -> Bool {
     let type = detectWallpaperProjectType(path: path)

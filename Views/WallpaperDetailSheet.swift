@@ -1027,6 +1027,7 @@ struct WallpaperDetailSheet: View {
                         // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
                         // viewModel 内部会按需停止对应屏幕的动态壁纸
                         try await viewModel.setWallpaper(from: imageURL, option: .desktop, for: selectedScreen)
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                     } catch {
                         await MainActor.run {
                             errorMessage = "\(t("error")): \(error.localizedDescription)"
@@ -1049,6 +1050,7 @@ struct WallpaperDetailSheet: View {
                     let imageURL = try await getWallpaperImageURL()
                     // viewModel 内部会按需停止动态壁纸
                     try await viewModel.setWallpaper(from: imageURL, option: .desktop)
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
                 } catch {
                     errorMessage = "\(t("error")): \(error.localizedDescription)"
                     showError = true
@@ -1229,6 +1231,7 @@ struct WallpaperDetailSheet: View {
     // MARK: - 键盘快捷键
 
     private func setupKeyboardMonitor() {
+        removeKeyboardMonitor()
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
             guard NSApp.isActive, let window = event.window, window.isKeyWindow else { return event }
             guard self.isVisible else { return event }
@@ -1246,8 +1249,12 @@ struct WallpaperDetailSheet: View {
                 guard !self.isNavigating else { return nil }
                 self.navigateToNextWallpaper()
                 return nil
-            case 53: // ESC：返回
-                self.onClose()
+            case 53: // ESC：优先关闭预览弹窗，否则关闭详情页
+                if PreviewWindowManager.shared.isPresented {
+                    PreviewWindowManager.shared.closePreview()
+                } else {
+                    self.onClose()
+                }
                 return nil
             default:
                 return event

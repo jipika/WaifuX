@@ -101,30 +101,47 @@ final class VideoThumbnailCache {
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 3840, height: 2160)
 
-            var seconds: Double = 0.5
+            // 计算候选时间点：优先中间帧，回退到 30%/70%/1s，避免第一帧（可能是黑屏/过渡）
+            var candidates: [Double] = [1.0]
             if let duration = try? await asset.load(.duration) {
                 let d = CMTimeGetSeconds(duration)
                 if d.isFinite, d > 0 {
-                    seconds = min(0.5, max(0.05, d * 0.15))
+                    // 主候选：中间时间点；回退：30%、70%、1秒
+                    candidates = [d * 0.5, d * 0.3, d * 0.7, min(d * 0.1, 2.0)]
+                        .filter { $0 >= 0.2 }  // 过滤掉太靠前的（避免第一帧）
+                    // 去重并保持顺序
+                    var seen = Set<Double>()
+                    candidates = candidates.compactMap {
+                        let rounded = (($0 * 10).rounded() / 10)
+                        guard !seen.contains(rounded) else { return nil }
+                        seen.insert(rounded)
+                        return $0
+                    }
                 }
             }
-            let t = CMTime(seconds: seconds, preferredTimescale: 600)
 
-            do {
-                let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
-                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                guard let tiff = image.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff),
-                      let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
-                    return nil
+            // 多点尝试，任一成功即返回
+            for seconds in candidates {
+                let t = CMTime(seconds: seconds, preferredTimescale: 600)
+                do {
+                    let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
+                    let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    guard let tiff = image.tiffRepresentation,
+                          let rep = NSBitmapImageRep(data: tiff),
+                          let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
+                        continue
+                    }
+                    try jpeg.write(to: outputURL, options: .atomic)
+                    print("[VideoThumbnailCache] Poster frame at \(String(format: "%.1f", seconds))s for wallpaper: \(outputURL.path)")
+                    return outputURL
+                } catch {
+                    print("[VideoThumbnailCache] Poster try at \(String(format: "%.1f", seconds))s failed: \(error)")
+                    continue
                 }
-                try jpeg.write(to: outputURL, options: .atomic)
-                print("[VideoThumbnailCache] Poster frame for wallpaper: \(outputURL.path)")
-                return outputURL
-            } catch {
-                print("[VideoThumbnailCache] Failed to generate poster frame: \(error)")
-                return nil
             }
+
+            print("[VideoThumbnailCache] All poster frame attempts exhausted for \(videoURL.lastPathComponent)")
+            return nil
         }.value
     }
 

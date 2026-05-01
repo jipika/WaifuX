@@ -51,9 +51,6 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // 每次应用 CLI 壁纸：先 stop 销毁上一轮 daemon/会话，再 set 重建，避免状态残留。
         try? executeCLI(arguments: ["stop"])
-        isControllingExternalEngine = false
-        isExternalPaused = false
-        lastWallpaperPath = nil
 
         lastWallpaperPath = path
         isExternalPaused = false
@@ -201,7 +198,10 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         do {
             try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // 在非主线程上读取管道，避免 CLI 进程被 SIGTERM 杀掉时 readDataToEndOfFile() 阻塞/崩溃主线程
+            let data = DispatchQueue.global(qos: .userInitiated).sync {
+                pipe.fileHandleForReading.readDataToEndOfFile()
+            }
             let output = String(data: data, encoding: .utf8) ?? ""
             task.waitUntilExit()
             if task.terminationStatus != 0 {
@@ -210,8 +210,6 @@ final class WallpaperEngineXBridge: ObservableObject {
                     throw WallpaperEngineError.executionFailed(trimmed)
                 }
                 let status = task.terminationStatus
-                // 在 macOS 上，被 SIGKILL 等信号终止时 terminationStatus 常为信号编号（9 = SIGKILL），
-                // 与「程序主动 exit(9)」不同；结合 terminationReason 更易理解。
                 var signalHint = ""
                 if #available(macOS 10.15, *) {
                     if task.terminationReason == .uncaughtSignal {

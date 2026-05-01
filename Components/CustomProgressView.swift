@@ -22,7 +22,9 @@ struct CustomProgressView: View {
         }
         .onAppear {
             timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
-                rotation += 6
+                Task { @MainActor in
+                    rotation += 6
+                }
             }
         }
         .onDisappear {

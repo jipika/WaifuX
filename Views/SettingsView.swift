@@ -806,14 +806,7 @@ private struct SchedulerSettingsTab: View {
     }
 }
 
-private extension NSScreen {
-    var wallpaperScreenIdentifier: String {
-        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-            return screenNumber.stringValue
-        }
-        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
-    }
-}
+
 
 // MARK: - 关于设置标签
 private struct AboutSettingsTab: View {

@@ -932,6 +932,8 @@ class WallpaperViewModel: ObservableObject {
     }
 
     // MARK: - 设置壁纸
+    /// - Note: macOS 的锁屏壁纸即桌面壁纸，没有独立的锁屏壁纸 API。
+    ///   `.lockScreen` 和 `.both` 最终都等同于设置桌面壁纸，避免重复操作。
     func setWallpaper(from imageURL: URL, option: WallpaperOption) async throws {
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
@@ -940,17 +942,7 @@ class WallpaperViewModel: ObservableObject {
         let screens = NSScreen.screens
 
         for screen in screens {
-            switch option {
-            case .desktop:
-                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-            case .lockScreen:
-                // macOS 锁屏壁纸设置需要更复杂的实现
-                // 这里使用简化版本
-                try setLockScreenWallpaper(imageURL)
-            case .both:
-                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-                try setLockScreenWallpaper(imageURL)
-            }
+            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
         }
 
         // 注册壁纸以便跨 Space 同步
@@ -958,22 +950,18 @@ class WallpaperViewModel: ObservableObject {
     }
     
     // MARK: - 设置壁纸到指定屏幕
+    /// - Note: macOS 的锁屏壁纸即桌面壁纸，没有独立的锁屏壁纸 API。
+    ///   `.lockScreen` 和 `.both` 最终都等同于设置桌面壁纸。
     func setWallpaper(from imageURL: URL, option: WallpaperOption, for targetScreen: NSScreen?) async throws {
         let workspace = NSWorkspace.shared
-        
+
         // 如果指定了特定屏幕，只设置到该屏幕
         if let targetScreen = targetScreen {
+            // 切到静态图前必须停 CLI 引擎，否则 WE Scene/Web 的 daemon 仍在后台渲染
+            WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
             // 只停目标屏幕的动态壁纸，避免影响其他屏幕
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
-            switch option {
-            case .desktop:
-                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
-            case .lockScreen:
-                try setLockScreenWallpaper(imageURL)
-            case .both:
-                try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
-                try setLockScreenWallpaper(imageURL)
-            }
+            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
             DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: targetScreen)
         } else {
             try await setWallpaper(from: imageURL, option: option)
@@ -981,57 +969,16 @@ class WallpaperViewModel: ObservableObject {
     }
 
     // MARK: - 设为壁纸（通过 Wallpaper 对象）
-    func setAsWallpaper(_ wallpaper: Wallpaper) async throws {
+    func setAsWallpaper(_ wallpaper: Wallpaper, targetScreen: NSScreen? = nil) async throws {
         guard let imageURL = wallpaper.fullImageURL else {
             throw NSError(domain: "WaifuX", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid image URL"])
         }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                do {
-                    guard let screen = NSScreen.main else {
-                        continuation.resume(throwing: NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"]))
-                        return
-                    }
-                    // 只停主屏幕的动态壁纸，避免影响其他屏幕
-                    VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
-
-                    let workspace = NSWorkspace.shared
-                    try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        let screen = targetScreen ?? NSScreen.main
+        guard let screen else {
+            throw NSError(domain: "WaifuX", code: 2, userInfo: [NSLocalizedDescriptionKey: "No screen available"])
         }
-    }
-
-    private func setLockScreenWallpaper(_ imageURL: URL) throws {
-        // macOS 锁屏壁纸设置
-        // 注意：macOS 不像 iOS 那样提供直接的锁屏壁纸 API
-        // 锁屏壁纸通常与桌面壁纸相同，或者通过系统偏好设置中的"屏幕保护程序"设置
-        // 这里我们尝试使用 defaults 命令设置锁屏壁纸（如果系统支持）
-
-        // 方法1：尝试设置桌面壁纸（macOS 锁屏通常显示桌面壁纸）
-        let workspace = NSWorkspace.shared
-        for screen in NSScreen.screens {
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-        }
-
-        // 方法2：尝试通过 defaults 命令设置锁屏图片（仅适用于某些 macOS 版本）
-        // 注意：这不会在所有 macOS 版本上都有效
-        let task = Process()
-        task.launchPath = "/usr/bin/defaults"
-        task.arguments = [
-            "write",
-            "/Library/Preferences/com.apple.loginwindow",
-            "DesktopPicture",
-            "-string",
-            imageURL.path
-        ]
-        // 忽略错误，因为此方法可能需要管理员权限
-        try? task.run()
+        // 直通到统一的 setWallpaper，确保手动设置和自动更换完全共用同一条路径
+        try await setWallpaper(from: imageURL, option: .desktop, for: screen)
     }
 
     // MARK: - 获取精选壁纸（用于轮播）- 日榜，仅横版
