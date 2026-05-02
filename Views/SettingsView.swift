@@ -1469,6 +1469,7 @@ private struct DirectoryMigrationSheet: View {
     @Binding var isPresented: Bool
     @State private var isMigrating = false
     @State private var progress: MigrationProgress = MigrationProgress(
+        step: .copying,
         currentFileName: "",
         processedCount: 0,
         totalCount: 0,
@@ -1605,6 +1606,13 @@ private struct DirectoryMigrationSheet: View {
         VStack(spacing: 20) {
             Spacer()
 
+            // 阶段描述
+            Text(progress.step.description)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
+                .lineLimit(1)
+
+            // 当前文件名
             Text(progress.currentFileName.isEmpty ? t("preparing") : progress.currentFileName)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.8))
