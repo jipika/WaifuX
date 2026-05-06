@@ -775,6 +775,42 @@ class WorkshopService: ObservableObject {
         guardCode: String? = nil,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> URL {
+        // 最多重试 2 次（共 3 次尝试），仅对可恢复的网络/下载错误重试
+        let maxRetries = 2
+        var lastError: Error?
+
+        for attempt in 0...maxRetries {
+            do {
+                return try await downloadWorkshopItemOnce(
+                    workshopID: workshopID,
+                    guardCode: guardCode,
+                    attempt: attempt,
+                    progressHandler: progressHandler
+                )
+            } catch let error as WorkshopError {
+                lastError = error
+                // 仅对超时、网络错误和下载不完整重试，其他错误直接抛出
+                switch error {
+                case .timeout, .loginTimeout, .downloadIncomplete:
+                    if attempt < maxRetries {
+                        AppLogger.info(.download, "Workshop 下载失败，正在重试", metadata:
+                            ["workshopID": workshopID, "attempt": attempt + 1, "error": error.localizedDescription])
+                        continue
+                    }
+                default:
+                    throw error
+                }
+            }
+        }
+        throw lastError ?? WorkshopError.downloadFailed("未知错误")
+    }
+
+    private func downloadWorkshopItemOnce(
+        workshopID: String,
+        guardCode: String? = nil,
+        attempt: Int,
+        progressHandler: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> URL {
         guard let steamcmdPath = WorkshopSourceManager.shared.steamCMDExecutableURL() else {
             throw WorkshopError.steamcmdNotFound
         }
@@ -957,7 +993,7 @@ class WorkshopService: ObservableObject {
                 }
             }
 
-            let timeoutSeconds: UInt64 = 300
+            let timeoutSeconds: UInt64 = 600
             let timeoutTask = Task {
                 try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
                 if task.isRunning {
@@ -975,7 +1011,7 @@ class WorkshopService: ObservableObject {
             )
 
             task.terminationHandler = { _ in
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
                     // 超时导致的终止，直接返回明确的超时错误
                     if timeoutFlag.value {
                         resumeBox.resume(throwing: WorkshopError.timeout)
@@ -1007,6 +1043,10 @@ class WorkshopService: ObservableObject {
                         // 如果需要验证码但没有提供，或者需要移动确认但确认未成功，都报错
                         let guardCodeMissing = needsGuardCode  // 下载时不传 guardCode，如果需要说明 token 彻底失效
                         if guardCodeMissing || confirmationMissing {
+                            // 会话已失效，自动清除过期凭据并提示用户重新登录
+                            Task { @MainActor in
+                                WorkshopSourceManager.shared.clearSteamCredentials()
+                            }
                             resumeBox.resume(throwing: WorkshopError.sessionExpired)
                             return
                         }
@@ -1033,6 +1073,10 @@ class WorkshopService: ObservableObject {
                         "login failed: No Connection"
                     ]
                     if sessionExpiredKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
+                        // 会话已失效，自动清除过期凭据并提示用户重新登录
+                        Task { @MainActor in
+                            WorkshopSourceManager.shared.clearSteamCredentials()
+                        }
                         resumeBox.resume(throwing: WorkshopError.sessionExpired)
                         return
                     }
@@ -1042,12 +1086,27 @@ class WorkshopService: ObservableObject {
                         "Login Failure",
                         "FAILED (Account",
                         "Account Logon Denied",
+                        "Account disabled",
+                        "Account locked",
                         "RateLimitExceeded",
                         "Two-factor code mismatch",
                         "No subscriptions"
                     ]
                     if authFailureKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         resumeBox.resume(throwing: WorkshopError.invalidCredentials)
+                        return
+                    }
+
+                    // Workshop 下载失败（SteamCMD 侧报告，可能是临时网络问题，可重试）
+                    let downloadFailureKeywords = [
+                        "Workshop download failed",
+                        "Download item",  // 仅匹配 "Download item XXXXX failed" 类错误
+                        "ERROR! Download"
+                    ]
+                    if downloadFailureKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) })
+                        && !combinedOutput.localizedCaseInsensitiveContains("Download Complete") {
+                        let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
+                        resumeBox.resume(throwing: WorkshopError.downloadIncomplete(cleaned))
                         return
                     }
 
@@ -1092,7 +1151,9 @@ class WorkshopService: ObservableObject {
                     }
 
                     if task.terminationStatus == 0 {
-                        resumeBox.resume(throwing: WorkshopError.downloadIncomplete)
+                        let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
+                        let detail = cleaned.isEmpty ? "SteamCMD 已退出但未生成下载内容" : cleaned
+                        resumeBox.resume(throwing: WorkshopError.downloadFailed("下载未完成: \(detail)"))
                     } else {
                         let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
                         resumeBox.resume(throwing: WorkshopError.downloadFailed(cleaned))
@@ -1190,7 +1251,7 @@ class WorkshopService: ObservableObject {
 
     // MARK: - App Availability
 
-    func verifySteamLogin(username: String, password: String, guardCode: String? = nil) async throws {
+    func verifySteamLogin(username: String, password: String, guardCode: String? = nil, retryCount: Int = 0) async throws {
         guard let steamcmdPath = WorkshopSourceManager.shared.steamCMDExecutableURL() else {
             throw WorkshopError.steamcmdNotFound
         }
@@ -1332,15 +1393,19 @@ class WorkshopService: ObservableObject {
 
             task.terminationHandler = { _ in
                 // 小延迟确保 readabilityHandler 处理完最后的数据
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
                     let combinedOutput = outputBox.combined()
                     AppLogger.info(.media, "verifySteamLogin steamcmd output", metadata: ["output": combinedOutput])
 
                     let isSelfUpdate = combinedOutput.localizedCaseInsensitiveContains("Update complete, launching")
                     if isSelfUpdate {
+                        guard retryCount < 2 else {
+                            resumeBox.resume(throwing: WorkshopError.downloadFailed("SteamCMD 自更新重试次数过多"))
+                            return
+                        }
                         Task { @MainActor in
                             do {
-                                try await self.verifySteamLogin(username: username, password: password, guardCode: guardCode)
+                                try await self.verifySteamLogin(username: username, password: password, guardCode: guardCode, retryCount: retryCount + 1)
                                 resumeBox.resume(returning: ())
                             } catch {
                                 resumeBox.resume(throwing: error)
@@ -1393,6 +1458,8 @@ class WorkshopService: ObservableObject {
                         "Login Failure",
                         "FAILED (Account",
                         "Account Logon Denied",
+                        "Account disabled",
+                        "Account locked",
                         "RateLimitExceeded",
                         "Two-factor code mismatch",
                         "No subscriptions"
@@ -1437,10 +1504,78 @@ class WorkshopService: ObservableObject {
         guard let steamcmdPath = WorkshopSourceManager.shared.steamCMDExecutableURL() else {
             return .notInstalled
         }
+        // steamCMDExecutableURL() 已验证安装完整性，此处再确认脚本文件存在
         guard FileManager.default.fileExists(atPath: steamcmdPath.path) else {
             return .notInstalled
         }
         return .ready
+    }
+
+    /// 扫描并清理下载失败产生的空文件夹
+    /// 返回清理的文件夹数量和释放的空间
+    @MainActor
+    func cleanupFailedDownloads() -> (count: Int, bytesFreed: Int64) {
+        let mediaFolder = DownloadPathManager.shared.mediaFolderURL
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: mediaFolder, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return (0, 0)
+        }
+
+        var cleanedCount = 0
+        var totalBytesFreed: Int64 = 0
+
+        for item in items {
+            guard item.lastPathComponent.hasPrefix("workshop_") else { continue }
+
+            // 检查是否是空文件夹或只有空的中间目录
+            let hasRealContent = hasContentFiles(at: item)
+
+            if !hasRealContent {
+                // 计算文件夹大小
+                let folderSize = Self.dirSize(item)
+                totalBytesFreed += folderSize
+
+                // 删除整个 workshop 文件夹
+                try? fm.removeItem(at: item)
+                cleanedCount += 1
+                print("[WorkshopService] 已清理空的下载目录: \(item.lastPathComponent)")
+            }
+        }
+
+        return (cleanedCount, totalBytesFreed)
+    }
+
+    /// 检查目录下是否有实际的内容文件（排除空目录和临时文件）
+    private func hasContentFiles(at dir: URL) -> Bool {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: nil) else { return false }
+
+        while let fileURL = enumerator.nextObject() as? URL {
+            // 跳过目录本身
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+
+            let filename = fileURL.lastPathComponent
+            // 跳过临时文件和隐藏文件
+            if filename.hasPrefix(".") || filename == "download_script.txt" { continue }
+
+            // 检查是否有 project.json（Workshop 内容的标志文件）
+            if filename == "project.json" { return true }
+
+            // 检查是否有实际的媒体文件
+            let ext = filename.lowercased()
+            if ["json", "jpg", "jpeg", "png", "gif", "webp", "mp4", "mov", "webm", "avi", "Scene.pak", "scene.pkg"].contains(ext) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 格式化文件大小为可读字符串
+    static func formattedByteCount(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     static func isWallpaperEngineAppInstalled() -> Bool {
@@ -1578,7 +1713,7 @@ enum WorkshopError: LocalizedError {
     case loginTimeout
     case guardCodeRequired(String)
     case timeout
-    case downloadIncomplete
+    case downloadIncomplete(String)
     case downloadFailed(String)
     case executionFailed(String)
     case workshopNotSupported
@@ -1591,10 +1726,10 @@ enum WorkshopError: LocalizedError {
         case .credentialsRequired: return "Steam credentials required"
         case .invalidCredentials: return "Invalid Steam credentials or 2FA required"
         case .sessionExpired: return "Steam 登录已过期，请在设置中重新验证登录"
-        case .loginTimeout: return "Steam 登录超时，请检查网络连接后重试"
+        case .loginTimeout: return "Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试"
         case .guardCodeRequired(let msg): return msg
-        case .timeout: return "SteamCMD 响应超时，请检查网络连接或稍后重试"
-        case .downloadIncomplete: return "Download incomplete"
+        case .timeout: return "下载超时（已等待 10 分钟），可能是网络波动或文件过大，请检查网络后重试"
+        case .downloadIncomplete(let msg): return msg.isEmpty ? "下载未完成，SteamCMD 进程异常退出，请重试" : msg
         case .downloadFailed(let msg): return msg
         case .executionFailed(let msg): return msg
         case .workshopNotSupported: return "Not a Workshop item"

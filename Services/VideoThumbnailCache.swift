@@ -19,9 +19,14 @@ final class VideoThumbnailCache {
         let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
         cacheDirectory = caches[0].appendingPathComponent("WaifuX/VideoThumbnails", isDirectory: true)
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-        
+
         memoryCache.countLimit = 50
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50MB
+    }
+
+    /// 清理内存缓存，用于内存压力响应
+    func clearMemoryCache() {
+        memoryCache.removeAllObjects()
     }
     
     /// 若已为本地媒体生成过列表缩略图（`generateThumbnail`）或动态壁纸海报帧（`posterJPEGFileURL`），返回对应磁盘文件 URL。
@@ -102,7 +107,7 @@ final class VideoThumbnailCache {
             generator.maximumSize = CGSize(width: 3840, height: 2160)
 
             // 计算候选时间点：优先中间帧，回退到 30%/70%/1s，避免第一帧（可能是黑屏/过渡）
-            var candidates: [Double] = [1.0]
+            var candidates: [Double] = []
             if let duration = try? await asset.load(.duration) {
                 let d = CMTimeGetSeconds(duration)
                 if d.isFinite, d > 0 {
@@ -118,6 +123,10 @@ final class VideoThumbnailCache {
                         return $0
                     }
                 }
+            }
+            // 兜底：如果所有候选都被过滤（如超短视频），回退到第一帧
+            if candidates.isEmpty {
+                candidates = [0.0]
             }
 
             // 多点尝试，任一成功即返回

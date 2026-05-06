@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Kingfisher
+@preconcurrency import Translation
 
 // MARK: - WallpaperExploreContentView - 壁纸探索页
 
@@ -9,6 +10,8 @@ struct WallpaperExploreContentView: View {
     @Binding var selectedWallpaper: Wallpaper?
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
+    @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
+    @StateObject private var translationBridge = SearchTranslationBridge()
     init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedWallpaper = selectedWallpaper
@@ -29,6 +32,7 @@ struct WallpaperExploreContentView: View {
     @State private var showAPIKeyAlert = false
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
+    @State private var pendingSearchText: String?
     /// 保留预取器引用，避免局部变量立即释放导致预取被取消，并可在新预取前停止旧任务
     @State private var gridImagePrefetcher: Kingfisher.ImagePrefetcher?
     /// 预取中心索引节流，避免快速滑动时反复 stop/start Prefetcher
@@ -42,15 +46,29 @@ struct WallpaperExploreContentView: View {
     @State private var visibleWallpapers: [Wallpaper] = []
 
     var body: some View {
+        if #available(macOS 15.0, *) {
+            TranslationTaskHost(bridge: translationBridge) {
+                mainContent
+            }
+        } else {
+            mainContent
+        }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
         GeometryReader { geometry in
             let contentWidth = calculateContentWidth(geometry: geometry)
             let gridConfig = WallpaperGridConfig(contentWidth: contentWidth)
 
             ZStack {
-                ExploreDynamicAtmosphereBackground(
+                ArcAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
                     referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: true
+                    isLightMode: arcSettings.isLightMode,
+                    dotGridOpacity: arcSettings.dotGridOpacity,
+                    useNoise: true,
+                    grainIntensity: arcSettings.exploreGrainWallpaper
                 )
                 .ignoresSafeArea()
 
@@ -69,6 +87,18 @@ struct WallpaperExploreContentView: View {
             if !visible {
                 pauseActivity()
             }
+        }
+        .onChange(of: searchText) { _, newValue in
+            translationBridge.detectLanguage(for: newValue)
+        }
+        .onChange(of: translationBridge.translationCompleted) { _, _ in
+            AppLogger.debug(.wallpaper, "[翻译] onChange translationCompleted")
+            guard let pending = pendingSearchText else { return }
+            pendingSearchText = nil
+            let query = translationBridge.effectiveQuery(for: pending)
+            AppLogger.debug(.wallpaper, "[翻译] translationCompleted 搜索 query='\(query)'")
+            viewModel.searchQuery = query
+            reloadData()
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
@@ -100,6 +130,7 @@ struct WallpaperExploreContentView: View {
                     .background(scrollTrackingOverlay)
                     .background(contentSizeTrackingOverlay)
                     .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                    .environment(\.arcIsLightMode, arcSettings.isLightMode)
                     .id("exploreTop")
                 }
                 .coordinateSpace(name: "exploreScroll")
@@ -195,11 +226,11 @@ struct WallpaperExploreContentView: View {
             HStack(spacing: 8) {
                 Text(greetingText)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.85))
 
                 Text(WallpaperSourceManager.shared.activeSource.displayName)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(arcSettings.primaryText.opacity(0.75))
                     .padding(.horizontal, 8)
                     .frame(height: 20)
                     .exploreFrostedCapsule(
@@ -215,7 +246,7 @@ struct WallpaperExploreContentView: View {
                 } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(arcSettings.primaryText.opacity(0.75))
                         .frame(width: 24, height: 20)
                         .exploreFrostedCapsule(
                             tint: exploreAtmosphere.tint.primary,
@@ -234,7 +265,7 @@ struct WallpaperExploreContentView: View {
             Text(t("wallpaperLibrary"))
                 .font(.system(size: 32, weight: .bold, design: .serif))
                 .tracking(-0.5)
-                .foregroundStyle(.white.opacity(0.98))
+                .foregroundStyle(arcSettings.primaryText)
                 .lineLimit(1)
         }
     }
@@ -246,10 +277,17 @@ struct WallpaperExploreContentView: View {
                 placeholder: t("search.placeholder"),
                 tint: exploreAtmosphere.tint.primary,
                 onSubmit: submitSearch,
-                onClear: { searchText = ""; submitSearch() }
+                onClear: { searchText = ""; translationBridge.reset(); submitSearch() },
+                translatedText: translationBridge.translatedText,
+                isTranslating: translationBridge.isTranslating,
+                onDismissTranslation: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        translationBridge.dismiss()
+                    }
+                }
             )
             
-            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+            ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainWallpaper) {
                 randomizeAtmosphere()
             }
 
@@ -265,7 +303,7 @@ struct WallpaperExploreContentView: View {
             HStack(alignment: .center, spacing: 10) {
                 Text(t("hotWallpaper") + ":")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.42))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.65))
                 
                 ForEach(HotTag.allCases) { tag in
                     TagChip(
@@ -340,7 +378,7 @@ struct WallpaperExploreContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(t("contentLevel"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.46))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
             FlowLayout(spacing: 10) {
                 ForEach(visiblePurityFilters) { filter in
                     FilterChip(
@@ -361,7 +399,7 @@ struct WallpaperExploreContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(t("colorFilter"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.46))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
             FlowLayout(spacing: 10) {
                 ForEach(quickColorPresets) { preset in
                     ColorChip(
@@ -383,10 +421,10 @@ struct WallpaperExploreContentView: View {
                 HStack(spacing: 10) {
                     Text(t("currentFilters"))
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.46))
+                        .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
                     Button(t("clear")) { resetServerFilters() }
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(arcSettings.secondaryText.opacity(0.72))
                         .buttonStyle(.plain)
                 }
                 FlowLayout(spacing: 10) {
@@ -418,7 +456,7 @@ struct WallpaperExploreContentView: View {
         HStack(alignment: .center) {
             Text("\(visibleWallpapers.count) \(t("wallpaperCount"))")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.66))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.66))
             
             Spacer()
             
@@ -538,7 +576,7 @@ struct WallpaperExploreContentView: View {
                 Text(hasRatio ? (viewModel.selectedRatios.first?.replacingOccurrences(of:"x", with: ":") ?? "") : t("ratio"))
                     .font(.system(size: 12, weight: .semibold))
             }
-            .foregroundStyle(.white.opacity(hasRatio ? 0.95 : 0.7))
+            .foregroundStyle(hasRatio ? arcSettings.primaryText.opacity(0.95) : arcSettings.secondaryText.opacity(0.7))
             .padding(.horizontal, 12)
             .frame(height: 30)
             .exploreFrostedCapsule(
@@ -710,7 +748,51 @@ struct WallpaperExploreContentView: View {
 
     private func submitSearch() {
         hotTag = nil
-        viewModel.searchQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        AppLogger.debug(.wallpaper, "[翻译] submitSearch: text='\(trimmed)' translatedText=\(translationBridge.translatedText ?? "nil") dismissed=\(translationBridge.translationDismissed)")
+
+        guard !trimmed.isEmpty else {
+            pendingSearchText = nil
+            viewModel.searchQuery = ""
+            translationBridge.reset()
+            reloadData()
+            return
+        }
+
+        // 同步检测中文（不依赖 debounce 的 isChineseDetected）
+        let chineseDetected = translationBridge.isChinese(trimmed)
+        AppLogger.debug(.wallpaper, "[翻译] submitSearch: isChinese=\(chineseDetected)")
+
+        // 判断是否需要翻译：中文文本 && (无翻译结果 || 翻译结果不匹配当前文本) && 未被用户关闭
+        let needsTranslation = chineseDetected
+            && !translationBridge.translationDismissed
+            && (translationBridge.translatedText == nil || translationBridge.translatedSourceText != trimmed)
+        if needsTranslation {
+            AppLogger.debug(.wallpaper, "[翻译] submitSearch: 触发翻译，等待翻译完成")
+            pendingSearchText = trimmed
+
+            // 先查缓存，命中则直接使用
+            if translationBridge.checkCache(for: trimmed) {
+                AppLogger.debug(.wallpaper, "[翻译] submitSearch: 缓存命中，直接搜索")
+                pendingSearchText = nil
+                let query = translationBridge.effectiveQuery(for: trimmed)
+                searchText = query
+                viewModel.searchQuery = query
+                reloadData()
+                return
+            }
+
+            // 缓存未命中，准备翻译并设置 config 触发 .translationTask
+            translationBridge.prepareForTranslation(trimmed)
+            translationBridge.triggerTranslation()
+            AppLogger.debug(.wallpaper, "[翻译] submitSearch: config 已设置，等待 .translationTask 触发")
+            return
+        }
+
+        pendingSearchText = nil
+        let query = translationBridge.effectiveQuery(for: trimmed)
+        AppLogger.debug(.wallpaper, "[翻译] submitSearch: 直接搜索 query='\(query)'")
+        viewModel.searchQuery = query
         reloadData()
     }
 
@@ -727,6 +809,7 @@ struct WallpaperExploreContentView: View {
 
     private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
+        translationBridge.reset()
         viewModel.searchQuery = ""
         category = .all
         fourKCategory = nil
@@ -1030,7 +1113,7 @@ private struct ColorChip: View {
                     .overlay(Circle().stroke(Color.white.opacity(0.24), lineWidth: 0.6))
                 Text(preset.displayHex)
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.94))
+                    .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.94))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -1063,9 +1146,9 @@ private struct ActiveFilterChip: View {
             HStack(spacing: 8) {
                 Circle().fill(Color(hex: "#\(chip.accentHex)")).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(chip.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.94))
+                    Text(chip.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.94))
                     if let subtitle = chip.subtitle {
-                        Text(subtitle).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(.white.opacity(0.56))
+                        Text(subtitle).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.56))
                     }
                 }
                 Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.72))
@@ -1113,7 +1196,7 @@ private struct FourKCategoryChip: View {
                 }
                 .overlay(Circle().stroke(Color.white.opacity(isSelected ? 0.18 : 0.08), lineWidth: 1))
 
-                Text(name).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.84)).lineLimit(1)
+                Text(name).font(.system(size: 13, weight: .semibold)).foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(isSelected ? 0.96 : 0.84)).lineLimit(1)
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
@@ -1176,7 +1259,7 @@ private struct WallpaperCard: View {
                 KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
                     .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                     .cacheMemoryOnly(false)
-                    .cancelOnDisappear(true)
+                    .fade(duration: 0.2)
                     .placeholder { _ in
                         placeholderGradient
                     }
@@ -1197,7 +1280,7 @@ private struct WallpaperCard: View {
             HStack(spacing: 12) {
                 Text(wallpaper.uploader?.username ?? wallpaper.categoryDisplayName)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.9))
                     .lineLimit(1)
                 Spacer(minLength: 12)
                 trailingMetadata
@@ -1240,7 +1323,7 @@ private struct WallpaperCard: View {
     func metaTag(text: String) -> some View {
         Text(text)
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.85))
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4))
@@ -1251,7 +1334,7 @@ private struct WallpaperCard: View {
         HStack(spacing: 6) {
             Circle().fill(Color(hex: "#\(hex)")).frame(width: 8, height: 8)
                 .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 0.5))
-            Text("#\(hex)").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(.white.opacity(0.85))
+            Text("#\(hex)").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.85))
         }
         .padding(.horizontal, 8)
         .frame(height: 24)

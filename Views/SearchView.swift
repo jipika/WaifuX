@@ -72,8 +72,6 @@ struct SearchView: View {
                     baseBottom: LiquidGlassColors.deepBackground
                 )
 
-                // 颗粒材质覆盖层
-                GrainTextureOverlay()
             }
         )
         .onAppear {

@@ -251,19 +251,40 @@ private struct GeneralSettingsTab: View {
             // 外观设置组
             MacSettingsSection(header: t("appearance")) {
                 MacSettingsRow(
-                    title: t("grainTextureEffect"),
-                    subtitle: t("grainTextureSubtitle"),
+                    title: t("autoDownloadOriginal"),
+                    subtitle: nil,
                     showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
+                }
+
+                MacSettingsRow(
+                    title: t("grainTextureEffect"),
+                    subtitle: t("grainTextureEffectDesc"),
+                    showDivider: viewModel.grainTextureEnabled
                 ) {
                     MacToggle(isOn: $viewModel.grainTextureEnabled)
                 }
 
-                MacSettingsRow(
-                    title: t("autoDownloadOriginal"),
-                    subtitle: nil,
-                    showDivider: false
-                ) {
-                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
+                if viewModel.grainTextureEnabled {
+                    HStack(spacing: 12) {
+                        Text(t("grainIntensity"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.9))
+
+                        Spacer()
+
+                        Slider(value: $viewModel.grainIntensity, in: 0...1, step: 0.05)
+                            .frame(width: 160)
+                            .tint(Color(hex: "30D158"))
+
+                        Text("\(Int(viewModel.grainIntensity * 100))%")
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.6))
+                            .frame(width: 36, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
             }
 
@@ -569,6 +590,9 @@ private struct SourceCapsule: View {
 private struct DownloadSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showMigrationSheet = false
+    @State private var isRepairing = false
+    @State private var showRepairAlert = false
+    @State private var repairResultMessage = ""
     @State private var pathRefreshID = UUID()
 
     var body: some View {
@@ -594,7 +618,7 @@ private struct DownloadSettingsTab: View {
                 MacSettingsRow(
                     title: t("downloadDirectory"),
                     subtitle: currentPathDisplay,
-                    showDivider: false
+                    showDivider: true
                 ) {
                     Button {
                         showMigrationSheet = true
@@ -616,11 +640,60 @@ private struct DownloadSettingsTab: View {
                     .buttonStyle(.plain)
                     .pointingHandCursor()
                 }
+
+                // 数据修复按钮
+                MacSettingsRow(
+                    title: t("repairData"),
+                    subtitle: t("repairDataDesc"),
+                    showDivider: false
+                ) {
+                    Button {
+                        showRepairAlert = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isRepairing {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(width: 14, height: 14)
+                            }
+                            Text(isRepairing ? t("repairing") : t("repair"))
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.orange.opacity(0.2))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.orange.opacity(0.4), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .disabled(isRepairing)
+                }
             }
         }
         .id(pathRefreshID)
         .sheet(isPresented: $showMigrationSheet) {
             DirectoryMigrationSheet(isPresented: $showMigrationSheet)
+        }
+        .alert(t("repairData"), isPresented: $showRepairAlert) {
+            Button(t("cancel"), role: .cancel) {}
+            Button(t("repair"), role: .destructive) {
+                startRepair()
+            }
+        } message: {
+            Text(t("repairDataConfirm"))
+        }
+        .alert(repairResultMessage, isPresented: Binding(
+            get: { !repairResultMessage.isEmpty && !isRepairing },
+            set: { if !$0 { repairResultMessage = "" } }
+        )) {
+            Button("OK") { repairResultMessage = "" }
         }
         .onReceive(NotificationCenter.default.publisher(for: .downloadPathChanged)) { _ in
             pathRefreshID = UUID()
@@ -629,11 +702,27 @@ private struct DownloadSettingsTab: View {
 
     private var currentPathDisplay: String {
         let path = DownloadPathManager.shared.currentRootPathDisplay
-        // 截断过长的路径
         if path.count > 60 {
             return "..." + String(path.suffix(57))
         }
         return path
+    }
+
+    private func startRepair() {
+        isRepairing = true
+        Task {
+            let result = await DirectoryMigrationService.shared.repairBrokenRecords()
+            isRepairing = false
+            if result.repairedCount == 0 && result.removedCount == 0 && result.migratedCount == 0 {
+                repairResultMessage = t("repairNoIssues")
+            } else {
+                repairResultMessage = String(
+                    format: t("repairResult"),
+                    result.repairedCount, result.migratedCount, result.removedCount, result.healthyCount
+                )
+            }
+            NotificationCenter.default.post(name: .downloadPathChanged, object: nil)
+        }
     }
 }
 
@@ -1234,13 +1323,15 @@ struct SettingsUpdateSection: View {
 
 // MARK: - Workshop 设置标签
 private struct WorkshopSettingsTab: View {
-    @StateObject private var sourceManager = WorkshopSourceManager.shared
-    @StateObject private var workshopService = WorkshopService.shared
+    @ObservedObject private var sourceManager = WorkshopSourceManager.shared
+    @ObservedObject private var workshopService = WorkshopService.shared
     @State private var steamUsername = ""
     @State private var steamPassword = ""
     @State private var steamGuardCode = ""
     @State private var isVerifyingSteamLogin = false
     @State private var steamLoginStatusText: String?
+    @State private var cleanupResult: (count: Int, bytesFreed: Int64)?
+    @State private var isCleaningUp = false
 
     var body: some View {
         ScrollView {
@@ -1258,9 +1349,12 @@ private struct WorkshopSettingsTab: View {
 
                 // SteamCMD 状态
                 steamCMDStatusSection
-                
+
                 // SteamCMD 登录
                 steamCMDLoginSection
+
+                // 清理下载缓存
+                cleanupSection
 
                 Spacer()
             }
@@ -1277,14 +1371,14 @@ private struct WorkshopSettingsTab: View {
                 Text(t("steamCMDAccount"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
-                if sourceManager.isSteamCMDLoggedIn {
+                if sourceManager.hasStoredSteamCredentials {
                     Label(t("loginDetected"), systemImage: "checkmark.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.green)
                 }
             }
             
-            if sourceManager.isSteamCMDLoggedIn {
+            if sourceManager.hasStoredSteamCredentials {
                 HStack {
                     Text(String(format: t("accountSaved"), sourceManager.steamCredentials?.username ?? ""))
                         .font(.system(size: 13))
@@ -1415,6 +1509,63 @@ private struct WorkshopSettingsTab: View {
                 Spacer()
 
                 steamCMDStatusTrailingLabel(status)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+    }
+
+    private var cleanupSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "trash.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.orange)
+                Text("清理下载缓存")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+
+            Text("删除下载失败产生的空文件夹，释放磁盘空间")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                if let result = cleanupResult, result.count > 0 {
+                    Label("已清理 \(result.count) 个文件夹，释放 \(WorkshopService.formattedByteCount(result.bytesFreed))",
+                          systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                        .transition(.opacity)
+                } else if let result = cleanupResult, result.count == 0 {
+                    Label("没有需要清理的文件夹", systemImage: "checkmark.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
+
+                Spacer()
+
+                Button {
+                    isCleaningUp = true
+                    Task {
+                        let result = workshopService.cleanupFailedDownloads()
+                        withAnimation {
+                            cleanupResult = result
+                            isCleaningUp = false
+                        }
+                    }
+                } label: {
+                    if isCleaningUp {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("清理")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(isCleaningUp)
             }
             .padding(12)
             .background(Color.white.opacity(0.03))

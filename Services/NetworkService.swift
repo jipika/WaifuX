@@ -11,20 +11,15 @@ actor NetworkService {
     private var networkMonitor: NetworkMonitor? = nil
 
     private init() {
-        // 配置 URLCache
-        let cache = URLCache(
-            memoryCapacity: 50_000_000,  // 50 MB 内存缓存
-            diskCapacity: 200_000_000,   // 200 MB 磁盘缓存
-            diskPath: "WaifuXCache"
-        )
-        self.cache = cache
+        // 使用全局 URLCache.shared（已在 WaifuXApp.swift 中配置），避免重复缓存层
+        self.cache = URLCache.shared
 
         // 配置 URLSession - 使用缓存以减少重复请求
         let config = URLSessionConfiguration.default
         config.requestCachePolicy = .returnCacheDataElseLoad  // 使用缓存加快加载
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60  // 资源超时时间
-        config.urlCache = cache
+        config.urlCache = URLCache.shared
         // 允许蜂窝网络访问
         config.allowsCellularAccess = true
         // 等待网络连接

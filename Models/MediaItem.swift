@@ -372,6 +372,21 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         URL(fileURLWithPath: localFilePath)
     }
 
+    /// 解析后的视频文件 URL：优先烘焙产物，其次目录内视频文件，最后原始路径
+    var resolvedVideoFileURL: URL? {
+        // 优先使用烘焙产物的视频
+        if let artifact = sceneBakeArtifact,
+           FileManager.default.fileExists(atPath: artifact.videoPath) {
+            return URL(fileURLWithPath: artifact.videoPath)
+        }
+        // 解析目录→视频文件（壁纸引擎源）
+        let local = localFileURL
+        if FileManager.default.fileExists(atPath: local.path) {
+            return MediaItem.resolveLocalVideoFile(from: local) ?? local
+        }
+        return nil
+    }
+
     var isActive: Bool {
         !metadata.isDeleted
     }

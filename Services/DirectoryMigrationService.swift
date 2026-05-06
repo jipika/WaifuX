@@ -113,14 +113,6 @@ final class DirectoryMigrationService {
             let destURL = newRoot.appendingPathComponent(relativePath)
             let fileName = sourceURL.lastPathComponent
 
-            let phaseProgress = Double(index) / Double(totalCount)
-            let overallProgress = phaseProgress * MigrationStep.copying.weight
-            reportProgress(
-                step: .copying, fileName: fileName,
-                processed: index, total: totalCount,
-                fraction: overallProgress, handler: progressHandler
-            )
-
             do {
                 let destDir = destURL.deletingLastPathComponent()
                 if !fileManager.fileExists(atPath: destDir.path) {
@@ -140,6 +132,14 @@ final class DirectoryMigrationService {
                 errors.append("\(fileName): \(error.localizedDescription)")
                 print("[DirectoryMigrationService] Copy failed: \(sourceURL.path): \(error)")
             }
+
+            let phaseProgress = Double(index + 1) / Double(totalCount)
+            let overallProgress = phaseProgress * MigrationStep.copying.weight
+            reportProgress(
+                step: .copying, fileName: fileName,
+                processed: index + 1, total: totalCount,
+                fraction: overallProgress, handler: progressHandler
+            )
         }
         updateCopiedCount(successCount)
 
@@ -178,12 +178,12 @@ final class DirectoryMigrationService {
             } catch {
                 print("[DirectoryMigrationService] Delete failed: \(sourceURL.path)")
             }
-            // 每删 10 个文件更新进度 + yield 让 UI 刷新
-            if index % 10 == 0 {
-                let deleteProgress = Double(index) / Double(totalCount)
+            // 每删 10 个文件更新进度，最后一个文件强制更新 + yield 让 UI 刷新
+            if index % 10 == 0 || index == totalCount - 1 {
+                let deleteProgress = Double(index + 1) / Double(totalCount)
                 reportProgress(
                     step: .deleting, fileName: sourceURL.lastPathComponent,
-                    processed: index, total: totalCount,
+                    processed: index + 1, total: totalCount,
                     fraction: deleteBase + deleteProgress * MigrationStep.deleting.weight,
                     handler: progressHandler
                 )
@@ -297,6 +297,126 @@ final class DirectoryMigrationService {
         await UserLibrary.shared.bulkUpdatePaths(oldPrefix: oldPath, newPrefix: newPath)
         VideoThumbnailCache.shared.migrateCacheKeys(fromOldPrefix: oldPath, toNewPrefix: newPath)
         print("[DirectoryMigrationService] Orphaned path repair completed")
+    }
+
+    // MARK: - 数据修复
+
+    struct RepairResult {
+        var repairedCount: Int = 0
+        var removedCount: Int = 0
+        var healthyCount: Int = 0
+        var migratedCount: Int = 0
+    }
+
+    /// 扫描所有下载记录，修复断裂路径或移除无法恢复的记录
+    func repairBrokenRecords() async -> RepairResult {
+        let fm = FileManager.default
+        var result = RepairResult()
+
+        // 收集所有可能的根目录
+        let currentRoot = DownloadPathManager.shared.rootFolderURL.path
+        let defaultRoot = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!.appendingPathComponent("WaifuX").path
+        let candidateRoots = Array(Set([currentRoot, defaultRoot])).filter { !$0.isEmpty }
+
+        // ── 修复 MediaLibraryService ──
+        for record in MediaLibraryService.shared.downloadRecords {
+            guard record.isActive else { continue }
+            let filePath = record.localFilePath
+
+            if fm.fileExists(atPath: filePath) {
+                result.healthyCount += 1
+            } else if let sourcePath = findFileInCandidateRoots(
+                originalPath: filePath, candidateRoots: candidateRoots, fm: fm
+            ) {
+                let finalPath = migrateFileToCurrentRoot(
+                    sourcePath: sourcePath, currentRoot: currentRoot, fm: fm
+                ) ?? sourcePath
+                MediaLibraryService.shared.repairDownloadPath(itemID: record.item.id, newPath: finalPath)
+                if finalPath != sourcePath {
+                    result.migratedCount += 1
+                } else {
+                    result.repairedCount += 1
+                }
+                print("[Repair] Media repaired: \(filePath) -> \(finalPath)")
+            } else {
+                MediaLibraryService.shared.deactivateDownloadRecord(itemID: record.item.id)
+                result.removedCount += 1
+                print("[Repair] Media not found, deactivated: \(filePath)")
+            }
+        }
+        MediaLibraryService.shared.persistDownloads()
+
+        // ── 修复 WallpaperLibraryService ──
+        for record in WallpaperLibraryService.shared.downloadRecords {
+            guard record.isActive else { continue }
+            let filePath = record.localFilePath
+
+            if fm.fileExists(atPath: filePath) {
+                result.healthyCount += 1
+            } else if let sourcePath = findFileInCandidateRoots(
+                originalPath: filePath, candidateRoots: candidateRoots, fm: fm
+            ) {
+                let finalPath = migrateFileToCurrentRoot(
+                    sourcePath: sourcePath, currentRoot: currentRoot, fm: fm
+                ) ?? sourcePath
+                WallpaperLibraryService.shared.repairDownloadPath(recordID: record.id, newPath: finalPath)
+                if finalPath != sourcePath {
+                    result.migratedCount += 1
+                } else {
+                    result.repairedCount += 1
+                }
+                print("[Repair] Wallpaper repaired: \(filePath) -> \(finalPath)")
+            } else {
+                WallpaperLibraryService.shared.deactivateDownloadRecord(recordID: record.id)
+                result.removedCount += 1
+                print("[Repair] Wallpaper not found, deactivated: \(filePath)")
+            }
+        }
+        WallpaperLibraryService.shared.persistDownloads()
+
+        print("[Repair] Done: repaired=\(result.repairedCount), migrated=\(result.migratedCount), removed=\(result.removedCount), healthy=\(result.healthyCount)")
+        return result
+    }
+
+    /// 尝试在候选根目录中找到对应文件
+    private func findFileInCandidateRoots(originalPath: String, candidateRoots: [String], fm: FileManager) -> String? {
+        for root in candidateRoots {
+            let rootWithSlash = root.hasSuffix("/") ? root : root + "/"
+            if originalPath.hasPrefix(rootWithSlash) { continue }
+            if let range = originalPath.range(of: "/WaifuX/") {
+                let relativePath = String(originalPath[range.upperBound...])
+                let candidate = rootWithSlash + relativePath
+                if fm.fileExists(atPath: candidate) {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 尝试将文件从旧位置迁移到当前下载根目录
+    /// - Returns: 迁移后的新路径，若已在当前目录或迁移失败则返回 nil
+    private func migrateFileToCurrentRoot(sourcePath: String, currentRoot: String, fm: FileManager) -> String? {
+        let rootWithSlash = currentRoot.hasSuffix("/") ? currentRoot : currentRoot + "/"
+        if sourcePath.hasPrefix(rootWithSlash) { return nil }
+
+        guard let range = sourcePath.range(of: "/WaifuX/") else { return nil }
+        let relativePath = String(sourcePath[range.upperBound...])
+        let targetPath = rootWithSlash + relativePath
+
+        guard !fm.fileExists(atPath: targetPath) else { return targetPath }
+
+        let targetDir = (targetPath as NSString).deletingLastPathComponent
+        do {
+            try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true, attributes: nil)
+            try fm.moveItem(atPath: sourcePath, toPath: targetPath)
+            print("[Repair] Migrated file: \(sourcePath) -> \(targetPath)")
+            return targetPath
+        } catch {
+            print("[Repair] Failed to migrate file: \(sourcePath) -> \(targetPath): \(error)")
+            return nil
+        }
     }
 
     // MARK: - Private

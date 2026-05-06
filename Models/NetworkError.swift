@@ -11,17 +11,17 @@ enum NetworkError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "Invalid response from server"
+            return t("error.network.message")
         case .httpError(let code):
-            return "HTTP error: \(code)"
+            return "\(t("error.server.title")): \(code)"
         case .decodingError:
-            return "Failed to decode response"
+            return t("error.parse.failed")
         case .networkError(let error):
             return error.localizedDescription
         case .serverError(let code):
-            return "Server error: \(code)"
+            return "\(t("error.server.title")): \(code)"
         case .timeout:
-            return "Request timed out"
+            return t("error.network.message")
         }
     }
 }

@@ -8,7 +8,7 @@ struct ContentView: View {
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var animeViewModel = AnimeViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
-    @StateObject private var localization = LocalizationService.shared
+    @ObservedObject private var localization = LocalizationService.shared
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
     @State private var selectedTab: MainTab = .home
     @State private var selectedWallpaper: Wallpaper?
@@ -31,11 +31,6 @@ struct ContentView: View {
         ZStack {
             Color(hex: "0D0D0D")
                 .ignoresSafeArea()
-
-            // 全局颗粒材质覆盖层
-            GrainTextureOverlay()
-                .ignoresSafeArea()
-                .zIndex(0)
 
             // Tab：keep-alive（不含我的库）；非当前页 opacity 0 + 不响应点击；`coverGIFPlaybackHostActive` 停后台 GIF
             ZStack {
@@ -349,10 +344,6 @@ struct MyMediaContentView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // 颗粒材质覆盖层
-            GrainTextureOverlay()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
                     mediaHero
@@ -461,7 +452,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.favoriteItems) { item in
                             MyMediaVideoCard(
                                 item: item,
-                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
+                                localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
                                 badgeText: t("badge.favorite"),
                                 accent: LiquidGlassColors.accentCyan,
                                 isEditing: isEditing && editingSection == .mediaFavorites,
@@ -563,7 +554,7 @@ struct MyMediaContentView: View {
                             if let item = task.mediaItem {
                                 MyMediaVideoCard(
                                     item: item,
-                                    localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
+                                    localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
                                     badgeText: task.badgeText,
                                     accent: LiquidGlassColors.tertiaryBlue,
                                     isEditing: isEditing && editingSection == .mediaDownloads,
@@ -580,7 +571,7 @@ struct MyMediaContentView: View {
                         ForEach(completedMediaDownloads) { record in
                             MyMediaVideoCard(
                                 item: record.item,
-                                localMediaFileURL: record.localFileURL,
+                                localMediaFileURL: record.resolvedVideoFileURL,
                                 badgeText: record.item.resolutionLabel,
                                 accent: LiquidGlassColors.tertiaryBlue,
                                 isEditing: isEditing && editingSection == .mediaDownloads,
@@ -621,7 +612,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.recentItems) { item in
                             MyMediaVideoCard(
                                 item: item,
-                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
+                                localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
                                 badgeText: t("badge.recent"),
                                 accent: LiquidGlassColors.warningOrange,
                                 isEditing: isEditing && editingSection == .history,
@@ -1122,9 +1113,19 @@ struct MyMediaContentView: View {
         let localPath = fileURL.absoluteString
         var dimensionX = 1920
         var dimensionY = 1080
-        if let image = NSImage(contentsOf: fileURL) {
-            dimensionX = Int(image.size.width)
-            dimensionY = Int(image.size.height)
+        if let imageSource = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+           let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight as String] as? Int {
+            // 检查方向，可能需要交换宽高
+            if let orientation = properties[kCGImagePropertyOrientation as String] as? UInt32,
+               (5...8).contains(orientation) {
+                dimensionX = height
+                dimensionY = width
+            } else {
+                dimensionX = width
+                dimensionY = height
+            }
         }
         let resolution = "\(dimensionX)x\(dimensionY)"
         let ratio = dimensionY > 0 ? Double(dimensionX) / Double(dimensionY) : 1.77
@@ -1420,9 +1421,13 @@ private struct MyMediaVideoCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    /// 异步生成抽帧后更新的本地封面 URL
+    @State private var resolvedThumbnailURL: URL?
+
+    private static let videoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
 
     private var listThumbnailURL: URL {
-        item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
+        resolvedThumbnailURL ?? item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
     }
 
     // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
@@ -1548,6 +1553,36 @@ private struct MyMediaVideoCard: View {
                     isHovered = hovering
                 }
             }
+        }
+        .onAppear { triggerThumbnailIfNeeded() }
+        .onChange(of: localMediaFileURL) { _, _ in resolvedThumbnailURL = nil; triggerThumbnailIfNeeded() }
+    }
+
+    /// 已下载的视频如果没有缓存抽帧，异步生成并刷新封面
+    @MainActor
+    private func triggerThumbnailIfNeeded() {
+        guard resolvedThumbnailURL == nil,
+              let local = localMediaFileURL,
+              local.isFileURL,
+              FileManager.default.fileExists(atPath: local.path) else { return }
+
+        // 解析目录→视频文件/预览图（壁纸引擎源），或直接使用文件
+        if let resolved = MediaItem.resolveLocalVideoFile(from: local) ?? (
+            Self.videoExtensions.contains(local.pathExtension.lowercased()) ? local : nil
+        ) {
+            if let cached = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: resolved) {
+                resolvedThumbnailURL = cached
+                return
+            }
+            // 如果是视频文件，异步生成抽帧
+            if Self.videoExtensions.contains(resolved.pathExtension.lowercased()) {
+                Task { @MainActor in
+                    if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: resolved) {
+                        resolvedThumbnailURL = poster
+                    }
+                }
+            }
+            return
         }
     }
 }

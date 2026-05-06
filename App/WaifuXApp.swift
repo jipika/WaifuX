@@ -84,8 +84,11 @@ struct WaifuXApp {
         #if os(macOS)
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global(qos: .utility))
         source.setEventHandler {
-            // 内存紧张时清理 Kingfisher 内存缓存
+            // 内存紧张时清理所有内存缓存
             ImageCache.default.clearMemoryCache()
+            Task { @MainActor in
+                VideoThumbnailCache.shared.clearMemoryCache()
+            }
         }
         source.resume()
         #endif
@@ -245,6 +248,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             
                             // 恢复动态壁纸自动暂停设置
                             DynamicWallpaperAutoPauseManager.shared.restoreSettings()
+
+                            // 初始化静态壁纸颗粒蒙层（独立于壁纸设置，开关实时生效）
+                            StaticWallpaperGrainManager.shared.updateOverlay()
                             
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

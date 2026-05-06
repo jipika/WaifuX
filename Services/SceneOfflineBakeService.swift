@@ -299,6 +299,8 @@ enum SceneOfflineBakeService {
             await MainActor.run {
                 MediaLibraryService.shared.attachSceneBakeArtifact(itemID: itemID, artifact: artifact)
             }
+            // 烘焙完成后异步生成抽帧，供封面展示使用
+            _ = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: outURL)
         }
         return artifact
     }

@@ -223,7 +223,7 @@ enum ExploreImageColorSampler {
 
 extension NSImage {
     /// 限制最大边长（点），供 `ExploreDynamicAtmosphereBackground` 做大面积模糊用，避免对原图全尺寸 blur。
-    func constrainedForAtmosphereBackdrop(maxEdge: CGFloat = 256) -> NSImage {
+    func constrainedForAtmosphereBackdrop(maxEdge: CGFloat = 512) -> NSImage {
         let w = size.width
         let h = size.height
         guard w > 0, h > 0, w.isFinite, h.isFinite else { return self }
@@ -461,92 +461,78 @@ final class ExploreAtmosphereController: ObservableObject {
     }
 }
 
-// MARK: - 胶片噪点平铺（Arc 类质感，生成一次复用）
+// MARK: - Arc 风格颗粒噪点纹理（更精细、更高对比度）
 
 // MARK: - 全局胶片噪点纹理
 
+/// 胶片颗粒纹理生成器（CIFilter 管线 + 簇化缩放）
+///
+/// 参考实现：neberej/daily-tools-mac-ios GrainEffect.swift
+/// 关键技术：CIRandomGenerator 生成高频噪声 → 缩小 0.25x → 最近邻放大 4x
+/// 产生 2~3 像素的颗粒簇（而非单像素数字噪点），模拟真实胶片的有机颗粒感
 enum GrainTextureTile {
-    /// 胶片颗粒：避开「贴在中灰」——softLight 对 128 附近几乎无变化，改用更宽的明暗变化才看得见。
-    static let image: NSImage = {
-        let w = 256
-        let h = 256
-        guard
-            let rep = NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: w,
-                pixelsHigh: h,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-            ),
-            let data = rep.bitmapData
-        else {
-            return NSImage(size: NSSize(width: 1, height: 1))
-        }
-        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
-        for y in 0..<h {
-            for x in 0..<w {
-                state = state &* 6_364_136_223_846_793_005 &+ 1
-                let u = UInt32(truncatingIfNeeded: state >> 33)
-                // 约 55–200 的亮度跨度，叠 softLight/overlay 时才有可感颗粒
-                let v = UInt8(clamping: 55 + Int(u % 146))
-                let o = (y * w + x) * 4
-                data[o] = v
-                data[o + 1] = v
-                data[o + 2] = v
-                data[o + 3] = 255
-            }
-        }
-        let img = NSImage(size: NSSize(width: w, height: h))
-        img.addRepresentation(rep)
-        return img
-    }()
-}
+    /// 用于 SwiftUI `.blendMode(.softLight)` 的单帧颗粒纹理
+    static let image: NSImage = generateGrainTile()
 
-// MARK: - 全局颗粒材质覆盖层（支持开关和轻量模式）
+    /// 用于 NSView CGContext overlay 混合的单帧颗粒纹理
+    static let cgImage: CGImage = generateGrainCGImage()
 
-struct GrainTextureOverlay: View {
-    @State private var enabled = true
-    @State private var quality = "high"
-    var lightweight: Bool = false
-    /// `UserDefaults.didChange` 触发极频繁，合并读取避免主线程反复刷新整层叠加
-    @State private var settingsReadTask: Task<Void, Never>?
+    // MARK: - 私有生成
 
-    var body: some View {
-        Group {
-            if enabled && quality != "off" {
-                let isLightweight = lightweight || quality == "low"
-
-                Image(nsImage: GrainTextureTile.image)
-                    .resizable(resizingMode: .tile)
-                    .blendMode(.overlay)
-                    .opacity(isLightweight ? 0.15 : 0.35)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-            }
-        }
-        .onAppear(perform: readSettings)
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            scheduleReadSettings()
-        }
+    private static func generateGrainTile() -> NSImage {
+        let ciImage = makeGrainCIImage()
+        let rep = NSCIImageRep(ciImage: ciImage)
+        let nsImage = NSImage(size: NSSize(width: rep.size.width, height: rep.size.height))
+        nsImage.addRepresentation(rep)
+        return nsImage
     }
 
-    private func scheduleReadSettings() {
-        settingsReadTask?.cancel()
-        settingsReadTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            guard !Task.isCancelled else { return }
-            readSettings()
-        }
+    private static func generateGrainCGImage() -> CGImage {
+        let ciImage = makeGrainCIImage()
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        let w = Int(ciImage.extent.width)
+        let h = Int(ciImage.extent.height)
+        let fallback = CIContext().createCGImage(
+            CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)),
+            from: CGRect(x: 0, y: 0, width: 256, height: 256)
+        )!
+        return context.createCGImage(ciImage, from: CGRect(x: 0, y: 0, width: w, height: h))
+            ?? fallback
     }
 
-    private func readSettings() {
-        enabled = UserDefaults.standard.object(forKey: "grain_texture_enabled") as? Bool ?? true
-        quality = UserDefaults.standard.string(forKey: "grain_texture_quality") ?? "high"
+    private static func makeGrainCIImage() -> CIImage {
+        // 1. CIRandomGenerator：生成全白高频噪声
+        guard let noiseFilter = CIFilter(name: "CIRandomGenerator") else {
+            return CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+        }
+        var noise = noiseFilter.outputImage ?? CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5))
+
+        // 2. CIColorControls：去饱和 + 降低亮度 → 单色暗调噪点
+        //    saturation=0 去色；brightness=-0.3 整体压暗，模拟胶片颗粒的暗调特征
+        if let colorFilter = CIFilter(name: "CIColorControls") {
+            colorFilter.setValue(noise, forKey: kCIInputImageKey)
+            colorFilter.setValue(0.0, forKey: kCIInputSaturationKey)
+            colorFilter.setValue(-0.3, forKey: kCIInputBrightnessKey)
+            noise = colorFilter.outputImage ?? noise
+        }
+
+        // 3. 簇化缩放（关键技术）：
+        //    缩小到 0.25x 丢失细节，再用最近邻放大 4x → 单像素变成 4x4 像素块
+        //    产生 2~3 像素的颗粒簇，这是胶片颗粒与数字噪点的核心区别
+        let clusterScale: CGFloat = 0.25
+        let zoomed = noise
+            .transformed(by: CGAffineTransform(scaleX: clusterScale, y: clusterScale))
+            .transformed(by: CGAffineTransform(scaleX: 1.0 / clusterScale, y: 1.0 / clusterScale))
+
+        // 4. 裁剪到 256x256 输出区域（放大后中心区域）
+        let outputSize = 256.0
+        let cropRect = CGRect(
+            x: zoomed.extent.midX - outputSize / 2,
+            y: zoomed.extent.midY - outputSize / 2,
+            width: outputSize,
+            height: outputSize
+        )
+        return zoomed.cropped(to: cropRect)
     }
 }
 
@@ -837,7 +823,7 @@ final class PreviewWindowManager: ObservableObject {
         }
     }
 
-    func openPreview(url: URL, isMuted: Bool, aspectRatio: Double? = nil) {
+    func openPreview(url: URL, isMuted: Bool, aspectRatio: Double? = nil, isWeb: Bool = false, posterURL: URL? = nil) {
         removeCloseObserver()
         windowController?.close()
         windowController = nil
@@ -881,7 +867,7 @@ final class PreviewWindowManager: ObservableObject {
         window.minSize = NSSize(width: 400, height: 400)
 
         let hostingView = NSHostingView(
-            rootView: WallpaperPreviewSheet(url: url, isMuted: .constant(isMuted))
+            rootView: WallpaperPreviewSheet(url: url, isMuted: .constant(isMuted), isWeb: isWeb, posterURL: posterURL)
         )
         window.contentView = hostingView
 

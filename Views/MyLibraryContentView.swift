@@ -7,8 +7,8 @@ struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
-    @StateObject private var animeFavoriteStore = AnimeFavoriteStore.shared
-    @StateObject private var folderStore = LibraryFolderStore.shared
+    @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
+    @ObservedObject private var folderStore = LibraryFolderStore.shared
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
@@ -94,10 +94,6 @@ struct MyLibraryContentView: View {
                 spread: 0.4
             )
             .ignoresSafeArea()
-
-            GrainTextureOverlay()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .ignoresSafeArea()
 
             GeometryReader { geometry in
                 let contentWidth = max(0, geometry.size.width - 56)
@@ -424,7 +420,7 @@ struct MyLibraryContentView: View {
             baseItems = filtered.map {
                 AnyMediaItem(
                     mediaItem: $0,
-                    localFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: $0)
+                    localFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: $0)
                 )
             }
         case .downloads:
@@ -581,7 +577,7 @@ struct MyLibraryContentView: View {
     private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
         MediaVideoCard(
             item: item.mediaItem,
-            localMediaFileURL: item.localFileURL,
+            localMediaFileURL: item.resolvedVideoFileURL,
             badgeText: selectedSubTab == .favorites ? t("badge.favorite") : item.mediaItem.resolutionLabel,
             accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
             isEditing: isEditing,
@@ -1408,9 +1404,19 @@ struct MyLibraryContentView: View {
         let localPath = fileURL.absoluteString
         var dimensionX = 1920
         var dimensionY = 1080
-        if let image = NSImage(contentsOf: fileURL) {
-            dimensionX = Int(image.size.width)
-            dimensionY = Int(image.size.height)
+        if let imageSource = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+           let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight as String] as? Int {
+            // 检查方向，可能需要交换宽高
+            if let orientation = properties[kCGImagePropertyOrientation as String] as? UInt32,
+               (5...8).contains(orientation) {
+                dimensionX = height
+                dimensionY = width
+            } else {
+                dimensionX = width
+                dimensionY = height
+            }
         }
         let resolution = "\(dimensionX)x\(dimensionY)"
         let ratio = dimensionY > 0 ? Double(dimensionX) / Double(dimensionY) : 1.77
@@ -1771,6 +1777,11 @@ private struct AnyMediaItem: Identifiable {
     /// 是否为竖屏；优先使用 UnifiedLocalMedia 的解析（包含烘焙产物信息），其次 MediaItem
     var isPortrait: Bool? {
         unifiedLocalMedia?.isPortrait ?? mediaItem.isPortrait
+    }
+
+    /// 解析后的视频文件 URL：优先烘焙产物，其次目录内视频文件
+    var resolvedVideoFileURL: URL? {
+        unifiedLocalMedia?.downloadRecord?.resolvedVideoFileURL ?? localFileURL
     }
 }
 

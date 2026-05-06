@@ -17,7 +17,11 @@ class WallpaperSchedulerService: ObservableObject {
     private var usedItemIDs: [String: Set<String>] = [:]
 
     private var timer: Timer?
+    private var pendingCleanupWorkItem: DispatchWorkItem?
     private let userDefaultsKey = "wallpaper_scheduler_config"
+    private let usedItemIDsKey = "wallpaper_scheduler_used_item_ids_v1"
+    private let lastChangeTimesKey = "wallpaper_scheduler_last_change_times_v1"
+    private let lastChangedItemIDsKey = "wallpaper_scheduler_last_changed_item_ids_v1"
     private let logTag = "[WallpaperScheduler]"
     private var isScreenLocked = false
 
@@ -32,6 +36,12 @@ class WallpaperSchedulerService: ObservableObject {
             self,
             selector: #selector(handleScreenUnlocked),
             name: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScreenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
     }
@@ -57,9 +67,92 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
-    /// 延迟恢复保存的调度配置
+    @objc private func handleScreenParametersChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // 防抖：延迟 0.5s 执行
+            self.pendingCleanupWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.cleanupOrphanedScreenState()
+                if self.isRunning {
+                    self.scheduleNextChange()
+                }
+            }
+            self.pendingCleanupWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        }
+    }
+
+    private func cleanupOrphanedScreenState() {
+        let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
+
+        // 清理 lastChangedItemIDs
+        let orphanedChangedItemIDs = Set(lastChangedItemIDs.keys).subtracting(currentScreenIDs)
+        for screenID in orphanedChangedItemIDs {
+            lastChangedItemIDs.removeValue(forKey: screenID)
+        }
+
+        // 清理 lastChangeTimes
+        let orphanedChangeTimes = Set(lastChangeTimes.keys).subtracting(currentScreenIDs)
+        for screenID in orphanedChangeTimes {
+            lastChangeTimes.removeValue(forKey: screenID)
+        }
+
+        // 清理 usedItemIDs
+        let orphanedUsedItemIDs = Set(usedItemIDs.keys).subtracting(currentScreenIDs)
+        for screenID in orphanedUsedItemIDs {
+            usedItemIDs.removeValue(forKey: screenID)
+        }
+
+        // 清理 displayConfigs
+        let orphanedDisplayConfigs = Set(config.displayConfigs.keys).subtracting(currentScreenIDs)
+        for screenID in orphanedDisplayConfigs {
+            config.displayConfigs.removeValue(forKey: screenID)
+        }
+
+        // 持久化清理后的状态
+        if !orphanedChangedItemIDs.isEmpty || !orphanedChangeTimes.isEmpty || !orphanedUsedItemIDs.isEmpty {
+            persistSchedulerState()
+            saveConfig()
+            let allOrphaned = orphanedChangedItemIDs.union(orphanedChangeTimes).union(orphanedUsedItemIDs)
+            print("\(logTag) Cleaned up orphaned state for \(allOrphaned.count) disconnected screen(s): \(allOrphaned)")
+        }
+    }
+
+    /// 延迟恢复保存的调度配置与运行状态
     func restoreSavedConfig() {
         loadConfig()
+        restoreSchedulerState()
+    }
+
+    /// 恢复随机一轮状态与上次切换时间，确保应用重启后随机不重复、间隔不立即触发
+    private func restoreSchedulerState() {
+        if let data = UserDefaults.standard.data(forKey: usedItemIDsKey),
+           let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            usedItemIDs = decoded.mapValues { Set($0) }
+        }
+        if let data = UserDefaults.standard.data(forKey: lastChangeTimesKey),
+           let decoded = try? PropertyListDecoder().decode([String: Date].self, from: data) {
+            lastChangeTimes = decoded
+        }
+        if let data = UserDefaults.standard.data(forKey: lastChangedItemIDsKey),
+           let decoded = try? PropertyListDecoder().decode([String: String].self, from: data) {
+            lastChangedItemIDs = decoded
+        }
+    }
+
+    private func persistSchedulerState() {
+        let encodableUsed = usedItemIDs.mapValues { Array($0) }
+        if let data = try? JSONEncoder().encode(encodableUsed) {
+            UserDefaults.standard.set(data, forKey: usedItemIDsKey)
+        }
+        if let data = try? PropertyListEncoder().encode(lastChangeTimes) {
+            UserDefaults.standard.set(data, forKey: lastChangeTimesKey)
+        }
+        if let data = try? PropertyListEncoder().encode(lastChangedItemIDs) {
+            UserDefaults.standard.set(data, forKey: lastChangedItemIDsKey)
+        }
     }
 
     // MARK: - Control
@@ -79,6 +172,8 @@ class WallpaperSchedulerService: ObservableObject {
         isRunning = false
         config.isEnabled = false
         saveConfig()
+        // 停止时保留持久化状态，以便重新启用时继续上轮随机进度
+        persistSchedulerState()
         print("\(logTag) Stopped.")
     }
 
@@ -93,6 +188,7 @@ class WallpaperSchedulerService: ObservableObject {
                 lastChangeTimes[screen.wallpaperScreenIdentifier] = now
             }
         }
+        persistSchedulerState()
         // 重启定时器以确保从现在开始重新计时
         if isRunning {
             scheduleNextChange()
@@ -216,6 +312,7 @@ class WallpaperSchedulerService: ObservableObject {
                 if success {
                     self.lastChangeTimes[screenID] = now
                     self.lastChangedItemIDs[screenID] = item.id
+                    self.persistSchedulerState()
                     print("\(logTag) Successfully applied '\(item.title)' to screen \(screenID)")
                 } else {
                     print("\(logTag) Failed to apply '\(item.title)' to screen \(screenID), will retry next cycle")
@@ -246,8 +343,7 @@ class WallpaperSchedulerService: ObservableObject {
                     path: webDirPath,
                     targetScreens: [screen]
                 )
-                let cliCaptureURL = URL(fileURLWithPath: "/tmp/wallpaperengine-cli-capture.png")
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(cliCaptureURL, for: screen)
+                // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
             }
             // 1b. .mp4 烘焙视频 → VideoWallpaperManager 直接播放
             else if let bakedPath = item.bakedVideoPath,
@@ -274,9 +370,38 @@ class WallpaperSchedulerService: ObservableObject {
 
                 if FileManager.default.fileExists(atPath: projectJSONPath.path),
                    let projectData = try? Data(contentsOf: projectJSONPath),
-                   let projectJSON = try? JSONSerialization.jsonObject(with: projectData) as? [String: Any],
-                   let typeString = projectJSON["type"] as? String {
-                    let type = typeString.lowercased()
+                   let projectJSON = try? JSONSerialization.jsonObject(with: projectData) as? [String: Any] {
+
+                    // Preset 类型（图片轮播）：project.json 含 "preset" 字段且无 "type" 字段
+                    if projectJSON["type"] == nil,
+                       let presetDict = projectJSON["preset"] as? [String: Any],
+                       let customDir = presetDict["customdirectory"] as? String {
+                        let imagesDir = resolvedRoot.appendingPathComponent(customDir)
+                        let images = enumerateImages(in: imagesDir)
+                        if !images.isEmpty {
+                            // 根据 preset 配置生成 HTML 轮播页面
+                            // imageswitchtimes 是倍率（1=默认），使用 5 秒基础间隔
+                            let multiplier = presetDict["imageswitchtimes"] as? Int ?? 1
+                            let switchTime = max(multiplier * 5, 3)
+                            let transitionMode = presetDict["TransitionMode"] as? Int ?? 1
+                            generatePresetHTML(
+                                images: images, imagesDir: imagesDir,
+                                switchTime: switchTime, transitionMode: transitionMode,
+                                outputDir: resolvedRoot
+                            )
+                            print("\(logTag) Generated preset HTML slideshow: \(images.count) images, interval=\(switchTime)s")
+                            // 通过 CLI web 渲染器渲染
+                            try WallpaperEngineXBridge.shared.setWallpaper(
+                                path: resolvedRoot.path,
+                                targetScreens: [screen]
+                            )
+                            // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
+                            return true
+                        }
+                    }
+
+                    let typeString = projectJSON["type"] as? String
+                    let type = typeString?.lowercased() ?? ""
 
                     if type == "video" {
                         // Video 类型：提取实际视频文件路径，用 VideoWallpaperManager 播放
@@ -301,8 +426,7 @@ class WallpaperSchedulerService: ObservableObject {
                                 path: resolvedRoot.path,
                                 targetScreens: [screen]
                             )
-                            let cliCaptureURL = URL(fileURLWithPath: "/tmp/wallpaperengine-cli-capture.png")
-                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(cliCaptureURL, for: screen)
+                            // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                         }
                     } else {
                         // Scene/Web 类型：通过 CLI 渲染
@@ -311,8 +435,7 @@ class WallpaperSchedulerService: ObservableObject {
                             path: resolvedRoot.path,
                             targetScreens: [screen]
                         )
-                        let cliCaptureURL = URL(fileURLWithPath: "/tmp/wallpaperengine-cli-capture.png")
-                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(cliCaptureURL, for: screen)
+                        // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                     }
                 } else {
                     // 无 project.json 的静态图目录
@@ -342,21 +465,12 @@ class WallpaperSchedulerService: ObservableObject {
                 let vm = WallpaperViewModel()
                 try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
             }
-            triggerSystemMenuBarRefresh()
+            // com.apple.desktop 通知已由 setDesktopImageURLForAllSpaces 内部发送，无需重复触发
             return true
         } catch {
             print("\(logTag) applyItem failed for '\(item.title)' (\(fileURL.lastPathComponent)): \(error)")
             return false
         }
-    }
-
-    private func triggerSystemMenuBarRefresh() {
-        DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name("com.apple.desktop"),
-            object: nil,
-            userInfo: nil,
-            deliverImmediately: true
-        )
     }
 
     /// 从 project.json 的 file/background 字段提取视频文件路径
@@ -387,6 +501,112 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     private let videoExtensions: Set<String> = ["mp4", "mov", "webm", "mkv", "avi", "m4v", "flv"]
+    private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
+
+    /// 枚举目录中的图片文件，按文件名排序
+    private func enumerateImages(in directory: URL) -> [URL] {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return contents
+            .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// 根据 preset 配置生成 HTML 图片轮播页面，写入 outputDir/index.html
+    private func generatePresetHTML(images: [URL], imagesDir: URL, switchTime: Int, transitionMode: Int, outputDir: URL) {
+        // 图片路径相对于 outputDir
+        let imagePaths = images.map { url -> String in
+            let absPath = url.path
+            let dirPath = outputDir.path.hasSuffix("/") ? outputDir.path : outputDir.path + "/"
+            if absPath.hasPrefix(dirPath) {
+                return String(absPath.dropFirst(dirPath.count))
+            }
+            return url.lastPathComponent
+        }
+
+        let escapedPaths = imagePaths.map { path -> String in
+            let escaped = path.replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(escaped)\""
+        }
+        let imagesJS = "[\(escapedPaths.joined(separator: ","))]"
+
+        // 过渡动画 CSS
+        let transitionCSS: String
+        switch transitionMode {
+        case 1: // 淡入淡出
+            transitionCSS = """
+            .slide { opacity: 0; transition: opacity 1.2s ease-in-out; }
+            .slide.active { opacity: 1; }
+            """
+        case 2: // 左右滑动
+            transitionCSS = """
+            .slide { position: absolute; top: 0; left: 100%; transition: left 1.2s ease-in-out; width: 100%; height: 100%; }
+            .slide.active { left: 0; }
+            .slide.prev { left: -100%; }
+            """
+        default: // 淡入淡出（默认）
+            transitionCSS = """
+            .slide { opacity: 0; transition: opacity 1.2s ease-in-out; }
+            .slide.active { opacity: 1; }
+            """
+        }
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+        .slideshow { position: relative; width: 100%; height: 100%; }
+        .slide {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-size: cover; background-position: center; background-repeat: no-repeat;
+        }
+        \(transitionCSS)
+        </style>
+        </head>
+        <body>
+        <div class="slideshow" id="slideshow"></div>
+        <script>
+        const images = \(imagesJS);
+        const switchTime = \(max(switchTime, 1)) * 1000;
+        const container = document.getElementById('slideshow');
+        let current = 0;
+
+        // 创建所有 slide 元素
+        images.forEach((src, i) => {
+            const div = document.createElement('div');
+            div.className = 'slide' + (i === 0 ? ' active' : '');
+            div.style.backgroundImage = 'url("' + src + '")';
+            container.appendChild(div);
+        });
+
+        const slides = container.querySelectorAll('.slide');
+
+        function nextSlide() {
+            slides[current].classList.remove('active');
+            if (slides[current].classList) slides[current].classList.add('prev');
+            current = (current + 1) % slides.length;
+            slides[current].classList.remove('prev');
+            slides[current].classList.add('active');
+            // 清理 prev 类
+            setTimeout(() => {
+                slides.forEach((s, i) => { if (i !== current) s.classList.remove('prev'); });
+            }, 1300);
+        }
+
+        setInterval(nextSlide, switchTime);
+        </script>
+        </body>
+        </html>
+        """
+
+        let htmlURL = outputDir.appendingPathComponent("index.html")
+        try? html.write(to: htmlURL, atomically: true, encoding: .utf8)
+    }
 
     // MARK: - Item Selection
 
@@ -544,6 +764,7 @@ class WallpaperSchedulerService: ObservableObject {
         guard let selected = candidates.randomElement() else { return nil }
         used.insert(selected.id)
         usedItemIDs[screenID] = used
+        persistSchedulerState()
         return selected
     }
 

@@ -10,6 +10,17 @@ import CryptoKit
 import WebKit
 import CRenderer
 
+// MARK: - NSScreen Extension
+extension NSScreen {
+    /// 返回稳定的屏幕标识符，用于跨模块的屏幕级状态字典 key。
+    var wallpaperScreenIdentifier: String {
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return screenNumber.stringValue
+        }
+        return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
+    }
+}
+
 // MARK: - Constants
 private let SOCKET_PATH = "/tmp/wallpaperengine-cli.sock"
 private let PID_PATH = "/tmp/wallpaperengine-cli.pid"
@@ -1842,8 +1853,10 @@ private final class DesktopWallpaperManager {
 
         for targetScreen in targetScreens {
             do {
+                // 使用 "充满屏幕" 缩放模式，与 App 内其他壁纸设置行为一致
                 try workspace.setDesktopImageURLForAllSpaces(dst, for: targetScreen, options: [
-                    .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue)
+                    .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                    .allowClipping: true
                 ])
             } catch {
                 print("[DesktopWallpaperManager] Failed to set desktop image: \(error)")

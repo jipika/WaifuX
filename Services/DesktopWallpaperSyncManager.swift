@@ -23,15 +23,22 @@ final class DesktopWallpaperSyncManager {
 
     /// 记录最后一次尝试同步的时间，避免过于频繁的重复同步
     private var lastSyncTime: Date?
-    private let minimumSyncInterval: TimeInterval = 0.1
+    private let minimumSyncInterval: TimeInterval = 0.5
     /// 用于 Space 切换的 debounce，快速连续切换时只保留最后一次
     private var pendingSyncWorkItem: DispatchWorkItem?
+    private var pendingScreenChangeWorkItem: DispatchWorkItem?
 
     private init() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(handleActiveSpaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScreenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
     }
@@ -85,6 +92,36 @@ final class DesktopWallpaperSyncManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
     }
 
+    @objc private func handleScreenParametersChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // 防抖：延迟 0.5s 执行
+            self.pendingScreenChangeWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.cleanupOrphanedScreenState()
+            }
+            self.pendingScreenChangeWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        }
+    }
+
+    private func cleanupOrphanedScreenState() {
+        let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
+        let orphanedScreenIDs = Set(lastSetImageURLByScreen.keys).subtracting(currentScreenIDs)
+        for screenID in orphanedScreenIDs {
+            lastSetImageURLByScreen.removeValue(forKey: screenID)
+            lastOptionsByScreen.removeValue(forKey: screenID)
+        }
+        if !orphanedScreenIDs.isEmpty {
+            print("[DesktopWallpaperSyncManager] Cleaned orphaned registration entries for \(orphanedScreenIDs.count) disconnected screen(s): \(orphanedScreenIDs)")
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     /// 执行实际同步逻辑
     private func performSync(source: String) {
         // 防抖动：避免短时间内多次同步（Space 切换通常不会连续触发）
@@ -107,7 +144,12 @@ final class DesktopWallpaperSyncManager {
                let posterURL = videoManager.posterURL(for: screen),
                videoManager.currentVideoURL != nil {
                 do {
-                    try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen)
+                    // 使用 "充满屏幕" 缩放模式，与初始设置保持一致
+                    let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                        .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                        .allowClipping: true
+                    ]
+                    try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
                     print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
                 } catch {
                     print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync poster for screen \(screen.localizedName): \(error)")
@@ -120,26 +162,21 @@ final class DesktopWallpaperSyncManager {
                 continue
             }
 
+            // 跳过 CLI 壁纸的临时 capture 路径（应用重启后不存在，且 CLI daemon 自行管理桌面壁纸）
+            if url.path.contains("wallpaperengine-cli-capture") {
+                print("[DesktopWallpaperSyncManager] [\(source)] Skipping CLI capture path for screen \(screen.localizedName)")
+                continue
+            }
+
             do {
-                var merged = lastOptionsByScreen[screenID] ?? [:]
-                merged[NSWorkspace.DesktopImageOptionKey(rawValue: "allSpaces")] = NSNumber(value: true)
-                try workspace.setDesktopImageURL(url, for: screen, options: merged)
+                // 使用 setDesktopImageURLForAllSpaces 确保所有 Spaces 同步，
+                // 该方法内部已发送 com.apple.desktop 通知，无需额外触发
+                try workspace.setDesktopImageURLForAllSpaces(url, for: screen, options: lastOptionsByScreen[screenID] ?? [:])
                 print("[DesktopWallpaperSyncManager] [\(source)] Synced static wallpaper for screen \(screen.localizedName)")
             } catch {
                 print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync wallpaper for screen \(screen.localizedName): \(error)")
             }
         }
-
-        triggerWallpaperAgentRefresh()
-    }
-
-    private func triggerWallpaperAgentRefresh() {
-        DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name("com.apple.desktop"),
-            object: nil,
-            userInfo: nil,
-            deliverImmediately: true
-        )
     }
 }
 

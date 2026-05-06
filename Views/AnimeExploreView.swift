@@ -15,6 +15,7 @@ struct AnimeExploreView: View {
         self.isVisible = isVisible
     }
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
+    @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
 
     // MARK: State
     @State private var selectedCategory: AnimeCategory = .all
@@ -43,10 +44,13 @@ struct AnimeExploreView: View {
             let gridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
             ZStack {
-                ExploreDynamicAtmosphereBackground(
+                ArcAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
                     referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: true
+                    isLightMode: arcSettings.isLightMode,
+                    dotGridOpacity: arcSettings.dotGridOpacity,
+                    useNoise: true,
+                    grainIntensity: arcSettings.exploreGrainAnime
                 )
                 .ignoresSafeArea()
 
@@ -66,6 +70,7 @@ struct AnimeExploreView: View {
                             .background(scrollTrackingOverlay)
                             .background(contentSizeTrackingOverlay)
                             .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                            .environment(\.arcIsLightMode, arcSettings.isLightMode)
                             .id("exploreTop")
                         }
                         .coordinateSpace(name: "exploreScroll")
@@ -152,10 +157,6 @@ struct AnimeExploreView: View {
             recomputeVisibleAnimeItems()
             syncAtmosphereIfNeeded()
         }
-        .onChange(of: selectedSort) { _, _ in
-            recomputeVisibleAnimeItems()
-            syncAtmosphereIfNeeded()
-        }
     }
 
     // MARK: - Sections
@@ -173,11 +174,11 @@ struct AnimeExploreView: View {
             HStack(spacing: 8) {
                 Text(greetingText)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.85))
 
                 Text("Bangumi")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(arcSettings.primaryText.opacity(0.75))
                     .padding(.horizontal, 8)
                     .frame(height: 20)
                     .exploreFrostedCapsule(
@@ -190,7 +191,7 @@ struct AnimeExploreView: View {
             Text(t("anime.exploreAnime"))
                 .font(.system(size: 32, weight: .bold, design: .serif))
                 .tracking(-0.5)
-                .foregroundStyle(.white.opacity(0.98))
+                .foregroundStyle(arcSettings.primaryText)
                 .lineLimit(1)
         }
     }
@@ -205,7 +206,7 @@ struct AnimeExploreView: View {
                 onClear: clearSearch
             )
 
-            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+            ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainAnime) {
                 randomizeAtmosphere()
             }
 
@@ -235,7 +236,7 @@ struct AnimeExploreView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(t("anime.hotTags"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.42))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.42))
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
@@ -272,15 +273,9 @@ struct AnimeExploreView: View {
         HStack(alignment: .center) {
             Text("\(visibleAnimeItems.count) \(t("content.animes"))")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.66))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.66))
 
             Spacer()
-
-            SortMenu(
-                options: AnimeSortOption.allCases,
-                selected: $selectedSort,
-                tint: exploreAtmosphere.tint.primary
-            )
         }
     }
 
@@ -557,14 +552,7 @@ struct AnimeExploreView: View {
     }
 
     private func recomputeVisibleAnimeItems() {
-        let source = viewModel.animeItems
-        if selectedSort == .newest {
-            visibleAnimeItems = source
-        } else {
-            visibleAnimeItems = source.sorted { lhs, rhs in
-                selectedSort.sortComparator(lhs, rhs, ascending: false)
-            }
-        }
+        visibleAnimeItems = viewModel.animeItems
     }
 
     private func syncAtmosphereIfNeeded() {
@@ -613,41 +601,18 @@ private struct AnimeGridConfig {
 
 private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
     case newest
-    case title
-    case popular
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .newest: return t("anime.sortNewest")
-        case .title: return t("anime.sortTitle")
-        case .popular: return t("anime.sortPopular")
         }
     }
 
     var menuTitle: String {
         switch self {
         case .newest: return t("anime.sortByNewest")
-        case .title: return t("anime.sortByTitle")
-        case .popular: return t("anime.sortByPopular")
-        }
-    }
-
-    func sortComparator(_ lhs: AnimeSearchResult, _ rhs: AnimeSearchResult, ascending: Bool) -> Bool {
-        switch self {
-        case .newest:
-            return false
-        case .title:
-            let cmp = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
-            return ascending ? cmp == .orderedDescending : cmp == .orderedAscending
-        case .popular:
-            let lhsScore = Double(lhs.rating ?? "0") ?? 0
-            let rhsScore = Double(rhs.rating ?? "0") ?? 0
-            if lhsScore == rhsScore {
-                return lhs.rank ?? Int.max < rhs.rank ?? Int.max
-            }
-            return ascending ? lhsScore < rhsScore : lhsScore > rhsScore
         }
     }
 }
@@ -679,7 +644,7 @@ private struct AnimeCard: View {
                 KFImage(anime.coverURL.flatMap { URL(string: $0) })
                     .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                     .cacheMemoryOnly(false)
-                    .cancelOnDisappear(true)
+                    .fade(duration: 0.2)
                     .placeholder { _ in
                         placeholderGradient
                     }
@@ -696,7 +661,7 @@ private struct AnimeCard: View {
                 HStack(spacing: 8) {
                     Text(anime.title)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.9))
                         .lineLimit(1)
 
                     Spacer(minLength: 4)
@@ -709,7 +674,7 @@ private struct AnimeCard: View {
                                 .foregroundStyle(.yellow)
                             Text(rating)
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.8))
+                                .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.8))
                         }
                     }
 
@@ -720,7 +685,7 @@ private struct AnimeCard: View {
                             Text(episode)
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                         }
-                        .foregroundStyle(.white.opacity(0.5))
+                        .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.5))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                     }

@@ -3,6 +3,7 @@ import AVKit
 import AVFoundation
 import AppKit
 import Kingfisher
+import WebKit
 
 struct MediaDetailSheet: View {
     let initialItem: MediaItem
@@ -27,6 +28,7 @@ struct MediaDetailSheet: View {
     @State private var isHeroContentHidden = false
     @State private var showDeleteConfirm = false
     @State private var showSteamGuardAlert = false
+    @State private var showSessionExpiredAlert = false
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
 
@@ -257,6 +259,11 @@ struct MediaDetailSheet: View {
         } message: {
             Text(t("deleteConfirmMessage"))
         }
+        .alert("Steam 登录已过期", isPresented: $showSessionExpiredAlert) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text("Steam 会话已失效，凭据已自动清除。请前往设置页面重新登录后再试。")
+        }
         .navigationBarBackButtonHidden(true)
         .task {
             AppLogger.info(.media, "媒体详情页 onAppear",
@@ -281,6 +288,12 @@ struct MediaDetailSheet: View {
         if let artifact = currentDownloadRecord?.sceneBakeArtifact,
            FileManager.default.fileExists(atPath: artifact.videoPath) {
             return URL(fileURLWithPath: artifact.videoPath)
+        }
+        // 已下载的视频文件优先使用本地路径，避免从网络加载
+        if let localURL = currentDownloadRecord?.localFileURL,
+           FileManager.default.fileExists(atPath: localURL.path),
+           ["mp4", "mov", "webm", "m4v"].contains(localURL.pathExtension.lowercased()) {
+            return localURL
         }
         return resolvedItem.previewVideoURL
     }
@@ -1236,11 +1249,17 @@ struct MediaDetailSheet: View {
                 AppLogger.info(.download, "Workshop 下载成功", metadata:
                     ["id": resolvedItem.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             } catch let error as WorkshopError {
-                if case .guardCodeRequired = error {
+                switch error {
+                case .guardCodeRequired:
                     isDownloading = false
                     pendingSteamGuardCode = ""
                     showSteamGuardAlert = true
-                } else {
+                case .sessionExpired:
+                    isDownloading = false
+                    showSessionExpiredAlert = true
+                    AppLogger.error(.download, "Workshop 会话过期，已清除凭据", metadata:
+                        ["id": resolvedItem.id])
+                default:
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
                     isDownloading = false
@@ -1354,7 +1373,9 @@ struct MediaDetailSheet: View {
             Task {
                 do {
                     try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                    )
                 } catch {
                     errorMessage = error.localizedDescription
                     showError = true
@@ -1437,6 +1458,10 @@ struct MediaDetailSheet: View {
         }
         
         let contentRoot = sceneEngineContentRoot(for: localURL)
+
+        // Preset 类型预处理：如果 project.json 含 preset 字段，生成 HTML 轮播页面
+        ensurePresetHTMLGenerated(at: contentRoot)
+
         let contentType = determineWorkshopContentType(at: contentRoot)
         if case .unsupported(let detectedType) = contentType {
             errorMessage = "检测到该文件类型为 \(detectedType.capitalized)，暂不支持设置此类型壁纸"
@@ -1532,16 +1557,34 @@ struct MediaDetailSheet: View {
     /// 预览设为壁纸的内容：优先已烘焙 MP4 → 本地视频文件 → 静态封面图
     private func previewWallpaper() async {
         let targetURL: URL?
+        var isWebPreview = false
 
         // 1. 已烘焙的 Scene MP4
         if let artifact = currentDownloadRecord?.sceneBakeArtifact,
            FileManager.default.fileExists(atPath: artifact.videoPath) {
             targetURL = URL(fileURLWithPath: artifact.videoPath)
         }
-        // 2. 本地视频文件
-        else if let localURL = findLocalWorkshopFile(),
-                ["mp4", "mov", "webm"].contains(localURL.pathExtension.lowercased()) {
-            targetURL = localURL
+        // 2. 本地 Workshop 文件/目录
+        else if let localURL = findLocalWorkshopFile() {
+            let ext = localURL.pathExtension.lowercased()
+            if ["mp4", "mov", "webm"].contains(ext) {
+                targetURL = localURL
+            } else {
+                // 判断目录内容类型（scene/web/image/video 等）
+                var checkDir = localURL
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDir), !isDir.boolValue {
+                    checkDir = localURL.deletingLastPathComponent()
+                }
+                let contentType = determineWorkshopContentType(at: checkDir)
+                if contentType == .web {
+                    targetURL = checkDir
+                    isWebPreview = true
+                } else {
+                    // 非 web 类型回退到静态图或原路径
+                    targetURL = resolvedShareableFileFromRecordOrCover() ?? localURL
+                }
+            }
         }
         // 3. 静态图（封面或下载记录中的图片）
         else if let imageURL = resolvedShareableFileFromRecordOrCover() {
@@ -1558,7 +1601,9 @@ struct MediaDetailSheet: View {
         if ["mp4", "mov", "webm"].contains(url.pathExtension.lowercased()) {
             aspectRatio = await videoAspectRatio(of: url) ?? aspectRatio
         }
-        PreviewWindowManager.shared.openPreview(url: url, isMuted: isMuted, aspectRatio: aspectRatio)
+        // Web壁纸传递背景图URL作为占位符
+        let posterForPreview: URL? = isWebPreview ? preferredWorkshopPosterForVideo : nil
+        PreviewWindowManager.shared.openPreview(url: url, isMuted: isMuted, aspectRatio: aspectRatio, isWeb: isWebPreview, posterURL: posterForPreview)
     }
 
     /// 从 "1920x1080" / "1920 x 1080" / "1080X1920" 这类分辨率字符串解析宽高比
@@ -1940,6 +1985,82 @@ struct MediaDetailSheet: View {
         return nil
     }
 
+    /// 如果目录是 preset 类型且还没有 index.html，根据 preset 配置生成 HTML 轮播页面
+    private func ensurePresetHTMLGenerated(at contentRoot: URL) {
+        let fm = FileManager.default
+        let htmlURL = contentRoot.appendingPathComponent("index.html")
+        guard !fm.fileExists(atPath: htmlURL.path) else { return } // 已有则跳过
+
+        let projectJSONURL = contentRoot.appendingPathComponent("project.json")
+        guard fm.fileExists(atPath: projectJSONURL.path),
+              let data = try? Data(contentsOf: projectJSONURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["type"] == nil,
+              let presetDict = json["preset"] as? [String: Any],
+              let customDir = presetDict["customdirectory"] as? String else { return }
+
+        let imagesDir = contentRoot.appendingPathComponent(customDir)
+        let imageExts: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
+        guard let contents = try? fm.contentsOfDirectory(
+            at: imagesDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return }
+        let images = contents
+            .filter { imageExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !images.isEmpty else { return }
+
+        let multiplier = presetDict["imageswitchtimes"] as? Int ?? 1
+        let switchTime = max(multiplier * 5, 3)
+        let escapedPaths = images.map { url -> String in
+            let relPath = "directories/customdirectory/" + url.lastPathComponent
+            let escaped = relPath.replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(escaped)\""
+        }
+        let imagesJS = "[\(escapedPaths.joined(separator: ","))]"
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+        .slideshow { position: relative; width: 100%; height: 100%; }
+        .slide {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-size: cover; background-position: center; background-repeat: no-repeat;
+            opacity: 0; transition: opacity 1.2s ease-in-out;
+        }
+        .slide.active { opacity: 1; }
+        </style>
+        </head>
+        <body>
+        <div class="slideshow" id="slideshow"></div>
+        <script>
+        const images = \(imagesJS);
+        const switchTime = \(max(switchTime, 1)) * 1000;
+        const container = document.getElementById('slideshow');
+        let current = 0;
+        images.forEach((src, i) => {
+            const div = document.createElement('div');
+            div.className = 'slide' + (i === 0 ? ' active' : '');
+            div.style.backgroundImage = 'url("' + src + '")';
+            container.appendChild(div);
+        });
+        const slides = container.querySelectorAll('.slide');
+        setInterval(() => {
+            slides[current].classList.remove('active');
+            current = (current + 1) % slides.length;
+            slides[current].classList.add('active');
+        }, switchTime);
+        </script>
+        </body>
+        </html>
+        """
+        try? html.write(to: htmlURL, atomically: true, encoding: .utf8)
+    }
+
     private func workshopContentDirectory(for item: MediaItem) -> URL? {
         let fm = FileManager.default
         guard let localURL = findLocalWorkshopFile(for: item) else { return nil }
@@ -2094,7 +2215,9 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         muted: isMuted
                     )
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                    )
                     onApplyFinished?()
                 } catch {
                     errorMessage = error.localizedDescription
@@ -2141,7 +2264,9 @@ struct MediaDetailSheet: View {
                         posterURL: posterURL,
                         targetScreens: nil
                     )
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                    )
                 } catch {
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
@@ -2193,7 +2318,9 @@ struct MediaDetailSheet: View {
                         try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: mainScreen)
                         DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: mainScreen)
                     }
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                    )
                 } catch {
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
@@ -2324,7 +2451,11 @@ private struct SourceLoadingPlaceholder: View {
 struct WallpaperPreviewSheet: View {
     let url: URL
     @Binding var isMuted: Bool
+    let isWeb: Bool
+    var posterURL: URL? = nil
     @Environment(\.dismiss) private var dismiss
+    @State private var isVideoReady = false
+    @State private var isWebLoaded = false
 
     private var isVideo: Bool {
         ["mp4", "mov", "webm"].contains(url.pathExtension.lowercased())
@@ -2334,12 +2465,28 @@ struct WallpaperPreviewSheet: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if isVideo {
+            if isWeb {
+                // Web壁纸：先显示背景图，加载完成后显示web内容
+                if let posterURL = posterURL {
+                    KFImage(posterURL)
+                        .cacheMemoryOnly(false)
+                        .cancelOnDisappear(true)
+                        .fade(duration: 0.3)
+                        .placeholder { _ in Color.black }
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea()
+                        .opacity(isWebLoaded ? 0 : 1)
+                }
+                WebWallpaperPreviewView(url: url, onLoaded: { isWebLoaded = true })
+                    .ignoresSafeArea()
+            } else if isVideo {
                 LoopingVideoBackgroundView(
                     url: url,
                     isMuted: isMuted,
                     contentMode: .fit,
-                    onReady: nil
+                    onReady: { isVideoReady = true }
                 )
                 .ignoresSafeArea()
             } else {
@@ -2352,6 +2499,20 @@ struct WallpaperPreviewSheet: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
+            }
+
+            // 视频/网页加载进度指示
+            if showLoadingIndicator {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(1.3)
+                    Text(isWeb ? "加载中..." : "视频加载中...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.6))
             }
 
             // 关闭按钮
@@ -2374,6 +2535,286 @@ struct WallpaperPreviewSheet: View {
                 Spacer()
             }
         }
+    }
+
+    private var showLoadingIndicator: Bool {
+        if isWeb { return !isWebLoaded }
+        if isVideo { return !isVideoReady }
+        return false
+    }
+}
+
+// MARK: - Web 壁纸预览 WebView
+struct WebWallpaperPreviewView: NSViewRepresentable {
+    let url: URL
+    var onLoaded: (() -> Void)?
+
+    /// 壁纸内容目录（用于读取 project.json）
+    private var contentDir: URL {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if url.pathExtension.lowercased() == "html" || url.pathExtension.lowercased() == "htm" {
+            return url.deletingLastPathComponent()
+        }
+        if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            return url
+        }
+        return url.deletingLastPathComponent()
+    }
+
+    /// WE Web API 垫片：避免壁纸脚本因 `undefined is not a function` 整页中断
+    private static let wallpaperEngineWebAPIShim = WKUserScript(
+        source: """
+        (function() {
+          try {
+            window.wallpaperMediaIntegration = {
+              playback: { PLAYING: 1, PAUSED: 2, STOPPED: 0 }
+            };
+            var __wxAudioCbs = [];
+            var __wxAudioBuf = new Float32Array(128);
+            var __wxAudioEnabled = false;
+            window.wallpaperRegisterAudioListener = function(cb) {
+              if (typeof cb === 'function') __wxAudioCbs.push(cb);
+            };
+            window.__wxUpdateAudioBuf = function(arr) {
+              if (arr && arr.length) {
+                __wxAudioEnabled = true;
+                for (var i = 0; i < __wxAudioBuf.length && i < arr.length; i++) {
+                  __wxAudioBuf[i] = arr[i];
+                }
+                for (var j = 0; j < __wxAudioCbs.length; j++) {
+                  try { __wxAudioCbs[j](__wxAudioBuf); } catch (e) {}
+                }
+              }
+            };
+            setInterval(function() {
+              if (!__wxAudioEnabled) {
+                for (var i = 0; i < __wxAudioBuf.length; i++) __wxAudioBuf[i] = 0;
+              }
+              for (var j = 0; j < __wxAudioCbs.length; j++) {
+                try { __wxAudioCbs[j](__wxAudioBuf); } catch (e) {}
+              }
+            }, 33);
+            window.wallpaperRegisterMediaStatusListener = function(cb) {
+              if (typeof cb === 'function') {
+                try { cb({ enabled: false }); } catch (e) {}
+              }
+            };
+            window.wallpaperRegisterMediaPropertiesListener = function(cb) {};
+            window.wallpaperRegisterMediaThumbnailListener = function(cb) {};
+            window.wallpaperRegisterMediaPlaybackListener = function(cb) {
+              if (typeof cb === 'function') {
+                try { cb({ state: window.wallpaperMediaIntegration.playback.STOPPED }); } catch (e) {}
+              }
+            };
+            window.wallpaperRegisterMediaTimelineListener = function(cb) {};
+          } catch (e) {}
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
+
+    /// `file://` 本地文件兼容：修复 Spine 纹理 crossOrigin 及 fetch() 读本地文件失败
+    private static let localFileCompatScript = WKUserScript(
+        source: """
+        (function() {
+          try {
+            if (location.protocol !== "file:") return;
+            var proto = HTMLImageElement.prototype;
+            var srcDesc = Object.getOwnPropertyDescriptor(proto, "src");
+            if (srcDesc && srcDesc.set) {
+              Object.defineProperty(proto, "src", {
+                set: function(value) {
+                  try {
+                    var s = String(value || "");
+                    if (s.indexOf("http:") !== 0 && s.indexOf("https:") !== 0 && s.indexOf("data:") !== 0 && s.indexOf("blob:") !== 0) {
+                      this.removeAttribute("crossorigin");
+                    }
+                  } catch (e) {}
+                  srcDesc.set.call(this, value);
+                },
+                get: srcDesc.get,
+                configurable: true
+              });
+            }
+            var origFetch = window.fetch;
+            if (typeof origFetch === "function") {
+              window.fetch = function(input, init) {
+                var url = typeof input === "string" ? input : (input && input.url) ? input.url : "";
+                if (url && url.indexOf("http:") !== 0 && url.indexOf("https:") !== 0 && url.indexOf("data:") !== 0 && url.indexOf("blob:") !== 0) {
+                  return new Promise(function(resolve, reject) {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("GET", url, true);
+                    xhr.onload = function() {
+                      if (xhr.status === 200 || xhr.status === 0) {
+                        resolve(new Response(xhr.responseText, { status: 200, statusText: "OK" }));
+                      } else {
+                        reject(new Error("HTTP " + xhr.status));
+                      }
+                    };
+                    xhr.onerror = function() { reject(new Error("network error")); };
+                    xhr.send();
+                  });
+                }
+                return origFetch.call(this, input, init);
+              };
+            }
+          } catch (e) {}
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+
+        // 注入 WE API Shim 和本地文件兼容脚本
+        let ucc = WKUserContentController()
+        ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
+        ucc.addUserScript(Self.localFileCompatScript)
+        config.userContentController = ucc
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+
+        // 找到 Web 壁纸入口文件
+        if let entryURL = resolveWebEntryURL(from: url) {
+            if #available(macOS 11.0, *) {
+                // 允许访问整个壁纸目录及其子目录（资源引用）
+                let allowDir = entryURL.deletingLastPathComponent()
+                webView.loadFileURL(entryURL, allowingReadAccessTo: allowDir)
+            } else {
+                webView.load(URLRequest(url: entryURL))
+            }
+        } else {
+            // 兜底：直接加载 URL
+            webView.load(URLRequest(url: url))
+        }
+
+        return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLoaded: onLoaded, contentDir: contentDir)
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var onLoaded: (() -> Void)?
+        let contentDir: URL
+
+        init(onLoaded: (() -> Void)?, contentDir: URL) {
+            self.onLoaded = onLoaded
+            self.contentDir = contentDir
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            print("[WebWallpaperPreviewView] Loaded: \(webView.url?.absoluteString ?? "unknown")")
+            runWebWallpaperBootstrap(webView: webView)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("[WebWallpaperPreviewView] Failed: \(error.localizedDescription)")
+            onLoaded?()
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            print("[WebWallpaperPreviewView] Provisional failed: \(error.localizedDescription)")
+            onLoaded?()
+        }
+
+        /// 对齐 Wallpaper Engine：注入 project 属性 + 修正缺失背景图与全屏布局
+        private func runWebWallpaperBootstrap(webView: WKWebView) {
+            let projectURL = contentDir.appendingPathComponent("project.json")
+            var propsBlock = ""
+            if let data = try? Data(contentsOf: projectURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let general = json["general"] as? [String: Any],
+               let props = general["properties"] as? [String: Any],
+               !props.isEmpty,
+               let propsData = try? JSONSerialization.data(withJSONObject: props, options: []),
+               let b64 = String(data: propsData.base64EncodedData(), encoding: .utf8) {
+                propsBlock = """
+                try {
+                  var props = JSON.parse(atob("\(b64)"));
+                  if (window.wallpaperPropertyListener && typeof window.wallpaperPropertyListener.applyUserProperties === 'function') {
+                    window.wallpaperPropertyListener.applyUserProperties(props);
+                  }
+                } catch(e) {}
+                """
+            }
+            let generalPropsBlock = """
+            try {
+              if (window.wallpaperPropertyListener && typeof window.wallpaperPropertyListener.applyGeneralProperties === 'function') {
+                window.wallpaperPropertyListener.applyGeneralProperties({ fps: { value: 30, type: 'slider' } });
+              }
+            } catch(eGP) {}
+            """
+            let layoutBlock = """
+            try {
+              document.documentElement.style.cssText = 'width:100%;height:100%;margin:0;padding:0;background:transparent;overflow:hidden;';
+              document.body.style.setProperty('background-image', 'none', 'important');
+              document.body.style.setProperty('width', '100%');
+              document.body.style.setProperty('height', '100%');
+              document.body.style.setProperty('margin', '0');
+              document.body.style.setProperty('overflow', 'hidden');
+              var pc = document.getElementById('player-container');
+              if (pc) { pc.style.width = '100%'; pc.style.height = '100%'; }
+              window.dispatchEvent(new Event('resize'));
+            } catch(e2) {}
+            """
+            let source = "(function(){\(propsBlock)\(generalPropsBlock)\(layoutBlock); return true;})();"
+            webView.evaluateJavaScript(source) { [weak self] _, _ in
+                self?.onLoaded?()
+            }
+        }
+    }
+
+    /// 解析 Web 壁纸入口文件 URL
+    private func resolveWebEntryURL(from url: URL) -> URL? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+
+        // 如果本身就是 HTML 文件
+        if url.pathExtension.lowercased() == "html" || url.pathExtension.lowercased() == "htm" {
+            return url
+        }
+
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+
+        // 1. 优先检查 index.html
+        let indexHTML = url.appendingPathComponent("index.html")
+        if fm.fileExists(atPath: indexHTML.path) {
+            return indexHTML
+        }
+
+        // 2. 检查 project.json 中的 file 字段
+        let projectJSON = url.appendingPathComponent("project.json")
+        if let data = try? Data(contentsOf: projectJSON),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let file = json["file"] as? String {
+            let fileURL = url.appendingPathComponent(file)
+            if fm.fileExists(atPath: fileURL.path),
+               fileURL.pathExtension.lowercased() == "html" {
+                return fileURL
+            }
+        }
+
+        // 3. 查找目录下的第一个 HTML 文件
+        if let contents = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil),
+           let firstHTML = contents.first(where: { ["html", "htm"].contains($0.pathExtension.lowercased()) }) {
+            return firstHTML
+        }
+
+        return nil
     }
 }
 

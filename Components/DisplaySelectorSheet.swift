@@ -274,7 +274,7 @@ extension View {
 
 // MARK: - 显示器选择弹窗覆盖层
 public struct DisplaySelectorOverlay: View {
-    @StateObject private var manager = DisplaySelectorManager.shared
+    @ObservedObject private var manager = DisplaySelectorManager.shared
     
     public var body: some View {
         Group {

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Kingfisher
+@preconcurrency import Translation
 
 // MARK: - MediaExploreContentView - 媒体探索页
 
@@ -9,7 +10,9 @@ struct MediaExploreContentView: View {
     @Binding var selectedMedia: MediaItem?
     var isVisible: Bool = true
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
-    @StateObject private var workshopSourceManager = WorkshopSourceManager.shared
+    @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
+    @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
+    @StateObject private var translationBridge = SearchTranslationBridge()
 
     @State private var selectedCategory: MediaCategory = .all
     @State private var selectedHotTag: MediaHotTag?
@@ -28,6 +31,9 @@ struct MediaExploreContentView: View {
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
+    @State private var pendingSearchText: String?
+    /// 翻译后的实际搜索词（英文），与 searchText（原始中文）分离
+    @State private var mediaSearchQuery: String = ""
 
     /// 缓存筛选/排序后的列表，避免每次 body（含滚动、`isLoading` 等）都对 `items` 全表 filter/sort，减轻 AttributeGraph 压力。
     @State private var visibleMediaItems: [MediaItem] = []
@@ -48,10 +54,13 @@ struct MediaExploreContentView: View {
             let gridContentWidth = max(0, geometry.size.width - 56)
 
             ZStack {
-                ExploreDynamicAtmosphereBackground(
+                ArcAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
                     referenceImage: exploreAtmosphere.referenceImage,
-                    lightweightBackdrop: true
+                    isLightMode: arcSettings.isLightMode,
+                    dotGridOpacity: arcSettings.dotGridOpacity,
+                    useNoise: true,
+                    grainIntensity: arcSettings.exploreGrainMedia
                 )
                 .ignoresSafeArea()
 
@@ -75,6 +84,7 @@ struct MediaExploreContentView: View {
                             .background(scrollTrackingOverlay)
                             .background(contentSizeTrackingOverlay)
                             .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                            .environment(\.arcIsLightMode, arcSettings.isLightMode)
                             .id("exploreTop")
                         }
                         .coordinateSpace(name: "exploreScroll")
@@ -91,51 +101,9 @@ struct MediaExploreContentView: View {
                         ))
                         .disabled(isInitialLoading)
 
-                        VStack {
-                            Spacer()
-                            if loadMoreFailed {
-                                BottomLoadingFailedCard {
-                                    loadMoreFailed = false
-                                    Task { await viewModel.loadMore() }
-                                }
-                                .padding(.bottom, 60)
-                            } else if isLoadingMore || (viewModel.isLoading && !visibleMediaItems.isEmpty) {
-                                BottomLoadingCard(isLoading: true)
-                                    .padding(.bottom, 60)
-                            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleMediaItems.isEmpty {
-                                BottomNoMoreCard()
-                                    .padding(.bottom, 60)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        bottomLoadingOverlay
 
-                        // 浮动返回顶部按钮（独立定位，不与其他内容耦合）
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Spacer()
-                                if scrollOffset > 300 {
-                                    Button {
-                                        withAnimation {
-                                            proxy.scrollTo("exploreTop", anchor: .top)
-                                        }
-                                    } label: {
-                                        Image(systemName: "arrow.up")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundStyle(.white.opacity(0.92))
-                                            .frame(width: 44, height: 44)
-                                            .liquidGlassSurface(.regular, in: Circle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.trailing, 28)
-                                    .padding(.bottom, 120)
-                                    .contentShape(Rectangle())
-                                    .zIndex(100)
-                                    .transition(.scale.combined(with: .opacity))
-                                }
-                            }
-                        }
-                        .zIndex(100)
+                        scrollToTopButton(proxy: proxy)
                     }
                 }
             }
@@ -156,9 +124,14 @@ struct MediaExploreContentView: View {
             }
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
-        .onChange(of: selectedSort) { _, _ in handleFilterChange() }
         .onChange(of: selectedWorkshopSort) { _, _ in handleWorkshopSortChange() }
-        .onChange(of: searchText) { _, _ in handleFilterChange() }
+        .onChange(of: searchText) { _, newValue in
+            translationBridge.detectLanguage(for: newValue)
+            handleFilterChange()
+        }
+        .onReceive(translationBridge.$translationCompleted) { _ in
+            handleTranslationCompleted()
+        }
         .onChange(of: viewModel.items) { _, _ in
             recomputeVisibleMediaItems()
             syncAtmosphereIfNeeded()
@@ -171,9 +144,69 @@ struct MediaExploreContentView: View {
         }
     }
 
+    private var bottomLoadingOverlay: some View {
+        VStack {
+            Spacer()
+            if loadMoreFailed {
+                BottomLoadingFailedCard {
+                    loadMoreFailed = false
+                    Task { await viewModel.loadMore() }
+                }
+                .padding(.bottom, 60)
+            } else if isLoadingMore || (viewModel.isLoading && !visibleMediaItems.isEmpty) {
+                BottomLoadingCard(isLoading: true)
+                    .padding(.bottom, 60)
+            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleMediaItems.isEmpty {
+                BottomNoMoreCard()
+                    .padding(.bottom, 60)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private func scrollToTopButton(proxy: ScrollViewProxy) -> some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                if scrollOffset > 300 {
+                    Button {
+                        withAnimation {
+                            proxy.scrollTo("exploreTop", anchor: .top)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .frame(width: 44, height: 44)
+                            .liquidGlassSurface(.regular, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 28)
+                    .padding(.bottom, 120)
+                    .contentShape(Rectangle())
+                    .zIndex(100)
+                    .transition(.scale.combined(with: .opacity))
+                }
+            }
+        }
+        .zIndex(100)
+    }
+
     // MARK: - Sections
 
+    @ViewBuilder
     private var heroSection: some View {
+        if #available(macOS 15.0, *) {
+            TranslationTaskHost(bridge: translationBridge) {
+                heroSectionContent
+            }
+        } else {
+            heroSectionContent
+        }
+    }
+
+    private var heroSectionContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             headerTitle
             searchRow
@@ -189,12 +222,12 @@ struct MediaExploreContentView: View {
             HStack(spacing: 8) {
                 Text(greetingText)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.56))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.85))
 
                 // 当前源标签
                 Text(workshopSourceManager.activeSource.displayName)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(arcSettings.primaryText.opacity(0.75))
                     .padding(.horizontal, 8)
                     .frame(height: 20)
                     .exploreFrostedCapsule(
@@ -209,7 +242,7 @@ struct MediaExploreContentView: View {
                 } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(arcSettings.primaryText.opacity(0.75))
                         .frame(width: 24, height: 20)
                         .exploreFrostedCapsule(
                             tint: exploreAtmosphere.tint.primary,
@@ -228,22 +261,29 @@ struct MediaExploreContentView: View {
             Text(t("exploreMedia"))
                 .font(.system(size: 32, weight: .bold, design: .serif))
                 .tracking(-0.5)
-                .foregroundStyle(.white.opacity(0.98))
+                .foregroundStyle(arcSettings.primaryText)
                 .lineLimit(1)
         }
     }
     
     private var searchRow: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             ExploreSearchBar(
                 text: $searchText,
                 placeholder: t("search.placeholder"),
                 tint: exploreAtmosphere.tint.primary,
                 onSubmit: { submitSearch() },
-                onClear: { submitSearch(with: "") }
+                onClear: { searchText = ""; translationBridge.reset(); submitSearch(with: "") },
+                translatedText: workshopSourceManager.activeSource != .wallpaperEngine ? translationBridge.translatedText : nil,
+                isTranslating: workshopSourceManager.activeSource != .wallpaperEngine ? translationBridge.isTranslating : false,
+                onDismissTranslation: workshopSourceManager.activeSource != .wallpaperEngine ? {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        translationBridge.dismiss()
+                    }
+                } : nil
             )
 
-            RandomAtmosphereButton(tint: exploreAtmosphere.tint.secondary) {
+            ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainMedia) {
                 randomizeAtmosphere()
             }
 
@@ -251,7 +291,7 @@ struct MediaExploreContentView: View {
                 resetAllFilters(reloadData: true)
             }
         }
-        .frame(maxWidth: 520)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
     
     private var hotTagsRow: some View {
@@ -262,7 +302,7 @@ struct MediaExploreContentView: View {
         HStack(alignment: .center, spacing: 10) {
             Text(t("hotWallpaper") + ":")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.4))
 
             ForEach(MediaHotTag.allCases) { tag in
                 TagChip(
@@ -277,12 +317,13 @@ struct MediaExploreContentView: View {
         }
     }
 
-    private func applyWorkshopFilters() async {
+    private func applyWorkshopFilters(query: String? = nil) async {
         viewModel.clearItems()
 
         let tags = selectedWorkshopTag.map { [$0.name] } ?? []
+        let searchQuery = query ?? workshopSearchQuery
         await viewModel.loadWorkshopWithFilters(
-            query: workshopSearchQuery,
+            query: searchQuery,
             tags: tags,
             type: selectedWorkshopType,
             contentLevel: selectedWorkshopContentLevel,
@@ -314,7 +355,7 @@ struct MediaExploreContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(t("categories"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.46))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
             FlowLayout(spacing: 12) {
                 ForEach(WorkshopSourceManager.WorkshopTypeFilter.allCases) { type in
                     CategoryChip(
@@ -338,7 +379,7 @@ struct MediaExploreContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(t("tags"))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.46))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
             FlowLayout(spacing: 12) {
                 ForEach(workshopSourceManager.availableTags) { tag in
                     CategoryChip(
@@ -393,7 +434,7 @@ struct MediaExploreContentView: View {
                 Text(hasResolution ? (selectedWorkshopResolution?.display ?? "") : t("resolution"))
                     .font(.system(size: 12, weight: .semibold))
             }
-            .foregroundStyle(.white.opacity(hasResolution ? 0.95 : 0.7))
+            .foregroundStyle(hasResolution ? arcSettings.primaryText.opacity(0.95) : arcSettings.secondaryText.opacity(0.7))
             .padding(.horizontal, 12)
             .frame(height: 34)
             .exploreFrostedCapsule(
@@ -420,7 +461,7 @@ struct MediaExploreContentView: View {
                     HStack(spacing: 10) {
                         Text(t("currentFilters"))
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.46))
+                            .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
                         Button(t("clear")) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 selectedWorkshopTag = nil
@@ -431,7 +472,7 @@ struct MediaExploreContentView: View {
                             }
                         }
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(arcSettings.secondaryText.opacity(0.72))
                         .buttonStyle(.plain)
                     }
                     FlowLayout(spacing: 10) {
@@ -522,14 +563,12 @@ struct MediaExploreContentView: View {
         HStack(alignment: .center) {
             Text("\(formattedCount(visibleMediaItems.count)) \(t("media.count")) · \(t("media.loaded")) \(formattedCount(viewModel.items.count))")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.64))
+                .foregroundStyle(arcSettings.secondaryText.opacity(0.64))
 
             Spacer()
 
             if workshopSourceManager.activeSource == .wallpaperEngine {
                 SortMenu(options: WorkshopSortOption.allCases, selected: $selectedWorkshopSort, tint: exploreAtmosphere.tint.primary)
-            } else {
-                SortMenu(options: MediaSortOption.allCases, selected: $selectedSort, tint: exploreAtmosphere.tint.primary)
             }
         }
     }
@@ -690,24 +729,59 @@ struct MediaExploreContentView: View {
     }
 
     private func submitSearch(with query: String? = nil) {
-        let searchQuery = query ?? searchText
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // BG 源：中文翻译处理（仅在无外部 query 时触发）
+        if query == nil && workshopSourceManager.activeSource != .wallpaperEngine && !trimmed.isEmpty {
+            let chineseDetected = translationBridge.isChinese(trimmed)
+            let needsTranslation = chineseDetected
+                && !translationBridge.translationDismissed
+                && (translationBridge.translatedText == nil || translationBridge.translatedSourceText != trimmed)
+
+            if needsTranslation {
+                pendingSearchText = trimmed
+                if translationBridge.checkCache(for: trimmed) {
+                    pendingSearchText = nil
+                    let effectiveQuery = translationBridge.effectiveQuery(for: trimmed)
+                    mediaSearchQuery = effectiveQuery
+                    executeSearch(query: effectiveQuery)
+                    return
+                }
+                translationBridge.prepareForTranslation(trimmed)
+                translationBridge.triggerTranslation()
+                return
+            }
+        }
+
+        let searchQuery = query ?? translationBridge.effectiveQuery(for: trimmed)
         if query != nil { searchText = "" }
+        mediaSearchQuery = searchQuery
+        pendingSearchText = nil
+        executeSearch(query: searchQuery)
+    }
+
+    private func executeSearch(query: String) {
         selectedCategory = .all
         selectedHotTag = nil
-        selectedWorkshopTag = nil
-        selectedWorkshopType = .all
-        selectedWorkshopContentLevel = .everyone
-        selectedWorkshopResolution = nil
         lastPrefetchCenterIndex = -1
         searchTask?.cancel()
         searchTask = Task {
             if workshopSourceManager.activeSource == .wallpaperEngine {
-                await viewModel.searchWorkshop(query: searchQuery)
+                await applyWorkshopFilters(query: query)
             } else {
-                await viewModel.search(query: searchQuery)
+                await viewModel.search(query: query)
             }
             searchTask = nil
         }
+    }
+
+    private func handleTranslationCompleted() {
+        guard workshopSourceManager.activeSource != .wallpaperEngine else { return }
+        guard let pending = pendingSearchText else { return }
+        pendingSearchText = nil
+        let query = translationBridge.effectiveQuery(for: pending)
+        mediaSearchQuery = query
+        executeSearch(query: query)
     }
 
     private func handleFilterChange() {
@@ -819,6 +893,8 @@ struct MediaExploreContentView: View {
 
     private func resetAllFilters(reloadData: Bool = false) {
         searchText = ""
+        mediaSearchQuery = ""
+        translationBridge.reset()
         selectedHotTag = nil
         selectedWorkshopTag = nil
         selectedWorkshopType = .all
@@ -872,14 +948,7 @@ struct MediaExploreContentView: View {
     }
 
     private func recomputeVisibleMediaItems() {
-        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let sourceOrder = Dictionary(uniqueKeysWithValues: viewModel.items.enumerated().map { ($1.id, $0) })
-        let filtered = viewModel.items.filter { item in
-            let matchesSearch = trimmedQuery.isEmpty || item.matches(search: trimmedQuery)
-            let matchesHotTag = selectedHotTag?.matches(item) ?? true
-            return matchesSearch && matchesHotTag
-        }
-        visibleMediaItems = selectedSort.sort(items: filtered, sourceOrder: sourceOrder)
+        visibleMediaItems = viewModel.items
     }
     
     private func animateCardAppearance(id: String, index: Int) {
@@ -925,52 +994,23 @@ private struct GridConfig {
 
 private enum MediaSortOption: String, CaseIterable, SortOptionProtocol {
     case newest
-    case title
-    case format
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .newest: return t("sort.newest")
-        case .title: return t("sort.title2")
-        case .format: return t("sort.format2")
         }
     }
 
     var menuTitle: String {
         switch self {
         case .newest: return t("sortByNewest")
-        case .title: return t("sortByTitle")
-        case .format: return t("sortByFormat")
-        }
-    }
-    
-    func sort(items: [MediaItem], sourceOrder: [String: Int]) -> [MediaItem] {
-        switch self {
-        case .newest:
-            return items
-        case .title:
-            return items.sorted {
-                let comparison = $0.title.localizedCaseInsensitiveCompare($1.title)
-                return comparison == .orderedSame 
-                    ? (sourceOrder[$0.id] ?? 0) < (sourceOrder[$1.id] ?? 0)
-                    : comparison == .orderedAscending
-            }
-        case .format:
-            return items.sorted {
-                let comparison = $0.formatText.localizedCaseInsensitiveCompare($1.formatText)
-                return comparison == .orderedSame
-                    ? (sourceOrder[$0.id] ?? 0) < (sourceOrder[$1.id] ?? 0)
-                    : comparison == .orderedDescending
-            }
         }
     }
 }
 
 private enum MediaHotTag: String, CaseIterable, Identifiable {
-    case fourK
-    case hd
     case anime
     case rain
     case cyberpunk
@@ -982,8 +1022,6 @@ private enum MediaHotTag: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .fourK: return "4K"
-        case .hd: return t("filter.hd")
         case .anime: return t("filter.anime")
         case .rain: return t("filter.rain")
         case .cyberpunk: return t("filter.cyberpunk")
@@ -992,11 +1030,11 @@ private enum MediaHotTag: String, CaseIterable, Identifiable {
         case .dark: return t("filter.dark")
         }
     }
-    
+
     var isServerSide: Bool {
         serverSlug != nil
     }
-    
+
     var serverSlug: String? {
         switch self {
         case .anime: return "anime"
@@ -1005,25 +1043,6 @@ private enum MediaHotTag: String, CaseIterable, Identifiable {
         case .nature: return "nature"
         case .game: return "games"
         case .dark: return "dark"
-        default: return nil
-        }
-    }
-    
-    func matches(_ item: MediaItem) -> Bool {
-        switch self {
-        case .fourK:
-            let normalized = item.formatText.uppercased().replacingOccurrences(of: " ", with: "")
-            if normalized.contains("3840X2160") || normalized.contains("4K") { return true }
-            if let er = item.exactResolution, er.uppercased().contains("3840") { return true }
-            return false
-        case .hd:
-            let normalized = item.formatText.uppercased().replacingOccurrences(of: " ", with: "")
-            if normalized.contains("HD") || normalized.contains("1920X1080") || normalized.contains("1280X720") { return true }
-            if let er = item.exactResolution,
-               er.uppercased().contains("1920") || er.uppercased().contains("1280") { return true }
-            return false
-        default:
-            return false
         }
     }
 }
@@ -1106,17 +1125,6 @@ private enum MediaCategory: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - MediaItem Extension
-
-private extension MediaItem {
-    func matches(search query: String) -> Bool {
-        let haystack = [
-            title, sourceText, categoryName ?? "", formatText,
-            tags.joined(separator: " ")
-        ].joined(separator: " ").lowercased()
-        return haystack.contains(query)
-    }
-}
 
 
 
@@ -1177,7 +1185,7 @@ private struct SimpleMediaCard: View {
                 KFImage(item.coverImageURL)
                     .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                     .cacheMemoryOnly(false)
-                    .cancelOnDisappear(true)
+                    .fade(duration: 0.2)
                     .placeholder { _ in placeholderGradient }
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -1194,7 +1202,7 @@ private struct SimpleMediaCard: View {
                 // Workshop 源显示作者名（如壁纸探索页显示上传者），MotionBG 显示标题
                 Text(item.sourceName == t("wallpaperEngine") ? (item.authorName ?? item.title) : item.title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.9))
                     .lineLimit(1)
                 
                 Spacer()
@@ -1262,7 +1270,7 @@ private struct SimpleMediaCard: View {
     private func metaTag(text: String) -> some View {
         Text(text)
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.85))
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4))
@@ -1276,7 +1284,7 @@ private struct SimpleMediaCard: View {
                 .foregroundStyle(.white.opacity(0.5))
             Text(value)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.62))
         }
     }
 
@@ -1306,7 +1314,7 @@ private struct WorkshopActiveFilterChip: View {
                 Circle().fill(Color(hex: "#\(accentHex)")).frame(width: 8, height: 8)
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.94))
+                    .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.94))
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.72))

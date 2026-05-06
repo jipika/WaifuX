@@ -16,15 +16,23 @@ final class VideoWallpaperManager: ObservableObject {
 
     /// 每个屏幕的独立 poster（key 为 screenID），解决多屏自动更换时 poster 被覆盖的问题
     private var posterURLByScreen: [String: URL] = [:]
+    /// 用于取消上一次未完成的 poster 设置任务，避免旧 poster 覆盖新壁纸
+    private var posterTask: Task<Void, Never>?
     /// 每个屏幕的独立音量（key 为 screenID），未设置时回退到全局 `volume`
     private var volumeByScreen: [String: Double] = [:]
 
     private var windows: [String: WallpaperVideoWindow] = [:]
     private var players: [String: AVQueuePlayer] = [:]
     private var loopers: [String: AVPlayerLooper] = [:]
+    /// 延迟释放的工作项，用于取消上一次未执行的清理，避免快速切换时多组 AVPlayer 并发驻留
+    private var pendingPlayerCleanups: [DispatchWorkItem] = []
+    private var pendingWindowCleanups: [DispatchWorkItem] = []
 
     /// 应挂载 MP4 壁纸层的屏幕 ID（`NSScreen.wallpaperScreenIdentifier`）。唤醒 / 分辨率变化时全局 `rebuildWindows()` 只重建这些屏，避免「只设一块屏动态」却给所有显示器都建了视频窗。
     private var videoTargetScreenIDs = Set<String>()
+    
+    /// 用于 poster 文件名的交替槽位，避免 macOS 桌面壁纸缓存旧图
+    private var posterSlot = 0
 
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
@@ -56,8 +64,14 @@ final class VideoWallpaperManager: ObservableObject {
     
     /// 是否在锁屏时显示预览图
     var showPosterOnLock: Bool {
-        get { defaults.bool(forKey: showPosterOnLockKey) }
-        set { 
+        get {
+            // 默认启用：未设置过此 key 时返回 true
+            if defaults.object(forKey: showPosterOnLockKey) == nil {
+                return true
+            }
+            return defaults.bool(forKey: showPosterOnLockKey)
+        }
+        set {
             defaults.set(newValue, forKey: showPosterOnLockKey)
             // 如果关闭此选项，隐藏所有预览图
             if !newValue {
@@ -183,6 +197,8 @@ final class VideoWallpaperManager: ObservableObject {
         }
         
         // 如果有预览图，设置为桌面壁纸（锁屏会显示这个）
+        // 注意：此处 fire-and-forget，不阻塞主线程；poster 为 nil 时不恢复原始壁纸，
+        // 避免切换时出现「闪回原始壁纸」的中间态。视频窗口会覆盖在桌面壁纸上方。
         if let posterURL = posterURL {
             setPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
         }
@@ -420,17 +436,17 @@ final class VideoWallpaperManager: ObservableObject {
             window.contentView = nil
             window.orderOut(nil)
             windows.removeValue(forKey: screenID)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                _ = window
-            }
+            let windowWork = DispatchWorkItem { _ = window }
+            pendingWindowCleanups.append(windowWork)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: windowWork)
         }
         if let player = players[screenID] {
             player.pause()
             player.removeAllItems()
             players.removeValue(forKey: screenID)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                _ = player
-            }
+            let playerWork = DispatchWorkItem { _ = player }
+            pendingPlayerCleanups.append(playerWork)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: playerWork)
         }
         if let looper = loopers[screenID] {
             looper.disableLooping()
@@ -490,51 +506,103 @@ final class VideoWallpaperManager: ObservableObject {
     
     /// 将预览图设为桌面壁纸，同时显式写入锁屏壁纸。
     /// 使用持久化存储，避免被系统清理。
+    /// - Note: 如需同步等待完成，请直接调用 `applyPosterAsDesktopWallpaper`；此方法内部 fire-and-forget。
     private func setPosterAsDesktopWallpaper(_ posterURL: URL, targetScreen: NSScreen? = nil) {
+        // 取消上一次未完成的 poster 设置，避免旧 poster 覆盖新壁纸
+        posterTask?.cancel()
+        posterTask = Task { @MainActor in
+            await applyPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
+        }
+    }
+
+    /// 恢复场景专用的同步 poster 设置，确保桌面/锁屏底图在视频窗口重建前已就绪
+    private func applyPosterAsDesktopWallpaperSync(_ posterURL: URL, targetScreen: NSScreen? = nil) {
         let workspace = NSWorkspace.shared
-        
-        Task { @MainActor in
-            do {
-                // 1. 读取预览图（本地文件或网络）
-                let data: Data
-                if posterURL.isFileURL {
-                    data = try Data(contentsOf: posterURL)
-                } else {
-                    let (d, _) = try await URLSession.shared.data(from: posterURL)
-                    data = d
-                }
-                
-                // 2. 保存到持久化目录（而不是临时目录）
-                let persistentURL = persistedPosterDirectory
-                    .appendingPathComponent("poster_\(posterURL.lastPathComponent)")
-                
-                // 清理旧的预览图文件（保留最近5个）
-                await cleanupOldPosters(keeping: persistentURL)
-                
-                try data.write(to: persistentURL)
-                print("[VideoWallpaperManager] Saved poster to persistent location: \(persistentURL.path)")
-                
-                // 3. 设置为桌面壁纸
-                let screensToSet: [NSScreen]
-                if let targetScreen = targetScreen {
-                    screensToSet = [targetScreen]
-                } else {
-                    screensToSet = NSScreen.screens
-                }
-                
-                for screen in screensToSet {
-                    try workspace.setDesktopImageURLForAllSpaces(persistentURL, for: screen)
-                }
-                print("[VideoWallpaperManager] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
-                // macOS 锁屏壁纸默认跟随桌面壁纸，无需额外设置
-            } catch {
-                print("[VideoWallpaperManager] Failed to set poster: \(error)")
+        do {
+            let data = try Data(contentsOf: posterURL)
+            // 使用交替槽位避免 macOS 桌面壁纸缓存旧图
+            posterSlot = 1 - posterSlot
+            let slotPrefix = posterSlot == 0 ? "poster_0_" : "poster_1_"
+            let persistentURL = persistedPosterDirectory
+                .appendingPathComponent("\(slotPrefix)\(posterURL.lastPathComponent)")
+            cleanupOldPosters(keeping: persistentURL)
+            try data.write(to: persistentURL)
+            print("[VideoWallpaperManager] [sync] Saved poster to persistent location: \(persistentURL.path)")
+
+            let screensToSet: [NSScreen]
+            if let targetScreen = targetScreen {
+                screensToSet = [targetScreen]
+            } else {
+                screensToSet = NSScreen.screens
             }
+
+            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                .allowClipping: true
+            ]
+            for screen in screensToSet {
+                try workspace.setDesktopImageURLForAllSpaces(persistentURL, for: screen, options: fillOptions)
+            }
+            print("[VideoWallpaperManager] [sync] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
+        } catch {
+            print("[VideoWallpaperManager] [sync] Failed to set poster: \(error)")
+        }
+    }
+
+    /// 异步可等待的 poster 设置核心逻辑
+    private func applyPosterAsDesktopWallpaper(_ posterURL: URL, targetScreen: NSScreen? = nil) async {
+        // 检查是否已被取消（快速连续切换壁纸时，旧任务应放弃）
+        try? await Task.sleep(nanoseconds: 0)
+        guard !Task.isCancelled else { return }
+        let workspace = NSWorkspace.shared
+        do {
+            // 1. 读取预览图（本地文件或网络）
+            let data: Data
+            if posterURL.isFileURL {
+                data = try Data(contentsOf: posterURL)
+            } else {
+                let (d, _) = try await URLSession.shared.data(from: posterURL)
+                data = d
+            }
+
+            // 2. 保存到持久化目录（而不是临时目录）
+            // 使用交替槽位避免 macOS 桌面壁纸缓存旧图
+            posterSlot = 1 - posterSlot
+            let slotPrefix = posterSlot == 0 ? "poster_0_" : "poster_1_"
+            let persistentURL = persistedPosterDirectory
+                .appendingPathComponent("\(slotPrefix)\(posterURL.lastPathComponent)")
+
+            // 清理旧的预览图文件（保留最近5个）
+            cleanupOldPosters(keeping: persistentURL)
+
+            try data.write(to: persistentURL)
+            print("[VideoWallpaperManager] Saved poster to persistent location: \(persistentURL.path)")
+
+            // 3. 设置为桌面壁纸
+            let screensToSet: [NSScreen]
+            if let targetScreen = targetScreen {
+                screensToSet = [targetScreen]
+            } else {
+                screensToSet = NSScreen.screens
+            }
+
+            // 使用 "充满屏幕" 缩放模式，避免锁屏出现填充色（与手动设置行为一致）
+            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                .allowClipping: true
+            ]
+            for screen in screensToSet {
+                try workspace.setDesktopImageURLForAllSpaces(persistentURL, for: screen, options: fillOptions)
+            }
+            print("[VideoWallpaperManager] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
+            // macOS 锁屏壁纸默认跟随桌面壁纸，无需额外设置
+        } catch {
+            print("[VideoWallpaperManager] Failed to set poster: \(error)")
         }
     }
     
-    /// 清理旧的预览图文件，只保留最近的几个
-    private func cleanupOldPosters(keeping keepURL: URL) async {
+    /// 清理旧的预览图文件，只保留最近的几个（同步版本）
+    private func cleanupOldPosters(keeping keepURL: URL) {
         do {
             let files = try FileManager.default.contentsOfDirectory(
                 at: persistedPosterDirectory,
@@ -748,10 +816,12 @@ final class VideoWallpaperManager: ObservableObject {
                 volumeByScreen = savedState.volumeByScreen ?? [:]
                 isPaused = false
                 videoTargetScreenIDs = Set(ids)
+                // 恢复场景下异步设置 poster，不阻塞主线程；视频窗口会覆盖在 poster 上方
                 for screen in screensForVideoWallpaperTargets() {
                     let screenID = screen.wallpaperScreenIdentifier
                     if let posterURL = posterURLByScreen[screenID] {
                         setPosterAsDesktopWallpaper(posterURL, targetScreen: screen)
+                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
                     }
                 }
                 try rebuildWindows()
@@ -817,6 +887,17 @@ final class VideoWallpaperManager: ObservableObject {
             self.pendingRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self, self.currentVideoURL != nil else { return }
+
+                // 清理已断开显示器的残留状态
+                let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
+                for screenID in Set(self.posterURLByScreen.keys).subtracting(currentScreenIDs) {
+                    self.posterURLByScreen.removeValue(forKey: screenID)
+                }
+                for screenID in Set(self.volumeByScreen.keys).subtracting(currentScreenIDs) {
+                    self.volumeByScreen.removeValue(forKey: screenID)
+                }
+                self.videoTargetScreenIDs = self.videoTargetScreenIDs.intersection(currentScreenIDs)
+
                 do {
                     try self.rebuildWindows()
                 } catch {
@@ -932,6 +1013,14 @@ final class VideoWallpaperManager: ObservableObject {
                 containerView.playerLayer.player = components.player
                 containerView.playerLayer.videoGravity = AVLayerVideoGravity.resizeAspectFill
                 components.player.play()
+                
+                // 更新噪点纹理叠加（桌面壁纸颗粒蒙层，由 Settings 开关独立控制）
+                let grainEnabled = ArcBackgroundSettings.shared.grainTextureEnabled
+                if grainEnabled {
+                    containerView.showGrainOverlay(intensity: ArcBackgroundSettings.shared.grainIntensity)
+                } else {
+                    containerView.hideGrainOverlay()
+                }
                 
                 // 4. 更新字典
                 players[targetScreenID] = components.player
@@ -1076,7 +1165,8 @@ final class VideoWallpaperManager: ObservableObject {
         }
         playerItem.audioTimePitchAlgorithm = .timeDomain
         if videoURL.isFileURL {
-            playerItem.preferredForwardBufferDuration = Double.greatestFiniteMagnitude
+            // 限制为 30 秒预缓冲，避免大视频文件无限占用内存
+            playerItem.preferredForwardBufferDuration = 30.0
         }
 
         let queuePlayer = AVQueuePlayer()
@@ -1126,6 +1216,12 @@ final class VideoWallpaperManager: ObservableObject {
 
         containerView.playerLayer.player = components.player
         containerView.playerLayer.videoGravity = .resizeAspectFill
+        
+        // 应用噪点纹理叠加（桌面壁纸颗粒蒙层，由 Settings 开关独立控制）
+        let grainEnabled = UserDefaults.standard.object(forKey: "grain_texture_enabled") as? Bool ?? true
+        if grainEnabled {
+            containerView.showGrainOverlay(intensity: ArcBackgroundSettings.shared.grainIntensity)
+        }
 
         components.player.play()
         window.orderBack(nil)
@@ -1135,6 +1231,12 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows() {
+        // 0. 取消上一次未执行的延迟释放，避免快速切换时多组 AVPlayer 并发驻留
+        pendingPlayerCleanups.forEach { $0.cancel() }
+        pendingPlayerCleanups.removeAll()
+        pendingWindowCleanups.forEach { $0.cancel() }
+        pendingWindowCleanups.removeAll()
+
         // 1. 先断开所有 playerLayer 与 player 的关联，避免渲染层持有已释放的 player
         for window in windows.values {
             if let contentView = window.contentView as? WallpaperVideoContainerView {
@@ -1162,11 +1264,9 @@ final class VideoWallpaperManager: ObservableObject {
         players.removeAll()
 
         // 延迟释放 player，让 MediaToolbox 后台线程完成 FigNotificationCenter 清理
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // playersToDelay 被闭包捕获，在此延迟后才释放
-            // 此时 MediaToolbox 后台的 FigNotificationCenterRemoveWeakListener 应已完成
-            _ = playersToDelay
-        }
+        let playerWork = DispatchWorkItem { _ = playersToDelay }
+        pendingPlayerCleanups.append(playerWork)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: playerWork)
 
         // 4. 关闭窗口
         // ⚠️ macOS 26.5 beta 会为 orderOut/close 自动创建 _NSWindowTransformAnimation 退出动画
@@ -1181,11 +1281,9 @@ final class VideoWallpaperManager: ObservableObject {
         windows.removeAll()
 
         // 延迟释放窗口，让 AppKit 的 _NSWindowTransformAnimation 退出动画完成
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // windowsToDelay 被闭包捕获，在此延迟后才由 ARC 释放
-            // 此时 AppKit 的窗口退出动画应已完成
-            _ = windowsToDelay
-        }
+        let windowWork = DispatchWorkItem { _ = windowsToDelay }
+        pendingWindowCleanups.append(windowWork)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: windowWork)
     }
 
     private func persistState() {
@@ -1325,6 +1423,7 @@ private final class WallpaperVideoWindow: NSWindow {
 
 private final class WallpaperVideoContainerView: NSView {
     private var posterImageView: NSImageView?
+    private var grainOverlayView: NSView?
     
     var isShowingPoster: Bool {
         posterImageView != nil
@@ -1369,11 +1468,103 @@ private final class WallpaperVideoContainerView: NSView {
         posterImageView?.removeFromSuperview()
         posterImageView = nil
     }
+    
+    /// 显示噪点纹理叠加（Arc 磨砂质感，平铺实现）
+    func showGrainOverlay(intensity: Double) {
+        hideGrainOverlay()
+        guard intensity > 0.01 else { return }
+
+        let overlayView = GrainPatternOverlayView(frame: bounds)
+        overlayView.intensity = intensity
+        overlayView.autoresizingMask = [.width, .height]
+        addSubview(overlayView)
+        grainOverlayView = overlayView
+    }
+    
+    /// 隐藏噪点纹理
+    func hideGrainOverlay() {
+        grainOverlayView?.removeFromSuperview()
+        grainOverlayView = nil
+    }
 
     override func layout() {
         super.layout()
         playerLayer.frame = bounds
         posterImageView?.frame = bounds
+        grainOverlayView?.frame = bounds
+    }
+}
+
+/// 视频壁纸颗粒蒙层视图
+///
+/// NSWindow overlay：半透明黑色噪点 + 普通 alpha 混合。
+private final class GrainPatternOverlayView: NSView {
+    var intensity: Double = 0.5 {
+        didSet { updateOpacity() }
+    }
+
+    private var grainImage: CGImage?
+    private let tileSize = CGSize(width: 2048, height: 2048)
+
+    override var isOpaque: Bool { false }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        wantsLayer = true
+        if window != nil { setupGrain() }
+    }
+
+    private func setupGrain() {
+        guard let layer = self.layer else { return }
+
+        if grainImage == nil {
+            grainImage = generateFilmGrainTexture(size: tileSize)
+        }
+        layer.contents = grainImage
+        layer.contentsGravity = .resizeAspectFill
+        updateOpacity()
+    }
+
+    private func updateOpacity() {
+        layer?.opacity = Float(intensity * 0.10)
+    }
+
+    override func resize(withOldSuperviewSize oldSize: NSSize) {
+        super.resize(withOldSuperviewSize: oldSize)
+        layer?.frame = bounds
+    }
+
+    /// 生成暗色噪点纹理（黑色为主，用于 alpha 混合压暗）
+    private func generateFilmGrainTexture(size: CGSize) -> CGImage? {
+        guard size.width > 0, size.height > 0 else { return nil }
+
+        let context = CIContext(options: [.workingColorSpace: NSNull()])
+
+        // 1. 基础白噪声
+        guard let noiseFilter = CIFilter(name: "CIRandomGenerator") else { return nil }
+        let margin: CGFloat = 4
+        let noiseSize = CGSize(width: size.width + margin * 2, height: size.height + margin * 2)
+        let baseNoise = noiseFilter.outputImage?.cropped(to: CGRect(origin: .zero, size: noiseSize))
+            ?? CIImage(color: CIColor(red: 0.0, green: 0.0, blue: 0.0))
+
+        // 2. 柔化：0.6px 让单像素噪点变成有机颗粒簇
+        guard let blurFilter = CIFilter(name: "CIGaussianBlur") else { return nil }
+        blurFilter.setValue(baseNoise, forKey: kCIInputImageKey)
+        blurFilter.setValue(0.6, forKey: kCIInputRadiusKey)
+        let blurred = blurFilter.outputImage ?? baseNoise
+
+        // 3. 颜色矩阵：映射到 0.0~0.15 暗色范围
+        guard let matrixFilter = CIFilter(name: "CIColorMatrix") else { return nil }
+        matrixFilter.setValue(blurred, forKey: kCIInputImageKey)
+        matrixFilter.setValue(CIVector(x: 0.10, y: 0, z: 0, w: 0), forKey: "inputRVector")
+        matrixFilter.setValue(CIVector(x: 0, y: 0.10, z: 0, w: 0), forKey: "inputGVector")
+        matrixFilter.setValue(CIVector(x: 0, y: 0, z: 0.10, w: 0), forKey: "inputBVector")
+        matrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        matrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+        let grain = matrixFilter.outputImage ?? blurred
+
+        let final = grain.cropped(to: CGRect(origin: CGPoint(x: margin, y: margin), size: size))
+        return context.createCGImage(final, from: final.extent)
     }
 }
 

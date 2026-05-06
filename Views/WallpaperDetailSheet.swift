@@ -252,9 +252,12 @@ struct WallpaperDetailSheet: View {
         contextWallpapers ?? viewModel.wallpapers
     }
 
-    /// 主壁纸 URL（原图优先）
+    /// 主壁纸 URL（本地已下载文件优先，避免已下载壁纸仍从网络加载）
     private var heroImageURL: URL? {
-        wallpaper.fullImageURL ?? wallpaper.thumbURL
+        if let localURL = viewModel.localFileURLIfAvailable(for: wallpaper) {
+            return localURL
+        }
+        return wallpaper.fullImageURL ?? wallpaper.thumbURL
     }
 
     private var isPortraitWallpaper: Bool {
@@ -1050,7 +1053,9 @@ struct WallpaperDetailSheet: View {
                     let imageURL = try await getWallpaperImageURL()
                     // viewModel 内部会按需停止动态壁纸
                     try await viewModel.setWallpaper(from: imageURL, option: .desktop)
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange()
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                    )
                 } catch {
                     errorMessage = "\(t("error")): \(error.localizedDescription)"
                     showError = true

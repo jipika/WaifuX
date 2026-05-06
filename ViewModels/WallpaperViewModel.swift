@@ -490,7 +490,7 @@ class WallpaperViewModel: ObservableObject {
                 hasMorePages = 1 < results.meta.lastPage
 
                 if results.data.isEmpty {
-                    errorMessage = "No wallpapers found. Check your API key and network connection."
+                    errorMessage = t("explore.noResults")
                 } else {
                     // 预加载前几张图片
                     preloadImages(for: Array(results.data.prefix(6)))
@@ -577,9 +577,13 @@ class WallpaperViewModel: ObservableObject {
                 var existingIDs = Set(wallpapers.map(\.id))
                 let appended = results.data.filter { existingIDs.insert($0.id).inserted }
                 wallpapers.append(contentsOf: appended)
-                
-                // 移除数据上限，避免滚动时出现空白
-                // 内存优化通过降低 Kingfisher 缓存实现
+
+                // 滑动窗口：超过上限时移除最早加载的数据，防止内存无限增长
+                if wallpapers.count > maxDataCount {
+                    let overflow = wallpapers.count - maxDataCount
+                    wallpapers.removeFirst(overflow)
+                }
+
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
@@ -941,12 +945,19 @@ class WallpaperViewModel: ObservableObject {
         let workspace = NSWorkspace.shared
         let screens = NSScreen.screens
 
+        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+            .allowClipping: true
+        ]
         for screen in screens {
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen)
+            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen, options: fillOptions)
         }
 
         // 注册壁纸以便跨 Space 同步
         DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
+
+        // 更新静态壁纸颗粒蒙层（独立窗口，不受壁纸切换影响）
+        StaticWallpaperGrainManager.shared.updateOverlay()
     }
     
     // MARK: - 设置壁纸到指定屏幕
@@ -961,7 +972,11 @@ class WallpaperViewModel: ObservableObject {
             WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
             // 只停目标屏幕的动态壁纸，避免影响其他屏幕
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen)
+            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                .allowClipping: true
+            ]
+            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen, options: fillOptions)
             DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: targetScreen)
         } else {
             try await setWallpaper(from: imageURL, option: option)

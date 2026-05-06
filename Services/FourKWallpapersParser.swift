@@ -152,10 +152,14 @@ struct Wallpaper4KList: Codable {
 
 // MARK: - Parser Error
 
-enum FourKWallpapersParserError: Error {
+enum FourKWallpapersParserError: Error, LocalizedError {
     case invalidHTML
     case parsingFailed(String)
     case elementNotFound(String)
+
+    var errorDescription: String? {
+        t("error.parse.failed")
+    }
 }
 
 // MARK: - Parser

@@ -15,6 +15,10 @@ final class MediaLibraryService: ObservableObject {
     private let legacyFavoritesKey = "media_favorites_v1"
     private let legacyDownloadsKey = "media_downloads_v1"
     private let defaults = UserDefaults.standard
+    /// 持久化防抖工作项，避免高频操作（批量收藏等）触发大量 JSON 编码 + UserDefaults 写入
+    private var persistFavoritesWork: DispatchWorkItem?
+    private var persistDownloadsWork: DispatchWorkItem?
+    private var persistRecentsWork: DispatchWorkItem?
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
@@ -116,6 +120,14 @@ final class MediaLibraryService: ObservableObject {
         return url
     }
 
+    /// 已下载媒体的视频文件 URL（优先烘焙产物，其次目录内视频文件）；用于封面抽帧
+    func resolvedVideoFileURLIfAvailable(for item: MediaItem) -> URL? {
+        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+            return nil
+        }
+        return record.resolvedVideoFileURL
+    }
+
     func recordDownload(item: MediaItem, localFileURL: URL) {
         if let index = downloadRecords.firstIndex(where: { $0.item.id == item.id }) {
             downloadRecords[index].item = item
@@ -133,6 +145,20 @@ final class MediaLibraryService: ObservableObject {
         upsert(item)
 
         SceneBakeEligibilityAnalyzer.scheduleAnalysisIfSceneProject(itemID: item.id, localFileURL: localFileURL)
+
+        // 视频文件下载完成后异步生成抽帧，供封面展示使用
+        let videoExts: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
+        let videoFileURL: URL? = if videoExts.contains(localFileURL.pathExtension.lowercased()) {
+            localFileURL
+        } else {
+            // 目录类型（壁纸引擎源）：解析其中的视频文件
+            MediaItem.resolveLocalVideoFile(from: localFileURL)
+        }
+        if let videoFileURL {
+            Task { @MainActor in
+                _ = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoFileURL)
+            }
+        }
     }
 
     /// 由 `SceneBakeEligibilityAnalyzer` 在后台线程完成后调用，写入带 UUID 的分析快照。
@@ -160,6 +186,14 @@ final class MediaLibraryService: ObservableObject {
         downloadRecords[index].sceneBakeArtifact = artifact
         persistDownloads()
         downloadRecords = downloadRecords
+
+        // 确保烘焙视频有抽帧封面
+        let bakedVideoURL = URL(fileURLWithPath: artifact.videoPath)
+        if FileManager.default.fileExists(atPath: artifact.videoPath) {
+            Task { @MainActor in
+                _ = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: bakedVideoURL)
+            }
+        }
     }
 
     func upsert(_ item: MediaItem) {
@@ -457,6 +491,37 @@ final class MediaLibraryService: ObservableObject {
         return cleanedCount
     }
 
+    /// 修复指定记录的路径（由 DirectoryMigrationService 调用）
+    func repairDownloadPath(itemID: String, newPath: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
+        let oldPath = downloadRecords[index].localFilePath
+        let oldPrefix = (oldPath as NSString).deletingLastPathComponent
+        let newPrefix = (newPath as NSString).deletingLastPathComponent
+        downloadRecords[index].localFilePath = newPath
+        // 同步更新 item 内部路径
+        let itemPath = downloadRecords[index].item.pageURL.path
+        if itemPath.hasPrefix(oldPrefix) {
+            downloadRecords[index].item.pageURL = URL(fileURLWithPath: newPrefix + String(itemPath.dropFirst(oldPrefix.count)))
+        }
+        if let previewPath = downloadRecords[index].item.previewVideoURL?.path, previewPath.hasPrefix(oldPrefix) {
+            downloadRecords[index].item.previewVideoURL = URL(fileURLWithPath: newPrefix + String(previewPath.dropFirst(oldPrefix.count)))
+        }
+        if var artifact = downloadRecords[index].sceneBakeArtifact, artifact.videoPath.hasPrefix(oldPrefix) {
+            artifact.videoPath = newPrefix + String(artifact.videoPath.dropFirst(oldPrefix.count))
+            downloadRecords[index].sceneBakeArtifact = artifact
+        }
+        if var eligibility = downloadRecords[index].sceneBakeEligibility, eligibility.contentRootPath.hasPrefix(oldPrefix) {
+            eligibility.contentRootPath = newPrefix + String(eligibility.contentRootPath.dropFirst(oldPrefix.count))
+            downloadRecords[index].sceneBakeEligibility = eligibility
+        }
+    }
+
+    /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
+    func deactivateDownloadRecord(itemID: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
+        downloadRecords[index].metadata.markLocalMutation(deleted: true)
+    }
+
     private func loadPersistedState() {
         let decoder = JSONDecoder()
 
@@ -487,21 +552,33 @@ final class MediaLibraryService: ObservableObject {
     }
 
     private func persistFavorites() {
-        if let data = try? JSONEncoder().encode(favoriteRecords) {
-            defaults.set(data, forKey: favoriteRecordsKey)
+        persistFavoritesWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(self.favoriteRecords) else { return }
+            self.defaults.set(data, forKey: self.favoriteRecordsKey)
         }
+        persistFavoritesWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func persistDownloads() {
-        if let data = try? JSONEncoder().encode(downloadRecords) {
-            defaults.set(data, forKey: downloadRecordsKey)
+        persistDownloadsWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(self.downloadRecords) else { return }
+            self.defaults.set(data, forKey: self.downloadRecordsKey)
         }
+        persistDownloadsWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func persistRecents() {
-        if let data = try? JSONEncoder().encode(recentItems) {
-            defaults.set(data, forKey: recentsKey)
+        persistRecentsWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(self.recentItems) else { return }
+            self.defaults.set(data, forKey: self.recentsKey)
         }
+        persistRecentsWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func deduplicated(_ items: [MediaItem]) -> [MediaItem] {
@@ -532,11 +609,14 @@ final class WallpaperLibraryService: ObservableObject {
     private let legacyCloudFavoritesKey = "cloud_favorites"
     private let legacyDownloadsKey = "wallpaper_downloads_v1"
     private let defaults = UserDefaults.standard
+    /// 持久化防抖工作项
+    private var persistFavoritesWork: DispatchWorkItem?
+    private var persistDownloadsWork: DispatchWorkItem?
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
     }
-    
+
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
         loadPersistedState()
@@ -879,7 +959,19 @@ final class WallpaperLibraryService: ObservableObject {
         
         return cleanedCount
     }
-    
+
+    /// 修复指定记录的路径（由 DirectoryMigrationService 调用）
+    func repairDownloadPath(recordID: String, newPath: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
+        downloadRecords[index].localFilePath = newPath
+    }
+
+    /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
+    func deactivateDownloadRecord(recordID: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
+        downloadRecords[index].metadata.markLocalMutation(deleted: true)
+    }
+
     // MARK: - 文件夹移动
     
     func moveWallpaperToFolder(wallpaperID: String, folderID: String?) {
@@ -957,15 +1049,23 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     private func persistFavorites() {
-        if let data = try? JSONEncoder().encode(favoriteRecords) {
-            defaults.set(data, forKey: favoriteRecordsKey)
+        persistFavoritesWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(self.favoriteRecords) else { return }
+            self.defaults.set(data, forKey: self.favoriteRecordsKey)
         }
+        persistFavoritesWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func persistDownloads() {
-        if let data = try? JSONEncoder().encode(downloadRecords) {
-            defaults.set(data, forKey: downloadRecordsKey)
+        persistDownloadsWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(self.downloadRecords) else { return }
+            self.defaults.set(data, forKey: self.downloadRecordsKey)
         }
+        persistDownloadsWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func deduplicated(_ records: [WallpaperFavoriteRecord]) -> [WallpaperFavoriteRecord] {

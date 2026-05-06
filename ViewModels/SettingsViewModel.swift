@@ -16,8 +16,20 @@ class SettingsViewModel: ObservableObject {
     }
     @Published private var themeModeRawValue: String = ThemeMode.system.rawValue { didSet { UserDefaults.standard.set(themeModeRawValue, forKey: "theme_mode") } }
     @Published var launchAtLogin = false { didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launch_at_login") } }
-    @Published var grainTextureEnabled = true { didSet { UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled") } }
+    @Published var grainTextureEnabled = false {
+        didSet {
+            UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled")
+            ArcBackgroundSettings.shared.grainTextureEnabled = grainTextureEnabled
+        }
+    }
     @Published var grainTextureQuality = "high" { didSet { UserDefaults.standard.set(grainTextureQuality, forKey: "grain_texture_quality") } }
+    /// 颗粒度强度 0.0~1.0，同步到 ArcBackgroundSettings.grainIntensity
+    @Published var grainIntensity: Double = 0.5 {
+        didSet {
+            UserDefaults.standard.set(grainIntensity, forKey: "arc_grain_intensity")
+            ArcBackgroundSettings.shared.grainIntensity = grainIntensity
+        }
+    }
     @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
     @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
@@ -108,8 +120,10 @@ class SettingsViewModel: ObservableObject {
             themeModeRawValue = raw
         }
         launchAtLogin = defaults.bool(forKey: "launch_at_login")
-        grainTextureEnabled = defaults.object(forKey: "grain_texture_enabled") as? Bool ?? true
+        grainTextureEnabled = defaults.object(forKey: "grain_texture_enabled") as? Bool ?? false
         grainTextureQuality = defaults.string(forKey: "grain_texture_quality") ?? "high"
+        let savedGrainIntensity = defaults.double(forKey: "arc_grain_intensity")
+        grainIntensity = savedGrainIntensity > 0 ? savedGrainIntensity : 0.5
         showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
         pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
         pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")

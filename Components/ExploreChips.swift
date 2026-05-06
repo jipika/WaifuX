@@ -9,6 +9,8 @@ public struct CategoryChip: View {
     let isSelected: Bool
     let action: () -> Void
     
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
     
     public init(
@@ -86,6 +88,8 @@ public struct TagChip: View {
     let isSelected: Bool
     let action: () -> Void
     
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
     
     public init(title: String, isSelected: Bool, action: @escaping () -> Void) {
@@ -98,7 +102,7 @@ public struct TagChip: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
+                .foregroundStyle(txt.primary.opacity(isSelected ? 0.95 : 0.78))
                 .padding(.horizontal, 14)
                 .frame(height: 32)
                 .background(
@@ -107,7 +111,7 @@ public struct TagChip: View {
                 )
                 .overlay(
                     Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
+                        .stroke(txt.primary.opacity(isSelected ? 0.3 : 0.15), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
@@ -127,38 +131,60 @@ public struct ExploreSearchBar: View {
     let tint: Color
     let onSubmit: () -> Void
     let onClear: () -> Void
-    
+    var translatedText: String? = nil
+    var isTranslating: Bool = false
+    var onDismissTranslation: (() -> Void)? = nil
+
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
+
     public init(
         text: Binding<String>,
         placeholder: String,
         tint: Color,
         onSubmit: @escaping () -> Void,
-        onClear: @escaping () -> Void
+        onClear: @escaping () -> Void,
+        translatedText: String? = nil,
+        isTranslating: Bool = false,
+        onDismissTranslation: (() -> Void)? = nil
     ) {
         self._text = text
         self.placeholder = placeholder
         self.tint = tint
         self.onSubmit = onSubmit
         self.onClear = onClear
+        self.translatedText = translatedText
+        self.isTranslating = isTranslating
+        self.onDismissTranslation = onDismissTranslation
     }
-    
+
     public var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.52))
-            
+                .foregroundStyle(txt.secondary.opacity(0.75))
+
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(txt.primary.opacity(0.92))
                 .onSubmit(onSubmit)
-            
+
+            if let translated = translatedText, !translated.isEmpty {
+                translationTag(text: translated)
+                    .fixedSize()
+                    .transition(.scale.combined(with: .opacity))
+            } else if isTranslating {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+            }
+
             if !text.isEmpty {
                 Button(action: onClear) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.36))
+                        .foregroundStyle(txt.secondary.opacity(0.5))
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -167,7 +193,41 @@ public struct ExploreSearchBar: View {
         .padding(.horizontal, 16)
         .frame(maxWidth: 460)
         .frame(height: 46)
-        .exploreFrostedCapsule(tint: tint, material: .thinMaterial, tintLayerOpacity: 0.04)
+        .exploreFrostedCapsule(
+            tint: tint,
+            material: .ultraThinMaterial,
+            tintLayerOpacity: 0.06
+        )
+    }
+
+    private func translationTag(text: String) -> some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if let onDismiss = onDismissTranslation {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(tint.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .contentShape(Circle())
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule(style: .continuous)
+                .fill(tint.opacity(0.12))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(tint.opacity(0.25), lineWidth: 0.5)
+        )
     }
 }
 
@@ -177,6 +237,8 @@ public struct ResetFiltersButton: View {
     let tint: Color
     let action: () -> Void
     
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
     
     public init(tint: Color, action: @escaping () -> Void) {
@@ -188,10 +250,14 @@ public struct ResetFiltersButton: View {
         Button(action: action) {
             Image(systemName: "arrow.counterclockwise")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(txt.primary.opacity(0.92))
                 .frame(width: 46, height: 46)
                 .contentShape(Circle())
-                .exploreFrostedCircle(tint: tint)
+                .arcFrostedCircle(
+                    intensity: ArcBackgroundSettings.shared.frostedIntensity,
+                    isLightMode: isLightMode,
+                    accentColor: tint
+                )
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.05 : 1.0)
@@ -205,6 +271,8 @@ public struct RandomAtmosphereButton: View {
     let tint: Color
     let action: () -> Void
 
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
 
     public init(tint: Color, action: @escaping () -> Void) {
@@ -216,7 +284,7 @@ public struct RandomAtmosphereButton: View {
         Button(action: action) {
             Image(systemName: "sparkles")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(txt.primary.opacity(0.92))
                 .frame(width: 46, height: 46)
                 .contentShape(Circle())
                 .exploreFrostedCircle(tint: tint)
@@ -234,6 +302,9 @@ public struct SortMenu<SortOption: SortOptionProtocol>: View {
     let options: [SortOption]
     @Binding var selected: SortOption
     let tint: Color
+    
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     
     public init(options: [SortOption], selected: Binding<SortOption>, tint: Color) {
         self.options = options
@@ -255,10 +326,14 @@ public struct SortMenu<SortOption: SortOptionProtocol>: View {
                 Text(selected.title)
                     .font(.system(size: 14, weight: .semibold))
             }
-            .foregroundStyle(.white.opacity(0.92))
+            .foregroundStyle(txt.primary.opacity(0.92))
             .padding(.horizontal, 16)
             .frame(height: 38)
-            .exploreFrostedCapsule(tint: tint)
+            .arcFrostedCapsule(
+                intensity: ArcBackgroundSettings.shared.frostedIntensity,
+                isLightMode: isLightMode,
+                accentColor: tint
+            )
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -273,6 +348,8 @@ public struct FilterChip: View {
     public let isSelected: Bool
     public let tint: Color
     public let action: () -> Void
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
     
     public init(title: String, subtitle: String = "", isSelected: Bool, tint: Color, action: @escaping () -> Void) {
@@ -286,22 +363,19 @@ public struct FilterChip: View {
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white.opacity(0.94))
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(txt.primary.opacity(0.94))
                 if !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                    Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(txt.secondary.opacity(0.8))
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(tint.opacity(isSelected ? 0.15 : 0.08))
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(tint.opacity(isSelected ? 0.4 : 0.2), lineWidth: 0.5)
+            .arcFrostedGlass(
+                cornerRadius: 16,
+                intensity: ArcBackgroundSettings.shared.frostedIntensity,
+                isLightMode: isLightMode,
+                accentColor: tint,
+                useNoise: false // 按钮不显示颗粒效果
             )
         }
         .buttonStyle(.plain)
@@ -337,7 +411,7 @@ public extension View {
         }
         .overlay(
             Capsule(style: .continuous)
-                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                .stroke(ArcBackgroundSettings.shared.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.18), lineWidth: 0.5)
         )
     }
 
@@ -353,7 +427,7 @@ public extension View {
         }
         .overlay(
             Circle()
-                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                .stroke(ArcBackgroundSettings.shared.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.18), lineWidth: 0.5)
         )
     }
 
@@ -367,7 +441,7 @@ public extension View {
             }
         }
         .overlay(
-            shape.stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+            shape.stroke(ArcBackgroundSettings.shared.isLightMode ? Color.black.opacity(0.08) : Color.white.opacity(0.2), lineWidth: 0.5)
         )
     }
 }

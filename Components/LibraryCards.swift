@@ -8,18 +8,53 @@ extension MediaItem {
         "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tiff", "tif"
     ]
 
+    private static let videoFileExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
+
+    /// 若 `url` 是目录（壁纸引擎 Workshop 项），递归查找其中的视频文件并返回；若是视频文件则直接返回。
+    nonisolated static func resolveLocalVideoFile(from url: URL) -> URL? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+
+        if !isDir.boolValue {
+            return videoFileExtensions.contains(url.pathExtension.lowercased()) ? url : nil
+        }
+
+        // 目录：使用 WorkshopService 的根解析逻辑
+        let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: url)
+        let rootContents = (try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil)) ?? []
+
+        // scene 类型（有 .pkg 文件）不生成视频抽帧
+        if rootContents.contains(where: { $0.pathExtension.lowercased() == "pkg" }) {
+            return nil
+        }
+
+        // 递归查找视频文件
+        if let enumerator = fm.enumerator(at: resolved, includingPropertiesForKeys: nil) {
+            for case let fileURL as URL in enumerator {
+                if videoFileExtensions.contains(fileURL.pathExtension.lowercased()) {
+                    return fileURL
+                }
+            }
+        }
+        return nil
+    }
+
     /// 「我的库」列表封面（仅静态 `KFImage`）：有本地文件时优先已缓存的截取帧，其次本地静图，再回退 `posterURL` / 站点 `coverImageURL`（下载与导入一致）。
     @MainActor
     func libraryGridThumbnailURL(localFileURL: URL?) -> URL {
         if let local = localFileURL,
            local.isFileURL,
            FileManager.default.fileExists(atPath: local.path) {
-            if let extracted = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: local) {
+            // 解析目录→视频文件（壁纸引擎源），或直接使用文件
+            let resolved = Self.resolveLocalVideoFile(from: local) ?? local
+
+            if let extracted = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: resolved) {
                 return extracted
             }
-            let ext = local.pathExtension.lowercased()
-            if Self.libraryLocalRasterExtensions.contains(ext) {
-                return local
+            let ext = resolved.pathExtension.lowercased()
+            if Self.libraryLocalRasterExtensions.contains(ext) || Self.videoFileExtensions.contains(ext) {
+                return resolved
             }
         }
         if let poster = posterURL, poster.isFileURL, FileManager.default.fileExists(atPath: poster.path) {
@@ -53,13 +88,17 @@ public struct MediaVideoCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    /// 异步生成抽帧后更新的本地封面 URL
+    @State private var resolvedThumbnailURL: URL?
+
+    private static let videoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
 
     private var thumbnailHeight: CGFloat {
         LibraryCardMetrics.thumbnailHeight
     }
 
     private var listThumbnailURL: URL {
-        item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
+        resolvedThumbnailURL ?? item.libraryGridThumbnailURL(localFileURL: localMediaFileURL)
     }
 
     // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
@@ -73,7 +112,6 @@ public struct MediaVideoCard: View {
                     KFImage(listThumbnailURL)
                         .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                         .cacheMemoryOnly(false)
-                        .cancelOnDisappear(true)
                         .fade(duration: 0.3)
                         .placeholder { _ in
                             SkeletonCard(width: cardWidth, height: thumbnailHeight, cornerRadius: 0)
@@ -191,6 +229,37 @@ public struct MediaVideoCard: View {
             if !isEditing {
                 isHovered = hovering
             }
+        }
+        .onAppear { triggerThumbnailIfNeeded() }
+        .onChange(of: localMediaFileURL) { _, _ in resolvedThumbnailURL = nil; triggerThumbnailIfNeeded() }
+    }
+
+    /// 已下载的视频如果没有缓存抽帧，异步生成并刷新封面
+    @MainActor
+    private func triggerThumbnailIfNeeded() {
+        guard resolvedThumbnailURL == nil,
+              let local = localMediaFileURL,
+              local.isFileURL,
+              FileManager.default.fileExists(atPath: local.path) else { return }
+
+        // 解析目录→视频文件/预览图（壁纸引擎源），或直接使用文件
+        if let resolved = MediaItem.resolveLocalVideoFile(from: local) ?? (
+            Self.videoExtensions.contains(local.pathExtension.lowercased()) ? local : nil
+        ) {
+            // 已有缓存则直接使用
+            if let cached = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: resolved) {
+                resolvedThumbnailURL = cached
+                return
+            }
+            // 如果是视频文件，异步生成抽帧
+            if Self.videoExtensions.contains(resolved.pathExtension.lowercased()) {
+                Task { @MainActor in
+                    if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: resolved) {
+                        resolvedThumbnailURL = poster
+                    }
+                }
+            }
+            return
         }
     }
 }

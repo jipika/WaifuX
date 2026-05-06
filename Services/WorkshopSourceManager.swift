@@ -121,42 +121,46 @@ class WorkshopSourceManager: ObservableObject {
         }
     }
 
-    // MARK: - SteamCMD 凭证
-    
+    // MARK: - SteamCMD 凭证（Keychain 安全存储）
+
     struct SteamCredentials: Codable {
         let username: String
         let password: String
         let guardCode: String?
     }
-    
-    private let steamCredentialsKey = "workshop_steam_credentials"
-    
+
+    // Keychain 存储标识
+    private let keychainService = "com.waifux.steamcmd.credentials"
+    private let keychainAccount = "steam_credentials"
+
+    // 旧版 UserDefaults key（仅用于一次性迁移）
+    private let legacyUserDefaultsKey = "workshop_steam_credentials"
+    private let migrationFlagKey = "workshop_steam_credentials_migrated_to_keychain"
+
     var steamCredentials: SteamCredentials? {
         get {
-            guard let data = UserDefaults.standard.data(forKey: steamCredentialsKey),
-                  let creds = try? JSONDecoder().decode(SteamCredentials.self, from: data) else {
-                return nil
-            }
-            return creds
+            loadCredentialsFromKeychain()
         }
         set {
-            if let data = try? JSONEncoder().encode(newValue) {
-                UserDefaults.standard.set(data, forKey: steamCredentialsKey)
+            if let credentials = newValue {
+                saveCredentialsToKeychain(credentials)
             } else {
-                UserDefaults.standard.removeObject(forKey: steamCredentialsKey)
+                deleteCredentialsFromKeychain()
             }
             objectWillChange.send()
         }
     }
-    
-    var isSteamCMDLoggedIn: Bool {
+
+    /// 仅检查本地是否存有凭据，不验证 SteamCMD 会话是否仍然有效
+    var hasStoredSteamCredentials: Bool {
         steamCredentials != nil
     }
-    
+
     func setSteamCredentials(username: String, password: String, guardCode: String? = nil) {
         steamCredentials = SteamCredentials(username: username, password: password, guardCode: guardCode)
     }
 
+    /// 更新 guardCode（手机确认登录后 guardCode 为 nil，此方法此时为空操作）
     func updateGuardCode(_ guardCode: String?) {
         guard let current = steamCredentials else { return }
         steamCredentials = SteamCredentials(username: current.username, password: current.password, guardCode: guardCode)
@@ -164,6 +168,75 @@ class WorkshopSourceManager: ObservableObject {
 
     func clearSteamCredentials() {
         steamCredentials = nil
+    }
+
+    // MARK: - Keychain 操作
+
+    private func loadCredentialsFromKeychain() -> SteamCredentials? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let creds = try? JSONDecoder().decode(SteamCredentials.self, from: data) else {
+            return nil
+        }
+        return creds
+    }
+
+    private func saveCredentialsToKeychain(_ credentials: SteamCredentials) {
+        guard let data = try? JSONEncoder().encode(credentials) else { return }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount
+        ]
+
+        // 先删除已存在的项
+        SecItemDelete(query as CFDictionary)
+
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecValueData as String: data
+        ]
+
+        SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    private func deleteCredentialsFromKeychain() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    /// 一次性迁移：将旧版 UserDefaults 中的凭据迁移到 Keychain
+    private func migrateCredentialsToKeychainIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: migrationFlagKey) else { return }
+
+        // 尝试从旧 UserDefaults key 读取
+        if let data = UserDefaults.standard.data(forKey: legacyUserDefaultsKey),
+           let creds = try? JSONDecoder().decode(SteamCredentials.self, from: data) {
+            saveCredentialsToKeychain(creds)
+            // 迁移成功后删除旧数据
+            UserDefaults.standard.removeObject(forKey: legacyUserDefaultsKey)
+            print("[WorkshopSourceManager] 已将 Steam 凭据从 UserDefaults 迁移到 Keychain")
+        }
+
+        UserDefaults.standard.set(true, forKey: migrationFlagKey)
     }
 
     // MARK: - SteamCMD 路径管理
@@ -255,7 +328,7 @@ class WorkshopSourceManager: ObservableObject {
 
     /// 验证 Application Support 中的 steamcmd 是否是可工作的安装
     /// 新版 SteamCMD 不再生成 steamcmd-pty，因此只检查核心必需文件的可执行性
-    private static func isValidSteamCMDInstallation(at dir: URL) -> Bool {
+    static func isValidSteamCMDInstallation(at dir: URL) -> Bool {
         let fm = FileManager.default
         let script = dir.appendingPathComponent("steamcmd.sh")
         let steamBin = dir.appendingPathComponent("steamcmd")
@@ -419,6 +492,7 @@ class WorkshopSourceManager: ObservableObject {
            let source = SourceType(rawValue: saved) {
             activeSource = source
         }
+        migrateCredentialsToKeychainIfNeeded()
     }
     
     // MARK: - Public API
@@ -471,7 +545,7 @@ class WorkshopSourceManager: ObservableObject {
     
     /// 是否已通过 SteamCMD 凭证配置
     var isSteamAuthenticated: Bool {
-        isSteamCMDLoggedIn
+        hasStoredSteamCredentials
     }
 }
 
