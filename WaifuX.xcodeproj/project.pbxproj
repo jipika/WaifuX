@@ -19,6 +19,7 @@
 		0F7695B164B3D415E4E7338A /* AnimeWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 767CAF3A84C77A18E7DED0F0 /* AnimeWindowManager.swift */; };
 		0FBA60AD0ADF8273C401F189 /* Resources in Resources */ = {isa = PBXBuildFile; fileRef = F3242C9320F0CB98E3F19C29 /* Resources */; };
 		1147AC4FB0855757FA44E4F3 /* SkeuomorphicStyles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 381BDA64B85EAA9CD2AB59E1 /* SkeuomorphicStyles.swift */; };
+		125C55DCCB210DEEC2C877E3 /* ScrollBottomSentinel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D49A7B305CF1CA62E5D9540 /* ScrollBottomSentinel.swift */; };
 		1690A3149D7BB0D38115C959 /* RuleRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A2B9FA650F7E9301E7CF0C7 /* RuleRepository.swift */; };
 		186AA69369A725B48BBB9F70 /* AppFluidMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A081A86646C339D74FD8840 /* AppFluidMotion.swift */; };
 		18A4D3D665501491CB6A0F14 /* SearchTranslationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B15A8B186373E1E4F65348F7 /* SearchTranslationService.swift */; };
@@ -150,7 +151,6 @@
 		DBF4F63F9D69E02FB6A63BB0 /* WallpaperSchedulerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5433F5B3470D14D8CE5A3029 /* WallpaperSchedulerViewModel.swift */; };
 		E14C8D6FB374C89B70996BEC /* SuperResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E901FF6D205414875FD5F4 /* SuperResolutionService.swift */; };
 		E2E777395B775DE3457A9092 /* ExploreAtmosphere.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97EC9C6232E75963BB2CFA0 /* ExploreAtmosphere.swift */; };
-
 		E3103B14290C2916CC737246 /* AnimeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AD24D6CC8E7DEC9CE467C9E /* AnimeContentView.swift */; };
 		E544D46BB305A201F8933FEB /* FullScreenWallpaperView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BD158374E9260871EF76B53 /* FullScreenWallpaperView.swift */; };
 		E62F10F75CABB92B3FB549BC /* AnimeProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 404E1B6C897DB662F6D35134 /* AnimeProgressStore.swift */; };
@@ -220,6 +220,7 @@
 		4462B9EB484AA7BCB2E7ADED /* HeroPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroPalette.swift; sourceTree = "<group>"; };
 		45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoThumbnailCache.swift; sourceTree = "<group>"; };
 		46516D807852C39C100910A6 /* ExploreGridContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreGridContainer.swift; sourceTree = "<group>"; };
+		4D49A7B305CF1CA62E5D9540 /* ScrollBottomSentinel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollBottomSentinel.swift; sourceTree = "<group>"; };
 		4FDF3284B97C8262C69C0105 /* GlassStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassStyle.swift; sourceTree = "<group>"; };
 		509F88E110E5EC7E70CE7841 /* CaptchaVerificationWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptchaVerificationWebView.swift; sourceTree = "<group>"; };
 		5147F264943106E0DEC95DF3 /* RuleMarketView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleMarketView.swift; sourceTree = "<group>"; };
@@ -319,7 +320,6 @@
 		E3C56B73C79CB82BC7DB1862 /* BangumiService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BangumiService.swift; sourceTree = "<group>"; };
 		E780D56A3F7FC9E4FB665ECC /* WallpaperExploreContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperExploreContentView.swift; sourceTree = "<group>"; };
 		E97EC9C6232E75963BB2CFA0 /* ExploreAtmosphere.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreAtmosphere.swift; sourceTree = "<group>"; };
-
 		EAFBE638C95E9FD01F7DCA2F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		ED321504BADDC0FCBA8515DB /* LibraryFolder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFolder.swift; sourceTree = "<group>"; };
 		EE9C4EA78094E6C55FED9BED /* WallpaperCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCategory.swift; sourceTree = "<group>"; };
@@ -381,7 +381,6 @@
 				4FDF3284B97C8262C69C0105 /* GlassStyle.swift */,
 				AB8B239A357D0A8869892193 /* LiquidGlassModifier.swift */,
 				7E087E594159B2CA1EFC903C /* NSScreen+Wallpaper.swift */,
-
 				DB805E534CA1B0DF8F944037 /* Print.swift */,
 				62D57CBF90122DC1D11BC1FE /* SmoothAnimations.swift */,
 				346599B5EA4571FB1FEAA1F3 /* VideoPreloader.swift */,
@@ -430,6 +429,7 @@
 				71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */,
 				296C346479FC6B9A4434C1AD /* NewFolderSheet.swift */,
 				639B58C37F12765D59215CD2 /* PerformanceModifiers.swift */,
+				4D49A7B305CF1CA62E5D9540 /* ScrollBottomSentinel.swift */,
 				90887F64FCF64F7B1EDB9EDD /* SearchOverlay.swift */,
 				3DD677130566473309944B56 /* SourceSwitchTooltip.swift */,
 				822E5DF14D2A26714C4EA62C /* TabSearchField.swift */,
@@ -726,7 +726,6 @@
 				281CA7998F293F98820088A6 /* DynamicWallpaperAutoPauseManager.swift in Sources */,
 				232BCC08D5E1BF5521A51688 /* ErrorStateView.swift in Sources */,
 				E2E777395B775DE3457A9092 /* ExploreAtmosphere.swift in Sources */,
-
 				0682731ADB738739A846FDBF /* ExploreChips.swift in Sources */,
 				FE7918F419971479AD53A5DD /* ExploreComponents.swift in Sources */,
 				9BAD1227153A6C0660E0D1A8 /* ExploreGridCollectionViewLayout.swift in Sources */,
@@ -790,6 +789,7 @@
 				33442C7DE9EE9AB91176D5AE /* SceneBakeEligibilityService.swift in Sources */,
 				E989D6EC4EC646557E114D01 /* SceneOfflineBakeService.swift in Sources */,
 				B6DE4FC5F0D5A362A10A956F /* SchedulerConfig.swift in Sources */,
+				125C55DCCB210DEEC2C877E3 /* ScrollBottomSentinel.swift in Sources */,
 				F8DEFE14F4E15588CBE6DA3D /* SearchOverlay.swift in Sources */,
 				18A4D3D665501491CB6A0F14 /* SearchTranslationService.swift in Sources */,
 				4490DB8509ED6250E793CCD4 /* SettingsSharedComponents.swift in Sources */,
@@ -851,7 +851,7 @@
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.89;
+				MARKETING_VERSION = 38.0.92;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;
 				SDKROOT = macosx;
@@ -996,7 +996,7 @@
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.89;
+				MARKETING_VERSION = 38.0.92;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;
 				SDKROOT = macosx;

@@ -637,7 +637,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.favoriteItems) { item in
                             MyMediaVideoCard(
                                 item: item,
-                                localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
+                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                 badgeText: t("badge.favorite"),
                                 accent: LiquidGlassColors.accentCyan,
                                 isEditing: isEditing && editingSection == .mediaFavorites,
@@ -739,7 +739,7 @@ struct MyMediaContentView: View {
                             if let item = task.mediaItem {
                                 MyMediaVideoCard(
                                     item: item,
-                                    localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
+                                    localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                     badgeText: task.badgeText,
                                     accent: LiquidGlassColors.tertiaryBlue,
                                     isEditing: isEditing && editingSection == .mediaDownloads,
@@ -756,7 +756,7 @@ struct MyMediaContentView: View {
                         ForEach(completedMediaDownloads) { record in
                             MyMediaVideoCard(
                                 item: record.item,
-                                localMediaFileURL: record.resolvedVideoFileURL,
+                                localMediaFileURL: record.localFileURL,
                                 badgeText: record.item.resolutionLabel,
                                 accent: LiquidGlassColors.tertiaryBlue,
                                 isEditing: isEditing && editingSection == .mediaDownloads,
@@ -797,7 +797,7 @@ struct MyMediaContentView: View {
                         ForEach(mediaViewModel.recentItems) { item in
                             MyMediaVideoCard(
                                 item: item,
-                                localMediaFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: item),
+                                localMediaFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: item),
                                 badgeText: t("badge.recent"),
                                 accent: LiquidGlassColors.warningOrange,
                                 isEditing: isEditing && editingSection == .history,
@@ -1755,6 +1755,12 @@ private struct MyMediaVideoCard: View {
               local.isFileURL,
               FileManager.default.fileExists(atPath: local.path) else { return }
 
+        let isWebWorkshop = MediaItem.localWorkshopProjectType(from: local) == "web"
+        if isWebWorkshop, let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+            resolvedThumbnailURL = localPreview
+            return
+        }
+
         // 解析目录→视频文件/预览图（壁纸引擎源），或直接使用文件
         if let resolved = MediaItem.resolveLocalVideoFile(from: local) ?? (
             Self.videoExtensions.contains(local.pathExtension.lowercased()) ? local : nil
@@ -1772,6 +1778,10 @@ private struct MyMediaVideoCard: View {
                 }
             }
             return
+        }
+
+        if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+            resolvedThumbnailURL = localPreview
         }
     }
 }

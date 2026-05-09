@@ -824,6 +824,10 @@ class WorkshopService: ObservableObject {
             throw WorkshopError.steamcmdNotFound
         }
 
+        if WorkshopSourceManager.shared.steamCredentials == nil {
+            WorkshopSourceManager.shared.refreshStoredSteamCredentials()
+        }
+
         guard let credentials = WorkshopSourceManager.shared.steamCredentials else {
             throw WorkshopError.credentialsRequired
         }

@@ -450,7 +450,7 @@ struct MyLibraryContentView: View {
             baseItems = filtered.map {
                 AnyMediaItem(
                     mediaItem: $0,
-                    localFileURL: MediaLibraryService.shared.resolvedVideoFileURLIfAvailable(for: $0)
+                    localFileURL: MediaLibraryService.shared.localFileURLIfAvailable(for: $0)
                 )
             }
         case .downloads:
@@ -595,7 +595,7 @@ struct MyLibraryContentView: View {
     private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
         MediaVideoCard(
             item: item.mediaItem,
-            localMediaFileURL: item.resolvedVideoFileURL,
+            localMediaFileURL: item.localFileURL,
             badgeText: selectedSubTab == .favorites ? t("badge.favorite") : item.mediaItem.resolutionLabel,
             accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
             isEditing: isEditing,

@@ -290,6 +290,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 第2帧：权限和库数据
             DispatchQueue.main.async {
                 DownloadPathManager.shared.migrateLegacyCustomFolderPreferenceIfNeeded()
+                WorkshopSourceManager.shared.refreshStoredSteamCredentials()
                 WallpaperLibraryService.shared.restoreSavedData()
                 LibraryFolderStore.shared.restoreSavedData()
                 

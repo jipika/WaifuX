@@ -13,6 +13,22 @@ extension MediaItem {
         "preview.gif", "preview.jpg", "preview.jpeg", "preview.png", "preview.webp"
     ]
 
+    /// 读取 Wallpaper Engine `project.json` 的 type，用于区分 Web 壁纸和可抽帧的视频类内容。
+    nonisolated static func localWorkshopProjectType(from url: URL) -> String? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+
+        let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: url)
+        let projectURL = resolved.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String else {
+            return nil
+        }
+        return type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     /// 若 `url` 是已下载的 Wallpaper Engine 项目录，优先寻找本地预览图（特别是 web 壁纸）。
     nonisolated static func resolveLocalWorkshopPreviewImage(from url: URL) -> URL? {
         let fm = FileManager.default
@@ -78,9 +94,11 @@ extension MediaItem {
         if let local = localFileURL,
            local.isFileURL,
            FileManager.default.fileExists(atPath: local.path) {
-            if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
+            let isWebWorkshop = Self.localWorkshopProjectType(from: local) == "web"
+            if isWebWorkshop, let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
                 return localPreview
             }
+
             // 解析目录→视频文件（壁纸引擎源），或直接使用文件
             let resolved = Self.resolveLocalVideoFile(from: local) ?? local
 
@@ -88,8 +106,11 @@ extension MediaItem {
                 return extracted
             }
             let ext = resolved.pathExtension.lowercased()
-            if Self.libraryLocalRasterExtensions.contains(ext) || Self.videoFileExtensions.contains(ext) {
+            if Self.libraryLocalRasterExtensions.contains(ext) {
                 return resolved
+            }
+            if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
+                return localPreview
             }
         }
         if let poster = posterURL, poster.isFileURL, FileManager.default.fileExists(atPath: poster.path) {
@@ -277,7 +298,8 @@ public struct MediaVideoCard: View {
               local.isFileURL,
               FileManager.default.fileExists(atPath: local.path) else { return }
 
-        if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+        let isWebWorkshop = MediaItem.localWorkshopProjectType(from: local) == "web"
+        if isWebWorkshop, let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
             resolvedThumbnailURL = localPreview
             return
         }
@@ -300,6 +322,10 @@ public struct MediaVideoCard: View {
                 }
             }
             return
+        }
+
+        if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+            resolvedThumbnailURL = localPreview
         }
     }
 }
