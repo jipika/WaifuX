@@ -1,6 +1,11 @@
 import SwiftUI
 import Kingfisher
 
+private enum HomePrefetchNamespace {
+    static let wallpaperShelf = "home-wallpaper-shelf"
+    static let mediaShelf = "home-media-shelf"
+}
+
 // MARK: - CarouselTimerManager（管理轮播定时器的引用类型）
 @MainActor
 final class CarouselTimerManager: ObservableObject {
@@ -119,6 +124,8 @@ struct HomeContentView: View {
     @State private var isCarouselInteracting = false
     @State private var isCarouselAnimating = false
     @State private var carouselDragOffset: CGFloat = 0
+    @State private var scrollOffset: CGFloat = 0
+    @State private var initialLoadTask: Task<Void, Never>?
 
     // 优化：缓存 heroPalette 避免每次访问都重新计算
     @State private var cachedHeroPalette: HeroDrivenPalette = HeroDrivenPalette(wallpaper: nil)
@@ -136,7 +143,7 @@ struct HomeContentView: View {
     }
 
     /// 横向内容区向上覆盖 hero 底部的高度（参考图中卡片覆盖很多）
-    private let heroContentOverlap: CGFloat = 205
+    private let heroContentOverlap: CGFloat = 160
 
 
 
@@ -160,6 +167,7 @@ struct HomeContentView: View {
                     // MARK: Hero（底层）
                     heroSection
                         .frame(height: heroH)
+                        .offset(y: scrollOffset < 0 ? -scrollOffset * 0.3 : 0)
                         .zIndex(0)
 
                     // MARK: 内容区（上浮覆盖 hero 底部）
@@ -174,13 +182,7 @@ struct HomeContentView: View {
                     .zIndex(1)
 
                     // MARK: 文案层（在可见区域中垂直居中）
-                    if let heroItem = currentHeroItem {
-                        HeroCaptionPanel(
-                            heroItem: heroItem,
-                            isFavorite: isCurrentHeroFavorite,
-                            onOpen: { openCurrentHeroItem() },
-                            onFavorite: { toggleCurrentHeroFavorite() }
-                        )
+                    heroCaptionLayer
                         .frame(maxWidth: 520, alignment: .leading)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(.leading, 112)
@@ -190,7 +192,6 @@ struct HomeContentView: View {
                         .transaction { transaction in
                             transaction.animation = nil
                         }
-                    }
 
                     // MARK: 控制层（指示器 & 翻页按钮 —— 必须在内容区上方）
                     VStack {
@@ -245,7 +246,6 @@ struct HomeContentView: View {
         .background(
             homeBackground
                 .ignoresSafeArea()
-                .id(currentHeroID)
         )
         .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
             handleScroll(offset: offset)
@@ -256,14 +256,23 @@ struct HomeContentView: View {
                 startCarouselAutoPlay()
             }
 
-            Task {
+            initialLoadTask?.cancel()
+            initialLoadTask = Task {
                 try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
                 await mediaViewModel.initialLoadIfNeeded()
+                guard !Task.isCancelled else { return }
                 await mediaViewModel.refreshHomeItems()
-                
+                guard !Task.isCancelled else { return }
                 // 独立获取 MotionBG 轮播数据（固定源，不跟随 explore 列表变化）
                 await refreshHeroMediaItems()
             }
+        }
+        .onDisappear {
+            initialLoadTask?.cancel()
+            initialLoadTask = nil
+            ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.wallpaperShelf)
+            ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.mediaShelf)
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             Task { @MainActor in
@@ -279,6 +288,10 @@ struct HomeContentView: View {
                 cancelCarouselLoopReset()
                 cancelCarouselInteractionReset()
                 atmosphereController.pause()
+                initialLoadTask?.cancel()
+                initialLoadTask = nil
+                ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.wallpaperShelf)
+                ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.mediaShelf)
             }
         }
         .onChange(of: heroItemIDs) { _, _ in
@@ -291,7 +304,7 @@ struct HomeContentView: View {
 
     // MARK: - 滚动处理
     private func handleScroll(offset: CGFloat) {
-        // 滚动速度检测已移除（状态切换本身会导致卡顿）
+        scrollOffset = offset
     }
 
     private var isCurrentHeroFavorite: Bool {
@@ -327,64 +340,44 @@ struct HomeContentView: View {
             
             ZStack {
                 if items.isEmpty {
-                    HeroSkeletonView(height: height)
+                    HeroSkeletonView(
+                        height: height,
+                        primary: atmosphereController.primary,
+                        secondary: atmosphereController.secondary,
+                        tertiary: atmosphereController.tertiary
+                    )
                 } else {
                     heroCarousel(width: width, height: height, items: items)
                 }
-
-                // MARK: 底部过渡层 —— 多层叠加实现从 hero 到内容的自然融合
-                VStack {
-                    Spacer()
-                    ZStack {
-                        // 第 1 层：从图片本身延伸的超长暗化渐变
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.black.opacity(0.05),
-                                Color.black.opacity(0.22),
-                                Color.black.opacity(0.50),
-                                Color.black.opacity(0.78),
-                                Color.black.opacity(0.92)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-
-                        // 第 2 层：轻微毛玻璃材质，让过渡更有"厚度"
-                        Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .opacity(0.35)
-                            .mask(
-                                LinearGradient(
-                                    colors: [
-                                        Color.clear,
-                                        Color.white.opacity(0.3),
-                                        Color.white.opacity(0.9),
-                                        Color.white
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-
-                        // 第 3 层：底部压暗，确保卡片文字可读
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.clear,
-                                Color.black.opacity(0.30),
-                                Color.black.opacity(0.65)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    }
-                    .frame(height: 220)
-                    .blur(radius: 18)
-                }
             }
             .frame(width: width, height: height)
-            .clipped()
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white, location: 0),
+                        .init(color: .white, location: 0.65),
+                        .init(color: .white.opacity(0.5), location: 0.85),
+                        .init(color: .clear, location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var heroCaptionLayer: some View {
+        if let heroItem = currentHeroItem {
+            HeroCaptionPanel(
+                heroItem: heroItem,
+                isFavorite: isCurrentHeroFavorite,
+                onOpen: { openCurrentHeroItem() },
+                onFavorite: { toggleCurrentHeroFavorite() }
+            )
+        } else {
+            HeroCaptionSkeletonView()
+                .allowsHitTesting(false)
         }
     }
 
@@ -417,6 +410,8 @@ struct HomeContentView: View {
             HomeShelfSection(
                 title: t("latestWallpaper"),
                 wallpapers: recentWallpapers,
+                atmospherePrimary: atmosphereController.primary,
+                atmosphereSecondary: atmosphereController.secondary,
                 onSelect: { wallpaper in
                     selectedWallpaper = wallpaper
                 }
@@ -426,6 +421,8 @@ struct HomeContentView: View {
             HomeMediaSection(
                 title: t("hotDynamic"),
                 mediaItems: mediaViewModel.homeItems,
+                atmospherePrimary: atmosphereController.primary,
+                atmosphereSecondary: atmosphereController.secondary,
                 onSelect: { item in
                     selectedMedia = item
                 }
@@ -1163,6 +1160,8 @@ private struct HeroPaginationDots: View {
 private struct HomeShelfSection: View {
     let title: String
     let wallpapers: [Wallpaper]
+    let atmospherePrimary: Color
+    let atmosphereSecondary: Color
     let onSelect: (Wallpaper) -> Void
 
     var body: some View {
@@ -1185,8 +1184,11 @@ private struct HomeShelfSection: View {
             }
 
             if wallpapers.isEmpty {
-                HorizontalScrollSkeleton()
-                    .frame(height: 158)
+                HorizontalScrollSkeleton(
+                    primaryColor: atmospherePrimary.opacity(0.12),
+                    secondaryColor: atmosphereSecondary.opacity(0.08)
+                )
+                .frame(height: 158)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
@@ -1200,12 +1202,16 @@ private struct HomeShelfSection: View {
                                 let urls = (index + 1..<(index + 4))
                                     .filter { $0 < wallpapers.count }
                                     .compactMap { wallpapers[$0].thumbURL }
-                                ImagePrefetcher(urls: urls).start()
+                                ForegroundPrefetchManager.shared.start(
+                                    urls: urls,
+                                    namespace: HomePrefetchNamespace.wallpaperShelf
+                                )
                             }
                         }
                     }
                     .padding(.vertical, 2)
                 }
+                .frame(height: 158)
             }
         }
     }
@@ -1456,6 +1462,8 @@ private struct HomeShelfDeckBackground: View {
 private struct HomeMediaSection: View {
     let title: String
     let mediaItems: [MediaItem]
+    let atmospherePrimary: Color
+    let atmosphereSecondary: Color
     let onSelect: (MediaItem) -> Void
 
     var body: some View {
@@ -1478,8 +1486,11 @@ private struct HomeMediaSection: View {
             }
 
             if mediaItems.isEmpty {
-                HorizontalScrollSkeleton()
-                    .frame(height: 158)
+                HorizontalScrollSkeleton(
+                    primaryColor: atmospherePrimary.opacity(0.12),
+                    secondaryColor: atmosphereSecondary.opacity(0.08)
+                )
+                .frame(height: 158)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 18) {
@@ -1493,12 +1504,16 @@ private struct HomeMediaSection: View {
                                 let urls = (index + 1..<(index + 4))
                                     .filter { $0 < mediaItems.count }
                                     .map { mediaItems[$0].coverImageURL }
-                                ImagePrefetcher(urls: urls).start()
+                                ForegroundPrefetchManager.shared.start(
+                                    urls: urls,
+                                    namespace: HomePrefetchNamespace.mediaShelf
+                                )
                             }
                         }
                     }
                     .padding(.vertical, 2)
                 }
+                .frame(height: 158)
             }
         }
     }
@@ -1673,4 +1688,3 @@ final class HomeAtmosphereController: ObservableObject {
         loadTask = nil
     }
 }
-

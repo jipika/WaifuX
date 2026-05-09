@@ -259,15 +259,17 @@ struct BangumiSearchResponse: Codable {
 actor BangumiService {
     static let shared = BangumiService()
     
-    private let session: URLSession
+    private let networkService = NetworkService.shared
     private let decoder: JSONDecoder
+    private let retryConfiguration = RetryConfiguration(
+        maxRetries: 2,
+        initialDelay: 1.0,
+        maxDelay: 3.0,
+        delayMultiplier: 2.0,
+        allowRetryOnCellular: true
+    )
     
     init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 300
-        self.session = URLSession(configuration: config)
-        
         self.decoder = JSONDecoder()
         self.decoder.dateDecodingStrategy = .iso8601
     }
@@ -286,15 +288,9 @@ actor BangumiService {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw BangumiError.invalidResponse
-        }
-
-        let trendingResponse = try decoder.decode(BangumiTrendingResponse.self, from: data)
+        let trendingResponse: BangumiTrendingResponse = try await executeJSONRequest(request, endpoint: "trending")
         print("[BangumiService] Fetched \(trendingResponse.data.count) trending items, total: \(trendingResponse.total ?? -1)")
 
         return (trendingResponse.data.map { $0.subject }, trendingResponse.total)
@@ -316,6 +312,7 @@ actor BangumiService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
         // 构建搜索参数 - 使用 keyword 进行搜索
         let searchRequest: [String: Any] = [
@@ -330,16 +327,7 @@ actor BangumiService {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: searchRequest)
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let errorString = String(data: data, encoding: .utf8) ?? "Unknown"
-            print("[BangumiService] Search error: \(errorString)")
-            throw BangumiError.invalidResponse
-        }
-
-        let searchResponse = try decoder.decode(BangumiSearchResponse.self, from: data)
+        let searchResponse: BangumiSearchResponse = try await executeJSONRequest(request, endpoint: "searchByKeyword")
         print("[BangumiService] Found \(searchResponse.data.count) items for keyword '\(keyword)', total: \(searchResponse.total ?? -1)")
 
         return (searchResponse.data, searchResponse.total)
@@ -361,6 +349,7 @@ actor BangumiService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
         // 构建搜索参数 (参考 Kazumi) - 使用 tag 过滤
         let searchRequest: [String: Any] = [
@@ -376,16 +365,7 @@ actor BangumiService {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: searchRequest)
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let errorString = String(data: data, encoding: .utf8) ?? "Unknown"
-            print("[BangumiService] Search error: \(errorString)")
-            throw BangumiError.invalidResponse
-        }
-
-        let searchResponse = try decoder.decode(BangumiSearchResponse.self, from: data)
+        let searchResponse: BangumiSearchResponse = try await executeJSONRequest(request, endpoint: "searchByTag")
         print("[BangumiService] Found \(searchResponse.data.count) items for tag '\(tag)', total: \(searchResponse.total ?? -1)")
 
         return (searchResponse.data, searchResponse.total)
@@ -405,15 +385,9 @@ actor BangumiService {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw BangumiError.invalidResponse
-        }
-
-        let detail = try decoder.decode(BangumiDetail.self, from: data)
+        let detail: BangumiDetail = try await executeJSONRequest(request, endpoint: "detail")
         print("[BangumiService] Detail loaded: \(detail.name)")
         return detail
     }
@@ -432,15 +406,9 @@ actor BangumiService {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw BangumiError.invalidResponse
-        }
-
-        let subject = try decoder.decode(BangumiSubjectDetail.self, from: data)
+        let subject: BangumiSubjectDetail = try await executeJSONRequest(request, endpoint: "subjectDetail")
         print("[BangumiService] Subject detail: \(subject.name), episodes: \(subject.totalEpisodes ?? 0)")
         return subject
     }
@@ -459,17 +427,76 @@ actor BangumiService {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("User-Agent", forHTTPHeaderField: "WaifuX/1.0")
+        request.timeoutInterval = 30
 
-        let (data, response) = try await session.data(for: request)
+        let episodesResponse: BangumiEpisodesResponse = try await executeJSONRequest(request, endpoint: "episodes")
+        print("[BangumiService] Fetched \(episodesResponse.data.count) episodes, total: \(episodesResponse.total ?? -1)")
+        return (episodesResponse.data, episodesResponse.total)
+    }
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+    private func executeJSONRequest<T: Decodable>(_ request: URLRequest, endpoint: String) async throws -> T {
+        let maxAttempts = retryConfiguration.maxRetries + 1
+        var lastError: Error?
+
+        for attempt in 1...maxAttempts {
+            do {
+                let data = try await networkService.fetchData(request: request, retryConfig: retryConfiguration)
+                try validateJSONPayload(data, endpoint: endpoint)
+                return try decoder.decode(T.self, from: data)
+            } catch {
+                lastError = error
+
+                guard attempt < maxAttempts, shouldRetryAfterDecodeFailure(error) else {
+                    throw mapError(error)
+                }
+
+                let delay = retryConfiguration.delayForRetry(attempt: attempt)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+
+        throw mapError(lastError ?? BangumiError.invalidResponse)
+    }
+
+    private func validateJSONPayload(_ data: Data, endpoint: String) throws {
+        guard !data.isEmpty else {
             throw BangumiError.invalidResponse
         }
 
-        let episodesResponse = try decoder.decode(BangumiEpisodesResponse.self, from: data)
-        print("[BangumiService] Fetched \(episodesResponse.data.count) episodes, total: \(episodesResponse.total ?? -1)")
-        return (episodesResponse.data, episodesResponse.total)
+        guard let body = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !body.isEmpty else {
+            throw BangumiError.invalidResponse
+        }
+
+        let looksComplete = (body.hasPrefix("{") && body.hasSuffix("}"))
+            || (body.hasPrefix("[") && body.hasSuffix("]"))
+        guard looksComplete else {
+            throw BangumiError.truncatedPayload(endpoint)
+        }
+    }
+
+    private func shouldRetryAfterDecodeFailure(_ error: Error) -> Bool {
+        if let bangumiError = error as? BangumiError, case .truncatedPayload = bangumiError {
+            return true
+        }
+
+        if case DecodingError.dataCorrupted(let context) = error {
+            return context.debugDescription.localizedCaseInsensitiveContains("Unexpected end of file")
+        }
+
+        let message = String(describing: error)
+        return message.localizedCaseInsensitiveContains("Unexpected end of file")
+    }
+
+    private func mapError(_ error: Error) -> Error {
+        if let bangumiError = error as? BangumiError {
+            return bangumiError
+        }
+        if error is DecodingError {
+            return BangumiError.decodingError(error)
+        }
+        return BangumiError.networkError(error)
     }
 }
 
@@ -539,6 +566,7 @@ struct BangumiDetailRating: Codable {
 enum BangumiError: Error {
     case invalidURL
     case invalidResponse
+    case truncatedPayload(String)
     case decodingError(Error)
     case networkError(Error)
 }

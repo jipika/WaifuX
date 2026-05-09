@@ -44,8 +44,9 @@ struct LiquidGlassWallpaperCard: View {
                                 endPoint: .bottomTrailing
                             ),
                             lineWidth: isHovered ? 1.5 : 0.5
-                        )
-                )
+                    )
+            )
+            .scaleEffect(isHovered ? 1.02 : 1.0)
 
                 // 信息栏 - 液态玻璃效果
                 HStack {
@@ -83,7 +84,6 @@ struct LiquidGlassWallpaperCard: View {
                         lineWidth: isHovered ? 1.5 : 0.5
                     )
             )
-            .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)

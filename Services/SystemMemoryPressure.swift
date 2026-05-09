@@ -1,5 +1,85 @@
 import Darwin
 import Foundation
+import Kingfisher
+
+@MainActor
+final class ForegroundPrefetchManager {
+    static let shared = ForegroundPrefetchManager()
+
+    private var activePrefetchers: [UUID: ImagePrefetcher] = [:]
+    private var namespaces: [String: Set<UUID>] = [:]
+
+    private init() {}
+
+    @discardableResult
+    func start(
+        urls: [URL],
+        options: KingfisherOptionsInfo? = nil,
+        namespace: String? = nil
+    ) -> UUID? {
+        guard !urls.isEmpty else { return nil }
+
+        let token = UUID()
+        let prefetcher = ImagePrefetcher(
+            urls: urls,
+            options: options,
+            completionHandler: { [weak self] _, _, _ in
+            Task { @MainActor in
+                self?.finish(token)
+            }
+        })
+
+        activePrefetchers[token] = prefetcher
+        if let namespace {
+            namespaces[namespace, default: []].insert(token)
+        }
+        prefetcher.start()
+        return token
+    }
+
+    func stop(_ token: UUID?) {
+        guard let token else { return }
+        guard let prefetcher = activePrefetchers.removeValue(forKey: token) else { return }
+        removeTokenFromNamespaces(token)
+        prefetcher.stop()
+    }
+
+    func stop(namespace: String) {
+        guard let tokens = namespaces[namespace], !tokens.isEmpty else {
+            namespaces.removeValue(forKey: namespace)
+            return
+        }
+
+        namespaces.removeValue(forKey: namespace)
+        for token in tokens {
+            activePrefetchers.removeValue(forKey: token)?.stop()
+        }
+        for token in tokens {
+            removeTokenFromNamespaces(token)
+        }
+    }
+
+    func stopAll() {
+        let prefetchers = activePrefetchers.values
+        activePrefetchers.removeAll()
+        namespaces.removeAll()
+        prefetchers.forEach { $0.stop() }
+    }
+
+    private func finish(_ token: UUID) {
+        activePrefetchers.removeValue(forKey: token)
+        removeTokenFromNamespaces(token)
+    }
+
+    private func removeTokenFromNamespaces(_ token: UUID) {
+        for key in Array(namespaces.keys) {
+            namespaces[key]?.remove(token)
+            if namespaces[key]?.isEmpty == true {
+                namespaces.removeValue(forKey: key)
+            }
+        }
+    }
+}
 
 /// 基于 `host_statistics64` 的近似可回收内存，用于避免在内存紧张时启动 Scene 分析 / 离线烘焙。
 enum SystemMemoryPressure {

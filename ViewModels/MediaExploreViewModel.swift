@@ -13,9 +13,6 @@ final class MediaExploreViewModel: ObservableObject {
     @Published private(set) var hasMorePages = true
     @Published private(set) var currentQuery = ""
 
-    // MARK: - 内存优化：限制最大数据量
-    private let maxDataCount = 150  // 最多保留150条媒体数据
-
     // MARK: - Network State
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
@@ -34,6 +31,12 @@ final class MediaExploreViewModel: ObservableObject {
     private var currentSource: MediaRouteSource = .home
     private var nextPagePath: String?
     private var detailTasks: [String: Task<MediaItem, Error>] = [:]
+    private var pendingDetailPrefetchItems: [MediaItem] = []
+    private var pendingDetailPrefetchIDs = Set<String>()
+    private var detailPrefetchCoordinatorTask: Task<Void, Never>?
+    private var networkRecoveryTask: Task<Void, Never>?
+    private var sourceSwitchTask: Task<Void, Never>?
+    private var networkMonitorSetupTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - 预加载支持
@@ -93,7 +96,10 @@ final class MediaExploreViewModel: ObservableObject {
                 self?.networkStatus = status
                 // 网络恢复时自动刷新
                 if status.connectionState.isConnected && self?.items.isEmpty == true {
-                    Task { await self?.loadHomeFeed() }
+                    self?.networkRecoveryTask?.cancel()
+                    self?.networkRecoveryTask = Task { [weak self] in
+                        await self?.loadHomeFeed()
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -104,10 +110,13 @@ final class MediaExploreViewModel: ObservableObject {
             .sink { [weak self] source in
                 guard let self = self else { return }
                 // 清空旧数据，避免切换时新旧内容混在一起
+                self.sourceSwitchTask?.cancel()
+                self.cancelDetailPrefetchQueue()
                 self.items.removeAll()
                 if source == .wallpaperEngine {
                     // 切换到 Workshop 数据源
-                    Task {
+                    self.sourceSwitchTask = Task { [weak self] in
+                        guard let self else { return }
                         await self.loadWorkshopFeed()
                         await self.refreshHomeItems()
                     }
@@ -116,7 +125,8 @@ final class MediaExploreViewModel: ObservableObject {
                     self.workshopCurrentPage = 1
                     self.workshopHasMore = true
                     self.workshopSearchQuery = ""
-                    Task {
+                    self.sourceSwitchTask = Task { [weak self] in
+                        guard let self else { return }
                         await self.loadHomeFeed()
                         await self.refreshHomeItems()
                     }
@@ -128,7 +138,7 @@ final class MediaExploreViewModel: ObservableObject {
         networkMonitor.startMonitoring()
 
         // 设置网络监测器到网络服务
-        Task {
+        networkMonitorSetupTask = Task { [networkService, networkMonitor] in
             await networkService.setNetworkMonitor(networkMonitor)
         }
     }
@@ -175,10 +185,11 @@ final class MediaExploreViewModel: ObservableObject {
             ))
         }
         
-        // 添加扫描到的本地文件（排除已在下载记录中的）
+        // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
         let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
             .map { ($0 as NSString).standardizingPath as String }
         for item in locals where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
+            guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
             result.append(UnifiedLocalMedia(
                 id: item.id,
                 mediaItem: item.toMediaItem(),
@@ -254,6 +265,7 @@ final class MediaExploreViewModel: ObservableObject {
         preloadTask?.cancel()
         preloadedItems = []
         preloadedNextPath = nil
+        cancelDetailPrefetchQueue()
 
         // 先测试网络连通性
         do {
@@ -348,9 +360,8 @@ final class MediaExploreViewModel: ObservableObject {
             let appended = page.items.filter { !existingIDs.contains($0.id) }
             page.items.forEach { mediaLibrary.upsert($0) }
             items.append(contentsOf: appended)
-            
-            // 移除数据上限，避免滚动时出现空白
-            // 内存优化通过降低 Kingfisher 缓存实现
+            enqueueDetailPrefetch(for: appended, prioritizeVisible: false)
+
             self.nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
         } catch {
@@ -385,6 +396,92 @@ final class MediaExploreViewModel: ObservableObject {
                 print("[MediaExploreViewModel] Preload failed: \(error)")
             }
         }
+    }
+
+    /// 将待补抓详情的媒体项放入稳定队列，统一做有限并发抓取与回填。
+    func enqueueDetailPrefetch(
+        for items: [MediaItem],
+        prioritizeVisible: Bool
+    ) {
+        guard workshopSourceManager.activeSource != .wallpaperEngine else { return }
+
+        let candidates = items.filter(shouldPrefetchDetail(for:))
+
+        guard !candidates.isEmpty else { return }
+
+        if prioritizeVisible {
+            for item in candidates.reversed() {
+                guard pendingDetailPrefetchIDs.insert(item.id).inserted else { continue }
+                pendingDetailPrefetchItems.insert(item, at: 0)
+            }
+        } else {
+            for item in candidates {
+                guard pendingDetailPrefetchIDs.insert(item.id).inserted else { continue }
+                pendingDetailPrefetchItems.append(item)
+            }
+        }
+
+        startDetailPrefetchCoordinatorIfNeeded()
+    }
+
+    private func startDetailPrefetchCoordinatorIfNeeded() {
+        guard detailPrefetchCoordinatorTask == nil else { return }
+
+        detailPrefetchCoordinatorTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.runDetailPrefetchCoordinator()
+        }
+    }
+
+    private func runDetailPrefetchCoordinator(maxConcurrent: Int = 4) async {
+        defer { detailPrefetchCoordinatorTask = nil }
+
+        while !Task.isCancelled {
+            let batch = nextDetailPrefetchBatch(limit: maxConcurrent)
+            guard !batch.isEmpty else { break }
+
+            await withTaskGroup(of: Void.self) { group in
+                for item in batch {
+                    group.addTask { [weak self] in
+                        guard let self else { return }
+                        _ = try? await self.loadDetail(for: item)
+                    }
+                }
+            }
+        }
+    }
+
+    private func nextDetailPrefetchBatch(limit: Int) -> [MediaItem] {
+        guard limit > 0, !pendingDetailPrefetchItems.isEmpty else { return [] }
+
+        var batch: [MediaItem] = []
+        batch.reserveCapacity(limit)
+
+        while batch.count < limit, !pendingDetailPrefetchItems.isEmpty {
+            let item = pendingDetailPrefetchItems.removeFirst()
+            pendingDetailPrefetchIDs.remove(item.id)
+            if shouldPrefetchDetail(for: item) {
+                batch.append(item)
+            }
+        }
+
+        return batch
+    }
+
+    private func shouldPrefetchDetail(for item: MediaItem) -> Bool {
+        guard item.posterURL == nil else { return false }
+        let alreadyHasPlaybackDetail = !item.downloadOptions.isEmpty || item.previewVideoURL != nil
+        if alreadyHasPlaybackDetail, item.posterURL != nil {
+            return false
+        }
+        return detailTasks[item.id] == nil
+    }
+
+    private func cancelDetailPrefetchQueue() {
+        detailPrefetchCoordinatorTask?.cancel()
+        detailPrefetchCoordinatorTask = nil
+        pendingDetailPrefetchItems.removeAll()
+        pendingDetailPrefetchIDs.removeAll()
     }
 
     // MARK: - 便捷加载方法
@@ -530,7 +627,8 @@ final class MediaExploreViewModel: ObservableObject {
             return try await runningTask.value
         }
 
-        if !item.downloadOptions.isEmpty || item.previewVideoURL != nil {
+        let alreadyHasPlaybackDetail = !item.downloadOptions.isEmpty || item.previewVideoURL != nil
+        if alreadyHasPlaybackDetail, item.posterURL != nil {
             mediaLibrary.upsert(item)
             return item
         }
@@ -818,7 +916,34 @@ final class MediaExploreViewModel: ObservableObject {
 
     private func replaceItem(with updatedItem: MediaItem) {
         if let index = items.firstIndex(where: { $0.id == updatedItem.id }) {
-            items[index] = updatedItem
+            // 保留列表 thumbnailURL，避免回填详情后整卡因基础缩略图 URL 变化闪烁；
+            // 但必须接纳详情页解析出的 posterURL，否则列表会一直停留在 364x205 小图。
+            let original = items[index]
+            items[index] = MediaItem(
+                slug: original.slug,
+                title: original.title,
+                pageURL: updatedItem.pageURL,
+                thumbnailURL: original.thumbnailURL,
+                resolutionLabel: original.resolutionLabel,
+                collectionTitle: original.collectionTitle,
+                summary: updatedItem.summary,
+                previewVideoURL: updatedItem.previewVideoURL ?? original.previewVideoURL,
+                posterURL: updatedItem.posterURL ?? original.posterURL,
+                tags: original.tags,
+                exactResolution: original.exactResolution,
+                durationSeconds: updatedItem.durationSeconds,
+                downloadOptions: updatedItem.downloadOptions,
+                sourceName: original.sourceName,
+                isAnimatedImage: updatedItem.isAnimatedImage,
+                subscriptionCount: updatedItem.subscriptionCount,
+                favoriteCount: updatedItem.favoriteCount,
+                viewCount: updatedItem.viewCount,
+                ratingScore: updatedItem.ratingScore,
+                authorName: updatedItem.authorName,
+                fileSize: updatedItem.fileSize,
+                createdAt: updatedItem.createdAt,
+                updatedAt: updatedItem.updatedAt
+            )
         }
     }
 
@@ -942,6 +1067,31 @@ final class MediaExploreViewModel: ObservableObject {
         downloadTaskService.updateProgress(id: taskID, progress: progress)
     }
 
+    func retryDownload(task: DownloadTask) async throws {
+        switch task.kind {
+        case .media:
+            guard let item = task.mediaItem else {
+                throw NetworkError.invalidResponse
+            }
+            let resolvedItem = try await loadDetail(for: item)
+            guard let option = preferredWallpaperOption(for: resolvedItem) else {
+                throw NetworkError.invalidResponse
+            }
+            downloadTaskService.removeTask(id: task.id)
+            _ = try await downloadMedia(resolvedItem, option: option)
+
+        case .workshop:
+            guard let item = task.workshopItem ?? task.mediaItem else {
+                throw NetworkError.invalidResponse
+            }
+            downloadTaskService.removeTask(id: task.id)
+            try await downloadWorkshopWallpaper(item)
+
+        case .wallpaper:
+            throw NetworkError.invalidResponse
+        }
+    }
+
     // MARK: - 批量删除
 
     /// 批量删除媒体收藏
@@ -970,7 +1120,37 @@ final class MediaExploreViewModel: ObservableObject {
     
     /// 清空所有项目（用于数据源切换时）
     func clearItems() {
+        cancelDetailPrefetchQueue()
         items.removeAll()
+        hasMorePages = true
+    }
+
+    /// 释放前台浏览态内存：取消当前前台任务并清空列表/本地列表快照，保留持久化库数据与设置状态。
+    func releaseForegroundMemory() {
+        networkRecoveryTask?.cancel()
+        sourceSwitchTask?.cancel()
+        networkMonitorSetupTask?.cancel()
+        preloadTask?.cancel()
+        networkRecoveryTask = nil
+        sourceSwitchTask = nil
+        networkMonitorSetupTask = nil
+        preloadTask = nil
+        preloadedItems.removeAll()
+        preloadedNextPath = nil
+        nextPagePath = nil
+        cancelDetailPrefetchQueue()
+        detailTasks.values.forEach { $0.cancel() }
+        detailTasks.removeAll()
+
+        items.removeAll()
+        homeItems.removeAll()
+        cachedAllLocalMedia.removeAll()
+        errorMessage = nil
+        isLoading = false
+        isLoadingMore = false
+        hasMorePages = true
+        workshopHasMore = true
+        workshopCurrentPage = 1
     }
 
     // MARK: - Workshop 数据加载
@@ -1141,6 +1321,7 @@ final class MediaExploreViewModel: ObservableObject {
             let existingIDs = Set(items.map(\.id))
             let newItems = mediaItems.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
+
             workshopHasMore = response.hasMore
             print("[MediaExploreViewModel] loadMoreWorkshop completed: +\(newItems.count) items, total: \(items.count)")
         } catch {

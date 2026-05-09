@@ -79,6 +79,7 @@ final class ArcBackgroundSettings: ObservableObject {
 
         DistributedNotificationCenter.default
             .publisher(for: Notification.Name("AppleInterfaceThemeChangedNotification"))
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.updateLightMode()
             }
@@ -86,6 +87,7 @@ final class ArcBackgroundSettings: ObservableObject {
 
         // 颗粒开关联动：grainTextureEnabled 控制桌面 useNoiseTexture
         $grainTextureEnabled
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] enabled in
                 self?.useNoiseTexture = enabled
             }

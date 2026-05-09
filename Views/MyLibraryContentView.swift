@@ -36,6 +36,11 @@ struct MyLibraryContentView: View {
     // 缓存壁纸和媒体列表，避免 computed property 在 body 重绘时反复 map/filter
     @State private var wallpaperItems: [AnyWallpaperItem] = []
     @State private var mediaItems: [AnyMediaItem] = []
+    @State private var wallpaperFolderDisplay: [String: FolderDisplayInfo] = [:]
+    @State private var mediaFolderDisplay: [String: FolderDisplayInfo] = [:]
+    @State private var lastWallpaperPrefetchBucket: Int?
+    @State private var lastMediaPrefetchBucket: Int?
+    @State private var lastAnimePrefetchBucket: Int?
     
     // 文件夹导航
     @State private var currentWallpaperFolderID: String? = nil
@@ -71,6 +76,11 @@ struct MyLibraryContentView: View {
             case .downloads: return LocalizationService.shared.t("my.downloads")
             }
         }
+    }
+
+    private struct FolderDisplayInfo {
+        let previewURLs: [URL]
+        let itemCount: Int
     }
 
     var body: some View {
@@ -159,6 +169,9 @@ struct MyLibraryContentView: View {
         .onReceive(folderStore.$mediaFolders) { _ in
             updateMediaItems()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
+            releaseForegroundMemory()
+        }
         .onChange(of: selectedContentType) { _, _ in
             // 切换内容类型时重置编辑状态和文件夹导航
             isEditing = false
@@ -195,6 +208,7 @@ struct MyLibraryContentView: View {
     // MARK: - 加载动漫收藏
     private func loadAnimeFavorites() async {
         let favorites = animeFavoriteStore.allFavorites
+        lastAnimePrefetchBucket = nil
         animeFavorites = favorites.map { favorite in
             AnimeSearchResult(
                 id: favorite.id,
@@ -213,6 +227,33 @@ struct MyLibraryContentView: View {
                 originalName: nil
             )
         }
+    }
+
+    private func releaseForegroundMemory() {
+        viewModel.releaseForegroundMemory()
+        mediaViewModel.releaseForegroundMemory()
+
+        selectedWallpaper = nil
+        selectedMedia = nil
+        selectedAnime = nil
+        wallpaperContext.removeAll()
+        mediaContext.removeAll()
+        animeFavorites.removeAll()
+        wallpaperItems.removeAll()
+        mediaItems.removeAll()
+        wallpaperFolderDisplay.removeAll()
+        mediaFolderDisplay.removeAll()
+        currentWallpaperFolderID = nil
+        currentMediaFolderID = nil
+        wallpaperFolderStack.removeAll()
+        mediaFolderStack.removeAll()
+        selectedItems.removeAll()
+        isEditing = false
+        showNewFolderSheet = false
+        newFolderName = ""
+        lastWallpaperPrefetchBucket = nil
+        lastMediaPrefetchBucket = nil
+        lastAnimePrefetchBucket = nil
     }
 
     // MARK: - Hero
@@ -311,12 +352,11 @@ struct MyLibraryContentView: View {
     }
     
     private func wallpaperFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
-        let previewURLs = wallpaperPreviewURLs(for: folder)
-        let count = wallpaperCount(in: folder)
+        let display = wallpaperFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
         return LibraryFolderCard(
             folder: folder,
-            previewURLs: previewURLs,
-            itemCount: count,
+            previewURLs: display.previewURLs,
+            itemCount: display.itemCount,
             cardWidth: config.cardWidth,
             onTap: { navigateToWallpaperFolder(folder.id) },
             onDrop: { ids in moveWallpapersToFolder(ids: ids, folderID: folder.id) },
@@ -326,19 +366,6 @@ struct MyLibraryContentView: View {
             }
         )
         .draggable("waifux:folder:\(folder.id)")
-    }
-    
-    private func wallpaperPreviewURLs(for folder: LibraryFolder) -> [URL] {
-        // 获取文件夹内的壁纸缩略图
-        let wallpapers = WallpaperLibraryService.shared.favoriteWallpapers(inFolder: folder.id)
-            + WallpaperLibraryService.shared.downloadedWallpapers(inFolder: folder.id).map(\.wallpaper)
-        return wallpapers.prefix(3).compactMap(\.thumbURL)
-    }
-    
-    private func wallpaperCount(in folder: LibraryFolder) -> Int {
-        let favCount = WallpaperLibraryService.shared.favoriteWallpapers(inFolder: folder.id).count
-        let dlCount = WallpaperLibraryService.shared.downloadedWallpapers(inFolder: folder.id).count
-        return favCount + dlCount
     }
     
     private func navigateToWallpaperFolder(_ folderID: String?) {
@@ -367,6 +394,7 @@ struct MyLibraryContentView: View {
     }
 
     private func updateWallpaperItems() {
+        lastWallpaperPrefetchBucket = nil
         let baseItems: [AnyWallpaperItem]
         switch selectedSubTab {
         case .favorites:
@@ -397,6 +425,7 @@ struct MyLibraryContentView: View {
         case .portrait:
             wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX < $0.wallpaper.dimensionY }
         }
+        refreshWallpaperFolderDisplay()
     }
     
     private var currentWallpaperFolders: [LibraryFolder] {
@@ -408,6 +437,7 @@ struct MyLibraryContentView: View {
     }
 
     private func updateMediaItems() {
+        lastMediaPrefetchBucket = nil
         let baseItems: [AnyMediaItem]
         switch selectedSubTab {
         case .favorites:
@@ -437,6 +467,7 @@ struct MyLibraryContentView: View {
         }
         // 媒体库不再做横屏/竖屏筛选
         mediaItems = baseItems
+        refreshMediaFolderDisplay()
     }
 
     @ViewBuilder
@@ -511,12 +542,11 @@ struct MyLibraryContentView: View {
     }
     
     private func mediaFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
-        let previewURLs = mediaPreviewURLs(for: folder)
-        let count = mediaCount(in: folder)
+        let display = mediaFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
         return LibraryFolderCard(
             folder: folder,
-            previewURLs: previewURLs,
-            itemCount: count,
+            previewURLs: display.previewURLs,
+            itemCount: display.itemCount,
             cardWidth: config.cardWidth,
             onTap: { navigateToMediaFolder(folder.id) },
             onDrop: { ids in moveMediasToFolder(ids: ids, folderID: folder.id) },
@@ -526,18 +556,6 @@ struct MyLibraryContentView: View {
             }
         )
         .draggable("waifux:folder:\(folder.id)")
-    }
-    
-    private func mediaPreviewURLs(for folder: LibraryFolder) -> [URL] {
-        let items = MediaLibraryService.shared.favoriteItems(inFolder: folder.id)
-            + MediaLibraryService.shared.downloadedItems(inFolder: folder.id).map(\.item)
-        return items.prefix(3).map(\.coverImageURL)
-    }
-    
-    private func mediaCount(in folder: LibraryFolder) -> Int {
-        let favCount = MediaLibraryService.shared.favoriteItems(inFolder: folder.id).count
-        let dlCount = MediaLibraryService.shared.downloadedItems(inFolder: folder.id).count
-        return favCount + dlCount
     }
     
     private func navigateToMediaFolder(_ folderID: String?) {
@@ -602,8 +620,12 @@ struct MyLibraryContentView: View {
     // MARK: - Image Preloading
     private func preloadNearbyWallpapers(around item: AnyWallpaperItem, config: LibraryGridConfig) {
         guard let index = wallpaperItems.firstIndex(where: { $0.id == item.id }) else { return }
+        let bucket = prefetchBucket(for: index)
+        guard lastWallpaperPrefetchBucket != bucket else { return }
+        lastWallpaperPrefetchBucket = bucket
+
         let targetSize = CGSize(width: 512, height: 512)
-        let range = max(0, index - 10)..<min(wallpaperItems.count, index + 11)
+        let range = prefetchRange(around: index, totalCount: wallpaperItems.count)
         let urls = range
             .filter { $0 != index }
             .compactMap { wallpaperItems[$0].wallpaper.thumbURL }
@@ -617,8 +639,12 @@ struct MyLibraryContentView: View {
 
     private func preloadNearbyMedia(around item: AnyMediaItem, config: LibraryGridConfig) {
         guard let index = currentMediaItems.firstIndex(where: { $0.id == item.id }) else { return }
+        let bucket = prefetchBucket(for: index)
+        guard lastMediaPrefetchBucket != bucket else { return }
+        lastMediaPrefetchBucket = bucket
+
         let targetSize = CGSize(width: 512, height: 512)
-        let range = max(0, index - 10)..<min(currentMediaItems.count, index + 11)
+        let range = prefetchRange(around: index, totalCount: currentMediaItems.count)
         let urls = range
             .filter { $0 != index }
             .map { currentMediaItems[$0] }
@@ -633,8 +659,12 @@ struct MyLibraryContentView: View {
 
     private func preloadNearbyAnime(around anime: AnimeSearchResult, config: LibraryGridConfig) {
         guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
+        let bucket = prefetchBucket(for: index)
+        guard lastAnimePrefetchBucket != bucket else { return }
+        lastAnimePrefetchBucket = bucket
+
         let targetSize = CGSize(width: 512, height: 512)
-        let range = max(0, index - 10)..<min(currentAnimeItems.count, index + 11)
+        let range = prefetchRange(around: index, totalCount: currentAnimeItems.count)
         let urls = range
             .filter { $0 != index }
             .compactMap { URL(string: currentAnimeItems[$0].coverURL ?? "") }
@@ -644,6 +674,54 @@ struct MyLibraryContentView: View {
             options: [.processor(DownsamplingImageProcessor(size: targetSize))]
         )
         prefetcher.start()
+    }
+
+    private func prefetchBucket(for index: Int) -> Int {
+        index / 6
+    }
+
+    private func prefetchRange(around index: Int, totalCount: Int) -> Range<Int> {
+        max(0, index - 8)..<min(totalCount, index + 9)
+    }
+
+    private func refreshWallpaperFolderDisplay() {
+        let folders = currentWallpaperFolders
+        guard !folders.isEmpty else {
+            wallpaperFolderDisplay = [:]
+            return
+        }
+
+        var next: [String: FolderDisplayInfo] = [:]
+        for folder in folders {
+            let favoriteWallpapers = WallpaperLibraryService.shared.favoriteWallpapers(inFolder: folder.id)
+            let downloadedWallpapers = WallpaperLibraryService.shared.downloadedWallpapers(inFolder: folder.id).map(\.wallpaper)
+            let wallpapers = favoriteWallpapers + downloadedWallpapers
+            next[folder.id] = FolderDisplayInfo(
+                previewURLs: Array(wallpapers.prefix(3).compactMap(\.thumbURL)),
+                itemCount: wallpapers.count
+            )
+        }
+        wallpaperFolderDisplay = next
+    }
+
+    private func refreshMediaFolderDisplay() {
+        let folders = currentMediaFolders
+        guard !folders.isEmpty else {
+            mediaFolderDisplay = [:]
+            return
+        }
+
+        var next: [String: FolderDisplayInfo] = [:]
+        for folder in folders {
+            let favoriteItems = MediaLibraryService.shared.favoriteItems(inFolder: folder.id)
+            let downloadedItems = MediaLibraryService.shared.downloadedItems(inFolder: folder.id).map(\.item)
+            let items = favoriteItems + downloadedItems
+            next[folder.id] = FolderDisplayInfo(
+                previewURLs: Array(items.prefix(3).map(\.coverImageURL)),
+                itemCount: items.count
+            )
+        }
+        mediaFolderDisplay = next
     }
 
     // MARK: - Anime Section
@@ -1230,10 +1308,12 @@ struct MyLibraryContentView: View {
 
     // MARK: - Import & Folder
     private func openFolderInFinder(_ url: URL) {
+        DownloadPathManager.shared.createDirectoryStructure()
         NSWorkspace.shared.open(url)
     }
 
     private func importWallpapers() {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1270,6 +1350,7 @@ struct MyLibraryContentView: View {
     }
 
     private func importMedia() async {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1306,6 +1387,7 @@ struct MyLibraryContentView: View {
     }
 
     private func importWorkshop() {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false

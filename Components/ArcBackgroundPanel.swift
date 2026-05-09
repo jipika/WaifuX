@@ -49,6 +49,11 @@ struct ArcBackgroundPanel: View {
     @Binding var grainIntensity: Double
     let onRandomize: () -> Void
     @ObservedObject private var settings = ArcBackgroundSettings.shared
+    
+    /// 弹窗配色固定跟随 macOS 系统强调色，不再跟随页面或自定义随机色变化。
+    private var systemAccentColor: Color {
+        Color(nsColor: .controlAccentColor)
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -67,7 +72,7 @@ struct ArcBackgroundPanel: View {
             cornerRadius: 24,
             intensity: settings.frostedIntensity,
             isLightMode: settings.isLightMode,
-            accentColor: settings.accentColor,
+            accentColor: systemAccentColor,
             useNoise: false
         )
     }
@@ -89,7 +94,7 @@ struct ArcBackgroundPanel: View {
                         .frame(height: 36)
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(isSelected ? settings.accentColor.opacity(0.15) : Color.clear)
+                                .fill(isSelected ? systemAccentColor.opacity(0.15) : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
@@ -109,7 +114,7 @@ struct ArcBackgroundPanel: View {
             // 背景预览
             ZStack {
                 ArcAtmosphereBackground(
-                    tint: ExploreAtmosphereTint.fromSampledTriplet(settings.accentColor, settings.accentColor.opacity(0.7), settings.accentColor.opacity(0.5)),
+                    tint: ExploreAtmosphereTint.fromSampledTriplet(systemAccentColor, systemAccentColor.opacity(0.7), systemAccentColor.opacity(0.5)),
                     referenceImage: nil,
                     isLightMode: settings.isLightMode,
                     dotGridOpacity: settings.dotGridOpacity,
@@ -127,7 +132,7 @@ struct ArcBackgroundPanel: View {
                 VStack(spacing: 8) {
                     HStack(spacing: 6) {
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(settings.accentColor.opacity(0.3))
+                            .fill(systemAccentColor.opacity(0.3))
                             .frame(width: 40, height: 20)
                         RoundedRectangle(cornerRadius: 4)
                             .fill(settings.secondaryText.opacity(0.2))
@@ -146,7 +151,7 @@ struct ArcBackgroundPanel: View {
                     .foregroundStyle(settings.secondaryText)
 
                 Slider(value: $grainIntensity, in: 0.0...1.0)
-                    .tint(settings.accentColor)
+                    .tint(systemAccentColor)
                     .frame(height: 20)
 
                 Image(systemName: "plus")
@@ -160,7 +165,6 @@ struct ArcBackgroundPanel: View {
 
     private var randomButton: some View {
         Button {
-            settings.randomizeAccent()
             onRandomize()
         } label: {
             HStack(spacing: 8) {
@@ -174,11 +178,11 @@ struct ArcBackgroundPanel: View {
             .frame(height: 40)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(settings.accentColor.opacity(0.12))
+                    .fill(systemAccentColor.opacity(0.12))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(settings.accentColor.opacity(0.25), lineWidth: 0.5)
+                    .stroke(systemAccentColor.opacity(0.25), lineWidth: 0.5)
             )
         }
         .buttonStyle(.plain)

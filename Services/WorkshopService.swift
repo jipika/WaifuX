@@ -22,6 +22,15 @@ class WorkshopService: ObservableObject {
     private let steamAPIBase = "https://api.steampowered.com"
     private var currentPage = 1
     private let pageSize = 20
+
+    /// 主窗口长期隐藏后释放 Workshop 浏览结果；后台下载/动态壁纸渲染不依赖这些前台列表。
+    func clearForegroundState() {
+        isLoading = false
+        errorMessage = nil
+        searchResults.removeAll()
+        hasMorePages = false
+        currentPage = 1
+    }
     
     // MARK: - Search
     

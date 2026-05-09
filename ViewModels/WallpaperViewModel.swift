@@ -9,9 +9,6 @@ class WallpaperViewModel: ObservableObject {
     @Published var featuredWallpapers: [Wallpaper] = []
     @Published var topWallpapers: [Wallpaper] = []
     @Published var latestWallpapers: [Wallpaper] = []
-    
-    // MARK: - 内存优化：限制最大数据量，防止无限滚动导致内存占满
-    private let maxDataCount = 200  // 最多保留200条数据，超过时清理早期数据
     @Published var availableTags: [APITag] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -314,10 +311,11 @@ class WallpaperViewModel: ObservableObject {
             ))
         }
         
-        // 添加扫描到的本地文件（排除已在下载记录中的）
+        // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
         let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
             .map { ($0 as NSString).standardizingPath as String }
         for item in locals where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
+            guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
             result.append(UnifiedLocalWallpaper(
                 id: item.id,
                 wallpaper: item.toWallpaper(),
@@ -459,33 +457,13 @@ class WallpaperViewModel: ObservableObject {
                 // 再次检查是否被取消
                 try Task.checkCancellation()
 
-                // ⚠️ 分批更新数据，避免一次性大量更新阻塞主线程
                 currentRandomSeed = sortingOption == .random ? results.meta.seed : nil
                 
                 // 先更新壁纸库（后台操作）
-                // ⚠️ 使用批量更新，减少持久化次数
                 wallpaperLibrary.upsertBatch(results.data)
                 
-                // 分批更新 UI，每 10 个让出一次主线程
-                let batchSize = 10
-                let total = results.data.count
-                for i in stride(from: 0, to: total, by: batchSize) {
-                    let end = min(i + batchSize, total)
-                    let batch = Array(results.data[i..<end])
-                    
-                    // 如果是第一批，立即更新显示
-                    if i == 0 {
-                        wallpapers = batch
-                    } else {
-                        // 后续批次追加
-                        wallpapers.append(contentsOf: batch)
-                    }
-                    
-                    // 让出主线程给 UI 渲染
-                    if end < total {
-                        await Task.yield()
-                    }
-                }
+                // 一次性替换 wallpapers，避免 NSCollectionView 多次收缩-膨胀导致的抖动
+                wallpapers = results.data
                 
                 hasMorePages = 1 < results.meta.lastPage
 
@@ -536,13 +514,15 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 加载更多（支持 Task Cancellation + 预加载）
     func loadMore() async {
-        // 取消之前的加载任务
-        loadMoreTask?.cancel()
-
         guard !isLoading, hasMorePages else { return }
         isLoading = true
 
         loadMoreTask = Task {
+            defer {
+                isLoading = false
+                loadMoreTask = nil
+            }
+
             do {
                 try Task.checkCancellation()
                 
@@ -578,12 +558,6 @@ class WallpaperViewModel: ObservableObject {
                 let appended = results.data.filter { existingIDs.insert($0.id).inserted }
                 wallpapers.append(contentsOf: appended)
 
-                // 滑动窗口：超过上限时移除最早加载的数据，防止内存无限增长
-                if wallpapers.count > maxDataCount {
-                    let overflow = wallpapers.count - maxDataCount
-                    wallpapers.removeFirst(overflow)
-                }
-
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
@@ -601,8 +575,6 @@ class WallpaperViewModel: ObservableObject {
             } catch {
                 errorMessage = error.localizedDescription
             }
-
-            isLoading = false
         }
 
         await loadMoreTask?.value
@@ -641,10 +613,47 @@ class WallpaperViewModel: ObservableObject {
         loadMoreTask?.cancel()
     }
 
+    /// 释放前台浏览态内存：取消任务并清空当前列表/本地列表快照，保留持久化库数据。
+    func releaseForegroundMemory() {
+        searchTask?.cancel()
+        loadMoreTask?.cancel()
+        debounceTask?.cancel()
+        preloadTask?.cancel()
+        ForegroundPrefetchManager.shared.stop(namespace: "wallpaper-view-model")
+
+        searchTask = nil
+        loadMoreTask = nil
+        debounceTask = nil
+        preloadTask = nil
+
+        wallpapers.removeAll()
+        featuredWallpapers.removeAll()
+        topWallpapers.removeAll()
+        latestWallpapers.removeAll()
+        availableTags.removeAll()
+        cachedAllLocalWallpapers.removeAll()
+        errorMessage = nil
+        isLoading = false
+        hasMorePages = true
+        currentPage = 1
+        currentRandomSeed = nil
+        preloadedWallpapers.removeAll()
+        preloadedPage = 0
+    }
+
     // MARK: - 图片预加载
     func preloadImages(for wallpapers: [Wallpaper]) {
-        let urls = wallpapers.compactMap(\.thumbURL)
-        ImagePrefetcher(urls: urls).start()
+        let urls = wallpapers.compactMap(\.gridPreviewURL)
+        let targetSize = CGSize(width: 512, height: 512)
+        ForegroundPrefetchManager.shared.start(
+            urls: urls,
+            options: [
+                .processor(DownsamplingImageProcessor(size: targetSize)),
+                .scaleFactor(NSScreen.main?.backingScaleFactor ?? 2),
+                .backgroundDecode
+            ],
+            namespace: "wallpaper-view-model"
+        )
     }
 
     private func fetchWallpapers(query: String, page: Int) async throws -> WallpaperSearchResponse {
@@ -805,7 +814,7 @@ class WallpaperViewModel: ObservableObject {
         // 位掩码格式: 1=包含, 0=排除
         // 第一位=SFW, 第二位=Sketchy, 第三位=NSFW
         let sfw = puritySFW ? 1 : 0
-        let sketchy = (apiKeyConfigured && puritySketchy) ? 1 : 0
+        let sketchy = puritySketchy ? 1 : 0
         let nsfw = (apiKeyConfigured && purityNSFW) ? 1 : 0
 
         // 确保至少选择一个
@@ -933,6 +942,15 @@ class WallpaperViewModel: ObservableObject {
 
     private func updateDownloadProgress(taskID: String, progress: Double) {
         downloadTaskService.updateProgress(id: taskID, progress: progress)
+    }
+
+    func retryDownload(task: DownloadTask) async throws {
+        guard let wallpaper = task.wallpaper else {
+            throw NetworkError.invalidResponse
+        }
+
+        downloadTaskService.removeTask(id: task.id)
+        try await downloadWallpaper(wallpaper)
     }
 
     // MARK: - 设置壁纸

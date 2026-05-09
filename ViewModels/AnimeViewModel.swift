@@ -13,9 +13,6 @@ class AnimeViewModel: ObservableObject {
     @Published var animeItems: [AnimeSearchResult] = []
     @Published var featuredItem: AnimeSearchResult?
     
-    // MARK: - 内存优化：限制最大数据量
-    private let maxDataCount = 150  // 最多保留150条动漫数据
-
     // MARK: - 分页状态
     @Published var isLoading = false
     @Published var isLoadingMore = false
@@ -351,6 +348,7 @@ class AnimeViewModel: ObservableObject {
                     }
                     
                     self.animeItems.append(contentsOf: newResults)
+
                     self.currentPage = nextPage
                     
                     // 修复：只有当返回的数据为空，或者已加载总数 >= total 时，才认为没有更多数据
@@ -399,6 +397,26 @@ class AnimeViewModel: ObservableObject {
         preloadedItems = []
         preloadedTotal = 0
         isPreloaded = false
+    }
+
+    /// 释放前台浏览态内存：取消任务并清空动漫列表/规则快照。
+    func releaseForegroundMemory() {
+        loadMoreTask?.cancel()
+        preloadTask?.cancel()
+        loadMoreTask = nil
+        preloadTask = nil
+
+        animeItems.removeAll()
+        availableRules.removeAll()
+        selectedRule = nil
+        featuredItem = nil
+        errorMessage = nil
+        isLoading = false
+        isLoadingMore = false
+        hasMorePages = true
+        isLoadMoreInProgress = false
+        currentPage = 1
+        invalidatePreload()
     }
     
     // MARK: - 预加载下一页

@@ -15,6 +15,7 @@ final class LocalWallpaperScanner {
     private var scannedWallpapers: [LocalWallpaperItem] = []
     private var scannedMediaItems: [LocalMediaItem] = []
     private var lastScanTime: Date?
+    private var scanTask: Task<Void, Never>?
     
     /// 扫描版本号，扫描完成后递增，供 ViewModel 监听以重建缓存
     @Published private(set) var scanRevision: UInt = 0
@@ -29,29 +30,28 @@ final class LocalWallpaperScanner {
     /// 获取所有本地壁纸（包括扫描到的文件）
     /// - Returns: 本地壁纸项目数组
     func getLocalWallpapers() -> [LocalWallpaperItem] {
-        // 检查是否需要重新扫描
-        if shouldRescan() {
-            Task {
-                await scanLocalFiles()
-            }
-        }
+        scheduleScanIfNeeded()
         return scannedWallpapers
     }
     
     /// 获取所有本地媒体（包括扫描到的文件）
     /// - Returns: 本地媒体项目数组
     func getLocalMedia() -> [LocalMediaItem] {
-        if shouldRescan() {
-            Task {
-                await scanLocalFiles()
-            }
-        }
+        scheduleScanIfNeeded()
         return scannedMediaItems
     }
     
     /// 强制重新扫描本地文件
     func forceRescan() async {
-        await scanLocalFiles()
+        await scanLocalFiles(force: true)
+    }
+
+    /// 主窗口长期隐藏后释放前台库列表缓存；下次打开时按需重新扫描。
+    func clearInMemoryCache() {
+        scannedWallpapers.removeAll()
+        scannedMediaItems.removeAll()
+        lastScanTime = nil
+        scanRevision &+= 1
     }
     
     /// 根据文件路径查找或创建壁纸对象
@@ -83,8 +83,38 @@ final class LocalWallpaperScanner {
         guard let lastScan = lastScanTime else { return true }
         return Date().timeIntervalSince(lastScan) > scanInterval
     }
-    
-    private func scanLocalFiles() async {
+
+    private func scheduleScanIfNeeded() {
+        guard shouldRescan() else { return }
+        guard scanTask == nil else { return }
+
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runScan()
+        }
+    }
+
+    private func scanLocalFiles(force: Bool = false) async {
+        if !force && !shouldRescan() {
+            return
+        }
+
+        if let scanTask {
+            await scanTask.value
+            return
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runScan()
+        }
+        scanTask = task
+        await task.value
+    }
+
+    private func runScan() async {
+        defer { scanTask = nil }
+
         let startTime = Date()
         print("[LocalWallpaperScanner] Starting local file scan...")
         

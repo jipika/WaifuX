@@ -25,8 +25,24 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     let uploader: Uploader?
 
     var fullURL: URL? { URL(string: url) }
-    var thumbURL: URL? { URL(string: thumbs.large) }
-    var smallThumbURL: URL? { URL(string: thumbs.small) }
+    var thumbURL: URL? { Self.normalizedImageURL(from: thumbs.large) }
+    var originalThumbURL: URL? { Self.normalizedImageURL(from: thumbs.original) }
+    var smallThumbURL: URL? { Self.normalizedImageURL(from: thumbs.small) }
+
+    /// 探索网格封面候选：缩略图失败时继续尝试原图/路径，避免部分源返回 404 后直接空白。
+    var gridPreviewURLs: [URL] {
+        Self.deduplicatedURLs([
+            thumbURL,
+            originalThumbURL,
+            smallThumbURL,
+            Self.normalizedImageURL(from: path),
+            fullImageURL
+        ])
+    }
+
+    var gridPreviewURL: URL? {
+        gridPreviewURLs.first
+    }
     var fileExtension: String {
         let pathExtension = (path as NSString).pathExtension.lowercased()
         if !pathExtension.isEmpty {
@@ -47,20 +63,75 @@ struct Wallpaper: Identifiable, Codable, Hashable {
             return parsed
         }
 
-        guard dimensionY > 0 else {
-            return nil
+        if let parsed = Self.parseAspectRatioLabel(ratio), parsed > 0 {
+            return parsed
         }
 
-        return Double(dimensionX) / Double(dimensionY)
+        if dimensionX > 100, dimensionY > 100 {
+            return Double(dimensionX) / Double(dimensionY)
+        }
+
+        if let dimensions = Self.parseDimensions(from: resolution) {
+            return Double(dimensions.width) / Double(dimensions.height)
+        }
+
+        if let dimensions = inferredOriginalDimensions {
+            return Double(dimensions.width) / Double(dimensions.height)
+        }
+
+        if dimensionX > 0, dimensionY > 0 {
+            return Double(dimensionX) / Double(dimensionY)
+        }
+
+        return nil
+    }
+
+    var effectiveDimensions: (width: Int, height: Int) {
+        if dimensionX > 100, dimensionY > 100 {
+            return (dimensionX, dimensionY)
+        }
+
+        if let dimensions = Self.parseDimensions(from: resolution) {
+            return dimensions
+        }
+
+        if let dimensions = inferredOriginalDimensions {
+            return dimensions
+        }
+
+        if dimensionX > 0, dimensionY > 0 {
+            return (dimensionX, dimensionY)
+        }
+
+        return (1920, 1080)
+    }
+
+    var effectiveAspectRatioValue: Double {
+        if let aspectRatioValue, aspectRatioValue > 0 {
+            return aspectRatioValue
+        }
+
+        let dimensions = effectiveDimensions
+        return Double(dimensions.width) / Double(max(1, dimensions.height))
+    }
+
+    var effectiveResolutionLabel: String {
+        let trimmed = resolution.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.parseDimensions(from: trimmed) != nil {
+            return trimmed
+        }
+
+        let dimensions = effectiveDimensions
+        return "\(dimensions.width)x\(dimensions.height)"
     }
 
     var fullImageURL: URL? {
         // 本地文件：path 是 file:// URL
-        if id.hasPrefix("local_"), let pathURL = URL(string: path) {
+        if id.hasPrefix("local_"), let pathURL = Self.normalizedImageURL(from: path) {
             return pathURL
         }
         // 网络文件：path 是 http(s) URL
-        if let pathURL = URL(string: path), path.hasPrefix("http") {
+        if let pathURL = Self.normalizedImageURL(from: path), ["http", "https"].contains(pathURL.scheme?.lowercased() ?? "") {
             return pathURL
         }
         return WallhavenAPI.imageURL(wallpaperId: id, ext: fileExtension)
@@ -201,6 +272,85 @@ struct Wallpaper: Identifiable, Codable, Hashable {
         "9x16": 9.0 / 16.0,
         "10x16": 10.0 / 16.0
     ]
+
+    private var inferredOriginalDimensions: (width: Int, height: Int)? {
+        for value in [thumbs.original, path, thumbs.large, thumbs.small, url] {
+            if let dimensions = Self.parseDimensions(from: value) {
+                return dimensions
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedImageURL(from value: String) -> URL? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.hasPrefix("//") {
+            return URL(string: "https:" + trimmed)
+        }
+
+        if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed)
+        }
+
+        guard let parsed = URL(string: trimmed),
+              let scheme = parsed.scheme?.lowercased(),
+              ["http", "https", "file"].contains(scheme) else {
+            return nil
+        }
+
+        return parsed
+    }
+
+    private static func deduplicatedURLs(_ urls: [URL?]) -> [URL] {
+        var seen: Set<String> = []
+        var result: [URL] = []
+
+        for url in urls.compactMap({ $0 }) {
+            let key = url.absoluteString
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(url)
+        }
+
+        return result
+    }
+
+    private static func parseDimensions(from value: String) -> (width: Int, height: Int)? {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "%C3%97", with: "x", options: .caseInsensitive)
+            .replacingOccurrences(of: "×", with: "x")
+        guard !normalized.isEmpty else { return nil }
+
+        let pattern = #"(?<!\d)(\d{3,5})\s*[xX]\s*(\d{3,5})(?!\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        guard let match = regex.firstMatch(in: normalized, range: nsRange),
+              match.numberOfRanges >= 3,
+              let widthRange = Range(match.range(at: 1), in: normalized),
+              let heightRange = Range(match.range(at: 2), in: normalized),
+              let width = Int(normalized[widthRange]),
+              let height = Int(normalized[heightRange]),
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+
+        return (width, height)
+    }
+
+    private static func parseAspectRatioLabel(_ value: String) -> Double? {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "：", with: ":")
+        guard !normalized.isEmpty else { return nil }
+
+        let parts = normalized.split(separator: ":").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
+        return parts[0] / parts[1]
+    }
 }
 
 struct WallpaperSearchResponse: Codable {

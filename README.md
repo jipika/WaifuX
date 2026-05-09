@@ -97,6 +97,10 @@ brew tap jipika/waifux
 brew install --cask waifux
 ```
 
+### 方式四：夸克网盘
+
+👉 **[https://pan.quark.cn/s/aa3ed02db5cf](https://pan.quark.cn/s/aa3ed02db5cf)**
+
 > ⚠️ 首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行。
 
 ---

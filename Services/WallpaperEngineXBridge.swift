@@ -2,6 +2,12 @@ import Foundation
 import AppKit
 import Combine
 
+/// 保证 CLI 命令按顺序执行的串行队列（文件级常量，避免 @MainActor 隔离）
+private let weCLIQueue = DispatchQueue(
+    label: "com.waifux.we.cli",
+    qos: .userInitiated
+)
+
 /// 负责与 Wallpaper Engine CLI 通信的桥接层
 /// 通过调用 wallpaperengine-cli 二进制控制壁纸引擎。
 /// **scene** 与 **web** 均由 CLI 渲染，与本机视频壁纸一样属于「动态壁纸」：`isControllingExternalEngine` 为真时菜单栏应走 pause/resume/stop CLI，而非 `VideoWallpaperManager`。
@@ -14,10 +20,14 @@ final class WallpaperEngineXBridge: ObservableObject {
     @Published private(set) var isExternalPaused = false
 
     private var lastWallpaperPath: String?
+    private var targetScreenIDs = Set<String>()
+    private var targetScreenFingerprints = Set<String>()
     private var cancellables = Set<AnyCancellable>()
 
     private let lastWallpaperPathKey = "we_last_wallpaper_path_v1"
     private let controllingExternalKey = "we_controlling_external_v1"
+    private let targetScreenIDsKey = "we_target_screen_ids_v1"
+    private let targetScreenFingerprintsKey = "we_target_screen_fingerprints_v1"
 
     private init() {
         // 监听 VideoWallpaperManager 恢复自己播放时，清空外部接管标记
@@ -27,6 +37,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 if url != nil {
                     self?.isControllingExternalEngine = false
                     self?.isExternalPaused = false
+                    self?.targetScreenIDs.removeAll()
+                    self?.targetScreenFingerprints.removeAll()
                 }
             }
             .store(in: &cancellables)
@@ -55,6 +67,13 @@ final class WallpaperEngineXBridge: ObservableObject {
         lastWallpaperPath = path
         isExternalPaused = false
         isControllingExternalEngine = true
+        if let screens = targetScreens, !screens.isEmpty {
+            targetScreenIDs = Set(screens.map(\.wallpaperScreenIdentifier))
+            targetScreenFingerprints = Set(screens.map(\.wallpaperScreenFingerprint))
+        } else {
+            targetScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+            targetScreenFingerprints = Set(NSScreen.screens.map(\.wallpaperScreenFingerprint))
+        }
         persistState()
 
         if let screens = targetScreens, !screens.isEmpty {
@@ -65,15 +84,21 @@ final class WallpaperEngineXBridge: ObservableObject {
         } else {
             try executeCLI(arguments: ["set", path])
         }
+
+        DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
     }
 
     /// 切换为**非 CLI**壁纸（静态 / 本机视频等）时必须调用：向 CLI 发 `stop` 并清空桥接状态；可重复调用。
     func ensureStoppedForNonCLIWallpaper() {
-        try? executeCLI(arguments: ["stop"])
+        Self.runCLIFireAndForget(arguments: ["stop"])
         isControllingExternalEngine = false
         isExternalPaused = false
+        targetScreenIDs.removeAll()
+        targetScreenFingerprints.removeAll()
         // 保留 lastWallpaperPath 与持久化路径，以便「关闭后再启用」时能恢复
         UserDefaults.standard.removeObject(forKey: controllingExternalKey)
+        UserDefaults.standard.removeObject(forKey: targetScreenIDsKey)
+        UserDefaults.standard.removeObject(forKey: targetScreenFingerprintsKey)
     }
 
     func stopWallpaper() {
@@ -83,13 +108,13 @@ final class WallpaperEngineXBridge: ObservableObject {
     func pauseWallpaper() {
         guard isControllingExternalEngine else { return }
         isExternalPaused = true
-        try? executeCLI(arguments: ["pause"])
+        Self.runCLIFireAndForget(arguments: ["pause"])
     }
 
     func resumeWallpaper() {
         guard isControllingExternalEngine else { return }
         isExternalPaused = false
-        try? executeCLI(arguments: ["resume"])
+        Self.runCLIFireAndForget(arguments: ["resume"])
     }
 
     func toggleWallpaper() {
@@ -101,24 +126,42 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
+    func shouldPauseForFullscreenCoveredScreenIDs(_ coveredScreenIDs: Set<String>) -> Bool {
+        let activeTargets = activeTargetScreens()
+        guard !activeTargets.isEmpty else { return false }
+        let activeTargetIDs = Set(activeTargets.map(\.wallpaperScreenIdentifier))
+        return activeTargetIDs.isSubset(of: coveredScreenIDs)
+    }
+
     func restoreIfNeeded() {
         // 从 UserDefaults 恢复上次状态（不在 init 中读取，避免 macOS 26+ _CFXPreferences 递归崩溃）
         if !isControllingExternalEngine {
             if let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) {
                 lastWallpaperPath = path
             }
+            targetScreenIDs = Set(UserDefaults.standard.stringArray(forKey: targetScreenIDsKey) ?? [])
+            targetScreenFingerprints = Set(UserDefaults.standard.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
         }
+
+        // 只有上次确实在使用 WE 壁纸（controllingExternalKey == true）时才恢复。
+        // 切换到静态壁纸时 lastWallpaperPath 会被故意保留以便未来手动重启用，
+        // 但 controllingExternalKey 已被清除，借此区分「上次正在使用」与「曾经使用过」。
+        guard UserDefaults.standard.bool(forKey: controllingExternalKey) else { return }
 
         guard let path = lastWallpaperPath else { return }
         isControllingExternalEngine = true
         isExternalPaused = false
-        try? setWallpaper(path: path)
+        let hasPersistedTargets = !targetScreenIDs.isEmpty || !targetScreenFingerprints.isEmpty
+        let screens = hasPersistedTargets ? activeTargetScreens() : []
+        try? setWallpaper(path: path, targetScreens: hasPersistedTargets && !screens.isEmpty ? screens : nil)
     }
 
     private func persistState() {
         if let path = lastWallpaperPath {
             UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
             UserDefaults.standard.set(isControllingExternalEngine, forKey: controllingExternalKey)
+            UserDefaults.standard.set(Array(targetScreenIDs), forKey: targetScreenIDsKey)
+            UserDefaults.standard.set(Array(targetScreenFingerprints), forKey: targetScreenFingerprintsKey)
         } else {
             clearPersistedState()
         }
@@ -127,6 +170,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     private func clearPersistedState() {
         UserDefaults.standard.removeObject(forKey: lastWallpaperPathKey)
         UserDefaults.standard.removeObject(forKey: controllingExternalKey)
+        UserDefaults.standard.removeObject(forKey: targetScreenIDsKey)
+        UserDefaults.standard.removeObject(forKey: targetScreenFingerprintsKey)
     }
 
     /// 批量更新持久化状态中的壁纸路径（目录迁移后调用）
@@ -183,8 +228,28 @@ final class WallpaperEngineXBridge: ObservableObject {
         Self.resolvedCLIExecutableURL()
     }
 
-    private func executeCLI(arguments: [String]) throws {
-        guard let cliPath = resolveCLIPath()?.path else {
+    private func activeTargetScreens() -> [NSScreen] {
+        if targetScreenIDs.isEmpty && targetScreenFingerprints.isEmpty {
+            return NSScreen.screens
+        }
+        relinkTargetScreens()
+        return NSScreen.screens.filter { screen in
+            targetScreenIDs.contains(screen.wallpaperScreenIdentifier) ||
+            targetScreenFingerprints.contains(screen.wallpaperScreenFingerprint)
+        }
+    }
+
+    private func relinkTargetScreens() {
+        for screen in NSScreen.screens where targetScreenFingerprints.contains(screen.wallpaperScreenFingerprint) {
+            targetScreenIDs.insert(screen.wallpaperScreenIdentifier)
+        }
+    }
+
+    // MARK: - CLI 执行
+
+    /// 核心 CLI 执行。nonisolated 确保可在任意线程/队列调用，不阻塞主线程。
+    nonisolated private static func _runCLI(arguments: [String]) throws {
+        guard let cliPath = resolvedCLIExecutableURL()?.path else {
             throw WallpaperEngineError.cliNotFound
         }
 
@@ -198,10 +263,7 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         do {
             try task.run()
-            // 在非主线程上读取管道，避免 CLI 进程被 SIGTERM 杀掉时 readDataToEndOfFile() 阻塞/崩溃主线程
-            let data = DispatchQueue.global(qos: .userInitiated).sync {
-                pipe.fileHandleForReading.readDataToEndOfFile()
-            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
             task.waitUntilExit()
             if task.terminationStatus != 0 {
@@ -229,6 +291,28 @@ final class WallpaperEngineXBridge: ObservableObject {
         } catch {
             throw WallpaperEngineError.executionFailed(error.localizedDescription)
         }
+    }
+
+    /// 后台串行 fire-and-forget。用于 pause/resume/stop 等高频自动触发场景，主线程不阻塞。
+    nonisolated private static func runCLIFireAndForget(arguments: [String]) {
+        weCLIQueue.async {
+            try? Self._runCLI(arguments: arguments)
+        }
+    }
+
+    /// 同步执行并传递错误。仅在用户主动 setWallpaper 这种低频操作中使用。
+    private func executeCLI(arguments: [String]) throws {
+        var capturedError: WallpaperEngineError?
+        weCLIQueue.sync {
+            do {
+                try Self._runCLI(arguments: arguments)
+            } catch let error as WallpaperEngineError {
+                capturedError = error
+            } catch {
+                capturedError = .executionFailed(error.localizedDescription)
+            }
+        }
+        if let error = capturedError { throw error }
     }
 }
 

@@ -7,9 +7,9 @@ import SwiftUI
 
 /// 搜索翻译桥接器：语言检测 macOS 14+，翻译 macOS 15+
 ///
-/// 不标记 @MainActor：.translationTask 闭包运行在非隔离上下文，
-/// 避免 session 和 self 跨隔离边界的数据竞争。
-/// UI 状态通过 @Published + SwiftUI @StateObject 保证主线程更新。
+/// 明确隔离到主 actor，确保所有 @Published 都只从主线程发布。
+/// `.translationTask` 的执行入口保持 nonisolated，只在需要读写 UI 状态时切回 MainActor。
+@MainActor
 final class SearchTranslationBridge: ObservableObject, @unchecked Sendable {
     @Published private(set) var isChineseDetected = false
     @Published private(set) var translatedText: String?
@@ -95,7 +95,7 @@ final class SearchTranslationBridge: ObservableObject, @unchecked Sendable {
     /// UI 状态通过 MainActor.run 更新。
     @available(macOS 15.0, *)
     nonisolated func performTranslation(session: TranslationSession) async {
-        guard let text = pendingText else {
+        guard let text = await MainActor.run(body: { self.pendingText }) else {
             AppLogger.debug(.wallpaper, "[翻译] performTranslation: pendingText 为空，跳过")
             await MainActor.run {
                 self.translatedSourceText = nil
@@ -166,7 +166,7 @@ final class SearchTranslationBridge: ObservableObject, @unchecked Sendable {
     }
 
     /// 同步检测文本是否为中文（用于 submitSearch，不依赖 debounce 结果）
-    func isChinese(_ text: String) -> Bool {
+    nonisolated func isChinese(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         let recognizer = NLLanguageRecognizer()

@@ -3,9 +3,20 @@ import AppKit
 import Kingfisher
 @preconcurrency import Translation
 
+private struct MediaLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 // MARK: - MediaExploreContentView - 媒体探索页
 
 struct MediaExploreContentView: View {
+    private static let scrollCoordinateSpaceName = "media-explore-scroll"
+    private static let loadMoreTriggerThreshold: CGFloat = 120
+
     @ObservedObject var viewModel: MediaExploreViewModel
     @Binding var selectedMedia: MediaItem?
     var isVisible: Bool = true
@@ -20,23 +31,25 @@ struct MediaExploreContentView: View {
     @State private var searchText = ""
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
-    @State private var scrollOffset: CGFloat = 0
-    @State private var contentSize: CGFloat = 0
-    @State private var containerSize: CGFloat = 0
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
-    @State private var gridImagePrefetcher: ImagePrefetcher?
-    @State private var lastPrefetchCenterIndex: Int = -1
     @State private var lastSyncedFirstItemID: String?
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
+    @State private var gridRefreshTask: Task<Void, Never>?
     @State private var pendingSearchText: String?
     /// 翻译后的实际搜索词（英文），与 searchText（原始中文）分离
     @State private var mediaSearchQuery: String = ""
 
-    /// 缓存筛选/排序后的列表，避免每次 body（含滚动、`isLoading` 等）都对 `items` 全表 filter/sort，减轻 AttributeGraph 压力。
-    @State private var visibleMediaItems: [MediaItem] = []
+    // ExploreGridContainer 控制 token
+    @State private var gridScrollToTopToken: Int = 0
+    @State private var gridReloadToken: Int = 0
+    @State private var gridLayoutRefreshToken: Int = 0
+    @State private var gridSavedScrollOffset: CGFloat = 0
+    @State private var gridContentHeight: CGFloat = 600
+    @State private var showScrollToTop: Bool = false
+
 
     // Workshop 筛选
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
@@ -64,54 +77,27 @@ struct MediaExploreContentView: View {
                 )
                 .ignoresSafeArea()
 
-                ScrollViewReader { proxy in
-                    ZStack {
-                        ScrollView(.vertical, showsIndicators: false) {
-                            LazyVStack(alignment: .leading, spacing: 16) {
-                                heroSection
-                                categorySection
-                                if workshopSourceManager.activeSource == .wallpaperEngine {
-                                    filterSection
-                                    workshopTagsSection
-                                    activeFiltersSection
-                                }
-                                contentSection(gridContentWidth: gridContentWidth)
-                            }
-                            .padding(.horizontal, 28)
-                            .padding(.top, 80)
-                            .padding(.bottom, 48)
-                            .frame(width: geometry.size.width, alignment: .leading)
-                            .background(scrollTrackingOverlay)
-                            .background(contentSizeTrackingOverlay)
-                            .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                            .environment(\.arcIsLightMode, arcSettings.isLightMode)
-                            .id("exploreTop")
-                        }
-                        .coordinateSpace(name: "exploreScroll")
-                        .iosSmoothScroll()
-                        .scrollDisabled(!isVisible)
-                        .modifier(ScrollLoadMoreModifier(
-                            scrollOffset: $scrollOffset,
-                            contentSize: $contentSize,
-                            containerSize: $containerSize,
-                            earlyThreshold: 800,
-                            bottomThreshold: 100,
-                            onLoadMore: triggerLoadMore,
-                            checkLoadMore: checkLoadMore
-                        ))
+                ZStack {
+                    contentArea(
+                        gridContentWidth: gridContentWidth,
+                        viewportHeight: geometry.size.height
+                    )
+                        .padding(.horizontal, 28)
+                        .frame(width: geometry.size.width, alignment: .leading)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                        .environment(\.arcIsLightMode, arcSettings.isLightMode)
                         .disabled(isInitialLoading)
 
-                        bottomLoadingOverlay
+                    bottomLoadingOverlay
 
-                        scrollToTopButton(proxy: proxy)
-                    }
+                    scrollToTopButton
                 }
             }
         }
         .onAppear {
             if isFirstAppearance {
-                resetAllFilters(reloadData: true)
-                isFirstAppearance = false
+                Task { await performFirstAppearanceLoad() }
             } else {
                 Task { await handleInitialLoad() }
             }
@@ -119,9 +105,14 @@ struct MediaExploreContentView: View {
         .onChange(of: isVisible) { _, visible in
             if !visible {
                 cancelTasks()
-                gridImagePrefetcher?.stop()
                 exploreAtmosphere.pause()
+            } else {
+                syncAtmosphereIfNeeded()
+                gridLayoutRefreshToken &+= 1
             }
+        }
+        .onChange(of: arcSettings.isLightMode) { _, _ in
+            gridReloadToken &+= 1
         }
         .onChange(of: selectedHotTag) { _, _ in handleFilterChange() }
         .onChange(of: selectedWorkshopSort) { _, _ in handleWorkshopSortChange() }
@@ -132,16 +123,61 @@ struct MediaExploreContentView: View {
         .onReceive(translationBridge.$translationCompleted) { _ in
             handleTranslationCompleted()
         }
-        .onChange(of: viewModel.items) { _, _ in
-            recomputeVisibleMediaItems()
+        .onChange(of: viewModel.items) { oldItems, newItems in
             syncAtmosphereIfNeeded()
+            if oldItems.count == newItems.count {
+                scheduleGridVisibleRefresh()
+            }
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in
-            recomputeVisibleMediaItems()
+            // viewModel.items 已通过 @Published 自动触发 UI 更新；这里 bump reload 让 cell 收藏状态刷新
+            scheduleGridVisibleRefresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
             handleSourceChange()
         }
+    }
+
+    @ViewBuilder
+    private func contentArea(gridContentWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+        if viewModel.items.isEmpty {
+            legacyScrollContent(gridContentWidth: gridContentWidth, body: AnyView(
+                Group {
+                    if isMediaLoadingState {
+                        loadingState
+                    } else {
+                        emptyState
+                    }
+                }
+                .transition(.opacity.animation(.easeInOut(duration: 0.3)))
+            ))
+        } else {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    headerStack
+                    mediaGrid(contentWidth: gridContentWidth)
+                        .frame(height: max(gridContentHeight, 320))
+                    loadMoreSentinel
+                }
+            }
+            .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+            .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
+                handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
+            }
+            .scrollDisabled(!isVisible)
+        }
+    }
+
+    /// 仅用于"骨架/空状态"等无网格场景的兜底滚动容器（保留 header）
+    private func legacyScrollContent(gridContentWidth: CGFloat, body: AnyView) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 16) {
+                headerStack
+                body
+            }
+            .padding(.bottom, 48)
+        }
+        .scrollDisabled(!isVisible)
     }
 
     private var bottomLoadingOverlay: some View {
@@ -153,10 +189,10 @@ struct MediaExploreContentView: View {
                     Task { await viewModel.loadMore() }
                 }
                 .padding(.bottom, 60)
-            } else if isLoadingMore || (viewModel.isLoading && !visibleMediaItems.isEmpty) {
+            } else if isLoadingMore || (viewModel.isLoadingMore && !viewModel.items.isEmpty) {
                 BottomLoadingCard(isLoading: true)
                     .padding(.bottom, 60)
-            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleMediaItems.isEmpty {
+            } else if !isLoadingMore && !viewModel.hasMorePages && !viewModel.items.isEmpty {
                 BottomNoMoreCard()
                     .padding(.bottom, 60)
             }
@@ -164,16 +200,14 @@ struct MediaExploreContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 
-    private func scrollToTopButton(proxy: ScrollViewProxy) -> some View {
+    private var scrollToTopButton: some View {
         VStack {
             Spacer()
             HStack {
                 Spacer()
-                if scrollOffset > 300 {
+                if showScrollToTop {
                     Button {
-                        withAnimation {
-                            proxy.scrollTo("exploreTop", anchor: .top)
-                        }
+                        gridScrollToTopToken &+= 1
                     } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 14, weight: .semibold))
@@ -191,6 +225,27 @@ struct MediaExploreContentView: View {
             }
         }
         .zIndex(100)
+    }
+
+    // MARK: - Header
+
+    private var headerStack: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            heroSection
+            categorySection
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                filterSection
+                workshopTagsSection
+                activeFiltersSection
+            }
+            contentHeader.padding(.top, 12)
+        }
+        .padding(.top, 80)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+        .environment(\.arcIsLightMode, arcSettings.isLightMode)
     }
 
     // MARK: - Sections
@@ -216,7 +271,7 @@ struct MediaExploreContentView: View {
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
-    
+
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -265,7 +320,7 @@ struct MediaExploreContentView: View {
                 .lineLimit(1)
         }
     }
-    
+
     private var searchRow: some View {
         HStack(alignment: .center, spacing: 12) {
             ExploreSearchBar(
@@ -293,7 +348,7 @@ struct MediaExploreContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-    
+
     private var hotTagsRow: some View {
         motionBGTagsRow
     }
@@ -319,6 +374,7 @@ struct MediaExploreContentView: View {
 
     private func applyWorkshopFilters(query: String? = nil) async {
         viewModel.clearItems()
+        bumpReloadToken()
 
         let tags = selectedWorkshopTag.map { [$0.name] } ?? []
         let searchQuery = query ?? workshopSearchQuery
@@ -329,6 +385,7 @@ struct MediaExploreContentView: View {
             contentLevel: selectedWorkshopContentLevel,
             resolution: selectedWorkshopResolution?.tagValue
         )
+        bumpReloadToken()
     }
 
     @ViewBuilder
@@ -407,7 +464,7 @@ struct MediaExploreContentView: View {
         // [强制规则] 内容级别已写死为 SFW (Everyone)，不在 UI 中显示筛选
         EmptyView()
     }
-    
+
     private var workshopResolutionMenu: some View {
         Menu {
             Button(t("allResolutions")) {
@@ -447,7 +504,7 @@ struct MediaExploreContentView: View {
         .offset(y: 1)
         .frame(height: 34)
     }
-    
+
     private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
         Array(WorkshopSourceManager.WorkshopContentLevel.allCases)
     }
@@ -542,26 +599,9 @@ struct MediaExploreContentView: View {
         Task { await applyWorkshopFilters() }
     }
 
-    private func contentSection(gridContentWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            contentHeader
-                .zIndex(1)
-            
-            if viewModel.isLoading && visibleMediaItems.isEmpty {
-                MediaGridSkeleton(contentWidth: gridContentWidth)
-                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
-            } else if visibleMediaItems.isEmpty {
-                emptyState
-                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
-            } else {
-                mediaGrid(contentWidth: gridContentWidth)
-            }
-        }
-    }
-    
     private var contentHeader: some View {
         HStack(alignment: .center) {
-            Text("\(formattedCount(visibleMediaItems.count)) \(t("media.count")) · \(t("media.loaded")) \(formattedCount(viewModel.items.count))")
+            Text("\(formattedCount(viewModel.items.count)) \(t("media.count")) · \(t("media.loaded")) \(formattedCount(viewModel.items.count))")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(arcSettings.secondaryText.opacity(0.64))
 
@@ -576,71 +616,88 @@ struct MediaExploreContentView: View {
     // MARK: - Grid
 
     private func mediaGrid(contentWidth: CGFloat) -> some View {
-        let config = GridConfig(contentWidth: contentWidth, columns: contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2), baseRatio: 0.6)
-        
-        return LazyVGrid(columns: config.columns, alignment: .leading, spacing: config.spacing) {
-            ForEach(visibleMediaItems) { item in
-                SimpleMediaCard(
-                    item: item,
-                    cardWidth: config.cardWidth,
-                    isFavorite: viewModel.isFavorite(item)
-                )
-                .onTapGesture {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        selectedMedia = item
-                    }
+        let columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
+
+        return ExploreGridContainer(
+            itemCount: { viewModel.items.count },
+            aspectRatio: { _ in
+                let spacing: CGFloat = 16
+                let totalSpacing = spacing * CGFloat(columnCount - 1)
+                let cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+                return MediaItem.effectiveAspectRatio(columnWidth: cardWidth)
+            },
+            configureCell: { cell, index in
+                guard index < viewModel.items.count else { return }
+                let item = viewModel.items[index]
+                cell.configure(with: item, isFavorite: viewModel.isFavorite(item))
+            },
+            cellClass: MediaGridCell.self,
+            onSelect: { index in
+                guard index < viewModel.items.count else { return }
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    selectedMedia = viewModel.items[index]
                 }
-                .onAppear {
-                    preloadNearbyImages(around: item, config: config)
-                    // 自动预加载 MotionBG 卡片详情（避免用户必须点进详情返回后才显示完整信息）
-                    if item.sourceName != t("wallpaperEngine") && !item.hasDetailPayload {
-                        Task(priority: .background) { await viewModel.ensureDetail(for: item) }
-                    }
+            },
+            onVisibleItemsChange: { indexPaths in
+                prefetchVisibleMediaDetails(indexPaths: indexPaths)
+            },
+            onScrollOffsetChange: { offset in
+                gridSavedScrollOffset = offset
+                let shouldShow = offset > 300
+                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
+            },
+            onReachBottom: triggerLoadMore,
+            scrollToTopToken: gridScrollToTopToken,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: false,
+            onContentHeightChange: { height in
+                if abs(gridContentHeight - height) > 0.5 {
+                    gridContentHeight = height
                 }
-                // 移除入场动画和滚动效果，解决卡顿和空白问题
-                // .cardEntrance(...)
-                // .scrollTransitionEffect()
-            }
-        }
-        // 移除强制高度，让 LazyVGrid 自然布局，解决空白问题
-        // .frame(height: config.calculateHeight(itemCount: displayedItems.count, extraHeight: 40))
+            },
+            isVisible: isVisible,
+            layoutWidth: contentWidth,
+            gridColumnCount: columnCount,
+            hoverExpansionAllowance: 8
+        )
     }
-    
-    /// 智能预加载附近图片（前后各 8 张）；中心索引节流减少 Prefetcher 抖动
-    private func preloadNearbyImages(around item: MediaItem, config: GridConfig) {
-        let items = visibleMediaItems
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        if lastPrefetchCenterIndex >= 0, abs(index - lastPrefetchCenterIndex) < 4 { return }
-        lastPrefetchCenterIndex = index
 
-        let targetSize = CGSize(width: 512, height: 512)
-        let count = items.count
-        guard count > 0 else { return }
-        let clamped = min(max(0, index), count - 1)
-        let lower = max(0, clamped - 8)
-        let upper = min(count, clamped + 9)
-        guard lower < upper else { return }
-        let range = lower..<upper
-        // 列表封面统一为 KFImage + 降采样静态帧，GIF 可与静图一同预取
-        let urls = range
-            .filter { $0 != clamped }
-            .map { items[$0] }
-            .map(\.coverImageURL)
+    private func bumpReloadToken() {
+        cancelScheduledGridVisibleRefresh()
+        gridReloadToken &+= 1
+    }
 
-        // 放到后台线程执行，避免阻塞主线程滚动
-        Task(priority: .background) {
-            await MainActor.run {
-                self.gridImagePrefetcher?.stop()
-            }
-            let prefetcher = ImagePrefetcher(
-                urls: urls,
-                options: [.processor(DownsamplingImageProcessor(size: targetSize))]
-            )
-            await MainActor.run {
-                self.gridImagePrefetcher = prefetcher
-            }
-            prefetcher.start()
+    private func scheduleGridVisibleRefresh(delayNanoseconds: UInt64 = 120_000_000) {
+        gridRefreshTask?.cancel()
+        gridRefreshTask = Task {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled else { return }
+            gridReloadToken &+= 1
+            gridRefreshTask = nil
         }
+    }
+
+    private func cancelScheduledGridVisibleRefresh() {
+        gridRefreshTask?.cancel()
+        gridRefreshTask = nil
+    }
+
+    private func prefetchVisibleMediaDetails(indexPaths: Set<IndexPath>) {
+        guard workshopSourceManager.activeSource != .wallpaperEngine else { return }
+
+        let candidates = indexPaths
+            .map(\.item)
+            .filter { $0 >= 0 && $0 < viewModel.items.count }
+            .sorted()
+            .prefix(6)
+            .compactMap { index -> MediaItem? in
+                let item = viewModel.items[index]
+                return item.posterURL == nil ? item : nil
+            }
+
+        guard !candidates.isEmpty else { return }
+        viewModel.enqueueDetailPrefetch(for: Array(candidates), prioritizeVisible: true)
     }
 
     // MARK: - UI Components
@@ -665,28 +722,39 @@ struct MediaExploreContentView: View {
         .frame(height: 220)
         .exploreFrostedPanel(cornerRadius: 28, tint: exploreAtmosphere.tint.primary)
     }
-    
-    private var scrollTrackingOverlay: some View {
-        GeometryReader { scrollProxy in
-            Color.clear.preference(
-                key: ExploreScrollOffsetKey.self,
-                value: -scrollProxy.frame(in: .named("exploreScroll")).minY
-            )
-        }
+
+    private var loadingState: some View {
+        ExploreLoadingStateView(
+            message: "加载中...",
+            tint: arcSettings.primaryText
+        )
+        .exploreFrostedPanel(cornerRadius: 28, tint: exploreAtmosphere.tint.primary)
     }
-    
-    private var contentSizeTrackingOverlay: some View {
-        GeometryReader { contentProxy in
+
+    private var isMediaLoadingState: Bool {
+        viewModel.items.isEmpty && (
+            isInitialLoading
+            || isFirstAppearance
+            || viewModel.isLoading
+            || viewModel.isLoadingMore
+            || searchTask != nil
+        )
+    }
+
+    private var loadMoreSentinel: some View {
+        GeometryReader { proxy in
             Color.clear.preference(
-                key: ExploreContentSizeKey.self,
-                value: contentProxy.size.height
+                key: MediaLoadMoreSentinelMinYPreferenceKey.self,
+                value: proxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
             )
         }
+        .frame(height: 1)
     }
 
     // MARK: - Actions
 
     private func handleInitialLoad() async {
+        cancelScheduledGridVisibleRefresh()
         if viewModel.items.isEmpty {
             isInitialLoading = true
         }
@@ -694,10 +762,37 @@ struct MediaExploreContentView: View {
         if searchText.isEmpty {
             searchText = viewModel.currentQuery
         }
-        lastPrefetchCenterIndex = -1
-        recomputeVisibleMediaItems()
         syncAtmosphereIfNeeded()
         isInitialLoading = false
+    }
+
+    private func performFirstAppearanceLoad() async {
+        cancelScheduledGridVisibleRefresh()
+        isInitialLoading = true
+        searchText = ""
+        mediaSearchQuery = ""
+        translationBridge.reset()
+        selectedHotTag = nil
+        selectedWorkshopTag = nil
+        selectedWorkshopType = .all
+        selectedWorkshopContentLevel = .everyone
+        selectedWorkshopResolution = nil
+        selectedWorkshopSort = .trendWeek
+        selectedCategory = .all
+        selectedSort = .newest
+        lastSyncedFirstItemID = nil
+        loadMoreFailed = false
+        viewModel.errorMessage = nil
+
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            await viewModel.loadWorkshopFeed()
+        } else {
+            await viewModel.loadHomeFeed()
+        }
+
+        syncAtmosphereIfNeeded()
+        isInitialLoading = false
+        isFirstAppearance = false
     }
 
     private func selectCategory(_ category: MediaCategory) {
@@ -710,10 +805,10 @@ struct MediaExploreContentView: View {
             searchText = ""
         }
 
-        lastPrefetchCenterIndex = -1
         lastSyncedFirstItemID = nil
         // 清空 ViewModel 数据避免显示旧数据
         viewModel.clearItems()
+        bumpReloadToken()
 
         searchTask?.cancel()
         searchTask = Task {
@@ -725,6 +820,7 @@ struct MediaExploreContentView: View {
             } else {
                 await viewModel.loadTagFeed(slug: category.slug, title: category.title)
             }
+            await MainActor.run { bumpReloadToken() }
         }
     }
 
@@ -763,15 +859,18 @@ struct MediaExploreContentView: View {
     private func executeSearch(query: String) {
         selectedCategory = .all
         selectedHotTag = nil
-        lastPrefetchCenterIndex = -1
         searchTask?.cancel()
+        bumpReloadToken()
         searchTask = Task {
             if workshopSourceManager.activeSource == .wallpaperEngine {
                 await applyWorkshopFilters(query: query)
             } else {
                 await viewModel.search(query: query)
             }
-            searchTask = nil
+            await MainActor.run {
+                bumpReloadToken()
+                searchTask = nil
+            }
         }
     }
 
@@ -785,8 +884,6 @@ struct MediaExploreContentView: View {
     }
 
     private func handleFilterChange() {
-        recomputeVisibleMediaItems()
-
         // Workshop 模式下不支持标签过滤
         if workshopSourceManager.activeSource == .wallpaperEngine {
             syncAtmosphereIfNeeded()
@@ -795,21 +892,27 @@ struct MediaExploreContentView: View {
 
         if let hotTag = selectedHotTag, hotTag.isServerSide,
            let slug = hotTag.serverSlug {
-            Task { await viewModel.loadTagFeed(slug: slug, title: hotTag.title) }
+            Task {
+                await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
+                await MainActor.run { bumpReloadToken() }
+            }
             return
         }
 
         if selectedHotTag != nil && viewModel.items.isEmpty {
             Task {
                 await viewModel.loadHomeFeed()
-                syncAtmosphereIfNeeded()
+                await MainActor.run {
+                    syncAtmosphereIfNeeded()
+                    bumpReloadToken()
+                }
             }
             return
         }
 
         syncAtmosphereIfNeeded()
     }
-    
+
     private func handleWorkshopSortChange() {
         AppLogger.info(.wallpaper, "Workshop 排序变化", metadata: ["排序": selectedWorkshopSort.rawValue])
         searchTask?.cancel()
@@ -819,6 +922,7 @@ struct MediaExploreContentView: View {
                 days: selectedWorkshopSort.days
             )
             await MainActor.run {
+                bumpReloadToken()
                 searchTask = nil
             }
         }
@@ -827,6 +931,7 @@ struct MediaExploreContentView: View {
     private func handleSourceChange() {
         // 数据源切换时重置并重新加载
         resetAllFilters(reloadData: true)
+        bumpReloadToken()
     }
 
     private func triggerLoadMore() {
@@ -856,38 +961,10 @@ struct MediaExploreContentView: View {
         }
     }
 
-    private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
-        guard viewModel.hasMorePages else { return }
-        guard !viewModel.isLoading, !isLoadingMore, !viewModel.isLoadingMore else { return }
-
-        // 计算距离底部距离
-        let distanceToBottom = contentHeight - (offset + containerHeight)
-
-        // 双阈值策略：
-        // 1. 提前加载（距离底部 < 800pt）- 正常预加载
-        // 2. 触底保底（距离底部 < 100pt）- 保底机制
-        let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
-        let shouldLoadBottom = distanceToBottom < 100
-
-        guard shouldLoadEarly || shouldLoadBottom else { return }
-
-        loadMoreTask?.cancel()
-        isLoadingMore = true
-        loadMoreFailed = false
-        Task {
-            if workshopSourceManager.activeSource == .wallpaperEngine {
-                await viewModel.loadMoreWorkshop()
-            } else {
-                await viewModel.loadMore()
-            }
-            await MainActor.run {
-                if viewModel.hasMorePages && viewModel.errorMessage != nil {
-                    loadMoreFailed = true
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    isLoadingMore = false
-                }
-            }
+    private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
+        guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
+        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
+            triggerLoadMore()
         }
     }
 
@@ -903,12 +980,10 @@ struct MediaExploreContentView: View {
         selectedWorkshopSort = .trendWeek
         selectedCategory = .all
         selectedSort = .newest
-        viewModel.clearItems()
-        lastPrefetchCenterIndex = -1
         lastSyncedFirstItemID = nil
         loadMoreFailed = false
         viewModel.errorMessage = nil
-        recomputeVisibleMediaItems()
+        bumpReloadToken()
 
         if reloadData {
             searchTask?.cancel()
@@ -918,7 +993,10 @@ struct MediaExploreContentView: View {
                 } else {
                     await viewModel.loadHomeFeed()
                 }
-                searchTask = nil
+                await MainActor.run {
+                    bumpReloadToken()
+                    searchTask = nil
+                }
             }
         }
     }
@@ -926,12 +1004,13 @@ struct MediaExploreContentView: View {
     private func cancelTasks() {
         searchTask?.cancel()
         loadMoreTask?.cancel()
+        cancelScheduledGridVisibleRefresh()
         searchTask = nil
         loadMoreTask = nil
     }
 
     private func syncAtmosphereIfNeeded() {
-        let items = visibleMediaItems
+        let items = viewModel.items
         let newFirstID = items.first?.id
         guard newFirstID != lastSyncedFirstItemID else { return }
         lastSyncedFirstItemID = newFirstID
@@ -939,26 +1018,18 @@ struct MediaExploreContentView: View {
     }
 
     private func randomizeAtmosphere() {
-        guard !visibleMediaItems.isEmpty else { return }
-        let random = visibleMediaItems.randomElement()!
+        guard !viewModel.items.isEmpty else { return }
+        let random = viewModel.items.randomElement()!
         exploreAtmosphere.updateFromImageURL(
             random.coverImageURL,
             keyPrefix: "rand-media"
         )
     }
 
-    private func recomputeVisibleMediaItems() {
-        visibleMediaItems = viewModel.items
-    }
-    
-    private func animateCardAppearance(id: String, index: Int) {
-        // 已移除 visibleCardIDs，避免滚动时触发 @State 更新导致卡顿
-    }
-    
     private func formattedCount(_ count: Int) -> String {
         NumberFormatter.localizedString(from: NSNumber(value: count), number: .decimal)
     }
-    
+
 }
 
 private func formatCompactCount(_ count: Int) -> String {
@@ -968,26 +1039,6 @@ private func formatCompactCount(_ count: Int) -> String {
         return String(format: "%.1fK", Double(count) / 1_000)
     }
     return "\(count)"
-}
-
-// MARK: - Grid Configuration
-
-private struct GridConfig {
-    let columnCount: Int
-    let spacing: CGFloat
-    let cardWidth: CGFloat
-    let columns: [GridItem]
-    
-    init(contentWidth: CGFloat, columns columnCount: Int, baseRatio: CGFloat, spacing: CGFloat = 16) {
-        self.columnCount = columnCount
-        self.spacing = spacing
-        let totalSpacing = spacing * CGFloat(columnCount - 1)
-        self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-        // 移除 cardHeight 计算，让卡片自动计算高度
-        self.columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
-    }
-    
-    // 移除强制高度计算方法
 }
 
 // MARK: - Models & Enums
@@ -1125,183 +1176,6 @@ private enum MediaCategory: String, CaseIterable, Identifiable {
     }
 }
 
-
-
-
-// MARK: - SimpleMediaCard (Kingfisher 高性能版)
-
-private struct SimpleMediaCard: View {
-    let item: MediaItem
-    var cardWidth: CGFloat
-    let isFavorite: Bool
-
-    @State private var isHovered = false
-
-    private static let thumbShape = UnevenRoundedRectangle(
-        topLeadingRadius: 14,
-        bottomLeadingRadius: 0,
-        bottomTrailingRadius: 0,
-        topTrailingRadius: 14,
-        style: .continuous
-    )
-    private static let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
-    
-    // 固定图片比例 16:10，高度自动计算
-    private var imageHeight: CGFloat {
-        cardWidth * 0.625  // 16:10 比例
-    }
-    
-    // 文字区域高度
-    private var textAreaHeight: CGFloat { 44 }
-
-    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
-    private let targetImageSize: CGSize = CGSize(width: 512, height: 512)
-
-    private var resolutionOverlayText: String {
-        // Workshop 源：右上角不重复显示类型（类型已在 tags 或详情中），改为显示文件大小
-        if item.sourceName == t("wallpaperEngine") {
-            if let fileSize = item.fileSize, fileSize > 0 {
-                let mb = Double(fileSize) / 1024 / 1024
-                if mb >= 1024 {
-                    return String(format: "%.1f GB", mb / 1024)
-                }
-                return String(format: "%.1f MB", mb)
-            }
-            return ""
-        }
-        return item.resolutionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var firstListTag: String? {
-        item.tags.lazy
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack {
-                // 与壁纸探索一致：仅静态缩略图（GIF 经降采样为单帧，不播放动画）
-                KFImage(item.coverImageURL)
-                    .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                    .cacheMemoryOnly(false)
-                    .fade(duration: 0.2)
-                    .placeholder { _ in placeholderGradient }
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
-            .frame(width: cardWidth, height: imageHeight)
-            .clipShape(Self.thumbShape)
-            .overlay(alignment: .topLeading) {
-                simplifiedMetadataRow
-                    .padding(10)
-            }
-
-
-            HStack(spacing: 8) {
-                // Workshop 源显示作者名（如壁纸探索页显示上传者），MotionBG 显示标题
-                Text(item.sourceName == t("wallpaperEngine") ? (item.authorName ?? item.title) : item.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.9))
-                    .lineLimit(1)
-                
-                Spacer()
-                
-                // Workshop 源显示订阅数/浏览数统计（如壁纸探索页）
-                if item.sourceName == t("wallpaperEngine") {
-                    HStack(spacing: 10) {
-                        if let subs = item.subscriptionCount, subs > 0 {
-                            cardStatLabel(systemImage: "heart.fill", value: formatCompactCount(subs))
-                        }
-                        if let views = item.viewCount, views > 0 {
-                            cardStatLabel(systemImage: "eye.fill", value: formatCompactCount(views))
-                        }
-                    }
-                }
-                
-                Image(systemName: isFavorite ? "heart.fill" : "heart")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.36))
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
-            .background(Color.black.opacity(0.46))
-        }
-        .background(
-            Self.cardShape
-                .fill(Color.clear)
-                .overlay(
-                    Self.cardShape
-                        .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
-                )
-        )
-        .clipShape(Self.cardShape)
-        .contentShape(Self.cardShape)
-        .scaleEffect(isHovered ? 1.02 : 1.0)
-        .animation(.spring(response: 0.2, dampingFraction: 0.85), value: isHovered)
-        .onHover { isHovered = $0 }
-    }
-    
-    private var simplifiedMetadataRow: some View {
-        HStack(spacing: 6) {
-            if let tag = firstListTag {
-                metaTag(text: tag)
-            }
-            if item.isGIF {
-                metaTag(text: "GIF")
-            }
-            if item.previewVideoURL != nil {
-                metaTag(text: "LIVE")
-            }
-            if let rating = item.ratingScore {
-                metaTag(text: String(format: "★ %.1f", rating))
-            }
-            if let subs = item.subscriptionCount, subs > 0 {
-                metaTag(text: formatCompactCount(subs) + " subs")
-            }
-            Spacer(minLength: 0)
-            if !resolutionOverlayText.isEmpty {
-                metaTag(text: resolutionOverlayText)
-            }
-        }
-    }
-
-    private func metaTag(text: String) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.85))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.4))
-            .clipShape(Capsule())
-    }
-    
-    private func cardStatLabel(systemImage: String, value: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: systemImage)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white.opacity(0.5))
-            Text(value)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.62))
-        }
-    }
-
-    private var placeholderGradient: some View {
-        LinearGradient(
-            colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .overlay {
-            Image(systemName: "photo.fill")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(.white.opacity(0.18))
-        }
-    }
-}
-
 private struct WorkshopActiveFilterChip: View {
     let title: String
     let accentHex: String
@@ -1352,9 +1226,9 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
     case updated = "updated"
     case created = "created"
     case topRated = "toprated"
-    
+
     var id: String { rawValue }
-    
+
     var title: String {
         switch self {
         case .trendToday: return t("workshop.sort.trendToday")
@@ -1368,9 +1242,9 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
         case .topRated: return t("workshop.sort.topRated")
         }
     }
-    
+
     var menuTitle: String { title }
-    
+
     /// 映射到 WorkshopSearchParams.SortOption
     var sortBy: WorkshopSearchParams.SortOption {
         switch self {
@@ -1384,7 +1258,7 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
             return .topRated
         }
     }
-    
+
     /// 时间范围（仅对热门趋势有效），nil = 全部时间
     var days: Int? {
         switch self {

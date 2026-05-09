@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import AppIntents
 import Kingfisher
+import ExceptionHandling
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
@@ -49,11 +50,7 @@ struct WaifuXApp {
         configureKingfisher()
         
         // 配置全局 URLCache
-        let cache = URLCache(
-            memoryCapacity: 50_000_000,  // 50 MB，与 Kingfisher 内存缓存叠加后更可控
-            diskCapacity: 500_000_000,   // 500 MB 磁盘缓存
-            diskPath: "WaifuXImageCache"
-        )
+        let cache = makeSharedURLCache()
         URLCache.shared = cache
 
         // 注意：不要修改 URLSession.shared 的配置
@@ -78,7 +75,23 @@ struct WaifuXApp {
         
         // 下载配置
         let downloader = KingfisherManager.shared.downloader
-        downloader.downloadTimeout = 30.0
+        let configuration = downloader.sessionConfiguration
+        configuration.httpMaximumConnectionsPerHost = 3
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 45
+        configuration.timeoutIntervalForResource = 120
+        downloader.sessionConfiguration = configuration
+        downloader.downloadTimeout = 45.0
+        KingfisherManager.shared.defaultOptions = [
+            .backgroundDecode,
+            .retryStrategy(DelayRetryStrategy(maxRetryCount: 2, retryInterval: .accumulated(1.0))),
+            .requestModifier(AnyModifier { request in
+                var request = request
+                request.timeoutInterval = max(request.timeoutInterval, 45)
+                applyImageRequestHeaders(to: &request)
+                return request
+            })
+        ]
         
         // 设置内存压力处理（使用 DispatchSource）
         #if os(macOS)
@@ -93,6 +106,53 @@ struct WaifuXApp {
         source.resume()
         #endif
     }
+
+    private static func makeSharedURLCache() -> URLCache {
+        let memoryCapacity = 50_000_000
+        let diskCapacity = 500_000_000
+        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("WaifuXImageCache", isDirectory: true)
+
+        if let cacheDirectory {
+            do {
+                try FileManager.default.createDirectory(
+                    at: cacheDirectory,
+                    withIntermediateDirectories: true
+                )
+                return URLCache(
+                    memoryCapacity: memoryCapacity,
+                    diskCapacity: diskCapacity,
+                    directory: cacheDirectory
+                )
+            } catch {
+                print("[WaifuXApp] Failed to create URLCache directory at \(cacheDirectory.path): \(error)")
+            }
+        }
+
+        return URLCache(
+            memoryCapacity: memoryCapacity,
+            diskCapacity: diskCapacity,
+            diskPath: nil
+        )
+    }
+
+    private static func applyImageRequestHeaders(to request: inout URLRequest) {
+        guard let host = request.url?.host?.lowercased() else { return }
+
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+
+        if host.contains("motionbgs.com") {
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            request.setValue("https://motionbgs.com/", forHTTPHeaderField: "Referer")
+        } else if host.contains("wallhaven.cc") {
+            request.setValue("https://wallhaven.cc/", forHTTPHeaderField: "Referer")
+        }
+    }
 }
 
 @MainActor
@@ -102,6 +162,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
     private var settingsViewModel: SettingsViewModel?
     private var settingsWindowController: NSWindowController?
+    /// 窗口隐藏后延迟释放视图树的任务，用于回收 IOSurface / CoreAnimation 等系统图形缓存
+    private var delayedReleaseTask: Task<Void, Never>?
     
     // MARK: - 窗口尺寸（唯一真实来源，全局统一）
     /// 最小允许的窗口大小
@@ -137,10 +199,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 设置标准菜单栏（包含 Edit 菜单，使 TextField 支持复制粘贴）
         setupMainMenu()
 
+        // 捕获 macOS 布局循环异常（NSHostingView + NSCollectionView 混合布局的已知问题）
+        // _postWindowNeedsLayout 在 _layoutViewTree 期间被触发时会抛出此异常
+        setupLayoutExceptionHandler()
+
         // 1. 初始化状态栏控制器（轻量级，不阻塞）
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
                 self?.showMainWindow()
+            },
+            releaseMemory: { [weak self] in
+                self?.releaseForegroundMemoryNow()
             },
             quit: { [weak self] in
                 self?.quitApplication()
@@ -198,7 +267,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.restoreAllDataAsync()
         }
-        
+
+        // 启动探索网格内存监控（800MB / 150 entries 阈值，触发 LRU trim）
+        // ⚠️ 必须异步启动，禁止在 init 路径或 applicationDidFinishLaunching 同步调用，
+        // 避免触发 macOS 26 _CFXPreferences 隐式递归
+        DispatchQueue.main.async {
+            ExploreGridMemoryMonitor.shared.startMonitoring()
+        }
+
         // 注：更新检查已移到 ContentView 中处理
     }
     
@@ -286,6 +362,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !isDynamicWallpaperRendering else { return }
         // 备用同步：当应用重新变为活跃时，检查并同步跨 Space 壁纸
         // 因为 activeSpaceDidChangeNotification 在应用后台时可能不可靠
         DesktopWallpaperSyncManager.shared.syncOnAppActivation()
@@ -297,6 +374,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showMainWindow() {
+        // 取消待执行的延迟释放，避免重新打开窗口后视图树被意外清空
+        delayedReleaseTask?.cancel()
+        delayedReleaseTask = nil
+
         updateActivationPolicy(showDockIcon: true)
 
         if window == nil {
@@ -332,6 +413,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
 
             window?.delegate = self
+        } else if window?.contentView == nil {
+            // 视图树之前已被释放，重新挂载
+            let contentView = ContentView()
+                .frame(
+                    minWidth: Self.minimumWindowSize.width,
+                    minHeight: Self.minimumWindowSize.height
+                )
+            let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+            window?.contentView = hostingView
         }
 
         // 确保窗口显示在最前面
@@ -355,21 +445,95 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func hideMainWindow() {
+        DynamicWallpaperAutoPauseManager.shared.suppressForegroundPauseForMainWindowHide()
         window?.orderOut(nil)
-        if !(settingsWindowController?.window?.isVisible ?? false) {
+
+        // 主窗口隐藏后尽快卸载前台视图树，后台只保留状态栏、动态壁纸、调度器和下载任务。
+        delayedReleaseTask?.cancel()
+        delayedReleaseTask = Task { @MainActor in
+            // 先让窗口服务器完成 orderOut，避免拆 contentView 时和窗口隐藏动画抢布局。
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+
+            if !(self.settingsWindowController?.window?.isVisible ?? false) {
+                self.updateActivationPolicy(showDockIcon: false)
+            }
+
+            NotificationCenter.default.post(name: .appDidHideWindow, object: nil)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            guard let window = self.window, !window.isVisible else { return }
+            self.releaseForegroundResourcesForHiddenWindow(window)
+            self.delayedReleaseTask = nil
+        }
+    }
+
+    func releaseForegroundMemoryNow() {
+        delayedReleaseTask?.cancel()
+        delayedReleaseTask = nil
+
+        guard let window else {
+            DisplaySelectorManager.shared.cancelForMemoryRelease()
+            ForegroundPrefetchManager.shared.stopAll()
+            KingfisherManager.shared.downloader.cancelAll()
+            ImageCache.default.clearMemoryCache()
+            VideoThumbnailCache.shared.clearMemoryCache()
+            ExploreGridImageCache.shared.removeAll()
+            VideoPreloader.shared.clearCache()
+            URLCache.shared.removeAllCachedResponses()
+            Task(priority: .utility) {
+                await ExploreGridImageLoader.shared.cancelAll()
+                await MediaService.shared.clearCache()
+                await ContentService.shared.clearCache()
+                await NetworkService.shared.clearCache()
+            }
+            return
+        }
+
+        if window.isVisible {
+            DynamicWallpaperAutoPauseManager.shared.suppressForegroundPauseForMainWindowHide()
+            window.orderOut(nil)
+        }
+
+        if !(self.settingsWindowController?.window?.isVisible ?? false) {
             updateActivationPolicy(showDockIcon: false)
         }
-        // 窗口隐藏时异步逐步清理内存，避免卡顿
-        Task { @MainActor in
-            // 先让窗口动画完成
-            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
-            // 第一步：通知各个 View 清理大内存数据（图片引用等）
-            NotificationCenter.default.post(name: .appDidHideWindow, object: nil)
-            // 小延迟后再清理缓存
-            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2秒
-            // 第二步：清理 Kingfisher 内存缓存
-            ImageCache.default.clearMemoryCache()
+
+        releaseForegroundResourcesForHiddenWindow(window)
+    }
+
+    private func releaseForegroundResourcesForHiddenWindow(_ window: NSWindow) {
+        NotificationCenter.default.post(name: .appShouldReleaseForegroundMemory, object: nil)
+        DisplaySelectorManager.shared.cancelForMemoryRelease()
+
+        // 释放视图树是回收系统图形缓存（IOSurface、CALayer backing store）的关键。
+        // 只清前台浏览/预览缓存；动态壁纸渲染、调度器、下载任务和状态栏继续运行。
+        ForegroundPrefetchManager.shared.stopAll()
+        KingfisherManager.shared.downloader.cancelAll()
+        autoreleasepool {
+            window.contentView = nil
         }
+
+        PreviewWindowManager.shared.closePreview()
+        ImageCache.default.clearMemoryCache()
+        VideoThumbnailCache.shared.clearMemoryCache()
+        ExploreGridImageCache.shared.removeAll()
+        VideoPreloader.shared.clearCache()
+        LocalWallpaperScanner.shared.clearInMemoryCache()
+        WorkshopService.shared.clearForegroundState()
+        URLCache.shared.removeAllCachedResponses()
+
+        Task(priority: .utility) {
+            await ExploreGridImageLoader.shared.cancelAll()
+            await MediaService.shared.clearCache()
+            await ContentService.shared.clearCache()
+            await NetworkService.shared.clearCache()
+        }
+    }
+
+    private var isDynamicWallpaperRendering: Bool {
+        VideoWallpaperManager.shared.currentVideoURL != nil ||
+        WallpaperEngineXBridge.shared.isControllingExternalEngine
     }
 
     func quitApplication() {
@@ -377,12 +541,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // 只清理动态壁纸窗口，不回退到旧静态壁纸
+        VideoWallpaperManager.shared.prepareForAppTermination()
+
         // 主程序退出时，强制清理所有 wallpaperengine-cli 进程（包括 daemon 和 client）
         let pkill = Process()
         pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         pkill.arguments = ["-9", "-f", "wallpaperengine-cli"]
         try? pkill.run()
         pkill.waitUntilExit()
+    }
+
+    /// 捕获 macOS 窗口布局循环异常。
+    /// 当 NSHostingView（SwiftUI）和 NSCollectionView（AppKit）混合布局时，
+    /// 窗口的 _layoutViewTree 可能触发 _postWindowNeedsLayout 导致无限布局循环崩溃。
+    /// NSExceptionHandler 只能记录日志，无法真正抑制异常（异常仍会被重新抛出）。
+    /// 真正的修复应确保所有 UI 操作都在主线程执行。
+    private func setupLayoutExceptionHandler() {
+        // 设置未捕获异常处理器，仅用于日志记录
+        NSSetUncaughtExceptionHandler { exception in
+            if exception.name.rawValue == "NSGenericException",
+               let reason = exception.reason,
+               reason.contains("Layout Window") {
+                AppLogger.error(.general, "检测到窗口布局循环异常（未捕获）: \(reason)")
+            }
+        }
+
+        // NSExceptionHandler 用于在异常传播过程中记录日志
+        guard let handler = NSExceptionHandler.default() else { return }
+        handler.setDelegate(LayoutExceptionHandlerDelegate.shared)
+        let mask = NSLogOtherExceptionMask | NSHandleOtherExceptionMask
+            | NSLogUncaughtExceptionMask | NSHandleUncaughtExceptionMask
+            | NSHandleUncaughtSystemExceptionMask
+        handler.setExceptionHandlingMask(mask)
     }
 
     private func setupMainMenu() {
@@ -766,5 +957,46 @@ struct AutoUpdateSheet: View {
         default:
             return t("updateNow")
         }
+    }
+}
+
+// MARK: - 布局异常处理代理
+
+/// 记录 macOS 窗口布局循环异常（_postWindowNeedsLayout）。
+/// 当 NSHostingView 和 NSCollectionView 混合布局时，窗口的 _layoutViewTree
+/// 可能触发 _postWindowNeedsLayout 导致 NSGenericException 崩溃。
+/// 注意：NSExceptionHandler 只能观察和记录，无法真正抑制异常传播。
+/// 异常仍会被重新抛出并导致崩溃。真正的修复需确保 UI 操作在主线程执行。
+/// NSExceptionHandlerDelegate 是 NSObject 的 category（非正式协议），
+/// 直接在 NSObject 子类上实现方法即可，无需协议声明。
+private final class LayoutExceptionHandlerDelegate: NSObject, @unchecked Sendable {
+    static let shared = LayoutExceptionHandlerDelegate()
+
+    /// 记录布局循环异常
+    @objc override func exceptionHandler(
+        _ sender: NSExceptionHandler,
+        shouldHandle exception: NSException,
+        mask: Int
+    ) -> Bool {
+        if exception.name.rawValue == "NSGenericException",
+           let reason = exception.reason,
+           reason.contains("Layout Window") {
+            AppLogger.error(.general, "窗口布局循环异常: \(reason)")
+        }
+        return true
+    }
+
+    /// 控制布局循环异常的日志记录
+    @objc override func exceptionHandler(
+        _ sender: NSExceptionHandler,
+        shouldLogException exception: NSException,
+        mask: Int
+    ) -> Bool {
+        if exception.name.rawValue == "NSGenericException",
+           let reason = exception.reason,
+           reason.contains("Layout Window") {
+            return false
+        }
+        return true
     }
 }

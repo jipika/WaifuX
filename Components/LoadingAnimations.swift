@@ -49,10 +49,18 @@ struct SkeletonCard: View {
     let width: CGFloat
     let height: CGFloat
     let cornerRadius: CGFloat
-    
+    var fillPrimary: Color = Color.white.opacity(0.08)
+    var fillSecondary: Color = Color.white.opacity(0.05)
+
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(Color.white.opacity(0.08))
+            .fill(
+                LinearGradient(
+                    colors: [fillPrimary, fillSecondary],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .frame(width: width, height: height)
             .shimmer()
     }
@@ -117,65 +125,94 @@ struct WallpaperCardSkeleton: View {
 // MARK: - Hero 区域骨架屏
 struct HeroSkeletonView: View {
     var height: CGFloat = 450
+    var primary: Color = Color(hex: "5A7CFF")
+    var secondary: Color = Color(hex: "8A5CFF")
+    var tertiary: Color = Color(hex: "20C1FF")
     
     var body: some View {
         ZStack {
-            // 主图骨架 - 使用渐变色避免纯黑
             LinearGradient(
                 colors: [
-                    Color(hex: "232338"),
-                    Color(hex: "1a1a2e"),
-                    Color(hex: "12121f")
+                    Color(hex: "1D2128"),
+                    primary.opacity(0.24),
+                    secondary.opacity(0.18),
+                    Color(hex: "10131A")
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RadialGradient(
+                colors: [
+                    primary.opacity(0.34),
+                    Color.clear
+                ],
+                center: .topLeading,
+                startRadius: 20,
+                endRadius: 620
+            )
+
+            RadialGradient(
+                colors: [
+                    tertiary.opacity(0.24),
+                    Color.clear
+                ],
+                center: .bottomTrailing,
+                startRadius: 40,
+                endRadius: 560
+            )
+
+            LinearGradient(
+                colors: [
+                    Color.clear,
+                    secondary.opacity(0.12),
+                    Color.black.opacity(0.30)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .shimmer()
+        }
+        .shimmer()
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+    }
+}
 
-            // 底部信息面板骨架
-            VStack(alignment: .leading, spacing: 18) {
-                // eyebrow 骨架
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.white.opacity(0.08))
-                    .frame(width: 80, height: 13)
-                    .shimmer()
+// MARK: - Hero 文案骨架屏
+struct HeroCaptionSkeletonView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 80, height: 13)
+                .shimmer()
 
-                // 大标题骨架
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.white.opacity(0.11))
-                    .frame(width: 300, height: 46)
-                    .shimmer()
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white.opacity(0.11))
+                .frame(width: 300, height: 46)
+                .shimmer()
 
-                // 元数据行骨架
-                HStack(spacing: 8) {
-                    ForEach(0..<4, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.white.opacity(0.07))
-                            .frame(width: i == 3 ? 50 : 70, height: 14)
-                            .shimmer()
-                    }
-                }
-
-                // 按钮行骨架
-                HStack(spacing: 12) {
-                    RoundedRectangle(cornerRadius: 22)
-                        .fill(Color.white.opacity(0.09))
-                        .frame(width: 130, height: 44)
-                        .shimmer()
-
-                    RoundedRectangle(cornerRadius: 22)
+            HStack(spacing: 8) {
+                ForEach(0..<4, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 3)
                         .fill(Color.white.opacity(0.07))
-                        .frame(width: 80, height: 44)
+                        .frame(width: i == 3 ? 50 : 70, height: 14)
                         .shimmer()
                 }
             }
-            .frame(maxWidth: 520, alignment: .leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .padding(.leading, 112)
-            .padding(.trailing, 96)
+
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(Color.white.opacity(0.09))
+                    .frame(width: 130, height: 44)
+                    .shimmer()
+
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(Color.white.opacity(0.07))
+                    .frame(width: 80, height: 44)
+                    .shimmer()
+            }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: height)
     }
 }
 
@@ -280,11 +317,21 @@ struct MediaGridSkeleton: View {
 
 // MARK: - 水平滚动骨架屏
 struct HorizontalScrollSkeleton: View {
+    var primaryColor: Color = Color.white.opacity(0.08)
+    var secondaryColor: Color = Color.white.opacity(0.05)
+
     var body: some View {
-        HStack(spacing: 18) {
-            ForEach(0..<5, id: \.self) { _ in
-                SkeletonCard(width: 278, height: 158, cornerRadius: 18)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 18) {
+                ForEach(0..<5, id: \.self) { _ in
+                    SkeletonCard(
+                        width: 278, height: 158, cornerRadius: 18,
+                        fillPrimary: primaryColor,
+                        fillSecondary: secondaryColor
+                    )
+                }
             }
+            .padding(.vertical, 2)
         }
     }
 }

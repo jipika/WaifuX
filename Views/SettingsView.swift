@@ -251,14 +251,6 @@ private struct GeneralSettingsTab: View {
             // 外观设置组
             MacSettingsSection(header: t("appearance")) {
                 MacSettingsRow(
-                    title: t("autoDownloadOriginal"),
-                    subtitle: nil,
-                    showDivider: true
-                ) {
-                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
-                }
-
-                MacSettingsRow(
                     title: t("grainTextureEffect"),
                     subtitle: t("grainTextureEffectDesc"),
                     showDivider: viewModel.grainTextureEnabled
@@ -290,20 +282,6 @@ private struct GeneralSettingsTab: View {
 
             // 动态壁纸设置组
             MacSettingsSection(header: t("videoWallpaper")) {
-                MacSettingsRow(
-                    title: t("showPosterOnLock"),
-                    subtitle: t("showPosterOnLockDesc"),
-                    showDivider: true
-                ) {
-                    MacToggle(isOn: Binding(
-                        get: { viewModel.showPosterOnLock },
-                        set: { newValue in
-                            viewModel.showPosterOnLock = newValue
-                            viewModel.syncVideoWallpaperSettings()
-                        }
-                    ))
-                }
-
                 MacSettingsRow(
                     title: t("pauseWhenOtherAppForeground"),
                     subtitle: t("pauseWhenOtherAppForegroundDesc"),
@@ -440,11 +418,6 @@ private struct GeneralSettingsTab: View {
 
             // 数据管理组
             MacSettingsSection(header: t("dataManagement")) {
-                // 壁纸数据源切换
-                wallpaperSourceSwitchView
-
-                Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
-
                 // API Key
                 HStack(spacing: 12) {
                     Text(t("apiKey"))
@@ -477,6 +450,13 @@ private struct GeneralSettingsTab: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
+
+                Text(t("apiKeyDescription"))
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
 
                 Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
 
@@ -511,79 +491,6 @@ private struct GeneralSettingsTab: View {
             Text(t("clearCacheConfirm"))
         }
     }
-
-    // MARK: - 壁纸数据源切换
-    @ViewBuilder
-    private var wallpaperSourceSwitchView: some View {
-        WallpaperSourcePicker()
-    }
-}
-
-// MARK: - 壁纸源选择器组件（胶囊分段控件风格）
-private struct WallpaperSourcePicker: View {
-    @ObservedObject private var sourceManager = WallpaperSourceManager.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                Text("壁纸数据源")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.9))
-
-                Spacer()
-
-                // 胶囊分段控件
-                HStack(spacing: 0) {
-                    SourceCapsule(
-                        title: "WallHaven",
-                        isActive: sourceManager.activeSource == .wallhaven,
-                        activeColor: Color(hex: "0A84FF")
-                    ) {
-                        sourceManager.switchTo(.wallhaven)
-                        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
-                    }
-
-                    SourceCapsule(
-                        title: "4K Wall",
-                        isActive: sourceManager.activeSource == .fourKWallpapers,
-                        activeColor: Color(hex: "FF9F0A")
-                    ) {
-                        sourceManager.switchTo(.fourKWallpapers)
-                        NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
-                    }
-                }
-                .fixedSize(horizontal: true, vertical: false)
-            }
-
-
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-}
-
-/// 单个胶囊按钮（激活态实心填充，非激活态透明）
-private struct SourceCapsule: View {
-    let title: String
-    let isActive: Bool
-    let activeColor: Color
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? .white : Color.white.opacity(0.5))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule()
-                        .fill(isActive ? activeColor : Color.clear)
-                )
-                .animation(.easeInOut(duration: 0.2), value: isActive)
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 // MARK: - 下载设置标签
@@ -598,14 +505,6 @@ private struct DownloadSettingsTab: View {
     var body: some View {
         MacSettingsForm {
             MacSettingsSection(header: t("downloadPreferences")) {
-                MacSettingsRow(
-                    title: t("autoDownloadOriginal"),
-                    subtitle: t("autoDownloadDesc"),
-                    showDivider: true
-                ) {
-                    MacToggle(isOn: $viewModel.autoDownloadOriginal)
-                }
-
                 MacSettingsRow(
                     title: t("saveToDownloadsFolder"),
                     subtitle: t("saveToDownloadsDesc"),
@@ -1328,10 +1227,12 @@ private struct WorkshopSettingsTab: View {
     @State private var steamUsername = ""
     @State private var steamPassword = ""
     @State private var steamGuardCode = ""
+    @State private var showLoginForm = false
     @State private var isVerifyingSteamLogin = false
     @State private var steamLoginStatusText: String?
     @State private var cleanupResult: (count: Int, bytesFreed: Int64)?
     @State private var isCleaningUp = false
+    @State private var steamCMDStatus: SteamCMDStatus = .downloading
 
     var body: some View {
         ScrollView {
@@ -1360,6 +1261,14 @@ private struct WorkshopSettingsTab: View {
             }
             .padding(24)
         }
+        .onAppear {
+            refreshSteamCMDStatus()
+            sourceManager.refreshStoredSteamCredentials()
+            syncCredentialPresentation()
+        }
+        .onChange(of: sourceManager.steamCredentialState) { _, _ in
+            syncCredentialPresentation()
+        }
     }
     
     private var steamCMDLoginSection: some View {
@@ -1371,24 +1280,39 @@ private struct WorkshopSettingsTab: View {
                 Text(t("steamCMDAccount"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
-                if sourceManager.hasStoredSteamCredentials {
-                    Label(t("loginDetected"), systemImage: "checkmark.circle.fill")
+                if case .available = sourceManager.steamCredentialState {
+                    Label("已保存", systemImage: "checkmark.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.green)
                 }
             }
             
-            if sourceManager.hasStoredSteamCredentials {
+            if case .available(let username) = sourceManager.steamCredentialState, !showLoginForm {
                 HStack {
-                    Text(String(format: t("accountSaved"), sourceManager.steamCredentials?.username ?? ""))
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(String(format: t("accountSaved"), username))
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Text("下次下载需要 Steam 账号的 Workshop 内容时会直接使用这组凭据。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary.opacity(0.85))
+                    }
                     Spacer()
+                    Button(t("relogin")) {
+                        steamUsername = username
+                        steamPassword = ""
+                        steamGuardCode = ""
+                        steamLoginStatusText = nil
+                        showLoginForm = true
+                    }
+                    .controlSize(.small)
                     Button(t("logout")) {
                         sourceManager.clearSteamCredentials()
                         steamUsername = ""
                         steamPassword = ""
                         steamGuardCode = ""
+                        steamLoginStatusText = "已清除已保存账号。"
+                        showLoginForm = true
                     }
                     .controlSize(.small)
                 }
@@ -1397,13 +1321,24 @@ private struct WorkshopSettingsTab: View {
                 .cornerRadius(8)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Label(credentialStateTitle, systemImage: credentialStateIcon)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(credentialStateColor)
+                        Spacer()
+                    }
+
+                    Text(credentialStateDescription)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
                     TextField(t("steamUsernamePlaceholder"), text: $steamUsername)
                         .textFieldStyle(.roundedBorder)
                     SecureField(t("steamPasswordPlaceholder"), text: $steamPassword)
                         .textFieldStyle(.roundedBorder)
                     TextField(t("steamGuardCodePlaceholder"), text: $steamGuardCode)
                         .textFieldStyle(.roundedBorder)
-                    Text(t("steamGuardCodeHint"))
+                    Text("只有在邮箱验证码或备用令牌场景下才需要填写验证码；大多数情况下可以留空，按提示去 Steam App 里确认即可。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     
@@ -1411,23 +1346,33 @@ private struct WorkshopSettingsTab: View {
                         if isVerifyingSteamLogin {
                             ProgressView()
                                 .scaleEffect(0.8)
-                            Text(t("testing"))
+                            Text("正在验证账号并连接 SteamCMD…")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         } else if let steamLoginStatusText {
                             Text(steamLoginStatusText)
                                 .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(loginStatusColor)
                         }
 
                         Spacer()
-                        Button(t("saveAccount")) {
+
+                        if case .available = sourceManager.steamCredentialState {
+                            Button("取消") {
+                                showLoginForm = false
+                                steamPassword = ""
+                                steamGuardCode = ""
+                                steamLoginStatusText = nil
+                            }
+                            .controlSize(.small)
+                        }
+
+                        Button("验证并保存") {
                             guard !steamUsername.isEmpty, !steamPassword.isEmpty else { return }
                             isVerifyingSteamLogin = true
                             steamLoginStatusText = nil
                             Task {
                                 do {
-                                    // 先验证登录，成功后再保存凭证
                                     try await workshopService.verifySteamLogin(
                                         username: steamUsername,
                                         password: steamPassword,
@@ -1439,7 +1384,14 @@ private struct WorkshopSettingsTab: View {
                                         guardCode: steamGuardCode
                                     )
                                     await MainActor.run {
-                                        steamLoginStatusText = t("loginDetected")
+                                        steamPassword = ""
+                                        steamGuardCode = ""
+                                        if case .available = sourceManager.steamCredentialState {
+                                            steamLoginStatusText = "账号验证成功，已保存到本机。"
+                                            showLoginForm = false
+                                        } else {
+                                            steamLoginStatusText = "账号验证成功，但本机保存状态未更新。可以先尝试下载，如仍提示需要登录，再重新保存一次。"
+                                        }
                                         isVerifyingSteamLogin = false
                                     }
                                 } catch let error as WorkshopError {
@@ -1448,13 +1400,15 @@ private struct WorkshopSettingsTab: View {
                                         case .guardCodeRequired(let msg):
                                             steamLoginStatusText = msg
                                         case .timeout:
-                                            steamLoginStatusText = "连接 SteamCMD 超时，请稍后重试"
+                                            steamLoginStatusText = "连接 SteamCMD 超时，请稍后重试。"
                                         case .loginTimeout:
-                                            steamLoginStatusText = "Steam 登录超时，请检查网络连接后重试"
+                                            steamLoginStatusText = "Steam 登录超时，请检查网络或代理设置后重试。"
                                         case .sessionExpired:
-                                            steamLoginStatusText = "Steam 登录已过期，请重新验证"
+                                            steamLoginStatusText = "Steam 登录已过期，请重新验证。"
                                         case .invalidCredentials:
-                                            steamLoginStatusText = "账号或密码错误，请检查"
+                                            steamLoginStatusText = "账号、密码或验证码不正确，请检查后重试。"
+                                        case .steamcmdNotFound:
+                                            steamLoginStatusText = "SteamCMD 组件不可用，请先检查安装状态。"
                                         default:
                                             steamLoginStatusText = t("steamPasswordError")
                                         }
@@ -1477,7 +1431,7 @@ private struct WorkshopSettingsTab: View {
                 .cornerRadius(8)
             }
             
-            Text(t("anonymousDownloadDesc"))
+            Text("SteamCMD 下载会使用这里保存的账号进行验证。未保存账号时，涉及 Steam 账号校验的 Workshop 内容将无法完成下载。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
@@ -1494,21 +1448,24 @@ private struct WorkshopSettingsTab: View {
                 Text(t("steamCMDStatus"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
+                Button("刷新") {
+                    refreshSteamCMDStatus()
+                }
+                .controlSize(.small)
             }
 
             HStack(spacing: 12) {
-                let status = workshopService.checkSteamCMDStatus()
                 Circle()
-                    .fill(steamCMDStatusColor(status))
+                    .fill(steamCMDStatusColor(steamCMDStatus))
                     .frame(width: 8, height: 8)
 
-                Text(steamCMDStatusText(status))
+                Text(steamCMDStatusText(steamCMDStatus))
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                steamCMDStatusTrailingLabel(status)
+                steamCMDStatusTrailingLabel(steamCMDStatus)
             }
             .padding(12)
             .background(Color.white.opacity(0.03))
@@ -1611,6 +1568,80 @@ private struct WorkshopSettingsTab: View {
             Label(t("downloading"), systemImage: "arrow.down.circle")
                 .font(.system(size: 12))
                 .foregroundStyle(.blue)
+        }
+    }
+
+    private var loginStatusColor: Color {
+        guard let steamLoginStatusText else { return .secondary }
+        if steamLoginStatusText.contains("成功") || steamLoginStatusText.contains("已保存") {
+            return .green
+        }
+        if steamLoginStatusText.contains("超时") || steamLoginStatusText.contains("错误") || steamLoginStatusText.contains("失败") {
+            return .orange
+        }
+        return .secondary
+    }
+
+    private var credentialStateTitle: String {
+        switch sourceManager.steamCredentialState {
+        case .unknown:
+            return "尚未加载本地账号"
+        case .missing:
+            return "未发现已保存账号"
+        case .failure:
+            return "读取本地账号失败"
+        case .available(let username):
+            return "已检测到账号 \(username)"
+        }
+    }
+
+    private var credentialStateDescription: String {
+        switch sourceManager.steamCredentialState {
+        case .unknown:
+            return "正在准备本地账号信息。"
+        case .missing:
+            return "当前没有检测到已保存的 SteamCMD 账号。你可以直接填写下面的表单进行验证并保存。"
+        case .failure(let message):
+            return "读取本地已保存账号时发生错误：\(message)"
+        case .available:
+            return "本机已经保存了可用账号。如果你想换账号，可以直接在下面重新验证并覆盖保存。"
+        }
+    }
+
+    private var credentialStateIcon: String {
+        switch sourceManager.steamCredentialState {
+        case .unknown: return "questionmark.circle"
+        case .missing: return "person.crop.circle.badge.exclamationmark"
+        case .failure: return "exclamationmark.triangle"
+        case .available: return "checkmark.circle"
+        }
+    }
+
+    private var credentialStateColor: Color {
+        switch sourceManager.steamCredentialState {
+        case .available: return .green
+        case .unknown: return .secondary
+        case .missing: return .orange
+        case .failure: return .red
+        }
+    }
+
+    private func refreshSteamCMDStatus() {
+        steamCMDStatus = workshopService.checkSteamCMDStatus()
+    }
+
+    private func syncCredentialPresentation() {
+        if case .available(let username) = sourceManager.steamCredentialState {
+            steamUsername = username
+            if let credentials = sourceManager.steamCredentials {
+                steamPassword = credentials.password
+                steamGuardCode = credentials.guardCode ?? ""
+            }
+            if !isVerifyingSteamLogin {
+                showLoginForm = false
+            }
+        } else if !isVerifyingSteamLogin {
+            showLoginForm = true
         }
     }
 }

@@ -10,7 +10,6 @@ class SettingsViewModel: ObservableObject {
     // 会触发 _CFXPreferences 递归栈溢出（EXC_BAD_ACCESS SIGSEGV）。
     // 改用 @Published + 手动 UserDefaults 同步 + restoreSavedSettings() 延迟恢复。
 
-    @Published var autoDownloadOriginal = false { didSet { UserDefaults.standard.set(autoDownloadOriginal, forKey: "auto_download_original") } }
     @Published var saveToDownloads = true {
         didSet { UserDefaults.standard.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
     }
@@ -30,7 +29,6 @@ class SettingsViewModel: ObservableObject {
             ArcBackgroundSettings.shared.grainIntensity = grainIntensity
         }
     }
-    @Published var showPosterOnLock = true { didSet { UserDefaults.standard.set(showPosterOnLock, forKey: "video_wallpaper_show_poster_on_lock") } }
     @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
     @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
@@ -106,7 +104,7 @@ class SettingsViewModel: ObservableObject {
 
     init() {
         // ⚠️ init 中不读 UserDefaults！所有持久化数据通过 restoreSavedSettings() 延迟恢复
-        // refreshDataSourceProfiles() 和 syncVideoWallpaperSettings() 也移到 restore 中
+        // refreshDataSourceProfiles() 等延后到 restore 中执行
     }
 
     /// ⚠️ 延迟恢复所有持久化设置（完全异步，避免阻塞主线程）
@@ -114,7 +112,6 @@ class SettingsViewModel: ObservableObject {
     func restoreSavedSettings() {
         // 第一步：快速恢复基本设置（UserDefaults 读取很快）
         let defaults = UserDefaults.standard
-        autoDownloadOriginal = defaults.bool(forKey: "auto_download_original")
         saveToDownloads = defaults.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
         if let raw = defaults.string(forKey: "theme_mode"), let _ = ThemeMode(rawValue: raw) {
             themeModeRawValue = raw
@@ -124,7 +121,6 @@ class SettingsViewModel: ObservableObject {
         grainTextureQuality = defaults.string(forKey: "grain_texture_quality") ?? "high"
         let savedGrainIntensity = defaults.double(forKey: "arc_grain_intensity")
         grainIntensity = savedGrainIntensity > 0 ? savedGrainIntensity : 0.5
-        showPosterOnLock = defaults.object(forKey: "video_wallpaper_show_poster_on_lock") as? Bool ?? true
         pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
         pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
         pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
@@ -135,9 +131,6 @@ class SettingsViewModel: ObservableObject {
         // 恢复 API Key 缓存
         Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
         Self._apiKeyRestored = true
-        
-        // 同步视频壁纸设置（轻量级）
-        syncVideoWallpaperSettings()
         
         // 第二步：后台异步执行耗时操作
         Task(priority: .background) { @MainActor in
@@ -150,11 +143,6 @@ class SettingsViewModel: ObservableObject {
             async let repoTask: () = loadRuleRepository()
             _ = await (cacheTask, repoTask)
         }
-    }
-
-    /// 同步动态壁纸设置到 VideoWallpaperManager
-    func syncVideoWallpaperSettings() {
-        VideoWallpaperManager.shared.showPosterOnLock = showPosterOnLock
     }
 
     /// 同步自动暂停设置到 DynamicWallpaperAutoPauseManager

@@ -17,9 +17,13 @@ final class DesktopWallpaperSyncManager {
 
     /// 每个屏幕最后通过 WaifuX 设置的静态壁纸 URL（key 为 screenID）
     private var lastSetImageURLByScreen: [String: URL] = [:]
+    /// 每个物理显示器指纹最后设置的静态壁纸 URL，用于外接屏重连后 screenID 变化时恢复。
+    private var lastSetImageURLByFingerprint: [String: URL] = [:]
 
     /// 每个屏幕最后设置的选项
     private var lastOptionsByScreen: [String: [NSWorkspace.DesktopImageOptionKey: Any]] = [:]
+    /// 每个物理显示器指纹最后设置的选项。
+    private var lastOptionsByFingerprint: [String: [NSWorkspace.DesktopImageOptionKey: Any]] = [:]
 
     /// 记录最后一次尝试同步的时间，避免过于频繁的重复同步
     private var lastSyncTime: Date?
@@ -58,8 +62,11 @@ final class DesktopWallpaperSyncManager {
 
         for targetScreen in targetScreens {
             let screenID = targetScreen.wallpaperScreenIdentifier
+            let fingerprint = targetScreen.wallpaperScreenFingerprint
             lastSetImageURLByScreen[screenID] = url
+            lastSetImageURLByFingerprint[fingerprint] = url
             lastOptionsByScreen[screenID] = options
+            lastOptionsByFingerprint[fingerprint] = options
         }
     }
 
@@ -68,11 +75,16 @@ final class DesktopWallpaperSyncManager {
     func clearRegistration(for screen: NSScreen? = nil) {
         if let screen = screen {
             let screenID = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
             lastSetImageURLByScreen.removeValue(forKey: screenID)
+            lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
             lastOptionsByScreen.removeValue(forKey: screenID)
+            lastOptionsByFingerprint.removeValue(forKey: fingerprint)
         } else {
             lastSetImageURLByScreen.removeAll()
+            lastSetImageURLByFingerprint.removeAll()
             lastOptionsByScreen.removeAll()
+            lastOptionsByFingerprint.removeAll()
         }
     }
 
@@ -99,22 +111,31 @@ final class DesktopWallpaperSyncManager {
             self.pendingScreenChangeWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                self.cleanupOrphanedScreenState()
+                self.relinkScreenStateForCurrentDisplays()
             }
             self.pendingScreenChangeWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
         }
     }
 
-    private func cleanupOrphanedScreenState() {
-        let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
-        let orphanedScreenIDs = Set(lastSetImageURLByScreen.keys).subtracting(currentScreenIDs)
-        for screenID in orphanedScreenIDs {
-            lastSetImageURLByScreen.removeValue(forKey: screenID)
-            lastOptionsByScreen.removeValue(forKey: screenID)
+    private func relinkScreenStateForCurrentDisplays() {
+        var relinkedCount = 0
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
+
+            if lastSetImageURLByScreen[screenID] == nil,
+               let url = lastSetImageURLByFingerprint[fingerprint] {
+                lastSetImageURLByScreen[screenID] = url
+                relinkedCount += 1
+            }
+            if lastOptionsByScreen[screenID] == nil,
+               let options = lastOptionsByFingerprint[fingerprint] {
+                lastOptionsByScreen[screenID] = options
+            }
         }
-        if !orphanedScreenIDs.isEmpty {
-            print("[DesktopWallpaperSyncManager] Cleaned orphaned registration entries for \(orphanedScreenIDs.count) disconnected screen(s): \(orphanedScreenIDs)")
+        if relinkedCount > 0 {
+            print("[DesktopWallpaperSyncManager] Relinked wallpaper registration for \(relinkedCount) reconnected screen(s)")
         }
     }
 
@@ -134,10 +155,12 @@ final class DesktopWallpaperSyncManager {
         let videoManager = VideoWallpaperManager.shared
         let workspace = NSWorkspace.shared
         let currentScreens = NSScreen.screens
+        relinkScreenStateForCurrentDisplays()
 
         // 1. 对每个当前屏幕，优先同步该屏幕自己的壁纸状态
         for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
 
             // 如果该屏幕属于视频壁纸目标，同步其 poster（不再跳过，确保所有 Spaces 都正确）
             if videoManager.hasActiveWallpaper(on: screen),
@@ -158,7 +181,7 @@ final class DesktopWallpaperSyncManager {
             }
 
             // 否则同步该屏幕最后注册的静态壁纸
-            guard let url = lastSetImageURLByScreen[screenID] else {
+            guard let url = lastSetImageURLByScreen[screenID] ?? lastSetImageURLByFingerprint[fingerprint] else {
                 continue
             }
 
@@ -171,7 +194,8 @@ final class DesktopWallpaperSyncManager {
             do {
                 // 使用 setDesktopImageURLForAllSpaces 确保所有 Spaces 同步，
                 // 该方法内部已发送 com.apple.desktop 通知，无需额外触发
-                try workspace.setDesktopImageURLForAllSpaces(url, for: screen, options: lastOptionsByScreen[screenID] ?? [:])
+                let options = lastOptionsByScreen[screenID] ?? lastOptionsByFingerprint[fingerprint] ?? [:]
+                try workspace.setDesktopImageURLForAllSpaces(url, for: screen, options: options)
                 print("[DesktopWallpaperSyncManager] [\(source)] Synced static wallpaper for screen \(screen.localizedName)")
             } catch {
                 print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync wallpaper for screen \(screen.localizedName): \(error)")
@@ -179,5 +203,4 @@ final class DesktopWallpaperSyncManager {
         }
     }
 }
-
 

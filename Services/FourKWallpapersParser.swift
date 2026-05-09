@@ -369,8 +369,11 @@ final class FourKWallpapersParser {
         let thumbnailExt = (thumbnailSrc as NSString).pathExtension.lowercased()
         let actualExt = thumbnailExt.isEmpty ? "jpg" : thumbnailExt
 
-        // 缩略图 URL（使用实际扩展名）
-        let thumbnailURLString = "\(baseURL)/images/walls/thumbs/\(id).\(actualExt)"
+        // 缩略图 URL 优先使用 HTML 里的真实 src，避免站点少数条目的路径/扩展名和推断规则不一致。
+        let resolvedThumbnailURLString = thumbnailSrc.hasPrefix("http") ? thumbnailSrc : "\(baseURL)\(thumbnailSrc)"
+        let thumbnailURLString = resolvedThumbnailURLString.isEmpty
+            ? "\(baseURL)/images/walls/thumbs/\(id).\(actualExt)"
+            : resolvedThumbnailURLString
         let hdThumbnailURLString = "\(baseURL)/images/walls/thumbs_3t/\(id).\(actualExt)"
 
         // 详情页链接 & 标题（提前解析，originalURL 需要 detailURL）
@@ -650,16 +653,25 @@ final class FourKWallpapersParser {
         }
     }
 
-    /// 从 URL 中提取分辨率（如 _3840x2160）
+    /// 从 URL 中提取分辨率（如 _3840x2160、-3840x2160-、3840x2160）
     private func extractDimensionsFromURL(_ urlString: String) -> (width: Int, height: Int)? {
-        // 匹配 URL 中的 _WxH 模式，如 _3840x2160
-        guard let range = urlString.range(of: "_(\\d{3,5})x(\\d{3,5})", options: .regularExpression) else {
+        let normalized = urlString
+            .replacingOccurrences(of: "%C3%97", with: "x", options: .caseInsensitive)
+            .replacingOccurrences(of: "×", with: "x")
+        let pattern = #"(?<!\d)(\d{3,5})[xX](\d{3,5})(?!\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        guard let match = regex.firstMatch(in: normalized, range: range),
+              match.numberOfRanges >= 3,
+              let widthRange = Range(match.range(at: 1), in: normalized),
+              let heightRange = Range(match.range(at: 2), in: normalized),
+              let width = Int(normalized[widthRange]),
+              let height = Int(normalized[heightRange]),
+              width > 0,
+              height > 0 else {
             return nil
         }
-        let match = String(urlString[range])
-        let parts = match.dropFirst().split(separator: "x").compactMap { Int($0) }
-        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
-        return (parts[0], parts[1])
+        return (width, height)
     }
 
     /// 从关键词推断原图分辨率

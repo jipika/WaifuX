@@ -43,6 +43,10 @@ struct WallpaperDetailSheet: View {
     /// 分享面板相对定位用（与分享按钮同几何的锚定 `NSView`）
     @State private var sharePickerAnchorView: NSView?
 
+    private var prefetchNamespace: String {
+        "wallpaper-detail-\(initialWallpaper.id)"
+    }
+
     // MARK: - 本地文件检测
     private var isLocalFile: Bool {
         wallpaper.id.hasPrefix("local_")
@@ -187,7 +191,10 @@ struct WallpaperDetailSheet: View {
                                 // 预加载下一张壁纸的主图（完整分辨率）
                                 if let nextWallpaper = nextItemDataSource.nextItem as? Wallpaper,
                                    let imageURL = nextWallpaper.fullImageURL ?? nextWallpaper.thumbURL {
-                                    ImagePrefetcher(urls: [imageURL]).start()
+                                    ForegroundPrefetchManager.shared.start(
+                                        urls: [imageURL],
+                                        namespace: prefetchNamespace
+                                    )
                                 }
                             }
                         )
@@ -235,6 +242,7 @@ struct WallpaperDetailSheet: View {
             isVisible = false
             // 清理预加载任务
             preloadTask?.cancel()
+            ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
             removeKeyboardMonitor()
         }
     }

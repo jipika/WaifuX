@@ -234,7 +234,7 @@ enum DataSourceProfileStore {
         if let url = Bundle.main.url(forResource: "DataSourceProfile", withExtension: "json", subdirectory: "Resources"),
            let data = try? Data(contentsOf: url),
            let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
-            print("[DataSourceProfileStore] Loaded built-in config from Bundle Resources")
+            // print("[DataSourceProfileStore] Loaded built-in config from Bundle Resources")
             return catalog
         }
 
@@ -242,7 +242,7 @@ enum DataSourceProfileStore {
         if let url = Bundle.main.url(forResource: "DataSourceProfile", withExtension: "json"),
            let data = try? Data(contentsOf: url),
            let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
-            print("[DataSourceProfileStore] Loaded built-in config from Bundle root")
+            // print("[DataSourceProfileStore] Loaded built-in config from Bundle root")
             return catalog
         }
 
@@ -254,13 +254,13 @@ enum DataSourceProfileStore {
            fileManager.fileExists(atPath: projectURL.path),
            let data = try? Data(contentsOf: projectURL),
            let catalog = try? JSONDecoder().decode(DataSourceCatalog.self, from: data) {
-            print("[DataSourceProfileStore] Loaded built-in config from current directory")
+            // print("[DataSourceProfileStore] Loaded built-in config from current directory")
             return catalog
         }
         #endif
 
         // 失败时返回空 catalog
-        print("[DataSourceProfileStore] Failed to load built-in config, using empty catalog")
+        // print("[DataSourceProfileStore] Failed to load built-in config, using empty catalog")
         return DataSourceCatalog(schemaVersion: schemaVersion, profiles: [])
     }
 
@@ -281,9 +281,9 @@ enum DataSourceProfileStore {
     static func activeProfile(defaults: UserDefaults = .standard) -> DataSourceProfile {
         let profiles = allProfiles(defaults: defaults)
         let activeID = defaults.string(forKey: activeProfileIDKey) ?? builtinProfile.id
-        print("[DataSourceProfileStore] activeProfile: activeID=\(activeID), availableProfiles=\(profiles.map { $0.id })")
+        // print("[DataSourceProfileStore] activeProfile: activeID=\(activeID), availableProfiles=\(profiles.map { $0.id })")
         let profile = profiles.first(where: { $0.id == activeID }) ?? builtinProfile
-        print("[DataSourceProfileStore] activeProfile: resolvedProfile=\(profile.id)")
+        // print("[DataSourceProfileStore] activeProfile: resolvedProfile=\(profile.id)")
         return profile
     }
 
@@ -342,7 +342,7 @@ enum DataSourceProfileStore {
         // 如果没有设置活跃配置ID，设置为内置配置
         if defaults.string(forKey: activeProfileIDKey) == nil {
             defaults.set(builtinProfile.id, forKey: activeProfileIDKey)
-            print("[DataSourceProfileStore] 初始化默认配置: \(builtinProfile.id)")
+            // print("[DataSourceProfileStore] 初始化默认配置: \(builtinProfile.id)")
         }
 
         // 验证当前活跃配置是否有效
@@ -351,7 +351,7 @@ enum DataSourceProfileStore {
         if let id = activeID, !all.contains(where: { $0.id == id }) {
             // 如果活跃配置ID对应的配置不存在，重置为内置配置
             defaults.set(builtinProfile.id, forKey: activeProfileIDKey)
-            print("[DataSourceProfileStore] 重置为默认配置: \(builtinProfile.id)")
+            // print("[DataSourceProfileStore] 重置为默认配置: \(builtinProfile.id)")
         }
     }
 

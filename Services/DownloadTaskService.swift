@@ -51,6 +51,7 @@ class DownloadTaskService: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var lastProgressUpdateTimes: [String: Date] = [:]
     private let progressUpdateMinInterval: TimeInterval = 0.08
+    private var suppressedToastTaskIDs = Set<String>()
 
     // MARK: - Active Download Tasks Management
     /// 使用 actor 隔离存储确保线程安全
@@ -211,6 +212,7 @@ class DownloadTaskService: ObservableObject {
         objectWillChange.send()
         tasks.removeAll { $0.id == id }
         lastProgressUpdateTimes.removeValue(forKey: id)
+        suppressedToastTaskIDs.remove(id)
         persistTasks()
     }
 
@@ -220,6 +222,18 @@ class DownloadTaskService: ObservableObject {
 
     func task(for itemID: String, kind: DownloadTaskKind) -> DownloadTask? {
         tasks.first { $0.kind == kind && $0.itemID == itemID }
+    }
+
+    func markToastSuppressed(for id: String) {
+        suppressedToastTaskIDs.insert(id)
+    }
+
+    func clearToastSuppression(for id: String) {
+        suppressedToastTaskIDs.remove(id)
+    }
+
+    func isToastSuppressed(for id: String) -> Bool {
+        suppressedToastTaskIDs.contains(id)
     }
 
     func updateProgress(id: String, progress: Double) {
@@ -260,6 +274,7 @@ class DownloadTaskService: ObservableObject {
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
         lastProgressUpdateTimes.removeValue(forKey: id)
+        suppressedToastTaskIDs.remove(id)
         persistTasks()
         scheduleVisibilityRefresh()
     }
@@ -279,6 +294,7 @@ class DownloadTaskService: ObservableObject {
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
         lastProgressUpdateTimes.removeValue(forKey: id)
+        suppressedToastTaskIDs.remove(id)
         persistTasks()
     }
 

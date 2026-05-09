@@ -127,6 +127,7 @@ final class StatusBarController: NSObject {
     private let menu = NSMenu()
 
     private lazy var openWindowItem = NSMenuItem(title: t("statusbar.showWindow"), action: #selector(showMainWindow), keyEquivalent: "")
+    private lazy var releaseMemoryItem = NSMenuItem(title: t("statusbar.releaseMemory"), action: #selector(releaseForegroundMemory), keyEquivalent: "")
     private lazy var toggleWallpaperItem = NSMenuItem(title: t("statusbar.enableWallpaper"), action: #selector(toggleDynamicWallpaper), keyEquivalent: "")
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
     private lazy var muteItem = NSMenuItem(title: t("statusbar.muteWallpaper"), action: #selector(toggleMute), keyEquivalent: "")
@@ -135,6 +136,7 @@ final class StatusBarController: NSObject {
     private let videoWallpaperManager = VideoWallpaperManager.shared
     private let weBridge = WallpaperEngineXBridge.shared
     private var showWindowHandler: (() -> Void)?
+    private var releaseMemoryHandler: (() -> Void)?
     private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
     
@@ -152,12 +154,13 @@ final class StatusBarController: NSObject {
     }
 
     /// 配置处理程序（只能调用一次）
-    func configure(showWindow: @escaping () -> Void, quit: @escaping () -> Void) {
+    func configure(showWindow: @escaping () -> Void, releaseMemory: @escaping () -> Void, quit: @escaping () -> Void) {
         guard !isConfigured else {
             print("[StatusBarController] Already configured, skipping...")
             return
         }
         self.showWindowHandler = showWindow
+        self.releaseMemoryHandler = releaseMemory
         self.quitHandler = quit
         self.isConfigured = true
     }
@@ -194,12 +197,14 @@ final class StatusBarController: NSObject {
         button.toolTip = "WaifuX"
 
         openWindowItem.target = self
+        releaseMemoryItem.target = self
         toggleWallpaperItem.target = self
         playPauseItem.target = self
         muteItem.target = self
         quitItem.target = self
 
         menu.addItem(openWindowItem)
+        menu.addItem(releaseMemoryItem)
         menu.addItem(.separator())
         menu.addItem(toggleWallpaperItem)
         menu.addItem(playPauseItem)
@@ -214,6 +219,7 @@ final class StatusBarController: NSObject {
     private func bindWallpaperState() {
         videoWallpaperManager.$currentVideoURL
             .combineLatest(videoWallpaperManager.$isPaused, videoWallpaperManager.$isMuted, videoWallpaperManager.$volume)
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _, _, _, _ in
                 self?.refreshMenuState()
@@ -222,6 +228,7 @@ final class StatusBarController: NSObject {
 
         weBridge.$isControllingExternalEngine
             .combineLatest(weBridge.$isExternalPaused)
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _, _ in
                 self?.refreshMenuState()
@@ -298,11 +305,16 @@ final class StatusBarController: NSObject {
         showWindowHandler?()
     }
 
+    @objc private func releaseForegroundMemory() {
+        releaseMemoryHandler?()
+    }
+
     @objc private func togglePlayback() {
         // 如果当前由 Wallpaper Engine X 接管，走 URL Scheme
         if weBridge.isControllingExternalEngine {
             if weBridge.isExternalPaused {
                 weBridge.resumeWallpaper()
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
             } else {
                 weBridge.pauseWallpaper()
             }
@@ -321,6 +333,7 @@ final class StatusBarController: NSObject {
 
                 if self.videoWallpaperManager.isPaused {
                     self.videoWallpaperManager.resumeWallpaper(for: selectedScreen)
+                    DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
                 } else {
                     self.videoWallpaperManager.pauseWallpaper(for: selectedScreen)
                 }
@@ -329,6 +342,7 @@ final class StatusBarController: NSObject {
             // 单显示器环境下直接操作
             if videoWallpaperManager.isPaused {
                 videoWallpaperManager.resumeWallpaper()
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
             } else {
                 videoWallpaperManager.pauseWallpaper()
             }

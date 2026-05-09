@@ -260,6 +260,14 @@ class DisplaySelectorManager: ObservableObject {
         isShowingSelector = false
         completionHandler = nil
     }
+
+    /// 主窗口进入后台极致释放时清掉待执行闭包，避免闭包继续持有详情页或 ViewModel。
+    func cancelForMemoryRelease() {
+        selectorTitle = ""
+        selectorMessage = ""
+        isShowingSelector = false
+        completionHandler = nil
+    }
 }
 
 // MARK: - 便捷扩展

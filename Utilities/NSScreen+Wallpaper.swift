@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 
 extension NSScreen {
     /// 返回稳定的屏幕标识符，用于跨模块的屏幕级状态字典 key。
@@ -14,5 +15,25 @@ extension NSScreen {
             return screenNumber.stringValue
         }
         return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
+    }
+
+    /// 尽量稳定的物理显示器指纹，用于外接屏断开 / 重连后 `NSScreenNumber` 变化时找回目标屏。
+    var wallpaperScreenFingerprint: String {
+        guard let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return "fallback:\(localizedName):\(Int(frame.width))x\(Int(frame.height))"
+        }
+
+        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+        let vendor = CGDisplayVendorNumber(displayID)
+        let model = CGDisplayModelNumber(displayID)
+        let serial = CGDisplaySerialNumber(displayID)
+        let builtin = CGDisplayIsBuiltin(displayID) != 0 ? "builtin" : "external"
+        let pixelWidth = Int(frame.width * backingScaleFactor)
+        let pixelHeight = Int(frame.height * backingScaleFactor)
+
+        if serial != 0 {
+            return "cg:\(vendor):\(model):\(serial):\(builtin)"
+        }
+        return "cg:\(vendor):\(model):noserial:\(localizedName):\(pixelWidth)x\(pixelHeight):\(builtin)"
     }
 }

@@ -3,24 +3,213 @@ import AppKit
 import Kingfisher
 import AVFoundation
 
+@MainActor
+private final class MainContentNavigationState: ObservableObject {
+    @Published var selectedTab: MainTab = .home
+    @Published var selectedWallpaper: Wallpaper?
+    @Published var selectedMedia: MediaItem?
+    @Published var selectedAnime: AnimeSearchResult?
+    @Published var librarySelectedAnime: AnimeSearchResult?
+    @Published var librarySelectedWallpaper: Wallpaper?
+    @Published var librarySelectedMedia: MediaItem?
+    @Published var libraryWallpaperContext: [Wallpaper] = []
+    @Published var libraryMediaContext: [MediaItem] = []
+
+    func binding<Value>(for keyPath: ReferenceWritableKeyPath<MainContentNavigationState, Value>) -> Binding<Value> {
+        Binding(
+            get: { self[keyPath: keyPath] },
+            set: { self[keyPath: keyPath] = $0 }
+        )
+    }
+
+    func resetForMemoryRelease() {
+        selectedWallpaper = nil
+        selectedMedia = nil
+        selectedAnime = nil
+        librarySelectedAnime = nil
+        librarySelectedWallpaper = nil
+        librarySelectedMedia = nil
+        libraryWallpaperContext.removeAll()
+        libraryMediaContext.removeAll()
+        selectedTab = .home
+    }
+}
+
+private extension MainTab {
+    var controllerIndex: Int {
+        switch self {
+        case .home: return 0
+        case .wallpaperExplore: return 1
+        case .animeExplore: return 2
+        case .mediaExplore: return 3
+        case .myMedia: return 4
+        }
+    }
+}
+
+private struct MainTabContainerView: NSViewControllerRepresentable {
+    @ObservedObject var navigationState: MainContentNavigationState
+    @ObservedObject var wallpaperViewModel: WallpaperViewModel
+    @ObservedObject var mediaViewModel: MediaExploreViewModel
+    @ObservedObject var animeViewModel: AnimeViewModel
+
+    func makeNSViewController(context: Context) -> MainTabViewController {
+        let controller = MainTabViewController()
+        controller.configure(
+            navigationState: navigationState,
+            wallpaperViewModel: wallpaperViewModel,
+            mediaViewModel: mediaViewModel,
+            animeViewModel: animeViewModel
+        )
+        return controller
+    }
+
+    func updateNSViewController(_ controller: MainTabViewController, context: Context) {
+        controller.select(tab: navigationState.selectedTab)
+    }
+}
+
+@MainActor
+private final class MainTabViewController: NSTabViewController {
+    private var isConfigured = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        tabStyle = .unspecified
+        tabView.tabViewType = .noTabsNoBorder
+    }
+
+    func configure(
+        navigationState: MainContentNavigationState,
+        wallpaperViewModel: WallpaperViewModel,
+        mediaViewModel: MediaExploreViewModel,
+        animeViewModel: AnimeViewModel
+    ) {
+        guard !isConfigured else {
+            select(tab: navigationState.selectedTab)
+            return
+        }
+
+        addPage(title: MainTab.home.title, view: HomeTabPage(
+            navigationState: navigationState,
+            wallpaperViewModel: wallpaperViewModel,
+            mediaViewModel: mediaViewModel
+        ))
+        addPage(title: MainTab.wallpaperExplore.title, view: WallpaperExploreTabPage(
+            navigationState: navigationState,
+            wallpaperViewModel: wallpaperViewModel
+        ))
+        addPage(title: MainTab.animeExplore.title, view: AnimeExploreTabPage(
+            navigationState: navigationState,
+            animeViewModel: animeViewModel
+        ))
+        addPage(title: MainTab.mediaExplore.title, view: MediaExploreTabPage(
+            navigationState: navigationState,
+            mediaViewModel: mediaViewModel
+        ))
+        addPage(title: MainTab.myMedia.title, view: MyLibraryTabPage(
+            navigationState: navigationState
+        ))
+
+        isConfigured = true
+        select(tab: navigationState.selectedTab)
+    }
+
+    func select(tab: MainTab) {
+        let targetIndex = tab.controllerIndex
+        guard selectedTabViewItemIndex != targetIndex else { return }
+        selectedTabViewItemIndex = targetIndex
+    }
+
+    private func addPage<Content: View>(title: String, view: Content) {
+        let hostingController = NSHostingController(rootView: view)
+        let item = NSTabViewItem(viewController: hostingController)
+        item.label = title
+        addTabViewItem(item)
+    }
+}
+
+private struct HomeTabPage: View {
+    @ObservedObject var navigationState: MainContentNavigationState
+    @ObservedObject var wallpaperViewModel: WallpaperViewModel
+    @ObservedObject var mediaViewModel: MediaExploreViewModel
+
+    var body: some View {
+        HomeContentView(
+            viewModel: wallpaperViewModel,
+            mediaViewModel: mediaViewModel,
+            selectedWallpaper: navigationState.binding(for: \.selectedWallpaper),
+            selectedMedia: navigationState.binding(for: \.selectedMedia),
+            isTabActive: navigationState.selectedTab == .home
+        )
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .home)
+    }
+}
+
+private struct WallpaperExploreTabPage: View {
+    @ObservedObject var navigationState: MainContentNavigationState
+    @ObservedObject var wallpaperViewModel: WallpaperViewModel
+
+    var body: some View {
+        WallpaperExploreContentView(
+            viewModel: wallpaperViewModel,
+            selectedWallpaper: navigationState.binding(for: \.selectedWallpaper),
+            isVisible: navigationState.selectedTab == .wallpaperExplore
+        )
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .wallpaperExplore)
+    }
+}
+
+private struct AnimeExploreTabPage: View {
+    @ObservedObject var navigationState: MainContentNavigationState
+    @ObservedObject var animeViewModel: AnimeViewModel
+
+    var body: some View {
+        AnimeExploreView(
+            viewModel: animeViewModel,
+            selectedAnime: navigationState.binding(for: \.selectedAnime),
+            isVisible: navigationState.selectedTab == .animeExplore
+        )
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .animeExplore)
+    }
+}
+
+private struct MediaExploreTabPage: View {
+    @ObservedObject var navigationState: MainContentNavigationState
+    @ObservedObject var mediaViewModel: MediaExploreViewModel
+
+    var body: some View {
+        MediaExploreContentView(
+            viewModel: mediaViewModel,
+            selectedMedia: navigationState.binding(for: \.selectedMedia),
+            isVisible: navigationState.selectedTab == .mediaExplore
+        )
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .mediaExplore)
+    }
+}
+
+private struct MyLibraryTabPage: View {
+    @ObservedObject var navigationState: MainContentNavigationState
+
+    var body: some View {
+        MyLibraryContentView(
+            selectedWallpaper: navigationState.binding(for: \.librarySelectedWallpaper),
+            selectedMedia: navigationState.binding(for: \.librarySelectedMedia),
+            selectedAnime: navigationState.binding(for: \.librarySelectedAnime),
+            wallpaperContext: navigationState.binding(for: \.libraryWallpaperContext),
+            mediaContext: navigationState.binding(for: \.libraryMediaContext)
+        )
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .myMedia)
+    }
+}
+
 struct ContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var animeViewModel = AnimeViewModel()
-    @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
+    @StateObject private var navigationState = MainContentNavigationState()
     @ObservedObject private var localization = LocalizationService.shared
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
-    @State private var selectedTab: MainTab = .home
-    @State private var selectedWallpaper: Wallpaper?
-    @State private var selectedMedia: MediaItem?
-    @State private var selectedAnime: AnimeSearchResult?
-    @State private var librarySelectedAnime: AnimeSearchResult?
-    @State private var librarySelectedWallpaper: Wallpaper?
-    @State private var librarySelectedMedia: MediaItem?
-    @State private var libraryWallpaperContext: [Wallpaper] = []
-    @State private var libraryMediaContext: [MediaItem] = []
-    /// 类似 Vue `keep-alive`：除「我的库」外，Tab 至少访问过一次后保留子树；非当前页仅隐藏并暂停滚动/GIF
-    @State private var mountedTabs: Set<MainTab> = [.home]
 
     // 更新弹窗状态
     @State private var showUpdateSheet = false
@@ -32,83 +221,21 @@ struct ContentView: View {
             Color(hex: "0D0D0D")
                 .ignoresSafeArea()
 
-            // Tab：keep-alive（不含我的库）；非当前页 opacity 0 + 不响应点击；`coverGIFPlaybackHostActive` 停后台 GIF
-            ZStack {
-                if mountedTabs.contains(.home) {
-                    HomeContentView(
-                        viewModel: viewModel,
-                        mediaViewModel: mediaViewModel,
-                        selectedWallpaper: $selectedWallpaper,
-                        selectedMedia: $selectedMedia,
-                        isTabActive: selectedTab == .home
-                    )
-                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .home)
-                    .opacity(selectedTab == .home ? 1 : 0)
-                    .zIndex(selectedTab == .home ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .home)
-                }
-
-                if mountedTabs.contains(.wallpaperExplore) {
-                    WallpaperExploreContentView(
-                        viewModel: viewModel,
-                        selectedWallpaper: $selectedWallpaper,
-                        isVisible: selectedTab == .wallpaperExplore
-                    )
-                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .wallpaperExplore)
-                    .opacity(selectedTab == .wallpaperExplore ? 1 : 0)
-                    .zIndex(selectedTab == .wallpaperExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .wallpaperExplore)
-                }
-
-                if mountedTabs.contains(.animeExplore) {
-                    AnimeExploreView(
-                        viewModel: animeViewModel,
-                        selectedAnime: $selectedAnime,
-                        isVisible: selectedTab == .animeExplore
-                    )
-                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .animeExplore)
-                    .opacity(selectedTab == .animeExplore ? 1 : 0)
-                    .zIndex(selectedTab == .animeExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .animeExplore)
-                }
-
-                if mountedTabs.contains(.mediaExplore) {
-                    MediaExploreContentView(
-                        viewModel: mediaViewModel,
-                        selectedMedia: $selectedMedia,
-                        isVisible: selectedTab == .mediaExplore
-                    )
-                    .environment(\.coverGIFPlaybackHostActive, selectedTab == .mediaExplore)
-                    .opacity(selectedTab == .mediaExplore ? 1 : 0)
-                    .zIndex(selectedTab == .mediaExplore ? 1 : 0)
-                    .allowsHitTesting(selectedTab == .mediaExplore)
-                }
-
-                // 我的库：不 keep-alive，仅选中时挂载；离开即销毁，`.task` 每次进入全量重载
-                if selectedTab == .myMedia {
-                    MyLibraryContentView(
-                        selectedWallpaper: $librarySelectedWallpaper,
-                        selectedMedia: $librarySelectedMedia,
-                        selectedAnime: $librarySelectedAnime,
-                        wallpaperContext: $libraryWallpaperContext,
-                        mediaContext: $libraryMediaContext
-                    )
-                    .environment(\.coverGIFPlaybackHostActive, true)
-                    .zIndex(1)
-                    .allowsHitTesting(true)
-                }
-            }
+            MainTabContainerView(
+                navigationState: navigationState,
+                wallpaperViewModel: viewModel,
+                mediaViewModel: mediaViewModel,
+                animeViewModel: animeViewModel
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: selectedTab) { _, tab in
-                if tab != .myMedia {
-                    mountedTabs.insert(tab)
-                }
+            .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
+                releaseForegroundMemory()
             }
             .id(localization.currentLanguage)
 
             VStack {
                 TopNavigationBar(
-                    selectedTab: $selectedTab,
+                    selectedTab: navigationState.binding(for: \.selectedTab),
                     onOpenSettings: { openSettingsWindow() },
                     onClose: { hideMainWindow() },
                     onMinimize: { minimizeWindow() },
@@ -120,9 +247,9 @@ struct ContentView: View {
                 Spacer()
             }
 
-            if let wallpaper = selectedWallpaper {
+            if let wallpaper = navigationState.selectedWallpaper {
                 WallpaperDetailSheet(wallpaper: wallpaper, viewModel: viewModel) {
-                    selectedWallpaper = nil
+                    navigationState.selectedWallpaper = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.asymmetric(
@@ -132,9 +259,9 @@ struct ContentView: View {
                 .zIndex(300)
             }
 
-            if let item = selectedMedia {
+            if let item = navigationState.selectedMedia {
                 MediaDetailSheet(item: item, viewModel: mediaViewModel) {
-                    selectedMedia = nil
+                    navigationState.selectedMedia = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.asymmetric(
@@ -144,8 +271,8 @@ struct ContentView: View {
                 .zIndex(300)
             }
 
-            if let anime = selectedAnime {
-                AnimeDetailSheet(anime: anime, selectedAnime: $selectedAnime)
+            if let anime = navigationState.selectedAnime {
+                AnimeDetailSheet(anime: anime, selectedAnime: navigationState.binding(for: \.selectedAnime))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.18)),
@@ -155,13 +282,13 @@ struct ContentView: View {
             }
             
             // 我的库中的详情页（在 ContentView 层级显示，确保覆盖 TopNavigationBar）
-            if let wallpaper = librarySelectedWallpaper {
+            if let wallpaper = navigationState.librarySelectedWallpaper {
                 WallpaperDetailSheet(
                     wallpaper: wallpaper,
                     viewModel: viewModel,
-                    contextWallpapers: libraryWallpaperContext.isEmpty ? nil : libraryWallpaperContext
+                    contextWallpapers: navigationState.libraryWallpaperContext.isEmpty ? nil : navigationState.libraryWallpaperContext
                 ) {
-                    librarySelectedWallpaper = nil
+                    navigationState.librarySelectedWallpaper = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.asymmetric(
@@ -171,13 +298,13 @@ struct ContentView: View {
                 .zIndex(300)
             }
             
-            if let item = librarySelectedMedia {
+            if let item = navigationState.librarySelectedMedia {
                 MediaDetailSheet(
                     item: item,
                     viewModel: mediaViewModel,
-                    contextItems: libraryMediaContext.isEmpty ? nil : libraryMediaContext
+                    contextItems: navigationState.libraryMediaContext.isEmpty ? nil : navigationState.libraryMediaContext
                 ) {
-                    librarySelectedMedia = nil
+                    navigationState.librarySelectedMedia = nil
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.asymmetric(
@@ -187,8 +314,8 @@ struct ContentView: View {
                 .zIndex(300)
             }
             
-            if let anime = librarySelectedAnime {
-                AnimeDetailSheet(anime: anime, selectedAnime: $librarySelectedAnime)
+            if let anime = navigationState.librarySelectedAnime {
+                AnimeDetailSheet(anime: anime, selectedAnime: navigationState.binding(for: \.librarySelectedAnime))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .transition(.asymmetric(
@@ -215,7 +342,17 @@ struct ContentView: View {
             // 下载进度弹窗 - 固定在底部
             VStack {
                 Spacer()
-                DownloadProgressToastHost(viewModel: downloadTaskViewModel)
+                DownloadProgressToastHost(
+                    onDismiss: { snapshot in
+                        handleDownloadToastDismiss(snapshot)
+                    },
+                    onCancel: { snapshot in
+                        handleDownloadToastCancel(snapshot)
+                    },
+                    onRetry: { snapshot in
+                        handleDownloadToastRetry(snapshot)
+                    }
+                )
                 WallpaperSourceSwitchToast()
                     .padding(.horizontal, 24)
                     .padding(.bottom, 8)
@@ -284,6 +421,54 @@ struct ContentView: View {
     private func hideMainWindow() {
         guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
         appDelegate.hideMainWindow()
+    }
+
+    private func releaseForegroundMemory() {
+        ForegroundPrefetchManager.shared.stopAll()
+        viewModel.releaseForegroundMemory()
+        mediaViewModel.releaseForegroundMemory()
+        animeViewModel.releaseForegroundMemory()
+        navigationState.resetForMemoryRelease()
+        showUpdateSheet = false
+        updateRelease = nil
+        updateCommit = nil
+    }
+
+    private func handleDownloadToastDismiss(_ snapshot: DownloadToastSnapshot) {
+        DownloadTaskService.shared.markToastSuppressed(for: snapshot.id)
+    }
+
+    private func handleDownloadToastCancel(_ snapshot: DownloadToastSnapshot) {
+        let service = DownloadTaskService.shared
+        service.markToastSuppressed(for: snapshot.id)
+        service.cancelTask(id: snapshot.id)
+        service.removeTask(id: snapshot.id)
+    }
+
+    private func handleDownloadToastRetry(_ snapshot: DownloadToastSnapshot) {
+        DownloadTaskService.shared.clearToastSuppression(for: snapshot.id)
+
+        guard let task = DownloadTaskService.shared.task(for: snapshot.id) else { return }
+
+        Task {
+            do {
+                switch task.kind {
+                case .wallpaper:
+                    try await viewModel.retryDownload(task: task)
+                case .media, .workshop:
+                    try await mediaViewModel.retryDownload(task: task)
+                }
+            } catch {
+                await MainActor.run {
+                    switch task.kind {
+                    case .wallpaper:
+                        viewModel.errorMessage = error.localizedDescription
+                    case .media, .workshop:
+                        mediaViewModel.errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1024,10 +1209,12 @@ struct MyMediaContentView: View {
     // MARK: - 导入与文件夹操作
 
     private func openFolderInFinder(_ url: URL) {
+        DownloadPathManager.shared.createDirectoryStructure()
         NSWorkspace.shared.open(url)
     }
 
     private func importWallpapers() {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1064,6 +1251,7 @@ struct MyMediaContentView: View {
     }
 
     private func importMedia() async {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1216,6 +1404,7 @@ struct MyMediaContentView: View {
 
 
     private func importWorkshop() {
+        DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1589,19 +1778,18 @@ private struct MyMediaVideoCard: View {
 
 // MARK: - iOS 丝滑风格下载进度弹窗宿主
 private struct DownloadProgressToastHost: View {
-    @ObservedObject var viewModel: DownloadTaskViewModel
+    @StateObject private var viewModel = DownloadToastViewModel()
+    let onDismiss: (DownloadToastSnapshot) -> Void
+    let onCancel: (DownloadToastSnapshot) -> Void
+    let onRetry: (DownloadToastSnapshot) -> Void
 
-    @State private var displayedTaskID: String?
+    @State private var displayedSnapshot: DownloadToastSnapshot?
     @State private var hideWorkItem: DispatchWorkItem?
 
     // iOS 丝滑动画状态
     @State private var toastOpacity: Double = 0
     @State private var toastScale: Double = 0.92
     @State private var toastOffset: CGFloat = 10
-
-    private var displayedTask: DownloadTask? {
-        viewModel.tasks.first(where: { $0.id == displayedTaskID })
-    }
 
     /// 入场动画：轻快弹簧，类似系统通知弹出
     private var iOSShowAnimation: Animation {
@@ -1615,10 +1803,19 @@ private struct DownloadProgressToastHost: View {
 
     var body: some View {
         Group {
-            if let task = displayedTask {
+            if let snapshot = displayedSnapshot {
                 DownloadProgressToast(
-                    task: task,
-                    activeTaskCount: viewModel.tasks.filter(\.isRunning).count
+                    snapshot: snapshot,
+                    activeTaskCount: viewModel.activeTaskCount,
+                    onDismiss: {
+                        dismiss(snapshot)
+                    },
+                    onCancel: {
+                        cancel(snapshot)
+                    },
+                    onRetry: {
+                        retry(snapshot)
+                    }
                 )
                 .frame(maxWidth: 440)
                 .padding(.bottom, 26)
@@ -1634,10 +1831,10 @@ private struct DownloadProgressToastHost: View {
             }
         }
         .onAppear {
-            reconcileDisplayedTask(with: viewModel.tasks)
+            reconcileDisplayedSnapshot(viewModel.snapshot)
         }
-        .onReceive(viewModel.$tasks) { tasks in
-            reconcileDisplayedTask(with: tasks)
+        .onChange(of: viewModel.snapshot) { _, snapshot in
+            reconcileDisplayedSnapshot(snapshot)
         }
     }
 
@@ -1669,42 +1866,45 @@ private struct DownloadProgressToastHost: View {
         }
     }
 
-    private func reconcileDisplayedTask(with tasks: [DownloadTask]) {
+    private func reconcileDisplayedSnapshot(_ snapshot: DownloadToastSnapshot?) {
         hideWorkItem?.cancel()
 
-        if let activeTask = tasks
-            .filter(\.isRunning)
-            .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt })
-        {
+        guard let snapshot else {
+            performHide {
+                displayedSnapshot = nil
+            }
+            return
+        }
+
+        if viewModel.isSuppressed(taskID: snapshot.id) {
+            displayedSnapshot = nil
+            return
+        }
+
+        if snapshot.isRunning {
             // 如果是新任务或当前无显示任务，重新执行入场动画
-            if displayedTaskID != activeTask.id {
-                displayedTaskID = activeTask.id
+            if displayedSnapshot?.id != snapshot.id {
+                displayedSnapshot = snapshot
                 performShow()
             } else {
                 withAnimation(iOSShowAnimation) {
-                    displayedTaskID = activeTask.id
+                    displayedSnapshot = snapshot
                 }
             }
             return
         }
 
-        if let recentTerminalTask = tasks
-            .filter({ task in
-                guard task.isTerminal else { return false }
-                let referenceDate = task.completedAt ?? task.lastUpdatedAt
-                return Date().timeIntervalSince(referenceDate) < 1.8
-            })
-            .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt })
-        {
-            if displayedTaskID != recentTerminalTask.id {
-                displayedTaskID = recentTerminalTask.id
+        if snapshot.status == .completed {
+            viewModel.clearSuppression(taskID: snapshot.id)
+            if displayedSnapshot?.id != snapshot.id {
+                displayedSnapshot = snapshot
                 performShow()
             }
 
             let workItem = DispatchWorkItem { [self] in
                 performHide {
-                    if displayedTaskID == recentTerminalTask.id {
-                        displayedTaskID = nil
+                    if displayedSnapshot?.id == snapshot.id {
+                        displayedSnapshot = nil
                     }
                 }
             }
@@ -1713,21 +1913,63 @@ private struct DownloadProgressToastHost: View {
             return
         }
 
+        if snapshot.isActionable {
+            if displayedSnapshot?.id != snapshot.id {
+                displayedSnapshot = snapshot
+                performShow()
+            } else {
+                withAnimation(iOSShowAnimation) {
+                    displayedSnapshot = snapshot
+                }
+            }
+            return
+        }
+
         performHide {
-            displayedTaskID = nil
+            displayedSnapshot = nil
+        }
+    }
+
+    private func dismiss(_ snapshot: DownloadToastSnapshot) {
+        onDismiss(snapshot)
+        performHide {
+            if displayedSnapshot?.id == snapshot.id {
+                displayedSnapshot = nil
+            }
+        }
+    }
+
+    private func cancel(_ snapshot: DownloadToastSnapshot) {
+        onCancel(snapshot)
+        performHide {
+            if displayedSnapshot?.id == snapshot.id {
+                displayedSnapshot = nil
+            }
+        }
+    }
+
+    private func retry(_ snapshot: DownloadToastSnapshot) {
+        onRetry(snapshot)
+        performHide {
+            if displayedSnapshot?.id == snapshot.id {
+                displayedSnapshot = nil
+            }
         }
     }
 }
 
 // MARK: - iOS 丝滑风格下载进度 Toast
 private struct DownloadProgressToast: View {
-    let task: DownloadTask
+    let snapshot: DownloadToastSnapshot
     let activeTaskCount: Int
+    let onDismiss: () -> Void
+    let onCancel: () -> Void
+    let onRetry: () -> Void
 
     @State private var animatedProgress: Double = 0
 
     private var tint: Color {
-        switch task.status {
+        switch snapshot.status {
         case .pending:
             return Color.white.opacity(0.7)
         case .downloading:
@@ -1744,7 +1986,7 @@ private struct DownloadProgressToast: View {
     }
 
     private var iconName: String {
-        switch task.kind {
+        switch snapshot.kind {
         case .wallpaper:
             return "photo.fill"
         case .media:
@@ -1755,7 +1997,7 @@ private struct DownloadProgressToast: View {
     }
 
     private var statusText: String {
-        switch task.status {
+        switch snapshot.status {
         case .pending:   return t("status.pending")
         case .downloading: return t("status.downloading")
         case .paused:     return t("status.paused")
@@ -1766,20 +2008,32 @@ private struct DownloadProgressToast: View {
     }
 
     private var subtitle: String {
-        if activeTaskCount > 1 && task.isRunning {
-            let base = task.subtitle.isEmpty ? "\(activeTaskCount) \(t("items"))" : "\(task.subtitle) · \(activeTaskCount) \(t("items"))"
+        if activeTaskCount > 1 && snapshot.isRunning {
+            let base = snapshot.subtitle.isEmpty ? "\(activeTaskCount) \(t("items"))" : "\(snapshot.subtitle) · \(activeTaskCount) \(t("items"))"
             return base
         }
-        if task.subtitle.isEmpty { return task.badgeText }
-        if task.badgeText.isEmpty { return task.subtitle }
-        return "\(task.subtitle) · \(task.badgeText)"
+        if snapshot.subtitle.isEmpty { return snapshot.badgeText }
+        if snapshot.badgeText.isEmpty { return snapshot.subtitle }
+        return "\(snapshot.subtitle) · \(snapshot.badgeText)"
     }
 
-    private var isCompleted: Bool { task.status == .completed }
+    private var isCompleted: Bool { snapshot.status == .completed }
+    private var showsRetry: Bool {
+        snapshot.status == .failed || snapshot.status == .cancelled || snapshot.status == .paused
+    }
+    private var showsCancel: Bool {
+        snapshot.status == .pending || snapshot.status == .downloading
+    }
 
     /// 进度条动画：平滑跟随（优化：更长的响应时间减少重绘频率）
     private var progressAnimation: Animation {
         .interpolatingSpring(stiffness: 120, damping: 20)
+    }
+
+    private enum ToastActionRole {
+        case secondary
+        case retry
+        case destructive
     }
 
     var body: some View {
@@ -1799,7 +2053,7 @@ private struct DownloadProgressToast: View {
                     .scaleEffect(isCompleted ? 1.08 : 1.0)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(task.title)
+                    Text(snapshot.title)
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(.white.opacity(0.94))
                         .lineLimit(1)
@@ -1838,7 +2092,7 @@ private struct DownloadProgressToast: View {
                 )
 
                 HStack {
-                    Text(task.kind == .wallpaper ? t("wallpaper.downloads") : t("media.downloads"))
+                    Text(snapshot.kind == .wallpaper ? t("wallpaper.downloads") : t("media.downloads"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.5))
 
@@ -1861,6 +2115,24 @@ private struct DownloadProgressToast: View {
                     Spacer()
                 }
             }
+
+            if showsCancel || showsRetry {
+                HStack(spacing: 10) {
+                    toastActionButton(
+                        title: showsCancel ? "后台继续" : "关闭",
+                        icon: showsCancel ? "arrow.down.circle" : "xmark",
+                        role: .secondary,
+                        action: onDismiss
+                    )
+
+                    toastActionButton(
+                        title: showsCancel ? "取消下载" : "重新下载",
+                        icon: showsCancel ? "xmark.circle.fill" : "arrow.clockwise",
+                        role: showsCancel ? .destructive : .retry,
+                        action: showsCancel ? onCancel : onRetry
+                    )
+                }
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
@@ -1873,14 +2145,66 @@ private struct DownloadProgressToast: View {
         )
         // 精简动画：只用颜色过渡，避免复杂的 layout transition 导致卡顿
         .animation(.easeInOut(duration: 0.20), value: isCompleted)
-        .onChange(of: task.progress) { _, newProgress in
+        .onChange(of: snapshot.progress) { _, newProgress in
             withAnimation(progressAnimation) {
                 animatedProgress = newProgress
             }
         }
         .onAppear {
-            animatedProgress = task.progress
+            animatedProgress = snapshot.progress
         }
+    }
+
+    @ViewBuilder
+    private func toastActionButton(title: String, icon: String, role: ToastActionRole, action: @escaping () -> Void) -> some View {
+        let fillColor: Color = {
+            switch role {
+            case .secondary:
+                return Color.white.opacity(0.08)
+            case .retry:
+                return Color(red: 0.58, green: 0.82, blue: 0.72).opacity(0.96)
+            case .destructive:
+                return Color(red: 0.93, green: 0.42, blue: 0.42).opacity(0.94)
+            }
+        }()
+
+        let foregroundColor: Color = {
+            switch role {
+            case .secondary:
+                return Color.white.opacity(0.88)
+            case .retry, .destructive:
+                return Color.black.opacity(0.84)
+            }
+        }()
+
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .bold))
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(foregroundColor)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 19, style: .continuous)
+                    .fill(fillColor)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 19, style: .continuous)
+                            .stroke(
+                                role == .secondary ? Color.white.opacity(0.08) : Color.white.opacity(0.16),
+                                lineWidth: 0.8
+                            )
+                    )
+            )
+            .shadow(
+                color: role == .secondary ? .clear : fillColor.opacity(0.24),
+                radius: 10,
+                y: 4
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 

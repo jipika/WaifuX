@@ -32,9 +32,9 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     private var isVideoFound = false
     private var currentRule: AnimeRule?
     
-    // 使用共享的 WebsiteDataStore，确保验证码 WebView 中设置的 Cookie 能同步到后续 URLSession 请求
-    // 注意：不再使用 nonPersistent()，因为那会导致 Cookie 隔离
-    private let dataStore = WKWebsiteDataStore.default()
+    // 使用非持久化数据存储，避免多个 WebView 实例共享 SQLite 连接导致 "API call with unopened database connection" 错误
+    // Cookie 同步通过 WebViewCookieSync 在验证码完成后单独处理
+    private let dataStore = WKWebsiteDataStore.nonPersistent()
     
     private override init() {
         super.init()

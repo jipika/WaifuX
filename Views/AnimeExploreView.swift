@@ -1,10 +1,20 @@
 import SwiftUI
 import AppKit
-import Kingfisher
+
+private struct AnimeLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
 
 // MARK: - AnimeExploreView - 动漫探索页
 
 struct AnimeExploreView: View {
+    private static let scrollCoordinateSpaceName = "anime-explore-scroll"
+    private static let loadMoreTriggerThreshold: CGFloat = 120
+
     @ObservedObject var viewModel: AnimeViewModel
     @Binding var selectedAnime: AnimeSearchResult?
     var isVisible: Bool = true
@@ -21,27 +31,28 @@ struct AnimeExploreView: View {
     @State private var selectedCategory: AnimeCategory = .all
     @State private var selectedHotTag: AnimeHotTag?
     @State private var searchText = ""
+    // TODO(anime sort): 排序选项目前未在 contentHeader 显示，保留 enum 与 state
+    // 避免漏改 resetAllFilters；后续接入 SortMenu 时再实质化
     @State private var selectedSort: AnimeSortOption = .newest
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
-    @State private var scrollOffset: CGFloat = 0
-    @State private var contentSize: CGFloat = 0
-    @State private var containerSize: CGFloat = 0
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var searchTask: Task<Void, Never>?
     @State private var isTagSearchActive = false
-    @State private var gridImagePrefetcher: Kingfisher.ImagePrefetcher?
-    @State private var lastPrefetchCenterIndex: Int = -1
     @State private var lastSyncedFirstAnimeID: String?
 
-    /// 缓存排序后的列表，避免每次 body 重绘时对 `animeItems` 全表排序
-    @State private var visibleAnimeItems: [AnimeSearchResult] = []
+    // ExploreGridContainer 控制 token
+    @State private var gridScrollToTopToken: Int = 0
+    @State private var gridReloadToken: Int = 0
+    @State private var gridLayoutRefreshToken: Int = 0
+    @State private var gridSavedScrollOffset: CGFloat = 0
+    @State private var gridContentHeight: CGFloat = 600
+    @State private var showScrollToTop: Bool = false
 
     var body: some View {
         GeometryReader { geometry in
             let contentWidth = calculateContentWidth(geometry: geometry)
-            let gridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
             ZStack {
                 ArcAtmosphereBackground(
@@ -54,92 +65,47 @@ struct AnimeExploreView: View {
                 )
                 .ignoresSafeArea()
 
-                ScrollViewReader { proxy in
-                    ZStack {
+                ZStack {
+                    if viewModel.animeItems.isEmpty {
+                        legacyScrollContent(width: geometry.size.width, contentWidth: contentWidth, body: AnyView(
+                            Group {
+                                if isAnimeLoadingState {
+                                    loadingState
+                                } else {
+                                    emptyState
+                                }
+                            }
+                            .transition(.opacity.animation(.easeInOut(duration: 0.25)))
+                        ))
+                    } else {
                         ScrollView(.vertical, showsIndicators: false) {
-                            LazyVStack(alignment: .leading, spacing: 16) {
-                                heroSection
-                                categorySection
-                                hotTagsSection
-                                contentSection(config: gridConfig)
+                            VStack(alignment: .leading, spacing: 0) {
+                                headerStack
+                                animeGrid(contentWidth: contentWidth)
+                                    .frame(height: max(gridContentHeight, 320))
+                                loadMoreSentinel
                             }
                             .padding(.horizontal, 28)
-                            .padding(.top, 80)
-                            .padding(.bottom, 48)
-                            .frame(width: geometry.size.width, alignment: .center)
-                            .background(scrollTrackingOverlay)
-                            .background(contentSizeTrackingOverlay)
+                            .frame(width: geometry.size.width, alignment: .leading)
                             .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
                             .environment(\.arcIsLightMode, arcSettings.isLightMode)
-                            .id("exploreTop")
                         }
-                        .coordinateSpace(name: "exploreScroll")
-                        .iosSmoothScroll()
+                        .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+                        .onPreferenceChange(AnimeLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
+                            handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: geometry.size.height)
+                        }
                         .scrollDisabled(!isVisible)
-                        .modifier(ScrollLoadMoreModifier(
-                            scrollOffset: $scrollOffset,
-                            contentSize: $contentSize,
-                            containerSize: $containerSize,
-                            earlyThreshold: 800,
-                            bottomThreshold: 100,
-                            onLoadMore: triggerLoadMore,
-                            checkLoadMore: checkLoadMore
-                        ))
                         .disabled(isInitialLoading)
-
-                        VStack {
-                            Spacer()
-                            if loadMoreFailed {
-                                BottomLoadingFailedCard {
-                                    loadMoreFailed = false
-                                    Task { await viewModel.loadMore() }
-                                }
-                                .padding(.bottom, 60)
-                            } else if isLoadingMore || (viewModel.isLoading && !visibleAnimeItems.isEmpty) {
-                                BottomLoadingCard(isLoading: true)
-                                    .padding(.bottom, 60)
-                            } else if !isLoadingMore && !viewModel.hasMorePages && !visibleAnimeItems.isEmpty {
-                                BottomNoMoreCard()
-                                    .padding(.bottom, 60)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-
-                        // 浮动返回顶部按钮（独立定位，不与其他内容耦合）
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Spacer()
-                                if scrollOffset > 300 {
-                                    Button {
-                                        withAnimation {
-                                            proxy.scrollTo("exploreTop", anchor: .top)
-                                        }
-                                    } label: {
-                                        Image(systemName: "arrow.up")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundStyle(.white.opacity(0.92))
-                                            .frame(width: 44, height: 44)
-                                            .liquidGlassSurface(.regular, in: Circle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.trailing, 28)
-                                    .padding(.bottom, 120)
-                                    .contentShape(Rectangle())
-                                    .zIndex(100)
-                                    .transition(.scale.combined(with: .opacity))
-                                }
-                            }
-                        }
-                        .zIndex(100)
                     }
+
+                    bottomLoadingOverlay
+                    scrollToTopButton
                 }
             }
         }
         .onAppear {
             if isFirstAppearance {
-                resetAllFilters(reloadData: true)
-                isFirstAppearance = false
+                Task { await performFirstAppearanceLoad() }
             } else {
                 handleAppear()
             }
@@ -148,15 +114,89 @@ struct AnimeExploreView: View {
             if !visible {
                 searchTask?.cancel()
                 searchTask = nil
-                gridImagePrefetcher?.stop()
                 exploreAtmosphere.pause()
+            } else {
+                syncAtmosphereIfNeeded()
+                gridLayoutRefreshToken &+= 1
             }
         }
         .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
         .onChange(of: viewModel.animeItems) { _, _ in
-            recomputeVisibleAnimeItems()
             syncAtmosphereIfNeeded()
         }
+    }
+
+    // MARK: - Legacy scroll wrapper (skeleton / empty state)
+
+    private func legacyScrollContent(width: CGFloat, contentWidth: CGFloat, body: AnyView) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 16) {
+                heroSection
+                categorySection
+                hotTagsSection
+                contentHeader
+                    .padding(.top, 12)
+                body
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 80)
+            .padding(.bottom, 48)
+            .frame(width: width, alignment: .leading)
+            .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+            .environment(\.arcIsLightMode, arcSettings.isLightMode)
+        }
+        .scrollDisabled(!isVisible)
+    }
+
+    private var bottomLoadingOverlay: some View {
+        VStack {
+            Spacer()
+            if loadMoreFailed {
+                BottomLoadingFailedCard {
+                    loadMoreFailed = false
+                    Task { await viewModel.loadMore() }
+                }
+                .padding(.bottom, 60)
+            } else if viewModel.isLoadingMore || isLoadingMore || (viewModel.isLoading && !viewModel.animeItems.isEmpty) {
+                BottomLoadingCard(isLoading: true)
+                    .padding(.bottom, 60)
+            } else if !isLoadingMore && !viewModel.isLoadingMore && !viewModel.hasMorePages && !viewModel.animeItems.isEmpty {
+                BottomNoMoreCard()
+                    .padding(.bottom, 60)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var isAnimeLoadingState: Bool {
+        viewModel.animeItems.isEmpty && (isInitialLoading || isFirstAppearance || viewModel.isLoading)
+    }
+
+    private var scrollToTopButton: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                if showScrollToTop {
+                    Button {
+                        gridScrollToTopToken &+= 1
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .frame(width: 44, height: 44)
+                            .liquidGlassSurface(.regular, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 28)
+                    .padding(.bottom, 120)
+                    .contentShape(Rectangle())
+                    .zIndex(100)
+                    .transition(.scale.combined(with: .opacity))
+                }
+            }
+        }
+        .zIndex(100)
     }
 
     // MARK: - Sections
@@ -253,86 +293,84 @@ struct AnimeExploreView: View {
         }
     }
 
-    private func contentSection(config: AnimeGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            contentHeader
-
-            if viewModel.isLoading && visibleAnimeItems.isEmpty {
-                AnimeGridSkeleton(contentWidth: config.contentWidth)
-                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
-            } else if visibleAnimeItems.isEmpty {
-                emptyState
-                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
-            } else {
-                animeGrid(config: config)
-            }
-        }
-    }
-
     private var contentHeader: some View {
         HStack(alignment: .center) {
-            Text("\(visibleAnimeItems.count) \(t("content.animes"))")
+            Text("\(viewModel.animeItems.count) \(t("content.animes"))")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(arcSettings.secondaryText.opacity(0.66))
 
             Spacer()
+            // TODO(anime sort): 暂不显示 SortMenu，等排序逻辑实质化后接入
         }
     }
 
-    // MARK: - Grid & Cards
+    // MARK: - Header Stack (注入 ExploreGridContainer.header)
 
-    private func animeGrid(config: AnimeGridConfig) -> some View {
-        LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-            ForEach(visibleAnimeItems) { anime in
-                AnimeCard(
-                    anime: anime,
-                    cardWidth: config.cardWidth,
-                    onTap: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            selectedAnime = anime
-                        }
-                    }
-                )
-                .onAppear {
-                    preloadNearbyImages(around: anime, config: config)
+    private var headerStack: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            heroSection
+            categorySection
+            hotTagsSection
+            contentHeader
+                .padding(.top, 12)
+        }
+        .padding(.top, 80)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+        .environment(\.arcIsLightMode, arcSettings.isLightMode)
+    }
+
+    // MARK: - Grid
+
+    private func animeGrid(contentWidth: CGFloat) -> some View {
+        let columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
+        let spacing: CGFloat = 20
+        let totalSpacing = spacing * CGFloat(columnCount - 1)
+        let cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+
+        // AnimeGridCell 内部约束 10:14 封面 + 44pt 底栏
+        let imageHeight = cardWidth * 1.4
+        let effectiveAspect = cardWidth / max(1, imageHeight + 44)
+
+        return ExploreGridContainer(
+            itemCount: { viewModel.animeItems.count },
+            aspectRatio: { _ in effectiveAspect },
+            configureCell: { cell, index in
+                guard index < viewModel.animeItems.count else { return }
+                cell.configure(with: viewModel.animeItems[index], isFavorite: false)
+            },
+            cellClass: AnimeGridCell.self,
+            onSelect: { index in
+                guard index < viewModel.animeItems.count else { return }
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    selectedAnime = viewModel.animeItems[index]
                 }
-            }
-        }
-    }
-
-    /// 智能预加载附近图片（前后各 8 张）；中心索引节流
-    private func preloadNearbyImages(around anime: AnimeSearchResult, config: AnimeGridConfig) {
-        let items = visibleAnimeItems
-        guard let index = items.firstIndex(where: { $0.id == anime.id }) else { return }
-        if lastPrefetchCenterIndex >= 0, abs(index - lastPrefetchCenterIndex) < 4 { return }
-        lastPrefetchCenterIndex = index
-
-        let targetSize = CGSize(width: 512, height: 512)
-        let count = items.count
-        guard count > 0 else { return }
-        let clamped = min(max(0, index), count - 1)
-        let lower = max(0, clamped - 8)
-        let upper = min(count, clamped + 9)
-        guard lower < upper else { return }
-        let range = lower..<upper
-        let urls = range
-            .filter { $0 != clamped }
-            .compactMap { items[$0].coverURL.flatMap { URL(string: $0) } }
-
-        // 放到后台线程执行，避免阻塞主线程滚动
-        Task(priority: .background) {
-            await MainActor.run {
-                self.gridImagePrefetcher?.stop()
-            }
-            let prefetcher = Kingfisher.ImagePrefetcher(
-                urls: urls,
-                options: [.processor(DownsamplingImageProcessor(size: targetSize))]
-            )
-            await MainActor.run {
-                self.gridImagePrefetcher = prefetcher
-            }
-            prefetcher.start()
-        }
+            },
+            onVisibleItemsChange: { _ in
+                // Cell 内 ImageLoader 走 LRU，无需 SwiftUI 侧 prefetch
+            },
+            onScrollOffsetChange: { offset in
+                gridSavedScrollOffset = offset
+                let shouldShow = offset > 300
+                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
+            },
+            onReachBottom: triggerLoadMore,
+            scrollToTopToken: gridScrollToTopToken,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: false,
+            onContentHeightChange: { height in
+                if abs(gridContentHeight - height) > 0.5 {
+                    gridContentHeight = height
+                }
+            },
+            isVisible: isVisible,
+            layoutWidth: contentWidth,
+            gridColumnCount: columnCount,
+            hoverExpansionAllowance: 8
+        )
     }
 
     // MARK: - UI Components
@@ -358,25 +396,47 @@ struct AnimeExploreView: View {
         .exploreFrostedPanel(cornerRadius: 30, tint: exploreAtmosphere.tint.primary)
     }
 
-    private var scrollTrackingOverlay: some View {
-        GeometryReader { scrollProxy in
-            Color.clear.preference(
-                key: ExploreScrollOffsetKey.self,
-                value: -scrollProxy.frame(in: .named("exploreScroll")).minY
-            )
-        }
+    private var loadingState: some View {
+        ExploreLoadingStateView(
+            message: "加载中...",
+            tint: arcSettings.primaryText
+        )
+        .exploreFrostedPanel(cornerRadius: 30, tint: exploreAtmosphere.tint.primary)
     }
 
-    private var contentSizeTrackingOverlay: some View {
-        GeometryReader { contentProxy in
+    private var loadMoreSentinel: some View {
+        GeometryReader { proxy in
             Color.clear.preference(
-                key: ExploreContentSizeKey.self,
-                value: contentProxy.size.height
+                key: AnimeLoadMoreSentinelMinYPreferenceKey.self,
+                value: proxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
             )
         }
+        .frame(height: 1)
     }
 
     // MARK: - Actions
+
+    private func bumpReloadToken() {
+        gridReloadToken &+= 1
+    }
+
+    private func performFirstAppearanceLoad() async {
+        isInitialLoading = true
+        searchText = ""
+        selectedHotTag = nil
+        selectedCategory = .all
+        selectedSort = .newest
+        isTagSearchActive = false
+        lastSyncedFirstAnimeID = nil
+        loadMoreFailed = false
+        viewModel.searchText = ""
+        viewModel.errorMessage = nil
+
+        await viewModel.loadInitialData()
+        syncAtmosphereIfNeeded()
+        isInitialLoading = false
+        isFirstAppearance = false
+    }
 
     private func handleAppear() {
         AppLogger.info(.anime, "动漫探索页 onAppear",
@@ -388,8 +448,6 @@ struct AnimeExploreView: View {
                 let start = Date()
                 await viewModel.loadInitialData()
                 await MainActor.run {
-                    lastPrefetchCenterIndex = -1
-                    recomputeVisibleAnimeItems()
                     syncAtmosphereIfNeeded()
                     isInitialLoading = false
                 }
@@ -401,8 +459,6 @@ struct AnimeExploreView: View {
                     ])
             }
         } else {
-            lastPrefetchCenterIndex = -1
-            recomputeVisibleAnimeItems()
             syncAtmosphereIfNeeded()
         }
     }
@@ -421,8 +477,8 @@ struct AnimeExploreView: View {
         Task {
             await viewModel.fetchByCategory(category)
             await MainActor.run {
-                recomputeVisibleAnimeItems()
                 syncAtmosphereIfNeeded()
+                bumpReloadToken()
             }
         }
     }
@@ -444,8 +500,8 @@ struct AnimeExploreView: View {
                 await viewModel.fetchPopular()
             }
             await MainActor.run {
-                recomputeVisibleAnimeItems()
                 syncAtmosphereIfNeeded()
+                bumpReloadToken()
             }
         }
     }
@@ -461,7 +517,10 @@ struct AnimeExploreView: View {
         searchTask?.cancel()
 
         if newValue.isEmpty {
-            Task { await viewModel.fetchPopular() }
+            Task {
+                await viewModel.fetchPopular()
+                await MainActor.run { bumpReloadToken() }
+            }
             return
         }
 
@@ -469,18 +528,25 @@ struct AnimeExploreView: View {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             await viewModel.search()
+            await MainActor.run { bumpReloadToken() }
         }
     }
 
     private func performSearch() {
         searchTask?.cancel()
-        Task { await viewModel.search() }
+        Task {
+            await viewModel.search()
+            await MainActor.run { bumpReloadToken() }
+        }
     }
 
     private func clearSearch() {
         searchText = ""
         selectedHotTag = nil
-        Task { await viewModel.search() }
+        Task {
+            await viewModel.search()
+            await MainActor.run { bumpReloadToken() }
+        }
     }
 
     private func triggerLoadMore() {
@@ -488,7 +554,7 @@ struct AnimeExploreView: View {
               !viewModel.isLoading,
               !isLoadingMore else { return }
 
-        AppLogger.info(.anime, "加载更多", metadata: ["当前数量": visibleAnimeItems.count])
+        AppLogger.info(.anime, "加载更多", metadata: ["当前数量": viewModel.animeItems.count])
         Task {
             isLoadingMore = true
             loadMoreFailed = false
@@ -500,25 +566,10 @@ struct AnimeExploreView: View {
         }
     }
 
-    private func checkLoadMore(offset: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) {
-        guard viewModel.hasMorePages else { return }
-        guard !viewModel.isLoading, !isLoadingMore else { return }
-
-        let distanceToBottom = contentHeight - (offset + containerHeight)
-
-        let shouldLoadEarly = distanceToBottom < 800 && distanceToBottom > 100
-        let shouldLoadBottom = distanceToBottom < 100
-
-        guard shouldLoadEarly || shouldLoadBottom else { return }
-
-        Task {
-            isLoadingMore = true
-            loadMoreFailed = false
-            defer { isLoadingMore = false }
-            await viewModel.loadMore()
-            if viewModel.hasMorePages && viewModel.errorMessage != nil {
-                loadMoreFailed = true
-            }
+    private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
+        guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
+        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
+            triggerLoadMore()
         }
     }
 
@@ -527,36 +578,34 @@ struct AnimeExploreView: View {
         selectedHotTag = nil
         selectedCategory = .all
         selectedSort = .newest
-        lastPrefetchCenterIndex = -1
         lastSyncedFirstAnimeID = nil
         loadMoreFailed = false
         viewModel.searchText = ""
         viewModel.errorMessage = nil
 
         if reloadData {
-            viewModel.animeItems.removeAll()
-            Task { await viewModel.loadInitialData() }
-        } else {
-            recomputeVisibleAnimeItems()
+            Task {
+                await viewModel.loadInitialData()
+                await MainActor.run { bumpReloadToken() }
+            }
         }
+        bumpReloadToken()
     }
 
     private func reloadData() {
         AppLogger.info(.anime, "重新搜索：用户操作触发")
-        lastPrefetchCenterIndex = -1
         lastSyncedFirstAnimeID = nil
         loadMoreFailed = false
         viewModel.errorMessage = nil
-        viewModel.animeItems.removeAll()
-        Task { await viewModel.loadInitialData() }
-    }
-
-    private func recomputeVisibleAnimeItems() {
-        visibleAnimeItems = viewModel.animeItems
+        Task {
+            await viewModel.loadInitialData()
+            await MainActor.run { bumpReloadToken() }
+        }
+        bumpReloadToken()
     }
 
     private func syncAtmosphereIfNeeded() {
-        let first = visibleAnimeItems.first
+        let first = viewModel.animeItems.first
         let fid = first?.id
         guard fid != lastSyncedFirstAnimeID else { return }
         lastSyncedFirstAnimeID = fid
@@ -566,8 +615,8 @@ struct AnimeExploreView: View {
     }
 
     private func randomizeAtmosphere() {
-        guard !visibleAnimeItems.isEmpty else { return }
-        let random = visibleAnimeItems.randomElement()!
+        guard !viewModel.animeItems.isEmpty else { return }
+        let random = viewModel.animeItems.randomElement()!
         if let coverURL = random.coverURL.flatMap({ URL(string: $0) }) {
             exploreAtmosphere.updateFromImageURL(coverURL, keyPrefix: "rand-anime")
         }
@@ -575,25 +624,6 @@ struct AnimeExploreView: View {
 
     private func calculateContentWidth(geometry: GeometryProxy) -> CGFloat {
         max(0, geometry.size.width - 56)
-    }
-}
-
-// MARK: - Grid Configuration
-
-private struct AnimeGridConfig {
-    let columnCount: Int
-    let spacing: CGFloat
-    let cardWidth: CGFloat
-    let contentWidth: CGFloat
-    let gridItems: [GridItem]
-
-    init(contentWidth: CGFloat) {
-        self.contentWidth = contentWidth
-        self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
-        self.spacing = 16
-        let totalSpacing = spacing * CGFloat(columnCount - 1)
-        self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-        self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
 }
 
@@ -617,115 +647,6 @@ private enum AnimeSortOption: String, CaseIterable, SortOptionProtocol {
     }
 }
 
-// MARK: - AnimeCard (内嵌私有卡片，参考 WallpaperCard 架构)
-
-private struct AnimeCard: View {
-    let anime: AnimeSearchResult
-    let cardWidth: CGFloat
-    let onTap: () -> Void
-
-    @State private var isHovered = false
-
-    // 竖图比例 10:14 (1:1.4)
-    private var imageHeight: CGFloat {
-        cardWidth * 1.4
-    }
-
-    // 信息栏高度
-    private var textAreaHeight: CGFloat { 44 }
-
-    // 降采样目标尺寸（固定 512x512，避免窗口大小变化导致缓存失效）
-    private let targetImageSize: CGSize = CGSize(width: 512, height: 512)
-
-    var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 0) {
-                // Kingfisher 高性能图片加载
-                KFImage(anime.coverURL.flatMap { URL(string: $0) })
-                    .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                    .cacheMemoryOnly(false)
-                    .fade(duration: 0.2)
-                    .placeholder { _ in
-                        placeholderGradient
-                    }
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                .frame(width: cardWidth, height: imageHeight)
-                .clipShape(UnevenRoundedRectangle(
-                    topLeadingRadius: 14, bottomLeadingRadius: 0,
-                    bottomTrailingRadius: 0, topTrailingRadius: 14,
-                    style: .continuous
-                ))
-
-                // 信息栏 - 参考 WallpaperCard 的 HStack 布局
-                HStack(spacing: 8) {
-                    Text(anime.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(ArcBackgroundSettings.shared.primaryText.opacity(0.9))
-                        .lineLimit(1)
-
-                    Spacer(minLength: 4)
-
-                    // 评分标签
-                    if let rating = anime.rating, !rating.isEmpty {
-                        HStack(spacing: 2) {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.yellow)
-                            Text(rating)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.8))
-                        }
-                    }
-
-                    if let episode = anime.latestEpisode, !episode.isEmpty {
-                        HStack(spacing: 3) {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 9))
-                            Text(episode)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        }
-                        .foregroundStyle(ArcBackgroundSettings.shared.secondaryText.opacity(0.5))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(width: cardWidth, height: textAreaHeight, alignment: .leading)
-                .background(Color.black.opacity(0.46))
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
-                    )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.01 : 1.0)
-        .animation(.easeOut(duration: 0.2), value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
-            isHovered = hovering
-        }
-    }
-
-    var placeholderGradient: some View {
-        LinearGradient(
-            colors: [Color(hex: "1C2431"), Color(hex: "233B5A"), Color(hex: "14181F")],
-            startPoint: .topLeading, endPoint: .bottomTrailing
-        )
-        .overlay {
-            Image(systemName: "tv")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(.white.opacity(0.18))
-        }
-    }
-}
-
 // MARK: - Skeleton
 
 private struct AnimeGridSkeleton: View {
@@ -733,11 +654,11 @@ private struct AnimeGridSkeleton: View {
 
     private var gridItems: [GridItem] {
         let count = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
-        return Array(repeating: GridItem(.flexible(), spacing: 16), count: count)
+        return Array(repeating: GridItem(.flexible(), spacing: 20), count: count)
     }
 
     var body: some View {
-        LazyVGrid(columns: gridItems, spacing: 16) {
+        LazyVGrid(columns: gridItems, spacing: 20) {
             ForEach(0..<6, id: \.self) { _ in
                 AnimeCardSkeleton()
             }

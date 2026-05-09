@@ -73,6 +73,26 @@ struct FixedProgressView: View {
     }
 }
 
+struct ExploreLoadingStateView: View {
+    var message: String = "加载中..."
+    var tint: Color = .white
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(tint)
+                .scaleEffect(1.15)
+                .frame(width: 28, height: 28)
+            Text(message)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(tint.opacity(0.82))
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 180)
+    }
+}
+
 // MARK: - 液态玻璃线性进度条（简约风格）
 struct LiquidGlassLinearProgressBar: View {
     let progress: Double

@@ -54,6 +54,10 @@ struct FullScreenWallpaperView: View {
     @State private var slideOutgoingOffset: CGFloat = 0
     @State private var isNavigating = false
 
+    private var prefetchNamespace: String {
+        "fullscreen-wallpaper-\(initialWallpaper.id)"
+    }
+
     private enum SlideDirection {
         case up, down
     }
@@ -178,7 +182,10 @@ struct FullScreenWallpaperView: View {
                         // 预加载下一张壁纸的主图
                         if let nextWallpaper = nextItemDataSource.nextItem as? Wallpaper,
                            let imageURL = nextWallpaper.fullImageURL ?? nextWallpaper.thumbURL {
-                            ImagePrefetcher(urls: [imageURL]).start()
+                            ForegroundPrefetchManager.shared.start(
+                                urls: [imageURL],
+                                namespace: prefetchNamespace
+                            )
                         }
                     }
                 )
@@ -377,6 +384,7 @@ struct FullScreenWallpaperView: View {
         
         // 取消预加载任务
         preloadTask?.cancel()
+        ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
 
         // 恢复窗口级别 - 使用 keyWindow 或 mainWindow 获取当前活动窗口
         DispatchQueue.main.async {

@@ -251,8 +251,11 @@ extension NSImage {
 
 @MainActor
 final class ExploreAtmosphereController: ObservableObject {
-    @Published private(set) var tint: ExploreAtmosphereTint
+    @Published private(set) var tint: ExploreAtmosphereTint {
+        didSet { headerStyleVersion &+= 1 }
+    }
     @Published private(set) var referenceImage: NSImage?
+    @Published private(set) var headerStyleVersion: UInt = 0
 
     private var loadTask: Task<Void, Never>?
     private let wallpaperMode: Bool

@@ -100,34 +100,34 @@ actor MediaService {
     func clearCache() async {
         listCache.removeAll()
         detailCache.removeAll()
-        print("[MediaService] 🗑️ 缓存已清除")
+        // print("[MediaService] 🗑️ 缓存已清除")
     }
 
     /// 清除特定 URL 的缓存
     func clearCache(for url: URL) async {
         let cacheKey = url.absoluteString
         if listCache.remove(cacheKey) != nil {
-            print("[MediaService] 🗑️ 已清除缓存: \(cacheKey)")
+            // print("[MediaService] 🗑️ 已清除缓存: \(cacheKey)")
         }
     }
 
     func fetchPage(source: MediaRouteSource, pagePath: String? = nil) async throws -> MediaListPage {
-        print("[MediaService] fetchPage ENTERED: source=\(source)")
-        print("[MediaService] config: baseURL=\(config.baseURL)")
-        print("[MediaService] config: routes home=\(config.routes.home)")
-        print("[MediaService] activeProfile: \(DataSourceProfileStore.activeProfile().name)")
+        // print("[MediaService] fetchPage ENTERED: source=\(source)")
+        // print("[MediaService] config: baseURL=\(config.baseURL)")
+        // print("[MediaService] config: routes home=\(config.routes.home)")
+        // print("[MediaService] activeProfile: \(DataSourceProfileStore.activeProfile().name)")
 
         let url = try makePageURL(source: source, pagePath: pagePath)
         let cacheKey = url.absoluteString
 
-        print("[MediaService] fetchPage: source=\(source), url=\(url)")
+        // print("[MediaService] fetchPage: source=\(source), url=\(url)")
 
         if let cached = listCache.get(cacheKey) {
-            print("[MediaService] fetchPage: returning cached data")
+            // print("[MediaService] fetchPage: returning cached data")
             return cached
         }
 
-        print("[MediaService] fetchPage: headers=\(htmlHeaders)")
+        // print("[MediaService] fetchPage: headers=\(htmlHeaders)")
 
         // 添加超时保护
         let html: String
@@ -136,11 +136,11 @@ actor MediaService {
                 try await self.networkService.fetchString(from: url, headers: self.htmlHeaders)
             }
         } catch {
-            print("[MediaService] fetchPage: network request failed: \(error)")
+            // print("[MediaService] fetchPage: network request failed: \(error)")
             throw error
         }
 
-        print("[MediaService] fetchPage: received html length=\(html.count)")
+        // print("[MediaService] fetchPage: received html length=\(html.count)")
         let page = parseListPage(html: html, source: source, pageURL: url)
         listCache.set(cacheKey, page)
         return page
@@ -184,41 +184,41 @@ actor MediaService {
     }
 
     private func makePageURL(source: MediaRouteSource, pagePath: String?) throws -> URL {
-        print("[MediaService] makePageURL: source=\(source), pagePath=\(pagePath ?? "nil")")
+        // // print("[MediaService] makePageURL: source=\(source), pagePath=\(pagePath ?? "nil")")
         if let rawPagePath = pagePath?.trimmingCharacters(in: .whitespacesAndNewlines), !rawPagePath.isEmpty {
             if let absolute = URL(string: rawPagePath), absolute.scheme != nil {
-                print("[MediaService] makePageURL: using absolute URL=\(absolute)")
+                // // print("[MediaService] makePageURL: using absolute URL=\(absolute)")
                 return absolute
             }
 
             if rawPagePath.hasPrefix("/") {
                 let url = absoluteURL(for: rawPagePath)
-                print("[MediaService] makePageURL: using absoluteURL=\(url)")
+                // // print("[MediaService] makePageURL: using absoluteURL=\(url)")
                 return url
             }
 
             if rawPagePath.contains("search?") || rawPagePath.contains("tag:") || rawPagePath.contains("hx2/") {
                 let url = absoluteURL(for: rawPagePath.hasPrefix("/") ? rawPagePath : "/\(rawPagePath)")
-                print("[MediaService] makePageURL: using special handler, url=\(url)")
+                // print("[MediaService] makePageURL: using special handler, url=\(url)")
                 return url
             }
 
             switch source {
             case .home:
                 let url = absoluteURL(for: rawPagePath.hasPrefix("?") || rawPagePath.hasPrefix("&") ? rawPagePath : "/\(rawPagePath)")
-                print("[MediaService] makePageURL: home path, url=\(url)")
+                // print("[MediaService] makePageURL: home path, url=\(url)")
                 return url
             case .mobile:
                 let url = absoluteURL(for: "/mobile/\(trimmedPathComponent(rawPagePath))")
-                print("[MediaService] makePageURL: mobile path, url=\(url)")
+                // print("[MediaService] makePageURL: mobile path, url=\(url)")
                 return url
             case .tag(let slug):
                 let url = absoluteURL(for: "/tag:\(slug)/\(trimmedPathComponent(rawPagePath))")
-                print("[MediaService] makePageURL: tag path, url=\(url)")
+                // print("[MediaService] makePageURL: tag path, url=\(url)")
                 return url
             case .search(let query):
                 let url = try makeSearchPageURL(query: query, pagePath: rawPagePath)
-                print("[MediaService] makePageURL: search path, url=\(url)")
+                // print("[MediaService] makePageURL: search path, url=\(url)")
                 return url
             }
         }
@@ -226,19 +226,19 @@ actor MediaService {
         switch source {
         case .home:
             let url = absoluteURL(for: resolvedRoute(config.routes.home))
-            print("[MediaService] makePageURL: default home, url=\(url)")
+            // print("[MediaService] makePageURL: default home, url=\(url)")
             return url
         case .mobile:
             let url = absoluteURL(for: resolvedRoute(config.routes.mobile))
-            print("[MediaService] makePageURL: default mobile, url=\(url)")
+            // print("[MediaService] makePageURL: default mobile, url=\(url)")
             return url
         case .tag(let slug):
             let url = absoluteURL(for: resolvedRoute(config.routes.tag, substitutions: ["slug": slug]))
-            print("[MediaService] makePageURL: default tag, url=\(url)")
+            // print("[MediaService] makePageURL: default tag, url=\(url)")
             return url
         case .search(let query):
             let url = try makeSearchPageURL(query: query, pagePath: nil)
-            print("[MediaService] makePageURL: default search, url=\(url)")
+            // print("[MediaService] makePageURL: default search, url=\(url)")
             return url
         }
     }
@@ -280,14 +280,14 @@ actor MediaService {
         var seen = Set<String>()
         var items: [MediaItem] = []
 
-        print("[MediaService] parseListPage: url=\(pageURL), htmlLength=\(html.count)")
+        // print("[MediaService] parseListPage: url=\(pageURL), htmlLength=\(html.count)")
 
         do {
             let document = try SwiftSoup.parse(html)
             let listSelector = config.parsing.searchList
             let elements = try document.select(listSelector)
 
-            print("[MediaService] parseListPage: listSelector=\(listSelector), found \(elements.count) elements")
+            // print("[MediaService] parseListPage: listSelector=\(listSelector), found \(elements.count) elements")
 
             for element in elements {
                 // 提取标题
@@ -340,10 +340,10 @@ actor MediaService {
                 )
             }
         } catch {
-            print("[MediaService] parseListPage: SwiftSoup parse error: \(error)")
+            // print("[MediaService] parseListPage: SwiftSoup parse error: \(error)")
         }
 
-        print("[MediaService] parseListPage: total items parsed=\(items.count)")
+        // print("[MediaService] parseListPage: total items parsed=\(items.count)")
 
         return MediaListPage(
             items: items,
@@ -477,7 +477,7 @@ actor MediaService {
                     let text = ((try? link.text()) ?? "").lowercased()
                     return text.contains("view more") || text.contains("next")
                 }), let href = try? paginationLink.attr("href"), !href.isEmpty {
-                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (pagination): '\(href)'")
+                    // print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (pagination): '\(href)'")
                     return pathPreservingQuery(from: href)
                 }
 
@@ -486,14 +486,14 @@ actor MediaService {
                     let href = ((try? link.attr("href")) ?? "")
                     return href.matches(regex: #"^/(tag:[^/]+/)?\d+/?$"#)
                 }), let href = try? numericLink.attr("href"), !href.isEmpty {
-                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (numeric): '\(href)'")
+                    // print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (numeric): '\(href)'")
                     return pathPreservingQuery(from: href)
                 }
 
                 // 最后才用 first()（可能是分类链接）
                 if let firstLink = matchedLinks?.first(),
                    let href = try? firstLink.attr("href"), !href.isEmpty {
-                    print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (first): '\(href)'")
+                    // print("[MediaService] parseNextPagePath: 配置选择器匹配成功 (first): '\(href)'")
                     return pathPreservingQuery(from: href)
                 }
             }
@@ -506,7 +506,7 @@ actor MediaService {
 
                 // 匹配 text 为 "Next" 且 href 包含数字路径的链接
                 if text.lowercased() == "next" && href.matches(regex: #"/\d+/?$"#) {
-                    print("[MediaService] parseNextPagePath: 后备匹配成功 (text='Next'): '\(href)'")
+                    // print("[MediaService] parseNextPagePath: 后备匹配成功 (text='Next'): '\(href)'")
                     return pathPreservingQuery(from: href)
                 }
             }
@@ -521,16 +521,16 @@ actor MediaService {
                     // 排除导航链接（Guides, About 等）
                     let isNav = text.lowercased().matches(regex: #"^(guides?|about|privacy|dmca|contact)$"#)
                     if !isNav {
-                        print("[MediaService] parseNextPagePath: 后备匹配成功 (href pattern): '\(href)'")
+                        // print("[MediaService] parseNextPagePath: 后备匹配成功 (href pattern): '\(href)'")
                         return pathPreservingQuery(from: href)
                     }
                 }
             }
 
-            print("[MediaService] parseNextPagePath: 未找到分页链接")
+            // print("[MediaService] parseNextPagePath: 未找到分页链接")
 
         } catch {
-            print("[MediaService] parseNextPagePath: 解析失败: \(error)")
+            // print("[MediaService] parseNextPagePath: 解析失败: \(error)")
         }
 
         return nil
@@ -586,7 +586,7 @@ actor MediaService {
                 tags.append(normalized)
             }
         } catch {
-            print("[MediaService] parseTags: error: \(error)")
+            // print("[MediaService] parseTags: error: \(error)")
         }
 
         return tags
@@ -743,7 +743,7 @@ actor MediaService {
             let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
             return regex
         } catch {
-            print("[MediaService] compileRegex error: \(error)")
+            // print("[MediaService] compileRegex error: \(error)")
             return nil
         }
     }

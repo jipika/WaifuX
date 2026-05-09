@@ -53,6 +53,10 @@ struct MediaDetailSheet: View {
     @StateObject private var nextItemDataSource = NextItemDataSource()
     @State private var currentItemIndex: Int = 0
 
+    private var prefetchNamespace: String {
+        "media-detail-\(initialItem.id)"
+    }
+
     // 计算属性：当前媒体项
     var item: MediaItem { resolvedItem }
 
@@ -220,7 +224,10 @@ struct MediaDetailSheet: View {
                                 if let nextMedia = nextItemDataSource.nextItem as? MediaItem {
                                     // 预加载图片
                                     let imageURL = nextMedia.posterURL ?? nextMedia.thumbnailURL
-                                    ImagePrefetcher(urls: [imageURL]).start()
+                                    ForegroundPrefetchManager.shared.start(
+                                        urls: [imageURL],
+                                        namespace: prefetchNamespace
+                                    )
                                     // 预加载视频（如果存在）
                                     if let videoURL = nextMedia.previewVideoURL {
                                         VideoPreloader.shared.preload(url: videoURL)
@@ -275,6 +282,7 @@ struct MediaDetailSheet: View {
         }
         .onDisappear {
             isVisible = false
+            ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
             removeKeyboardMonitor()
         }
     }
@@ -2700,6 +2708,13 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        nsView.stopLoading()
+        nsView.navigationDelegate = nil
+        nsView.configuration.userContentController.removeAllUserScripts()
+        nsView.loadHTMLString("", baseURL: nil)
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onLoaded: onLoaded, contentDir: contentDir)

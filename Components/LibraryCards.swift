@@ -9,6 +9,38 @@ extension MediaItem {
     ]
 
     private static let videoFileExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
+    private static let workshopPreviewFallbackNames = [
+        "preview.gif", "preview.jpg", "preview.jpeg", "preview.png", "preview.webp"
+    ]
+
+    /// 若 `url` 是已下载的 Wallpaper Engine 项目录，优先寻找本地预览图（特别是 web 壁纸）。
+    nonisolated static func resolveLocalWorkshopPreviewImage(from url: URL) -> URL? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+
+        let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: url)
+        let projectURL = resolved.appendingPathComponent("project.json")
+        if let data = try? Data(contentsOf: projectURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let previewName = json["preview"] as? String {
+            let trimmed = previewName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let candidate = resolved.appendingPathComponent(trimmed)
+                if fm.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+        }
+
+        for name in workshopPreviewFallbackNames {
+            let candidate = resolved.appendingPathComponent(name)
+            if fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
 
     /// 若 `url` 是目录（壁纸引擎 Workshop 项），递归查找其中的视频文件并返回；若是视频文件则直接返回。
     nonisolated static func resolveLocalVideoFile(from url: URL) -> URL? {
@@ -46,6 +78,9 @@ extension MediaItem {
         if let local = localFileURL,
            local.isFileURL,
            FileManager.default.fileExists(atPath: local.path) {
+            if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
+                return localPreview
+            }
             // 解析目录→视频文件（壁纸引擎源），或直接使用文件
             let resolved = Self.resolveLocalVideoFile(from: local) ?? local
 
@@ -241,6 +276,11 @@ public struct MediaVideoCard: View {
               let local = localMediaFileURL,
               local.isFileURL,
               FileManager.default.fileExists(atPath: local.path) else { return }
+
+        if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+            resolvedThumbnailURL = localPreview
+            return
+        }
 
         // 解析目录→视频文件/预览图（壁纸引擎源），或直接使用文件
         if let resolved = MediaItem.resolveLocalVideoFile(from: local) ?? (
