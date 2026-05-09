@@ -1,7 +1,7 @@
 import SwiftUI
 
 private struct ScrollBottomSentinelMinYPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
