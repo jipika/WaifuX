@@ -40,6 +40,13 @@ struct CaptchaVerificationWebView: NSViewRepresentable {
             nsView.load(request)
         }
     }
+
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        nsView.stopLoading()
+        nsView.navigationDelegate = nil
+        nsView.uiDelegate = nil
+        nsView.loadHTMLString("", baseURL: nil)
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator()

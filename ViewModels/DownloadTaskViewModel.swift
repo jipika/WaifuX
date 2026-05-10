@@ -125,13 +125,17 @@ final class DownloadToastViewModel: ObservableObject {
 
     private let downloadService: DownloadTaskService
     private var cancellables = Set<AnyCancellable>()
+    private var preferredRunningTaskID: String?
 
     init(downloadService: DownloadTaskService = .shared) {
         self.downloadService = downloadService
 
         downloadService.$tasks
             .receive(on: DispatchQueue.main)
-            .map(Self.makePresentationState)
+            .map { [weak self] tasks -> (snapshot: DownloadToastSnapshot?, activeCount: Int) in
+                guard let self else { return (nil, 0) }
+                return self.makePresentationState(from: tasks)
+            }
             .removeDuplicates(by: { lhs, rhs in
                 lhs.activeCount == rhs.activeCount && lhs.snapshot == rhs.snapshot
             })
@@ -150,14 +154,30 @@ final class DownloadToastViewModel: ObservableObject {
         downloadService.clearToastSuppression(for: taskID)
     }
 
-    private static func makePresentationState(from tasks: [DownloadTask]) -> (snapshot: DownloadToastSnapshot?, activeCount: Int) {
+    private func makePresentationState(from tasks: [DownloadTask]) -> (snapshot: DownloadToastSnapshot?, activeCount: Int) {
         let activeCount = tasks.filter(\.isRunning).count
+        let runningTasks = tasks.filter(\.isRunning)
+        let visibleRunningTasks = runningTasks.filter { !downloadService.isToastSuppressed(for: $0.id) }
 
-        if let runningTask = tasks
-            .filter(\.isRunning)
-            .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
+        // 如果被抑制的偏好任务重新可见了，清除偏好让它能被再次选中
+        if let preferredID = preferredRunningTaskID,
+           !runningTasks.contains(where: { $0.id == preferredID }) {
+            preferredRunningTaskID = nil
+        }
+
+        // 固定显示当前偏好的 running 任务，避免多个任务同时下载时弹窗来回闪烁
+        if let preferredID = preferredRunningTaskID,
+           let task = visibleRunningTasks.first(where: { $0.id == preferredID }) {
+            return (DownloadToastSnapshot(task: task), activeCount)
+        }
+
+        // 选择最新的 running 任务并记住它
+        if let runningTask = visibleRunningTasks.max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
+            preferredRunningTaskID = runningTask.id
             return (DownloadToastSnapshot(task: runningTask), activeCount)
         }
+
+        preferredRunningTaskID = nil
 
         if let actionableTask = tasks
             .filter({ task in

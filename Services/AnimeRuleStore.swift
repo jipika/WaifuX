@@ -76,6 +76,11 @@ actor AnimeRuleStore {
         }
     }
 
+    /// 后台释放前台资源时只清内存，不删除本地规则文件。
+    func clearInMemoryCache() {
+        rules.removeAll(keepingCapacity: false)
+    }
+
     /// 从 Kazumi 官方索引全量同步：远程成功后再清空本地并逐条下载覆盖（与索引一致，弃用项不安装）
     func replaceAllRulesFromKazumiRemote() async throws {
         print("[AnimeRuleStore] 开始获取 Kazumi 远程索引…")

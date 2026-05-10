@@ -85,8 +85,13 @@ class WorkshopService: ObservableObject {
             requiredTags.append(contentsOf: params.tags)
         }
         // 新版 browse 页面中内容级别通过 requiredtags[]=Mature/Questionable/Everyone 实现
-        // [强制规则] 仅允许 SFW 内容：硬编码 Everyone 标签，禁止传入其他内容级别
-        requiredTags.append("Everyone")
+        // [强制规则] 默认 Everyone；仅允许传入 Everyone 或 Questionable，禁止 Mature
+        let effectiveContentLevel = params.contentLevel ?? "Everyone"
+        if effectiveContentLevel == "Everyone" || effectiveContentLevel == "Questionable" {
+            requiredTags.append(effectiveContentLevel)
+        } else {
+            requiredTags.append("Everyone")
+        }
         // 分辨率/比例筛选通过 requiredtags[] 发送（Steam Workshop 分辨率以标签形式存在）
         if let resolution = params.resolution {
             requiredTags.append(resolution)
@@ -752,7 +757,75 @@ class WorkshopService: ObservableObject {
             throw WorkshopError.apiError("解析 Steam API 响应失败")
         }
     }
-    
+
+    // MARK: - 通过 Steam Workshop URL 解析项目
+
+    /// 从 Steam Workshop URL 解析 publishedfileid，支持多种格式：
+    /// - https://steamcommunity.com/sharedfiles/filedetails/?id=3722857902
+    /// - https://steamcommunity.com/sharedfiles/filedetails/?id=3722857902&searchtext=...
+    /// - steamcommunity.com/sharedfiles/filedetails/?id=3722857902
+    /// - 纯数字 ID
+    static func extractWorkshopID(from urlString: String) -> String? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 纯数字直接返回
+        if trimmed.allSatisfy({ $0.isNumber }) {
+            return trimmed
+        }
+
+        guard let url = URL(string: trimmed),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        // 检查路径是否为 sharedfiles/filedetails/
+        let path = components.path.lowercased()
+        guard path.contains("sharedfiles/filedetails") else { return nil }
+
+        return components.queryItems?.first(where: { $0.name.lowercased() == "id" })?.value
+    }
+
+    /// 通过 Workshop URL 获取单个项目详情并转换为 MediaItem
+    func resolveWorkshopItemByURL(_ urlString: String) async throws -> MediaItem {
+        guard let workshopID = Self.extractWorkshopID(from: urlString) else {
+            throw WorkshopError.invalidURL
+        }
+
+        let details = try await fetchPublishedFileDetails(ids: [workshopID])
+        guard let detail = details.first else {
+            throw WorkshopError.apiError("未找到该 Workshop 项目")
+        }
+
+        guard detail.creator_app_id == 431960 || detail.consumer_app_id == 431960 else {
+            throw WorkshopError.workshopNotSupported
+        }
+
+        let wallpaper = WorkshopWallpaper(
+            id: detail.publishedfileid,
+            title: detail.title,
+            description: detail.description,
+            previewURL: detail.preview_url.flatMap { URL(string: $0) },
+            author: WorkshopAuthor(
+                steamID: detail.creator,
+                name: "Unknown",
+                avatarURL: nil
+            ),
+            fileSize: Int64(detail.file_size ?? "0"),
+            fileURL: detail.file_url.flatMap { URL(string: $0) },
+            steamAppID: String(detail.consumer_app_id ?? 431960),
+            subscriptions: detail.subscriptions,
+            favorites: detail.favorited,
+            views: detail.views,
+            rating: detail.vote_data?.score ?? detail.score,
+            type: WorkshopWallpaper.detectType(fromTags: detail.tags?.map(\.tag) ?? []),
+            tags: detail.tags?.map { $0.tag } ?? [],
+            isAnimatedImage: detail.preview_url?.lowercased().contains(".gif"),
+            createdAt: detail.time_created.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) },
+            updatedAt: detail.time_updated.flatMap { Date(timeIntervalSince1970: TimeInterval($0)) }
+        )
+        return convertToMediaItem(wallpaper)
+    }
+
     // MARK: - Type Detection
     
     private func detectType(from urlString: String) -> WorkshopWallpaper.WallpaperType {

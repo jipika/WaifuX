@@ -265,6 +265,11 @@ actor RuleRepository {
     func isConfigured() -> Bool {
         return currentOwner != nil && currentRepo != nil
     }
+
+    /// 后台释放前台资源时清掉仓库索引缓存，保留用户配置的仓库地址。
+    func clearCache() {
+        cachedIndex = nil
+    }
 }
 
 // MARK: - 数据模型

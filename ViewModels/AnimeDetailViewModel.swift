@@ -256,15 +256,16 @@ class AnimeDetailViewModel: ObservableObject {
         print("[AnimeDetailViewModel] ========== 搜索源 '\(rule.name)' ==========")
         print("[AnimeDetailViewModel] 关键词: \(searchQuery)")
 
-        guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+        guard sourceResults.firstIndex(where: { $0.id == rule.id }) != nil else { return }
 
         // 更新状态为加载中
         await MainActor.run {
-            var updatedResult = sourceResults[index]
+            guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+            var updatedResult = sourceResults[currentIndex]
             updatedResult.status = .loading
             updatedResult.selectedItem = nil
             updatedResult.detail = nil
-            sourceResults[index] = updatedResult
+            sourceResults[currentIndex] = updatedResult
         }
 
         do {
@@ -285,14 +286,15 @@ class AnimeDetailViewModel: ObservableObject {
             }
 
             await MainActor.run {
-                var updatedResult = sourceResults[index]
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                var updatedResult = sourceResults[currentIndex]
                 if items.isEmpty {
                     updatedResult.status = .noResult
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 } else if items.count == 1 {
                     // 只有一个结果，自动选择但不自动查询剧集
                     updatedResult.selectedItem = items[0]
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                     // 可选：自动查询剧集
                     Task {
                         await self.queryEpisodes(for: items[0], in: rule)
@@ -301,36 +303,38 @@ class AnimeDetailViewModel: ObservableObject {
                     // 多个结果，需要用户选择
                     updatedResult.status = .needsSelection(items)
                     updatedResult.searchItems = items
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 }
             }
 
         } catch let error as AnimeParserError {
             await MainActor.run {
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 switch error {
                 case .captchaRequired:
                     // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
-                    var updatedResult = sourceResults[index]
+                    var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .captcha
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 case .noResult:
-                    var updatedResult = sourceResults[index]
+                    var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .noResult
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 case .networkError(let underlying):
-                    var updatedResult = sourceResults[index]
+                    var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .error(underlying.localizedDescription)
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 default:
-                    var updatedResult = sourceResults[index]
+                    var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .error(error.localizedDescription)
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 }
             }
         } catch {
             let errorString = error.localizedDescription.lowercased()
             await MainActor.run {
-                var updatedResult = sourceResults[index]
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                var updatedResult = sourceResults[currentIndex]
                 // 优化：避免误判，只匹配明确的验证码关键词
                 if errorString.contains("captcha") ||
                    errorString.contains("需要验证") ||
@@ -340,7 +344,7 @@ class AnimeDetailViewModel: ObservableObject {
                 } else {
                     updatedResult.status = .error(error.localizedDescription)
                 }
-                sourceResults[index] = updatedResult
+                sourceResults[currentIndex] = updatedResult
             }
         }
 
@@ -361,14 +365,13 @@ class AnimeDetailViewModel: ObservableObject {
             print("[AnimeDetailViewModel] 将清除旧 Cookie 后重试")
         }
 
-        guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
-
         // 更新状态为加载中，同时保存 selectedItem（即使出错也需要保存，用于验证码验证后重试）
         await MainActor.run {
-            var updatedResult = sourceResults[index]
+            guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+            var updatedResult = sourceResults[currentIndex]
             updatedResult.status = .loading
             updatedResult.selectedItem = item
-            sourceResults[index] = updatedResult
+            sourceResults[currentIndex] = updatedResult
         }
 
         do {
@@ -397,9 +400,10 @@ class AnimeDetailViewModel: ObservableObject {
             if details.isEmpty {
                 print("[AnimeDetailViewModel] ⚠️ 未找到播放列表")
                 await MainActor.run {
-                    var updatedResult = sourceResults[index]
+                    guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                    var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .noResult
-                    sourceResults[index] = updatedResult
+                    sourceResults[currentIndex] = updatedResult
                 }
                 // noResult 也是终端状态，检查是否需要冻结排序
                 checkAndFreezeInitialOrder()
@@ -412,11 +416,12 @@ class AnimeDetailViewModel: ObservableObject {
 
             // 更新 sourceResults 中的数据
             await MainActor.run {
-                var updatedResult = sourceResults[index]
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                var updatedResult = sourceResults[currentIndex]
                 updatedResult.selectedItem = item
                 updatedResult.detail = firstDetail
                 updatedResult.status = .success
-                sourceResults[index] = updatedResult
+                sourceResults[currentIndex] = updatedResult
             }
 
             // 检查是否所有源都完成初始搜索，如果是则冻结排序
@@ -424,7 +429,8 @@ class AnimeDetailViewModel: ObservableObject {
 
         } catch let error as AnimeParserError {
             await MainActor.run {
-                var updatedResult = sourceResults[index]
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                var updatedResult = sourceResults[currentIndex]
                 switch error {
                 case .captchaRequired:
                     // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
@@ -436,15 +442,16 @@ class AnimeDetailViewModel: ObservableObject {
                 default:
                     updatedResult.status = .error(error.localizedDescription)
                 }
-                sourceResults[index] = updatedResult
+                sourceResults[currentIndex] = updatedResult
             }
             // captcha/error 也是终端状态，检查是否需要冻结排序
             checkAndFreezeInitialOrder()
         } catch {
             await MainActor.run {
-                var updatedResult = sourceResults[index]
+                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                var updatedResult = sourceResults[currentIndex]
                 updatedResult.status = .error(error.localizedDescription)
-                sourceResults[index] = updatedResult
+                sourceResults[currentIndex] = updatedResult
             }
             // captcha/error 也是终端状态，检查是否需要冻结排序
             checkAndFreezeInitialOrder()
@@ -937,6 +944,37 @@ class AnimeDetailViewModel: ObservableObject {
         danmakuList = []
     }
 
+    /// 前台窗口释放时使用：保留收藏/偏好等持久状态，清掉播放页的大对象和临时数据。
+    func releaseForegroundMemory() {
+        stopPlayback()
+        AnimeVideoExtractor.shared.cancel()
+
+        availableRules.removeAll(keepingCapacity: false)
+        sourceResults.removeAll(keepingCapacity: false)
+        videoSources.removeAll(keepingCapacity: false)
+        bangumiDetail = nil
+        bangumiEpisodes.removeAll(keepingCapacity: false)
+        danmakuList.removeAll(keepingCapacity: false)
+        captchaVerificationSession = nil
+        aliasSearchRule = nil
+        aliasSearchText = ""
+        showAliasSearchSheet = false
+
+        selectedSourceIndex = 0
+        isLoadingVideo = false
+        isBuffering = false
+        isLoadingDanmaku = false
+        isLoadingBangumi = false
+        isLoadingRules = false
+        videoError = nil
+        showPlayerWindow = false
+        currentProgress = 0
+        currentTime = 0
+        totalDuration = 0
+        isInitialLoadComplete = false
+        frozenSourceOrder.removeAll(keepingCapacity: false)
+    }
+
     // MARK: - 弹幕功能
 
     /// 加载弹幕（参考 Kazumi 的弹幕获取逻辑）
@@ -1128,4 +1166,3 @@ class AnimeDetailViewModel: ObservableObject {
         return cleaned.isEmpty ? title : cleaned
     }
 }
-

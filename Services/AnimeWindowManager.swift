@@ -7,6 +7,7 @@ class AnimePlayerWindowController: NSWindowController {
     let animeId: String
     let viewModel: AnimeDetailViewModel
     let player = NativeVideoPlayer()
+    private var didReleaseResources = false
     
     nonisolated(unsafe) private var keyMonitor: Any?
     nonisolated(unsafe) private var mouseMonitor: Any?
@@ -149,14 +150,27 @@ class AnimePlayerWindowController: NSWindowController {
     }
     
     func closeWindow() {
-        viewModel.stopPlayback()
+        releaseResourcesForClose()
         window?.close()
+    }
+
+    private func releaseResourcesForClose() {
+        guard !didReleaseResources else { return }
+        didReleaseResources = true
+
+        viewModel.releaseForegroundMemory()
+        player.releaseResources()
+        AnimeVideoExtractor.shared.cancel()
+        removeEventMonitors()
+
+        window?.contentView = nil
     }
 }
 
 // MARK: - NSWindowDelegate
 extension AnimePlayerWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        releaseResourcesForClose()
         AnimeWindowManager.shared.windowWillClose(animeId: animeId)
     }
     
@@ -211,5 +225,12 @@ class AnimeWindowManager: ObservableObject {
     func closeWindow(for animeId: String) {
         windowControllers[animeId]?.closeWindow()
         windowControllers.removeValue(forKey: animeId)
+    }
+
+    /// 主窗口进入后台极致释放时，关闭所有独立动漫播放窗口并释放播放器/WebView 资源。
+    func closeAllWindowsForMemoryRelease() {
+        let controllers = Array(windowControllers.values)
+        windowControllers.removeAll()
+        controllers.forEach { $0.closeWindow() }
     }
 }

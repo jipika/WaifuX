@@ -2679,6 +2679,7 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.websiteDataStore = .nonPersistent()
 
         // 注入 WE API Shim 和本地文件兼容脚本
         let ucc = WKUserContentController()

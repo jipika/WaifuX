@@ -173,6 +173,11 @@ actor RuleLoader {
         return Array(rules.values).sorted { $0.name < $1.name }
     }
 
+    /// 后台释放前台资源时只清内存，不删除用户安装/同步到本地的规则文件。
+    func clearInMemoryCache() {
+        rules.removeAll(keepingCapacity: false)
+    }
+
     // MARK: - 删除规则
 
     func removeRule(id: String) throws {

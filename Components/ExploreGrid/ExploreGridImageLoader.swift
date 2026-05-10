@@ -143,6 +143,10 @@ actor ExploreGridImageLoader {
                 .requestModifier(AnyModifier { request in
                     var request = request
                     request.timeoutInterval = max(request.timeoutInterval, 45)
+                    if let host = request.url?.host?.lowercased(),
+                       host.contains("steam") || host.contains("akamaihd") {
+                        request.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                    }
                     return request
                 })
             ],
@@ -153,6 +157,10 @@ actor ExploreGridImageLoader {
                 .requestModifier(AnyModifier { request in
                     var request = request
                     request.timeoutInterval = max(request.timeoutInterval, 45)
+                    if let host = request.url?.host?.lowercased(),
+                       host.contains("steam") || host.contains("akamaihd") {
+                        request.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                    }
                     return request
                 })
             ]

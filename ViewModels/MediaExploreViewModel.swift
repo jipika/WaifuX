@@ -94,11 +94,16 @@ final class MediaExploreViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.networkStatus = status
-                // 网络恢复时自动刷新
+                // 网络恢复时自动刷新，根据当前源加载正确数据
                 if status.connectionState.isConnected && self?.items.isEmpty == true {
                     self?.networkRecoveryTask?.cancel()
                     self?.networkRecoveryTask = Task { [weak self] in
-                        await self?.loadHomeFeed()
+                        guard let self else { return }
+                        if self.workshopSourceManager.activeSource == .wallpaperEngine {
+                            await self.loadWorkshopFeed()
+                        } else {
+                            await self.loadHomeFeed()
+                        }
                     }
                 }
             }
@@ -236,7 +241,11 @@ final class MediaExploreViewModel: ObservableObject {
             print("[MediaExploreViewModel] items not empty, skipping initial load")
             return
         }
-        await load(source: .home)
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            await loadWorkshopFeed()
+        } else {
+            await load(source: .home)
+        }
     }
 
     func load(source: MediaRouteSource) async {
@@ -1378,6 +1387,15 @@ final class MediaExploreViewModel: ObservableObject {
             return appContentPath
         }
         return url
+    }
+
+    // MARK: - 通过 URL 解析 Workshop 项目
+
+    /// 解析 Steam Workshop 链接并返回 MediaItem，失败时抛出错误
+    func resolveWorkshopItemByURL(_ urlString: String) async throws -> MediaItem {
+        let item = try await workshopService.resolveWorkshopItemByURL(urlString)
+        print("[MediaExploreViewModel] resolveWorkshopItemByURL success: \(item.id) - \(item.title)")
+        return item
     }
 }
 

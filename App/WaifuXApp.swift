@@ -3,6 +3,7 @@ import AppKit
 import AppIntents
 import Kingfisher
 import ExceptionHandling
+import WebKit
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
@@ -475,6 +476,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         guard let window else {
             DisplaySelectorManager.shared.cancelForMemoryRelease()
+            AnimeWindowManager.shared.closeAllWindowsForMemoryRelease()
+            AnimeVideoExtractor.shared.cancel()
             ForegroundPrefetchManager.shared.stopAll()
             KingfisherManager.shared.downloader.cancelAll()
             ImageCache.default.clearMemoryCache()
@@ -482,11 +485,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ExploreGridImageCache.shared.removeAll()
             VideoPreloader.shared.clearCache()
             URLCache.shared.removeAllCachedResponses()
+            clearWebKitForegroundCaches()
             Task(priority: .utility) {
                 await ExploreGridImageLoader.shared.cancelAll()
                 await MediaService.shared.clearCache()
                 await ContentService.shared.clearCache()
                 await NetworkService.shared.clearCache()
+                await KazumiRuleLoader.shared.clearCache()
+                await AnimeRuleStore.shared.clearInMemoryCache()
+                await RuleLoader.shared.clearInMemoryCache()
+                await RuleRepository.shared.clearCache()
             }
             return
         }
@@ -506,6 +514,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func releaseForegroundResourcesForHiddenWindow(_ window: NSWindow) {
         NotificationCenter.default.post(name: .appShouldReleaseForegroundMemory, object: nil)
         DisplaySelectorManager.shared.cancelForMemoryRelease()
+        AnimeWindowManager.shared.closeAllWindowsForMemoryRelease()
+        AnimeVideoExtractor.shared.cancel()
 
         // 释放视图树是回收系统图形缓存（IOSurface、CALayer backing store）的关键。
         // 只清前台浏览/预览缓存；动态壁纸渲染、调度器、下载任务和状态栏继续运行。
@@ -523,12 +533,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         LocalWallpaperScanner.shared.clearInMemoryCache()
         WorkshopService.shared.clearForegroundState()
         URLCache.shared.removeAllCachedResponses()
+        clearWebKitForegroundCaches()
 
         Task(priority: .utility) {
             await ExploreGridImageLoader.shared.cancelAll()
             await MediaService.shared.clearCache()
             await ContentService.shared.clearCache()
             await NetworkService.shared.clearCache()
+            await KazumiRuleLoader.shared.clearCache()
+            await AnimeRuleStore.shared.clearInMemoryCache()
+            await RuleLoader.shared.clearInMemoryCache()
+            await RuleRepository.shared.clearCache()
+        }
+    }
+
+    private func clearWebKitForegroundCaches() {
+        let cacheTypes: Set<String> = [
+            WKWebsiteDataTypeMemoryCache,
+            WKWebsiteDataTypeDiskCache
+        ]
+
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: cacheTypes,
+            modifiedSince: .distantPast
+        ) {
+            print("[WaifuXApp] WebKit foreground caches cleared")
         }
     }
 

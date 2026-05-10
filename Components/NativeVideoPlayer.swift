@@ -81,11 +81,7 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     }
     
     deinit {
-        if let observer = timeObserver {
-            avPlayer.removeTimeObserver(observer)
-        }
-        itemObservers.forEach { $0.invalidate() }
-        rateObserver?.invalidate()
+        tearDownPlayerResources(invalidateRateObserver: true)
     }
     
     // MARK: - 播放器控制
@@ -248,20 +244,52 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     }
     
     func stop() {
+        tearDownPlayerResources(invalidateRateObserver: false)
+        resetPlaybackState()
+        onStateChanged?(.idle)
+    }
+
+    func releaseResources() {
+        tearDownPlayerResources(invalidateRateObserver: true)
+        resetPlaybackState()
+        onStateChanged = nil
+        onBufferChanged = nil
+        onFinish = nil
+        onReady = nil
+    }
+
+    private func tearDownPlayerResources(invalidateRateObserver: Bool) {
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
-        state = .idle
-        currentTime = 0
-        totalDuration = 0
-        bufferedDuration = 0
         if let observer = timeObserver {
             avPlayer.removeTimeObserver(observer)
             timeObserver = nil
         }
+        if let observer = boundaryObserver {
+            avPlayer.removeTimeObserver(observer)
+            boundaryObserver = nil
+        }
         itemObservers.forEach { $0.invalidate() }
         itemObservers.removeAll()
+        if invalidateRateObserver {
+            rateObserver?.invalidate()
+            rateObserver = nil
+        }
         cancellables.removeAll()
-        onStateChanged?(.idle)
+        currentURL = nil
+        pendingStartTime = 0
+    }
+
+    private func resetPlaybackState() {
+        state = .idle
+        currentTime = 0
+        totalDuration = 0
+        bufferedDuration = 0
+        isLoading = false
+        isSeeking = false
+        timeModel.currentTime = 0
+        timeModel.totalTime = 0
+        timeModel.bufferedTime = 0
     }
     
     // MARK: - 内部方法
@@ -326,6 +354,15 @@ struct NativeVideoPlayerView: NSViewRepresentable {
         // 确保 AVPlayerLayer 始终与 NSView bounds 同步，防止动画/快速切换时 frame 异常
         if let playerLayer = nsView.layer?.sublayers?.first as? AVPlayerLayer {
             playerLayer.frame = nsView.bounds
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        nsView.layer?.sublayers?.forEach { layer in
+            if let playerLayer = layer as? AVPlayerLayer {
+                playerLayer.player = nil
+            }
+            layer.removeFromSuperlayer()
         }
     }
 }

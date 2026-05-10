@@ -58,6 +58,10 @@ struct MediaExploreContentView: View {
     @State private var selectedWorkshopResolution: WorkshopSourceManager.WorkshopResolution? = nil
     @State private var workshopSearchQuery: String = ""
     @State private var selectedWorkshopSort: WorkshopSortOption = .trendWeek
+    @State private var showWorkshopURLSheet = false
+    @State private var workshopURLInput = ""
+    @State private var isResolvingWorkshopURL = false
+    @State private var workshopURLError: String?
     private var workshopService: WorkshopService {
         WorkshopService.shared
     }
@@ -94,6 +98,15 @@ struct MediaExploreContentView: View {
                     scrollToTopButton
                 }
             }
+        }
+        .sheet(isPresented: $showWorkshopURLSheet) {
+            WorkshopURLInputSheet(
+                urlInput: $workshopURLInput,
+                errorMessage: workshopURLError,
+                isLoading: isResolvingWorkshopURL,
+                onSubmit: { handleWorkshopURLSubmit() },
+                onDismiss: { showWorkshopURLSheet = false }
+            )
         }
         .onAppear {
             if isFirstAppearance {
@@ -338,6 +351,12 @@ struct MediaExploreContentView: View {
                 } : nil
             )
 
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
+                    showWorkshopURLSheet = true
+                }
+            }
+
             ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainMedia) {
                 randomizeAtmosphere()
             }
@@ -461,8 +480,33 @@ struct MediaExploreContentView: View {
 
     @ViewBuilder
     private var filterSection: some View {
-        // [强制规则] 内容级别已写死为 SFW (Everyone)，不在 UI 中显示筛选
-        EmptyView()
+        if workshopSourceManager.activeSource == .wallpaperEngine {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(t("contentLevel"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
+                FlowLayout(spacing: 10) {
+                    ForEach(visibleWorkshopContentLevels) { level in
+                        FilterChip(
+                            title: level.title,
+                            subtitle: level.subtitle,
+                            isSelected: selectedWorkshopContentLevel?.id == level.id,
+                            tint: level.tint
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                if selectedWorkshopContentLevel?.id == level.id {
+                                    // 点击已选中项：回到默认 Everyone（不允许空选）
+                                    selectedWorkshopContentLevel = .everyone
+                                } else {
+                                    selectedWorkshopContentLevel = level
+                                }
+                                Task { await applyWorkshopFilters() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var workshopResolutionMenu: some View {
@@ -506,7 +550,7 @@ struct MediaExploreContentView: View {
     }
 
     private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
-        Array(WorkshopSourceManager.WorkshopContentLevel.allCases)
+        [.everyone, .questionable]
     }
 
     @ViewBuilder
@@ -554,7 +598,7 @@ struct MediaExploreContentView: View {
         let title: String
         let accentHex: String
         let kind: Kind
-        enum Kind { case type, tag, resolution }
+        enum Kind { case type, tag, level, resolution }
     }
 
     private var workshopActiveFilterChips: [WorkshopFilterChipData] {
@@ -575,7 +619,14 @@ struct MediaExploreContentView: View {
                 kind: .tag
             ))
         }
-        // [强制规则] 内容级别已写死为 SFW (Everyone)，不在当前筛选中显示
+        if let level = selectedWorkshopContentLevel, level != .everyone {
+            chips.append(WorkshopFilterChipData(
+                id: "level_\(level.id)",
+                title: level.title,
+                accentHex: level.accentHex,
+                kind: .level
+            ))
+        }
         if let res = selectedWorkshopResolution {
             chips.append(WorkshopFilterChipData(
                 id: "res_\(res.id)",
@@ -593,6 +644,8 @@ struct MediaExploreContentView: View {
             selectedWorkshopType = .all
         case .tag:
             selectedWorkshopTag = nil
+        case .level:
+            selectedWorkshopContentLevel = .everyone
         case .resolution:
             selectedWorkshopResolution = nil
         }
@@ -934,6 +987,36 @@ struct MediaExploreContentView: View {
         bumpReloadToken()
     }
 
+    private func handleWorkshopURLSubmit() {
+        let url = workshopURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            workshopURLError = "请输入 Workshop 链接"
+            return
+        }
+        guard WorkshopService.extractWorkshopID(from: url) != nil else {
+            workshopURLError = "无法解析 Workshop 链接，请检查链接格式"
+            return
+        }
+        isResolvingWorkshopURL = true
+        workshopURLError = nil
+        Task {
+            do {
+                let item = try await viewModel.resolveWorkshopItemByURL(url)
+                await MainActor.run {
+                    isResolvingWorkshopURL = false
+                    showWorkshopURLSheet = false
+                    workshopURLInput = ""
+                    selectedMedia = item
+                }
+            } catch {
+                await MainActor.run {
+                    isResolvingWorkshopURL = false
+                    workshopURLError = error.localizedDescription
+                }
+            }
+        }
+    }
+
     private func triggerLoadMore() {
         guard viewModel.hasMorePages,
               !viewModel.isLoading,
@@ -1269,6 +1352,148 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
         case .trendYear: return 365
         case .trendAll, .updated, .created, .topRated:
             return nil
+        }
+    }
+}
+
+// MARK: - Workshop URL 输入按钮
+
+private struct WorkshopURLInputButton: View {
+    let tint: Color
+    let action: () -> Void
+    @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "link")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(arcSettings.primaryText.opacity(0.92))
+                .frame(width: 46, height: 46)
+                .contentShape(Circle())
+                .arcFrostedCircle(
+                    intensity: arcSettings.frostedIntensity,
+                    isLightMode: arcSettings.isLightMode,
+                    accentColor: tint
+                )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered ? 1.05 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .onHover { isHovered = $0 }
+        .help("通过 Workshop 链接打开")
+    }
+}
+
+// MARK: - Workshop URL 输入弹窗
+
+private struct WorkshopURLInputSheet: View {
+    @Binding var urlInput: String
+    let errorMessage: String?
+    let isLoading: Bool
+    let onSubmit: () -> Void
+    let onDismiss: () -> Void
+
+    @FocusState private var isInputFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Text("通过链接打开 Workshop 壁纸")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Spacer()
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Input
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("粘贴 Steam Workshop 链接...", text: $urlInput, axis: .vertical)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(.white.opacity(0.1), lineWidth: 1)
+                    )
+                    .focused($isInputFocused)
+                    .onSubmit {
+                        if !isLoading { onSubmit() }
+                    }
+
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.red.opacity(0.8))
+                        .transition(.opacity)
+                }
+
+                Text("支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+
+            // Buttons
+            HStack(spacing: 12) {
+                Button(action: onDismiss) {
+                    Text("取消")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(.white.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onSubmit) {
+                    HStack(spacing: 6) {
+                        if isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        }
+                        Text("确认")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white.opacity(0.95))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 36)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.35))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoading || urlInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+        .background(
+            DarkLiquidGlassBackground(cornerRadius: 16, isHovered: false)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isInputFocused = true
+            }
         }
     }
 }
