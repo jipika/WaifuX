@@ -1262,6 +1262,10 @@ struct MediaDetailSheet: View {
                     isDownloading = false
                     pendingSteamGuardCode = ""
                     showSteamGuardAlert = true
+                case .confirmationRequired(let msg):
+                    isDownloading = false
+                    errorMessage = msg
+                    showError = true
                 case .sessionExpired:
                     isDownloading = false
                     showSessionExpiredAlert = true

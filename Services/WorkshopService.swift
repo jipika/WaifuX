@@ -858,6 +858,38 @@ class WorkshopService: ObservableObject {
         guardCode: String? = nil,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> URL {
+        // 先尝试不带密码的 login，复用已保存的 session token
+        // 如果 session 已失效，再 fallback 到带密码的登录
+        do {
+            return try await downloadWorkshopItemOnce(
+                workshopID: workshopID,
+                guardCode: guardCode,
+                attempt: 0,
+                usePassword: false,
+                progressHandler: progressHandler
+            )
+        } catch let error as WorkshopError {
+            switch error {
+            case .sessionExpired, .confirmationRequired, .guardCodeRequired, .invalidCredentials:
+                // session 已失效或需要重新认证，使用密码重试一次
+                AppLogger.info(.download, "Workshop 无密码登录失败，尝试使用密码", metadata:
+                    ["workshopID": workshopID, "error": error.localizedDescription])
+                return try await downloadWorkshopItemWithRetry(
+                    workshopID: workshopID,
+                    guardCode: guardCode,
+                    progressHandler: progressHandler
+                )
+            default:
+                throw error
+            }
+        }
+    }
+
+    private func downloadWorkshopItemWithRetry(
+        workshopID: String,
+        guardCode: String? = nil,
+        progressHandler: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> URL {
         // 最多重试 2 次（共 3 次尝试），仅对可恢复的网络/下载错误重试
         let maxRetries = 2
         var lastError: Error?
@@ -868,6 +900,7 @@ class WorkshopService: ObservableObject {
                     workshopID: workshopID,
                     guardCode: guardCode,
                     attempt: attempt,
+                    usePassword: true,
                     progressHandler: progressHandler
                 )
             } catch let error as WorkshopError {
@@ -892,6 +925,7 @@ class WorkshopService: ObservableObject {
         workshopID: String,
         guardCode: String? = nil,
         attempt: Int,
+        usePassword: Bool = false,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> URL {
         guard let steamcmdPath = WorkshopSourceManager.shared.steamCMDExecutableURL() else {
@@ -925,39 +959,55 @@ class WorkshopService: ObservableObject {
             totalSize = 0
         }
 
-        let loginLine = [
+        // 优先尝试不带密码的 login，复用已保存的 session token
+        // 如果传密码，steamcmd 会执行 SetLoginInformation 清除内存 token 并强制重新认证
+        let loginLineNoPassword = [
+            "login",
+            Self.steamCMDScriptArgument(credentials.username)
+        ].joined(separator: " ")
+        let loginLineWithPassword = [
             "login",
             Self.steamCMDScriptArgument(credentials.username),
             Self.steamCMDScriptArgument(credentials.password)
         ].joined(separator: " ")
 
-        let scriptContent = [
+        let scriptContentNoPassword = [
             "@NoPromptForPassword 1",
             "force_install_dir \(Self.steamCMDScriptArgument(downloadDir.path))",
-            loginLine,
+            loginLineNoPassword,
+            "workshop_download_item \(wallpaperEngineAppID) \(workshopID)",
+            "quit"
+        ].joined(separator: "\n")
+        let scriptContentWithPassword = [
+            "@NoPromptForPassword 1",
+            "force_install_dir \(Self.steamCMDScriptArgument(downloadDir.path))",
+            loginLineWithPassword,
             "workshop_download_item \(wallpaperEngineAppID) \(workshopID)",
             "quit"
         ].joined(separator: "\n")
 
-        let scriptURL = downloadDir.appendingPathComponent("download_script.txt")
-        try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-
         let contentPath = downloadDir
             .appendingPathComponent("steamapps/workshop/content/\(wallpaperEngineAppID)/\(workshopID)")
 
-        defer {
-            try? FileManager.default.removeItem(at: scriptURL)
-        }
+        let activeScriptContent = usePassword ? scriptContentWithPassword : scriptContentNoPassword
 
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
-            // 注意：steamcmd 没有提供有效的下载进度参数，+download_progress 会报 "Command not found"
-            // 进度通过轮询文件大小实现（见下方 pollingTask）
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
+            // 直接执行 steamcmd 二进制，绕过 steamcmd.sh 脚本中路径空格导致的解析问题
+            // 同时通过 stdin Pipe 发送命令，绕过 macOS 上 +runscript 卡死的问题
+            let steamcmdBinURL = steamcmdPath.deletingLastPathComponent().appendingPathComponent("steamcmd")
+            task.executableURL = steamcmdBinURL
+            task.arguments = []
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
             let environment = Self.steamCMDEnvironment(steamcmdDirectory: steamcmdPath.deletingLastPathComponent())
             task.environment = environment
+
+            let inputPipe = Pipe()
+            task.standardInput = inputPipe
+            if let data = activeScriptContent.data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(data)
+                inputPipe.fileHandleForWriting.closeFile()
+            }
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -1101,7 +1151,10 @@ class WorkshopService: ObservableObject {
                     AppLogger.info(.media, "downloadWorkshopItem steamcmd output", metadata: ["output": combinedOutput])
 
                     // 检查是否需要用户通过手机 App 确认登录（移动验证器类型）
-                    let needsMobileConfirmation = combinedOutput.localizedCaseInsensitiveContains("Please confirm the login")
+                    let needsMobileConfirmation = [
+                        "Please confirm the login",
+                        "Waiting for confirmation"
+                    ].contains { combinedOutput.localizedCaseInsensitiveContains($0) }
                     // 如果需要确认，检查是否已经确认成功
                     let mobileConfirmationSucceeded = combinedOutput.localizedCaseInsensitiveContains("Waiting for confirmation...OK")
                         || combinedOutput.localizedCaseInsensitiveContains("Waiting for confirmation... OK")
@@ -1119,10 +1172,15 @@ class WorkshopService: ObservableObject {
                         // 移动确认场景但确认未成功
                         let confirmationMissing = needsMobileConfirmation && !mobileConfirmationSucceeded
 
-                        // 如果需要验证码但没有提供，或者需要移动确认但确认未成功，都报错
-                        let guardCodeMissing = needsGuardCode  // 下载时不传 guardCode，如果需要说明 token 彻底失效
-                        if guardCodeMissing || confirmationMissing {
-                            // 会话已失效，自动清除过期凭据并提示用户重新登录
+                        // 需要移动确认但用户未确认 → 不要清除凭据，提示用户去 App 中确认
+                        if confirmationMissing {
+                            resumeBox.resume(throwing: WorkshopError.confirmationRequired("请在 Steam App 中确认登录请求后重试下载"))
+                            return
+                        }
+
+                        // 需要邮箱验证码但没有提供 → 说明缓存已失效，清除凭据
+                        let guardCodeMissing = needsGuardCode
+                        if guardCodeMissing {
                             Task { @MainActor in
                                 WorkshopSourceManager.shared.clearSteamCredentials()
                             }
@@ -1361,6 +1419,7 @@ class WorkshopService: ObservableObject {
     nonisolated private static func steamCMDEnvironment(steamcmdDirectory: URL) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["DYLD_LIBRARY_PATH"] = steamcmdDirectory.path
+        environment["DYLD_FRAMEWORK_PATH"] = steamcmdDirectory.path
         applySteamCMDProxyEnvironment(to: &environment)
         return environment
     }
@@ -1470,9 +1529,6 @@ class WorkshopService: ObservableObject {
 
         AppLogger.info(.media, "verifySteamLogin", metadata: ["path": steamcmdPath.path])
 
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steamcmd_verify_\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
         var loginParts = [
             "login",
             Self.steamCMDScriptArgument(username),
@@ -1484,21 +1540,24 @@ class WorkshopService: ObservableObject {
         let loginLine = loginParts.joined(separator: " ")
 
         let scriptContent = ["@NoPromptForPassword 1", loginLine, "quit"].joined(separator: "\n")
-        let scriptURL = tempDir.appendingPathComponent("verify_script.txt")
-        try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempDir)
-        }
 
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
-            // steamcmd.sh 是 shell 脚本，需要通过 bash 执行，不能直接作为 Process 的 executable
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
+            // 直接执行 steamcmd 二进制，绕过 steamcmd.sh 脚本中路径空格导致的解析问题
+            // 同时通过 stdin Pipe 发送命令，绕过 macOS 上 +runscript 卡死的问题
+            let steamcmdBinURL = steamcmdPath.deletingLastPathComponent().appendingPathComponent("steamcmd")
+            task.executableURL = steamcmdBinURL
+            task.arguments = []
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
             let environment = WorkshopService.steamCMDEnvironment(steamcmdDirectory: steamcmdPath.deletingLastPathComponent())
             task.environment = environment
+
+            let inputPipe = Pipe()
+            task.standardInput = inputPipe
+            if let data = scriptContent.data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(data)
+                inputPipe.fileHandleForWriting.closeFile()
+            }
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -1715,8 +1774,9 @@ class WorkshopService: ObservableObject {
             }
             return .notInstalled
         }
-        // steamCMDExecutableURL() 已验证安装完整性，此处再确认脚本文件存在
-        guard FileManager.default.fileExists(atPath: steamcmdPath.path) else {
+        // steamCMDExecutableURL() 已验证安装完整性，此处再确认二进制文件存在
+        let steamcmdBinPath = steamcmdPath.deletingLastPathComponent().appendingPathComponent("steamcmd")
+        guard FileManager.default.fileExists(atPath: steamcmdBinPath.path) else {
             if let setupError = WorkshopSourceManager.shared.steamCMDLastSetupError {
                 return .error(setupError)
             }
@@ -1927,6 +1987,7 @@ enum WorkshopError: LocalizedError {
     case sessionExpired
     case loginTimeout
     case guardCodeRequired(String)
+    case confirmationRequired(String)
     case timeout
     case downloadIncomplete(String)
     case downloadFailed(String)
@@ -1944,6 +2005,7 @@ enum WorkshopError: LocalizedError {
         case .sessionExpired: return "Steam 登录已过期，请在设置中重新验证登录"
         case .loginTimeout: return "Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试"
         case .guardCodeRequired(let msg): return msg
+        case .confirmationRequired(let msg): return msg
         case .timeout: return "下载超时（已等待 10 分钟），可能是网络波动或文件过大，请检查网络后重试"
         case .downloadIncomplete(let msg): return msg.isEmpty ? "下载未完成，SteamCMD 进程异常退出，请重试" : msg
         case .downloadFailed(let msg): return "下载失败：\(msg)"

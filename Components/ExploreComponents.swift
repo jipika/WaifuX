@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - 探索页公共组件
 
@@ -173,6 +174,109 @@ public struct ScrollOffsetPreferenceKey: PreferenceKey {
     public static let defaultValue: CGFloat = 0
     public static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+// MARK: - 滚动到顶部助手
+
+/// 放在 ScrollView 内容顶部，通过 PreferenceKey 报告当前滚动偏移量。
+public struct ScrollOffsetTracker: View {
+    public let coordinateSpace: String
+
+    public init(coordinateSpace: String) {
+        self.coordinateSpace = coordinateSpace
+    }
+
+    public var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: ScrollOffsetPreferenceKey.self,
+                value: -proxy.frame(in: .named(coordinateSpace)).minY
+            )
+        }
+        .frame(height: 0)
+    }
+}
+
+/// 用于从 SwiftUI ScrollView 内部触发滚动到顶部，并实时报告滚动偏移量的 AppKit 桥接助手。
+/// 当 `trigger` 变化时，向上遍历视图层级找到 NSScrollView 并将 contentOffset 归零。
+/// 同时通过 KVO 监听底层 NSScrollView 的 bounds 变化，实时回调 `onOffsetChange`。
+public struct ScrollToTopHelper: NSViewRepresentable {
+    public var trigger: Int
+    public var onOffsetChange: ((CGFloat) -> Void)?
+
+    public init(trigger: Int, onOffsetChange: ((CGFloat) -> Void)? = nil) {
+        self.trigger = trigger
+        self.onOffsetChange = onOffsetChange
+    }
+
+    public func makeNSView(context: Context) -> NSView {
+        let view = ScrollToTopNSView()
+        view.onOffsetChange = onOffsetChange
+        return view
+    }
+
+    public func updateNSView(_ nsView: NSView, context: Context) {
+        guard let view = nsView as? ScrollToTopNSView else { return }
+        view.onOffsetChange = onOffsetChange
+
+        guard trigger != context.coordinator.lastTrigger else { return }
+        context.coordinator.lastTrigger = trigger
+        view.scrollToTop()
+    }
+
+    public func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    public class Coordinator {
+        public var lastTrigger: Int = 0
+        public init() {}
+    }
+}
+
+private final class ScrollToTopNSView: NSView {
+    var onOffsetChange: ((CGFloat) -> Void)?
+    private var observation: NSKeyValueObservation?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        startObserving()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            observation?.invalidate()
+            observation = nil
+        }
+    }
+
+    private func startObserving() {
+        guard observation == nil else { return }
+        guard let scrollView = findParentScrollView() else { return }
+
+        observation = scrollView.contentView.observe(\.bounds, options: [.new, .initial]) { [weak self] clipView, _ in
+            self?.onOffsetChange?(clipView.bounds.origin.y)
+        }
+    }
+
+    private func findParentScrollView() -> NSScrollView? {
+        var current = superview
+        while let view = current {
+            if let scrollView = view as? NSScrollView {
+                return scrollView
+            }
+            current = view.superview
+        }
+        return nil
+    }
+
+    func scrollToTop() {
+        guard let scrollView = findParentScrollView() else { return }
+        let origin = NSPoint(x: 0, y: 0)
+        scrollView.contentView.scroll(to: origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 }
 

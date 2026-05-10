@@ -49,6 +49,7 @@ struct AnimeExploreView: View {
     @State private var gridSavedScrollOffset: CGFloat = 0
     @State private var gridContentHeight: CGFloat = 600
     @State private var showScrollToTop: Bool = false
+    @State private var outerScrollToTopToken: Int = 0
 
     var body: some View {
         GeometryReader { geometry in
@@ -91,6 +92,12 @@ struct AnimeExploreView: View {
                             .environment(\.arcIsLightMode, arcSettings.isLightMode)
                         }
                         .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+                        .background(
+                            ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
+                                let shouldShow = offset > 300
+                                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
+                            }
+                        )
                         .onPreferenceChange(AnimeLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                             handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: geometry.size.height)
                         }
@@ -180,6 +187,7 @@ struct AnimeExploreView: View {
                 if showScrollToTop {
                     Button {
                         gridScrollToTopToken &+= 1
+                        outerScrollToTopToken &+= 1
                     } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 14, weight: .semibold))
@@ -353,8 +361,6 @@ struct AnimeExploreView: View {
             },
             onScrollOffsetChange: { offset in
                 gridSavedScrollOffset = offset
-                let shouldShow = offset > 300
-                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
             },
             onReachBottom: triggerLoadMore,
             scrollToTopToken: gridScrollToTopToken,

@@ -58,6 +58,7 @@ struct WallpaperExploreContentView: View {
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var showScrollToTop = false
+    @State private var outerScrollToTopToken: Int = 0
     @State private var showAPIKeyAlert = false
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
@@ -191,6 +192,12 @@ struct WallpaperExploreContentView: View {
                     .environment(\.arcIsLightMode, arcSettings.isLightMode)
                 }
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+                .background(
+                    ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
+                        let shouldShow = offset > 300
+                        if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
+                    }
+                )
                 .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                     handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
                 }
@@ -234,6 +241,7 @@ struct WallpaperExploreContentView: View {
                 if showScrollToTop {
                     Button {
                         gridScrollToTopToken += 1
+                        outerScrollToTopToken += 1
                     } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 14, weight: .semibold))
@@ -586,10 +594,6 @@ struct WallpaperExploreContentView: View {
             },
             onScrollOffsetChange: { offset in
                 gridSavedScrollOffset = offset
-                let shouldShowScrollToTop = offset > 300
-                if showScrollToTop != shouldShowScrollToTop {
-                    showScrollToTop = shouldShowScrollToTop
-                }
             },
             onReachBottom: triggerLoadMore,
             scrollToTopToken: gridScrollToTopToken,

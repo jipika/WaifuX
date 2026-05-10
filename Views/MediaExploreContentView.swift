@@ -49,7 +49,7 @@ struct MediaExploreContentView: View {
     @State private var gridSavedScrollOffset: CGFloat = 0
     @State private var gridContentHeight: CGFloat = 600
     @State private var showScrollToTop: Bool = false
-
+    @State private var outerScrollToTopToken: Int = 0
 
     // Workshop 筛选
     @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
@@ -174,6 +174,12 @@ struct MediaExploreContentView: View {
                 }
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+            .background(
+                ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
+                    let shouldShow = offset > 300
+                    if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
+                }
+            )
             .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                 handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
             }
@@ -221,6 +227,7 @@ struct MediaExploreContentView: View {
                 if showScrollToTop {
                     Button {
                         gridScrollToTopToken &+= 1
+                        outerScrollToTopToken &+= 1
                     } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 14, weight: .semibold))
@@ -696,8 +703,6 @@ struct MediaExploreContentView: View {
             },
             onScrollOffsetChange: { offset in
                 gridSavedScrollOffset = offset
-                let shouldShow = offset > 300
-                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
             },
             onReachBottom: triggerLoadMore,
             scrollToTopToken: gridScrollToTopToken,
