@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CFNetwork
 import SwiftSoup
 
 // MARK: - Workshop Service
@@ -924,11 +925,15 @@ class WorkshopService: ObservableObject {
             totalSize = 0
         }
 
-        let loginLine = "login \"\(credentials.username)\""
+        let loginLine = [
+            "login",
+            Self.steamCMDScriptArgument(credentials.username),
+            Self.steamCMDScriptArgument(credentials.password)
+        ].joined(separator: " ")
 
         let scriptContent = [
             "@NoPromptForPassword 1",
-            "force_install_dir \"\(downloadDir.path)\"",
+            "force_install_dir \(Self.steamCMDScriptArgument(downloadDir.path))",
             loginLine,
             "workshop_download_item \(wallpaperEngineAppID) \(workshopID)",
             "quit"
@@ -951,19 +956,7 @@ class WorkshopService: ObservableObject {
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
             task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
-            var environment = ProcessInfo.processInfo.environment
-            environment["DYLD_LIBRARY_PATH"] = steamcmdPath.deletingLastPathComponent().path
-            // 注入 HTTP 代理配置（steamcmd 支持 HTTP_PROXY 环境变量）
-            // 仅在用户于 App 设置中显式开启代理时才注入；关闭时不做任何操作，完全保持原有行为
-            let defaults = UserDefaults.standard
-            if defaults.bool(forKey: "proxy_enabled"),
-               let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
-               let portStr = defaults.string(forKey: "proxy_port"),
-               let port = Int(portStr), port > 0 {
-                let proxyURL = "http://\(host):\(port)"
-                environment["HTTP_PROXY"] = proxyURL
-                environment["HTTPS_PROXY"] = proxyURL
-            }
+            let environment = Self.steamCMDEnvironment(steamcmdDirectory: steamcmdPath.deletingLastPathComponent())
             task.environment = environment
 
             let outputPipe = Pipe()
@@ -1142,7 +1135,13 @@ class WorkshopService: ObservableObject {
                     let loginTimeoutIndicators = [
                         "ERROR (Timeout)",
                         "Connection timed out",
-                        "Could not connect to Steam network"
+                        "Could not connect to Steam network",
+                        "Operation timed out",
+                        "Network is unreachable",
+                        "No route to host",
+                        "Connection refused",
+                        "Unable to connect to Steam",
+                        "Failed to connect to Steam"
                     ]
                     if loginTimeoutIndicators.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
@@ -1151,12 +1150,13 @@ class WorkshopService: ObservableObject {
                         return
                     }
 
-                    // session token 过期：只传用户名登录时 token 无效
+                    // session token 过期或网络导致的登录失败
                     let sessionExpiredKeywords = [
                         "ERROR! Not logged on",
                         "Not logged on",
                         "No login session, exiting",
-                        "login failed: No Connection"
+                        "login failed: No Connection",
+                        "Login Failure"
                     ]
                     if sessionExpiredKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         // 会话已失效，自动清除过期凭据并提示用户重新登录
@@ -1324,15 +1324,141 @@ class WorkshopService: ObservableObject {
         return result
     }
 
+    /// 将 SteamCMD 登录阶段的原始输出整理成可展示给用户的诊断信息。
+    nonisolated private static func steamCMDLoginFailureDetail(from raw: String) -> String {
+        let cleaned = cleanSteamCMDError(raw)
+        let detail = cleaned.isEmpty ? "SteamCMD 未返回可解析的错误输出。" : cleaned
+
+        let knownReasons: [(String, String)] = [
+            ("Invalid Password", "Steam 返回：账号名或密码不正确。"),
+            ("Two-factor code mismatch", "Steam 返回：Steam Guard 验证码不正确或已过期。"),
+            ("RateLimitExceeded", "Steam 返回：登录尝试过于频繁，请稍后再试。"),
+            ("Account Logon Denied", "Steam 返回：登录被拒绝，可能需要邮箱确认、Steam Guard 或解除账号安全限制。"),
+            ("FAILED (Account", "Steam 返回：账号登录失败，请检查账号状态或 Steam Guard 要求。"),
+            ("Account disabled", "Steam 返回：账号已被禁用。"),
+            ("Account locked", "Steam 返回：账号已被锁定。"),
+            ("No subscriptions", "Steam 返回：该账号没有可用订阅或无权访问该内容。"),
+            ("Login Failure", "Steam 返回：登录失败。")
+        ]
+
+        if let reason = knownReasons.first(where: { raw.localizedCaseInsensitiveContains($0.0) })?.1 {
+            return "\(reason)\n\nSteamCMD 原始信息：\n\(detail)"
+        }
+
+        return "SteamCMD 登录失败。\n\nSteamCMD 原始信息：\n\(detail)"
+    }
+
+    /// SteamCMD runscript 参数使用双引号包裹；这里统一转义会破坏脚本行结构的字符。
+    nonisolated private static func steamCMDScriptArgument(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+        return "\"\(escaped)\""
+    }
+
+    nonisolated private static func steamCMDEnvironment(steamcmdDirectory: URL) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["DYLD_LIBRARY_PATH"] = steamcmdDirectory.path
+        applySteamCMDProxyEnvironment(to: &environment)
+        return environment
+    }
+
+    nonisolated private static func applySteamCMDProxyEnvironment(to environment: inout [String: String]) {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "proxy_enabled"),
+           let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
+           let portStr = defaults.string(forKey: "proxy_port"),
+           let port = Int(portStr), port > 0 {
+            let proxyURL = "http://\(host):\(port)"
+            environment["HTTP_PROXY"] = proxyURL
+            environment["HTTPS_PROXY"] = proxyURL
+            environment["http_proxy"] = proxyURL
+            environment["https_proxy"] = proxyURL
+            return
+        }
+
+        guard let systemProxy = systemProxyEnvironmentForSteamCMD() else { return }
+        for (key, value) in systemProxy {
+            environment[key] = value
+        }
+    }
+
+    nonisolated private static func systemProxyEnvironmentForSteamCMD() -> [String: String]? {
+        guard let unmanagedSettings = CFNetworkCopySystemProxySettings() else { return nil }
+        let settings = unmanagedSettings.takeRetainedValue() as NSDictionary
+        var environment: [String: String] = [:]
+
+        if let httpProxy = proxyURL(
+            settings: settings,
+            enabledKey: kCFNetworkProxiesHTTPEnable,
+            hostKey: kCFNetworkProxiesHTTPProxy,
+            portKey: kCFNetworkProxiesHTTPPort,
+            scheme: "http"
+        ) {
+            environment["HTTP_PROXY"] = httpProxy
+            environment["http_proxy"] = httpProxy
+        }
+
+        if let httpsProxy = proxyURL(
+            settings: settings,
+            enabledKey: kCFNetworkProxiesHTTPSEnable,
+            hostKey: kCFNetworkProxiesHTTPSProxy,
+            portKey: kCFNetworkProxiesHTTPSPort,
+            scheme: "http"
+        ) {
+            environment["HTTPS_PROXY"] = httpsProxy
+            environment["https_proxy"] = httpsProxy
+        } else if let httpProxy = environment["HTTP_PROXY"] {
+            environment["HTTPS_PROXY"] = httpProxy
+            environment["https_proxy"] = httpProxy
+        }
+
+        if let socksProxy = proxyURL(
+            settings: settings,
+            enabledKey: kCFNetworkProxiesSOCKSEnable,
+            hostKey: kCFNetworkProxiesSOCKSProxy,
+            portKey: kCFNetworkProxiesSOCKSPort,
+            scheme: "socks5h"
+        ) {
+            environment["ALL_PROXY"] = socksProxy
+            environment["all_proxy"] = socksProxy
+        }
+
+        return environment.isEmpty ? nil : environment
+    }
+
+    nonisolated private static func proxyURL(
+        settings: NSDictionary,
+        enabledKey: CFString,
+        hostKey: CFString,
+        portKey: CFString,
+        scheme: String
+    ) -> String? {
+        let enabled = (settings[enabledKey] as? NSNumber)?.boolValue ?? false
+        guard enabled,
+              let host = settings[hostKey] as? String, !host.isEmpty,
+              let port = (settings[portKey] as? NSNumber)?.intValue, port > 0 else {
+            return nil
+        }
+        return "\(scheme)://\(host):\(port)"
+    }
+
     /// 判断 SteamCMD 输出是否表示登录成功
     nonisolated private static func isSteamLoginSuccessful(_ output: String) -> Bool {
-        let successIndicators = [
-            "Waiting for user info...OK",
-            "Waiting for user info... OK",
+        let patterns = [
+            "Waiting for user info\\.\\.\\.\\s*OK",
             "Logged in OK",
             "Logon successful"
         ]
-        return successIndicators.contains { output.localizedCaseInsensitiveContains($0) }
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+               regex.firstMatch(in: output, options: [], range: NSRange(location: 0, length: output.utf16.count)) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - App Availability
@@ -1347,14 +1473,15 @@ class WorkshopService: ObservableObject {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steamcmd_verify_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
-        // 密码转义：先转义反斜杠，再转义双引号
-        let escapedPassword = password
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        var loginLine = "login \"\(username)\" \"\(escapedPassword)\""
+        var loginParts = [
+            "login",
+            Self.steamCMDScriptArgument(username),
+            Self.steamCMDScriptArgument(password)
+        ]
         if let code = guardCode, !code.isEmpty {
-            loginLine += " \"\(code)\""
+            loginParts.append(Self.steamCMDScriptArgument(code))
         }
+        let loginLine = loginParts.joined(separator: " ")
 
         let scriptContent = ["@NoPromptForPassword 1", loginLine, "quit"].joined(separator: "\n")
         let scriptURL = tempDir.appendingPathComponent("verify_script.txt")
@@ -1370,19 +1497,7 @@ class WorkshopService: ObservableObject {
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
             task.arguments = [steamcmdPath.path, "+runscript", scriptURL.path]
             task.currentDirectoryURL = steamcmdPath.deletingLastPathComponent()
-            var environment = ProcessInfo.processInfo.environment
-            environment["DYLD_LIBRARY_PATH"] = steamcmdPath.deletingLastPathComponent().path
-            // 注入 HTTP 代理配置（steamcmd 支持 HTTP_PROXY 环境变量）
-            // 仅在用户于 App 设置中显式开启代理时才注入；关闭时不做任何操作，完全保持原有行为
-            let defaults = UserDefaults.standard
-            if defaults.bool(forKey: "proxy_enabled"),
-               let host = defaults.string(forKey: "proxy_host"), !host.isEmpty,
-               let portStr = defaults.string(forKey: "proxy_port"),
-               let port = Int(portStr), port > 0 {
-                let proxyURL = "http://\(host):\(port)"
-                environment["HTTP_PROXY"] = proxyURL
-                environment["HTTPS_PROXY"] = proxyURL
-            }
+            let environment = WorkshopService.steamCMDEnvironment(steamcmdDirectory: steamcmdPath.deletingLastPathComponent())
             task.environment = environment
 
             let outputPipe = Pipe()
@@ -1531,7 +1646,13 @@ class WorkshopService: ObservableObject {
                     let loginTimeoutIndicators = [
                         "ERROR (Timeout)",
                         "Connection timed out",
-                        "Could not connect to Steam network"
+                        "Could not connect to Steam network",
+                        "Operation timed out",
+                        "Network is unreachable",
+                        "No route to host",
+                        "Connection refused",
+                        "Unable to connect to Steam",
+                        "Failed to connect to Steam"
                     ]
                     if loginTimeoutIndicators.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         AppLogger.error(.media, "verifySteamLogin login timeout detected")
@@ -1551,7 +1672,8 @@ class WorkshopService: ObservableObject {
                         "No subscriptions"
                     ]
                     if authFailureKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
-                        resumeBox.resume(throwing: WorkshopError.invalidCredentials)
+                        let detail = WorkshopService.steamCMDLoginFailureDetail(from: combinedOutput)
+                        resumeBox.resume(throwing: WorkshopError.steamLoginFailed(detail))
                         return
                     }
 
@@ -1588,10 +1710,16 @@ class WorkshopService: ObservableObject {
 
     func checkSteamCMDStatus() -> SteamCMDStatus {
         guard let steamcmdPath = WorkshopSourceManager.shared.steamCMDExecutableURL() else {
+            if let setupError = WorkshopSourceManager.shared.steamCMDLastSetupError {
+                return .error(setupError)
+            }
             return .notInstalled
         }
         // steamCMDExecutableURL() 已验证安装完整性，此处再确认脚本文件存在
         guard FileManager.default.fileExists(atPath: steamcmdPath.path) else {
+            if let setupError = WorkshopSourceManager.shared.steamCMDLastSetupError {
+                return .error(setupError)
+            }
             return .notInstalled
         }
         return .ready
@@ -1795,6 +1923,7 @@ enum WorkshopError: LocalizedError {
     case steamcmdNotFound
     case credentialsRequired
     case invalidCredentials
+    case steamLoginFailed(String)
     case sessionExpired
     case loginTimeout
     case guardCodeRequired(String)
@@ -1806,19 +1935,20 @@ enum WorkshopError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "Invalid URL"
+        case .invalidURL: return "无效的链接"
         case .apiError(let msg): return msg
-        case .steamcmdNotFound: return "SteamCMD not found"
-        case .credentialsRequired: return "Steam credentials required"
-        case .invalidCredentials: return "Invalid Steam credentials or 2FA required"
+        case .steamcmdNotFound: return "SteamCMD 组件缺失，请重新安装应用"
+        case .credentialsRequired: return "需要登录 Steam 账号，请在设置中登录 SteamCMD"
+        case .invalidCredentials: return "Steam 账号或密码错误，或需要 Steam Guard 验证码"
+        case .steamLoginFailed(let msg): return msg
         case .sessionExpired: return "Steam 登录已过期，请在设置中重新验证登录"
         case .loginTimeout: return "Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试"
         case .guardCodeRequired(let msg): return msg
         case .timeout: return "下载超时（已等待 10 分钟），可能是网络波动或文件过大，请检查网络后重试"
         case .downloadIncomplete(let msg): return msg.isEmpty ? "下载未完成，SteamCMD 进程异常退出，请重试" : msg
-        case .downloadFailed(let msg): return msg
-        case .executionFailed(let msg): return msg
-        case .workshopNotSupported: return "Not a Workshop item"
+        case .downloadFailed(let msg): return "下载失败：\(msg)"
+        case .executionFailed(let msg): return "执行失败：\(msg)"
+        case .workshopNotSupported: return "非 Workshop 项目"
         }
     }
 }

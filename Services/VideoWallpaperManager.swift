@@ -828,7 +828,7 @@ final class VideoWallpaperManager: ObservableObject {
                 }
             }
             self.pendingRebuildWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
         }
     }
 
@@ -1110,16 +1110,10 @@ final class VideoWallpaperManager: ObservableObject {
     private func makePlayerComponents(for screen: NSScreen, videoURL: URL, muted: Bool) -> (player: AVQueuePlayer, looper: AVPlayerLooper, item: AVPlayerItem) {
         let playerItem = AVPlayerItem(url: videoURL)
 
-        // 配置高质量播放设置
+        // 配置播放设置
         playerItem.preferredPeakBitRate = 0
-        if #available(macOS 10.15, *) {
-            playerItem.appliesPerFrameHDRDisplayMetadata = true
-        }
-        let screenSize = screen.frame.size
-        playerItem.preferredMaximumResolution = CGSize(
-            width: screenSize.width * screen.backingScaleFactor,
-            height: screenSize.height * screen.backingScaleFactor
-        )
+        // 使用视频原始分辨率，避免 Retina 屏下因物理像素分辨率过高导致 GPU 过载
+        playerItem.preferredMaximumResolution = CGSize.zero
         if #available(macOS 10.15, *) {
             playerItem.seekingWaitsForVideoCompositionRendering = false
         }

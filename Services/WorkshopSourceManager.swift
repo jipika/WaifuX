@@ -141,6 +141,7 @@ class WorkshopSourceManager: ObservableObject {
 
     @Published private(set) var steamCredentials: SteamCredentials?
     @Published private(set) var steamCredentialState: SteamCredentialState = .unknown
+    @Published private(set) var steamCMDLastSetupError: String?
 
     /// 仅检查本地是否存有凭据，不验证 SteamCMD 会话是否仍然有效
     var hasStoredSteamCredentials: Bool {
@@ -253,18 +254,22 @@ class WorkshopSourceManager: ObservableObject {
     /// 若已存在副本但缺少 Bundle 中新增的文件（版本更新），增量补充缺失文件，保留 config/ 登录缓存。
     func steamCMDExecutableURL() -> URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            steamCMDLastSetupError = "无法定位用户 Application Support 目录"
             return nil
         }
         let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
         let script = destDir.appendingPathComponent("steamcmd.sh")
 
         // 如果 Application Support 中已有可工作的副本，直接返回
+        Self.repairSteamCMDExecutablePermissions(at: destDir)
         if Self.isValidSteamCMDInstallation(at: destDir) {
+            steamCMDLastSetupError = nil
             return script
         }
 
         // 从 Bundle 复制原始 steamcmd 目录
         guard let bundleSteamcmdDir = Self.bundledSteamCMDDirectoryURL() else {
+            steamCMDLastSetupError = "App 包内缺少 Resources/steamcmd/steamcmd.sh"
             return nil
         }
 
@@ -286,12 +291,69 @@ class WorkshopSourceManager: ObservableObject {
                 try FileManager.default.copyItem(at: bundleSteamcmdDir, to: destDir)
                 print("[WorkshopSourceManager] 已将 steamcmd 复制到 \(destDir.path)")
             }
+            Self.repairSteamCMDExecutablePermissions(at: destDir)
         } catch {
+            steamCMDLastSetupError = "复制 SteamCMD 到 \(destDir.path) 失败：\(error.localizedDescription)"
             print("[WorkshopSourceManager] 复制 steamcmd 失败: \(error)")
             return nil
         }
 
+        guard Self.isValidSteamCMDInstallation(at: destDir) else {
+            steamCMDLastSetupError = Self.steamCMDInstallationProblem(at: destDir)
+            print("[WorkshopSourceManager] steamcmd 校验失败: \(steamCMDLastSetupError ?? "unknown")")
+            return nil
+        }
+
+        steamCMDLastSetupError = nil
         return script
+    }
+
+    private static func repairSteamCMDExecutablePermissions(at dir: URL) {
+        let executableNames = [
+            "steamcmd.sh",
+            "steamcmd",
+            "steamconsole.dylib",
+            "steamclient.dylib",
+            "libtier0_s.dylib",
+            "libvstdlib_s.dylib",
+            "crashhandler.dylib",
+            "libaudio.dylib",
+            "libsteaminput.dylib"
+        ]
+        for name in executableNames {
+            let path = dir.appendingPathComponent(name).path
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+    }
+
+    private static func steamCMDInstallationProblem(at dir: URL) -> String {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else {
+            return "SteamCMD 工作目录不存在：\(dir.path)"
+        }
+
+        let requiredExecutableFiles = ["steamcmd.sh", "steamcmd"]
+        for name in requiredExecutableFiles {
+            let path = dir.appendingPathComponent(name).path
+            if !fm.fileExists(atPath: path) {
+                return "缺少 \(name)：\(path)"
+            }
+            if !fm.isExecutableFile(atPath: path) {
+                return "\(name) 不可执行：\(path)"
+            }
+        }
+
+        let requiredDylibs = ["steamclient.dylib", "libtier0_s.dylib", "libvstdlib_s.dylib"]
+        for name in requiredDylibs {
+            let path = dir.appendingPathComponent(name).path
+            if !fm.fileExists(atPath: path) {
+                return "缺少 \(name)：\(path)"
+            }
+        }
+
+        return "SteamCMD 文件存在但校验未通过：\(dir.path)"
     }
 
     /// 验证 Application Support 中的 steamcmd 是否是可工作的安装

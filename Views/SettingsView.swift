@@ -1227,6 +1227,7 @@ private struct WorkshopSettingsTab: View {
     @State private var steamUsername = ""
     @State private var steamPassword = ""
     @State private var steamGuardCode = ""
+    @State private var isSteamPasswordVisible = false
     @State private var showLoginForm = false
     @State private var isVerifyingSteamLogin = false
     @State private var steamLoginStatusText: String?
@@ -1334,8 +1335,7 @@ private struct WorkshopSettingsTab: View {
 
                     TextField(t("steamUsernamePlaceholder"), text: $steamUsername)
                         .textFieldStyle(.roundedBorder)
-                    SecureField(t("steamPasswordPlaceholder"), text: $steamPassword)
-                        .textFieldStyle(.roundedBorder)
+                    steamPasswordField
                     TextField(t("steamGuardCodePlaceholder"), text: $steamGuardCode)
                         .textFieldStyle(.roundedBorder)
                     Text("只有在邮箱验证码或备用令牌场景下才需要填写验证码；大多数情况下可以留空，按提示去 Steam App 里确认即可。")
@@ -1407,16 +1407,22 @@ private struct WorkshopSettingsTab: View {
                                             steamLoginStatusText = "Steam 登录已过期，请重新验证。"
                                         case .invalidCredentials:
                                             steamLoginStatusText = "账号、密码或验证码不正确，请检查后重试。"
+                                        case .steamLoginFailed(let msg):
+                                            steamLoginStatusText = msg
                                         case .steamcmdNotFound:
                                             steamLoginStatusText = "SteamCMD 组件不可用，请先检查安装状态。"
+                                        case .downloadFailed(let msg):
+                                            steamLoginStatusText = msg
+                                        case .executionFailed(let msg):
+                                            steamLoginStatusText = "SteamCMD 执行失败：\(msg)"
                                         default:
-                                            steamLoginStatusText = t("steamPasswordError")
+                                            steamLoginStatusText = error.localizedDescription
                                         }
                                         isVerifyingSteamLogin = false
                                     }
                                 } catch {
                                     await MainActor.run {
-                                        steamLoginStatusText = t("steamPasswordError")
+                                        steamLoginStatusText = error.localizedDescription
                                         isVerifyingSteamLogin = false
                                     }
                                 }
@@ -1470,6 +1476,30 @@ private struct WorkshopSettingsTab: View {
             .padding(12)
             .background(Color.white.opacity(0.03))
             .cornerRadius(8)
+        }
+    }
+
+    private var steamPasswordField: some View {
+        HStack(spacing: 6) {
+            Group {
+                if isSteamPasswordVisible {
+                    TextField(t("steamPasswordPlaceholder"), text: $steamPassword)
+                } else {
+                    SecureField(t("steamPasswordPlaceholder"), text: $steamPassword)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            Button {
+                isSteamPasswordVisible.toggle()
+            } label: {
+                Image(systemName: isSteamPasswordVisible ? "eye.slash" : "eye")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+            .help(isSteamPasswordVisible ? "隐藏密码" : "显示密码")
+            .accessibilityLabel(isSteamPasswordVisible ? "隐藏 Steam 密码" : "显示 Steam 密码")
         }
     }
 
