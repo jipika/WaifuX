@@ -70,6 +70,7 @@ struct MediaExploreContentView: View {
         GeometryReader { geometry in
             let gridContentWidth = max(0, geometry.size.width - 56)
 
+            let viewportHeight = geometry.size.height
             ZStack {
                 ArcAtmosphereBackground(
                     tint: exploreAtmosphere.tint,
@@ -136,15 +137,17 @@ struct MediaExploreContentView: View {
         .onReceive(translationBridge.$translationCompleted) { _ in
             handleTranslationCompleted()
         }
-        .onChange(of: viewModel.items) { oldItems, newItems in
-            syncAtmosphereIfNeeded()
-            if oldItems.count == newItems.count {
-                scheduleGridVisibleRefresh()
+        .onChange(of: viewModel.isLoading) { _, newValue in
+            if !newValue {
+                syncAtmosphereIfNeeded()
+                bumpReloadToken()
             }
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in
-            // viewModel.items 已通过 @Published 自动触发 UI 更新；这里 bump reload 让 cell 收藏状态刷新
             scheduleGridVisibleRefresh()
+        }
+        .onChange(of: viewModel.items.count) { _, count in
+            if count > 60 { showScrollToTop = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
             handleSourceChange()
@@ -167,6 +170,8 @@ struct MediaExploreContentView: View {
         } else {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
+                    ScrollToTopHelper(trigger: outerScrollToTopToken)
+                        .frame(height: 0)
                     headerStack
                     mediaGrid(contentWidth: gridContentWidth)
                         .frame(height: max(gridContentHeight, 320))
@@ -174,12 +179,6 @@ struct MediaExploreContentView: View {
                 }
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-            .background(
-                ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
-                    let shouldShow = offset > 300
-                    if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
-                }
-            )
             .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                 handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
             }
@@ -245,6 +244,7 @@ struct MediaExploreContentView: View {
             }
         }
         .zIndex(100)
+        .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
 
     // MARK: - Header
@@ -400,7 +400,6 @@ struct MediaExploreContentView: View {
 
     private func applyWorkshopFilters(query: String? = nil) async {
         viewModel.clearItems()
-        bumpReloadToken()
 
         let tags = selectedWorkshopTag.map { [$0.name] } ?? []
         let searchQuery = query ?? workshopSearchQuery
@@ -411,7 +410,6 @@ struct MediaExploreContentView: View {
             contentLevel: selectedWorkshopContentLevel,
             resolution: selectedWorkshopResolution?.tagValue
         )
-        bumpReloadToken()
     }
 
     @ViewBuilder
@@ -680,11 +678,29 @@ struct MediaExploreContentView: View {
 
         return ExploreGridContainer(
             itemCount: { viewModel.items.count },
-            aspectRatio: { _ in
+            aspectRatio: { index in
                 let spacing: CGFloat = 16
                 let totalSpacing = spacing * CGFloat(columnCount - 1)
                 let cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-                return MediaItem.effectiveAspectRatio(columnWidth: cardWidth)
+                guard cardWidth > 0 else { return 1.6 }
+                // 从 exactResolution 解析实际宽高比，使竖图/方图获得正确高度
+                let aspect: CGFloat = {
+                    guard index < viewModel.items.count else { return 1.6 }
+                    let item = viewModel.items[index]
+                    let raw = (item.exactResolution ?? item.resolutionLabel ?? "")
+                        .replacingOccurrences(of: " ", with: "")
+                        .replacingOccurrences(of: "X", with: "x")
+                    let parts = raw.split(separator: "x")
+                    guard parts.count == 2,
+                          let w = Double(parts[0]), w > 0,
+                          let h = Double(parts[1]), h > 0 else { return 1.6 }
+                    return min(max(CGFloat(w / h), 0.35), 3.6)
+                }()
+                // 最大图片高度限制：避免极端竖图撑出比屏幕还高的卡片
+                let maxImageHeight: CGFloat = cardWidth * 1.8
+                let imageHeight = min(cardWidth / aspect, maxImageHeight)
+                let totalHeight = imageHeight + 44
+                return cardWidth / max(1, totalHeight)
             },
             configureCell: { cell, index in
                 guard index < viewModel.items.count else { return }
@@ -866,7 +882,6 @@ struct MediaExploreContentView: View {
         lastSyncedFirstItemID = nil
         // 清空 ViewModel 数据避免显示旧数据
         viewModel.clearItems()
-        bumpReloadToken()
 
         searchTask?.cancel()
         searchTask = Task {
@@ -878,7 +893,6 @@ struct MediaExploreContentView: View {
             } else {
                 await viewModel.loadTagFeed(slug: category.slug, title: category.title)
             }
-            await MainActor.run { bumpReloadToken() }
         }
     }
 
@@ -918,16 +932,11 @@ struct MediaExploreContentView: View {
         selectedCategory = .all
         selectedHotTag = nil
         searchTask?.cancel()
-        bumpReloadToken()
         searchTask = Task {
             if workshopSourceManager.activeSource == .wallpaperEngine {
                 await applyWorkshopFilters(query: query)
             } else {
                 await viewModel.search(query: query)
-            }
-            await MainActor.run {
-                bumpReloadToken()
-                searchTask = nil
             }
         }
     }
@@ -952,7 +961,6 @@ struct MediaExploreContentView: View {
            let slug = hotTag.serverSlug {
             Task {
                 await viewModel.loadTagFeed(slug: slug, title: hotTag.title)
-                await MainActor.run { bumpReloadToken() }
             }
             return
         }
@@ -962,7 +970,6 @@ struct MediaExploreContentView: View {
                 await viewModel.loadHomeFeed()
                 await MainActor.run {
                     syncAtmosphereIfNeeded()
-                    bumpReloadToken()
                 }
             }
             return
@@ -979,17 +986,12 @@ struct MediaExploreContentView: View {
                 sortBy: selectedWorkshopSort.sortBy,
                 days: selectedWorkshopSort.days
             )
-            await MainActor.run {
-                bumpReloadToken()
-                searchTask = nil
-            }
         }
     }
 
     private func handleSourceChange() {
         // 数据源切换时重置并重新加载
         resetAllFilters(reloadData: true)
-        bumpReloadToken()
     }
 
     private func handleWorkshopURLSubmit() {
@@ -1071,7 +1073,6 @@ struct MediaExploreContentView: View {
         lastSyncedFirstItemID = nil
         loadMoreFailed = false
         viewModel.errorMessage = nil
-        bumpReloadToken()
 
         if reloadData {
             searchTask?.cancel()
@@ -1080,10 +1081,6 @@ struct MediaExploreContentView: View {
                     await viewModel.loadWorkshopFeed()
                 } else {
                     await viewModel.loadHomeFeed()
-                }
-                await MainActor.run {
-                    bumpReloadToken()
-                    searchTask = nil
                 }
             }
         }
@@ -1502,3 +1499,5 @@ private struct WorkshopURLInputSheet: View {
         }
     }
 }
+
+// (scroll offset tracking removed — showScrollToTop is now driven by gridContentHeight threshold)

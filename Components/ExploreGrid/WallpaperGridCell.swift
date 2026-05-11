@@ -56,60 +56,6 @@ final class WallpaperGridCell: ExploreGridItem {
     override var hoverOverlayMaxOpacity: Float { 0 }
     override var shouldAnimateBorderOnHover: Bool { true }
 
-    override func minimumAcceptableImageEdge(for targetSize: CGSize) -> CGFloat {
-        let targetMaxEdge = max(targetSize.width, targetSize.height)
-        let aspectRatio = CGFloat(currentWallpaper?.effectiveAspectRatioValue ?? 1)
-        let isExtremeAspect = aspectRatio < 0.7 || aspectRatio > 2.1
-
-        let ratio: CGFloat
-        switch targetMaxEdge {
-        case 1100...:
-            ratio = isExtremeAspect ? 0.88 : 0.82
-        case 900...:
-            ratio = isExtremeAspect ? 0.82 : 0.76
-        default:
-            ratio = isExtremeAspect ? 0.74 : 0.66
-        }
-
-        return max(targetMaxEdge * ratio, 420)
-    }
-
-    override func isImageAcceptablySharp(_ image: NSImage, pixelSize: CGSize, for targetSize: CGSize) -> Bool {
-        let aspectRatio = CGFloat(currentWallpaper?.effectiveAspectRatioValue ?? 1)
-        let isExtremeAspect = aspectRatio < 0.7 || aspectRatio > 2.1
-        let targetMaxEdge = max(targetSize.width, targetSize.height)
-
-        let widthRatio: CGFloat
-        let heightRatio: CGFloat
-        switch targetMaxEdge {
-        case 1100...:
-            widthRatio = isExtremeAspect ? 0.82 : 0.74
-            heightRatio = isExtremeAspect ? 0.9 : 0.82
-        case 900...:
-            widthRatio = isExtremeAspect ? 0.76 : 0.7
-            heightRatio = isExtremeAspect ? 0.84 : 0.76
-        default:
-            widthRatio = isExtremeAspect ? 0.68 : 0.62
-            heightRatio = isExtremeAspect ? 0.76 : 0.68
-        }
-
-        let requiredWidth = max(targetSize.width * widthRatio, 320)
-        let requiredHeight = max(targetSize.height * heightRatio, 320)
-
-        let matchesPerAxis = pixelSize.width >= requiredWidth && pixelSize.height >= requiredHeight
-        if matchesPerAxis {
-            return true
-        }
-
-        // 对接近方图保留一层最大边兜底，避免个别站点返回的像素元数据轻微偏差导致误判。
-        if !isExtremeAspect {
-            let imageMaxEdge = max(pixelSize.width, pixelSize.height)
-            return imageMaxEdge >= minimumAcceptableImageEdge(for: targetSize)
-        }
-
-        return false
-    }
-
     override func setupContentLayout() {
         coverImageView.isHidden = false
         containerView.layer?.backgroundColor = NSColor(hexString: "1A1D24").withAlphaComponent(0.6).cgColor
@@ -162,7 +108,14 @@ final class WallpaperGridCell: ExploreGridItem {
 
     override func configure(with item: Any, isFavorite: Bool) {
         guard let wallpaper = item as? Wallpaper else { return }
+        let isSameWallpaper = wallpaper.id == currentWallpaper?.id
         currentWallpaper = wallpaper
+
+        if isSameWallpaper, coverImageView.image != nil {
+            // 同一张壁纸且图片已加载，仅更新 UI 状态，跳过图片重载
+            favoritesView.configure(value: compactNumber(wallpaper.favorites), tint: isFavorite ? NSColor(hexString: "FF5A7D") : secondaryStatColor)
+            return
+        }
 
         applyTheme()
         applyBorder(for: wallpaper)
@@ -246,8 +199,11 @@ final class WallpaperGridCell: ExploreGridItem {
         layoutBottomBar(in: bottomBar.bounds)
         if let currentWallpaper {
             let targetSize = preferredImageTargetSize()
-            wallpaperImageURLs = preferredImageURLs(for: currentWallpaper, targetSize: targetSize)
-            loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
+            let urls = preferredImageURLs(for: currentWallpaper, targetSize: targetSize)
+            if urls != wallpaperImageURLs {
+                wallpaperImageURLs = urls
+                loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
+            }
         }
     }
 

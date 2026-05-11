@@ -34,6 +34,10 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     @Published private(set) var currentVideoURL: URL?
+    /// 是否有任何屏幕正在播放视频壁纸（外部使用）
+    var isVideoWallpaperActive: Bool {
+        !videoURLByScreen.isEmpty || !videoURLByScreenFingerprint.isEmpty
+    }
     /// 已废弃：多屏场景下请使用 `posterURL(for:)` 获取指定屏幕的 poster
     @Published private(set) var currentPosterURL: URL?
     @Published private(set) var isMuted = true
@@ -44,8 +48,12 @@ final class VideoWallpaperManager: ObservableObject {
     private var posterURLByScreen: [String: URL] = [:]
     /// 同一 poster 的物理显示器指纹索引，用于外接屏重连后 screenID 变化时恢复。
     private var posterURLByScreenFingerprint: [String: URL] = [:]
-    /// 用于取消上一次未完成的 poster 设置任务，避免旧 poster 覆盖新壁纸
-    private var posterTask: Task<Void, Never>?
+    /// 每个屏幕独立的视频文件路径；解决多屏分别设置不同视频后重启只能恢复最后一块屏的问题。
+    private var videoURLByScreen: [String: URL] = [:]
+    /// 每个物理显示器对应的视频文件路径，用于 screenID 变化后的恢复。
+    private var videoURLByScreenFingerprint: [String: URL] = [:]
+    /// 每个屏幕独立的 poster 设置任务，避免一块屏的新任务取消掉另一块屏的恢复。
+    private var posterTasks: [String: Task<Void, Never>] = [:]
     /// 每个屏幕的独立音量（key 为 screenID），未设置时回退到全局 `volume`
     private var volumeByScreen: [String: Double] = [:]
     /// 音量的物理显示器指纹索引，用于 screenID 变化后的恢复。
@@ -88,6 +96,28 @@ final class VideoWallpaperManager: ObservableObject {
     /// 获取指定屏幕的 poster URL（多屏场景下的正确入口）
     func posterURL(for screen: NSScreen) -> URL? {
         posterURLByScreen[screen.wallpaperScreenIdentifier] ?? posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint]
+    }
+
+    /// 获取指定屏幕应播放的视频 URL。
+    private func videoURL(for screen: NSScreen) -> URL? {
+        videoURLByScreen[screen.wallpaperScreenIdentifier] ??
+        videoURLByScreenFingerprint[screen.wallpaperScreenFingerprint] ??
+        currentVideoURL
+    }
+
+    /// 是否有任何屏幕正在运行视频壁纸（内部 guard 使用，不依赖全局单例）
+    private var hasActiveVideoWallpaper: Bool {
+        !videoURLByScreen.isEmpty || !videoURLByScreenFingerprint.isEmpty
+    }
+
+    /// 将 `currentVideoURL` 与每屏视频状态同步，
+    /// 确保 UI 层通过 `@Published` 观察到的值与实际状态一致。
+    private func syncCurrentVideoURL() {
+        if videoURLByScreen.isEmpty && videoURLByScreenFingerprint.isEmpty {
+            currentVideoURL = nil
+        } else {
+            currentVideoURL = videoURLByScreen.values.first ?? videoURLByScreenFingerprint.values.first
+        }
     }
 
     /// 当前持久化的预览图路径（兼容旧代码，返回第一个找到的 poster）
@@ -178,10 +208,13 @@ final class VideoWallpaperManager: ObservableObject {
         let isNewVideo = currentVideoURL != localFileURL
         let activeScreenIDs = Set(windows.keys)
         let screenIDsNow = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+        let targetScreenID = targetScreen?.wallpaperScreenIdentifier
+        let isSameVideoForTarget = targetScreen.flatMap { videoURL(for: $0) } == localFileURL
 
         if !isNewVideo,
            currentVideoURL == localFileURL,
            !windows.isEmpty,
+           (targetScreen == nil || isSameVideoForTarget),
            activeScreenIDs == videoTargetScreenIDs,
            videoTargetScreenIDs.isSubset(of: screenIDsNow) {
             currentVideoURL = localFileURL
@@ -196,20 +229,14 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        if isNewVideo {
-            if let targetScreen {
-                videoTargetScreenIDs = [targetScreen.wallpaperScreenIdentifier]
-                videoTargetScreenFingerprints = [targetScreen.wallpaperScreenFingerprint]
-            } else {
-                videoTargetScreenIDs = screenIDsNow
-                videoTargetScreenFingerprints = Set(NSScreen.screens.map(\.wallpaperScreenFingerprint))
-            }
-        } else if let targetScreen {
+        if let targetScreen {
             videoTargetScreenIDs.insert(targetScreen.wallpaperScreenIdentifier)
             videoTargetScreenFingerprints.insert(targetScreen.wallpaperScreenFingerprint)
         } else {
             videoTargetScreenIDs = screenIDsNow
             videoTargetScreenFingerprints = Set(NSScreen.screens.map(\.wallpaperScreenFingerprint))
+            videoURLByScreen.removeAll()
+            videoURLByScreenFingerprint.removeAll()
         }
 
         discardOriginalWallpaperSnapshot()
@@ -226,17 +253,24 @@ final class VideoWallpaperManager: ObservableObject {
         if let targetScreen {
             posterURLByScreen[targetScreen.wallpaperScreenIdentifier] = posterURL
             posterURLByScreenFingerprint[targetScreen.wallpaperScreenFingerprint] = posterURL
+            videoURLByScreen[targetScreen.wallpaperScreenIdentifier] = localFileURL
+            videoURLByScreenFingerprint[targetScreen.wallpaperScreenFingerprint] = localFileURL
         } else {
             for screen in NSScreen.screens {
                 posterURLByScreen[screen.wallpaperScreenIdentifier] = posterURL
                 posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint] = posterURL
+                videoURLByScreen[screen.wallpaperScreenIdentifier] = localFileURL
+                videoURLByScreenFingerprint[screen.wallpaperScreenFingerprint] = localFileURL
             }
         }
         currentPosterURL = posterURL  // 兼容旧代码
         isMuted = muted
         isPaused = false
 
-        try rebuildWindows(targetScreen: targetScreen)
+        try rebuildWindows(targetScreen: targetScreenID.flatMap { id in
+            NSScreen.screens.first { $0.wallpaperScreenIdentifier == id }
+        })
+        syncCurrentVideoURL()
         persistState()
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
     }
@@ -296,7 +330,7 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     func resumeWallpaper(for targetScreen: NSScreen? = nil) {
-        guard currentVideoURL != nil else { return }
+        guard hasActiveVideoWallpaper else { return }
         
         if let targetScreen = targetScreen {
             // 恢复特定屏幕的壁纸
@@ -390,10 +424,13 @@ final class VideoWallpaperManager: ObservableObject {
             currentPosterURL = nil
             posterURLByScreen.removeAll()
             posterURLByScreenFingerprint.removeAll()
+            videoURLByScreen.removeAll()
+            videoURLByScreenFingerprint.removeAll()
             isPaused = false
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             discardOriginalWallpaperSnapshot()
+            syncCurrentVideoURL()
             // 不删除保存的状态，以便下次可以恢复
             return
         }
@@ -411,6 +448,8 @@ final class VideoWallpaperManager: ObservableObject {
         videoTargetScreenFingerprints.remove(screenFingerprint)
         posterURLByScreen.removeValue(forKey: screenID)
         posterURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
+        videoURLByScreen.removeValue(forKey: screenID)
+        videoURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
         discardOriginalWallpaperSnapshot()
 
         if players.isEmpty {
@@ -418,6 +457,8 @@ final class VideoWallpaperManager: ObservableObject {
             currentPosterURL = nil
             posterURLByScreen.removeAll()
             posterURLByScreenFingerprint.removeAll()
+            videoURLByScreen.removeAll()
+            videoURLByScreenFingerprint.removeAll()
             isPaused = false
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
@@ -425,14 +466,26 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
         }
+        syncCurrentVideoURL()
     }
 
     /// 应用退出前调用：只清理视频窗口和播放器，不回退到旧静态壁纸。
     /// 与 `stopWallpaper()` 不同，此方法不清理保存的状态（`stateKey`），下次启动仍可恢复视频壁纸。
     func prepareForAppTermination() {
-        guard currentVideoURL != nil else { return }
+        guard hasActiveVideoWallpaper else { return }
 
         discardOriginalWallpaperSnapshot()
+        posterTasks.values.forEach { $0.cancel() }
+        posterTasks.removeAll()
+
+        // 退出前为每个目标屏幕持久化其 poster，确保拆掉视频窗口后
+        // 每块屏的桌面壁纸（含锁屏底图）仍显示各自对应的 poster，而不是所有屏同步为主屏。
+        for screen in screensForVideoWallpaperTargets() {
+            if let posterURL = posterURL(for: screen) {
+                applyPosterAsDesktopWallpaperSync(posterURL, targetScreen: screen)
+                DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+            }
+        }
 
         // 同步清理窗口和播放器（应用即将退出，不需要延迟释放）
         pendingPlayerCleanups.forEach { $0.cancel() }
@@ -475,11 +528,14 @@ final class VideoWallpaperManager: ObservableObject {
             currentPosterURL = nil
             posterURLByScreen.removeAll()
             posterURLByScreenFingerprint.removeAll()
+            videoURLByScreen.removeAll()
+            videoURLByScreenFingerprint.removeAll()
             isPaused = false
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             discardOriginalWallpaperSnapshot()
             defaults.removeObject(forKey: stateKey)
+            syncCurrentVideoURL()
             return
         }
 
@@ -496,6 +552,8 @@ final class VideoWallpaperManager: ObservableObject {
         videoTargetScreenFingerprints.remove(screenFingerprint)
         posterURLByScreen.removeValue(forKey: screenID)
         posterURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
+        videoURLByScreen.removeValue(forKey: screenID)
+        videoURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
         discardOriginalWallpaperSnapshot()
 
         if players.isEmpty {
@@ -503,6 +561,8 @@ final class VideoWallpaperManager: ObservableObject {
             currentPosterURL = nil
             posterURLByScreen.removeAll()
             posterURLByScreenFingerprint.removeAll()
+            videoURLByScreen.removeAll()
+            videoURLByScreenFingerprint.removeAll()
             isPaused = false
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
@@ -510,6 +570,7 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
         }
+        syncCurrentVideoURL()
     }
 
     /// 拆除单个屏幕的视频窗口、player 和 looper
@@ -553,10 +614,14 @@ final class VideoWallpaperManager: ObservableObject {
     /// 使用持久化存储，避免被系统清理。
     /// - Note: 如需同步等待完成，请直接调用 `applyPosterAsDesktopWallpaper`；此方法内部 fire-and-forget。
     private func setPosterAsDesktopWallpaper(_ posterURL: URL, targetScreen: NSScreen? = nil) {
-        // 取消上一次未完成的 poster 设置，避免旧 poster 覆盖新壁纸
-        posterTask?.cancel()
-        posterTask = Task { @MainActor in
-            await applyPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
+        let targetScreens = targetScreen.map { [$0] } ?? NSScreen.screens
+        for screen in targetScreens {
+            let screenID = screen.wallpaperScreenIdentifier
+            posterTasks[screenID]?.cancel()
+            posterTasks[screenID] = Task { @MainActor [weak self] in
+                await self?.applyPosterAsDesktopWallpaper(posterURL, targetScreen: screen)
+                self?.posterTasks.removeValue(forKey: screenID)
+            }
         }
     }
 
@@ -711,8 +776,12 @@ final class VideoWallpaperManager: ObservableObject {
         // 恢复 per-screen poster（新版）
         let restoredPosterURLs = savedState.posterURLs?.compactMapValues { URL(string: $0) } ?? [:]
         let restoredPosterURLsByFingerprint = savedState.posterURLsByFingerprint?.compactMapValues { URL(string: $0) } ?? [:]
+        let restoredVideoURLs = savedState.videoURLs?.compactMapValues { URL(string: $0) } ?? [:]
+        let restoredVideoURLsByFingerprint = savedState.videoURLsByFingerprint?.compactMapValues { URL(string: $0) } ?? [:]
         posterURLByScreen = restoredPosterURLs
         posterURLByScreenFingerprint = restoredPosterURLsByFingerprint
+        videoURLByScreen = restoredVideoURLs
+        videoURLByScreenFingerprint = restoredVideoURLsByFingerprint
         // 兼容旧数据：如果 per-screen 为空但有全局 poster，平铺到所有目标屏
         if posterURLByScreen.isEmpty, let globalPosterURL, let ids = savedState.videoScreenIDs {
             for screenID in ids {
@@ -724,11 +793,21 @@ final class VideoWallpaperManager: ObservableObject {
                 posterURLByScreenFingerprint[fingerprint] = globalPosterURL
             }
         }
+        if videoURLByScreen.isEmpty, let ids = savedState.videoScreenIDs {
+            for screenID in ids {
+                videoURLByScreen[screenID] = url
+            }
+        }
+        if videoURLByScreenFingerprint.isEmpty, let fingerprints = savedState.videoScreenFingerprints {
+            for fingerprint in fingerprints {
+                videoURLByScreenFingerprint[fingerprint] = url
+            }
+        }
 
         do {
             if savedState.hasExplicitScreenTargets {
                 discardOriginalWallpaperSnapshot()
-                currentVideoURL = url
+                syncCurrentVideoURL()
                 currentPosterURL = globalPosterURL  // 兼容旧代码
                 isMuted = savedState.isMuted
                 volume = savedState.volume ?? (savedState.isMuted ? 0 : 1)
@@ -788,6 +867,12 @@ final class VideoWallpaperManager: ObservableObject {
                 volumeByScreenFingerprint: savedState.volumeByScreenFingerprint,
                 videoScreenIDs: savedState.videoScreenIDs,
                 videoScreenFingerprints: savedState.videoScreenFingerprints,
+                videoURLs: savedState.videoURLs?.mapValues { url in
+                    url.hasPrefix(oldPrefix) ? newPrefix + String(url.dropFirst(oldPrefix.count)) : url
+                },
+                videoURLsByFingerprint: savedState.videoURLsByFingerprint?.mapValues { url in
+                    url.hasPrefix(oldPrefix) ? newPrefix + String(url.dropFirst(oldPrefix.count)) : url
+                },
                 posterURLs: savedState.posterURLs?.mapValues { url in
                     url.hasPrefix(oldPrefix) ? newPrefix + String(url.dropFirst(oldPrefix.count)) : url
                 },
@@ -807,12 +892,12 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSNotification 回调可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            guard self.currentVideoURL != nil else { return }
+            guard self.hasActiveVideoWallpaper else { return }
             
             // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
             self.pendingRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
-                guard let self = self, self.currentVideoURL != nil else { return }
+                guard let self = self, self.hasActiveVideoWallpaper else { return }
 
                 self.relinkDisplayStateForCurrentScreens()
 
@@ -851,7 +936,7 @@ final class VideoWallpaperManager: ObservableObject {
             self.pendingRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
-                if self.currentVideoURL != nil, self.windows.isEmpty {
+                if self.hasActiveVideoWallpaper, self.windows.isEmpty {
                     try? self.rebuildWindows()
                 }
                 // 只有非手动暂停时才恢复播放
@@ -875,6 +960,9 @@ final class VideoWallpaperManager: ObservableObject {
             if videoTargetScreenFingerprints.contains(fingerprint) {
                 videoTargetScreenIDs.insert(screenID)
             }
+            if let videoURL = videoURLByScreenFingerprint[fingerprint] {
+                videoURLByScreen[screenID] = videoURL
+            }
             if let posterURL = posterURLByScreenFingerprint[fingerprint] {
                 posterURLByScreen[screenID] = posterURL
             }
@@ -882,6 +970,7 @@ final class VideoWallpaperManager: ObservableObject {
                 volumeByScreen[screenID] = screenVolume
             }
         }
+        syncCurrentVideoURL()
     }
 
     private func currentTargetScreenConfigurations() -> [ScreenConfigurationSignature] {
@@ -906,7 +995,7 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func rebuildWindows(targetScreen: NSScreen? = nil) throws {
-        guard let currentVideoURL else { return }
+        guard hasActiveVideoWallpaper else { return }
         
         // 如果正在重建，跳过此次请求
         // 注意：@MainActor 保证串行执行，无需额外加锁
@@ -942,7 +1031,8 @@ final class VideoWallpaperManager: ObservableObject {
             for screen in screensToRebuild {
                 Task { @MainActor in
                     do {
-                        try createWindow(for: screen, videoURL: currentVideoURL, muted: isMuted)
+                        guard let videoURL = self.videoURL(for: screen) else { return }
+                        try createWindow(for: screen, videoURL: videoURL, muted: isMuted)
                     } catch {
                         NSLog("[VideoWallpaperManager] Failed to create window: \(error.localizedDescription)")
                     }
@@ -967,7 +1057,11 @@ final class VideoWallpaperManager: ObservableObject {
                 }
                 
                 // 2. 创建新 player
-                let components = makePlayerComponents(for: targetScreen, videoURL: currentVideoURL, muted: isMuted)
+                guard let videoURL = videoURL(for: targetScreen) else {
+                    NSLog("[VideoWallpaperManager] Missing video URL for target screen \(targetScreenID)")
+                    return
+                }
+                let components = makePlayerComponents(for: targetScreen, videoURL: videoURL, muted: isMuted)
                 self.loopers[targetScreenID] = components.looper
                 
                 // 3. 无缝替换：直接修改 playerLayer.player，窗口始终停留在桌面层级
@@ -990,7 +1084,11 @@ final class VideoWallpaperManager: ObservableObject {
             } else {
                 // 没有现有窗口，创建新窗口
                 do {
-                    try createWindow(for: targetScreen, videoURL: currentVideoURL, muted: isMuted)
+                    guard let videoURL = videoURL(for: targetScreen) else {
+                        NSLog("[VideoWallpaperManager] Missing video URL for target screen \(targetScreenID)")
+                        return
+                    }
+                    try createWindow(for: targetScreen, videoURL: videoURL, muted: isMuted)
                 } catch {
                     NSLog("[VideoWallpaperManager] Failed to create window: \(error.localizedDescription)")
                 }
@@ -1228,6 +1326,8 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows() {
+        posterTasks.values.forEach { $0.cancel() }
+        posterTasks.removeAll()
         // 0. 取消上一次未执行的延迟释放，避免快速切换时多组 AVPlayer 并发驻留
         pendingPlayerCleanups.forEach { $0.cancel() }
         pendingPlayerCleanups.removeAll()
@@ -1291,10 +1391,15 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func persistState() {
-        guard let currentVideoURL else { return }
+        guard hasActiveVideoWallpaper else { return }
+
+        let globalFileURL = currentVideoURL?.absoluteString
+            ?? videoURLByScreen.values.first?.absoluteString
+            ?? videoURLByScreenFingerprint.values.first?.absoluteString
+            ?? ""
 
         let state = SavedVideoWallpaperState(
-            fileURL: currentVideoURL.absoluteString,
+            fileURL: globalFileURL,
             posterURL: currentPosterURL?.absoluteString,
             isMuted: isMuted,
             isPaused: isPaused,
@@ -1303,6 +1408,8 @@ final class VideoWallpaperManager: ObservableObject {
             volumeByScreenFingerprint: volumeByScreenFingerprint.isEmpty ? nil : volumeByScreenFingerprint,
             videoScreenIDs: videoTargetScreenIDs.isEmpty ? nil : videoTargetScreenIDs.sorted(),
             videoScreenFingerprints: videoTargetScreenFingerprints.isEmpty ? nil : videoTargetScreenFingerprints.sorted(),
+            videoURLs: videoURLByScreen.isEmpty ? nil : videoURLByScreen.mapValues { $0.absoluteString },
+            videoURLsByFingerprint: videoURLByScreenFingerprint.isEmpty ? nil : videoURLByScreenFingerprint.mapValues { $0.absoluteString },
             posterURLs: posterURLByScreen.isEmpty ? nil : posterURLByScreen.mapValues { $0.absoluteString },
             posterURLsByFingerprint: posterURLByScreenFingerprint.isEmpty ? nil : posterURLByScreenFingerprint.mapValues { $0.absoluteString }
         )
@@ -1367,6 +1474,10 @@ private struct SavedVideoWallpaperState: Codable {
     let videoScreenIDs: [String]?
     /// 应显示 MP4 的物理显示器指纹；用于外接屏重连后找回目标屏
     let videoScreenFingerprints: [String]?
+    /// 每个屏幕的独立视频文件；旧版持久化无此字段时回退到全局 fileURL
+    let videoURLs: [String: String]?
+    /// 每个物理显示器指纹对应的视频文件；用于 screenID 重连变化恢复
+    let videoURLsByFingerprint: [String: String]?
     /// 每个屏幕的独立 poster；旧版持久化无此字段（兼容旧数据时回退到全局 posterURL）
     let posterURLs: [String: String]?
     /// 每个物理显示器指纹的独立 poster；用于 screenID 重连变化恢复
@@ -1388,6 +1499,8 @@ private struct SavedVideoWallpaperState: Codable {
         volumeByScreenFingerprint = try container.decodeIfPresent([String: Double].self, forKey: .volumeByScreenFingerprint)
         videoScreenIDs = try container.decodeIfPresent([String].self, forKey: .videoScreenIDs)
         videoScreenFingerprints = try container.decodeIfPresent([String].self, forKey: .videoScreenFingerprints)
+        videoURLs = try container.decodeIfPresent([String: String].self, forKey: .videoURLs)
+        videoURLsByFingerprint = try container.decodeIfPresent([String: String].self, forKey: .videoURLsByFingerprint)
         posterURLs = try container.decodeIfPresent([String: String].self, forKey: .posterURLs)
         posterURLsByFingerprint = try container.decodeIfPresent([String: String].self, forKey: .posterURLsByFingerprint)
     }
@@ -1402,6 +1515,8 @@ private struct SavedVideoWallpaperState: Codable {
         volumeByScreenFingerprint: [String: Double]?,
         videoScreenIDs: [String]?,
         videoScreenFingerprints: [String]?,
+        videoURLs: [String: String]? = nil,
+        videoURLsByFingerprint: [String: String]? = nil,
         posterURLs: [String: String]? = nil,
         posterURLsByFingerprint: [String: String]? = nil
     ) {
@@ -1414,6 +1529,8 @@ private struct SavedVideoWallpaperState: Codable {
         self.volumeByScreenFingerprint = volumeByScreenFingerprint
         self.videoScreenIDs = videoScreenIDs
         self.videoScreenFingerprints = videoScreenFingerprints
+        self.videoURLs = videoURLs
+        self.videoURLsByFingerprint = videoURLsByFingerprint
         self.posterURLs = posterURLs
         self.posterURLsByFingerprint = posterURLsByFingerprint
     }
@@ -1422,6 +1539,7 @@ private struct SavedVideoWallpaperState: Codable {
         case fileURL, posterURL, isMuted, isPaused, volume
         case volumeByScreen, volumeByScreenFingerprint
         case videoScreenIDs, videoScreenFingerprints
+        case videoURLs, videoURLsByFingerprint
         case posterURLs, posterURLsByFingerprint
     }
 }

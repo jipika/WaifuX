@@ -237,7 +237,7 @@ final class StatusBarController: NSObject {
     }
 
     private func refreshMenuState() {
-        let hasNativeWallpaper = videoWallpaperManager.currentVideoURL != nil
+        let hasNativeWallpaper = videoWallpaperManager.isVideoWallpaperActive
         let hasExternalWallpaper = weBridge.isControllingExternalEngine
         let hasWallpaper = hasNativeWallpaper || hasExternalWallpaper
 
@@ -259,7 +259,7 @@ final class StatusBarController: NSObject {
     }
 
     private func updateVolumeSliderVisibility() {
-        let hasNativeWallpaper = videoWallpaperManager.currentVideoURL != nil
+        let hasNativeWallpaper = videoWallpaperManager.isVideoWallpaperActive
 
         // 先移除所有现有的屏幕音量 items
         for item in screenVolumeItems {
@@ -323,7 +323,7 @@ final class StatusBarController: NSObject {
 
         // 检测多显示器
         let screens = NSScreen.screens
-        if screens.count > 1 && videoWallpaperManager.currentVideoURL != nil {
+        if screens.count > 1 && videoWallpaperManager.isVideoWallpaperActive {
             // 多显示器环境下显示选择弹窗
             DisplaySelectorManager.shared.showSelector(
                 title: videoWallpaperManager.isPaused ? t("resumeWallpaper") : t("pauseWallpaper"),
@@ -356,13 +356,13 @@ final class StatusBarController: NSObject {
             return
         }
 
-        if videoWallpaperManager.currentVideoURL != nil {
+        if videoWallpaperManager.isVideoWallpaperActive {
             // 关闭动态壁纸
             videoWallpaperManager.stopWallpaper()
         } else {
             // 先尝试恢复上次保存的壁纸，没有则打开主窗口让用户选择
             videoWallpaperManager.restoreIfNeeded()
-            if videoWallpaperManager.currentVideoURL == nil {
+            if !videoWallpaperManager.isVideoWallpaperActive {
                 weBridge.restoreIfNeeded()
                 if !weBridge.isControllingExternalEngine {
                     showWindowHandler?()

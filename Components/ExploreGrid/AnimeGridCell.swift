@@ -121,6 +121,7 @@ final class AnimeGridCell: ExploreGridItem {
 
     override func configure(with item: Any, isFavorite: Bool) {
         guard let anime = item as? AnimeSearchResult else { return }
+        if anime.id == currentAnime?.id, coverImageView.image != nil { return }
         currentAnime = anime
 
         titleLabel.stringValue = anime.title

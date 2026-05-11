@@ -77,12 +77,12 @@ struct WaifuXApp {
         // 下载配置
         let downloader = KingfisherManager.shared.downloader
         let configuration = downloader.sessionConfiguration
-        configuration.httpMaximumConnectionsPerHost = 3
+        configuration.httpMaximumConnectionsPerHost = 10
         configuration.waitsForConnectivity = true
-        configuration.timeoutIntervalForRequest = 45
-        configuration.timeoutIntervalForResource = 120
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 180
         downloader.sessionConfiguration = configuration
-        downloader.downloadTimeout = 45.0
+        downloader.downloadTimeout = 60.0
         KingfisherManager.shared.defaultOptions = [
             .backgroundDecode,
             .retryStrategy(DelayRetryStrategy(maxRetryCount: 2, retryInterval: .accumulated(1.0))),
@@ -273,7 +273,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // ⚠️ 必须异步启动，禁止在 init 路径或 applicationDidFinishLaunching 同步调用，
         // 避免触发 macOS 26 _CFXPreferences 隐式递归
         DispatchQueue.main.async {
-            ExploreGridMemoryMonitor.shared.startMonitoring()
+            // ExploreGridMemoryMonitor 已移除，Kingfisher 管理自己的缓存
         }
 
         // 注：更新检查已移到 ContentView 中处理
@@ -320,7 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             
                             // 恢复动态壁纸（如果用户之前设置了）
                             VideoWallpaperManager.shared.restoreIfNeeded()
-                            if VideoWallpaperManager.shared.currentVideoURL == nil {
+                            if !VideoWallpaperManager.shared.isVideoWallpaperActive {
                                 WallpaperEngineXBridge.shared.restoreIfNeeded()
                             }
                             
@@ -482,12 +482,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             KingfisherManager.shared.downloader.cancelAll()
             ImageCache.default.clearMemoryCache()
             VideoThumbnailCache.shared.clearMemoryCache()
-            ExploreGridImageCache.shared.removeAll()
             VideoPreloader.shared.clearCache()
             URLCache.shared.removeAllCachedResponses()
             clearWebKitForegroundCaches()
             Task(priority: .utility) {
-                await ExploreGridImageLoader.shared.cancelAll()
+                // ExploreGridImageLoader 已移除
                 await MediaService.shared.clearCache()
                 await ContentService.shared.clearCache()
                 await NetworkService.shared.clearCache()
@@ -528,7 +527,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         PreviewWindowManager.shared.closePreview()
         ImageCache.default.clearMemoryCache()
         VideoThumbnailCache.shared.clearMemoryCache()
-        ExploreGridImageCache.shared.removeAll()
         VideoPreloader.shared.clearCache()
         LocalWallpaperScanner.shared.clearInMemoryCache()
         WorkshopService.shared.clearForegroundState()
@@ -536,7 +534,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         clearWebKitForegroundCaches()
 
         Task(priority: .utility) {
-            await ExploreGridImageLoader.shared.cancelAll()
+            // ExploreGridImageLoader 已移除
             await MediaService.shared.clearCache()
             await ContentService.shared.clearCache()
             await NetworkService.shared.clearCache()
@@ -562,7 +560,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private var isDynamicWallpaperRendering: Bool {
-        VideoWallpaperManager.shared.currentVideoURL != nil ||
+        VideoWallpaperManager.shared.isVideoWallpaperActive ||
         WallpaperEngineXBridge.shared.isControllingExternalEngine
     }
 

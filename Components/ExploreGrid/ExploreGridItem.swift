@@ -1,4 +1,5 @@
 import AppKit
+import Kingfisher
 
 private final class ExploreGridAspectFillImageView: NSImageView {
     override var image: NSImage? {
@@ -91,10 +92,6 @@ class ExploreGridItem: NSCollectionViewItem {
     private var loadTask: Task<Void, Never>?
     private(set) var isHovered = false
     private var isHoverInteractionEnabled = true
-    private var currentImageURL: URL?
-    private var currentImageURLs: [URL] = []
-    private var currentImageTargetSize: CGSize = .zero
-    private var isCurrentImageRequestPending = false
     private var trackingArea: NSTrackingArea?
     var hoverExpansionAllowance: CGFloat = 0 {
         didSet {
@@ -145,26 +142,9 @@ class ExploreGridItem: NSCollectionViewItem {
     override func prepareForReuse() {
         super.prepareForReuse()
 
-        let cancelledURL = currentImageURL
-        let cancelledTargetSize = currentImageTargetSize
         loadTask?.cancel()
         loadTask = nil
-        let cancelledURLs = currentImageURLs
-        if (!cancelledURLs.isEmpty || cancelledURL != nil), cancelledTargetSize != .zero {
-            Task {
-                for url in cancelledURLs.isEmpty ? [cancelledURL].compactMap({ $0 }) : cancelledURLs {
-                    await ExploreGridImageLoader.shared.cancel(
-                        url: url,
-                        targetSize: cancelledTargetSize
-                    )
-                }
-            }
-        }
         coverImageView.image = nil
-        currentImageURL = nil
-        currentImageURLs = []
-        currentImageTargetSize = .zero
-        isCurrentImageRequestPending = false
 
         isHovered = false
         removeHoverAnimations()
@@ -227,128 +207,69 @@ class ExploreGridItem: NSCollectionViewItem {
         // 子类按需覆写
     }
 
-    /// 加载图片
+    /// 加载图片。传入单个 URL，使用 Kingfisher 内置缓存。
     func loadImage(url: URL?, targetSize: CGSize) {
-        loadImage(urls: url.map { [$0] } ?? [], targetSize: targetSize)
+        guard let url else { return }
+        loadImage(urls: [url], targetSize: targetSize)
     }
 
-    /// 加载图片。传入多个候选 URL 时，前一个加载失败或分辨率不足会继续尝试后续候选。
+    /// 加载图片。遍历候选 URL，取第一个成功加载且像素尺寸不低于目标 55% 的，用 Kingfisher 处理后显示。
     func loadImage(urls: [URL], targetSize: CGSize) {
-        let roundedTargetSize = CGSize(width: ceil(targetSize.width), height: ceil(targetSize.height))
-        let candidates = deduplicatedURLs(urls)
-        let sameURL = candidates == currentImageURLs
-        // 与按物理像素桶化的 decode 尺寸对齐，避免布局微抖反复排队解码
-        let sizeChanged = abs(roundedTargetSize.width - currentImageTargetSize.width) > 24
-            || abs(roundedTargetSize.height - currentImageTargetSize.height) > 24
-        let hasDisplayedImage = coverImageView.image != nil
-        if sameURL && !sizeChanged && (hasDisplayedImage || isCurrentImageRequestPending) {
-            return
-        }
-        currentImageURL = candidates.first
-        currentImageURLs = candidates
-        currentImageTargetSize = roundedTargetSize
+        guard !urls.isEmpty else { return }
+
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let pixelSize = CGSize(width: max(targetSize.width, 64),
+                                height: max(targetSize.height, 64))
+        let minPixelEdge = max(pixelSize.width, pixelSize.height) * 0.55
 
         loadTask?.cancel()
-        if candidates.isEmpty {
-            coverImageView.image = nil
-            loadTask = nil
-            isCurrentImageRequestPending = false
-            return
-        }
-
-        isCurrentImageRequestPending = true
         loadTask = Task { [weak self] in
             guard let self else { return }
 
+            let options: KingfisherOptionsInfo = [
+                .processor(DownsamplingImageProcessor(size: pixelSize)),
+                .scaleFactor(CGFloat(scale)),
+                .backgroundDecode,
+                .retryStrategy(DelayRetryStrategy(maxRetryCount: 1, retryInterval: .seconds(0.5))),
+                .requestModifier(AnyModifier { request in
+                    var req = request
+                    req.timeoutInterval = 30
+                    if let host = req.url?.host?.lowercased(),
+                       host.contains("steam") || host.contains("akamaihd") {
+                        req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                    }
+                    return req
+                })
+            ]
+
+            // 遍历候选 URL：取第一张分辨率不低于目标 55% 的（避免小缩略图硬撑大）
             var bestImage: NSImage?
-            var bestURL: URL?
-            var bestMaxEdge: CGFloat = 0
-
-            for candidate in candidates {
+            var bestEdge: CGFloat = 0
+            for url in urls {
                 guard !Task.isCancelled else { return }
-                if let image = await ExploreGridImageLoader.shared.load(url: candidate, targetSize: roundedTargetSize) {
-                    let imagePixelSize = pixelSize(for: image)
-                    let imageMaxEdge = max(imagePixelSize.width, imagePixelSize.height)
-
-                    // 分辨率足够，直接使用
-                    if isImageAcceptablySharp(image, pixelSize: imagePixelSize, for: roundedTargetSize) {
-                        bestImage = image
-                        bestURL = candidate
-                        break
-                    }
-
-                    // 分辨率不够，记录当前最佳，继续尝试更高分辨率的候选
-                    if imageMaxEdge > bestMaxEdge {
-                        bestImage = image
-                        bestURL = candidate
-                        bestMaxEdge = imageMaxEdge
-                    }
+                guard let image = try? await KingfisherManager.shared.retrieveImage(
+                    with: .network(url),
+                    options: options
+                ).image else { continue }
+                let imageEdge = max(image.size.width, image.size.height)
+                if imageEdge >= minPixelEdge {
+                    bestImage = image
+                    break
+                }
+                if imageEdge > bestEdge {
+                    bestImage = image
+                    bestEdge = imageEdge
                 }
             }
 
-            guard !Task.isCancelled else { return }
-
-            let requestedURLs = candidates
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard self.currentImageURLs == requestedURLs else { return }
-                self.currentImageURL = bestURL
-                self.coverImageView.image = bestImage
-                self.isCurrentImageRequestPending = false
-                self.loadTask = nil
+            guard let finalImage = bestImage, !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.coverImageView.image = finalImage
             }
         }
     }
 
-    /// 子类可按内容类型调整“这张图可以直接展示”的最低像素要求。
-    /// 默认阈值偏保守，兼顾通用列表页的速度与容错。
-    func minimumAcceptableImageEdge(for targetSize: CGSize) -> CGFloat {
-        let targetMaxEdge = max(targetSize.width, targetSize.height)
-        return max(targetMaxEdge * 0.55, 320)
-    }
 
-    /// 子类可按内容类型覆写清晰度判定。
-    /// 默认只看最大边，兼顾现有媒体/动漫页的容错。
-    func isImageAcceptablySharp(_ image: NSImage, pixelSize: CGSize, for targetSize: CGSize) -> Bool {
-        let imageMaxEdge = max(pixelSize.width, pixelSize.height)
-        return imageMaxEdge >= minimumAcceptableImageEdge(for: targetSize)
-    }
-
-    /// 获取图片物理像素的最大边（用于分辨率检查）
-    /// 注意：不要把逻辑尺寸 * scale 作为优先依据，否则小缩略图会被误判成“已经够清晰”。
-    /// 这里优先使用 CGImage / NSImageRep 的真实像素，只有完全拿不到时才退回估算值。
-    func pixelSize(for image: NSImage) -> CGSize {
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            return CGSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
-        }
-
-        let rep = image.representations.max {
-            ($0.pixelsWide * $0.pixelsHigh) < ($1.pixelsWide * $1.pixelsHigh)
-        }
-
-        if let rep, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
-            return CGSize(width: CGFloat(rep.pixelsWide), height: CGFloat(rep.pixelsHigh))
-        }
-
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let estimatedWidth = max(1, image.size.width * scale)
-        let estimatedHeight = max(1, image.size.height * scale)
-        return CGSize(width: estimatedWidth, height: estimatedHeight)
-    }
-
-    private func deduplicatedURLs(_ urls: [URL]) -> [URL] {
-        var seen: Set<String> = []
-        var result: [URL] = []
-
-        for url in urls {
-            let key = url.absoluteString
-            guard !seen.contains(key) else { continue }
-            seen.insert(key)
-            result.append(url)
-        }
-
-        return result
-    }
 
     // MARK: - Hover
 

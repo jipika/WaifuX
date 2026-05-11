@@ -165,7 +165,7 @@ final class DesktopWallpaperSyncManager {
             // 如果该屏幕属于视频壁纸目标，同步其 poster（不再跳过，确保所有 Spaces 都正确）
             if videoManager.hasActiveWallpaper(on: screen),
                let posterURL = videoManager.posterURL(for: screen),
-               videoManager.currentVideoURL != nil {
+               videoManager.isVideoWallpaperActive {
                 do {
                     // 使用 "充满屏幕" 缩放模式，与初始设置保持一致
                     let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [

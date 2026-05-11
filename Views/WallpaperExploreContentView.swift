@@ -181,6 +181,8 @@ struct WallpaperExploreContentView: View {
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
+                        ScrollToTopHelper(trigger: outerScrollToTopToken)
+                            .frame(height: 0)
                         gridHeaderStack
                         wallpaperGrid(config: gridConfig)
                             .frame(height: max(gridContentHeight, 320))
@@ -192,12 +194,10 @@ struct WallpaperExploreContentView: View {
                     .environment(\.arcIsLightMode, arcSettings.isLightMode)
                 }
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-                .background(
-                    ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
-                        let shouldShow = offset > 300
-                        if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
-                    }
-                )
+                .onChange(of: viewModel.wallpapers.count) { _, count in
+                    if count > 60 { showScrollToTop = true }
+                }
+
                 .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                     handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
                 }
@@ -259,6 +259,7 @@ struct WallpaperExploreContentView: View {
             }
         }
         .zIndex(100)
+        .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
     
     private var bottomLoadingOverlay: some View {
@@ -986,7 +987,13 @@ struct WallpaperExploreContentView: View {
         viewModel.errorMessage = nil
         // 不再手动清空 wallpapers，让旧数据保持在屏幕上直到 search() 一次性替换新数据，
         // 避免根视图在 ExploreGridContainer 和 legacyScrollContent 之间来回切换导致的抖动。
-        Task { await viewModel.search() }
+        Task {
+            await viewModel.search()
+            await MainActor.run {
+                recomputeVisibleWallpapers()
+                syncAtmosphereIfNeeded()
+            }
+        }
     }
 
     private func resetAllFilters(reloadData: Bool = false) {
@@ -1026,10 +1033,6 @@ struct WallpaperExploreContentView: View {
         } else {
             newVisible = viewModel.wallpapers
         }
-        // 只在数据真正变化时才更新，避免相同数据触发 NSCollectionView 无意义 reload
-        let countChanged = newVisible.count != visibleWallpapers.count
-        let idsChanged = countChanged || zip(newVisible, visibleWallpapers).contains { $0.id != $1.id }
-        guard idsChanged else { return }
         visibleWallpapers = newVisible
         gridReloadToken += 1
     }

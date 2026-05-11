@@ -81,6 +81,8 @@ struct AnimeExploreView: View {
                     } else {
                         ScrollView(.vertical, showsIndicators: false) {
                             VStack(alignment: .leading, spacing: 0) {
+                                ScrollToTopHelper(trigger: outerScrollToTopToken)
+                                    .frame(height: 0)
                                 headerStack
                                 animeGrid(contentWidth: contentWidth)
                                     .frame(height: max(gridContentHeight, 320))
@@ -92,12 +94,10 @@ struct AnimeExploreView: View {
                             .environment(\.arcIsLightMode, arcSettings.isLightMode)
                         }
                         .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-                        .background(
-                            ScrollToTopHelper(trigger: outerScrollToTopToken) { offset in
-                                let shouldShow = offset > 300
-                                if showScrollToTop != shouldShow { showScrollToTop = shouldShow }
-                            }
-                        )
+                        .onChange(of: viewModel.animeItems.count) { _, count in
+                            if count > 60 { showScrollToTop = true }
+                        }
+
                         .onPreferenceChange(AnimeLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
                             handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: geometry.size.height)
                         }
@@ -205,6 +205,7 @@ struct AnimeExploreView: View {
             }
         }
         .zIndex(100)
+        .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
 
     // MARK: - Sections

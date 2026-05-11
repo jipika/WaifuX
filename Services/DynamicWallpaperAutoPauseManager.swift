@@ -153,7 +153,7 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
     private func checkAndApply() {
-        let hasNative = VideoWallpaperManager.shared.currentVideoURL != nil
+        let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
         guard hasNative || hasExternal else {
             foregroundPauseRequested = false
@@ -261,7 +261,7 @@ final class DynamicWallpaperAutoPauseManager {
     private func handleAppActivationChange() {
         guard pauseWhenOtherAppForeground else { return }
         guard !isForegroundPauseSuppressed else { return }
-        let hasNative = VideoWallpaperManager.shared.currentVideoURL != nil
+        let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
         guard hasNative || hasExternal else { return }
         guard !VideoWallpaperManager.shared.isScreenLocked else { return }
@@ -400,7 +400,7 @@ final class DynamicWallpaperAutoPauseManager {
             let screenID = screen.wallpaperScreenIdentifier
 
             // 暂停原生视频壁纸
-            if videoManager.currentVideoURL != nil,
+            if videoManager.isVideoWallpaperActive,
                !videoManager.isPaused(on: screen) {
                 videoManager.pauseWallpaper(for: screen)
                 pausedScreenIDs.insert(screenID)
@@ -414,7 +414,7 @@ final class DynamicWallpaperAutoPauseManager {
     private func resumeScreens(byIDs screenIDs: Set<String>) {
         guard !screenIDs.isEmpty else { return }
         let videoManager = VideoWallpaperManager.shared
-        guard videoManager.currentVideoURL != nil else { return }
+        guard videoManager.isVideoWallpaperActive else { return }
 
         for screen in NSScreen.screens where screenIDs.contains(screen.wallpaperScreenIdentifier) {
             videoManager.resumeWallpaper(for: screen)
@@ -465,7 +465,7 @@ final class DynamicWallpaperAutoPauseManager {
             return
         }
 
-        guard videoManager.currentVideoURL != nil else { return }
+        guard videoManager.isVideoWallpaperActive else { return }
         guard globalAutoPausedNativePlayingScreenIDs.isEmpty else { return }
 
         let managedScreenIDs = Set(videoManager.activeScreens.map(\.wallpaperScreenIdentifier))
@@ -509,7 +509,7 @@ final class DynamicWallpaperAutoPauseManager {
             globalAutoPausedNativeManuallyPausedScreenIDs.removeAll()
             return
         }
-        guard videoManager.currentVideoURL != nil else {
+        guard videoManager.isVideoWallpaperActive else {
             globalAutoPausedNativePlayingScreenIDs.removeAll()
             globalAutoPausedNativeManuallyPausedScreenIDs.removeAll()
             return
