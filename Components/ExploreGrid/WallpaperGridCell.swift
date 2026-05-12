@@ -108,14 +108,7 @@ final class WallpaperGridCell: ExploreGridItem {
 
     override func configure(with item: Any, isFavorite: Bool) {
         guard let wallpaper = item as? Wallpaper else { return }
-        let isSameWallpaper = wallpaper.id == currentWallpaper?.id
         currentWallpaper = wallpaper
-
-        if isSameWallpaper, coverImageView.image != nil {
-            // 同一张壁纸且图片已加载，仅更新 UI 状态，跳过图片重载
-            favoritesView.configure(value: compactNumber(wallpaper.favorites), tint: isFavorite ? NSColor(hexString: "FF5A7D") : secondaryStatColor)
-            return
-        }
 
         applyTheme()
         applyBorder(for: wallpaper)

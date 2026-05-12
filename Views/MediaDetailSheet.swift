@@ -597,13 +597,17 @@ struct MediaDetailSheet: View {
             } label: {
                 HStack(spacing: 8) {
                     if isBakingScene {
-                        CustomProgressView(tint: .white)
-                            .scaleEffect(0.75)
+                        Circle()
+                            .trim(from: 0, to: 0.75)
+                            .stroke(.white, lineWidth: 2.5)
+                            .rotationEffect(.degrees(isBakingScene ? 360 : 0))
+                            .frame(width: 16, height: 16)
+                            .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: isBakingScene)
                     } else {
                         Image(systemName: "film.stack")
                             .font(.system(size: 14, weight: .semibold))
                     }
-                    Text(t("sceneBake.button"))
+                    Text(isBakingScene ? t("sceneBake.progressTitle") : t("sceneBake.button"))
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .foregroundStyle(.white.opacity(0.95))
@@ -645,6 +649,10 @@ struct MediaDetailSheet: View {
         isBakingScene = true
         errorMessage = ""
         Task {
+            // 有缓存则立即关闭加载状态
+            if SceneOfflineBakeService.hasCachedArtifact(record: record) {
+                await MainActor.run { isBakingScene = false }
+            }
             do {
                 let artifact = try await SceneOfflineBakeService.bake(record: record)
                 let videoURL = URL(fileURLWithPath: artifact.videoPath)
@@ -2468,6 +2476,7 @@ struct WallpaperPreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isVideoReady = false
     @State private var isWebLoaded = false
+    @StateObject private var previewPlayer = PreviewPlayer()
 
     private var isVideo: Bool {
         ["mp4", "mov", "webm"].contains(url.pathExtension.lowercased())
@@ -2478,7 +2487,6 @@ struct WallpaperPreviewSheet: View {
             Color.black.ignoresSafeArea()
 
             if isWeb {
-                // Web壁纸：先显示背景图，加载完成后显示web内容
                 if let posterURL = posterURL {
                     KFImage(posterURL)
                         .cacheMemoryOnly(false)
@@ -2494,12 +2502,20 @@ struct WallpaperPreviewSheet: View {
                 WebWallpaperPreviewView(url: url, onLoaded: { isWebLoaded = true })
                     .ignoresSafeArea()
             } else if isVideo {
-                LoopingVideoBackgroundView(
-                    url: url,
-                    isMuted: isMuted,
-                    contentMode: .fit,
-                    onReady: { isVideoReady = true }
-                )
+                // 非循环播放器 + 底部进度条
+                ZStack {
+                    AVPlayerViewRepresentable(player: previewPlayer.player)
+                        .ignoresSafeArea()
+                        .onAppear {
+                            previewPlayer.load(url: url, isMuted: isMuted)
+                        }
+
+                    // 底部控制栏
+                    VStack {
+                        Spacer()
+                        videoPreviewControls
+                    }
+                }
                 .ignoresSafeArea()
             } else {
                 KFImage(url)
@@ -2514,7 +2530,7 @@ struct WallpaperPreviewSheet: View {
             }
 
             // 视频/网页加载进度指示
-            if showLoadingIndicator {
+            if isWeb ? !isWebLoaded : previewPlayer.totalDuration == 0 {
                 VStack(spacing: 12) {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
@@ -2549,11 +2565,95 @@ struct WallpaperPreviewSheet: View {
         }
     }
 
-    private var showLoadingIndicator: Bool {
-        if isWeb { return !isWebLoaded }
-        if isVideo { return !isVideoReady }
-        return false
+    // MARK: - 视频预览控制
+
+    private var videoPreviewControls: some View {
+        VStack(spacing: 6) {
+            // 进度条
+            Slider(
+                value: Binding(
+                    get: { previewPlayer.totalDuration > 0 ? previewPlayer.currentTime / previewPlayer.totalDuration : 0 },
+                    set: { ratio in previewPlayer.seek(to: ratio * previewPlayer.totalDuration) }
+                ),
+                in: 0...1
+            )
+            .controlSize(.small)
+            .accentColor(.white)
+
+            // 时间标签 + 静音按钮
+            HStack {
+                Text(timeString(previewPlayer.currentTime))
+                    .font(.monospacedDigit(.caption2)())
+                    .foregroundColor(.white.opacity(0.8))
+                Spacer()
+                Button {
+                    isMuted.toggle()
+                    previewPlayer.player.isMuted = isMuted
+                } label: {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                Text(timeString(previewPlayer.totalDuration))
+                    .font(.monospacedDigit(.caption2)())
+                    .foregroundColor(.white.opacity(0.8))
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 16)
     }
+
+    private func timeString(_ interval: TimeInterval) -> String {
+        guard interval.isFinite, interval >= 0 else { return "0:00" }
+        let m = Int(interval) / 60
+        let s = Int(interval) % 60
+        return "\(m):\(String(format: "%02d", s))"
+    }
+}
+
+// MARK: - 预览播放器（可拖拽进度条）
+
+final class PreviewPlayer: ObservableObject {
+    let player = AVPlayer()
+    @Published var currentTime: TimeInterval = 0
+    @Published var totalDuration: TimeInterval = 0
+    private var timeObserver: Any?
+
+    func load(url: URL, isMuted: Bool) {
+        player.isMuted = isMuted
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        player.play()
+
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
+            guard let self, item.duration.seconds.isFinite, item.duration.seconds > 0 else { return }
+            self.currentTime = time.seconds
+            self.totalDuration = item.duration.seconds
+        }
+    }
+
+    func seek(to time: TimeInterval) {
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+    }
+
+    deinit {
+        if let observer = timeObserver { player.removeTimeObserver(observer) }
+    }
+}
+
+struct AVPlayerViewRepresentable: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .none   // 用自定义控制
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {}
 }
 
 // MARK: - Web 壁纸预览 WebView

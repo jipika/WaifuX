@@ -34,6 +34,7 @@ struct MediaExploreContentView: View {
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var lastSyncedFirstItemID: String?
+    @State private var isApplyingProgrammaticReset = false
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -776,20 +777,29 @@ struct MediaExploreContentView: View {
 
     // MARK: - UI Components
 
+    private func smartRetry() async {
+        let query = viewModel.currentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            await viewModel.search(query: query)
+        } else {
+            await viewModel.loadHomeFeed()
+        }
+    }
+
     private var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
                 ErrorStateView(
                     type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
                     message: errorMessage,
-                    retryAction: { Task { await viewModel.loadHomeFeed() } }
+                    retryAction: { Task { await smartRetry() } }
                 )
             } else {
                 ErrorStateView(
                     type: .empty,
                     title: t("noMediaFilter"),
                     message: t("tryDifferentFilter"),
-                    retryAction: { Task { await viewModel.loadHomeFeed() } }
+                    retryAction: { Task { await smartRetry() } }
                 )
             }
         }
@@ -884,9 +894,10 @@ struct MediaExploreContentView: View {
         viewModel.clearItems()
 
         searchTask?.cancel()
-        searchTask = Task {
+        viewModel.isLoading = false
+        searchTask = Task { @MainActor in
+            defer { searchTask = nil }
             if workshopSourceManager.activeSource == .wallpaperEngine {
-                // Workshop 模式下，加载 Workshop 内容
                 await viewModel.loadWorkshopFeed()
             } else if category == .all {
                 await viewModel.loadHomeFeed()
@@ -932,7 +943,13 @@ struct MediaExploreContentView: View {
         selectedCategory = .all
         selectedHotTag = nil
         searchTask?.cancel()
-        searchTask = Task {
+        viewModel.isLoading = false
+        searchTask = Task { @MainActor in
+            defer {
+                searchTask = nil
+                syncAtmosphereIfNeeded()
+                bumpReloadToken()
+            }
             if workshopSourceManager.activeSource == .wallpaperEngine {
                 await applyWorkshopFilters(query: query)
             } else {
@@ -951,6 +968,8 @@ struct MediaExploreContentView: View {
     }
 
     private func handleFilterChange() {
+        guard !isApplyingProgrammaticReset else { return }
+
         // Workshop 模式下不支持标签过滤
         if workshopSourceManager.activeSource == .wallpaperEngine {
             syncAtmosphereIfNeeded()
@@ -979,9 +998,15 @@ struct MediaExploreContentView: View {
     }
 
     private func handleWorkshopSortChange() {
+        guard !isApplyingProgrammaticReset else { return }
+
         AppLogger.info(.wallpaper, "Workshop 排序变化", metadata: ["排序": selectedWorkshopSort.rawValue])
+        // 仅在 Workshop 模式下实际重载数据；MotionBG 下仅更新 UI 不触发加载
+        guard workshopSourceManager.activeSource == .wallpaperEngine else { return }
         searchTask?.cancel()
-        searchTask = Task {
+        viewModel.isLoading = false
+        searchTask = Task { @MainActor in
+            defer { searchTask = nil }
             await viewModel.setWorkshopSort(
                 sortBy: selectedWorkshopSort.sortBy,
                 days: selectedWorkshopSort.days
@@ -1059,6 +1084,7 @@ struct MediaExploreContentView: View {
     }
 
     private func resetAllFilters(reloadData: Bool = false) {
+        isApplyingProgrammaticReset = true
         searchText = ""
         mediaSearchQuery = ""
         translationBridge.reset()
@@ -1075,14 +1101,38 @@ struct MediaExploreContentView: View {
         viewModel.errorMessage = nil
 
         if reloadData {
-            searchTask?.cancel()
-            searchTask = Task {
-                if workshopSourceManager.activeSource == .wallpaperEngine {
-                    await viewModel.loadWorkshopFeed()
-                } else {
-                    await viewModel.loadHomeFeed()
-                }
+            reloadDefaultFeedAfterReset()
+        } else {
+            Task { @MainActor in
+                await Task.yield()
+                isApplyingProgrammaticReset = false
             }
+        }
+    }
+
+    private func reloadDefaultFeedAfterReset() {
+        searchTask?.cancel()
+        loadMoreTask?.cancel()
+        cancelScheduledGridVisibleRefresh()
+        pendingSearchText = nil
+        isLoadingMore = false
+        isInitialLoading = viewModel.items.isEmpty
+
+        searchTask = Task { @MainActor in
+            defer {
+                isInitialLoading = false
+                isApplyingProgrammaticReset = false
+                searchTask = nil
+            }
+
+            if workshopSourceManager.activeSource == .wallpaperEngine {
+                await viewModel.resetAndLoadDefaultWorkshopFeed()
+            } else {
+                await viewModel.resetAndLoadDefaultHomeFeed()
+            }
+
+            syncAtmosphereIfNeeded()
+            bumpReloadToken()
         }
     }
 
@@ -1099,7 +1149,10 @@ struct MediaExploreContentView: View {
         let newFirstID = items.first?.id
         guard newFirstID != lastSyncedFirstItemID else { return }
         lastSyncedFirstItemID = newFirstID
-        exploreAtmosphere.updateFirstMedia(items.first)
+        DispatchQueue.main.async {
+            guard lastSyncedFirstItemID == newFirstID else { return }
+            exploreAtmosphere.updateFirstMedia(items.first)
+        }
     }
 
     private func randomizeAtmosphere() {

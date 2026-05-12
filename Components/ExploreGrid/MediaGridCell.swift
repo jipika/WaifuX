@@ -85,14 +85,7 @@ final class MediaGridCell: ExploreGridItem {
 
     override func configure(with item: Any, isFavorite: Bool) {
         guard let media = item as? MediaItem else { return }
-        let isSameMedia = media.id == currentMedia?.id
         currentMedia = media
-
-        if isSameMedia, coverImageView.image != nil {
-            heartLabel.stringValue = isFavorite ? "♥" : "♡"
-            heartLabel.textColor = isFavorite ? NSColor(hexString: "FF5A7D") : NSColor.white.withAlphaComponent(0.36)
-            return
-        }
 
         titleLabel.stringValue = media.title
         heartLabel.stringValue = isFavorite ? "♥" : "♡"

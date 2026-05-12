@@ -93,6 +93,11 @@ class ExploreGridItem: NSCollectionViewItem {
     private(set) var isHovered = false
     private var isHoverInteractionEnabled = true
     private var trackingArea: NSTrackingArea?
+
+    // MARK: - 动画 GIF 支持
+    private var animationTimer: Timer?
+    private var animatedFrames: [(image: NSImage, duration: TimeInterval)] = []
+    private var currentFrameIndex: Int = 0
     var hoverExpansionAllowance: CGFloat = 0 {
         didSet {
             guard abs(hoverExpansionAllowance - oldValue) > 0.5 else { return }
@@ -145,6 +150,7 @@ class ExploreGridItem: NSCollectionViewItem {
         loadTask?.cancel()
         loadTask = nil
         coverImageView.image = nil
+        stopAnimating()
 
         isHovered = false
         removeHoverAnimations()
@@ -264,12 +270,76 @@ class ExploreGridItem: NSCollectionViewItem {
 
             guard let finalImage = bestImage, !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                self?.coverImageView.image = finalImage
+                guard let self, !Task.isCancelled else { return }
+                self.coverImageView.image = finalImage
+            }
+            // 用第一个候选 URL 的原始数据检测是否为动图（不依赖后缀名）
+            if let url = urls.first {
+                var req = URLRequest(url: url)
+                req.timeoutInterval = 15
+                req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                if let (data, resp) = try? await URLSession.shared.data(for: req),
+                   resp.mimeType?.hasPrefix("image/gif") == true || data.prefix(3) == Data("GIF".utf8) {
+                    await MainActor.run { [weak self] in
+                        self?.startAnimatingIfAnimated(data: data)
+                    }
+                }
             }
         }
     }
 
+    // MARK: - 动画 GIF
 
+    /// 从已下载的图片数据检测并启动动画。data 是 Kingfisher 下载的原始数据。
+    func startAnimatingIfAnimated(data: Data) {
+        stopAnimating()
+        guard let cgSource = CGImageSourceCreateWithData(data as CFData, nil) else { return }
+        let count = CGImageSourceGetCount(cgSource)
+        guard count > 1 else { return }
+
+        var frames: [(image: NSImage, duration: TimeInterval)] = []
+        for i in 0..<count {
+            guard let cgImage = CGImageSourceCreateImageAtIndex(cgSource, i, nil) else { continue }
+            let dur = Self.frameDuration(at: i, source: cgSource)
+            frames.append((image: NSImage(cgImage: cgImage, size: .zero), duration: dur))
+        }
+        guard !frames.isEmpty else { return }
+
+        animatedFrames = frames
+        currentFrameIndex = 0
+        coverImageView.image = frames[0].image
+        advanceFrameRepeating()
+    }
+
+    func stopAnimating() {
+        animationTimer?.invalidate()
+        animationTimer = nil
+        animatedFrames = []
+        currentFrameIndex = 0
+    }
+
+    private func advanceFrameRepeating() {
+        guard currentFrameIndex < animatedFrames.count else {
+            currentFrameIndex = 0
+            advanceFrameRepeating()
+            return
+        }
+        let dur = max(animatedFrames[currentFrameIndex].duration, 0.05)
+        animationTimer = Timer.scheduledTimer(withTimeInterval: dur, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            currentFrameIndex = (currentFrameIndex + 1) % animatedFrames.count
+            coverImageView.image = animatedFrames[currentFrameIndex].image
+            advanceFrameRepeating()
+        }
+    }
+
+    private static func frameDuration(at index: Int, source: CGImageSource) -> TimeInterval {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let gifProps = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] else { return 0.1 }
+        if let dur = gifProps[kCGImagePropertyGIFDelayTime] as? NSNumber, dur.doubleValue > 0 { return dur.doubleValue }
+        if let dur = gifProps[kCGImagePropertyGIFUnclampedDelayTime] as? NSNumber, dur.doubleValue > 0 { return dur.doubleValue }
+        return 0.1
+    }
 
     // MARK: - Hover
 

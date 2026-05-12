@@ -160,9 +160,9 @@ actor FourKWallpapersService {
             Wallpaper.Tag(id: index, name: tag.name, alias: nil)
         }
 
-        // path 用于 fullImageURL（详情页/轮播图展示），使用 thumbs_3t (~1280px) 保证清晰且快速加载
-        // 原图 URL 只存在 thumbs.original 中，下载时使用
-        let imagePath = w.hdThumbnailURL
+        // path 用于 fullImageURL（详情页/全屏查看/设为壁纸），优先原图 URL（4K+），回退 hdThumbnailURL
+        // isOriginalImage 判断 originalURL 是否为真正的原图 URL
+        let imagePath = isOriginalImage ? w.originalURL : w.hdThumbnailURL
 
         // 文件类型推断
         let detectedFileType: String

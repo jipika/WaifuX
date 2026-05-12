@@ -384,6 +384,11 @@ struct ContentView: View {
             // 数据源确定后再加载首页数据
             try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
             await viewModel.initialLoad()
+
+            Task(priority: .utility) {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                await mediaViewModel.initialLoadIfNeeded()
+            }
             
             // 延迟2秒后检查更新（自动检查，非强制，避免频繁触发）
             try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
@@ -1407,7 +1412,7 @@ struct MyMediaContentView: View {
         DownloadPathManager.shared.createDirectoryStructure()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.prompt = t("import")
 
@@ -1416,40 +1421,88 @@ struct MyMediaContentView: View {
         let destinationRoot = DownloadPathManager.shared.mediaFolderURL
         let fileManager = FileManager.default
         var importedCount = 0
+        var skippedCount = 0
 
+        // 递归查找目录树中的第一个 project.json（含 preview 同目录）
+        func findProjectJSON(in dir: URL) -> (projectURL: URL, parentDir: URL)? {
+            guard let enumerator = fileManager.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
+            for case let fileURL as URL in enumerator {
+                if fileURL.lastPathComponent == "project.json" {
+                    return (fileURL, fileURL.deletingLastPathComponent())
+                }
+            }
+            return nil
+        }
+
+        // 在指定目录下递归查找预览图
+        func findPreview(in dir: URL) -> URL? {
+            guard let enumerator = fileManager.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
+            let exts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif"]
+            for case let fileURL as URL in enumerator {
+                let name = fileURL.lastPathComponent.lowercased()
+                if name == "preview.jpg" || name == "preview.jpeg" || name == "preview.png" || name == "preview.webp" || name == "preview.gif" {
+                    return fileURL
+                }
+            }
+            return nil
+        }
+
+        // 收集所有待导入的源目录（用户选文件夹→递归扫描子目录；选 .pkg→取上级目录）
+        var sourceDirPaths: [String] = []
         for url in panel.urls {
-            let ext = url.pathExtension.lowercased()
-            guard ext == "pkg" else {
-                print("[ContentView] Skipped non-pkg file: \(url.lastPathComponent)")
+            let path = url.path
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                // 批量模式：列出其下所有子目录，每个都尝试递归查找 project.json
+                let subItems = (try? fileManager.contentsOfDirectory(atPath: path)) ?? []
+                for name in subItems {
+                    guard !name.hasPrefix(".") else { continue }
+                    let subPath = (path as NSString).appendingPathComponent(name)
+                    var subIsDir: ObjCBool = false
+                    guard fileManager.fileExists(atPath: subPath, isDirectory: &subIsDir), subIsDir.boolValue else { continue }
+                    sourceDirPaths.append(subPath)
+                }
+            } else if url.pathExtension.lowercased() == "pkg" {
+                // 单文件模式：取 .pkg 所在目录
+                sourceDirPaths.append(url.deletingLastPathComponent().path)
+            }
+        }
+
+        // 去重
+        sourceDirPaths = Array(Set(sourceDirPaths))
+
+        for sourcePath in sourceDirPaths {
+            let sourceURL = URL(fileURLWithPath: sourcePath)
+            let sourceName = (sourcePath as NSString).lastPathComponent
+
+            // 递归查找 project.json
+            guard let found = findProjectJSON(in: sourceURL) else {
+                print("[ContentView] No project.json found under \(sourceName)")
+                skippedCount += 1
                 continue
             }
 
-            let sourceDir = url.deletingLastPathComponent()
-            let projectJSONURL = sourceDir.appendingPathComponent("project.json")
-            guard fileManager.fileExists(atPath: projectJSONURL.path) else {
-                print("[ContentView] No project.json found next to \(url.lastPathComponent)")
-                continue
-            }
+            let projectJSONURL = found.projectURL
 
             guard let data = try? Data(contentsOf: projectJSONURL),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("[ContentView] Failed to parse project.json for \(url.lastPathComponent)")
+                print("[ContentView] Failed to parse project.json in \(sourceName)")
+                skippedCount += 1
                 continue
             }
 
-            let title = (json["title"] as? String) ?? sourceDir.lastPathComponent
+            let title = (json["title"] as? String) ?? sourceName
             var workshopID = (json["publishedfileid"] as? String) ?? (json["id"] as? String)
 
             if workshopID == nil {
-                let dirName = sourceDir.lastPathComponent
-                let numeric = dirName.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
-                if !numeric.isEmpty {
-                    workshopID = numeric
-                }
+                let numeric = sourceName.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if !numeric.isEmpty { workshopID = numeric }
             }
 
             guard let id = workshopID, !id.isEmpty else {
-                print("[ContentView] Could not infer workshop ID for \(url.lastPathComponent)")
+                print("[ContentView] Could not infer workshop ID for \(sourceName)")
+                skippedCount += 1
                 continue
             }
 
@@ -1458,17 +1511,11 @@ struct MyMediaContentView: View {
                 if fileManager.fileExists(atPath: destDir.path) {
                     try fileManager.removeItem(at: destDir)
                 }
-                try fileManager.copyItem(at: sourceDir, to: destDir)
+                // 复制整个 workshop 目录（保留 steamapps/... 深层结构）
+                try fileManager.copyItem(at: sourceURL, to: destDir)
 
-                let previewExtensions = ["jpg", "jpeg", "png", "webp", "gif"]
-                var previewURL: URL?
-                for pe in previewExtensions {
-                    let candidate = destDir.appendingPathComponent("preview.\(pe)")
-                    if fileManager.fileExists(atPath: candidate.path) {
-                        previewURL = candidate
-                        break
-                    }
-                }
+                // 在复制的目录中递归查找预览图
+                let previewURL = findPreview(in: destDir)
 
                 let item = makeImportedWorkshopItem(
                     workshopID: id,
@@ -1480,12 +1527,29 @@ struct MyMediaContentView: View {
                 MediaLibraryService.shared.recordDownload(item: item, localFileURL: destDir)
                 importedCount += 1
             } catch {
-                print("[ContentView] Failed to import workshop \(url.lastPathComponent): \(error)")
+                print("[ContentView] Failed to import \(sourceName): \(error)")
+                skippedCount += 1
             }
         }
 
         if importedCount > 0 {
             mediaViewModel.objectWillChange.send()
+        }
+
+        // 反馈
+        let message: String
+        if importedCount > 0 {
+            message = String(format: t("import.workshop.result"), importedCount, skippedCount)
+        } else {
+            message = t("import.workshop.none")
+        }
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = t("import")
+            alert.informativeText = message
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
     }
 

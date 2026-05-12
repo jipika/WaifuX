@@ -305,6 +305,14 @@ enum SceneOfflineBakeService {
         return artifact
     }
 
+    /// 检查是否有缓存（不触发实际烘焙）
+    static func hasCachedArtifact(record: MediaDownloadRecord) -> Bool {
+        guard let art = record.sceneBakeArtifact,
+              art.analysisId == record.sceneBakeEligibility?.analysisId,
+              FileManager.default.fileExists(atPath: art.videoPath) else { return false }
+        return true
+    }
+
     /// 与 `MediaDownloadRecord.sceneBakeEligibility` 配套；默认主屏逻辑分辨率 × scale、8s、30fps。
     static func bake(
         record: MediaDownloadRecord,

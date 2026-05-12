@@ -364,7 +364,8 @@ final class ExploreAtmosphereController: ObservableObject {
         referenceImage = nil
 
         tint = .mediaFallback
-        let url = item.coverImageURL
+        // 列表首屏优先用缩略图做氛围采样，避免首次进入时解码较大的 poster 图造成卡顿。
+        let url = item.thumbnailURL
 
         loadTask = Task {
             let result = try? await KingfisherManager.shared.retrieveImage(with: .network(url))

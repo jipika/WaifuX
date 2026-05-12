@@ -68,6 +68,8 @@ class WorkshopService: ObservableObject {
             URLQueryItem(name: "browsesort", value: sortValue(for: params.sortBy)),
             URLQueryItem(name: "section", value: "readytouseitems"),
             URLQueryItem(name: "created_filetype", value: "0"),
+            URLQueryItem(name: "excludedtags[]", value: "Preset"),
+            URLQueryItem(name: "excludedtags[]", value: "RequiredItem"),
             URLQueryItem(name: "updated_filters", value: "1")
         ]
 
@@ -172,10 +174,12 @@ class WorkshopService: ObservableObject {
 
         // Steam Workshop browse 列表页不返回标签/类型，用请求参数做兜底注入
         let enriched = enrichWorkshopItems(wallpapers, params: params)
+        // 过滤掉子壁纸/依赖（fileSize == 0 的 API 明确无内容）
+        let filtered = enriched.filter { $0.fileSize != 0 }
 
         return WorkshopSearchResponse(
-            items: enriched,
-            total: enriched.count,
+            items: filtered,
+            total: filtered.count,
             page: params.page,
             hasMore: enriched.count >= params.pageSize
         )

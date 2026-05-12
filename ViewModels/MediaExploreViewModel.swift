@@ -503,6 +503,23 @@ final class MediaExploreViewModel: ObservableObject {
         await load(source: .home)
     }
 
+    /// 重置 MotionBG 浏览状态并强制加载默认首页。
+    @MainActor
+    func resetAndLoadDefaultHomeFeed() async {
+        preloadTask?.cancel()
+        cancelDetailPrefetchQueue()
+        preloadedItems = []
+        preloadedNextPath = nil
+        nextPagePath = nil
+        currentQuery = ""
+        currentSource = .home
+        hasMorePages = true
+        isLoading = false
+        isLoadingMore = false
+        errorMessage = nil
+        await load(source: .home)
+    }
+
     /// 独立刷新首页推荐数据（与 Explore 列表数据分离）
     @MainActor
     func refreshHomeItems() async {
@@ -1180,6 +1197,32 @@ final class MediaExploreViewModel: ObservableObject {
         )
     }
 
+    /// 重置 Workshop 浏览状态并强制加载默认趋势列表。
+    @MainActor
+    func resetAndLoadDefaultWorkshopFeed() async {
+        workshopSearchQuery = ""
+        currentQuery = ""
+        workshopCurrentTags = []
+        workshopCurrentType = .all
+        workshopCurrentContentLevel = .everyone
+        workshopCurrentResolution = nil
+        workshopSortBy = .ranked
+        workshopDays = 7
+        workshopCurrentPage = 1
+        workshopHasMore = true
+        hasMorePages = true
+        isLoading = false
+        isLoadingMore = false
+        errorMessage = nil
+        await loadWorkshopFeedInternal(
+            query: "",
+            tags: [],
+            type: .all,
+            contentLevel: .everyone,
+            resolution: nil
+        )
+    }
+
     /// Workshop 搜索（与 Explore 搜索栏提交一致：清空标签/类型并回到默认 SFW）
     func searchWorkshop(query: String) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1282,6 +1325,7 @@ final class MediaExploreViewModel: ObservableObject {
             let mediaItems = workshopService.convertToMediaItems(response.items)
             items = mediaItems
             workshopHasMore = response.hasMore
+            hasMorePages = response.hasMore
             currentTitle = query.isEmpty ? "Workshop" : "搜索: \(query)"
             print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items, sort=\(workshopSortBy.rawValue), days=\(workshopDays.map(String.init) ?? "all")")
         } catch {
@@ -1332,6 +1376,7 @@ final class MediaExploreViewModel: ObservableObject {
             items.append(contentsOf: newItems)
 
             workshopHasMore = response.hasMore
+            hasMorePages = response.hasMore
             print("[MediaExploreViewModel] loadMoreWorkshop completed: +\(newItems.count) items, total: \(items.count)")
         } catch {
             errorMessage = error.localizedDescription
