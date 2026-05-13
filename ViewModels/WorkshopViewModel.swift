@@ -23,14 +23,27 @@ class WorkshopViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     
     // MARK: - Internal State
-    
+
+    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目。
+    private static let maxCachedItems = 300
     private var currentPage = 1
     private let pageSize = 20
     private var currentSearchTask: Task<Void, Never>?
-    
+
     // MARK: - Initialization
-    
+
     init() {
+        // 注册内存压力通知
+        NotificationCenter.default.addObserver(
+            forName: .appDidReceiveMemoryPressure,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in
+                self?.handleMemoryPressure()
+            }
+        }
+
         // 监听 WorkshopSourceManager 的变化
         WorkshopSourceManager.shared.$activeSource
             .receive(on: DispatchQueue.main)
@@ -139,6 +152,17 @@ class WorkshopViewModel: ObservableObject {
         }
     }
     
+    // MARK: - 内存压力处理
+
+    private func handleMemoryPressure() {
+        print("[WorkshopViewModel] 内存压力，释放缓存: wallpapers=\(wallpapers.count)")
+        currentSearchTask?.cancel()
+        // 裁剪列表：仅保留最近 2 页（~40 条）
+        if wallpapers.count > 40 {
+            wallpapers = Array(wallpapers.suffix(40))
+        }
+    }
+
     // MARK: - Download
     
     /// 下载壁纸

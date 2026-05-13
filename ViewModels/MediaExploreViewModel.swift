@@ -17,6 +17,9 @@ final class MediaExploreViewModel: ObservableObject {
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
 
+    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目触发 grid reload。
+    private static let maxCachedItems = 300
+
     private let mediaService = MediaService.shared
     private let mediaLibrary = MediaLibraryService.shared
     private let networkService = NetworkService.shared
@@ -73,6 +76,17 @@ final class MediaExploreViewModel: ObservableObject {
     @Published var cachedAllLocalMedia: [UnifiedLocalMedia] = []
 
     init() {
+        // 注册内存压力通知（由 WaifuXApp.configureKingfisher 中的 DispatchSource 触发）
+        NotificationCenter.default.addObserver(
+            forName: .appDidReceiveMemoryPressure,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in
+                self?.handleMemoryPressure()
+            }
+        }
+
         // 监听 Service 数据变化：重建缓存并递增 revision
         Publishers.Merge3(
             mediaLibrary.$favoriteRecords.map { _ in () },
@@ -1149,6 +1163,29 @@ final class MediaExploreViewModel: ObservableObject {
         cancelDetailPrefetchQueue()
         items.removeAll()
         hasMorePages = true
+    }
+
+    // MARK: - 内存压力处理
+
+    /// 系统内存压力时自动触发：裁剪列表并取消网络请求。
+    /// Kingfisher / VideoThumbnailCache 等由 WaifuXApp 的 DispatchSource 统一清理。
+    /// 不破坏分页游标，用户继续下滑后可正常加载更多。
+    private func handleMemoryPressure() {
+        print("[MediaExploreViewModel] 内存压力，释放缓存: items=\(items.count)")
+        networkRecoveryTask?.cancel()
+        preloadTask?.cancel()
+        preloadedItems.removeAll()
+        preloadedNextPath = nil
+        cancelDetailPrefetchQueue()
+        detailTasks.values.forEach { $0.cancel() }
+        detailTasks.removeAll()
+        // 裁剪列表：仅保留最近 2 页（~40 条）
+        if items.count > 40 {
+            items = Array(items.suffix(40))
+        }
+        if homeItems.count > 40 {
+            homeItems = Array(homeItems.suffix(40))
+        }
     }
 
     /// 释放前台浏览态内存：取消当前前台任务并清空列表/本地列表快照，保留持久化库数据与设置状态。

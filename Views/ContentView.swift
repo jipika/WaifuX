@@ -701,6 +701,7 @@ struct MyMediaContentView: View {
                         ForEach(completedWallpaperDownloads) { record in
                             WallpaperEditCard(
                                 wallpaper: record.wallpaper,
+                                localFileURL: record.localFileURL,
                                 accent: LiquidGlassColors.tertiaryBlue,
                                 isEditing: isEditing && editingSection == .wallpaperDownloads,
                                 isSelected: selectedItems.contains(record.wallpaper.id)
@@ -1437,7 +1438,6 @@ struct MyMediaContentView: View {
         // 在指定目录下递归查找预览图
         func findPreview(in dir: URL) -> URL? {
             guard let enumerator = fileManager.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
-            let exts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif"]
             for case let fileURL as URL in enumerator {
                 let name = fileURL.lastPathComponent.lowercased()
                 if name == "preview.jpg" || name == "preview.jpeg" || name == "preview.png" || name == "preview.webp" || name == "preview.gif" {
@@ -1837,6 +1837,25 @@ private struct MyMediaVideoCard: View {
             if Self.videoExtensions.contains(resolved.pathExtension.lowercased()) {
                 Task { @MainActor in
                     if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: resolved) {
+                        resolvedThumbnailURL = poster
+                    }
+                }
+            }
+            return
+        }
+
+        // Workshop Scene 项目（含 .pkg）：resolveLocalVideoFile 返回 nil，
+        // 尝试使用烘焙产物的 MP4 视频进行抽帧
+        if let record = MediaLibraryService.shared.downloadRecords.first(where: { $0.item.id == item.id }),
+           let bakedVideo = record.sceneBakeArtifact.flatMap({ $0.videoPath }).map({ URL(fileURLWithPath: $0) }),
+           FileManager.default.fileExists(atPath: bakedVideo.path) {
+            if let cached = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: bakedVideo) {
+                resolvedThumbnailURL = cached
+                return
+            }
+            if Self.videoExtensions.contains(bakedVideo.pathExtension.lowercased()) {
+                Task { @MainActor in
+                    if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: bakedVideo) {
                         resolvedThumbnailURL = poster
                     }
                 }

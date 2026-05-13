@@ -102,6 +102,7 @@ struct WaifuXApp {
             ImageCache.default.clearMemoryCache()
             Task { @MainActor in
                 VideoThumbnailCache.shared.clearMemoryCache()
+                NotificationCenter.default.post(name: .appDidReceiveMemoryPressure, object: nil)
             }
         }
         source.resume()

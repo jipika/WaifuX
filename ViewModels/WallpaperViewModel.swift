@@ -22,6 +22,9 @@ class WallpaperViewModel: ObservableObject {
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
 
+    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目。
+    private static let maxCachedItems = 300
+
     // MARK: - Task Cancellation Support
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
@@ -192,6 +195,17 @@ class WallpaperViewModel: ObservableObject {
     @Published var cachedAllLocalWallpapers: [UnifiedLocalWallpaper] = []
 
     init() {
+        // 注册内存压力通知
+        NotificationCenter.default.addObserver(
+            forName: .appDidReceiveMemoryPressure,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in
+                self?.handleMemoryPressure()
+            }
+        }
+
         // 监听 Service 数据变化：重建缓存并递增 revision（@Published 会触发 ObservableObject 刷新）
         Publishers.Merge3(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
@@ -604,6 +618,23 @@ class WallpaperViewModel: ObservableObject {
             } catch {
                 // 预加载失败静默忽略
             }
+        }
+    }
+
+    // MARK: - 内存压力处理
+
+    /// 系统内存压力时自动触发：裁剪列表并取消网络请求。
+    private func handleMemoryPressure() {
+        print("[WallpaperViewModel] 内存压力，释放缓存: wallpapers=\(wallpapers.count)")
+        searchTask?.cancel()
+        loadMoreTask?.cancel()
+        debounceTask?.cancel()
+        preloadTask?.cancel()
+        preloadedWallpapers.removeAll()
+        preloadedPage = 0
+        // 裁剪列表：仅保留最近 2 页（~48 条）
+        if wallpapers.count > 48 {
+            wallpapers = Array(wallpapers.suffix(48))
         }
     }
 

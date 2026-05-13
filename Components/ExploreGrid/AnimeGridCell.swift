@@ -228,9 +228,6 @@ final class AnimeGridCell: ExploreGridItem {
                 height: textSize.height
             ).integral
         }
-        if let coverURL = currentAnime?.coverURL.flatMap(URL.init(string:)) {
-            loadImage(url: coverURL, targetSize: preferredImageTargetSize())
-        }
     }
 
     override func hoverStateDidChange(_ hovering: Bool) {

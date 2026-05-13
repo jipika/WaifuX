@@ -35,6 +35,12 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 私有状态
     private var currentPage = 1
     private let pageSize = 20
+    private var hasRegisteredMemoryPressure = false
+
+    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目触发 grid reload。
+    /// 用户在 AnimeExploreView 中持续滚动加载时，旧条目数据会保持不超此限，
+    /// 避免 items 数组无限制增长带动 Kingfisher/LRU 缓存无法回收图片内存。
+    private static let maxCachedItems = 300
     private var loadMoreTask: Task<Void, Never>?
     
     // MARK: - 预加载支持
@@ -51,6 +57,20 @@ class AnimeViewModel: ObservableObject {
     func loadInitialData() async {
         isLoading = true
         defer { isLoading = false }
+
+        // 注册内存压力通知（只注册一次）
+        if !hasRegisteredMemoryPressure {
+            hasRegisteredMemoryPressure = true
+            NotificationCenter.default.addObserver(
+                forName: .appDidReceiveMemoryPressure,
+                object: nil,
+                queue: .main
+            ) { _ in
+                Task { @MainActor [weak self] in
+                    self?.handleMemoryPressure()
+                }
+            }
+        }
 
         // 重置分页状态
         currentPage = 1
@@ -397,6 +417,24 @@ class AnimeViewModel: ObservableObject {
         preloadedItems = []
         preloadedTotal = 0
         isPreloaded = false
+    }
+
+    // MARK: - 内存压力处理
+
+    /// 系统内存压力时自动触发：立即清空 Kingfisher 内存缓存并裁剪列表，
+    /// 仅保留最近 2 页数据（约 40 条），同时取消所有网络请求与预加载任务。
+    /// 不破坏分页游标，用户继续下滑时可正常加载更多。
+    private func handleMemoryPressure() {
+        print("[AnimeViewModel] 内存压力，释放缓存: items=\(animeItems.count)")
+        // 取消当前网络任务
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
+        preloadTask?.cancel()
+        invalidatePreload()
+        // 裁剪列表：仅保留最近 2 页（~40 条）
+        if animeItems.count > 40 {
+            animeItems = Array(animeItems.suffix(40))
+        }
     }
 
     /// 释放前台浏览态内存：取消任务并清空动漫列表/规则快照。

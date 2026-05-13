@@ -474,6 +474,7 @@ struct MyLibraryContentView: View {
     private func wallpaperGridItem(item: AnyWallpaperItem, config: LibraryGridConfig) -> some View {
         WallpaperEditCard(
             wallpaper: item.wallpaper,
+            localFileURL: item.localFileURL,
             accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
             isEditing: isEditing,
             isSelected: selectedItems.contains(item.id),
@@ -742,15 +743,25 @@ struct MyLibraryContentView: View {
                 item.libraryGridThumbnailURL(localFileURL: localPaths[item.id])
             }
             // 异步生成尚未缓存的抽帧（与 MediaVideoCard.onAppear 逻辑一致）
-            for (_, localURL) in localPaths {
+            for (itemID, localURL) in localPaths {
                 guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
-                if let r = MediaItem.resolveLocalVideoFile(from: localURL) ?? (
+                // 第一步：尝试常规视频文件解析
+                let resolvedVideo = MediaItem.resolveLocalVideoFile(from: localURL) ?? (
                     ["mp4", "mov", "webm", "m4v", "mkv"].contains(localURL.pathExtension.lowercased()) ? localURL : nil
-                ),
-                   VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: r) == nil,
-                   ["mp4", "mov", "webm", "m4v", "mkv"].contains(r.pathExtension.lowercased()) {
+                )
+                // 第二步：若常规解析失败，尝试查找烘焙产物（Scene 项目）
+                let bakeVideoURL: URL? = (resolvedVideo == nil)
+                    ? MediaLibraryService.shared.downloadRecords
+                        .first(where: { $0.item.id == itemID })?
+                        .sceneBakeArtifact
+                        .flatMap { URL(fileURLWithPath: $0.videoPath) }
+                    : nil
+                let videoURL = resolvedVideo ?? bakeVideoURL
+                if let videoURL,
+                   VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: videoURL) == nil,
+                   ["mp4", "mov", "webm", "m4v", "mkv"].contains(videoURL.pathExtension.lowercased()) {
                     Task { @MainActor in
-                        if await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: r) != nil {
+                        if await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL) != nil {
                             refreshMediaFolderDisplay()
                         }
                     }
@@ -1455,7 +1466,6 @@ struct MyLibraryContentView: View {
         // 在指定目录下递归查找预览图
         func findPreview(in dir: URL) -> URL? {
             guard let enumerator = fileManager.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
-            let exts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif"]
             for case let fileURL as URL in enumerator {
                 let name = fileURL.lastPathComponent.lowercased()
                 if name == "preview.jpg" || name == "preview.jpeg" || name == "preview.png" || name == "preview.webp" || name == "preview.gif" {
@@ -1919,17 +1929,20 @@ struct AnimeLibraryCard: View {
 private struct AnyWallpaperItem: Identifiable {
     let id: String
     let wallpaper: Wallpaper
+    let localFileURL: URL?
     let downloadDate: Date?
 
     init(wallpaper: Wallpaper) {
         self.id = wallpaper.id
         self.wallpaper = wallpaper
+        self.localFileURL = nil
         self.downloadDate = nil
     }
 
     init(unified: UnifiedLocalWallpaper) {
         self.id = unified.id
         self.wallpaper = unified.wallpaper
+        self.localFileURL = unified.fileURL
         self.downloadDate = unified.downloadRecord?.downloadedAt
     }
 }

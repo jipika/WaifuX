@@ -120,33 +120,51 @@ final class LoopingVideoPlayerContainerView: NSView {
     init(contentMode: LoopingVideoBackgroundView.ContentMode = .fill) {
         self.contentMode = contentMode
         super.init(frame: .zero)
-        wantsLayer = true
-        let playerLayer = AVPlayerLayer()
-        playerLayer.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
-        layer = playerLayer
     }
 
     required init?(coder: NSCoder) {
         self.contentMode = .fill
         super.init(coder: coder)
-        wantsLayer = true
-        let playerLayer = AVPlayerLayer()
-        playerLayer.videoGravity = .resizeAspectFill
-        layer = playerLayer
+    }
+
+    /// 使用 makeBackingLayer 提供 AVPlayerLayer 作为 backing layer，
+    /// 避免 macOS < 26 上 wantsLayer + 手动替换 layer 导致的几何信息丢失问题。
+    override func makeBackingLayer() -> CALayer {
+        let layer = AVPlayerLayer()
+        layer.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
+        layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer.frame = bounds
+        return layer
     }
 
     var playerLayer: AVPlayerLayer {
-        guard let layer = layer as? AVPlayerLayer else {
-            let newLayer = AVPlayerLayer()
-            newLayer.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
-            self.layer = newLayer
-            return newLayer
+        // makeBackingLayer 确保 backing layer 始终是 AVPlayerLayer
+        guard let avLayer = layer as? AVPlayerLayer else {
+            // 防御性兜底：理论上不会触发，但防止极端情况下的崩溃
+            let fallback = AVPlayerLayer()
+            fallback.videoGravity = contentMode == .fill ? .resizeAspectFill : .resizeAspect
+            fallback.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            fallback.frame = bounds
+            self.layer = fallback
+            return fallback
         }
-        return layer
+        return avLayer
     }
 
     override func layout() {
         super.layout()
-        playerLayer.frame = bounds
+        // 确保 layer 尺寸与 view 同步（macOS < 26 的补充保障）
+        if playerLayer.frame != bounds {
+            playerLayer.frame = bounds
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // macOS < 26：加入 window 时确保 layer 尺寸正确
+        // 解决 NSViewRepresentable 在 GeometryReader 中尺寸传递的时序问题
+        if window != nil {
+            playerLayer.frame = bounds
+        }
     }
 }

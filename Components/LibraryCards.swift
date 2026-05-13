@@ -109,6 +109,16 @@ extension MediaItem {
             if Self.libraryLocalRasterExtensions.contains(ext) {
                 return resolved
             }
+            // Workshop Scene 项目（含 .pkg）：尝试使用烘焙产物的 MP4 抽帧缓存
+            if Self.localWorkshopProjectType(from: local) == "scene",
+               let record = MediaLibraryService.shared.downloadRecords.first(where: { $0.item.id == id }),
+               let bakedPath = record.sceneBakeArtifact?.videoPath,
+               FileManager.default.fileExists(atPath: bakedPath) {
+                let bakedURL = URL(fileURLWithPath: bakedPath)
+                if let extracted = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: bakedURL) {
+                    return extracted
+                }
+            }
             if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
                 return localPreview
             }
@@ -324,6 +334,25 @@ public struct MediaVideoCard: View {
             return
         }
 
+        // Workshop Scene 项目（含 .pkg）：resolveLocalVideoFile 返回 nil，
+        // 尝试使用烘焙产物的 MP4 视频进行抽帧
+        if let record = MediaLibraryService.shared.downloadRecords.first(where: { $0.item.id == item.id }),
+           let bakedVideo = record.sceneBakeArtifact.flatMap({ $0.videoPath }).map({ URL(fileURLWithPath: $0) }),
+           FileManager.default.fileExists(atPath: bakedVideo.path) {
+            if let cached = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: bakedVideo) {
+                resolvedThumbnailURL = cached
+                return
+            }
+            if Self.videoExtensions.contains(bakedVideo.pathExtension.lowercased()) {
+                Task { @MainActor in
+                    if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: bakedVideo) {
+                        resolvedThumbnailURL = poster
+                    }
+                }
+            }
+            return
+        }
+
         if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
             resolvedThumbnailURL = localPreview
         }
@@ -334,6 +363,8 @@ public struct MediaVideoCard: View {
 
 public struct WallpaperEditCard: View {
     let wallpaper: Wallpaper
+    /// 已下载壁纸的本地文件路径（可选），离线时直接用本地文件避免依赖远程缓存
+    var localFileURL: URL? = nil
     var accent: Color = LiquidGlassColors.primaryPink
     let isEditing: Bool
     let isSelected: Bool
@@ -350,12 +381,22 @@ public struct WallpaperEditCard: View {
         LibraryCardMetrics.thumbnailHeight
     }
 
+    /// 封面 URL：已下载壁纸优先用本地文件，离线也能显示
+    private var resolvedThumbURL: URL? {
+        if let local = localFileURL,
+           local.isFileURL,
+           FileManager.default.fileExists(atPath: local.path) {
+            return local
+        }
+        return wallpaper.thumbURL ?? wallpaper.smallThumbURL
+    }
+
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
                 // 图片区域
                 ZStack {
-                    KFImage(wallpaper.thumbURL ?? wallpaper.smallThumbURL)
+                    KFImage(resolvedThumbURL)
                         .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
                         .cacheMemoryOnly(false)
                         .fade(duration: 0.3)

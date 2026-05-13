@@ -90,6 +90,8 @@ class ExploreGridItem: NSCollectionViewItem {
     // MARK: - 状态
 
     private var loadTask: Task<Void, Never>?
+    /// 当前正在加载（或已加载）的图片 URL，用于 tab 切回时跳过重复的 Kingfisher 请求
+    private var currentLoadingURL: URL?
     private(set) var isHovered = false
     private var isHoverInteractionEnabled = true
     private var trackingArea: NSTrackingArea?
@@ -149,6 +151,7 @@ class ExploreGridItem: NSCollectionViewItem {
 
         loadTask?.cancel()
         loadTask = nil
+        currentLoadingURL = nil
         coverImageView.image = nil
         stopAnimating()
 
@@ -223,11 +226,15 @@ class ExploreGridItem: NSCollectionViewItem {
     func loadImage(urls: [URL], targetSize: CGSize) {
         guard !urls.isEmpty else { return }
 
+        // tab 切回时如果图片 URL 没变，跳过 Kingfisher 重新请求
+        if urls.first == currentLoadingURL { return }
+
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let pixelSize = CGSize(width: max(targetSize.width, 64),
                                 height: max(targetSize.height, 64))
         let minPixelEdge = max(pixelSize.width, pixelSize.height) * 0.55
 
+        currentLoadingURL = urls.first
         loadTask?.cancel()
         loadTask = Task { [weak self] in
             guard let self else { return }
@@ -273,17 +280,19 @@ class ExploreGridItem: NSCollectionViewItem {
                 guard let self, !Task.isCancelled else { return }
                 self.coverImageView.image = finalImage
             }
-            // 用第一个候选 URL 的原始数据检测是否为动图（不依赖后缀名）
-            if let url = urls.first {
-                var req = URLRequest(url: url)
-                req.timeoutInterval = 15
+            // 用原始数据检测 GIF（不依赖 URL 后缀，Steam Workshop 动图预览后缀是 .png 但内容为 GIF）
+            guard !Task.isCancelled, let firstURL = urls.first else { return }
+            var req = URLRequest(url: firstURL)
+            req.timeoutInterval = 15
+            if let host = firstURL.host?.lowercased(),
+               host.contains("steam") || host.contains("akamaihd") {
                 req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
-                if let (data, resp) = try? await URLSession.shared.data(for: req),
-                   resp.mimeType?.hasPrefix("image/gif") == true || data.prefix(3) == Data("GIF".utf8) {
-                    await MainActor.run { [weak self] in
-                        self?.startAnimatingIfAnimated(data: data)
-                    }
-                }
+            }
+            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                  resp.mimeType?.hasPrefix("image/gif") == true || data.prefix(3) == Data("GIF".utf8)
+            else { return }
+            await MainActor.run { [weak self] in
+                self?.startAnimatingIfAnimated(data: data)
             }
         }
     }
@@ -291,17 +300,32 @@ class ExploreGridItem: NSCollectionViewItem {
     // MARK: - 动画 GIF
 
     /// 从已下载的图片数据检测并启动动画。data 是 Kingfisher 下载的原始数据。
+    /// 内存保护：最多解码 50 帧，每帧用 ImageIO 缩略图接口下采样到封面视图尺寸，
+    /// 避免大 GIF（如 4K 分辨率的 Steam 封面动图）单帧解码即可达 8MB，累积数十帧后撑爆内存。
     func startAnimatingIfAnimated(data: Data) {
         stopAnimating()
         guard let cgSource = CGImageSourceCreateWithData(data as CFData, nil) else { return }
         let count = CGImageSourceGetCount(cgSource)
         guard count > 1 else { return }
 
+        // 限制最大帧数并计算采样步长
+        let maxFrames = 50
+        let frameStep = max(1, count / maxFrames)
+        let maxPixel = Int(max(coverImageView.bounds.width, coverImageView.bounds.height) * 3)
+
         var frames: [(image: NSImage, duration: TimeInterval)] = []
-        for i in 0..<count {
-            guard let cgImage = CGImageSourceCreateImageAtIndex(cgSource, i, nil) else { continue }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        var i = 0
+        while i < count, frames.count < maxFrames {
             let dur = Self.frameDuration(at: i, source: cgSource)
-            frames.append((image: NSImage(cgImage: cgImage, size: .zero), duration: dur))
+            if let thumb = CGImageSourceCreateThumbnailAtIndex(cgSource, i, options as CFDictionary) {
+                frames.append((image: NSImage(cgImage: thumb, size: .zero), duration: dur))
+            }
+            i += frameStep
         }
         guard !frames.isEmpty else { return }
 

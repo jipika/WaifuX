@@ -87,6 +87,14 @@ final class DynamicWallpaperAutoPauseManager {
                 self?.handleAppActivationChange()
             }
         }
+
+        // 监听 Space 切换（进出全屏会触发），避免全屏检测仅依赖 3s 轮询导致的恢复延迟
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleActiveSpaceChange),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
     }
 
     func restoreSettings() {
@@ -283,6 +291,13 @@ final class DynamicWallpaperAutoPauseManager {
                 self.resumeFromGlobalPauseIfPossible()
             }
         }
+    }
+
+    @objc private func handleActiveSpaceChange() {
+        guard pauseWhenFullscreenCovers else { return }
+        guard !VideoWallpaperManager.shared.isScreenLocked else { return }
+        // Space 切换（进出全屏）时立即重新检测，不等 3s 轮询
+        checkAndApply()
     }
 
     /// 检查前台是否是非本应用且非 Finder 的其他应用

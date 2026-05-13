@@ -157,6 +157,21 @@ final class VideoWallpaperManager: ObservableObject {
             name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
+
+        // 系统休眠（合盖、Apple 菜单 > 睡眠）
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleSystemWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleSystemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
         
         // 监听锁屏/解锁通知
         DistributedNotificationCenter.default.addObserver(
@@ -946,6 +961,43 @@ final class VideoWallpaperManager: ObservableObject {
                         self.hidePosterImage(for: screenID)
                     }
                 }
+                // 重新评估自动暂停状态，避免 AutoPause 之前暂停的屏幕被错误恢复
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            }
+            self.pendingRebuildWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        }
+    }
+
+    @objc private func handleSystemWillSleep() {
+        // 系统休眠前暂停所有播放
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            for player in self.players.values {
+                player.pause()
+                player.rate = 0
+            }
+        }
+    }
+
+    @objc private func handleSystemDidWake() {
+        // 系统唤醒后防抖重建并恢复播放
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.pendingRebuildWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                if self.hasActiveVideoWallpaper, self.windows.isEmpty {
+                    try? self.rebuildWindows()
+                }
+                if !self.isPaused {
+                    for (screenID, player) in self.players {
+                        player.play()
+                        self.hidePosterImage(for: screenID)
+                    }
+                }
+                // 唤醒后立即重新评估自动暂停状态，避免 AutoPause 之前暂停的屏幕被错误恢复导致闪烁
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
             }
             self.pendingRebuildWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
