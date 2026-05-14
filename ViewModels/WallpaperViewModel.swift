@@ -428,14 +428,11 @@ class WallpaperViewModel: ObservableObject {
             throw NetworkError.invalidResponse
         }
         let response = try await networkService.fetch(
-            WallpaperSearchResponse.self,
+            WallpaperDetailResponse.self,
             from: url,
             headers: WallhavenAPI.authenticationHeaders(apiKey: normalizedAPIKey)
         )
-        guard let wallpaper = response.data.first else {
-            throw NetworkError.invalidResponse
-        }
-        return wallpaper
+        return response.data
     }
 
     // MARK: - 分享
