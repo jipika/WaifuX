@@ -30,6 +30,25 @@ else
   echo "🔧 使用已提交的 $CLI_BIN（跳过 CLI 构建）。若需重编请设 WAIFUX_FORCE_CLI_REBUILD=1"
 fi
 
+# 捆绑 Homebrew dylib 依赖（无论 CLI 是否重建都需要确保依赖路径正确）
+echo "📚 捆绑 dylib 依赖..."
+if [[ -f "$PROJECT_DIR/scripts/bundle-dylibs.py" && -f "$PROJECT_DIR/Resources/lib/liblinux-wallpaperengine-renderer.dylib" ]]; then
+  python3 "$PROJECT_DIR/scripts/bundle-dylibs.py" \
+    "$PROJECT_DIR/Resources/lib/liblinux-wallpaperengine-renderer.dylib" \
+    "$PROJECT_DIR/Resources/lib"
+  # 重新签名
+  for f in "$PROJECT_DIR"/Resources/lib/*.dylib; do
+    codesign --force -s - "$f" 2>/dev/null || true
+  done
+  install_name_tool -id "@rpath/liblinux-wallpaperengine-renderer.dylib" \
+    "$PROJECT_DIR/Resources/lib/liblinux-wallpaperengine-renderer.dylib" 2>/dev/null || true
+  codesign --force -s - \
+    "$PROJECT_DIR/Resources/lib/liblinux-wallpaperengine-renderer.dylib" 2>/dev/null || true
+  echo "✅ dylib 依赖捆绑完成"
+else
+  echo "⚠️ 跳过 dylib 捆绑（bundle-dylibs.py 或渲染器 dylib 不存在）"
+fi
+
 # 清理旧构建
 echo "🧹 清理旧构建..."
 rm -rf "$BUILD_DIR"
