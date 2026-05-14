@@ -60,7 +60,7 @@ class AnimePlayerWindowController: NSWindowController {
         
         // 设置内容视图（传入 player）
         let contentView = AnimePlayerWindow(viewModel: viewModel, player: player)
-        window.contentView = NSHostingView(rootView: contentView)
+        window.contentView = EdgeToEdgeHostingView(rootView: contentView)
     }
     
     @objc private func handleToggleFullScreen() {

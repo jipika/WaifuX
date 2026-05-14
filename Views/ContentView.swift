@@ -3,6 +3,22 @@ import AppKit
 import Kingfisher
 import AVFoundation
 
+/// macOS 15+ 的 Liquid Glass 改变了标题栏 safe area 行为，
+/// NSHostingController 会报告标题栏高度作为 top safe area，
+/// 但我们的 UI 已经通过 fullSizeContentView 自行处理布局。
+/// 使用 SwiftUI 的 .ignoresSafeArea() 在视图层面解决。
+private struct EdgeToEdgeContainer<Content: View>: View {
+    let content: Content
+
+    var body: some View {
+        if #available(macOS 15.0, *) {
+            content.ignoresSafeArea(.container, edges: .top)
+        } else {
+            content
+        }
+    }
+}
+
 @MainActor
 private final class MainContentNavigationState: ObservableObject {
     @Published var selectedTab: MainTab = .home
@@ -122,7 +138,7 @@ private final class MainTabViewController: NSTabViewController {
     }
 
     private func addPage<Content: View>(title: String, view: Content) {
-        let hostingController = NSHostingController(rootView: view)
+        let hostingController = NSHostingController(rootView: EdgeToEdgeContainer(content: view))
         let item = NSTabViewItem(viewController: hostingController)
         item.label = title
         addTabViewItem(item)

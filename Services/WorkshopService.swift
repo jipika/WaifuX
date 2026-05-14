@@ -9,16 +9,16 @@ import SwiftSoup
 @MainActor
 class WorkshopService: ObservableObject {
     static let shared = WorkshopService()
-    
+
     // MARK: - Published State
-    
+
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var searchResults: [WorkshopWallpaper] = []
     @Published var hasMorePages = false
-    
+
     // MARK: - Configuration
-    
+
     private let wallpaperEngineAppID = "431960"
     private let steamAPIBase = "https://api.steampowered.com"
     private var currentPage = 1
@@ -32,24 +32,24 @@ class WorkshopService: ObservableObject {
         hasMorePages = false
         currentPage = 1
     }
-    
+
     // MARK: - Search
-    
+
     func search(params: WorkshopSearchParams) async throws -> WorkshopSearchResponse {
         await MainActor.run {
             isLoading = true
             errorMessage = nil
             currentPage = params.page
         }
-        
+
         defer {
             isLoading = false
         }
-        
+
         let result = try await searchHTML(params: params)
         return result
     }
-    
+
     private func sortValue(for sort: WorkshopSearchParams.SortOption) -> String {
         // Steam Workshop 2026年4月改版后的 browsesort 参数值
         switch sort {
@@ -105,7 +105,7 @@ class WorkshopService: ObservableObject {
 
         queryItems.append(URLQueryItem(name: "p", value: String(params.page)))
         queryItems.append(URLQueryItem(name: "num_per_page", value: String(params.pageSize)))
-        
+
         // 热门趋势排序支持时间范围（days 参数）
         if params.sortBy == .ranked, let days = params.days {
             queryItems.append(URLQueryItem(name: "days", value: String(days)))
@@ -160,7 +160,7 @@ class WorkshopService: ObservableObject {
             wallpapers = try parseWorkshopHTML(html, page: params.page)
             AppLogger.info(.media, "searchHTML used HTML parsing: \(wallpapers.count) items")
         }
-        
+
         // 无论数据来源是 JSON/SSR 还是 HTML，都用 Steam Web API 批量补全
         // （JSON 提取可能缺少 vote_data 等字段，API 补全可以兜底）
         if !wallpapers.isEmpty {
@@ -240,9 +240,9 @@ class WorkshopService: ObservableObject {
     }
 
     private let workshopBrowseBase = "https://steamcommunity.com/workshop/browse/"
-    
+
     // MARK: - HTML Parsing
-    
+
     private func parseWorkshopHTML(_ html: String, page: Int) throws -> [WorkshopWallpaper] {
         let document = try SwiftSoup.parse(html)
         let elements = try document.select(".workshopItem")
@@ -336,21 +336,21 @@ class WorkshopService: ObservableObject {
 
         return wallpapers
     }
-    
+
     /// 从 HTML DOM 提取作者名映射（用于补充 JSON/SSR 提取缺失的作者显示名）
     private func extractAuthorMapFromHTML(_ html: String) -> [String: String] {
         guard let document = try? SwiftSoup.parse(html) else { return [:] }
         let links = try? document.select("a[href*=/sharedfiles/filedetails/?id=]")
-        
+
         var authorMap: [String: String] = [:]
         var seenIDs = Set<String>()
-        
+
         for link in links ?? Elements() {
             let href = (try? link.attr("href")) ?? ""
             guard let id = href.components(separatedBy: "id=").last?.components(separatedBy: "&").first, !id.isEmpty else { continue }
             guard !seenIDs.contains(id) else { continue }
             seenIDs.insert(id)
-            
+
             var authorName = "Unknown"
             var current: Element? = link
             for _ in 0..<5 {
@@ -366,15 +366,15 @@ class WorkshopService: ObservableObject {
                 }
                 if authorName != "Unknown" { break }
             }
-            
+
             if authorName != "Unknown" {
                 authorMap[id] = authorName
             }
         }
-        
+
         return authorMap
     }
-    
+
     private func parseWorkshopItem(_ element: Element) throws -> WorkshopWallpaper? {
         do {
             var id = try element.attr("data-publishedfileid")
@@ -387,12 +387,12 @@ class WorkshopService: ObservableObject {
                 }
             }
             guard !id.isEmpty else { return nil }
-            
+
             let title = try element.select(".workshopItemTitle").first()?.text() ??
                        element.select(".workshopItemDetailsTitle").first()?.text() ??
                        element.select("a[href*=/sharedfiles/filedetails]").first()?.text() ??
                        "Untitled"
-            
+
             var previewURL: URL?
             let imgSelectors = [
                 "img.workshopItemPreviewImage",
@@ -421,7 +421,7 @@ class WorkshopService: ObservableObject {
                     }
                 }
             }
-            
+
             var subscriptions = 0
             let statsSelectors = [".subscriptionCount", ".subscriptions", "[data-subscriptions]", ".stats"]
             for selector in statsSelectors {
@@ -431,7 +431,7 @@ class WorkshopService: ObservableObject {
                     break
                 }
             }
-            
+
             var fileSize: Int64? = nil
             let sizeSelectors = [".fileSize", ".file_size", "[data-filesize]"]
             for selector in sizeSelectors {
@@ -441,7 +441,7 @@ class WorkshopService: ObservableObject {
                     break
                 }
             }
-            
+
             var authorName = "Unknown"
             let authorSelectors = [
                 ".workshopItemAuthorName",
@@ -460,7 +460,7 @@ class WorkshopService: ObservableObject {
                     break
                 }
             }
-            
+
             var tags: [String] = []
             let tagElements = try element.select(".workshopTags a, .tags a, .tag, [data-tag]")
             for tagEl in tagElements {
@@ -469,13 +469,13 @@ class WorkshopService: ObservableObject {
                     tags.append(tagText)
                 }
             }
-            
+
             let author = WorkshopAuthor(
                 steamID: "",
                 name: authorName,
                 avatarURL: nil
             )
-            
+
             let isAnimatedImage = previewURL?.absoluteString.lowercased().contains(".gif") ?? false
 
             return WorkshopWallpaper(
@@ -580,7 +580,7 @@ class WorkshopService: ObservableObject {
 
         guard let script = scriptContent else { return nil }
 
-        let resultsSearch = "\\\"results\\\":[" 
+        let resultsSearch = "\\\"results\\\":["
         guard let resultsRange = script.range(of: resultsSearch) else { return nil }
         let arrayStart = script.index(resultsRange.upperBound, offsetBy: -1)
 
@@ -706,7 +706,7 @@ class WorkshopService: ObservableObject {
         let lower = text.lowercased()
         let numberString = lower.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted).joined()
         guard let number = Double(numberString) else { return nil }
-        
+
         if lower.contains("gb") {
             return Int64(number * 1024 * 1024 * 1024)
         } else if lower.contains("mb") {
@@ -716,35 +716,35 @@ class WorkshopService: ObservableObject {
         }
         return Int64(number)
     }
-    
+
     // MARK: - Steam Web API 批量补全
-    
+
     /// 用 GetPublishedFileDetails 批量补全 Workshop 物品元数据
     private func enrichWithAPIDetails(_ items: [WorkshopWallpaper]) async throws -> [WorkshopWallpaper] {
         let ids = items.map(\.id)
         let details = try await fetchPublishedFileDetails(ids: ids)
         let detailMap = Dictionary(uniqueKeysWithValues: details.map { ($0.publishedfileid, $0) })
-        
+
         return items.map { item in
             guard let detail = detailMap[item.id] else { return item }
             return WorkshopWallpaper(base: item, detail: detail)
         }
     }
-    
+
     /// 批量查询 Steam Web API 获取文件详情
     private func fetchPublishedFileDetails(ids: [String]) async throws -> [SteamPublishedFileDetail] {
         guard !ids.isEmpty else { return [] }
-        
+
         var request = URLRequest(url: URL(string: "\(steamAPIBase)/ISteamRemoteStorage/GetPublishedFileDetails/v1/")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        
+
         var body = "itemcount=\(ids.count)"
         for (index, id) in ids.enumerated() {
             body += "&publishedfileids[\(index)]=\(id)"
         }
         request.httpBody = body.data(using: .utf8)
-        
+
         let data = try await NetworkService.shared.fetchData(request: request)
 
         do {
@@ -832,7 +832,7 @@ class WorkshopService: ObservableObject {
     }
 
     // MARK: - Type Detection
-    
+
     private func detectType(from urlString: String) -> WorkshopWallpaper.WallpaperType {
         let lower = urlString.lowercased()
         if lower.contains(".mp4") || lower.contains(".webm") || lower.contains(".mov") {

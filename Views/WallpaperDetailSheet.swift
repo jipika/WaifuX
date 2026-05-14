@@ -623,6 +623,16 @@ struct WallpaperDetailSheet: View {
                     }
                 }
 
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(wallpaper.url, forType: .string)
+                } label: {
+                    DetailSheetCircleIconLabel(systemName: "link")
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+                .help("复制链接")
+
                 dividerLine
                     .frame(width: 80)
             }

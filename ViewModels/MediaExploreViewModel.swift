@@ -1471,12 +1471,27 @@ final class MediaExploreViewModel: ObservableObject {
         return url
     }
 
-    // MARK: - 通过 URL 解析 Workshop 项目
+    // MARK: - 通过 URL 解析项目
 
     /// 解析 Steam Workshop 链接并返回 MediaItem，失败时抛出错误
     func resolveWorkshopItemByURL(_ urlString: String) async throws -> MediaItem {
         let item = try await workshopService.resolveWorkshopItemByURL(urlString)
         print("[MediaExploreViewModel] resolveWorkshopItemByURL success: \(item.id) - \(item.title)")
+        return item
+    }
+
+    /// 解析 MotionBG 链接并返回 MediaItem，失败时抛出错误
+    func resolveMotionBGItemByURL(_ urlString: String) async throws -> MediaItem {
+        guard let url = URL(string: urlString),
+              url.host?.contains("motionbgs") == true else {
+            throw WorkshopError.invalidURL
+        }
+        let slug = url.lastPathComponent
+        guard !slug.isEmpty, slug != "/" else {
+            throw WorkshopError.invalidURL
+        }
+        let item = try await mediaService.fetchDetail(slug: slug)
+        print("[MediaExploreViewModel] resolveMotionBGItemByURL success: \(item.id) - \(item.title)")
         return item
     }
 }

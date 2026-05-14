@@ -789,6 +789,16 @@ struct MediaDetailSheet: View {
                     }
                 }
 
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(resolvedItem.pageURL.absoluteString, forType: .string)
+                } label: {
+                    DetailSheetCircleIconLabel(systemName: "link")
+                        .detailGlassCircleChrome()
+                }
+                .buttonStyle(.plain)
+                .help("复制链接")
+
                 dividerLine
                     .frame(width: 70)
             }

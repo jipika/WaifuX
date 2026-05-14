@@ -398,6 +398,46 @@ class WallpaperViewModel: ObservableObject {
         wallpaperLibrary.removeWallpaperDownloads(withIDs: ids)
     }
 
+    // MARK: - 通过 URL 解析壁纸
+
+    /// 提取 Wallhaven 壁纸 ID（支持 wallhaven.cc/w/{id} 和 wallhaven.cc/wallpaper/{id}）
+    static func extractWallhavenID(from urlString: String) -> String? {
+        guard let url = URL(string: urlString),
+              url.host?.contains("wallhaven") == true else { return nil }
+        let pathComponents = url.pathComponents
+        // 格式: /w/{id} 或 /wallpaper/{id}
+        if let idIndex = pathComponents.firstIndex(where: { $0 == "w" || $0 == "wallpaper" }),
+           idIndex + 1 < pathComponents.count {
+            return pathComponents[idIndex + 1]
+        }
+        return nil
+    }
+
+    /// 通过链接解析壁纸，支持 Wallhaven / 4KWallpapers
+    func resolveWallpaperByURL(_ urlString: String) async throws -> Wallpaper {
+        // 尝试 Wallhaven
+        if let wallpaperID = Self.extractWallhavenID(from: urlString) {
+            return try await resolveWallhavenWallpaperByID(wallpaperID)
+        }
+        throw NSError(domain: "WaifuX", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析此链接，仅支持 Wallhaven 链接（wallhaven.cc/w/{id}）"])
+    }
+
+    /// 通过 Wallhaven API 按 ID 获取壁纸详情
+    private func resolveWallhavenWallpaperByID(_ id: String) async throws -> Wallpaper {
+        guard let url = WallhavenAPI.url(for: .wallpaper(id: id)) else {
+            throw NetworkError.invalidResponse
+        }
+        let response = try await networkService.fetch(
+            WallpaperSearchResponse.self,
+            from: url,
+            headers: WallhavenAPI.authenticationHeaders(apiKey: normalizedAPIKey)
+        )
+        guard let wallpaper = response.data.first else {
+            throw NetworkError.invalidResponse
+        }
+        return wallpaper
+    }
+
     // MARK: - 分享
     func shareWallpaper(_ wallpaper: Wallpaper, from view: NSView? = nil) {
         guard let url = URL(string: wallpaper.url) else { return }

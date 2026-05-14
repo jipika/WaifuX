@@ -53,7 +53,7 @@ struct MediaExploreContentView: View {
     @State private var outerScrollToTopToken: Int = 0
 
     // Workshop 筛选
-    @State private var selectedWorkshopTag: WorkshopSourceManager.WorkshopTag?
+    @State private var selectedWorkshopTags: Set<WorkshopSourceManager.WorkshopTag> = []
     @State private var selectedWorkshopType: WorkshopSourceManager.WorkshopTypeFilter = .all
     @State private var selectedWorkshopContentLevel: WorkshopSourceManager.WorkshopContentLevel? = .everyone
     @State private var selectedWorkshopResolution: WorkshopSourceManager.WorkshopResolution? = nil
@@ -359,10 +359,8 @@ struct MediaExploreContentView: View {
                 } : nil
             )
 
-            if workshopSourceManager.activeSource == .wallpaperEngine {
-                WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
-                    showWorkshopURLSheet = true
-                }
+            WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
+                showWorkshopURLSheet = true
             }
 
             ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainMedia) {
@@ -402,7 +400,7 @@ struct MediaExploreContentView: View {
     private func applyWorkshopFilters(query: String? = nil) async {
         viewModel.clearItems()
 
-        let tags = selectedWorkshopTag.map { [$0.name] } ?? []
+        let tags = selectedWorkshopTags.map { $0.name }
         let searchQuery = query ?? workshopSearchQuery
         await viewModel.loadWorkshopWithFilters(
             query: searchQuery,
@@ -468,13 +466,13 @@ struct MediaExploreContentView: View {
                         icon: tag.icon,
                         title: tag.displayName,
                         accentColors: tag.accentColors,
-                        isSelected: selectedWorkshopTag?.id == tag.id
+                        isSelected: selectedWorkshopTags.contains(tag)
                     ) {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            if selectedWorkshopTag?.id == tag.id {
-                                selectedWorkshopTag = nil
+                            if selectedWorkshopTags.contains(tag) {
+                                selectedWorkshopTags.remove(tag)
                             } else {
-                                selectedWorkshopTag = tag
+                                selectedWorkshopTags.insert(tag)
                             }
                             Task { await applyWorkshopFilters() }
                         }
@@ -571,7 +569,7 @@ struct MediaExploreContentView: View {
                             .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
                         Button(t("clear")) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                selectedWorkshopTag = nil
+                                selectedWorkshopTags = []
                                 selectedWorkshopContentLevel = .everyone
                                 selectedWorkshopType = .all
                                 selectedWorkshopResolution = nil
@@ -617,7 +615,7 @@ struct MediaExploreContentView: View {
                 kind: .type
             ))
         }
-        if let tag = selectedWorkshopTag {
+        for tag in selectedWorkshopTags {
             chips.append(WorkshopFilterChipData(
                 id: "tag_\(tag.id)",
                 title: tag.displayName,
@@ -649,7 +647,8 @@ struct MediaExploreContentView: View {
         case .type:
             selectedWorkshopType = .all
         case .tag:
-            selectedWorkshopTag = nil
+            let tagId = chip.id.replacingOccurrences(of: "tag_", with: "")
+            selectedWorkshopTags = selectedWorkshopTags.filter { $0.id != tagId }
         case .level:
             selectedWorkshopContentLevel = .everyone
         case .resolution:
@@ -857,7 +856,7 @@ struct MediaExploreContentView: View {
         mediaSearchQuery = ""
         translationBridge.reset()
         selectedHotTag = nil
-        selectedWorkshopTag = nil
+        selectedWorkshopTags = []
         selectedWorkshopType = .all
         selectedWorkshopContentLevel = .everyone
         selectedWorkshopResolution = nil
@@ -883,7 +882,7 @@ struct MediaExploreContentView: View {
         withAnimation(AppFluidMotion.interactiveSpring) {
             selectedCategory = category
             selectedHotTag = nil
-            selectedWorkshopTag = nil
+            selectedWorkshopTags = []
             selectedWorkshopType = .all
             selectedWorkshopContentLevel = .everyone
             searchText = ""
@@ -1022,18 +1021,20 @@ struct MediaExploreContentView: View {
     private func handleWorkshopURLSubmit() {
         let url = workshopURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else {
-            workshopURLError = "请输入 Workshop 链接"
-            return
-        }
-        guard WorkshopService.extractWorkshopID(from: url) != nil else {
-            workshopURLError = "无法解析 Workshop 链接，请检查链接格式"
+            workshopURLError = "请输入链接"
             return
         }
         isResolvingWorkshopURL = true
         workshopURLError = nil
         Task {
             do {
-                let item = try await viewModel.resolveWorkshopItemByURL(url)
+                let isWE = WorkshopService.extractWorkshopID(from: url) != nil
+                let item: MediaItem
+                if isWE {
+                    item = try await viewModel.resolveWorkshopItemByURL(url)
+                } else {
+                    item = try await viewModel.resolveMotionBGItemByURL(url)
+                }
                 await MainActor.run {
                     isResolvingWorkshopURL = false
                     showWorkshopURLSheet = false
@@ -1089,7 +1090,7 @@ struct MediaExploreContentView: View {
         mediaSearchQuery = ""
         translationBridge.reset()
         selectedHotTag = nil
-        selectedWorkshopTag = nil
+        selectedWorkshopTags = []
         selectedWorkshopType = .all
         selectedWorkshopContentLevel = .everyone
         selectedWorkshopResolution = nil
@@ -1413,7 +1414,7 @@ private enum WorkshopSortOption: String, CaseIterable, SortOptionProtocol {
 
 // MARK: - Workshop URL 输入按钮
 
-private struct WorkshopURLInputButton: View {
+struct WorkshopURLInputButton: View {
     let tint: Color
     let action: () -> Void
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
@@ -1436,13 +1437,13 @@ private struct WorkshopURLInputButton: View {
         .scaleEffect(isHovered ? 1.05 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
         .onHover { isHovered = $0 }
-        .help("通过 Workshop 链接打开")
+        .help("通过链接打开壁纸")
     }
 }
 
 // MARK: - Workshop URL 输入弹窗
 
-private struct WorkshopURLInputSheet: View {
+struct WorkshopURLInputSheet: View {
     @Binding var urlInput: String
     let errorMessage: String?
     let isLoading: Bool
@@ -1455,7 +1456,7 @@ private struct WorkshopURLInputSheet: View {
         VStack(spacing: 20) {
             // Header
             HStack {
-                Text("通过链接打开 Workshop 壁纸")
+                Text("通过链接打开壁纸")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.92))
                 Spacer()
@@ -1471,7 +1472,7 @@ private struct WorkshopURLInputSheet: View {
 
             // Input
             VStack(alignment: .leading, spacing: 8) {
-                TextField("粘贴 Steam Workshop 链接...", text: $urlInput, axis: .vertical)
+                TextField("粘贴壁纸链接...", text: $urlInput, axis: .vertical)
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.9))
                     .textFieldStyle(.plain)
@@ -1497,7 +1498,7 @@ private struct WorkshopURLInputSheet: View {
                         .transition(.opacity)
                 }
 
-                Text("支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890")
+                Text("支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890 或 motionbgs.com/xxx")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.35))
             }

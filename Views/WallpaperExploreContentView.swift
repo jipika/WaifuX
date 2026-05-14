@@ -73,6 +73,11 @@ struct WallpaperExploreContentView: View {
 
     @State private var loadMoreTask: Task<Void, Never>?
 
+    @State private var showWallpaperURLSheet = false
+    @State private var wallpaperURLInput = ""
+    @State private var isResolvingWallpaperURL = false
+    @State private var wallpaperURLError: String?
+
     /// 缓存筛选后的列表，避免每次 body 重绘时对 `wallpapers` 全表过滤（Wallhaven 分类）
     @State private var visibleWallpapers: [Wallpaper] = []
 
@@ -163,6 +168,15 @@ struct WallpaperExploreContentView: View {
         .onChange(of: fourKSorting) { _, _ in handle4KSortingChange() }
         .onChange(of: viewModel.wallpapers) { _, _ in recomputeVisibleWallpapers(); syncAtmosphereIfNeeded() }
         .overlay(alertOverlay)
+        .sheet(isPresented: $showWallpaperURLSheet) {
+            WorkshopURLInputSheet(
+                urlInput: $wallpaperURLInput,
+                errorMessage: wallpaperURLError,
+                isLoading: isResolvingWallpaperURL,
+                onSubmit: { handleWallpaperURLSubmit() },
+                onDismiss: { showWallpaperURLSheet = false }
+            )
+        }
     }
     
     private func scrollContent(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
@@ -368,6 +382,10 @@ struct WallpaperExploreContentView: View {
                 }
             )
             
+            WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
+                showWallpaperURLSheet = true
+            }
+
             ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainWallpaper) {
                 randomizeAtmosphere()
             }
@@ -842,6 +860,32 @@ struct WallpaperExploreContentView: View {
     }
     
     // 移除递归加载逻辑，保留触底分页保底机制
+
+    private func handleWallpaperURLSubmit() {
+        let url = wallpaperURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            wallpaperURLError = "请输入链接"
+            return
+        }
+        isResolvingWallpaperURL = true
+        wallpaperURLError = nil
+        Task {
+            do {
+                let wallpaper = try await viewModel.resolveWallpaperByURL(url)
+                await MainActor.run {
+                    isResolvingWallpaperURL = false
+                    showWallpaperURLSheet = false
+                    wallpaperURLInput = ""
+                    selectedWallpaper = wallpaper
+                }
+            } catch {
+                await MainActor.run {
+                    isResolvingWallpaperURL = false
+                    wallpaperURLError = error.localizedDescription
+                }
+            }
+        }
+    }
 
     private func handleDataSourceChange() {
         if !viewModel.currentSourceSupportsNSFW {

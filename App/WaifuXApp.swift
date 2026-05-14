@@ -7,6 +7,16 @@ import WebKit
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
+
+    /// macOS 15+ (Sequoia) 的 Liquid Glass 改变了 safe area 行为，
+    /// 强制覆盖 safe area 为 0 会与 SwiftUI 布局引擎产生冲突导致振荡。
+    private let useLegacySafeAreaOverride: Bool = {
+        if #available(macOS 15.0, *) {
+            return false
+        }
+        return true
+    }()
+
     private let zeroInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
     required init(rootView: Content) {
@@ -27,20 +37,20 @@ final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override var safeAreaRect: NSRect {
-        bounds
+        useLegacySafeAreaOverride ? bounds : super.safeAreaRect
     }
 
     override var safeAreaInsets: NSEdgeInsets {
-        zeroInsets
+        useLegacySafeAreaOverride ? zeroInsets : super.safeAreaInsets
     }
 
     override var safeAreaLayoutGuide: NSLayoutGuide {
-        edgeToEdgeLayoutGuide
+        useLegacySafeAreaOverride ? edgeToEdgeLayoutGuide : super.safeAreaLayoutGuide
     }
 
     override var additionalSafeAreaInsets: NSEdgeInsets {
-        get { zeroInsets }
-        set { }
+        get { useLegacySafeAreaOverride ? zeroInsets : super.additionalSafeAreaInsets }
+        set { if useLegacySafeAreaOverride { /* ignore */ } else { super.additionalSafeAreaInsets = newValue } }
     }
 }
 
@@ -701,6 +711,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.contentView = EdgeToEdgeHostingView(
             rootView: SettingsView(viewModel: settingsViewModel!)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
         )
 
         let windowController = NSWindowController(window: settingsWindow)

@@ -1378,8 +1378,6 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows() {
-        posterTasks.values.forEach { $0.cancel() }
-        posterTasks.removeAll()
         // 0. 取消上一次未执行的延迟释放，避免快速切换时多组 AVPlayer 并发驻留
         pendingPlayerCleanups.forEach { $0.cancel() }
         pendingPlayerCleanups.removeAll()
