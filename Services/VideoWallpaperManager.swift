@@ -74,14 +74,14 @@ final class VideoWallpaperManager: ObservableObject {
     private var videoTargetScreenIDs = Set<String>()
     /// 应挂载 MP4 壁纸层的物理显示器指纹。不要在显示器断开时清理，重连后靠它找回目标屏。
     private var videoTargetScreenFingerprints = Set<String>()
-    
+
     /// 用于 poster 文件名的交替槽位，避免 macOS 桌面壁纸缓存旧图
     private var posterSlot = 0
 
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
     private let originalWallpaperKey = "video_wallpaper_original_desktop_v2"  // 旧版原始壁纸快照 key，仅用于清理遗留数据
-    
+
     /// 持久化预览图存储目录（避免被系统清理）
     /// 注意：放在 WallHaven 目录下，与 Cache 分开，避免被清理缓存误删
     private var persistedPosterDirectory: URL {
@@ -92,7 +92,7 @@ final class VideoWallpaperManager: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
-    
+
     /// 获取指定屏幕的 poster URL（多屏场景下的正确入口）
     func posterURL(for screen: NSScreen) -> URL? {
         posterURLByScreen[screen.wallpaperScreenIdentifier] ?? posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint]
@@ -126,7 +126,7 @@ final class VideoWallpaperManager: ObservableObject {
         let fileName = "poster_\(posterURL.lastPathComponent)"
         return persistedPosterDirectory.appendingPathComponent(fileName)
     }
-    
+
     // 防止重复重建（@MainActor 保证串行访问，无需 NSLock）
     private var isRebuilding = false
     private var pendingRebuildWorkItem: DispatchWorkItem?
@@ -135,7 +135,7 @@ final class VideoWallpaperManager: ObservableObject {
     private init() {
         setupNotificationObservers()
     }
-    
+
     private func setupNotificationObservers() {
         NotificationCenter.default.addObserver(
             self,
@@ -172,7 +172,7 @@ final class VideoWallpaperManager: ObservableObject {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
-        
+
         // 监听锁屏/解锁通知
         DistributedNotificationCenter.default.addObserver(
             self,
@@ -180,7 +180,7 @@ final class VideoWallpaperManager: ObservableObject {
             name: Notification.Name("com.apple.screenIsLocked"),
             object: nil
         )
-        
+
         DistributedNotificationCenter.default.addObserver(
             self,
             selector: #selector(handleScreenUnlocked),
@@ -188,7 +188,7 @@ final class VideoWallpaperManager: ObservableObject {
             object: nil
         )
     }
-    
+
     @MainActor
     deinit {
         NotificationCenter.default.removeObserver(self)
@@ -255,7 +255,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         discardOriginalWallpaperSnapshot()
-        
+
         // 如果有预览图，设置为桌面壁纸（锁屏会显示这个）
         // 注意：此处 fire-and-forget，不阻塞主线程；poster 为 nil 时保持当前桌面不变。
         // 视频窗口会覆盖在桌面壁纸上方。
@@ -346,7 +346,7 @@ final class VideoWallpaperManager: ObservableObject {
 
     func resumeWallpaper(for targetScreen: NSScreen? = nil) {
         guard hasActiveVideoWallpaper else { return }
-        
+
         if let targetScreen = targetScreen {
             // 恢复特定屏幕的壁纸
             let screenID = targetScreen.wallpaperScreenIdentifier
@@ -362,7 +362,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
         persistState()
     }
-    
+
     /// 获取当前正在播放动态壁纸的显示器
     var activeScreens: [NSScreen] {
         let activeScreenIDs = Set(players.keys)
@@ -377,7 +377,7 @@ final class VideoWallpaperManager: ObservableObject {
             player.rate != 0 ? screenID : nil
         })
     }
-    
+
     /// 检测指定屏幕是否有正在播放的动态壁纸
     func hasActiveWallpaper(on screen: NSScreen) -> Bool {
         let screenID = screen.wallpaperScreenIdentifier
@@ -390,12 +390,12 @@ final class VideoWallpaperManager: ObservableObject {
         guard let player = players[screenID] else { return true }
         return player.rate == 0
     }
-    
+
     // MARK: - 锁屏处理
-    
+
     /// 当前是否处于锁屏状态（供 AutoPauseManager 等外部模块查询）
     private(set) var isScreenLocked = false
-    
+
     @objc private func handleScreenLocked() {
         // ⚠️ DistributedNotificationCenter 回调不在主线程！必须 dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
@@ -413,7 +413,7 @@ final class VideoWallpaperManager: ObservableObject {
             }
         }
     }
-    
+
     @objc private func handleScreenUnlocked() {
         // ⚠️ DistributedNotificationCenter 回调不在主线程！必须 dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
@@ -618,13 +618,13 @@ final class VideoWallpaperManager: ObservableObject {
         fadeInTimeouts[screenID]?.cancel()
         fadeInTimeouts.removeValue(forKey: screenID)
     }
-    
+
     // MARK: - 锁屏壁纸管理
 
     private func discardOriginalWallpaperSnapshot() {
         defaults.removeObject(forKey: originalWallpaperKey)
     }
-    
+
     /// 将预览图设为桌面壁纸，同时显式写入锁屏壁纸。
     /// 使用持久化存储，避免被系统清理。
     /// - Note: 如需同步等待完成，请直接调用 `applyPosterAsDesktopWallpaper`；此方法内部 fire-and-forget。
@@ -725,7 +725,7 @@ final class VideoWallpaperManager: ObservableObject {
             print("[VideoWallpaperManager] Failed to set poster: \(error)")
         }
     }
-    
+
     /// 清理旧的预览图文件，只保留最近的几个（同步版本）
     private func cleanupOldPosters(keeping keepURL: URL) {
         do {
@@ -734,7 +734,7 @@ final class VideoWallpaperManager: ObservableObject {
                 includingPropertiesForKeys: [.creationDateKey],
                 options: .skipsHiddenFiles
             )
-            
+
             // 按创建时间排序，保留最新的5个
             let sortedFiles = files
                 .filter { $0.lastPathComponent.hasPrefix("poster_") }
@@ -744,7 +744,7 @@ final class VideoWallpaperManager: ObservableObject {
                     return (url, date)
                 }
                 .sorted { $0.1 > $1.1 }
-            
+
             // 删除旧的（保留5个 + 当前要保存的）
             let filesToDelete = sortedFiles.dropFirst(5)
             for (url, _) in filesToDelete {
@@ -757,7 +757,7 @@ final class VideoWallpaperManager: ObservableObject {
             print("[VideoWallpaperManager] Failed to cleanup old posters: \(error)")
         }
     }
-    
+
     /// 清理所有持久化的预览图文件
     private func cleanupPersistedPosters() {
         do {
@@ -908,7 +908,7 @@ final class VideoWallpaperManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.hasActiveVideoWallpaper else { return }
-            
+
             // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
             self.pendingRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
@@ -1048,14 +1048,14 @@ final class VideoWallpaperManager: ObservableObject {
 
     private func rebuildWindows(targetScreen: NSScreen? = nil) throws {
         guard hasActiveVideoWallpaper else { return }
-        
+
         // 如果正在重建，跳过此次请求
         // 注意：@MainActor 保证串行执行，无需额外加锁
         guard !isRebuilding else {
             NSLog("[VideoWallpaperManager] Rebuild already in progress, skipping...")
             return
         }
-        
+
         isRebuilding = true
         defer { isRebuilding = false }
 
@@ -1076,7 +1076,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         NSLog("[VideoWallpaperManager] Rebuilding windows for \(screensToRebuild.count) screen(s)")
-        
+
         // 如果只更新特定屏幕，不要 teardown 所有窗口——优先复用现有窗口，只替换 player，实现无感切换
         if targetScreen == nil {
             teardownAllWindows()
@@ -1107,20 +1107,21 @@ final class VideoWallpaperManager: ObservableObject {
                     oldLooper.disableLooping()
                     loopers.removeValue(forKey: targetScreenID)
                 }
-                
+
                 // 2. 创建新 player
                 guard let videoURL = videoURL(for: targetScreen) else {
                     NSLog("[VideoWallpaperManager] Missing video URL for target screen \(targetScreenID)")
                     return
                 }
-                let components = makePlayerComponents(for: targetScreen, videoURL: videoURL, muted: isMuted)
+                let hdrEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
+                let components = makePlayerComponents(for: targetScreen, videoURL: videoURL, muted: isMuted, hdrEnabled: hdrEnabled)
                 self.loopers[targetScreenID] = components.looper
-                
+
                 // 3. 无缝替换：直接修改 playerLayer.player，窗口始终停留在桌面层级
                 containerView.playerLayer.player = components.player
                 containerView.playerLayer.videoGravity = AVLayerVideoGravity.resizeAspectFill
                 components.player.play()
-                
+
                 // 更新噪点纹理叠加（桌面壁纸颗粒蒙层，由 Settings 开关独立控制）
                 let grainEnabled = ArcBackgroundSettings.shared.grainTextureEnabled
                 if grainEnabled {
@@ -1128,10 +1129,10 @@ final class VideoWallpaperManager: ObservableObject {
                 } else {
                     containerView.hideGrainOverlay()
                 }
-                
+
                 // 4. 更新字典
                 players[targetScreenID] = components.player
-                
+
                 NSLog("[VideoWallpaperManager] Seamlessly replaced player for screen \(targetScreenID)")
             } else {
                 // 没有现有窗口，创建新窗口
@@ -1257,8 +1258,13 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     /// 创建并配置 AVPlayer + AVPlayerLooper，供 `createWindow` 与窗口复用路径共享。
-    private func makePlayerComponents(for screen: NSScreen, videoURL: URL, muted: Bool) -> (player: AVQueuePlayer, looper: AVPlayerLooper, item: AVPlayerItem) {
+    private func makePlayerComponents(for screen: NSScreen, videoURL: URL, muted: Bool, hdrEnabled: Bool = true) -> (player: AVQueuePlayer, looper: AVPlayerLooper, item: AVPlayerItem) {
         let playerItem = AVPlayerItem(url: videoURL)
+
+        // HDR 关闭时强制 SDR 渲染
+        if !hdrEnabled {
+            applySDRVideoComposition(to: playerItem)
+        }
 
         // 配置播放设置
         playerItem.preferredPeakBitRate = 0
@@ -1286,6 +1292,19 @@ final class VideoWallpaperManager: ObservableObject {
         queuePlayer.insert(playerItem, after: nil)
 
         return (queuePlayer, looper, playerItem)
+    }
+
+    /// 为 AVPlayerItem 应用 SDR 视频合成（强制非 HDR 渲染）
+    private func applySDRVideoComposition(to playerItem: AVPlayerItem) {
+        let asset = playerItem.asset
+        let composition = AVMutableVideoComposition(asset: asset, applyingCIFiltersWithHandler: { request in
+            request.finish(with: request.sourceImage, context: nil)
+        })
+        // 设置 SDR 色域：Rec.709
+        composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+        playerItem.videoComposition = composition
     }
 
     private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) throws {
@@ -1316,7 +1335,8 @@ final class VideoWallpaperManager: ObservableObject {
         // 统一使用 AVPlayerLooper 简单循环播放原视频，不做 crossfade composition。
         // 复杂的首尾帧 crossfade 渲染逻辑已保留在 makeLoopingCompositionItem / exportLoopedVideo 中，
         // 待后续增加用户手动开关后再决定是否恢复调用。
-        let components = makePlayerComponents(for: screen, videoURL: videoURL, muted: muted)
+        let hdrEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
+        let components = makePlayerComponents(for: screen, videoURL: videoURL, muted: muted, hdrEnabled: hdrEnabled)
         self.loopers[screenID] = components.looper
 
         containerView.playerLayer.player = components.player
@@ -1468,18 +1488,18 @@ final class VideoWallpaperManager: ObservableObject {
             defaults.set(encoded, forKey: stateKey)
         }
     }
-    
+
     // MARK: - 预览图管理
-    
+
     /// 显示预览图（用于锁屏或无权限时）
     private func showPosterImage(for screenID: String) {
         guard let posterURL = posterURLByScreen[screenID],
               let window = windows[screenID],
               let containerView = window.contentView as? WallpaperVideoContainerView else { return }
-        
+
         // 如果已经显示了预览图，不再重复加载
         guard !containerView.isShowingPoster else { return }
-        
+
         // 异步加载预览图
         Task {
             if let image = await loadPosterImage(from: posterURL) {
@@ -1489,15 +1509,15 @@ final class VideoWallpaperManager: ObservableObject {
             }
         }
     }
-    
+
     /// 隐藏预览图
     private func hidePosterImage(for screenID: String) {
         guard let window = windows[screenID],
               let containerView = window.contentView as? WallpaperVideoContainerView else { return }
-        
+
         containerView.hidePoster()
     }
-    
+
     /// 从 URL 加载预览图
     private func loadPosterImage(from url: URL) async -> NSImage? {
         do {
@@ -1602,11 +1622,11 @@ private final class WallpaperVideoWindow: NSWindow {
 private final class WallpaperVideoContainerView: NSView {
     private var posterImageView: NSImageView?
     private var grainOverlayView: NSView?
-    
+
     var isShowingPoster: Bool {
         posterImageView != nil
     }
-    
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -1628,11 +1648,11 @@ private final class WallpaperVideoContainerView: NSView {
         }
         return layer
     }
-    
+
     /// 显示预览图（锁屏或无权限时使用）
     func showPoster(_ image: NSImage) {
         hidePoster()
-        
+
         let imageView = NSImageView(frame: bounds)
         imageView.image = image
         imageView.imageScaling = .scaleAxesIndependently
@@ -1640,13 +1660,13 @@ private final class WallpaperVideoContainerView: NSView {
         addSubview(imageView)
         posterImageView = imageView
     }
-    
+
     /// 隐藏预览图
     func hidePoster() {
         posterImageView?.removeFromSuperview()
         posterImageView = nil
     }
-    
+
     /// 显示噪点纹理叠加（Arc 磨砂质感，平铺实现）
     func showGrainOverlay(intensity: Double) {
         hideGrainOverlay()
@@ -1658,7 +1678,7 @@ private final class WallpaperVideoContainerView: NSView {
         addSubview(overlayView)
         grainOverlayView = overlayView
     }
-    
+
     /// 隐藏噪点纹理
     func hideGrainOverlay() {
         grainOverlayView?.removeFromSuperview()

@@ -5,7 +5,7 @@ actor NetworkService {
 
     private var session: URLSession
     private let cache: URLCache
-    
+
     // MARK: - Retry Configuration
     private var defaultRetryConfig: RetryConfiguration = .default
     private var networkMonitor: NetworkMonitor? = nil
@@ -55,32 +55,32 @@ actor NetworkService {
 
         self.session = URLSession(configuration: config)
     }
-    
+
     // MARK: - Retry Configuration
-    
+
     /// 设置默认重试配置
     func setDefaultRetryConfiguration(_ config: RetryConfiguration) {
         self.defaultRetryConfig = config
     }
-    
+
     /// 设置网络监测器 (用于根据网络质量调整重试策略)
     func setNetworkMonitor(_ monitor: NetworkMonitor) {
         self.networkMonitor = monitor
     }
-    
+
     /// 获取当前有效的重试配置
     private func effectiveRetryConfiguration(_ customConfig: RetryConfiguration? = nil) -> RetryConfiguration {
         if let custom = customConfig {
             return custom
         }
-        
+
         // 暂时使用默认配置，避免访问NetworkMonitor的@MainActor属性
         // 后续可以通过其他方式实现网络质量检测
         return defaultRetryConfig
     }
 
     // MARK: - Public API with Retry
-    
+
     /// 获取 API 数据（⚠️ 禁用缓存，每次重新请求）
     func fetch<T: Decodable>(
         _ type: T.Type,
@@ -89,11 +89,11 @@ actor NetworkService {
         retryConfig: RetryConfiguration? = nil
     ) async throws -> T {
         let config = effectiveRetryConfiguration(retryConfig)
-        
+
         return try await executeWithRetry(config: config, operation: { attempt in
             // ⚠️ API 请求禁用缓存
             let data = try await self.fetchDataInternal(from: url, headers: headers, attempt: attempt, useCache: false)
-            
+
             let decoder = JSONDecoder()
             do {
                 let result = try decoder.decode(T.self, from: data)
@@ -131,9 +131,9 @@ actor NetworkService {
             try await self.performRequest(request: request, progressHandler: nil)
         }
     }
-    
+
     // MARK: - Internal Implementation
-    
+
     private func fetchDataInternal(
         from url: URL,
         headers: [String: String] = [:],
@@ -142,7 +142,7 @@ actor NetworkService {
         useHosts: Bool = true,  // 是否使用 hosts 加速
         useCache: Bool = true   // 是否使用缓存（图片用 true，API 请求用 false）
     ) async throws -> Data {
-        
+
         // 构建请求
         func buildRequest(for targetURL: URL, withHost host: String?) -> URLRequest {
             var request = URLRequest(url: targetURL)
@@ -158,15 +158,15 @@ actor NetworkService {
             }
             return request
         }
-        
+
         // 尝试使用 hosts 加速
         if useHosts && GitHubHosts.isEnabled && GitHubHosts.isGitHubURL(url.absoluteString) {
             let (requestURL, hostHeader) = Self.resolveGitHubURL(url)
-            
+
             // 只有当 hosts 解析成功时才尝试
             if hostHeader != nil {
                 let request = buildRequest(for: requestURL, withHost: hostHeader)
-                
+
                 do {
                     let data = try await performRequest(request: request, progressHandler: progressHandler)
                     return data
@@ -175,18 +175,18 @@ actor NetworkService {
                 }
             }
         }
-        
+
         // 使用原始域名请求
         let request = buildRequest(for: url, withHost: nil)
         return try await performRequest(request: request, progressHandler: progressHandler)
     }
-    
+
     /// 执行网络请求
     private func performRequest(
         request: URLRequest,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> Data {
-        
+
         if let progressHandler {
             let (bytes, response) = try await session.bytes(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -203,7 +203,7 @@ actor NetworkService {
             var data = Data()
             var buffer: [UInt8] = []
             buffer.reserveCapacity(chunkSize)
-            
+
             // 节流控制：只有当进度变化超过阈值时才回调，避免 UI 频繁刷新
             var lastReportedProgress: Double = 0
             let progressThreshold = 0.01  // 1% 变化阈值
@@ -211,6 +211,8 @@ actor NetworkService {
             progressHandler(expectedLength > 0 ? 0.0 : 0.08)
 
             for try await byte in bytes {
+                // 每处理一个 chunk 检查一次取消状态，确保及时响应取消操作
+                try Task.checkCancellation()
                 buffer.append(byte)
 
                 if buffer.count >= chunkSize {
@@ -260,39 +262,39 @@ actor NetworkService {
         let data = try await fetchData(from: url, headers: headers)
         return String(decoding: data, as: UTF8.self)
     }
-    
+
     func fetchImage(
         from url: URL,
         progressHandler: (@Sendable (Double) -> Void)? = nil,
         retryConfig: RetryConfiguration? = nil
     ) async throws -> Data {
         let config = effectiveRetryConfiguration(retryConfig)
-        
+
         return try await executeWithRetry(config: config) { attempt in
             let data = try await self.fetchDataInternal(from: url, attempt: attempt, progressHandler: progressHandler)
             return data
         }
     }
-    
+
     // MARK: - 缓存管理
-    
+
     /// 清除所有缓存
     func clearCache() {
         cache.removeAllCachedResponses()
     }
-    
+
     /// 清除特定 URL 的缓存
     func clearCache(for url: URL) {
         let request = URLRequest(url: url)
         cache.removeCachedResponse(for: request)
     }
-    
+
     /// 获取缓存大小
     func getCacheSize() -> String {
         let memorySize = cache.currentMemoryUsage
         let diskSize = cache.currentDiskUsage
         let totalSize = memorySize + diskSize
-        
+
         if totalSize < 1024 {
             return "\(totalSize) bytes"
         } else if totalSize < 1024 * 1024 {
@@ -301,48 +303,48 @@ actor NetworkService {
             return "\(String(format: "%.2f", Double(totalSize) / (1024 * 1024))) MB"
         }
     }
-    
+
     // MARK: - Retry Logic
-    
+
     private func executeWithRetry<T>(
         config: RetryConfiguration,
         operation: (Int) async throws -> T
     ) async throws -> T {
         var lastError: Error?
-        
+
         for attempt in 1...(config.maxRetries + 1) {
             do {
                 let result = try await operation(attempt)
                 return result
             } catch {
                 lastError = error
-                
+
                 // 检查是否应该重试
                 guard attempt <= config.maxRetries else {
                     break
                 }
-                
+
                 // 检查错误是否可重试
                 guard error.isRetryable else {
                     throw error
                 }
-                
+
                 // 检查是否取消
                 if error is CancellationError {
                     throw error
                 }
-                
+
                 // 计算延迟时间
                 let delay = config.delayForRetry(attempt: attempt)
-                
+
                 // 等待延迟时间
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                
+
                 // 再次检查是否取消
                 try Task.checkCancellation()
             }
         }
-        
+
         // 所有重试都失败了
         throw lastError ?? NetworkError.networkError(URLError(.unknown))
     }

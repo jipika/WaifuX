@@ -143,7 +143,7 @@ struct SettingsView: View {
                     case .download:
                         DownloadSettingsTab(viewModel: viewModel)
                     case .workshop:
-                        WorkshopSettingsTab()
+                        WorkshopSettingsTab(viewModel: viewModel)
                     case .scheduler:
                         SchedulerSettingsTab(viewModel: viewModel)
                     case .about:
@@ -313,7 +313,7 @@ private struct GeneralSettingsTab: View {
                 MacSettingsRow(
                     title: t("pauseOnBatteryPower"),
                     subtitle: t("pauseOnBatteryPowerDesc"),
-                    showDivider: false
+                    showDivider: true
                 ) {
                     MacToggle(isOn: Binding(
                         get: { viewModel.pauseOnBatteryPower },
@@ -322,6 +322,14 @@ private struct GeneralSettingsTab: View {
                             viewModel.syncAutoPauseSettings()
                         }
                     ))
+                }
+
+                MacSettingsRow(
+                    title: t("hdrEnabled"),
+                    subtitle: t("hdrEnabledDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: $viewModel.hdrEnabled)
                 }
             }
 
@@ -628,7 +636,7 @@ private struct DownloadSettingsTab: View {
 // MARK: - 调度器设置标签
 private struct SchedulerSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
-    
+
     private var screens: [NSScreen] {
         NSScreen.screens
     }
@@ -662,15 +670,15 @@ private struct SchedulerSettingsTab: View {
                 ForEach(Array(screens.enumerated()), id: \.offset) { index, screen in
                     let screenID = screen.wallpaperScreenIdentifier
                     let displayConfig = viewModel.schedulerViewModel.displayConfig(for: screenID)
-                    
+
                     VStack(spacing: 0) {
                         HStack(spacing: 12) {
                             Text("\(t("display")) \(index + 1) · \(screen.localizedName)")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(Color.white.opacity(0.9))
-                            
+
                             Spacer()
-                            
+
                             MacToggle(isOn: Binding(
                                 get: { displayConfig.isEnabled },
                                 set: { viewModel.schedulerViewModel.updateDisplayEnabled($0, for: screenID) }
@@ -678,18 +686,18 @@ private struct SchedulerSettingsTab: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
-                        
+
                         if displayConfig.isEnabled {
                             dividerLine
-                            
+
                             // 间隔选择
                             HStack(spacing: 12) {
                                 Text(t("replaceInterval"))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(Color.white.opacity(0.9))
-                                
+
                                 Spacer()
-                                
+
                                 Menu {
                                     ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
                                         Button(intervalLabel(for: minutes)) {
@@ -705,17 +713,17 @@ private struct SchedulerSettingsTab: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 12)
-                            
+
                             dividerLine
-                            
+
                             // 顺序选择
                             HStack(spacing: 12) {
                                 Text(t("replaceOrder"))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(Color.white.opacity(0.9))
-                                
+
                                 Spacer()
-                                
+
                                 Picker("", selection: Binding(
                                     get: { displayConfig.order },
                                     set: { viewModel.schedulerViewModel.updateDisplayOrder($0, for: screenID) }
@@ -728,17 +736,17 @@ private struct SchedulerSettingsTab: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 12)
-                            
+
                             dividerLine
-                            
+
                             // 内容类型选择
                             HStack(spacing: 12) {
                                 Text(t("contentTypes"))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(Color.white.opacity(0.9))
-                                
+
                                 Spacer()
-                                
+
                                 HStack(spacing: 16) {
                                     Toggle(isOn: Binding(
                                         get: { displayConfig.includeWallpapers },
@@ -749,7 +757,7 @@ private struct SchedulerSettingsTab: View {
                                             .foregroundStyle(Color.white.opacity(0.8))
                                     }
                                     .toggleStyle(.checkbox)
-                                    
+
                                     Toggle(isOn: Binding(
                                         get: { displayConfig.includeMedia },
                                         set: { viewModel.schedulerViewModel.updateDisplayIncludeMedia($0, for: screenID) }
@@ -765,7 +773,7 @@ private struct SchedulerSettingsTab: View {
                             .padding(.vertical, 12)
                         }
                     }
-                    
+
                     if index < screens.count - 1 {
                         dividerLine
                     }
@@ -882,7 +890,7 @@ private struct AboutSettingsTab: View {
             }
 
             // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
-            if showAutoUpdateSheet, 
+            if showAutoUpdateSheet,
                case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
                 AutoUpdateSheet(
                     currentVersion: current,
@@ -906,9 +914,9 @@ private struct AboutSettingsTab: View {
                 .padding(.leading, 16)
         }
     }
-    
+
     // MARK: - 自动更新区域
-    
+
     @ViewBuilder
     private var autoUpdateSection: some View {
         MacSettingsSection {
@@ -936,7 +944,7 @@ private struct AboutSettingsTab: View {
                     // 更新状态指示
                     updateStatusIndicator
                 }
-                
+
                 // 更新操作区域
                 HStack(spacing: 12) {
                     Button {
@@ -964,16 +972,16 @@ private struct AboutSettingsTab: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking)
-                    
+
                     if let lastCheck = viewModel.updateChecker.lastCheckDate {
                         Text("上次检查: \(formatRelativeDate(lastCheck))")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
-                    
+
                     Spacer()
                 }
-                
+
                 // 已下载但未安装的提示
                 if case .downloaded = UpdateManager.shared.state {
                     HStack(spacing: 8) {
@@ -999,7 +1007,7 @@ private struct AboutSettingsTab: View {
             .padding(14)
         }
     }
-    
+
     @ViewBuilder
     private var updateStatusIndicator: some View {
         switch viewModel.updateCheckResult {
@@ -1016,7 +1024,7 @@ private struct AboutSettingsTab: View {
                 }
             }
             .buttonStyle(.plain)
-            
+
         case .noUpdate:
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
@@ -1038,7 +1046,7 @@ private struct AboutSettingsTab: View {
             EmptyView()
         }
     }
-    
+
     private func formatRelativeDate(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -1053,7 +1061,7 @@ struct SettingsUpdateSection: View {
     @ObservedObject var updateChecker = UpdateChecker.shared
     @ObservedObject var updateManager = UpdateManager.shared
     @State private var showUpdateSheet = false
-    
+
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 16) {
@@ -1066,13 +1074,13 @@ struct SettingsUpdateSection: View {
                         Text(viewModel.appVersion)
                             .font(.system(size: 14, weight: .medium))
                     }
-                    
+
                     Spacer()
-                    
+
                     // 更新状态指示
                     updateStatusView
                 }
-                
+
                 // 检查更新按钮
                 HStack(spacing: 12) {
                     Button {
@@ -1100,14 +1108,14 @@ struct SettingsUpdateSection: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(viewModel.isCheckingUpdate || updateChecker.isChecking)
-                    
+
                     if let lastCheck = updateChecker.lastCheckDate {
                         Text("上次检查: \(formatRelativeDate(lastCheck))")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 }
-                
+
                 // 已下载但未安装的提示
                 if case .downloaded(_) = updateManager.state {
                     HStack(spacing: 8) {
@@ -1133,9 +1141,9 @@ struct SettingsUpdateSection: View {
             .padding(16)
             .background(Color.secondary.opacity(0.05))
             .cornerRadius(12)
-            
+
             // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
-            if showUpdateSheet, 
+            if showUpdateSheet,
                case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
                 AutoUpdateSheet(
                     currentVersion: current,
@@ -1149,7 +1157,7 @@ struct SettingsUpdateSection: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var updateStatusView: some View {
         switch viewModel.updateCheckResult {
@@ -1182,7 +1190,7 @@ struct SettingsUpdateSection: View {
             EmptyView()
         }
     }
-    
+
     private func formatRelativeDate(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -1222,6 +1230,7 @@ struct SettingsUpdateSection: View {
 
 // MARK: - Workshop 设置标签
 private struct WorkshopSettingsTab: View {
+    @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject private var sourceManager = WorkshopSourceManager.shared
     @ObservedObject private var workshopService = WorkshopService.shared
     @State private var steamUsername = ""
@@ -1258,6 +1267,18 @@ private struct WorkshopSettingsTab: View {
                 // 清理下载缓存
                 cleanupSection
 
+                // 显示全部内容（仅登录 Steam 后显示）
+                if sourceManager.isSteamAuthenticated {
+                    MacSettingsSection {
+                        MacSettingsRow(title: t("workshop.showAllContent"), subtitle: t("workshop.showAllContentDesc"), showDivider: false) {
+                            MacToggle(isOn: Binding(
+                                get: { viewModel.showAllWorkshopContent },
+                                set: { viewModel.showAllWorkshopContent = $0 }
+                            ))
+                        }
+                    }
+                }
+
                 Spacer()
             }
             .padding(24)
@@ -1271,7 +1292,7 @@ private struct WorkshopSettingsTab: View {
             syncCredentialPresentation()
         }
     }
-    
+
     private var steamCMDLoginSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -1287,7 +1308,7 @@ private struct WorkshopSettingsTab: View {
                         .foregroundStyle(.green)
                 }
             }
-            
+
             if case .available(let username) = sourceManager.steamCredentialState, !showLoginForm {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
@@ -1341,7 +1362,7 @@ private struct WorkshopSettingsTab: View {
                     Text("只有在邮箱验证码或备用令牌场景下才需要填写验证码；大多数情况下可以留空，按提示去 Steam App 里确认即可。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                    
+
                     HStack {
                         if isVerifyingSteamLogin {
                             ProgressView()
@@ -1436,7 +1457,7 @@ private struct WorkshopSettingsTab: View {
                 .background(Color.white.opacity(0.03))
                 .cornerRadius(8)
             }
-            
+
             Text("SteamCMD 下载会使用这里保存的账号进行验证。未保存账号时，涉及 Steam 账号校验的 Workshop 内容将无法完成下载。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

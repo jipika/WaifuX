@@ -554,7 +554,11 @@ struct MediaExploreContentView: View {
     }
 
     private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
-        [.everyone, .questionable]
+        if workshopSourceManager.isSteamAuthenticated && UserDefaults.standard.bool(forKey: "show_all_workshop_content") {
+            [.everyone, .questionable, .mature]
+        } else {
+            [.everyone, .questionable]
+        }
     }
 
     @ViewBuilder

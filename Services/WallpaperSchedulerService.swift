@@ -22,8 +22,13 @@ class WallpaperSchedulerService: ObservableObject {
     private let usedItemIDsKey = "wallpaper_scheduler_used_item_ids_v1"
     private let lastChangeTimesKey = "wallpaper_scheduler_last_change_times_v1"
     private let lastChangedItemIDsKey = "wallpaper_scheduler_last_changed_item_ids_v1"
+    private let displayFingerprintsKey = "wallpaper_scheduler_display_fingerprints_v1"
     private let logTag = "[WallpaperScheduler]"
     private var isScreenLocked = false
+
+    /// Persists screenID → fingerprint mapping so that display configs can be
+    /// relinked after sleep/wake when CGDirectDisplayID may change on external monitors.
+    private var displayFingerprints: [String: String] = [:]
 
     private init() {
         DistributedNotificationCenter.default.addObserver(
@@ -74,6 +79,7 @@ class WallpaperSchedulerService: ObservableObject {
             self.pendingCleanupWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
+                self.relinkDisplayConfigsByFingerprint()
                 self.cleanupOrphanedScreenState()
                 if self.isRunning {
                     self.scheduleNextChange()
@@ -120,9 +126,60 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
+    /// Re-maps display configs whose screen ID changed (e.g. after sleep/wake when
+    /// CGDirectDisplayID may change on external monitors) using the stable fingerprint.
+    private func relinkDisplayConfigsByFingerprint() {
+        let currentScreens = NSScreen.screens
+        let currentScreenIDs = Set(currentScreens.map { $0.wallpaperScreenIdentifier })
+
+        // Find orphaned config keys — screen IDs that were in displayConfigs but are no longer present
+        let orphanedIDs = Set(config.displayConfigs.keys).subtracting(currentScreenIDs)
+        guard !orphanedIDs.isEmpty else { return }
+
+        // Build fingerprint → current screenID map
+        var fingerprintToScreenID: [String: String] = [:]
+        for screen in currentScreens {
+            fingerprintToScreenID[screen.wallpaperScreenFingerprint] = screen.wallpaperScreenIdentifier
+        }
+
+        var migratedCount = 0
+        for orphanedID in orphanedIDs {
+            guard let fingerprint = displayFingerprints[orphanedID],
+                  let newScreenID = fingerprintToScreenID[fingerprint],
+                  !config.displayConfigs.keys.contains(newScreenID) else { continue }
+
+            if let orphanedConfig = config.displayConfigs[orphanedID] {
+                config.displayConfigs[newScreenID] = orphanedConfig
+                displayFingerprints[newScreenID] = fingerprint
+                migratedCount += 1
+            }
+            displayFingerprints.removeValue(forKey: orphanedID)
+            config.displayConfigs.removeValue(forKey: orphanedID)
+        }
+
+        if migratedCount > 0 {
+            saveConfig()
+            saveDisplayFingerprints()
+            print("\(logTag) Relinked \(migratedCount) display config(s) by fingerprint after screen change")
+        }
+    }
+
+    /// Persists fingerprint mapping whenever display configs are saved.
+    private func syncDisplayFingerprints() {
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            if config.displayConfigs.keys.contains(screenID) {
+                displayFingerprints[screenID] = screen.wallpaperScreenFingerprint
+            }
+        }
+    }
+
     /// 延迟恢复保存的调度配置与运行状态
     func restoreSavedConfig() {
         loadConfig()
+        loadDisplayFingerprints()
+        // After loading, try to relink configs if screen IDs changed since last launch
+        relinkDisplayConfigsByFingerprint()
         restoreSchedulerState()
     }
 
@@ -213,6 +270,14 @@ class WallpaperSchedulerService: ObservableObject {
         displayConfig.isEnabled = enabled
         newConfig.displayConfigs[screenID] = displayConfig
         updateConfig(newConfig)
+
+        if !enabled {
+            // 关掉该显示器的自动更换后，同步停止正在播放的动态壁纸
+            if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
+                VideoWallpaperManager.shared.stopWallpaper(for: screen)
+                print("\(logTag) Auto-switch disabled for screen \(screenID), stopped video wallpaper")
+            }
+        }
     }
 
     func updateDisplayInterval(_ minutes: Int, for screenID: String) {
@@ -773,6 +838,21 @@ class WallpaperSchedulerService: ObservableObject {
     private func saveConfig() {
         if let encoded = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+        }
+        syncDisplayFingerprints()
+        saveDisplayFingerprints()
+    }
+
+    private func saveDisplayFingerprints() {
+        if let data = try? PropertyListEncoder().encode(displayFingerprints) {
+            UserDefaults.standard.set(data, forKey: displayFingerprintsKey)
+        }
+    }
+
+    private func loadDisplayFingerprints() {
+        if let data = UserDefaults.standard.data(forKey: displayFingerprintsKey),
+           let decoded = try? PropertyListDecoder().decode([String: String].self, from: data) {
+            displayFingerprints = decoded
         }
     }
 

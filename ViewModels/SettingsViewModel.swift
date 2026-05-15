@@ -32,6 +32,8 @@ class SettingsViewModel: ObservableObject {
     @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
     @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
+    @Published var hdrEnabled = true { didSet { UserDefaults.standard.set(hdrEnabled, forKey: "hdr_enabled") } }
+    @Published var showAllWorkshopContent = false { didSet { UserDefaults.standard.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
     @Published var proxyEnabled = false { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled"); syncProxySettings() } }
     @Published var proxyHost: String = "" { didSet { UserDefaults.standard.set(proxyHost, forKey: "proxy_host"); syncProxySettings() } }
     @Published var proxyPort: String = "" { didSet { UserDefaults.standard.set(proxyPort, forKey: "proxy_port"); syncProxySettings() } }
@@ -59,7 +61,7 @@ class SettingsViewModel: ObservableObject {
     // MARK: - 调度器相关（延迟初始化，避免启动时阻塞）
     private var _schedulerViewModel: WallpaperSchedulerViewModel?
     private var _downloadTaskViewModel: DownloadTaskViewModel?
-    
+
     var schedulerViewModel: WallpaperSchedulerViewModel {
         if _schedulerViewModel == nil {
             _schedulerViewModel = WallpaperSchedulerViewModel()
@@ -71,7 +73,7 @@ class SettingsViewModel: ObservableObject {
         }
         return _schedulerViewModel!
     }
-    
+
     var downloadTaskViewModel: DownloadTaskViewModel {
         if _downloadTaskViewModel == nil {
             _downloadTaskViewModel = DownloadTaskViewModel()
@@ -94,7 +96,7 @@ class SettingsViewModel: ObservableObject {
             let trimmedValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             Self._cachedAPIKey = trimmedValue.isEmpty ? nil : trimmedValue
             UserDefaults.standard.set(trimmedValue, forKey: apiKeyUserDefaultsKey)
-            
+
             // 同步更新 WallpaperViewModel 的 API Key 缓存，确保实时生效
             WallpaperViewModel.updateSharedAPIKeyCache(trimmedValue)
         }
@@ -124,6 +126,8 @@ class SettingsViewModel: ObservableObject {
         pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
         pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
         pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
+        hdrEnabled = defaults.object(forKey: "hdr_enabled") as? Bool ?? true
+        showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
         proxyEnabled = defaults.bool(forKey: "proxy_enabled")
         proxyHost = defaults.string(forKey: "proxy_host") ?? ""
         proxyPort = defaults.string(forKey: "proxy_port") ?? ""
@@ -131,13 +135,13 @@ class SettingsViewModel: ObservableObject {
         // 恢复 API Key 缓存
         Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
         Self._apiKeyRestored = true
-        
+
         // 第二步：后台异步执行耗时操作
         Task(priority: .background) { @MainActor in
             // 小延迟确保 UI 先响应
             try? await Task.sleep(nanoseconds: 50_000_000) // 0.05秒
             refreshDataSourceProfiles()
-            
+
             // 缓存计算和规则仓库加载可以并行
             async let cacheTask: () = updateCacheSize()
             async let repoTask: () = loadRuleRepository()

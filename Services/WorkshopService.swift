@@ -88,9 +88,10 @@ class WorkshopService: ObservableObject {
             requiredTags.append(contentsOf: params.tags)
         }
         // 新版 browse 页面中内容级别通过 requiredtags[]=Mature/Questionable/Everyone 实现
-        // [强制规则] 默认 Everyone；仅允许传入 Everyone 或 Questionable，禁止 Mature
+        // 内容级别由开关控制：开启时放行 Mature，关闭时强制降级为 Everyone
         let effectiveContentLevel = params.contentLevel ?? "Everyone"
-        if effectiveContentLevel == "Everyone" || effectiveContentLevel == "Questionable" {
+        let showAllContent = UserDefaults.standard.bool(forKey: "show_all_workshop_content")
+        if effectiveContentLevel == "Everyone" || effectiveContentLevel == "Questionable" || (effectiveContentLevel == "Mature" && showAllContent) {
             requiredTags.append(effectiveContentLevel)
         } else {
             requiredTags.append("Everyone")

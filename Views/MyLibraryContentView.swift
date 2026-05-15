@@ -41,13 +41,13 @@ struct MyLibraryContentView: View {
     @State private var lastWallpaperPrefetchBucket: Int?
     @State private var lastMediaPrefetchBucket: Int?
     @State private var lastAnimePrefetchBucket: Int?
-    
+
     // 文件夹导航
     @State private var currentWallpaperFolderID: String? = nil
     @State private var currentMediaFolderID: String? = nil
     @State private var wallpaperFolderStack: [String] = []  // 面包屑栈
     @State private var mediaFolderStack: [String] = []  // 面包屑栈
-    
+
     // 新建文件夹
     @State private var showNewFolderSheet = false
     @State private var newFolderName = ""
@@ -108,12 +108,13 @@ struct MyLibraryContentView: View {
             GeometryReader { geometry in
                 let contentWidth = max(0, geometry.size.width - 56)
                 let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
+                let animeGridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 32) {
                         mediaHero
                         ContentTypePicker(selected: $selectedContentType)
-                        contentSections(config: gridConfig)
+                        contentSections(config: gridConfig, animeConfig: animeGridConfig)
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 28)
@@ -208,16 +209,26 @@ struct MyLibraryContentView: View {
     // MARK: - 加载动漫收藏
     private func loadAnimeFavorites() async {
         let favorites = animeFavoriteStore.allFavorites
+        let progressStore = AnimeProgressStore.shared
         lastAnimePrefetchBucket = nil
         animeFavorites = favorites.map { favorite in
-            AnimeSearchResult(
+            // 尝试从进度存储中获取观看信息
+            let summary = progressStore.animeSummaries[favorite.id]
+            let latestEp: String?
+            if let summary, let epNum = summary.lastEpisodeNumber {
+                latestEp = "第 \(epNum) 集"
+            } else {
+                latestEp = nil
+            }
+
+            return AnimeSearchResult(
                 id: favorite.id,
                 title: favorite.title,
                 coverURL: favorite.coverURL,
                 detailURL: "",
                 sourceId: "bangumi",
                 sourceName: "Bangumi",
-                latestEpisode: nil,
+                latestEpisode: latestEp,
                 rating: nil,
                 summary: nil,
                 rank: nil,
@@ -295,14 +306,14 @@ struct MyLibraryContentView: View {
 
     // MARK: - Content Sections
     @ViewBuilder
-    private func contentSections(config: LibraryGridConfig) -> some View {
+    private func contentSections(config: LibraryGridConfig, animeConfig: AnimeGridConfig) -> some View {
         switch selectedContentType {
         case .wallpaper:
             wallpaperSection(config: config)
         case .video:
             mediaSection(config: config)
         case .anime:
-            animeSection(config: config)
+            animeSection(config: animeConfig)
         }
     }
 
@@ -315,7 +326,7 @@ struct MyLibraryContentView: View {
                 importAction: importWallpapers,
                 folderURL: DownloadPathManager.shared.wallpapersFolderURL
             )
-            
+
             // 文件夹导航面包屑
             folderBreadcrumb(
                 folderStack: wallpaperFolderStack,
@@ -350,7 +361,7 @@ struct MyLibraryContentView: View {
             }
         }
     }
-    
+
     private func wallpaperFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
         let display = wallpaperFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
         return LibraryFolderCard(
@@ -367,7 +378,7 @@ struct MyLibraryContentView: View {
         )
         .draggable("waifux:folder:\(folder.id)")
     }
-    
+
     private func navigateToWallpaperFolder(_ folderID: String?) {
         if let current = currentWallpaperFolderID, folderID != nil {
             wallpaperFolderStack.append(current)
@@ -375,7 +386,7 @@ struct MyLibraryContentView: View {
         currentWallpaperFolderID = folderID
         updateWallpaperItems()
     }
-    
+
     private func popWallpaperFolder() {
         guard !wallpaperFolderStack.isEmpty else {
             currentWallpaperFolderID = nil
@@ -385,7 +396,7 @@ struct MyLibraryContentView: View {
         currentWallpaperFolderID = wallpaperFolderStack.popLast()
         updateWallpaperItems()
     }
-    
+
     private func moveWallpapersToFolder(ids: [String], folderID: String) {
         for id in ids {
             folderStore.moveWallpaperToFolder(wallpaperID: id, folderID: folderID)
@@ -427,11 +438,11 @@ struct MyLibraryContentView: View {
         }
         refreshWallpaperFolderDisplay()
     }
-    
+
     private var currentWallpaperFolders: [LibraryFolder] {
         folderStore.folders(for: .wallpaper, parentID: currentWallpaperFolderID)
     }
-    
+
     private var currentMediaFolders: [LibraryFolder] {
         folderStore.folders(for: .media, parentID: currentMediaFolderID)
     }
@@ -506,7 +517,7 @@ struct MyLibraryContentView: View {
                 workshopImportAction: importWorkshop,
                 folderURL: DownloadPathManager.shared.mediaFolderURL
             )
-            
+
             // 文件夹导航面包屑
             folderBreadcrumb(
                 folderStack: mediaFolderStack,
@@ -541,7 +552,7 @@ struct MyLibraryContentView: View {
             }
         }
     }
-    
+
     private func mediaFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
         let display = mediaFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
         return LibraryFolderCard(
@@ -558,7 +569,7 @@ struct MyLibraryContentView: View {
         )
         .draggable("waifux:folder:\(folder.id)")
     }
-    
+
     private func navigateToMediaFolder(_ folderID: String?) {
         if let current = currentMediaFolderID, folderID != nil {
             mediaFolderStack.append(current)
@@ -566,7 +577,7 @@ struct MyLibraryContentView: View {
         currentMediaFolderID = folderID
         updateMediaItems()
     }
-    
+
     private func popMediaFolder() {
         guard !mediaFolderStack.isEmpty else {
             currentMediaFolderID = nil
@@ -576,7 +587,7 @@ struct MyLibraryContentView: View {
         currentMediaFolderID = mediaFolderStack.popLast()
         updateMediaItems()
     }
-    
+
     private func moveMediasToFolder(ids: [String], folderID: String) {
         for id in ids {
             folderStore.moveMediaToFolder(mediaID: id, folderID: folderID)
@@ -658,7 +669,7 @@ struct MyLibraryContentView: View {
         prefetcher.start()
     }
 
-    private func preloadNearbyAnime(around anime: AnimeSearchResult, config: LibraryGridConfig) {
+    private func preloadNearbyAnime(around anime: AnimeSearchResult, config: AnimeGridConfig) {
         guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
         let bucket = prefetchBucket(for: index)
         guard lastAnimePrefetchBucket != bucket else { return }
@@ -776,7 +787,7 @@ struct MyLibraryContentView: View {
     }
 
     // MARK: - Anime Section
-    private func animeSection(config: LibraryGridConfig) -> some View {
+    private func animeSection(config: AnimeGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             sectionHeader(
                 title: t("library.anime"),
@@ -938,7 +949,7 @@ struct MyLibraryContentView: View {
                     .buttonStyle(.plain)
                     .pointingHandCursor()
                 }
-                
+
                 // 编辑 / 完成
                 Button {
                     withAnimation {
@@ -1030,7 +1041,7 @@ struct MyLibraryContentView: View {
             }
         }
     }
-    
+
     // MARK: - 文件夹面包屑
     @ViewBuilder
     private func folderBreadcrumb(
@@ -1048,21 +1059,21 @@ struct MyLibraryContentView: View {
                 }
                 .buttonStyle(.plain)
                 .pointingHandCursor()
-                
+
                 if !folderStack.isEmpty {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.3))
-                    
+
                     Text("...")
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.5))
-                    
+
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.3))
                 }
-                
+
                 Button(action: onBack) {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.left")
@@ -1080,7 +1091,7 @@ struct MyLibraryContentView: View {
                 }
                 .buttonStyle(.plain)
                 .pointingHandCursor()
-                
+
                 Spacer()
             }
             .padding(.horizontal, 4)
@@ -1166,7 +1177,7 @@ struct MyLibraryContentView: View {
             selectedWallpaper = wallpaper
         }
     }
-    
+
     private func handleFolderTap(_ folder: LibraryFolder) {
         if isEditing {
             toggleSelection("folder_\(folder.id)")
@@ -1229,7 +1240,7 @@ struct MyLibraryContentView: View {
         // 分离文件夹 ID 和普通项目 ID
         let folderIDs = selectedItems.filter { $0.hasPrefix("folder_") }
         let itemIDs = selectedItems.filter { !$0.hasPrefix("folder_") }
-        
+
         // 先删除文件夹
         for folderID in folderIDs {
             let realID = String(folderID.dropFirst(7))
@@ -1242,7 +1253,7 @@ struct MyLibraryContentView: View {
                 break
             }
         }
-        
+
         // 再删除普通项目
         switch selectedContentType {
         case .wallpaper:
@@ -1351,6 +1362,22 @@ struct MyLibraryContentView: View {
             self.contentWidth = contentWidth
             self.columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
             self.spacing = 16
+            let totalSpacing = spacing * CGFloat(columnCount - 1)
+            self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
+            self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        }
+    }
+
+    /// 动漫列表专用网格配置，列数更多使封面更小
+    private struct AnimeGridConfig {
+        let columnCount: Int
+        let spacing: CGFloat
+        let cardWidth: CGFloat
+        let gridItems: [GridItem]
+
+        init(contentWidth: CGFloat) {
+            self.spacing = 12
+            self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
             let totalSpacing = spacing * CGFloat(columnCount - 1)
             self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
             self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
@@ -1782,6 +1809,7 @@ struct ContentTypeButton: View {
 }
 
 // MARK: - Anime Library Card
+
 struct AnimeLibraryCard: View {
     let anime: AnimeSearchResult
     let isEditing: Bool
@@ -1790,15 +1818,25 @@ struct AnimeLibraryCard: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @State private var progressText: String? = nil
+    @State private var progressValue: Double? = nil
 
-    private var thumbnailHeight: CGFloat {
-        LibraryCardMetrics.thumbnailHeight + 72
+    /// 竖版封面（10:14 比例）
+    private var imageHeight: CGFloat {
+        cardWidth * 1.4
+    }
+
+    /// 底部信息栏高度
+    private let bottomBarHeight: CGFloat = 52
+
+    private var totalCardHeight: CGFloat {
+        imageHeight + bottomBarHeight
     }
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 0) {
-                // 图片区域 - 单独裁剪顶部圆角
+                // 图片区域
                 ZStack {
                     KFImage(URL(string: anime.coverURL ?? ""))
                         .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
@@ -1807,13 +1845,13 @@ struct AnimeLibraryCard: View {
                         .placeholder { _ in
                             SkeletonCard(
                                 width: cardWidth,
-                                height: thumbnailHeight,
+                                height: imageHeight,
                                 cornerRadius: 0
                             )
                         }
                         .resizable()
                         .scaledToFill()
-                        .frame(width: cardWidth, height: thumbnailHeight)
+                        .frame(width: cardWidth, height: imageHeight)
                         .clipped()
 
                     // 左上角复选框（编辑模式下显示）
@@ -1837,13 +1875,11 @@ struct AnimeLibraryCard: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
-                    // 右上角标签（非编辑模式下显示评分/排名）
+                    // 右上角评分/排名（非编辑模式）
                     if !isEditing {
                         VStack {
                             HStack {
                                 Spacer()
-                                
-                                // 显示评分或排名标签
                                 if let rating = anime.rating, let score = Double(rating), score > 0 {
                                     HStack(spacing: 4) {
                                         Image(systemName: "star.fill")
@@ -1870,7 +1906,7 @@ struct AnimeLibraryCard: View {
                                             Capsule(style: .continuous)
                                                 .fill(Color.black.opacity(0.45))
                                         )
-                                    .padding(12)
+                                        .padding(12)
                                 }
                             }
                             Spacer()
@@ -1878,30 +1914,16 @@ struct AnimeLibraryCard: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     }
 
-                    // 选中时的遮罩 - 确保填满整个图片区域
+                    // 选中遮罩
                     if isEditing && isSelected {
                         Color.black.opacity(0.3)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
+                .frame(width: cardWidth, height: imageHeight)
 
-                // 信息区域
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(anime.title)
-                        .font(.system(size: 14.5, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-
-                    if let tags = anime.tags, !tags.isEmpty {
-                        Text(tags.prefix(3).map { $0.name }.joined(separator: ", "))
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.56))
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(width: cardWidth, alignment: .leading)
+                // 底部信息栏（半透明黑底，与 AnimeGridCell 风格一致）
+                bottomInfoBar
             }
             .frame(width: cardWidth, alignment: .leading)
             .background(
@@ -1920,6 +1942,85 @@ struct AnimeLibraryCard: View {
         .throttledHover(interval: 0.05) { hovering in
             if !isEditing {
                 isHovered = hovering
+            }
+        }
+        .onAppear {
+            loadProgress()
+        }
+    }
+
+    // MARK: - 底部信息栏
+
+    private var bottomInfoBar: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                // 标题
+                Text(anime.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .lineLimit(1)
+
+                // 进度 / 集数信息
+                if let progressText {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text(progressText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                } else if let episode = anime.latestEpisode?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !episode.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text(episode)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                }
+
+                // 进度条（有进度时显示）
+                if let progressValue {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(.white.opacity(0.15))
+                                .frame(height: 3)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(LiquidGlassColors.tertiaryBlue.opacity(0.8))
+                                .frame(width: geo.size.width * CGFloat(min(max(progressValue, 0), 1)), height: 3)
+                        }
+                    }
+                    .frame(height: 3)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            Spacer(minLength: 0)
+        }
+        .frame(width: cardWidth, height: bottomBarHeight, alignment: .leading)
+    }
+
+    // MARK: - 加载进度
+
+    private func loadProgress() {
+        let summary = AnimeProgressStore.shared.animeSummaries[anime.id]
+        if let summary {
+            if summary.watchedEpisodes > 0 {
+                progressText = summary.continueWatchingText
+            } else {
+                progressText = "开始观看"
+            }
+            if summary.totalEpisodes > 0 {
+                progressValue = summary.overallProgress
+            } else if let lastEp = summary.lastEpisodeNumber {
+                progressText = "看到第 \(lastEp) 集"
             }
         }
     }

@@ -5,23 +5,23 @@ import Combine
 private actor DownloadTaskStorage {
     var activeDownloads: [String: Task<Void, Error>] = [:]
     var cancellationFlags: [String: Bool] = [:]
-    
+
     func register(id: String, task: Task<Void, Error>) {
         activeDownloads[id] = task
         cancellationFlags[id] = false
     }
-    
+
     func unregister(id: String) {
         activeDownloads.removeValue(forKey: id)
         cancellationFlags.removeValue(forKey: id)
     }
-    
+
     func cancel(id: String) {
         activeDownloads[id]?.cancel()
         activeDownloads.removeValue(forKey: id)
         cancellationFlags[id] = true
     }
-    
+
     func cancelAll() {
         for (_, task) in activeDownloads {
             task.cancel()
@@ -31,11 +31,11 @@ private actor DownloadTaskStorage {
         }
         activeDownloads.removeAll()
     }
-    
+
     func isCancelled(id: String) -> Bool {
         cancellationFlags[id] ?? false
     }
-    
+
     func resetCancellationFlag(id: String) {
         cancellationFlags[id] = false
     }
@@ -178,7 +178,7 @@ class DownloadTaskService: ObservableObject {
     func isDownloadCancelled(id: String) async -> Bool {
         await taskStorage.isCancelled(id: id)
     }
-    
+
     /// 检查下载是否被取消（同步版本，仅用于非主线程场景）
     /// ⚠️ 不要在 @MainActor 上下文中调用此方法，会导致死锁
     nonisolated func isDownloadCancelledSync(id: String) -> Bool {
@@ -192,7 +192,7 @@ class DownloadTaskService: ObservableObject {
         semaphore.wait()
         return box.value
     }
-    
+
     /// 用于跨并发域传递可变状态的盒子
     private final class ResultBox<T>: @unchecked Sendable {
         var value: T
@@ -239,7 +239,7 @@ class DownloadTaskService: ObservableObject {
     func updateProgress(id: String, progress: Double) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         let clampedProgress = min(max(progress, 0.0), 1.0)
-        
+
         // 防抖优化：如果进度变化小于 0.5% 且不是开始/结束，跳过更新
         let currentProgress = tasks[index].progress
         let isStart = currentProgress == 0 && clampedProgress > 0
@@ -255,7 +255,7 @@ class DownloadTaskService: ObservableObject {
            now.timeIntervalSince(lastTime) < progressUpdateMinInterval {
             return
         }
-        
+
         objectWillChange.send()
         tasks[index].progress = clampedProgress
         if tasks[index].status != .paused {

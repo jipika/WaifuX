@@ -915,14 +915,17 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 下载壁纸
     func downloadWallpaper(_ wallpaper: Wallpaper) async throws {
-        // 确保下载权限
-        guard await downloadPathManager.ensureDirectoryStructure() else {
-            throw DownloadError.permissionDenied
-        }
-
         let task = downloadTaskService.addTask(wallpaper: wallpaper)
 
-        do {
+        // 将实际下载逻辑包装为可取消的 Task，并注册到 DownloadTaskService
+        let downloadTask = Task { [weak self] in
+            guard let self else { throw CancellationError() }
+
+            // 确保下载权限
+            guard await downloadPathManager.ensureDirectoryStructure() else {
+                throw DownloadError.permissionDenied
+            }
+
             let imageData = try await downloadWallpaperData(wallpaper, taskID: task.id)
 
             guard let originalURL = wallpaper.fullImageURL else {
@@ -954,8 +957,20 @@ class WallpaperViewModel: ObservableObject {
             } else {
                 throw DownloadError.writeFailed(NSError(domain: "WaifuX", code: -1, userInfo: [NSLocalizedDescriptionKey: "File not found after write"]))
             }
+        }
+
+        // 注册任务以便支持取消
+        downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
+
+        defer { downloadTaskService.unregisterDownloadTask(id: task.id) }
+
+        do {
+            try await downloadTask.value
         } catch {
-            downloadTaskService.markFailed(id: task.id)
+            // 取消时不重复标记 failed（已在 cancelTask 中标记 cancelled）
+            if !(error is CancellationError) {
+                downloadTaskService.markFailed(id: task.id)
+            }
             throw error
         }
     }
