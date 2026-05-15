@@ -178,7 +178,7 @@ struct WallpaperExploreContentView: View {
             )
         }
     }
-    
+
     private func scrollContent(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
         return ZStack {
             if visibleWallpapers.isEmpty {
@@ -275,7 +275,7 @@ struct WallpaperExploreContentView: View {
         .zIndex(100)
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
-    
+
     private var bottomLoadingOverlay: some View {
         VStack {
             Spacer()
@@ -295,7 +295,7 @@ struct WallpaperExploreContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
-    
+
     private var alertOverlay: some View {
         EmptyView()
             .alert(t("apiKeyRequired"), isPresented: $showAPIKeyAlert) {
@@ -315,7 +315,7 @@ struct WallpaperExploreContentView: View {
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
-    
+
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -356,7 +356,7 @@ struct WallpaperExploreContentView: View {
                     message: "点击这里切换壁纸源"
                 )
             }
-            
+
             Text(t("wallpaperLibrary"))
                 .font(.system(size: 32, weight: .bold, design: .serif))
                 .tracking(-0.5)
@@ -364,7 +364,7 @@ struct WallpaperExploreContentView: View {
                 .lineLimit(1)
         }
     }
-    
+
     private var searchRow: some View {
         HStack(spacing: 12) {
             ExploreSearchBar(
@@ -381,7 +381,7 @@ struct WallpaperExploreContentView: View {
                     }
                 }
             )
-            
+
             WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
                 showWallpaperURLSheet = true
             }
@@ -395,7 +395,7 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var hotTagsRow: some View {
         if viewModel.currentSourceSupportsRatioFilter {
@@ -403,7 +403,7 @@ struct WallpaperExploreContentView: View {
                 Text(t("hotWallpaper") + ":")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(arcSettings.secondaryText.opacity(0.65))
-                
+
                 ForEach(HotTag.allCases) { tag in
                     TagChip(
                         title: tag.title,
@@ -414,7 +414,7 @@ struct WallpaperExploreContentView: View {
                         }
                     }
                 }
-                
+
                 ratioMenu
             }
         }
@@ -441,7 +441,7 @@ struct WallpaperExploreContentView: View {
                     name: t("tab.all"),
                     isSelected: fourKCategory == nil
                 ) { fourKCategory = nil; handle4KCategoryChange() }
-                
+
                 ForEach(FourKWallpapersParser.categories) { cat in
                     FourKCategoryChip(
                         category: cat,
@@ -463,7 +463,7 @@ struct WallpaperExploreContentView: View {
     private var filterSection: some View {
         let hasNSFW = viewModel.currentSourceSupportsNSFW
         let hasColor = viewModel.currentSourceSupportsColorFilter
-        
+
         if hasNSFW || hasColor {
             VStack(alignment: .leading, spacing: 16) {
                 if hasNSFW { purityFilter }
@@ -471,7 +471,7 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var purityFilter: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -492,7 +492,7 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var colorFilter: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -511,7 +511,7 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var activeFiltersSection: some View {
         let chips = activeFilterChips
@@ -538,7 +538,7 @@ struct WallpaperExploreContentView: View {
     private func contentSection(config: WallpaperGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             contentHeader
-            
+
             if viewModel.isLoading && visibleWallpapers.isEmpty {
                 WallpaperGridSkeleton(contentWidth: config.contentWidth)
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
@@ -551,15 +551,15 @@ struct WallpaperExploreContentView: View {
             }
         }
     }
-    
+
     private var contentHeader: some View {
         HStack(alignment: .center) {
             Text("\(visibleWallpapers.count) \(t("wallpaperCount"))")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(arcSettings.secondaryText.opacity(0.66))
-            
+
             Spacer()
-            
+
             if viewModel.currentSourceSupportsWallhavenSorting {
                 SortMenu(options: SortingOption.allCases, selected: $viewModel.sortingOption, tint: exploreAtmosphere.tint.primary)
             } else {
@@ -789,7 +789,7 @@ struct WallpaperExploreContentView: View {
         }
         .frame(height: 1)
     }
-    
+
     private var ratioMenu: some View {
         Menu {
             Button(t("allRatios")) { viewModel.selectedRatios = []; reloadData() }
@@ -825,7 +825,7 @@ struct WallpaperExploreContentView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
     }
-    
+
     // MARK: - Actions
 
     private func handleAppear() {
@@ -858,7 +858,7 @@ struct WallpaperExploreContentView: View {
             syncAtmosphereIfNeeded()
         }
     }
-    
+
     // 移除递归加载逻辑，保留触底分页保底机制
 
     private func handleWallpaperURLSubmit() {
@@ -1136,7 +1136,7 @@ private struct WallpaperGridConfig {
     let cardWidth: CGFloat
     let contentWidth: CGFloat
     let gridItems: [GridItem]
-    
+
     init(contentWidth: CGFloat) {
         self.contentWidth = contentWidth
         self.columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
@@ -1147,7 +1147,7 @@ private struct WallpaperGridConfig {
         // 使用 flexible 而非 fixed，让卡片自然布局
         self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
-    
+
     // 移除强制高度计算方法
 }
 
@@ -1244,14 +1244,14 @@ private extension WallpaperExploreContentView {
         if !viewModel.currentSourceSupportsNSFW { return [.sfw] }
         return viewModel.apiKeyConfigured ? Array(PurityFilter.allCases) : [.sfw, .sketchy]
     }
-    
+
     var quickColorPresets: [WallhavenAPI.ColorPreset] {
         [
             "990000", "ea4c88", "993399", "0066cc", "0099cc", "66cccc",
             "669900", "999900", "ffff00", "ff9900", "ff6600", "424153"
         ].compactMap { WallhavenAPI.colorPreset(for: $0) }
     }
-    
+
     var activeFilterChips: [FilterChipData] {
         var chips: [FilterChipData] = []
         if viewModel.currentSourceSupportsNSFW {
@@ -1265,7 +1265,7 @@ private extension WallpaperExploreContentView {
         }
         return chips
     }
-    
+
     func isPuritySelected(_ filter: PurityFilter) -> Bool {
         switch filter {
         case .sfw: return viewModel.puritySFW
@@ -1273,7 +1273,7 @@ private extension WallpaperExploreContentView {
         case .nsfw: return viewModel.purityNSFW
         }
     }
-    
+
     func togglePurity(_ filter: PurityFilter) {
         // Sketchy 和 NSFW 需要 API Key
         if filter.requiresAPIKey && !viewModel.apiKeyConfigured {
@@ -1290,12 +1290,12 @@ private extension WallpaperExploreContentView {
         }
         reloadData()
     }
-    
+
     func toggleColor(_ preset: WallhavenAPI.ColorPreset) {
         viewModel.selectedColors = (viewModel.selectedColors.first == preset.hex) ? [] : [preset.hex]
         reloadData()
     }
-    
+
     func resetServerFilters() {
         viewModel.puritySFW = true
         viewModel.puritySketchy = false
@@ -1303,7 +1303,7 @@ private extension WallpaperExploreContentView {
         viewModel.selectedColors = []
         reloadData()
     }
-    
+
     func removeFilter(_ chip: FilterChipData) {
         switch chip.kind {
         case .purity(let purity):
@@ -1342,7 +1342,7 @@ private struct ColorChip: View {
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -1379,7 +1379,7 @@ private struct ActiveFilterChip: View {
     let chip: FilterChipData
     let onRemove: () -> Void
     @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: onRemove) {
             HStack(spacing: 8) {
@@ -1465,9 +1465,9 @@ extension SortingOption: CaseIterable, SortOptionProtocol, Identifiable {
     public static var allCases: [SortingOption] {
         [.toplist, .dateAdded, .favorites, .views, .random, .relevance]
     }
-    
+
     public var id: String { rawValue }
-    
+
     public var title: String {
         switch self {
         case .dateAdded: return t("sort.latest")
@@ -1478,7 +1478,7 @@ extension SortingOption: CaseIterable, SortOptionProtocol, Identifiable {
         case .relevance: return t("sort.relevance")
         }
     }
-    
+
     public var menuTitle: String { title }
 }
 

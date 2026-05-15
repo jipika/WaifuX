@@ -42,6 +42,7 @@ struct WallpaperDetailSheet: View {
     @State private var preloadTask: Task<Void, Never>?
     /// 分享面板相对定位用（与分享按钮同几何的锚定 `NSView`）
     @State private var sharePickerAnchorView: NSView?
+    @State private var showCopyLinkToast = false
 
     private var prefetchNamespace: String {
         "wallpaper-detail-\(initialWallpaper.id)"
@@ -51,7 +52,7 @@ struct WallpaperDetailSheet: View {
     private var isLocalFile: Bool {
         wallpaper.id.hasPrefix("local_")
     }
-    
+
     /// 是否已下载（包括网络下载和本地文件）
     private var isAlreadyDownloaded: Bool {
         isLocalFile || viewModel.isDownloaded(wallpaper)
@@ -86,7 +87,7 @@ struct WallpaperDetailSheet: View {
                             .animation(.easeInOut(duration: 0.3))
                         )
                 }
-                
+
                 // 图片加载动画
                 if !isImageLoaded && !isNavigating {
                     LoadingOverlayView()
@@ -201,6 +202,23 @@ struct WallpaperDetailSheet: View {
                         .padding(.trailing, 28)
                         .padding(.bottom, 28)
                     }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showCopyLinkToast {
+                    Text("链接已复制")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
+                        )
+                        .padding(.bottom, 48)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
                 }
             }
         }
@@ -626,6 +644,11 @@ struct WallpaperDetailSheet: View {
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(wallpaper.url, forType: .string)
+                    showCopyLinkToast = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        showCopyLinkToast = false
+                    }
                 } label: {
                     DetailSheetCircleIconLabel(systemName: "link")
                         .detailGlassCircleChrome()
@@ -757,7 +780,7 @@ struct WallpaperDetailSheet: View {
             .foregroundStyle(.white.opacity(0.56))
             .tracking(2)
     }
-    
+
     // 紧凑的信息项
     private func compactFact(label: String, value: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
@@ -765,13 +788,13 @@ struct WallpaperDetailSheet: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.45))
                 .frame(width: 70, alignment: .leading)
-            
+
             Text(value)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
-            
+
             Spacer(minLength: 0)
         }
     }
@@ -1007,7 +1030,7 @@ struct WallpaperDetailSheet: View {
             AppLogger.debug(.download, "跳过下载：本地文件", metadata: ["id": wallpaper.id])
             return
         }
-        
+
         AppLogger.info(.download, "开始下载壁纸",
             metadata: ["id": wallpaper.id, "分辨率": wallpaper.resolution, "大小": wallpaper.fileSize.map { "\($0)B" } ?? "未知"])
         isDownloading = true
@@ -1083,7 +1106,7 @@ struct WallpaperDetailSheet: View {
             }
         }
     }
-    
+
     /// 获取壁纸图片 URL（本地/已下载文件直接返回，未下载的网络壁纸才下载到临时目录）
     private func getWallpaperImageURL() async throws -> URL {
         // 本地壁纸：直接使用本地文件路径
@@ -1094,13 +1117,13 @@ struct WallpaperDetailSheet: View {
             print("[WallpaperDetailSheet] Using local wallpaper file: \(localURL.path)")
             return localURL
         }
-        
+
         // 已下载的网络壁纸：直接使用本地已下载的文件，避免重复联网下载
         if let downloadedURL = viewModel.localFileURLIfAvailable(for: wallpaper) {
             print("[WallpaperDetailSheet] Using downloaded wallpaper file: \(downloadedURL.path)")
             return downloadedURL
         }
-        
+
         // 未下载的网络壁纸：下载到临时目录
         let imageData = try await viewModel.downloadWallpaperData(wallpaper)
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(wallpaper.id).jpg")
@@ -1320,12 +1343,12 @@ struct WallpaperDetailSheet: View {
 private struct LoadingOverlayView: View {
     @State private var isAnimating = false
     @State private var rotationAngle: Double = 0
-    
+
     var body: some View {
         ZStack {
             Color(hex: "0A0A0C")
                 .ignoresSafeArea()
-            
+
             VStack(spacing: 24) {
                 // 加载指示器
                 ZStack {
@@ -1344,7 +1367,7 @@ private struct LoadingOverlayView: View {
                             lineWidth: 3
                         )
                         .frame(width: 48, height: 48)
-                    
+
                     // 旋转的弧线
                     Circle()
                         .trim(from: 0, to: 0.7)
@@ -1368,7 +1391,7 @@ private struct LoadingOverlayView: View {
                         rotationAngle = 360
                     }
                 }
-                
+
                 // 加载文本
                 Text(t("loading"))
                     .font(.system(size: 14, weight: .medium))

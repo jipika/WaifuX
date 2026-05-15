@@ -44,6 +44,7 @@ struct MediaDetailSheet: View {
     /// 烘焙并应用 MP4 成功后短暂显示在底部状态行（约 4s）
     @State private var sceneBakeStatusFlash: String?
     @State private var sharePickerAnchorView: NSView?
+    @State private var showCopyLinkToast = false
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -72,12 +73,12 @@ struct MediaDetailSheet: View {
     private var navigationItems: [MediaItem] {
         contextItems ?? viewModel.items
     }
-    
+
     // MARK: - 本地文件检测
     private var isLocalFile: Bool {
         resolvedItem.id.hasPrefix("local_") || resolvedItem.sourceName == t("local")
     }
-    
+
     /// 是否已下载（包括网络下载和本地文件）
     private var isAlreadyDownloaded: Bool {
         isLocalFile || viewModel.isDownloaded(resolvedItem)
@@ -119,7 +120,7 @@ struct MediaDetailSheet: View {
                             .animation(.easeInOut(duration: 0.3))
                         )
                 }
-                
+
                 // 媒体加载动画
                 if !isMediaLoaded && !isNavigating {
                     LoadingOverlayView()
@@ -238,6 +239,23 @@ struct MediaDetailSheet: View {
                         .padding(.trailing, 28)
                         .padding(.bottom, 28)
                     }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showCopyLinkToast {
+                    Text("链接已复制")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
+                        )
+                        .padding(.bottom, 48)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
                 }
             }
         }
@@ -792,6 +810,11 @@ struct MediaDetailSheet: View {
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(resolvedItem.pageURL.absoluteString, forType: .string)
+                    showCopyLinkToast = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        showCopyLinkToast = false
+                    }
                 } label: {
                     DetailSheetCircleIconLabel(systemName: "link")
                         .detailGlassCircleChrome()
@@ -994,12 +1017,12 @@ struct MediaDetailSheet: View {
     private var mediaTitle: String {
         resolvedItem.title
     }
-    
+
     private func formatCount(_ count: Int) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.maximumFractionDigits = 1
-        
+
         if count >= 1_000_000 {
             return String(format: "%.1fM", Double(count) / 1_000_000)
         } else if count >= 1_000 {
@@ -1007,7 +1030,7 @@ struct MediaDetailSheet: View {
         }
         return formatter.string(from: NSNumber(value: count)) ?? "\(count)"
     }
-    
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let mb = Double(bytes) / 1024 / 1024
         if mb >= 1024 {
@@ -1015,7 +1038,7 @@ struct MediaDetailSheet: View {
         }
         return String(format: "%.1f MB", mb)
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -1318,7 +1341,7 @@ struct MediaDetailSheet: View {
         // Wallpaper Engine 类内容：Workshop 与本地入库（同一套路径解析）
         if let localURL = findLocalWorkshopFile(for: resolvedItem) {
             let contentRoot = sceneEngineContentRoot(for: localURL)
-            
+
             // 检查并自动下载 Workshop 依赖项（预设壁纸的母壁纸）
             if let dependencyID = readWorkshopDependencyID(from: contentRoot),
                !isWorkshopDependencyDownloaded(dependencyID: dependencyID) {
@@ -1360,7 +1383,7 @@ struct MediaDetailSheet: View {
                 }
                 return
             }
-            
+
             // 没有依赖或已下载，直接设置
             applyWorkshopWallpaperFromLocalURL(localURL)
             return
@@ -1416,7 +1439,7 @@ struct MediaDetailSheet: View {
     }
 
     // MARK: - Workshop 依赖处理
-    
+
     /// 从 project.json 读取 dependency ID
     private func readWorkshopDependencyID(from contentDir: URL) -> String? {
         let projectURL = contentDir.appendingPathComponent("project.json")
@@ -1426,18 +1449,18 @@ struct MediaDetailSheet: View {
         }
         return json["dependency"] as? String
     }
-    
+
     /// 检查 Workshop 依赖项是否已下载到本地
     private func isWorkshopDependencyDownloaded(dependencyID: String) -> Bool {
         let fm = FileManager.default
         let mediaFolder = DownloadPathManager.shared.mediaFolderURL
-        
+
         // 1. 检查 MediaLibrary 中是否有记录
         let depItemID = "workshop_\(dependencyID)"
         if MediaLibraryService.shared.downloadedItems.contains(where: { $0.item.id == depItemID }) {
             return true
         }
-        
+
         // 2. 检查本地目录是否存在（包括嵌套路径）
         let depPaths = [
             mediaFolder.appendingPathComponent("workshop_\(dependencyID)/steamapps/workshop/content/431960/\(dependencyID)"),
@@ -1454,7 +1477,7 @@ struct MediaDetailSheet: View {
         }
         return false
     }
-    
+
     /// 下载 Workshop 依赖项
     private func downloadWorkshopDependency(dependencyID: String) async throws {
         let localURL = try await WorkshopService.shared.downloadWorkshopItem(
@@ -1466,7 +1489,7 @@ struct MediaDetailSheet: View {
         )
         print("[DependencyDownload] \(dependencyID) completed at \(localURL.path)")
     }
-    
+
     /// 从本地 URL 设置 Workshop 壁纸（提取原 setAsDesktopWallpaper 中的设置逻辑）
     private func applyWorkshopWallpaperFromLocalURL(_ localURL: URL) {
         let ext = localURL.pathExtension.lowercased()
@@ -1474,19 +1497,19 @@ struct MediaDetailSheet: View {
         let isImageFile = ["jpg", "jpeg", "png", "bmp", "gif", "webp"].contains(ext)
         var isDirectory: ObjCBool = false
         FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
-        
+
         if isVideoFile && !isDirectory.boolValue {
             print("[MediaDetailSheet] WE video file, using VideoWallpaperManager: \(localURL.path)")
             applyWorkshopVideoWallpaper(videoURL: localURL, preferPosterFrameFromVideo: true)
             return
         }
-        
+
         // pickWorkshopPlayableFile 已识别为 .image 并返回了图片文件路径 → 直接处理，不走 sceneEngineContentRoot
         if isImageFile && !isDirectory.boolValue {
             applyWorkshopImageWallpaper(imageURL: localURL)
             return
         }
-        
+
         let contentRoot = sceneEngineContentRoot(for: localURL)
 
         // Preset 类型预处理：如果 project.json 含 preset 字段，生成 HTML 轮播页面
@@ -1498,7 +1521,7 @@ struct MediaDetailSheet: View {
             showError = true
             return
         }
-        
+
         switch contentType {
         case .scene:
             applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
@@ -1834,7 +1857,7 @@ struct MediaDetailSheet: View {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .unknown
         }
-        
+
         // 1. 优先读取明确的 type 字段
         if let typeString = json["type"] as? String {
             let type = typeString.lowercased()
@@ -1845,15 +1868,15 @@ struct MediaDetailSheet: View {
             default: return .unsupported(typeString)
             }
         }
-        
+
         // 2. 启发式推断（type 缺失时常见于预设包/依赖型壁纸）
         return inferWorkshopContentType(from: json, contentDir: contentDir)
     }
-    
+
     /// 当 project.json 缺少 type 字段时的启发式类型推断
     private func inferWorkshopContentType(from json: [String: Any], contentDir: URL) -> WorkshopContentType {
         let fm = FileManager.default
-        
+
         // 1. 有 background 指向明确的媒体文件 → 优先按实际媒体类型识别（不应被 dependency/preset 覆盖为 web）
         if let background = json["background"] as? String {
             let bgPath = contentDir.appendingPathComponent(background).path
@@ -1867,29 +1890,29 @@ struct MediaDetailSheet: View {
                 }
             }
         }
-        
+
         // 2. 有 dependency + preset → Web 预设
         if json["dependency"] != nil && json["preset"] != nil {
             return .web
         }
-        
+
         // 目录下有 scene.pkg 或 scene.json → scene
         if fm.fileExists(atPath: contentDir.appendingPathComponent("scene.pkg").path) ||
            fm.fileExists(atPath: contentDir.appendingPathComponent("scene.json").path) {
             return .scene
         }
-        
+
         // 目录下有视频文件 → video
         let rootContents = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil)
         if rootContents?.contains(where: { ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased()) }) == true {
             return .video
         }
-        
+
         // 有 dependency → 尝试 web
         if json["dependency"] != nil {
             return .web
         }
-        
+
         return .unknown
     }
 
@@ -2365,12 +2388,12 @@ struct MediaDetailSheet: View {
 private struct LoadingOverlayView: View {
     @State private var isAnimating = false
     @State private var rotationAngle: Double = 0
-    
+
     var body: some View {
         ZStack {
             Color(hex: "0A0A0C")
                 .ignoresSafeArea()
-            
+
             VStack(spacing: 24) {
                 // 加载指示器
                 ZStack {
@@ -2389,7 +2412,7 @@ private struct LoadingOverlayView: View {
                             lineWidth: 3
                         )
                         .frame(width: 48, height: 48)
-                    
+
                     // 旋转的弧线
                     Circle()
                         .trim(from: 0, to: 0.7)
@@ -2413,7 +2436,7 @@ private struct LoadingOverlayView: View {
                         rotationAngle = 360
                     }
                 }
-                
+
                 // 加载文本
                 Text(t("loading"))
                     .font(.system(size: 14, weight: .medium))

@@ -17,7 +17,7 @@ class WallpaperViewModel: ObservableObject {
     @Published var searchQuery = ""
     @Published var selectedPurity: String = "sfw"  // sfw, sketchy, nsfw
     @Published var selectedCategory = "111" // 所有分类
-    
+
     // MARK: - Network State
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
@@ -33,7 +33,7 @@ class WallpaperViewModel: ObservableObject {
     private var preloadTask: Task<Void, Never>?
     private var preloadedWallpapers: [Wallpaper] = []
     private var preloadedPage: Int = 0
-    
+
     // MARK: - 防抖搜索
     private var debounceTask: Task<Void, Never>?
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
@@ -91,15 +91,15 @@ class WallpaperViewModel: ObservableObject {
     // API Key - 使用 Keychain 安全存储（优化：内存缓存 + 异步访问）
     private let apiKeyService = "com.waifux.wallhaven.apikey"
     private let apiKeyAccount = "wallhaven_api_key"
-    
+
     // 内存缓存，避免重复 Keychain 访问
     @Published private var cachedAPIKey: String?
     private var apiKeyLoaded = false
-    
+
     /// ⚠️ 启动时缓存的 effectiveAPIKey（从 UserDefaults 延迟读取，避免 _CFXPreferences 栈溢出）
     /// 使用 static 保证所有实例共享（必须在 AppDelegate 中调用 restoreAPIKeyState() 初始化）
     private static var _launchCachedEffectiveKey: String? = nil
-    
+
     /// 异步加载 API Key（在后台线程执行 Keychain 操作）
     private func loadAPIKeyAsync() async -> String? {
         let query: [String: Any] = [
@@ -109,11 +109,11 @@ class WallpaperViewModel: ObservableObject {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        
+
         return await Task.detached(priority: .utility) {
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
-            
+
             guard status == errSecSuccess,
                   let data = result as? Data,
                   let key = String(data: data, encoding: .utf8) else {
@@ -122,7 +122,7 @@ class WallpaperViewModel: ObservableObject {
             return key.trimmingCharacters(in: .whitespacesAndNewlines)
         }.value
     }
-    
+
     /// 异步保存 API Key
     private func saveAPIKeyAsync(_ value: String) async {
         let query: [String: Any] = [
@@ -130,25 +130,25 @@ class WallpaperViewModel: ObservableObject {
             kSecAttrService as String: apiKeyService,
             kSecAttrAccount as String: apiKeyAccount
         ]
-        
+
         await Task.detached(priority: .utility) {
             // 先删除已存在的项
             SecItemDelete(query as CFDictionary)
-            
+
             // 添加新值
             guard !value.isEmpty else { return }
-            
+
             let attributes: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: self.apiKeyService,
                 kSecAttrAccount as String: self.apiKeyAccount,
                 kSecValueData as String: value.data(using: .utf8)!
             ]
-            
+
             SecItemAdd(attributes as CFDictionary, nil)
         }.value
     }
-    
+
     /// 获取 API Key（优先从内存缓存读取）
     var apiKey: String {
         get {
@@ -172,7 +172,7 @@ class WallpaperViewModel: ObservableObject {
             }
         }
     }
-    
+
     /// 异步加载 API Key 到内存缓存
     @MainActor
     private func loadAPIKeyIfNeeded() async {
@@ -180,7 +180,7 @@ class WallpaperViewModel: ObservableObject {
         cachedAPIKey = await loadAPIKeyAsync()
         apiKeyLoaded = true
     }
-    
+
     private var normalizedAPIKey: String? {
         // 使用统一的有效 API Key 检查逻辑
         effectiveAPIKey
@@ -219,10 +219,10 @@ class WallpaperViewModel: ObservableObject {
             // 不额外 `objectWillChange.send()`：`cachedAllLocalWallpapers` 与 `libraryContentRevision` 的 @Published 已会触发依赖视图更新
         }
         .store(in: &cancellables)
-        
+
         // 初始重建一次缓存
         rebuildLocalWallpaperCache()
-        
+
         // 监听网络状态变化
         networkMonitor.$status
             .receive(on: DispatchQueue.main)
@@ -234,10 +234,10 @@ class WallpaperViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
-        
+
         // 启动网络监测
         networkMonitor.startMonitoring()
-        
+
         // 设置网络监测器到网络服务
         Task {
             await networkService.setNetworkMonitor(networkMonitor)
@@ -266,20 +266,20 @@ class WallpaperViewModel: ObservableObject {
         if apiKeyLoaded, let cached = cachedAPIKey, !cached.isEmpty { return cached }
         return nil
     }
-    
+
     /// ⚠️ 延迟恢复 API Key 状态（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     /// 从 UserDefaults 安全地读取 API Key 并缓存到内存中（static，所有实例共享）
     func restoreAPIKeyState() {
         let settingsKey = UserDefaults.standard.string(forKey: "wallhaven_api_key")?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         Self._launchCachedEffectiveKey = settingsKey.isEmpty ? nil : settingsKey
-        
+
         // 同步加载 Keychain 到内存缓存
         Task {
             await loadAPIKeyIfNeeded()
         }
     }
-    
+
     /// 供外部（如 SettingsViewModel）调用以实时更新 API Key 缓存
     static func updateSharedAPIKeyCache(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,25 +294,25 @@ class WallpaperViewModel: ObservableObject {
     var downloadedWallpapers: [WallpaperDownloadRecord] {
         wallpaperLibrary.downloadedWallpapers
     }
-    
+
     /// 本地扫描的壁纸（用户手动复制到目录的文件）
     var localWallpapers: [LocalWallpaperItem] {
         localScanner.getLocalWallpapers()
     }
-    
+
     /// 所有可显示的本地壁纸（下载记录 + 扫描到的本地文件）
     /// 用于库页面显示。现在返回内存缓存，避免重复文件 I/O。
     var allLocalWallpapers: [UnifiedLocalWallpaper] {
         cachedAllLocalWallpapers
     }
-    
+
     /// 重建本地壁纸缓存（在 downloadRecords / favoriteRecords / scanRevision 变化时自动调用）
     private func rebuildLocalWallpaperCache() {
         let downloads = wallpaperLibrary.downloadedWallpapers
         let locals = localScanner.getLocalWallpapers()
-        
+
         var result: [UnifiedLocalWallpaper] = []
-        
+
         // 添加下载记录
         for record in downloads {
             result.append(UnifiedLocalWallpaper(
@@ -324,7 +324,7 @@ class WallpaperViewModel: ObservableObject {
                 isLocalFile: false
             ))
         }
-        
+
         // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
         let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
             .map { ($0 as NSString).standardizingPath as String }
@@ -339,7 +339,7 @@ class WallpaperViewModel: ObservableObject {
                 isLocalFile: true
             ))
         }
-        
+
         // 按下载/创建时间排序
         cachedAllLocalWallpapers = result.sorted { a, b in
             let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601($0) } ?? Date.distantPast
@@ -347,7 +347,7 @@ class WallpaperViewModel: ObservableObject {
             return dateA > dateB
         }
     }
-    
+
     /// 显式清理无效下载记录（文件不存在的记录），不应在 computed property 中自动调用
     func cleanupInvalidDownloadRecords() {
         wallpaperLibrary.cleanupInvalidDownloadRecords()
@@ -369,7 +369,7 @@ class WallpaperViewModel: ObservableObject {
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
         wallpaperLibrary.isDownloaded(wallpaper)
     }
-    
+
     /// 获取已下载壁纸的本地文件 URL（如果存在）
     func localFileURLIfAvailable(for wallpaper: Wallpaper) -> URL? {
         wallpaperLibrary.localFileURLIfAvailable(for: wallpaper)
@@ -460,16 +460,16 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 防抖搜索
     func searchDebounced() {
         debounceTask?.cancel()
-        
+
         debounceTask = Task { [weak self] in
             guard let self = self else { return }
-            
+
             // 等待防抖间隔
             try? await Task.sleep(nanoseconds: UInt64(self.debounceInterval * 1_000_000_000))
-            
+
             // 检查是否被取消
             guard !Task.isCancelled else { return }
-            
+
             await self.search()
         }
     }
@@ -509,13 +509,13 @@ class WallpaperViewModel: ObservableObject {
                 try Task.checkCancellation()
 
                 currentRandomSeed = sortingOption == .random ? results.meta.seed : nil
-                
+
                 // 先更新壁纸库（后台操作）
                 wallpaperLibrary.upsertBatch(results.data)
-                
+
                 // 一次性替换 wallpapers，避免 NSCollectionView 多次收缩-膨胀导致的抖动
                 wallpapers = results.data
-                
+
                 hasMorePages = 1 < results.meta.lastPage
 
                 if results.data.isEmpty {
@@ -576,10 +576,10 @@ class WallpaperViewModel: ObservableObject {
 
             do {
                 try Task.checkCancellation()
-                
+
                 let nextPage = currentPage + 1
                 let results: WallpaperSearchResponse
-                
+
                 // 检查是否有预加载的数据
                 if preloadedPage == nextPage && !preloadedWallpapers.isEmpty {
                     results = WallpaperSearchResponse(
@@ -614,7 +614,7 @@ class WallpaperViewModel: ObservableObject {
 
                 // 预加载新加载的图片
                 preloadImages(for: Array(appended.prefix(4)))
-                
+
                 // 预加载下一页数据
                 if hasMorePages {
                     triggerPreloadNextPage()
@@ -630,25 +630,25 @@ class WallpaperViewModel: ObservableObject {
 
         await loadMoreTask?.value
     }
-    
+
     // MARK: - 预加载下一页
     private func triggerPreloadNextPage() {
         preloadTask?.cancel()
-        
+
         let nextPageToPreload = currentPage + 1
         let currentQuery = searchQuery
-        
+
         preloadTask = Task(priority: .low) {
             // 延迟一下再开始预加载，避免影响当前页的图片加载
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            
+
             guard !Task.isCancelled else { return }
-            
+
             do {
                 let results = try await fetchWallpapers(query: currentQuery, page: nextPageToPreload)
-                
+
                 guard !Task.isCancelled else { return }
-                
+
                 // 存储预加载的数据
                 preloadedPage = nextPageToPreload
                 preloadedWallpapers = results.data
@@ -745,10 +745,10 @@ class WallpaperViewModel: ObservableObject {
 
     /// Wallhaven 请求最大重试次数（⚠️ VM 层不再重试，交给 NetworkService 统一重试）
     private let maxWallhavenRetries = 0
-    
+
     private func fetchWallpapers(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
         let sourceManager = WallpaperSourceManager.shared
-        
+
         // 根据当前活跃源决定从哪个数据源获取
         // ⚠️ 注意：运行时不再自动切换数据源，切换只在应用启动时的健康检查中决定
         switch sourceManager.activeSource {
@@ -758,7 +758,7 @@ class WallpaperViewModel: ObservableObject {
             return try await fetchFromFallbackSource(.fourKWallpapers, parameters: parameters)
         }
     }
-    
+
     private func fetchFromWallhaven(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
         guard let url = WallhavenAPI.url(for: .search(parameters)) else {
             throw NetworkError.invalidResponse
@@ -801,7 +801,7 @@ class WallpaperViewModel: ObservableObject {
                 } else {
                     categorySlug = nil
                 }
-                
+
                 // 决定使用 Popular 还是 Latest URL
                 let usePopular: Bool
                 switch selected4KSorting {
@@ -919,7 +919,7 @@ class WallpaperViewModel: ObservableObject {
         guard await downloadPathManager.ensureDirectoryStructure() else {
             throw DownloadError.permissionDenied
         }
-        
+
         let task = downloadTaskService.addTask(wallpaper: wallpaper)
 
         do {
@@ -946,7 +946,7 @@ class WallpaperViewModel: ObservableObject {
 
             // 写入文件
             try imageData.write(to: fileURL)
-            
+
             // 验证文件是否成功写入
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
@@ -991,7 +991,7 @@ class WallpaperViewModel: ObservableObject {
         guard let downloadURL else {
             throw NetworkError.invalidResponse
         }
-        
+
         // 本地文件：直接读取数据
         if downloadURL.isFileURL {
             guard FileManager.default.fileExists(atPath: downloadURL.path) else {
@@ -1045,7 +1045,7 @@ class WallpaperViewModel: ObservableObject {
         // 更新静态壁纸颗粒蒙层（独立窗口，不受壁纸切换影响）
         StaticWallpaperGrainManager.shared.updateOverlay()
     }
-    
+
     // MARK: - 设置壁纸到指定屏幕
     /// - Note: macOS 的锁屏壁纸即桌面壁纸，没有独立的锁屏壁纸 API。
     ///   `.lockScreen` 和 `.both` 最终都等同于设置桌面壁纸。
@@ -1161,7 +1161,7 @@ class WallpaperViewModel: ObservableObject {
     func initialLoad() async {
         // 1. 立即加载收藏（本地数据，很快）
         loadFavorites()
-        
+
         // 2. 优先加载关键数据（首屏需要的数据）
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -1171,7 +1171,7 @@ class WallpaperViewModel: ObservableObject {
                 await self.fetchFeaturedAndUpdate()
             }
         }
-        
+
         // 3. 延迟加载非关键数据（2秒后）
         Task(priority: .low) {
             try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
@@ -1217,13 +1217,13 @@ class WallpaperViewModel: ObservableObject {
             for i in stride(from: 0, to: total, by: batchSize) {
                 let end = min(i + batchSize, total)
                 let batch = Array(results[i..<end])
-                
+
                 if i == 0 {
                     featuredWallpapers = batch
                 } else {
                     featuredWallpapers.append(contentsOf: batch)
                 }
-                
+
                 if end < total {
                     await Task.yield()
                 }
@@ -1281,17 +1281,17 @@ struct UnifiedLocalWallpaper: Identifiable {
     let downloadRecord: WallpaperDownloadRecord?
     let fileURL: URL
     let isLocalFile: Bool
-    
+
     /// 标题
     var title: String {
         localItem?.title ?? "Wallpaper"
     }
-    
+
     /// 分辨率
     var resolution: String {
         wallpaper.resolution
     }
-    
+
     /// 文件大小标签
     var fileSizeLabel: String {
         if let localItem = localItem, let size = localItem.fileSize {
@@ -1300,7 +1300,7 @@ struct UnifiedLocalWallpaper: Identifiable {
         }
         return wallpaper.fileSizeLabel
     }
-    
+
     /// 创建/下载时间
     var dateLabel: String? {
         if let record = downloadRecord {

@@ -173,25 +173,25 @@ final class MediaExploreViewModel: ObservableObject {
     var downloadedItems: [MediaDownloadRecord] {
         mediaLibrary.downloadedItems
     }
-    
+
     /// 本地扫描的媒体（用户手动复制到目录的文件）
     var localMediaItems: [LocalMediaItem] {
         localScanner.getLocalMedia()
     }
-    
+
     /// 所有可显示的本地媒体（下载记录 + 扫描到的本地文件）
     /// 用于库页面显示。现在返回内存缓存，避免重复文件 I/O。
     var allLocalMedia: [UnifiedLocalMedia] {
         cachedAllLocalMedia
     }
-    
+
     /// 重建本地媒体缓存（在 downloadRecords / favoriteRecords / scanRevision 变化时自动调用）
     private func rebuildLocalMediaCache() {
         let downloads = mediaLibrary.downloadedItems
         let locals = localScanner.getLocalMedia()
-        
+
         var result: [UnifiedLocalMedia] = []
-        
+
         // 添加下载记录
         for record in downloads {
             result.append(UnifiedLocalMedia(
@@ -203,7 +203,7 @@ final class MediaExploreViewModel: ObservableObject {
                 isLocalFile: false
             ))
         }
-        
+
         // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
         let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
             .map { ($0 as NSString).standardizingPath as String }
@@ -218,7 +218,7 @@ final class MediaExploreViewModel: ObservableObject {
                 isLocalFile: true
             ))
         }
-        
+
         // 按下载/创建时间排序
         cachedAllLocalMedia = result.sorted { a, b in
             let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
@@ -226,7 +226,7 @@ final class MediaExploreViewModel: ObservableObject {
             return dateA > dateB
         }
     }
-    
+
     /// 显式清理无效下载记录（文件不存在的记录），不应在 computed property 中自动调用
     func cleanupInvalidDownloadRecords() {
         mediaLibrary.cleanupInvalidDownloadRecords()
@@ -356,7 +356,7 @@ final class MediaExploreViewModel: ObservableObject {
         guard !isLoading, !isLoadingMore, let nextPagePath else { return }
         isLoadingMore = true
 
-        defer { 
+        defer {
             isLoadingMore = false
             // 加载完成后触发预加载
             if hasMorePages {
@@ -366,7 +366,7 @@ final class MediaExploreViewModel: ObservableObject {
 
         do {
             let page: MediaListPage
-            
+
             // 检查是否有预加载的数据
             if preloadedNextPath == nextPagePath && !preloadedItems.isEmpty {
                 print("[MediaExploreViewModel] Using preloaded page")
@@ -378,7 +378,7 @@ final class MediaExploreViewModel: ObservableObject {
                 // 正常加载
                 page = try await mediaService.fetchPage(source: currentSource, pagePath: nextPagePath)
             }
-            
+
             let existingIDs = Set(items.map(\.id))
             let appended = page.items.filter { !existingIDs.contains($0.id) }
             page.items.forEach { mediaLibrary.upsert($0) }
@@ -391,26 +391,26 @@ final class MediaExploreViewModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
-    
+
     // MARK: - 预加载下一页
     private func triggerPreloadNextPage() {
         preloadTask?.cancel()
-        
+
         guard let nextPath = nextPagePath else { return }
         let source = currentSource
-        
+
         preloadTask = Task(priority: .low) {
             // 延迟一下再开始预加载
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            
+
             guard !Task.isCancelled else { return }
-            
+
             do {
                 print("[MediaExploreViewModel] Preloading next page...")
                 let page = try await mediaService.fetchPage(source: source, pagePath: nextPath)
-                
+
                 guard !Task.isCancelled else { return }
-                
+
                 // 存储预加载的数据
                 preloadedItems = page.items
                 preloadedNextPath = page.nextPagePath
@@ -741,7 +741,7 @@ final class MediaExploreViewModel: ObservableObject {
         if item.hasDetailPayload {
             return item
         }
-        
+
         // 否则加载详情
         do {
             return try await loadDetail(for: item)
@@ -1076,10 +1076,10 @@ final class MediaExploreViewModel: ObservableObject {
                         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                         print("[MediaExploreViewModel] Created directory: \(directory.path)")
                     }
-                    
+
                     let cachedData = try Data(contentsOf: cachedURL)
                     try cachedData.write(to: fileURL, options: .atomic)
-                    
+
                     // 验证文件是否成功写入
                     if FileManager.default.fileExists(atPath: fileURL.path) {
                         print("[MediaExploreViewModel] ✅ File saved successfully: \(fileURL.path)")
@@ -1157,7 +1157,7 @@ final class MediaExploreViewModel: ObservableObject {
     func removeRecentItems(withIDs ids: Set<String>) {
         mediaLibrary.removeRecentItems(withIDs: ids)
     }
-    
+
     /// 清空所有项目（用于数据源切换时）
     func clearItems() {
         cancelDetailPrefetchQueue()
@@ -1299,7 +1299,7 @@ final class MediaExploreViewModel: ObservableObject {
         workshopCurrentResolution = resolution
         await loadWorkshopFeedInternal(query: query, tags: tags, type: type, contentLevel: contentLevel, resolution: resolution)
     }
-    
+
     /// 设置 Workshop 排序方式
     func setWorkshopSort(sortBy: WorkshopSearchParams.SortOption, days: Int? = nil) async {
         workshopSortBy = sortBy
@@ -1507,17 +1507,17 @@ struct UnifiedLocalMedia: Identifiable {
     let downloadRecord: MediaDownloadRecord?
     let fileURL: URL
     let isLocalFile: Bool
-    
+
     /// 标题
     var title: String {
         localItem?.title ?? mediaItem.title
     }
-    
+
     /// 分辨率
     var resolution: String? {
         localItem?.resolution ?? mediaItem.exactResolution
     }
-    
+
     /// 文件大小标签
     var fileSizeLabel: String? {
         localItem?.fileSizeLabel ?? downloadRecord.flatMap { _ in
@@ -1528,12 +1528,12 @@ struct UnifiedLocalMedia: Identifiable {
             }
         }
     }
-    
+
     /// 时长标签
     var durationLabel: String? {
         localItem?.durationLabel ?? mediaItem.durationLabel
     }
-    
+
     /// 创建/下载时间
     var dateLabel: String? {
         if let record = downloadRecord {
