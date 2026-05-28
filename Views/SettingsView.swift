@@ -1420,7 +1420,7 @@ private struct WorkshopSettingsTab: View {
                         Text(String(format: t("accountSaved"), username))
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
-                        Text("下次下载需要 Steam 账号的 Workshop 内容时会直接使用这组凭据。")
+                        Text("下次下载需要 Steam 账号的 Workshop 内容时会从系统钥匙串读取凭据。")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary.opacity(0.85))
                     }
@@ -1513,10 +1513,10 @@ private struct WorkshopSettingsTab: View {
                                         steamPassword = ""
                                         steamGuardCode = ""
                                         if case .available = sourceManager.steamCredentialState {
-                                            steamLoginStatusText = "账号验证成功，已保存到本机。"
+                                            steamLoginStatusText = "账号验证成功，已保存到系统钥匙串。"
                                             showLoginForm = false
                                         } else {
-                                            steamLoginStatusText = "账号验证成功，但本机保存状态未更新。可以先尝试下载，如仍提示需要登录，再重新保存一次。"
+                                            steamLoginStatusText = "账号验证成功，但钥匙串保存状态未更新。可以先尝试下载，如仍提示需要登录，再重新保存一次。"
                                         }
                                         isVerifyingSteamLogin = false
                                     }
@@ -1923,9 +1923,9 @@ private struct WorkshopSettingsTab: View {
         case .missing:
             return "当前没有检测到已保存的 SteamCMD 账号。你可以直接填写下面的表单进行验证并保存。"
         case .failure(let message):
-            return "读取本地已保存账号时发生错误：\(message)"
+            return "读取已保存账号时发生错误：\(message)"
         case .available:
-            return "本机已经保存了可用账号。如果你想换账号，可以直接在下面重新验证并覆盖保存。"
+            return "系统钥匙串已经保存了可用账号。如果你想换账号，可以直接在下面重新验证并覆盖保存。"
         }
     }
 

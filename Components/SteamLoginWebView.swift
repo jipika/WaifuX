@@ -8,7 +8,9 @@ struct SteamLoginWebView: NSViewRepresentable {
     @Binding var isLoggedIn: Bool
     @Binding var steamID: String
     @Binding var isLoading: Bool
+    @Binding var subscriptionHTMLRequestID: Int
     var onLoginSuccess: ((String) -> Void)?
+    var onSubscriptionsHTML: ((String) -> Void)?
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -26,7 +28,14 @@ struct SteamLoginWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        // 更新逻辑（如需要）
+        context.coordinator.parent = self
+        guard subscriptionHTMLRequestID > 0,
+              context.coordinator.lastHandledSubscriptionHTMLRequestID != subscriptionHTMLRequestID else {
+            return
+        }
+
+        context.coordinator.lastHandledSubscriptionHTMLRequestID = subscriptionHTMLRequestID
+        context.coordinator.loadSubscriptionsPageAndCaptureHTML(in: nsView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -36,6 +45,8 @@ struct SteamLoginWebView: NSViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: SteamLoginWebView
         private var hasDetectedLogin = false
+        fileprivate var lastHandledSubscriptionHTMLRequestID = 0
+        private var shouldCaptureSubscriptionsHTML = false
 
         init(_ parent: SteamLoginWebView) {
             self.parent = parent
@@ -50,6 +61,14 @@ struct SteamLoginWebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
+            }
+
+            // Steam's login cookies are HttpOnly, so document.cookie often cannot
+            // see them. Check the WebKit cookie store first; it works when the
+            // page is already logged in before the sheet opens.
+            extractSteamIDFromCookies(webView: webView)
+            if shouldCaptureSubscriptionsHTML {
+                captureSubscriptionsHTML(from: webView)
             }
 
             // 检查当前 URL 是否包含订阅页面
@@ -104,11 +123,7 @@ struct SteamLoginWebView: NSViewRepresentable {
                 if let regex = try? NSRegularExpression(pattern: pattern),
                    let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) {
                     let steamID = String(html[Range(match.range(at: 1), in: html)!])
-                    DispatchQueue.main.async {
-                        self.parent.steamID = steamID
-                        self.parent.isLoggedIn = true
-                        self.parent.onLoginSuccess?(steamID)
-                    }
+                    completeLogin(with: steamID)
                     return
                 }
             }
@@ -126,11 +141,7 @@ struct SteamLoginWebView: NSViewRepresentable {
                             // OpenID identity 格式：https://steamcommunity.com/openid/id/76561198000000000
                             let components = value.components(separatedBy: "/")
                             if let steamID = components.last, steamID.count == 17, steamID.allSatisfy(\.isNumber) {
-                                DispatchQueue.main.async {
-                                    self.parent.steamID = steamID
-                                    self.parent.isLoggedIn = true
-                                    self.parent.onLoginSuccess?(steamID)
-                                }
+                                completeLogin(with: steamID)
                                 return
                             }
                         }
@@ -147,33 +158,133 @@ struct SteamLoginWebView: NSViewRepresentable {
         }
 
         private func extractSteamIDFromCookies(webView: WKWebView) {
-            // 从 WKWebsiteDataStore 获取 Cookie
-            webView.configuration.websiteDataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-                for record in records {
-                    if record.displayName.contains("steamcommunity") {
-                        // 找到 Steam Cookie，但无法直接读取内容
-                        // 需要通过 JavaScript 获取
-                        webView.evaluateJavaScript("document.cookie") { result, error in
-                            if let cookieString = result as? String {
-                                // 解析 Cookie 中的 steamLoginSecure
-                                let cookies = cookieString.components(separatedBy: "; ")
-                                for cookie in cookies {
-                                    if cookie.hasPrefix("steamLoginSecure=") {
-                                        // 找到登录 Cookie，但需要 SteamID
-                                        // 从页面再次提取
-                                        webView.evaluateJavaScript("document.body.innerHTML") { htmlResult, _ in
-                                            if let html = htmlResult as? String {
-                                                self.extractSteamIDFromPage(html, webView: webView)
-                                            }
-                                        }
-                                        return
-                                    }
-                                }
-                            }
-                        }
-                        return
+            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                guard let cookie = cookies.first(where: { cookie in
+                    cookie.name == "steamLoginSecure" &&
+                    cookie.domain.contains("steamcommunity.com")
+                }) else {
+                    return
+                }
+
+                if let steamID = self.steamIDFromSteamLoginSecureCookie(cookie.value) {
+                    self.completeLogin(with: steamID)
+                } else {
+                    DispatchQueue.main.async {
+                        self.parent.isLoggedIn = true
                     }
                 }
+            }
+        }
+
+        fileprivate func loadSubscriptionsPageAndCaptureHTML(in webView: WKWebView) {
+            shouldCaptureSubscriptionsHTML = true
+            DispatchQueue.main.async {
+                self.parent.isLoading = true
+            }
+
+            let url = subscriptionsURL()
+            if let currentURL = webView.url,
+               currentURL.absoluteString == url.absoluteString {
+                webView.reload()
+            } else {
+                webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
+            }
+        }
+
+        private func subscriptionsURL() -> URL {
+            let trimmedSteamID = parent.steamID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let basePath: String
+            if trimmedSteamID.count == 17, trimmedSteamID.allSatisfy(\.isNumber) {
+                basePath = "/profiles/\(trimmedSteamID)/myworkshopfiles/"
+            } else {
+                basePath = "/myworkshopfiles/"
+            }
+
+            var components = URLComponents(string: "https://steamcommunity.com\(basePath)")!
+            components.queryItems = [
+                URLQueryItem(name: "appid", value: "431960"),
+                URLQueryItem(name: "browsefilter", value: "mysubscriptions"),
+                URLQueryItem(name: "browsesort", value: "mysubscriptions"),
+                URLQueryItem(name: "view", value: "imagewall"),
+                URLQueryItem(name: "numperpage", value: "30")
+            ]
+            return components.url!
+        }
+
+        private func captureSubscriptionsHTML(from webView: WKWebView, attempt: Int = 0) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let script = """
+                (() => {
+                  const html = document.documentElement.outerHTML;
+                  const ids = new Set();
+                  document.querySelectorAll('[id^="Subscription"]').forEach((node) => {
+                    const match = String(node.id || '').match(/^Subscription(\\d+)/);
+                    if (match) ids.add(match[1]);
+                  });
+                  document.querySelectorAll('a[href*="sharedfiles/filedetails/?id="], a[href*="filedetails/?id="]').forEach((node) => {
+                    try {
+                      const url = new URL(node.href);
+                      const id = url.searchParams.get('id');
+                      if (id) ids.add(id);
+                    } catch (_) {}
+                  });
+                  return {
+                    url: location.href,
+                    title: document.title,
+                    itemCount: ids.size,
+                    html
+                  };
+                })()
+                """
+                webView.evaluateJavaScript(script) { result, _ in
+                    let payload = result as? [String: Any]
+                    let itemCount = payload?["itemCount"] as? Int ?? 0
+                    let html = payload?["html"] as? String
+                    let url = payload?["url"] as? String ?? webView.url?.absoluteString ?? ""
+                    let title = payload?["title"] as? String ?? ""
+
+                    if itemCount == 0, attempt < 8 {
+                        print("[SteamLogin] Waiting for subscription items, attempt=\(attempt + 1), url=\(url), title=\(title)")
+                        self.captureSubscriptionsHTML(from: webView, attempt: attempt + 1)
+                        return
+                    }
+
+                    DispatchQueue.main.async {
+                        self.parent.isLoading = false
+                    }
+                    guard let html, !html.isEmpty else { return }
+                    self.shouldCaptureSubscriptionsHTML = false
+                    self.parent.onSubscriptionsHTML?(html)
+                }
+            }
+        }
+
+        private func steamIDFromSteamLoginSecureCookie(_ value: String) -> String? {
+            let decoded = value.removingPercentEncoding ?? value
+            let patterns = [
+                #"^(\d{17})(?:\|\||%7C%7C)"#,
+                #"(\d{17})"#
+            ]
+
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let match = regex.firstMatch(in: decoded, range: NSRange(decoded.startIndex..., in: decoded)),
+                      let range = Range(match.range(at: 1), in: decoded) else {
+                    continue
+                }
+                return String(decoded[range])
+            }
+
+            return nil
+        }
+
+        private func completeLogin(with steamID: String) {
+            DispatchQueue.main.async {
+                guard !self.hasDetectedLogin else { return }
+                self.hasDetectedLogin = true
+                self.parent.steamID = steamID
+                self.parent.isLoggedIn = true
+                self.parent.onLoginSuccess?(steamID)
             }
         }
     }
@@ -183,10 +294,13 @@ struct SteamLoginWebView: NSViewRepresentable {
 /// 包装 SteamLoginWebView 的 Sheet 视图
 struct SteamLoginSheet: View {
     @Binding var isPresented: Bool
+    var onSyncSubscriptions: (() -> Void)? = nil
+    var onSyncSubscriptionsHTML: ((String) -> Void)? = nil
+
     @State private var isLoggedIn = false
     @State private var steamID = ""
     @State private var isLoading = false
-    @State private var showingSyncSheet = false
+    @State private var subscriptionHTMLRequestID = 0
 
     @EnvironmentObject var workshopSourceManager: WorkshopSourceManager
 
@@ -218,11 +332,24 @@ struct SteamLoginSheet: View {
                 SteamLoginWebView(
                     isLoggedIn: $isLoggedIn,
                     steamID: $steamID,
-                    isLoading: $isLoading
+                    isLoading: $isLoading,
+                    subscriptionHTMLRequestID: $subscriptionHTMLRequestID
                 ) { id in
                     // 登录成功回调
                     workshopSourceManager.steamProfileID = id
                     workshopSourceManager.refreshStoredSteamCredentials()
+                    Task { @MainActor in
+                        await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
+                    }
+                } onSubscriptionsHTML: { html in
+                    Task { @MainActor in
+                        isPresented = false
+                        if let onSyncSubscriptionsHTML {
+                            onSyncSubscriptionsHTML(html)
+                        } else {
+                            onSyncSubscriptions?()
+                        }
+                    }
                 }
 
                 if isLoading {
@@ -256,8 +383,10 @@ struct SteamLoginSheet: View {
                     Spacer()
 
                     Button("同步订阅") {
-                        isPresented = false
-                        showingSyncSheet = true
+                        Task { @MainActor in
+                            await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
+                            subscriptionHTMLRequestID += 1
+                        }
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 13, weight: .semibold))
@@ -285,10 +414,6 @@ struct SteamLoginSheet: View {
         }
         .frame(width: 600, height: 500)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $showingSyncSheet) {
-            // 触发同步订阅
-            // 这里需要通知父组件开始同步
-        }
     }
 }
 

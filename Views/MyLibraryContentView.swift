@@ -247,14 +247,16 @@ struct MyLibraryContentView: View {
             syncSelectionSheet
         }
         .sheet(isPresented: $showSteamLoginSheet) {
-            SteamLoginSheet(isPresented: $showSteamLoginSheet)
-                .environmentObject(workshopSourceManager)
-                .onDisappear {
-                    // 登录成功后自动开始同步
-                    if workshopSourceManager.hasSteamProfileID {
-                        Task { await fetchSubscriptionList() }
-                    }
+            SteamLoginSheet(
+                isPresented: $showSteamLoginSheet,
+                onSyncSubscriptions: {
+                    Task { await fetchSubscriptionList() }
+                },
+                onSyncSubscriptionsHTML: { html in
+                    Task { await fetchSubscriptionList(fromWebViewHTML: html) }
                 }
+            )
+                .environmentObject(workshopSourceManager)
         }
     }
 
@@ -2096,6 +2098,36 @@ struct MyLibraryContentView: View {
         }
     }
 
+    private func fetchSubscriptionList(fromWebViewHTML html: String) async {
+        syncIsLoadingList = true
+        syncSelectedIDs = []
+
+        defer { syncIsLoadingList = false }
+
+        let steamID = workshopSourceManager.steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !steamID.isEmpty else {
+            showSyncProfileSheet = true
+            return
+        }
+
+        do {
+            let allItems = try await mediaViewModel.fetchSubscribedItems(fromWebViewHTML: html, steamID: steamID)
+            syncSubscribedItems = allItems
+            syncSelectedIDs = Set(allItems.map(\.id))
+            showSyncSelectionSheet = true
+        } catch {
+            syncErrorMessage = error.localizedDescription
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "获取订阅列表失败"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
     /// 下载用户勾选的订阅项
     private func downloadSelectedSubscriptions(_ items: [WorkshopWallpaper]) async {
         guard !items.isEmpty else { return }
@@ -2138,12 +2170,7 @@ struct MyLibraryContentView: View {
     @State private var showSteamLoginSheet = false
 
     private func syncSubscriptions() {
-        guard workshopSourceManager.hasSteamProfileID else {
-            // 显示 Web 登录页面而不是输入 SteamID
-            showSteamLoginSheet = true
-            return
-        }
-        Task { await fetchSubscriptionList() }
+        showSteamLoginSheet = true
     }
 
     private func makeImportedWallpaper(from fileURL: URL) -> Wallpaper {

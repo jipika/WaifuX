@@ -17,4 +17,44 @@ enum WebViewCookieSync {
             }
         }
     }
+
+    @MainActor
+    static func cookieHeader(for url: URL) async -> String {
+        let wkCookies = await allWKCookies()
+        let sharedCookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
+        let cookies = (wkCookies + sharedCookies)
+            .filter { cookie in
+                cookieMatches(cookie, url: url)
+            }
+
+        var seen = Set<String>()
+        return cookies
+            .sorted { $0.path.count > $1.path.count }
+            .compactMap { cookie in
+                let key = "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
+                guard seen.insert(key).inserted else { return nil }
+                return "\(cookie.name)=\(cookie.value)"
+            }
+            .joined(separator: "; ")
+    }
+
+    @MainActor
+    private static func allWKCookies() async -> [HTTPCookie] {
+        await withCheckedContinuation { (continuation: CheckedContinuation<[HTTPCookie], Never>) in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                continuation.resume(returning: cookies)
+            }
+        }
+    }
+
+    private static func cookieMatches(_ cookie: HTTPCookie, url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard host == domain || host.hasSuffix(".\(domain)") else { return false }
+
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        guard requestPath.hasPrefix(cookie.path) || cookie.path == "/" else { return false }
+        if cookie.isSecure && url.scheme?.lowercased() != "https" { return false }
+        return true
+    }
 }

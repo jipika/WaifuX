@@ -109,11 +109,21 @@ class WorkshopService: ObservableObject {
         }
 
         var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+        let cookieHeader = await WebViewCookieSync.cookieHeader(for: url)
+        if !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         let data = try await NetworkService.shared.fetchData(request: request)
         guard let html = String(data: data, encoding: .utf8) else {
             throw WorkshopError.apiError("无法解析 HTML 响应")
+        }
+
+        if try isSteamLoginPage(html) {
+            AppLogger.error(.media, "fetchSubscriptions returned Steam login page", metadata: ["steamID": steamID, "url": url.absoluteString])
+            throw WorkshopError.apiError("Steam Web 登录会话没有带到订阅请求，请重新点“登录 Steam”，确认页面已登录后再同步。")
         }
 
         // 先尝试从 SSR JSON 提取
@@ -247,7 +257,12 @@ class WorkshopService: ObservableObject {
         }
 
         var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+        let cookieHeader = await WebViewCookieSync.cookieHeader(for: url)
+        if !cookieHeader.isEmpty {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         let data = try await NetworkService.shared.fetchData(request: request)
         guard let html = String(data: data, encoding: .utf8) else {
@@ -280,6 +295,102 @@ class WorkshopService: ObservableObject {
             AppLogger.error(.media, "fetchSubscriptions HTML API enrichment failed", metadata: ["steamID": steamID, "error": "\(error)"])
         }
         return parsed
+    }
+
+    /// 从已经登录的 Steam WebView 页面 HTML 中解析订阅列表。
+    /// 这个路径避免 URLSession 复用 WebView Cookie 失败时把登录页误判为空订阅。
+    func parseSubscriptionsHTML(_ html: String, steamID: String) async throws -> [WorkshopWallpaper] {
+        if try isSteamLoginPage(html) {
+            throw WorkshopError.apiError("Steam Web 登录页仍未进入订阅列表，请在弹出的 Steam 页面确认已登录后再同步。")
+        }
+
+        var wallpapers = extractFromJSON(html)
+        if wallpapers.isEmpty {
+            let subscriptionIDs = extractSubscriptionIDs(from: html)
+            if !subscriptionIDs.isEmpty {
+                AppLogger.info(.media, "parseSubscriptionsHTML extracted subscription IDs", metadata: ["steamID": steamID, "count": subscriptionIDs.count])
+                wallpapers = subscriptionIDs.map { placeholderSubscriptionWallpaper(id: $0) }
+            }
+        }
+
+        if wallpapers.isEmpty {
+            let doc = try SwiftSoup.parse(html)
+            let items = try doc.select(".workshopItem, .workshopItemWrapper, [id*='sharedfiles_']")
+            wallpapers = try items.compactMap { try parseWorkshopItem($0) }
+            if wallpapers.isEmpty {
+                wallpapers = try parseModernWorkshopHTML(doc)
+            }
+        }
+
+        if wallpapers.isEmpty {
+            let doc = try SwiftSoup.parse(html)
+            let title = try doc.title()
+            let bodyText = try doc.body()?.text().prefix(300) ?? ""
+            AppLogger.warn(.media, "parseSubscriptionsHTML found no workshop items", metadata: ["steamID": steamID, "title": title, "body": bodyText])
+            throw WorkshopError.apiError("已打开 Steam 页面，但没有从当前页面解析到订阅项目。请确认页面显示的是“已订阅的物品 / My Subscriptions”，并在页面加载完成后再点底部“同步订阅”。")
+        }
+
+        do {
+            wallpapers = try await enrichWithAPIDetails(wallpapers)
+        } catch {
+            AppLogger.error(.media, "parseSubscriptionsHTML API enrichment failed", metadata: ["steamID": steamID, "error": "\(error)"])
+        }
+
+        AppLogger.info(.media, "parseSubscriptionsHTML parsed subscriptions", metadata: ["steamID": steamID, "count": wallpapers.count])
+        return wallpapers
+    }
+
+    private func extractSubscriptionIDs(from html: String) -> [String] {
+        let patterns = [
+            #"Subscription(\d{5,})"#,
+            #"sharedfiles/filedetails/\?id=(\d{5,})"#,
+            #"filedetails/\?id=(\d{5,})"#,
+            #"publishedfileid["'=:\s\\]+(\d{5,})"#,
+            #""publishedfileid"\s*:\s*"(\d{5,})""#,
+            #""publishedfileid"\s*:\s*(\d{5,})"#
+        ]
+
+        var ids: [String] = []
+        var seen = Set<String>()
+        let range = NSRange(html.startIndex..., in: html)
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            for match in regex.matches(in: html, options: [], range: range) {
+                guard match.numberOfRanges > 1,
+                      let idRange = Range(match.range(at: 1), in: html) else {
+                    continue
+                }
+
+                let id = String(html[idRange])
+                guard seen.insert(id).inserted else { continue }
+                ids.append(id)
+            }
+        }
+
+        return ids
+    }
+
+    private func placeholderSubscriptionWallpaper(id: String) -> WorkshopWallpaper {
+        WorkshopWallpaper(
+            id: id,
+            title: id,
+            description: nil,
+            previewURL: nil,
+            author: WorkshopAuthor(steamID: "", name: "Unknown", avatarURL: nil),
+            fileSize: nil,
+            fileURL: nil,
+            steamAppID: wallpaperEngineAppID,
+            subscriptions: nil,
+            favorites: nil,
+            views: nil,
+            rating: nil,
+            type: .unknown,
+            tags: [],
+            isAnimatedImage: nil,
+            createdAt: nil,
+            updatedAt: nil
+        )
     }
 
     // MARK: - Web 登录相关
@@ -330,6 +441,16 @@ class WorkshopService: ObservableObject {
             AppLogger.error(.media, "checkWebLoginStatus failed", metadata: ["steamID": steamID, "error": "\(error)"])
             return false
         }
+    }
+
+    private func isSteamLoginPage(_ html: String) throws -> Bool {
+        let doc = try SwiftSoup.parse(html)
+        let title = try doc.title()
+        let loginForm = try doc.select("form[action*='login']").first()
+        let loginRoot = try doc.select("#responsive_page_template_content script[src*='login']").first()
+        return loginForm != nil
+            || loginRoot != nil
+            || title.localizedCaseInsensitiveContains("Sign In")
     }
 
     /// 获取用户所有已订阅的壁纸（自动翻页）

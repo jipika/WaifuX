@@ -78,6 +78,13 @@ if [[ -n "$CLI_REBUILD_REASON" ]]; then
     chmod +x "$PROJECT_DIR/scripts/build-wallpaperengine-cli.sh"
     "$PROJECT_DIR/scripts/build-wallpaperengine-cli.sh"
   fi
+  # build-wallpaperengine-cli.sh uses the same temporary zip_data/zip_accessor
+  # paths as the main app and removes them on exit. Regenerate the universal
+  # objects required by the WaifuX Embed Assets build phase before archiving.
+  if [[ -f "$PROJECT_DIR/scripts/build-wallpaper-wgpu.sh" ]]; then
+    echo "🔧 恢复主 App 内嵌 assets 对象..."
+    WAIFUX_FORCE_EMBED_ASSETS=1 "$PROJECT_DIR/scripts/build-wallpaper-wgpu.sh"
+  fi
 else
   echo "🔧 使用已提交的 $CLI_BIN（跳过旧 CLI 构建）。若需重编请设 WAIFUX_FORCE_CLI_REBUILD=1"
 fi

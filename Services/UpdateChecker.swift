@@ -875,9 +875,6 @@ ditto "$APP_PATH" "$DEST_PATH"
 hdiutil detach "$MOUNT_POINT" -quiet
 rmdir "$MOUNT_POINT" 2>/dev/null || true
 
-# 移除隔离属性
-xattr -rd com.apple.quarantine "$DEST_PATH" 2>/dev/null || true
-
 # 启动新版本
 open "$DEST_PATH"
 

@@ -2117,6 +2117,7 @@ final class MediaExploreViewModel: ObservableObject {
     /// 同步已下载列表的 Workshop ID 集合
     private var downloadedWorkshopIDs: Set<String> {
         Set(mediaLibrary.downloadRecords.compactMap { record -> String? in
+            guard mediaLibrary.localFileURLIfAvailable(for: record.item) != nil else { return nil }
             guard record.id.hasPrefix("workshop_") else { return nil }
             return String(record.id.dropFirst("workshop_".count))
         })
@@ -2127,6 +2128,15 @@ final class MediaExploreViewModel: ObservableObject {
     /// - Returns: 未下载的订阅物品列表
     func fetchSubscribedItems(steamID: String) async throws -> [WorkshopWallpaper] {
         let subscribed = try await workshopService.fetchAllSubscriptions(steamID: steamID)
+        return filterUndownloadedSubscriptions(subscribed)
+    }
+
+    func fetchSubscribedItems(fromWebViewHTML html: String, steamID: String) async throws -> [WorkshopWallpaper] {
+        let subscribed = try await workshopService.parseSubscriptionsHTML(html, steamID: steamID)
+        return filterUndownloadedSubscriptions(subscribed)
+    }
+
+    private func filterUndownloadedSubscriptions(_ subscribed: [WorkshopWallpaper]) -> [WorkshopWallpaper] {
         let alreadyDownloaded = downloadedWorkshopIDs
         return subscribed.filter { !alreadyDownloaded.contains($0.id) }
     }
