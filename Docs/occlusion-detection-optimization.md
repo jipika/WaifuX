@@ -261,6 +261,18 @@ $ DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer" \
 
 ---
 
+## TODO
+
+### 后续优化
+
+| # | 内容 | 优先级 |
+|---|------|--------|
+| 1 | **AX 权限提示 UI** — 当用户开启窗口覆盖暂停但没有 AX 权限时，在 SettingsView 对应开关下方显示提示条，引导用户前往「系统设置 → 隐私与安全性 → 辅助功能」授权，从而启用事件驱动模式（~0.5s 响应）。参考 stors_wallpaper 的 `AccessibilityPermissionStatus` + `AXIsProcessTrustedWithOptions` 实现。 | 高 |
+| 2 | 修复 Space 切换边缘情况 — `handleActiveSpaceChange` 中窗口覆盖路径不依赖 `pauseWhenOtherAppForeground` / `pauseWhenFullscreenCovers` 为 true 才触发 | 中 |
+| 3 | `checkForegroundCoverage(pid:)` 参数传递 — 让 `getForegroundAppCoveredScreens()` 接受可选 pid 参数，或删除闲置参数 | 低 |
+
+---
+
 ## 相关 PR
 
 - [jipika/WaifuX#50](https://github.com/jipika/WaifuX/pull/50) — perf: 遮挡检测迁移到 AXObserver 事件驱动 + 网格采样
