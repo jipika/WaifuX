@@ -216,6 +216,7 @@
 		DB540D9F6379FDAEFB285F76 /* VideoThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */; };
 		DB8871BEB9E5BFA5DF65AA40 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9FBFD203D24AC295FEDADA9 /* StatusBarController.swift */; };
 		DBF4F63F9D69E02FB6A63BB0 /* WallpaperSchedulerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5433F5B3470D14D8CE5A3029 /* WallpaperSchedulerViewModel.swift */; };
+		DEB000000000000000000002 /* Debouncer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEB000000000000000000001 /* Debouncer.swift */; };
 		E14C8D6FB374C89B70996BEC /* SuperResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E901FF6D205414875FD5F4 /* SuperResolutionService.swift */; };
 		E2E777395B775DE3457A9092 /* ExploreAtmosphere.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97EC9C6232E75963BB2CFA0 /* ExploreAtmosphere.swift */; };
 		E3103B14290C2916CC737246 /* AnimeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AD24D6CC8E7DEC9CE467C9E /* AnimeContentView.swift */; };
@@ -465,6 +466,7 @@
 		DACDF1F5659B23034A3076C7 /* MediaCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCardView.swift; sourceTree = "<group>"; };
 		DB805E534CA1B0DF8F944037 /* Print.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Print.swift; sourceTree = "<group>"; };
 		DCB5D4A6D1AA43902CF9E13E /* PowerSourceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerSourceMonitor.swift; sourceTree = "<group>"; };
+		DEB000000000000000000001 /* Debouncer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Debouncer.swift; sourceTree = "<group>"; };
 		DDACF870010A59BA3EC37538 /* SourceRulesSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceRulesSettingsView.swift; sourceTree = "<group>"; };
 		DE340CF2EF289C67261EF588 /* AnimeDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeDetailSheet.swift; sourceTree = "<group>"; };
 		DF90DB2136AE18C3077FA9DD /* DynamicWallpaperAutoPauseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicWallpaperAutoPauseManager.swift; sourceTree = "<group>"; };
@@ -544,6 +546,7 @@
 				7CE736888A84E23833953C49 /* ArcBackgroundSettings.swift */,
 				7025EE0D111F36D9DC79675B /* ArcFrostedGlass.swift */,
 				02E3788AB0F9EC18D14604A4 /* BounceSymbolModifier.swift */,
+				DEB000000000000000000001 /* Debouncer.swift */,
 				E97EC9C6232E75963BB2CFA0 /* ExploreAtmosphere.swift */,
 				5E59748FA75E24603AC8DF96 /* ExploreGridLayout.swift */,
 				C29FB33BEC37A4DFE4E3B207 /* FileIO.swift */,
@@ -1095,6 +1098,7 @@
 				FD1B442F09B4C2465EEA06DF /* DataSourceRule.swift in Sources */,
 				7A5CA2BA6D3C63B7CB949C6C /* DesktopIconManager.swift in Sources */,
 				7BE02314734DADA1C09E6947 /* DesktopWallpaperSyncManager.swift in Sources */,
+				DEB000000000000000000002 /* Debouncer.swift in Sources */,
 				01B60DB90F73D58721413052 /* DirectoryMigrationService.swift in Sources */,
 				84DDA015EC91D1FC45D283A9 /* DisplaySelectorSheet.swift in Sources */,
 				A3A3F41F4607385F40147A9C /* DownloadError.swift in Sources */,

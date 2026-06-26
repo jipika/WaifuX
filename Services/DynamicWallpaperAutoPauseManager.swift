@@ -50,6 +50,14 @@ final class DynamicWallpaperAutoPauseManager {
     /// 主窗口收起到状态栏时会触发一次前台应用切换；这不是用户希望暂停壁纸的信号。
     private var suppressForegroundPauseUntil: Date?
 
+    // AXObserver for window tracking (event-driven coverage detection)
+    private var axObserver: AXObserver?
+    private var axObserverRunLoopSource: CFRunLoopSource?
+    private var currentAXElement: AXUIElement?
+    private let windowCoverageDebouncer = Debouncer(delay: 0.5)
+    private static let axCallbackLock = NSLock()
+    private static var lastAXCallbackTime: CFAbsoluteTime = 0
+
     private let pauseWhenOtherAppKey = "pause_when_other_app_foreground"
     private let pauseWhenFullscreenKey = "pause_when_fullscreen_covers"
     private let pauseOnBatteryKey = "pause_on_battery_power"
@@ -83,7 +91,7 @@ final class DynamicWallpaperAutoPauseManager {
         }
     }
 
-    /// 任意非本应用窗口对某屏的单窗口覆盖面积 ≥ 阈值时，按屏暂停该屏壁纸
+    /// 非本应用窗口对某屏的累计覆盖比例 ≥ 阈值时，按屏暂停该屏壁纸
     var pauseWhenWindowCoverage: Bool {
         get { UserDefaults.standard.bool(forKey: pauseWhenWindowCoverageKey) }
         set {
@@ -184,7 +192,9 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
     private func updateTimer() {
-        let needsTimer = pauseWhenFullscreenCovers || pauseWhenOtherAppForeground || pauseWhenWindowCoverage
+        let needsPollingForFullscreenOrForeground = pauseWhenFullscreenCovers || pauseWhenOtherAppForeground
+        let needsPollingForWindowCoverage = pauseWhenWindowCoverage && !AXIsProcessTrusted()
+        let needsTimer = needsPollingForFullscreenOrForeground || needsPollingForWindowCoverage
         if needsTimer {
             // 共用一个 3s 轮询，覆盖两类无法仅靠通知捕获的状态变化：
             // - 全屏覆盖：CGWindowList 无法用通知替代
@@ -248,6 +258,16 @@ final class DynamicWallpaperAutoPauseManager {
                 }
             }
         }
+
+        // 窗口覆盖 + AX 可用：事件驱动模式，立即 setup AXObserver
+        if pauseWhenWindowCoverage && AXIsProcessTrusted() {
+            handleAppActivationChange()
+        }
+
+        // 窗口覆盖关闭时，停止 AXObserver
+        if !pauseWhenWindowCoverage {
+            stopAXObserver()
+        }
     }
 
     private func startTimer(interval: TimeInterval) {
@@ -267,6 +287,7 @@ final class DynamicWallpaperAutoPauseManager {
         checkTimerCancellable = nil
         checkTimer?.invalidate()
         checkTimer = nil
+        stopAXObserver()
     }
 
     private func checkAndApply() {
@@ -301,7 +322,8 @@ final class DynamicWallpaperAutoPauseManager {
         }
 
         // 窗口覆盖比例检测（按屏，独立稳定性采样）
-        if pauseWhenWindowCoverage {
+        // 有 AX 权限时由 AXObserver 事件驱动，不走 timer 轮询
+        if pauseWhenWindowCoverage && !AXIsProcessTrusted() {
             let thresholdRatio = CGFloat(windowCoveragePauseThreshold / 100.0)
             fullscreenDetectionQueue.async { [weak self] in
                 guard let self else { return }
@@ -416,7 +438,7 @@ final class DynamicWallpaperAutoPauseManager {
 
     /// 前台应用切换时由通知驱动，无需轮询
     private func handleAppActivationChange() {
-        guard pauseWhenOtherAppForeground else { return }
+        guard pauseWhenOtherAppForeground || pauseWhenWindowCoverage else { return }
         guard !isForegroundPauseSuppressed else { return }
         let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
@@ -431,7 +453,32 @@ final class DynamicWallpaperAutoPauseManager {
                 return // 被取消
             }
             guard let self else { return }
-            self.reevaluateForegroundCoverage()
+
+            // 前台覆盖检测（保持原逻辑）
+            if self.pauseWhenOtherAppForeground {
+                self.reevaluateForegroundCoverage()
+            }
+
+            // AXObserver 管理（窗口覆盖事件驱动）
+            if self.pauseWhenWindowCoverage {
+                let frontApp = NSWorkspace.shared.frontmostApplication
+                let bundleID = frontApp?.bundleIdentifier
+                let ourBundleID = Bundle.main.bundleIdentifier
+                let finderBundleID = "com.apple.finder"
+
+                if let pid = frontApp?.processIdentifier,
+                   bundleID != ourBundleID && bundleID != finderBundleID {
+                    // 非 Finder 且非本应用：启动 AXObserver + 立即检测一次
+                    if AXIsProcessTrusted() {
+                        self.setupAXObserver(for: pid)
+                    }
+                    self.checkWindowCoverage()
+                } else {
+                    // Finder 或本应用前台：停止 AXObserver + 清除窗口覆盖暂停
+                    self.stopAXObserver()
+                    self.clearWindowCoveragePause()
+                }
+            }
         }
     }
 
@@ -571,7 +618,7 @@ final class DynamicWallpaperAutoPauseManager {
                     width: boundsDict["Width"] ?? 0,
                     height: boundsDict["Height"] ?? 0
                 )
-                let bounds = normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
+                let bounds = Self.normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
 
                 // 检查窗口是否覆盖了该屏幕的大部分区域
                 let intersection = bounds.intersection(screenFrame)
@@ -671,7 +718,7 @@ final class DynamicWallpaperAutoPauseManager {
                 width: boundsDict["Width"] ?? 0,
                 height: boundsDict["Height"] ?? 0
             )
-            let bounds = normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
+            let bounds = Self.normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
 
             // 检查窗口实际覆盖了哪块屏幕。不能只比较宽高：两块同尺寸或外接屏
             // 大于内置屏时，会把未相交的屏幕也误判为被全屏覆盖。
@@ -694,7 +741,112 @@ final class DynamicWallpaperAutoPauseManager {
         return coveredScreens
     }
 
-    nonisolated private func normalizedWindowBounds(_ bounds: CGRect, screens: [NSScreen], desktopFrame: CGRect) -> CGRect {
+    nonisolated private static func captureWindowSnapshot(screenFrames: [String: CGRect]) -> WindowSnapshot? {
+        let screens = NSScreen.screens.filter { screenFrames[$0.wallpaperScreenIdentifier] != nil }
+        let screenRects = Array(screenFrames.values)
+        let desktopFrame = screenRects.reduce(CGRect.null) { $0.union($1) }
+
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        let windows = windowList.compactMap { window -> WindowSnapshot.Window? in
+            let pid: pid_t
+            if let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t {
+                pid = ownerPID
+            } else if let ownerPID = window[kCGWindowOwnerPID as String] as? Int {
+                pid = pid_t(ownerPID)
+            } else {
+                return nil
+            }
+
+            guard let layer = window[kCGWindowLayer as String] as? Int,
+                  let alpha = window[kCGWindowAlpha as String] as? Double,
+                  let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+                return nil
+            }
+
+            return WindowSnapshot.Window(
+                pid: pid,
+                layer: layer,
+                alpha: alpha,
+                bounds: normalizedWindowBounds(bounds, screens: screens, desktopFrame: desktopFrame)
+            )
+        }
+
+        return WindowSnapshot(screenFrames: screenFrames, windows: windows)
+    }
+
+    nonisolated private static func windowCoverageScreens(
+        in snapshot: WindowSnapshot,
+        thresholdRatio: CGFloat
+    ) -> Set<String> {
+        var coveredScreens = Set<String>()
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let thresholdSamples = Int(ceil(CGFloat(CoverageSampling.sampleCount) * thresholdRatio))
+
+        for (screenID, screenFrame) in snapshot.screenFrames {
+            let candidateRects = snapshot.windows.compactMap { window -> CGRect? in
+                guard window.isVisibleContentWindow(excluding: myPID) else { return nil }
+                let intersection = window.bounds.intersection(screenFrame)
+                guard !intersection.isNull, !intersection.isEmpty else { return nil }
+                return intersection
+            }
+
+            if isGridCoverageAtOrAboveThreshold(
+                screenFrame: screenFrame,
+                candidateRects: candidateRects,
+                thresholdSamples: thresholdSamples
+            ) {
+                coveredScreens.insert(screenID)
+            }
+        }
+
+        return coveredScreens
+    }
+
+    nonisolated private static func isGridCoverageAtOrAboveThreshold(
+        screenFrame: CGRect,
+        candidateRects: [CGRect],
+        thresholdSamples: Int
+    ) -> Bool {
+        guard thresholdSamples > 0 else { return true }
+        guard !candidateRects.isEmpty, screenFrame.width > 0, screenFrame.height > 0 else { return false }
+
+        let gridSize = CoverageSampling.gridSize
+        let totalSamples = CoverageSampling.sampleCount
+        let stepX = screenFrame.width / CGFloat(gridSize)
+        let stepY = screenFrame.height / CGFloat(gridSize)
+        var coveredSamples = 0
+        var checkedSamples = 0
+
+        for row in 0..<gridSize {
+            let y = screenFrame.minY + (CGFloat(row) + 0.5) * stepY
+
+            for column in 0..<gridSize {
+                let x = screenFrame.minX + (CGFloat(column) + 0.5) * stepX
+                let samplePoint = CGPoint(x: x, y: y)
+                checkedSamples += 1
+
+                for rect in candidateRects where rect.contains(samplePoint) {
+                    coveredSamples += 1
+                    if coveredSamples >= thresholdSamples {
+                        return true
+                    }
+                    break
+                }
+
+                if coveredSamples + (totalSamples - checkedSamples) < thresholdSamples {
+                    return false
+                }
+            }
+        }
+
+        return false
+    }
+
+    nonisolated private static func normalizedWindowBounds(_ bounds: CGRect, screens: [NSScreen], desktopFrame: CGRect) -> CGRect {
         guard !desktopFrame.isNull else { return bounds }
         let flippedBounds = CGRect(
             x: bounds.origin.x,
@@ -921,57 +1073,140 @@ final class DynamicWallpaperAutoPauseManager {
         batteryPauseRequested
     }
 
-    // MARK: - 窗口覆盖比例暂停（独立机制，与前台/全屏覆盖并存）
+    // MARK: - AXObserver for Window Moves/Resizes
 
-    /// 扫描所有非本应用、layer 0、alpha>0 的窗口，对每屏计算单个窗口的最大覆盖面积。
-    /// 当某屏存在某个窗口覆盖面积 ≥ threshold × screenArea 时，认为该屏需要按比例暂停。
-    nonisolated private func getWindowCoverageCoveredScreens(threshold: CGFloat) -> [NSScreen] {
-        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
-            return []
-        }
-        let screens = NSScreen.screens
-        guard !screens.isEmpty else { return [] }
-        let desktopFrame = screens.reduce(CGRect.null) { $0.union($1.frame) }
-        let ourBundleID = Bundle.main.bundleIdentifier
+    private func setupAXObserver(for pid: pid_t) {
+        stopAXObserver()
 
-        // 一次性收集所有合格窗口的归一化 bounds
-        var windowBoundsList: [CGRect] = []
-        windowBoundsList.reserveCapacity(windowList.count)
-        for window in windowList {
-            guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            guard let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0 else { continue }
-            if let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
-               let app = NSRunningApplication(processIdentifier: pid_t(ownerPID)),
-               app.bundleIdentifier == ourBundleID {
-                continue
+        var observer: AXObserver?
+        let err = AXObserverCreate(pid, { (axObserver, axElement, notification, refcon) in
+            let now = CFAbsoluteTimeGetCurrent()
+            DynamicWallpaperAutoPauseManager.axCallbackLock.lock()
+            if now - DynamicWallpaperAutoPauseManager.lastAXCallbackTime < 0.2 {
+                DynamicWallpaperAutoPauseManager.axCallbackLock.unlock()
+                return
             }
-            guard let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
-            let raw = CGRect(
-                x: boundsDict["X"] ?? 0,
-                y: boundsDict["Y"] ?? 0,
-                width: boundsDict["Width"] ?? 0,
-                height: boundsDict["Height"] ?? 0
-            )
-            guard raw.width > 0, raw.height > 0 else { continue }
-            windowBoundsList.append(normalizedWindowBounds(raw, screens: screens, desktopFrame: desktopFrame))
-        }
-        guard !windowBoundsList.isEmpty else { return [] }
+            DynamicWallpaperAutoPauseManager.lastAXCallbackTime = now
+            DynamicWallpaperAutoPauseManager.axCallbackLock.unlock()
 
-        var covered: [NSScreen] = []
-        for screen in screens {
-            let screenArea = screen.frame.width * screen.frame.height
-            guard screenArea > 0 else { continue }
-            let need = screenArea * threshold
-            for bounds in windowBoundsList {
-                let inter = bounds.intersection(screen.frame)
-                guard !inter.isNull, !inter.isEmpty else { continue }
-                if inter.width * inter.height >= need {
-                    covered.append(screen)
-                    break
+            guard let refcon = refcon else { return }
+            let manager = Unmanaged<DynamicWallpaperAutoPauseManager>.fromOpaque(refcon).takeUnretainedValue()
+
+            var pidValue: pid_t = 0
+            AXUIElementGetPid(axElement, &pidValue)
+            let elementPid = pidValue
+
+            // Hop to @MainActor before touching any manager state.
+            // The AXObserver callback can fire on an arbitrary thread;
+            // all mutable state (including windowCoverageDebouncer) is
+            // isolated to the main actor.
+            Task { @MainActor [weak manager] in
+                guard let manager = manager else { return }
+                manager.windowCoverageDebouncer.debounce {
+                    Task { @MainActor in
+                        manager.checkWindowCoverage()
+                        if elementPid > 0 {
+                            manager.checkForegroundCoverage(pid: elementPid)
+                        }
+                    }
+                }
+            }
+        }, &observer)
+
+        guard err == .success, let axObserver = observer else {
+            return
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+
+        AXObserverAddNotification(axObserver, appElement, kAXMovedNotification as CFString, refcon)
+        AXObserverAddNotification(axObserver, appElement, kAXResizedNotification as CFString, refcon)
+        AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, refcon)
+        AXObserverAddNotification(axObserver, appElement, kAXUIElementDestroyedNotification as CFString, refcon)
+
+        self.axObserver = axObserver
+        self.currentAXElement = appElement
+
+        let runLoopSource = AXObserverGetRunLoopSource(axObserver)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+        self.axObserverRunLoopSource = runLoopSource
+    }
+
+    private func stopAXObserver() {
+        if let axObserver = axObserver, let appElement = currentAXElement {
+            AXObserverRemoveNotification(axObserver, appElement, kAXMovedNotification as CFString)
+            AXObserverRemoveNotification(axObserver, appElement, kAXResizedNotification as CFString)
+            AXObserverRemoveNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString)
+            AXObserverRemoveNotification(axObserver, appElement, kAXUIElementDestroyedNotification as CFString)
+        }
+
+        if let runLoopSource = axObserverRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+        }
+
+        self.axObserver = nil
+        self.axObserverRunLoopSource = nil
+        self.currentAXElement = nil
+    }
+
+    /// 由 AXObserver 事件驱动调用：检测窗口覆盖比例
+    private func checkWindowCoverage() {
+        guard pauseWhenWindowCoverage else { return }
+        let thresholdRatio = CGFloat(windowCoveragePauseThreshold / 100.0)
+        fullscreenDetectionQueue.async { [weak self] in
+            guard let self else { return }
+            let screens = self.getWindowCoverageCoveredScreens(threshold: thresholdRatio)
+            let ids = Set(screens.map { $0.wallpaperScreenIdentifier })
+            DispatchQueue.main.async { [weak self] in
+                self?.applyWindowCoverageDetectionResult(newIDs: ids, screens: screens)
+            }
+        }
+    }
+
+    /// 由 AXObserver 事件驱动调用：用当前前台 app 重新评估前台覆盖
+    private func checkForegroundCoverage(pid: pid_t) {
+        guard pauseWhenOtherAppForeground else { return }
+        reevaluateForegroundCoverage()
+    }
+
+    /// 当 Finder/本应用到前台时，清除窗口覆盖暂停状态（桌面可见 → 无需暂停）
+    private func clearWindowCoveragePause() {
+        guard !windowCoveragePausedScreenIDs.isEmpty else { return }
+        let toResume = windowCoveragePausedScreenIDs
+        windowCoveragePausedScreenIDs.removeAll()
+        windowCoverageCoveredScreenIDs.removeAll()
+        pendingWindowCoverageScreenIDs = nil
+        pendingWindowCoverageSampleCount = 0
+        guard !hasActiveGlobalPauseReason else { return }
+        let stillPaused = foregroundPausedScreenIDs.union(fullscreenAutoPausedScreenIDs)
+        let canResume = toResume.subtracting(stillPaused)
+        if !canResume.isEmpty {
+            resumeScreens(byIDs: canResume)
+            let weBridge = WallpaperEngineXBridge.shared
+            if weBridge.isControllingExternalEngine {
+                for sid in canResume where weBridge.isManaging(screenID: sid) {
+                    weBridge.resumeWallpaper(for: sid)
                 }
             }
         }
-        return covered
+    }
+
+    // MARK: - 窗口覆盖比例暂停（独立机制，与前台/全屏覆盖并存）
+
+    /// 扫描所有非本应用、layer 0、alpha>0 的窗口，对每屏做网格采样累计覆盖检测。
+    /// 当某屏被窗口累计覆盖的采样点数量达到阈值时，认为该屏需要按比例暂停。
+    nonisolated private func getWindowCoverageCoveredScreens(threshold: CGFloat) -> [NSScreen] {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return [] }
+
+        let screenFrames = screens.reduce(into: [String: CGRect]()) { result, screen in
+            result[screen.wallpaperScreenIdentifier] = screen.frame
+        }
+        guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames) else { return [] }
+
+        let coveredIDs = Self.windowCoverageScreens(in: snapshot, thresholdRatio: threshold)
+        return screens.filter { coveredIDs.contains($0.wallpaperScreenIdentifier) }
     }
 
     /// 应用窗口覆盖比例检测结果：稳定性采样 + 按屏 pause/resume
@@ -1038,4 +1273,25 @@ final class DynamicWallpaperAutoPauseManager {
         pendingWindowCoverageSampleCount = 0
         return true
     }
+}
+
+private enum CoverageSampling {
+    static let gridSize = 50
+    static let sampleCount = gridSize * gridSize
+}
+
+private struct WindowSnapshot: @unchecked Sendable {
+    struct Window: @unchecked Sendable {
+        let pid: pid_t
+        let layer: Int
+        let alpha: Double
+        let bounds: CGRect
+
+        func isVisibleContentWindow(excluding excludedPID: pid_t) -> Bool {
+            pid != excludedPID && layer == 0 && alpha > 0
+        }
+    }
+
+    let screenFrames: [String: CGRect]
+    let windows: [Window]
 }
