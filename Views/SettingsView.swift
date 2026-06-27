@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ApplicationServices
 
 // MARK: - 毛玻璃背景视图
 private struct VisualEffectView: NSViewRepresentable {
@@ -278,6 +279,15 @@ private struct GeneralSettingsTab: View {
         )
     }
 
+    private var needsWindowCoverageAccessibilityHint: Bool {
+        viewModel.pauseWhenWindowCoverage && !AXIsProcessTrusted()
+    }
+
+    private func openAccessibilitySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     var body: some View {
         MacSettingsForm {
             // 语言设置组
@@ -432,7 +442,7 @@ private struct GeneralSettingsTab: View {
                 if viewModel.pauseWhenWindowCoverage {
                     MacSettingsRow(
                         title: t("windowCoverageThreshold"),
-                        showDivider: true
+                        showDivider: !needsWindowCoverageAccessibilityHint
                     ) {
                         HStack(spacing: 8) {
                             Text("\(Int(viewModel.windowCoveragePauseThreshold))%")
@@ -449,6 +459,25 @@ private struct GeneralSettingsTab: View {
                             )
                             .frame(width: 120)
                             .tint(Color(hex: "30D158"))
+                        }
+                    }
+
+                    if needsWindowCoverageAccessibilityHint {
+                        MacSettingsRow(
+                            title: t("windowCoverageAccessibilityRequired"),
+                            subtitle: t("windowCoverageAccessibilityDesc"),
+                            showDivider: true
+                        ) {
+                            Button {
+                                openAccessibilitySettings()
+                            } label: {
+                                Image(systemName: "arrow.up.forward.app")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color(hex: "0A84FF"))
+                                    .frame(width: 28, height: 24)
+                            }
+                            .buttonStyle(.plain)
+                            .help(t("openAccessibilitySettings"))
                         }
                     }
                 }

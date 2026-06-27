@@ -86,3 +86,74 @@ final class Debouncer: @unchecked Sendable {
         }
     }
 }
+
+// MARK: - LeadingTrailingCoalescer
+
+/// Coalesces event bursts into a gated leading callback and a settled trailing
+/// callback. This is useful for window geometry events where we want a quick
+/// first reaction plus one correction after the burst quiets down.
+final class LeadingTrailingCoalescer: @unchecked Sendable {
+    private let gateInterval: TimeInterval
+    private let settleDelay: TimeInterval
+    private let queue: DispatchQueue
+    private let onLeading: @Sendable () -> Void
+    private let onTrailing: @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var lastLeadingFireTime: CFAbsoluteTime = 0
+    private var trailingWorkItem: DispatchWorkItem?
+
+    init(
+        gateInterval: TimeInterval,
+        settleDelay: TimeInterval,
+        queue: DispatchQueue = .main,
+        onLeading: @escaping @Sendable () -> Void,
+        onTrailing: @escaping @Sendable () -> Void
+    ) {
+        self.gateInterval = gateInterval
+        self.settleDelay = settleDelay
+        self.queue = queue
+        self.onLeading = onLeading
+        self.onTrailing = onTrailing
+    }
+
+    func signal() {
+        let now = CFAbsoluteTimeGetCurrent()
+        var shouldFireLeading = false
+
+        lock.lock()
+        if now - lastLeadingFireTime >= gateInterval {
+            lastLeadingFireTime = now
+            shouldFireLeading = true
+        }
+
+        trailingWorkItem?.cancel()
+        let trailing = DispatchWorkItem { [weak self] in
+            self?.onTrailing()
+        }
+        trailingWorkItem = trailing
+        lock.unlock()
+
+        if shouldFireLeading {
+            queue.async { [onLeading] in
+                onLeading()
+            }
+        }
+        queue.asyncAfter(deadline: .now() + settleDelay, execute: trailing)
+    }
+
+    func cancel() {
+        lock.lock()
+        trailingWorkItem?.cancel()
+        trailingWorkItem = nil
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        trailingWorkItem?.cancel()
+        trailingWorkItem = nil
+        lastLeadingFireTime = 0
+        lock.unlock()
+    }
+}
