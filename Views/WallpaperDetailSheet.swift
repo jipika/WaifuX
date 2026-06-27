@@ -57,6 +57,12 @@ struct WallpaperDetailSheet: View {
     @State private var isLoadingAuthorWallpapers = false
     @State private var authorWallpapersPage = 1
     @State private var hasMoreAuthorWallpapers = true
+    /// 已加载的作者用户名，防止面板已打开时重复加载
+    @State private var authorLoadedUploaderName: String?
+    /// 缓存当前作者 uploader，避免切换壁纸时因新壁纸无 uploader 导致面板闪退
+    @State private var cachedAuthorUploader: Wallpaper.Uploader?
+    /// 从作者面板切换时使用淡入淡出过渡（而非滑动）
+    @State private var isAuthorPanelFade = false
 
     private var prefetchNamespace: String {
         "wallpaper-detail-\(initialWallpaper.id)"
@@ -94,11 +100,13 @@ struct WallpaperDetailSheet: View {
                     fixedWallpaperBackground(width: viewW, height: viewH)
                         .id("wallpaper-bg-\(wallpaper.id)")
                         .transition(
-                            AnyTransition.asymmetric(
-                                insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
-                                removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
-                            )
-                            .animation(.easeInOut(duration: 0.3))
+                            isAuthorPanelFade
+                                ? AnyTransition.opacity.animation(.easeInOut(duration: 0.28))
+                                : AnyTransition.asymmetric(
+                                    insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
+                                    removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
+                                  )
+                                  .animation(.easeInOut(duration: 0.3))
                         )
                 }
 
@@ -1567,11 +1575,12 @@ struct WallpaperDetailSheet: View {
 
     @ViewBuilder
     private var authorSheetOverlay: some View {
-        if showAuthorSheet, let uploader = wallpaper.uploader {
+        if showAuthorSheet, let uploader = cachedAuthorUploader {
             AuthorWallpaperSheet(
                 uploader: uploader,
                 wallpapers: authorWallpapers,
                 isLoading: isLoadingAuthorWallpapers,
+                activeWallpaperID: wallpaper.id,
                 onSelectWallpaper: { selectedWallpaper in
                     navigateToAuthorWallpaper(selectedWallpaper)
                 },
@@ -1590,7 +1599,11 @@ struct WallpaperDetailSheet: View {
     /// 打开作者壁纸弹窗，开始加载该作者的壁纸列表
     private func openAuthorSheet() {
         guard let uploader = wallpaper.uploader else { return }
+        // 面板已打开且同一作者时，不重复加载
+        if showAuthorSheet && uploader.username == authorLoadedUploaderName { return }
         showAuthorSheet = true
+        authorLoadedUploaderName = uploader.username
+        cachedAuthorUploader = uploader
         authorWallpapers = []
         authorWallpapersPage = 1
         hasMoreAuthorWallpapers = true
@@ -1601,11 +1614,11 @@ struct WallpaperDetailSheet: View {
                 let results = try await viewModel.fetchWallpapersByAuthor(
                     username: uploader.username,
                     page: 1,
-                    limit: 20
+                    limit: 24
                 )
                 await MainActor.run {
                     authorWallpapers = results
-                    hasMoreAuthorWallpapers = results.count >= 20
+                    hasMoreAuthorWallpapers = results.count >= 24
                     isLoadingAuthorWallpapers = false
                 }
             } catch {
@@ -1624,11 +1637,13 @@ struct WallpaperDetailSheet: View {
         authorWallpapersPage = 1
         hasMoreAuthorWallpapers = true
         isLoadingAuthorWallpapers = false
+        authorLoadedUploaderName = nil
+        cachedAuthorUploader = nil
     }
 
     /// 加载更多作者壁纸（分页），防止重复触发
     private func loadMoreAuthorWallpapers() {
-        guard let uploader = wallpaper.uploader, !isLoadingAuthorWallpapers, hasMoreAuthorWallpapers else { return }
+        guard let uploader = cachedAuthorUploader, !isLoadingAuthorWallpapers, hasMoreAuthorWallpapers else { return }
         isLoadingAuthorWallpapers = true
         let nextPage = authorWallpapersPage + 1
 
@@ -1637,12 +1652,12 @@ struct WallpaperDetailSheet: View {
                 let results = try await viewModel.fetchWallpapersByAuthor(
                     username: uploader.username,
                     page: nextPage,
-                    limit: 20
+                    limit: 24
                 )
                 await MainActor.run {
                     authorWallpapers.append(contentsOf: results)
                     authorWallpapersPage = nextPage
-                    hasMoreAuthorWallpapers = results.count >= 20
+                    hasMoreAuthorWallpapers = results.count >= 24
                     isLoadingAuthorWallpapers = false
                 }
             } catch {
@@ -1655,29 +1670,21 @@ struct WallpaperDetailSheet: View {
         }
     }
 
-    /// 从作者壁纸弹窗导航到壁纸详情（关闭弹窗，重新获取 uploader）
+    /// 从作者壁纸面板切换到新的壁纸详情（不关闭面板，原地替换数据，不做 NavigationStack 跳转）
     private func navigateToAuthorWallpaper(_ wallpaper: Wallpaper) {
-        // 关闭作者弹窗
-        showAuthorSheet = false
-        authorWallpapers = []
-        authorWallpapersPage = 1
-        hasMoreAuthorWallpapers = true
+        // 使用淡入淡出过渡（而非滑动），不关闭作者面板
+        isAuthorPanelFade = true
+        isNavigating = true
 
-        // 如果有 push 回调，使用 NavigationStack 入栈（保留当前详情页在栈中）
-        if let onNavigateToWallpaper {
-            onNavigateToWallpaper(wallpaper)
-            return
-        }
-
-        // 否则在当前详情页内替换壁纸
-        if let index = viewModel.wallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
-            navigateToIndex(index)
-        } else {
-            prepareSlideTransition(direction: .down)
-            reloadWallpaper(wallpaper)
-        }
+        // 直接替换当前壁纸数据，不走 navigateToIndex（避免更新 currentWallpaperIndex 触发副作用）
+        reloadWallpaper(wallpaper)
         // 重新获取 uploader 数据（新壁纸来自搜索列表，不含 uploader）
         fetchDetailAndUpdateUploader()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            self.isNavigating = false
+            self.isAuthorPanelFade = false
+        }
     }
 }
 

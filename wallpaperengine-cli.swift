@@ -960,6 +960,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             var __wxAudioCbs = [];
             var __wxAudioBuf = new Float32Array(128);
             var __wxAudioEnabled = false;
+            var __wxLastAudioAt = 0;
             window.wallpaperRegisterAudioListener = function(cb) {
               if (typeof cb === 'function') __wxAudioCbs.push(cb);
             };
@@ -967,6 +968,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             window.__wxUpdateAudioBuf = function(arr) {
               if (arr && arr.length) {
                 __wxAudioEnabled = true;
+                __wxLastAudioAt = Date.now();
                 for (var i = 0; i < __wxAudioBuf.length && i < arr.length; i++) {
                   __wxAudioBuf[i] = arr[i];
                 }
@@ -977,7 +979,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             };
             // Fallback：无真实音频时维持旧行为（全零），或做 idle 动画
             setInterval(function() {
-              if (!__wxAudioEnabled) {
+              if (!__wxAudioEnabled || Date.now() - __wxLastAudioAt > 500) {
                 for (var i = 0; i < __wxAudioBuf.length; i++) __wxAudioBuf[i] = 0;
               }
               for (var j = 0; j < __wxAudioCbs.length; j++) {
@@ -2774,6 +2776,8 @@ private final class Daemon: NSObject, NSApplicationDelegate {
                         DesktopWallpaperManager.shared.pushWebAudioFrame(spec)
                     }
                     // 不发响应：30fps 高频命令，sendResponse 会塞爆缓冲且让 App 侧每帧都要 recv。
+                    // 必须显式关闭 fd，否则每帧泄漏一个文件描述符，~8s 后耗尽（256/30fps）导致 daemon 完全停止接收 IPC。
+                    close(fd)
                 }
             }
         }
@@ -3366,6 +3370,11 @@ struct WallpaperEngineCLI {
         }
 
         // Client mode
+        // 忽略 SIGPIPE：client 向旧 daemon 发送 stop 命令时，若旧 daemon 已卡死（如 fd 泄漏导致
+        // accept 循环阻塞），socket 写入端不可读会触发 SIGPIPE。默认动作是终止进程（exit 13），
+        // 导致后续 startDaemonProcess() 根本不执行，新 daemon 无法启动。
+        signal(SIGPIPE, SIG_IGN)
+
         let args = Array(allArgs.dropFirst())
         let remainingArgs = args
 

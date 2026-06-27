@@ -30,6 +30,9 @@ packages:
   Cache:
     url: https://github.com/hyperoslo/Cache.git
     from: "7.4.0"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle.git
+    from: "2.6.0"
 
 settings:
   base:
@@ -73,7 +76,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.123
+        MARKETING_VERSION: 38.0.124
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
@@ -91,6 +94,7 @@ targets:
       - package: Kanna
       - package: Kingfisher
       - package: Cache
+      - package: Sparkle
       - target: WaifuXWallpaperExtension
         embed: true
     postBuildScripts:
@@ -229,7 +233,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuXWallpaperExtension
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.wallpaperextension
-        MARKETING_VERSION: 38.0.123
+        MARKETING_VERSION: 38.0.124
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"

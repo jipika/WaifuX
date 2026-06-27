@@ -466,11 +466,11 @@ class WallpaperSchedulerService: ObservableObject {
         var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
         let wasOnEndMode = displayConfig.isOnEndMode
         displayConfig.intervalMinutes = minutes
+        let isNowOnEndMode = minutes == SchedulerConfig.intervalOnEndMinutes
         newConfig.displayConfigs[screenID] = displayConfig
         updateConfig(newConfig)
 
         // 如果切换到"播完即换"模式，需要重新应用壁纸以启用非循环播放器
-        let isNowOnEndMode = minutes == SchedulerConfig.intervalOnEndMinutes
         if !wasOnEndMode && isNowOnEndMode {
             if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
                 Task { @MainActor in
@@ -551,19 +551,32 @@ class WallpaperSchedulerService: ObservableObject {
         updateConfig(newConfig)
     }
 
+    func updateDisplayWebSceneSwitchSeconds(_ seconds: Int?, for screenID: String) {
+        var newConfig = config
+        var displayConfig = newConfig.resolvedDisplayConfig(for: screenID)
+        displayConfig.webSceneSwitchSeconds = seconds
+        newConfig.displayConfigs[screenID] = displayConfig
+        updateConfig(newConfig)
+    }
+
     // MARK: - Scheduling
 
     /// Returns the smallest interval among enabled timed displays.
     /// 注意："播完即换"模式的屏幕（intervalMinutes < 0）不参与定时器调度；
-    /// 若所有启用屏幕都处于"播完即换"模式，则返回 0 表示无需创建 timer。
+    /// 但如果设置了 webSceneSwitchSeconds（Web/Scene 壁纸切换间隔），则仍需定时器。
     private func effectiveCheckInterval() -> TimeInterval {
         let screens = NSScreen.screens
         let intervals = screens.compactMap { screen -> TimeInterval? in
             let screenID = screen.wallpaperScreenIdentifier
             let displayConfig = config.resolvedDisplayConfig(for: screenID)
             guard displayConfig.isEnabled else { return nil }
-            // 排除"播完即换"模式的屏幕
-            guard !displayConfig.isOnEndMode else { return nil }
+            // "播完即换"模式的屏幕：仅当设置了 Web/Scene 切换间隔时才纳入定时器
+            guard !displayConfig.isOnEndMode else {
+                if let wsSec = displayConfig.webSceneSwitchSeconds {
+                    return TimeInterval(wsSec)
+                }
+                return nil
+            }
             return TimeInterval(displayConfig.intervalMinutes * 60)
         }
         return intervals.min() ?? 0
@@ -604,8 +617,28 @@ class WallpaperSchedulerService: ObservableObject {
             let displayConfig = config.resolvedDisplayConfig(for: screenID)
             guard displayConfig.isEnabled else { continue }
 
-            // "播完即换"模式的屏幕不参与定时器调度，由视频播放完成通知触发
-            guard !displayConfig.isOnEndMode else { continue }
+            // "播完即换"模式的屏幕：设置了 webSceneSwitchSeconds 时由定时器调度（仅 Web/Scene 壁纸）
+            // 视频壁纸仍由播放完成通知触发，不走定时器
+            if displayConfig.isOnEndMode {
+                guard let wsSec = displayConfig.webSceneSwitchSeconds,
+                      WallpaperEngineXBridge.shared.isManaging(screen: screen) else { continue }
+                let items = getSchedulableItems(for: displayConfig)
+                if items.isEmpty {
+                    print("\(logTag) Screen \(screenID): no schedulable items for on-end mode with webSceneSwitchSeconds")
+                    continue
+                }
+                let interval = TimeInterval(wsSec)
+                if let lastChange = lastChangeTimes[screenID],
+                   now.timeIntervalSince(lastChange) < interval - 0.5 {
+                    continue
+                }
+                guard let item = selectNextItem(from: items, lastID: lastChangedItemIDs[screenID], screenID: screenID, order: displayConfig.order) else {
+                    print("\(logTag) Screen \(screenID): item selection returned nil for on-end mode with webSceneSwitchSeconds")
+                    continue
+                }
+                pending.append((screenID, item, screen))
+                continue
+            }
 
             let items = getSchedulableItems(for: displayConfig)
             if items.isEmpty {
@@ -659,6 +692,8 @@ class WallpaperSchedulerService: ObservableObject {
 
         let displayConfig = config.resolvedDisplayConfig(for: screenID)
         let isOnEndMode = displayConfig.isOnEndMode
+        // Web/Scene 壁纸在播完即换模式下是否启用了定时切换
+        let webSceneSwitchEnabled = isOnEndMode && displayConfig.webSceneSwitchSeconds != nil
 
         let fileURL = item.fileURL
         let ext = fileURL.pathExtension.lowercased()
@@ -669,8 +704,9 @@ class WallpaperSchedulerService: ObservableObject {
             // 优先使用烘焙 MP4 产物（WE Scene 离线烘焙）。
             // 实时渲染模式下需跳过：scene 壁纸的烘焙 MP4 仅供锁屏/桌面 poster，不得反向替换
             // 桌面实时渲染（否则会变成播放固定时长 MP4 循环而非 wallpaper-wgpu 实时渲染）。
-            // on-end 模式必须播放视频以接收播放完成通知，保留烘焙产物。
-            let preferRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") && !isOnEndMode
+            // on-end 模式下：如果设置了 webSceneSwitchSeconds（走定时器而非视频通知），允许实时渲染。
+            let preferRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+                && (!isOnEndMode || webSceneSwitchEnabled)
             if let bakedPath = item.bakedVideoPath,
                !preferRealtime,
                SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)) {
@@ -712,7 +748,8 @@ class WallpaperSchedulerService: ObservableObject {
                        let presetDict = projectJSON["preset"] as? [String: Any],
                        let customDir = presetDict["customdirectory"] as? String {
                         // "播完即换"模式下跳过图片轮播（不支持播放完成通知）
-                        if isOnEndMode {
+                        // 但如果设置了 webSceneSwitchSeconds，则允许图片轮播
+                        if isOnEndMode && !webSceneSwitchEnabled {
                             print("\(logTag) Skipping preset slideshow in on-end mode")
                             return false
                         }
@@ -764,7 +801,8 @@ class WallpaperSchedulerService: ObservableObject {
                         } else {
                             print("\(logTag) Video type but no video file found in project, falling back to CLI")
                             // "播完即换"模式下不能用 CLI 壁纸
-                            if isOnEndMode {
+                            // 但如果设置了 webSceneSwitchSeconds，则允许 CLI fallback
+                            if isOnEndMode && !webSceneSwitchEnabled {
                                 print("\(logTag) Skipping CLI fallback in on-end mode")
                                 return false
                             }
@@ -777,7 +815,8 @@ class WallpaperSchedulerService: ObservableObject {
                     } else {
                         // Scene/Web 类型：通过 CLI 渲染
                         // "播完即换"模式下不能用 CLI 壁纸（无播放完成通知），跳过
-                        if isOnEndMode {
+                        // 但如果设置了 webSceneSwitchSeconds，则允许通过 CLI 渲染
+                        if isOnEndMode && !webSceneSwitchEnabled {
                             print("\(logTag) Skipping \(type) wallpaper '\(item.title)' in on-end mode (CLI renderer not supported)")
                             return false
                         }
@@ -803,7 +842,7 @@ class WallpaperSchedulerService: ObservableObject {
                     }
                 } else {
                     // 无 project.json 的静态图目录
-                    if isOnEndMode {
+                    if isOnEndMode && !webSceneSwitchEnabled {
                         print("\(logTag) Skipping static image directory '\(item.title)' in on-end mode")
                         return false
                     }
@@ -830,7 +869,7 @@ class WallpaperSchedulerService: ObservableObject {
                 }
             } else {
                 // 4. 静态图 → WallpaperViewModel
-                if isOnEndMode {
+                if isOnEndMode && !webSceneSwitchEnabled {
                     print("\(logTag) Skipping static image '\(item.title)' in on-end mode")
                     return false
                 }
@@ -1009,7 +1048,9 @@ class WallpaperSchedulerService: ObservableObject {
         var items: [SchedulableItem] = []
 
         // "播完即换"模式下只获取视频项（静态图片和 Web/Scene 壁纸不支持播完即换）
+        // 但如果设置了 webSceneSwitchSeconds，则允许包含 Web/Scene 壁纸
         let onEndMode = displayConfig.isOnEndMode
+        let webSceneSwitchEnabled = onEndMode && displayConfig.webSceneSwitchSeconds != nil
 
         // 文件夹过滤：nil = 全部，非空 = 仅这些文件夹（含根目录无 folderID 的项）
         let folderIDs = displayConfig.folderIDs
@@ -1020,7 +1061,7 @@ class WallpaperSchedulerService: ObservableObject {
             return folderIDs.contains(itemFolderID)
         }
 
-        if displayConfig.includeWallpapers && !onEndMode {
+        if displayConfig.includeWallpapers && (!onEndMode || webSceneSwitchEnabled) {
             // Downloaded wallpapers（图片或已烘焙的 WE scene 目录）
             for record in WallpaperLibraryService.shared.downloadedWallpapers {
                 guard folderFilter(record.folderID) else { continue }
@@ -1075,9 +1116,10 @@ class WallpaperSchedulerService: ObservableObject {
                 // 但实时渲染模式下，scene 壁纸的烘焙 MP4 仅供锁屏/桌面 poster（见
                 // SceneOfflineBakeService.scheduleRealtimeCompanionBake 注释），
                 // 不得反向替换桌面实时渲染——否则轮播第二次起会变成播放固定时长的
-                // 烘焙视频而非 wallpaper-wgpu 实时渲染。on-end 模式仍需可播放视频，保留烘焙产物。
+                // 烘焙视频而非 wallpaper-wgpu 实时渲染。
+                // on-end 模式下：如果设置了 webSceneSwitchSeconds（走定时器），允许实时渲染。
                 let isRealtimeRenderingEnabled = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
-                let preferRealtimeForScene = isRealtimeRenderingEnabled && !onEndMode
+                let preferRealtimeForScene = isRealtimeRenderingEnabled && (!onEndMode || webSceneSwitchEnabled)
                 var bakedVideoPath: String? = nil
                 var sceneBakeItemID: String? = nil
                 if isWorkshop, !preferRealtimeForScene, let art = record.sceneBakeArtifact {
@@ -1088,7 +1130,8 @@ class WallpaperSchedulerService: ObservableObject {
                 }
 
                 // "播完即换"模式下跳过 Web 壁纸（由 CLI 渲染，不支持播完即换）
-                if onEndMode && url.pathExtension.lowercased() == "web" {
+                // 但如果设置了 webSceneSwitchSeconds，则允许包含 Web 壁纸
+                if onEndMode && !webSceneSwitchEnabled && url.pathExtension.lowercased() == "web" {
                     continue
                 }
 
@@ -1096,7 +1139,8 @@ class WallpaperSchedulerService: ObservableObject {
                 // 1. 有 bakedVideoPath 的烘焙 mp4 项
                 // 2. 直接是 mp4/m4v 视频文件的非 Workshop 项
                 // 3. Workshop 目录项（包含可提取的视频文件，由 applyItem 运行时判断）
-                if onEndMode {
+                // 如果设置了 webSceneSwitchSeconds，则放宽限制，允许所有 Workshop 项
+                if onEndMode && !webSceneSwitchEnabled {
                     if bakedVideoPath != nil {
                         // 有烘焙视频产物，可播放
                     } else if !isWorkshop && isAllowedExt && !isDirectory {

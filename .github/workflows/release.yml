@@ -310,6 +310,25 @@ jobs:
               fi
               return 0
             fi
+            # 对 framework：先递归签内部嵌套代码（XPC services、.app 包、独立可执行文件），再签 framework 本身
+            if [[ "$f" == *.framework ]]; then
+              echo "  Signing nested code in: $(basename "$f")"
+              find "$f" -name "*.xpc" -type d 2>/dev/null | while read -r xpc; do
+                echo "    XPC: ${xpc#"$f/"}"
+                codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$xpc" || echo "    ⚠️ Failed: ${xpc#"$f/"}"
+              done
+              find "$f" -name "*.app" -type d 2>/dev/null | while read -r app; do
+                echo "    App: ${app#"$f/"}"
+                codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$app" || echo "    ⚠️ Failed: ${app#"$f/"}"
+              done
+              find "$f" -type f 2>/dev/null | while read -r exe; do
+                case "$exe" in *.app/*|*.xpc/*) continue ;; esac
+                if file "$exe" | grep -q "Mach-O"; then
+                  echo "    Executable: ${exe#"$f/"}"
+                  codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$exe" || echo "    ⚠️ Failed: ${exe#"$f/"}"
+                fi
+              done
+            fi
             SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
             if [[ "$(basename "$f")" == "wallpaper-wgpu" && -f "WallpaperRenderer.entitlements" ]]; then
               SIGN_ARGS+=(--entitlements "WallpaperRenderer.entitlements")
@@ -411,6 +430,77 @@ jobs:
             sleep 30
           done
 
+      - name: Setup Sparkle tools
+        run: |
+          curl -sL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
+          cd /tmp && tar xJf Sparkle.tar.xz
+          echo "/tmp/Sparkle/bin" >> $GITHUB_PATH
+
+      - name: Sign DMG and generate appcast.xml
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_PATH="build/WaifuX.dmg"
+
+          # 签名 DMG 获取 Ed25519 签名
+          ED_SIG=$(sign_update -s "$SPARKLE_PRIVATE_KEY" "$DMG_PATH" 2>&1 | grep -o 'sparkle:edSignature="[^"]*"' | sed 's/sparkle:edSignature="//;s/"//')
+          if [ -z "$ED_SIG" ]; then
+            echo "❌ Failed to sign DMG with Sparkle"
+            exit 1
+          fi
+          echo "✅ DMG signed: $ED_SIG"
+
+          # 获取文件大小
+          DMG_SIZE=$(stat -f%z "$DMG_PATH")
+          PUB_DATE=$(date -R)
+
+          # 用 Python 生成 appcast.xml（避免 sed 正则元字符问题：base64 签名含 + / 等）
+          CHANGELOG="${{ steps.changelog.outputs.changelog }}"
+          python3 -c "
+          import sys
+          changelog = sys.argv[5].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+          lines = changelog.split('\n')
+          items = ''.join('<li>{}</li>'.format(l.lstrip('- ')) for l in lines if l.strip().startswith('- '))
+          description = '<h3>WaifuX {}</h3><ul>{}</ul>'.format(sys.argv[1], items) if items else '<p>WaifuX {}</p>'.format(sys.argv[1])
+
+          template = '''<?xml version=\"1.0\" encoding=\"utf-8\"?>
+          <rss version=\"2.0\" xmlns:sparkle=\"http://www.andymatuschak.org/xml-namespaces/sparkle\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">
+            <channel>
+              <title>WaifuX</title>
+              <link>https://jipika.github.io/WaifuX/appcast.xml</link>
+              <description>WaifuX Updates</description>
+              <language>zh</language>
+              <item>
+                <title>Version {version}</title>
+                <sparkle:version>{version}</sparkle:version>
+                <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+                <pubDate>{pub_date}</pubDate>
+                <description><![CDATA[{desc}]]></description>
+                <enclosure
+                  url=\"https://github.com/jipika/WaifuX/releases/download/v{version}/WaifuX.dmg\"
+                  type=\"application/octet-stream\"
+                  length=\"{size}\"
+                  sparkle:edSignature=\"{sig}\"
+                />
+              </item>
+            </channel>
+          </rss>'''
+          xml = template.format(
+            version=sys.argv[1],
+            pub_date=sys.argv[2],
+            size=sys.argv[3],
+            sig=sys.argv[4],
+            desc=description
+          )
+          with open('Docs/appcast.xml', 'w') as f:
+            f.write(xml)
+          " "$VERSION" "$PUB_DATE" "$DMG_SIZE" "$ED_SIG" "$CHANGELOG"
+
+          echo "✅ Generated Docs/appcast.xml:"
+          cat Docs/appcast.xml
+
       - name: Generate Changelog
         id: changelog
         run: |
@@ -479,3 +569,18 @@ jobs:
           name: WaifuX-test-${{ github.sha }}
           path: build/WaifuX.dmg
           retention-days: 3
+
+      # 提交更新后的 appcast.xml 到 GitHub Pages
+      - name: Update appcast on GitHub Pages
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Docs/appcast.xml
+          if git diff --cached --quiet; then
+            echo "appcast.xml unchanged, skipping commit"
+          else
+            git commit -m "chore: update appcast.xml for v${{ steps.version.outputs.version }}"
+            git push
+            echo "✅ appcast.xml committed and pushed"
+          fi

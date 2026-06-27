@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>WaifuX</title>
+    <link>https://jipika.github.io/WaifuX/appcast.xml</link>
+    <description>WaifuX Updates</description>
+    <language>zh</language>
+    <item>
+      <title>Version 38.0.123</title>
+      <sparkle:version>38.0.123</sparkle:version>
+      <sparkle:shortVersionString>38.0.123</sparkle:shortVersionString>
+      <pubDate>Thu, 26 Jun 2025 00:00:00 +0800</pubDate>
+      <description><![CDATA[<p>WaifuX 38.0.123</p>]]></description>
+      <enclosure
+        url="https://github.com/jipika/WaifuX/releases/download/v38.0.123/WaifuX.dmg"
+        type="application/octet-stream"
+        length="0"
+        sparkle:edSignature="PLACEHOLDER_SIGNATURE"
+      />
+    </item>
+  </channel>
+</rss>

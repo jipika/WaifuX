@@ -647,7 +647,7 @@ public struct WallpaperEditCard: View, @preconcurrency Equatable {
     }
 
     private var trailingMetadataRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 5) {
             statLabel(
                 systemImage: "heart.fill",
                 value: compactNumber(wallpaper.favorites),
@@ -668,6 +668,8 @@ public struct WallpaperEditCard: View, @preconcurrency Equatable {
                 )
             }
         }
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func metaTag(text: String) -> some View {

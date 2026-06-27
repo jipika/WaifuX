@@ -1,12 +1,713 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WaifuX - macOS 壁纸应用</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WaifuX - macOS 动态壁纸引擎</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        /* Strands 背景 */
+        #strands-bg {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 0;
+        }
+
+        /* Hero 布局 */
+        .hero {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            padding: 0 40px;
+        }
+
+        .hero-left {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-left: 8%;
+            max-width: 550px;
+        }
+
+        .hero-title { font-size: 64px; font-weight: 700; line-height: 1.2; letter-spacing: -1px; color: #aaa; }
+        .hero-subtitle { font-size: 15px; color: #999; line-height: 1.8; }
+        .buttons { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+        .btn {
+            padding: 10px 20px; font-size: 14px; font-weight: 500; border-radius: 8px;
+            cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center;
+            gap: 8px; font-family: inherit; text-decoration: none; white-space: nowrap;
+        }
+        .btn-primary { background: #fff; color: #000; border: none; }
+        .btn-primary:hover { background: #e8e8e8; }
+        .btn-outline { background: rgba(255,255,255,0.06); color: #ccc; border: 1px solid rgba(255,255,255,0.15); }
+        .btn-outline:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.25); }
+        .version-info { font-size: 13px; color: #555; }
+
+        /* Homebrew 弹窗 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(8px);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: rgba(20,18,28,0.95);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 32px;
+            max-width: 480px;
+            width: 90%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .modal h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+        .modal p {
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 20px;
+        }
+        .modal-code {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+        }
+        .modal-code code {
+            flex: 1;
+            font-family: 'IBM Plex Mono', 'Courier New', monospace;
+            font-size: 14px;
+            color: #00ffa9;
+            user-select: all;
+        }
+        .modal-copy {
+            padding: 6px 14px;
+            font-size: 12px;
+            font-family: inherit;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            background: transparent;
+            color: #ccc;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+        .modal-copy:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        .modal-close {
+            width: 100%;
+            padding: 10px;
+            font-size: 13px;
+            font-family: inherit;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            background: transparent;
+            color: #888;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .modal-close:hover { background: rgba(255,255,255,0.05); color: #fff; }
+
+        /* 语言切换 */
+
+        /* 右侧 ASCII */
+        .ascii-right {
+            position: absolute;
+            right: -64px;
+            top: -84px;
+            right: -12px;
+            width: 380px;
+            height: 350px;
+            overflow: hidden;
+        }
+
+        .ascii-wrap {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .ascii-wrap canvas {
+            position: absolute;
+            left: 0; top: 0;
+            width: 100%; height: 100%;
+            image-rendering: pixelated;
+        }
+
+        .ascii-wrap pre {
+            margin: 0;
+            user-select: none;
+            padding: 0;
+            line-height: 1em;
+            text-align: left;
+            position: absolute;
+            left: 0; top: 0;
+            background-image: radial-gradient(circle, #ff6188 0%, #fc9867 50%, #ffd866 100%);
+            background-attachment: fixed;
+            -webkit-text-fill-color: transparent;
+            -webkit-background-clip: text;
+            z-index: 9;
+            mix-blend-mode: difference;
+            white-space: pre;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="strands-bg"></canvas>
+
+    <section class="hero">
+        <div class="hero-left">
+            <h1 class="hero-title" data-i18n="title">让你的桌面<br>活起来</h1>
+            <p class="hero-subtitle" data-i18n="subtitle">支持 Wallpaper Engine 工作坊、视频、Web 壁纸，<br>为你的 macOS 带来无限可能。</p>
+            <p class="version-info">
+                <a href="https://github.com/jipika/WaifuX" target="_blank" style="color:#888;text-decoration:none;">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="#ffd866" stroke="#ffd866" stroke-width="1" style="vertical-align:-2px"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+                    <span id="stars">--</span>
+                </a>
+                · <span data-i18n="latest">最新</span> <span id="version">--</span> · <span data-i18n="compat">支持 macOS 14.4 或更高版本</span>
+            </p>
+            <div class="buttons">
+                <a class="btn btn-primary" id="directDownload" href="https://github.com/jipika/WaifuX/releases/latest" target="_blank" onclick="downloadAndVisit(event)">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span data-i18n="download">下载 WaifuX</span>
+                </a>
+                <a class="btn btn-outline" href="javascript:void(0)" onclick="showHomebrew()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 17V7l8-4 8 4v10"/><path d="M4 11h16"/><path d="M9 17v4h6v-4"/></svg>
+                    <span data-i18n="homebrew">通过 Homebrew 安装</span>
+                </a>
+                <a class="btn btn-outline" href="https://github.com/jipika/WaifuX" target="_blank">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+                    GitHub
+                </a>
+            </div>
+        </div>
+
+        <!-- 右侧 ASCII -->
+        <div class="ascii-right">
+            <div class="ascii-wrap" id="asciiContainer"></div>
+        </div>
+    </section>
+
+    <!-- 底部提示 -->
+    <div style="position:fixed;bottom:24px;left:0;right:0;text-align:center;z-index:10;">
+        <p style="font-size:13px;color:#777;letter-spacing:1px;" data-i18n="platform_hint">全平台版本开发中，敬请期待</p>
+    </div>
+
+    <!-- Homebrew 安装弹窗 -->
+    <div class="modal-overlay" id="homebrewModal" onclick="if(event.target===this)closeHomebrew()">
+        <div class="modal">
+            <h3 data-i18n="homebrew_title">通过 Homebrew 安装</h3>
+            <p data-i18n="homebrew_desc">在终端中依次运行以下命令：</p>
+
+            <div style="margin-bottom:12px;">
+                <div style="font-size:12px;color:#666;margin-bottom:6px;">1. <span data-i18n="step_tap">添加 Tap（如尚未添加）</span></div>
+                <div class="modal-code">
+                    <code>brew tap jipika/waifux</code>
+                    <button class="modal-copy" onclick="copyCommand('brew tap jipika/waifux')">复制</button>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="font-size:12px;color:#666;margin-bottom:6px;">2. <span data-i18n="step_install">安装 WaifuX</span></div>
+                <div class="modal-code">
+                    <code>brew install --cask waifux</code>
+                    <button class="modal-copy" onclick="copyCommand('brew install --cask waifux')">复制</button>
+                </div>
+            </div>
+
+            <div style="margin-bottom:20px;">
+                <div style="font-size:12px;color:#666;margin-bottom:6px;">3. <span data-i18n="step_launch">启动应用</span></div>
+                <div class="modal-code">
+                    <code>open -a WaifuX</code>
+                    <button class="modal-copy" onclick="copyCommand('open -a WaifuX')">复制</button>
+                </div>
+            </div>
+
+            <button class="modal-close" onclick="closeHomebrew()" data-i18n="close">关闭</button>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script>
+// ============================================================
+// 1. STRANDS 背景
+// ============================================================
+(() => {
+    const canvas = document.getElementById('strands-bg');
+    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: true });
+    if (!gl) return;
+    gl.clearColor(0,0,0,0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    const VS = `#version 300 es
+    in vec2 position;
+    void main(){gl_Position=vec4(position,0.,1.);}`;
+
+    const FS = `#version 300 es
+    precision highp float;
+    uniform float uTime;
+    uniform vec2 uResolution;
+    uniform int uStrandCount;
+    out vec4 fragColor;
+
+    const float PI = 3.14159265;
+
+    vec3 palette(float t) {
+        t = fract(t);
+        return 0.5 + 0.5 * cos(6.28318 * (t + vec3(0.0, 0.33, 0.67)));
+    }
+
+    void main() {
+        vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+        float env = pow(max(cos(uv.x * PI * 1.3), 0.0), 3.0);
+        vec3 col = vec3(0.0);
+
+        for (int i = 0; i < 8; i++) {
+            if (i >= uStrandCount) break;
+            float fi = float(i);
+            float ph = fi * 1.7;
+            float freq = 2.0 + fi * 0.35;
+            float spd = 1.4 + fi * 1.2;
+            float tt = uTime * 0.4;
+            float w = sin(uv.x * freq + tt * spd + ph) * 0.6
+                    + sin(uv.x * freq * 1.1 - tt * spd * 0.7 + ph * 1.7) * 0.4;
+            float y = w * 0.12 * env * 1.2;
+            float d = abs(uv.y - y);
+            float thick = 0.04 * (0.35 + env) * 0.6;
+            float g = thick / (d + thick * 0.45);
+            g = g * g;
+            col += palette(fi / 8.0 + uv.x * 0.3 + uTime * 0.04) * g * env;
+        }
+
+        col = 1.0 - exp(-col * 2.7);
+        float alpha = clamp(max(max(col.r, col.g), col.b), 0.0, 1.0) * 0.8;
+        fragColor = vec4(col * 0.8, alpha);
+    }`;
+
+    function mkShader(src, type) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+            console.error('Shader:', gl.getShaderInfoLog(s));
+        }
+        return s;
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, mkShader(VS, gl.VERTEX_SHADER));
+    gl.attachShader(prog, mkShader(FS, gl.FRAGMENT_SHADER));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+    const posLoc = gl.getAttribLocation(prog, 'position');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    const uTime = gl.getUniformLocation(prog, 'uTime');
+    const uRes = gl.getUniformLocation(prog, 'uResolution');
+    const uStrands = gl.getUniformLocation(prog, 'uStrandCount');
+    gl.uniform1i(uStrands, 6);
+
+    function resize() {
+        canvas.width = innerWidth;
+        canvas.height = innerHeight;
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniform2f(uRes, canvas.width, canvas.height);
+    }
+    resize();
+    addEventListener('resize', resize);
+
+    (function loop(t) {
+        requestAnimationFrame(loop);
+        gl.uniform1f(uTime, t * 0.001);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+    })(0);
+})();
+
+// ============================================================
+// 2. ASCII TEXT — WaifuX（右侧）
+// ============================================================
+(async () => {
+    const container = document.getElementById('asciiContainer');
+    if (!container || typeof THREE === 'undefined') return;
+
+    const PX = window.devicePixelRatio || 1;
+    function mapVal(n, a, b, c, d) { return ((n - a) / (b - a)) * (d - c) + c; }
+
+    class AsciiFilter {
+        constructor(renderer, { fontSize = 10, fontFamily = "'IBM Plex Mono', monospace" } = {}) {
+            this.renderer = renderer;
+            this.fontSize = fontSize;
+            this.fontFamily = fontFamily;
+            this.charset = ' .\'`^",:;Il!i~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+            this.deg = 0;
+            this.mouse = { x: 0, y: 0 };
+            this.center = { x: 0, y: 0 };
+
+            this.domElement = document.createElement('div');
+            Object.assign(this.domElement.style, {
+                position:'absolute', top:'0', left:'0', width:'100%', height:'100%', overflow:'hidden'
+            });
+
+            this.pre = document.createElement('pre');
+            Object.assign(this.pre.style, {
+                margin:'0', userSelect:'none', padding:'0', lineHeight:'1em', textAlign:'left',
+                position:'absolute', left:'0', top:'0',
+                backgroundImage:'radial-gradient(circle, #ff6188 0%, #fc9867 50%, #ffd866 100%)',
+                backgroundAttachment:'fixed',
+                WebkitTextFillColor:'transparent', WebkitBackgroundClip:'text',
+                zIndex:'9', mixBlendMode:'difference', whiteSpace:'pre'
+            });
+            this.domElement.appendChild(this.pre);
+
+            this.canvas = document.createElement('canvas');
+            Object.assign(this.canvas.style, {
+                position:'absolute', left:'0', top:'0', width:'100%', height:'100%', imageRendering:'pixelated'
+            });
+            this.context = this.canvas.getContext('2d');
+            if (this.context) this.context.imageSmoothingEnabled = false;
+            this.domElement.appendChild(this.canvas);
+
+            this.onMouseMove = this.onMouseMove.bind(this);
+            document.addEventListener('mousemove', this.onMouseMove);
+        }
+
+        setSize(w, h) {
+            this.renderer.setSize(w, h);
+            this.center = { x: w / 2, y: h / 2 };
+            this.mouse = { ...this.center };
+            if (!this.context) return;
+            this.context.font = `${this.fontSize}px ${this.fontFamily}`;
+            const cw = this.context.measureText('A').width;
+            this.cols = Math.floor(w / (this.fontSize * (cw / this.fontSize)));
+            this.rows = Math.floor(h / this.fontSize);
+            this.canvas.width = this.cols;
+            this.canvas.height = this.rows;
+            this.pre.style.fontFamily = this.fontFamily;
+            this.pre.style.fontSize = `${this.fontSize}px`;
+        }
+
+        onMouseMove(e) { this.mouse = { x: e.clientX * PX, y: e.clientY * PX }; }
+
+        render(scene, camera) {
+            this.renderer.render(scene, camera);
+            const w = this.canvas.width, h = this.canvas.height;
+            if (!this.context || !w || !h) return;
+            this.context.clearRect(0, 0, w, h);
+            this.context.drawImage(this.renderer.domElement, 0, 0, w, h);
+            this.asciify(this.context, w, h);
+            const dx = this.mouse.x - this.center.x, dy = this.mouse.y - this.center.y;
+            const deg = Math.atan2(dy, dx) * 180 / Math.PI;
+            this.deg += (deg - this.deg) * 0.075;
+            this.domElement.style.filter = `hue-rotate(${this.deg.toFixed(1)}deg)`;
+        }
+
+        asciify(ctx, w, h) {
+            const imgData = ctx.getImageData(0, 0, w, h).data;
+            let str = '';
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const i = x * 4 + y * 4 * w;
+                    if (imgData[i + 3] === 0) { str += ' '; continue; }
+                    const gray = (0.3 * imgData[i] + 0.6 * imgData[i+1] + 0.1 * imgData[i+2]) / 255;
+                    let idx = Math.floor((1 - gray) * (this.charset.length - 1));
+                    idx = this.charset.length - idx - 1;
+                    str += this.charset[idx];
+                }
+                str += '\n';
+            }
+            this.pre.innerHTML = str;
+        }
+
+        dispose() { document.removeEventListener('mousemove', this.onMouseMove); }
+    }
+
+    await document.fonts.load('600 200px "IBM Plex Mono"');
+    await document.fonts.load('500 6px "IBM Plex Mono"');
+    await document.fonts.ready;
+
+    const rect = container.getBoundingClientRect();
+    const w = rect.width || 400;
+    const h = rect.height || 180;
+
+    const camera = new THREE.PerspectiveCamera(45, w / h, 1, 1000);
+    camera.position.z = 30;
+    const scene = new THREE.Scene();
+
+    // 画 "WaifuX" 纹理
+    const tc = document.createElement('canvas');
+    const tctx = tc.getContext('2d');
+    tctx.font = '600 300px IBM Plex Mono';
+    const metrics = tctx.measureText('WaifuX');
+    tc.width = Math.ceil(metrics.width) + 20;
+    tc.height = Math.ceil(metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent) + 20;
+    tctx.fillStyle = '#fdf9f3';
+    tctx.font = '600 300px IBM Plex Mono';
+    tctx.fillText('WaifuX', 10, 10 + metrics.actualBoundingBoxAscent);
+
+    const texture = new THREE.CanvasTexture(tc);
+    texture.minFilter = THREE.NearestFilter;
+
+    const aspect = tc.width / tc.height;
+    const baseH = 5;
+    const planeW = baseH * aspect;
+    const geometry = new THREE.PlaneGeometry(planeW, baseH, 36, 36);
+    const material = new THREE.ShaderMaterial({
+        vertexShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        void main() {
+            vUv = uv;
+            float t = uTime * 5.0;
+            vec3 p = position;
+            p.x += sin(t + position.y) * 0.5;
+            p.y += cos(t + position.z) * 0.15;
+            p.z += sin(t + position.x);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }`,
+        fragmentShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        uniform sampler2D uTexture;
+        void main() {
+            float t = uTime;
+            vec2 pos = vUv;
+            float r = texture2D(uTexture, pos + cos(t*2.0-t+pos.x)*0.01).r;
+            float g = texture2D(uTexture, pos + tan(t*0.5+pos.x-t)*0.01).g;
+            float b = texture2D(uTexture, pos - cos(t*2.0+t+pos.y)*0.01).b;
+            float a = texture2D(uTexture, pos).a;
+            gl_FragColor = vec4(r, g, b, a);
+        }`,
+        transparent: true,
+        uniforms: {
+            uTime: { value: 0 },
+            uTexture: { value: texture }
+        }
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
+    renderer.setPixelRatio(1);
+    renderer.setClearColor(0x000000, 0);
+
+    const filter = new AsciiFilter(renderer, { fontSize: 6 });
+    container.appendChild(filter.domElement);
+    filter.setSize(w, h);
+
+    let mouse = { x: w / 2, y: h / 2 };
+    container.addEventListener('mousemove', e => {
+        const r = container.getBoundingClientRect();
+        mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+    });
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const time = performance.now() * 0.001;
+        material.uniforms.uTime.value = Math.sin(time);
+
+        const rx = mapVal(mouse.y, 0, h, 0.5, -0.5);
+        const ry = mapVal(mouse.x, 0, w, -0.5, 0.5);
+        mesh.rotation.x += (rx - mesh.rotation.x) * 0.05;
+        mesh.rotation.y += (ry - mesh.rotation.y) * 0.05;
+
+        filter.render(scene, camera);
+    }
+    animate();
+})();
+
+// ============================================================
+// 3. 多语言
+// ============================================================
+const i18n = {
+    zh: {
+        title: '让你的桌面<br>活起来',
+        subtitle: '支持 Wallpaper Engine 工作坊、视频、Web 壁纸，<br>为你的 macOS 带来无限可能。',
+        latest: '最新',
+        compat: '支持 macOS 14.4 或更高版本',
+        download: '下载 WaifuX',
+        homebrew: '通过 Homebrew 安装',
+        homebrew_title: '通过 Homebrew 安装',
+        homebrew_desc: '在终端中运行以下命令：',
+        close: '关闭',
+        copied: '已复制',
+        platform_hint: '全平台版本开发中，敬请期待',
+        step_tap: '添加 Tap（如尚未添加）',
+        step_install: '安装 WaifuX',
+        step_launch: '启动应用'
+    },
+    en: {
+        title: 'Bring Your<br>Desktop to Life',
+        subtitle: 'Wallpaper Engine Workshop, video & web wallpapers,<br>unlimited possibilities for your macOS.',
+        latest: 'Latest',
+        compat: 'Requires macOS 14.4 or later',
+        download: 'Download WaifuX',
+        homebrew: 'Install via Homebrew',
+        homebrew_title: 'Install via Homebrew',
+        homebrew_desc: 'Run the following command in Terminal:',
+        close: 'Close',
+        copied: 'Copied',
+        platform_hint: 'Cross-platform version coming soon',
+        step_tap: 'Add the Tap (if not already added)',
+        step_install: 'Install WaifuX',
+        step_launch: 'Launch the app'
+    },
+    ja: {
+        title: 'デスクトップを<br>ライブにする',
+        subtitle: 'Wallpaper Engine ワークショップ、動画、Web壁紙、<br>macOSの可能性を無限に広げる。',
+        latest: '最新',
+        compat: 'macOS 14.4以降が必要',
+        download: 'ダウンロード',
+        homebrew: 'Homebrewでインストール',
+        homebrew_title: 'Homebrewでインストール',
+        homebrew_desc: 'ターミナルで以下のコマンドを実行：',
+        close: '閉じる',
+        copied: 'コピー済み',
+        platform_hint: 'クロスプラットフォーム版は開発中です',
+        step_tap: 'Tapを追加（まだ追加していない場合）',
+        step_install: 'WaifuXをインストール',
+        step_launch: 'アプリを起動'
+    }
+};
+
+function detectLang() {
+    const nav = navigator.language || navigator.userLanguage || '';
+    if (nav.startsWith('zh')) return 'zh';
+    if (nav.startsWith('ja')) return 'ja';
+    return 'en';
+}
+
+let currentLang = localStorage.getItem('waifux-lang') || detectLang();
+
+function setLang(lang) {
+    currentLang = lang;
+    localStorage.setItem('waifux-lang', lang);
+    applyLang();
+}
+
+function applyLang() {
+    const t = i18n[currentLang];
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        if (t[key]) el.innerHTML = t[key];
+    });
+    document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : currentLang === 'ja' ? 'ja' : 'en';
+}
+
+// 初始化语言
+applyLang();
+
+// ============================================================
+// 4. Homebrew 弹窗
+// ============================================================
+function showHomebrew() {
+    document.getElementById('homebrewModal').classList.add('show');
+}
+
+function closeHomebrew() {
+    document.getElementById('homebrewModal').classList.remove('show');
+}
+
+function copyCommand(cmd) {
+    navigator.clipboard.writeText(cmd).then(() => {
+        event.target.textContent = i18n[currentLang].copied;
+        setTimeout(() => { event.target.textContent = currentLang === 'zh' ? '复制' : currentLang === 'ja' ? 'コピー' : 'Copy'; }, 1500);
+    });
+}
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeHomebrew();
+});
+
+// ============================================================
+// 5. 下载并跳转
+// ============================================================
+function downloadAndVisit(e) {
+    e.preventDefault();
+    const url = document.getElementById('directDownload').href;
+    window.open('https://github.com/jipika/WaifuX/releases/latest', '_blank');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+// ============================================================
+// 4. GitHub 数据
+// ============================================================
+(async () => {
+    try {
+        const [repoRes, releaseRes] = await Promise.all([
+            fetch('https://api.github.com/repos/jipika/WaifuX'),
+            fetch('https://api.github.com/repos/jipika/WaifuX/releases/latest')
+        ]);
+
+        if (repoRes.ok) {
+            const repo = await repoRes.json();
+            const stars = repo.stargazers_count;
+            document.getElementById('stars').textContent = stars >= 1000
+                ? (stars / 1000).toFixed(1) + 'k'
+                : stars;
+        }
+
+        if (releaseRes.ok) {
+            const release = await releaseRes.json();
+            const tag = release.tag_name || '2.0.0';
+            document.getElementById('version').textContent = tag;
+
+            // 找到 .dmg 或 .zip 下载链接
+            const assets = release.assets || [];
+            const dmgAsset = assets.find(a =>
+                a.name.endsWith('.dmg') || a.name.endsWith('.zip')
+            );
+
+            // 更新下载按钮链接
+            const downloadBtn = document.getElementById('directDownload');
+            if (dmgAsset) {
+                downloadBtn.href = dmgAsset.browser_download_url;
+            } else {
+                downloadBtn.href = release.zipball_url;
+            }
+        }
+    } catch (e) {
+        console.log('GitHub API error:', e);
+    }
+})();
+    </script>
+</body>
 </html>

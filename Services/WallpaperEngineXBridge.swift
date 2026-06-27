@@ -81,6 +81,9 @@ private struct ScreenProcessInfo {
     let cropControlURL: URL?
     /// `--canvas-size-file` JSON 文件路径（wgpu scene 就绪后写出 ortho 尺寸，App 读取做 crop 计算）。
     let canvasSizeURL: URL?
+    /// `--wallpaper-control` JSON 文件路径（wgpu 每 200ms 轮询，热切换壁纸/更新属性）。
+    /// 首次启动时传入此参数，后续切换壁纸只写此文件，不杀进程。
+    let wallpaperControlURL: URL?
 }
 
 private struct RendererAudioControlState: Codable {
@@ -291,8 +294,12 @@ final class WallpaperEngineXBridge: ObservableObject {
     ///   - assetsPath: assets-pc 资源目录路径（nil 时从内嵌 assets 解压）
     ///   - targetScreens: 目标屏幕列表（nil 表示所有屏幕）
     ///   - userProperties: 用户属性覆盖 JSON（nil 时不传 --user-properties）
-    func setWallpaper(path: String, assetsPath: String? = nil, targetScreens: [NSScreen]? = nil, userProperties: String? = nil) async throws {
+    ///   - forceRestart: 强制重启进程（例如屏幕分辨率变化时），默认 false 走热切换
+    func setWallpaper(path: String, assetsPath: String? = nil, targetScreens: [NSScreen]? = nil, userProperties: String? = nil, forceRestart: Bool = false) async throws {
         print("[WallpaperEngineXBridge] >>> setWallpaper START path=\(path)")
+
+        // 记录当前焦点应用，渲染器启动后恢复焦点（避免新进程窗口抢焦点）
+        let previousApp = NSWorkspace.shared.frontmostApplication
 
         // 处理之前堆积的进程终止事件
         processPendingTermination()
@@ -311,14 +318,11 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 设场景/web 壁纸时关闭并清除静态图 overlay（renderer 窗口本身覆盖桌面，静态 overlay 无意义且浪费窗口）
         StaticImageWallpaperOverlayManager.shared.clearState()
 
-        // 壁纸切换时使设计面板的缓存失效
-        WebWallpaperDesignService.shared.invalidateAllCaches()
+	// 壁纸切换时使设计面板的缓存失效
+	WebWallpaperDesignService.shared.invalidateAllCaches()
 
-        // 更新批次号，避免旧的终止事件污染新状态
-        launchGeneration &+= 1
-
-        let resolvedPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path)).path
-        let renderKind: RenderKind = isWebWallpaper(path: resolvedPath) ? .web : .scene
+	let resolvedPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path)).path
+	let renderKind: RenderKind = isWebWallpaper(path: resolvedPath) ? .web : .scene
 
         print("[WallpaperEngineXBridge] step 1: 停止本机视频层")
 
@@ -341,7 +345,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
         }
 
-        // 2. 终止目标屏幕的旧进程（不影响其他屏幕）
+        // 2. 处理目标屏幕：已有进程 → 控制文件热切换；无进程 → 清理后启动
         if #available(macOS 26.0, *) {
             LockScreenWallpaperService.shared.clearRealtimeSourceIfNeeded(notify: renderKind != .web)
         }
@@ -353,10 +357,6 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         let effectiveScreenIDs = Set(effectiveScreens.map(\.wallpaperScreenIdentifier))
 
-        // 只停目标屏幕的进程，其他屏幕不受影响
-        for screenID in effectiveScreenIDs {
-            await stopScreenProcess(screenID)
-        }
         let targetWebStates = screenRenderStates.values.filter { state in
             state.renderKind == .web && effectiveScreenIDs.contains(state.screenID)
         }
@@ -375,15 +375,13 @@ final class WallpaperEngineXBridge: ObservableObject {
             recordRenderState(path: resolvedPath, renderKind: renderKind, screens: effectiveScreens, userProperties: userProperties)
             DynamicWallpaperAutoPauseManager.shared.clearForegroundPauseForWallpaperSwitch()
             DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
-            // 解析 project.json 的 audio.enabled / supportsaudioprocessing；命中则启动音频中继。
-            // 非 web 壁纸切换路径会在 ensureStoppedForNonCLIWallpaper / stopRenderProcess 走到时 stop。
             ensureAudioRelayMatchesActiveWallpaper(projectRoot: resolvedPath)
             return
         }
         // 切到非 web 壁纸：根据其它屏剩余 web 壁纸重新评估是否仍需音频中继
         ensureAudioRelayMatchesActiveWallpaper()
 
-        // 4. 解析 assets 路径（如果内嵌 assets 未解压完成，异步等待后台解压）
+        // 3. 解析 assets 路径（如果内嵌 assets 未解压完成，异步等待后台解压）
         let resolvedAssets: String
         if let ap = assetsPath, !ap.isEmpty {
             resolvedAssets = ap
@@ -393,51 +391,51 @@ final class WallpaperEngineXBridge: ObservableObject {
             resolvedAssets = ""
         }
 
-        // 5. 启动 wallpaper-wgpu
+        // 4. 准备 wallpaper-wgpu 二进制路径
         guard let cliURL = Self.resolvedCLIExecutableURL() else {
             print("[WallpaperEngineXBridge] ❌ wallpaper-wgpu 二进制未找到，已搜索所有路径")
             throw WallpaperEngineError.cliNotFound
         }
         print("[WallpaperEngineXBridge] wallpaper-wgpu 路径: \(cliURL.path)")
 
-        // 参数格式: <path> --assets <assets> --wallpaper --background [--screen ...] [--user-properties ...]
-        // 注意：--screen 参数在每个屏幕的独立进程中追加，此处只构建公共参数
-        var args = [resolvedPath]
+        // 基础参数（共享给所有屏幕）
+        var baseArgs = [resolvedPath]
         if !resolvedAssets.isEmpty {
-            args += ["--assets", resolvedAssets]
+            baseArgs += ["--assets", resolvedAssets]
             print("[WallpaperEngineXBridge] assets 路径: \(resolvedAssets)")
         } else {
             print("[WallpaperEngineXBridge] ⚠️ assets 为空，未传入 --assets 参数")
         }
-        args += ["--wallpaper", "--background"]
+        baseArgs += ["--wallpaper", "--background"]
 
-        // 超分辨率模式（MetalFX Spatial Upscaler）
-        // 渲染器以低分辨率渲染场景，再通过 Apple MetalFX MTLFXSpatialScaler
-        // 智能超分辨率提升画质，替代简单的线性拉伸。
+        // 超分辨率模式
         if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
             let percent = UserDefaults.standard.double(forKey: "upscaling_percent")
             let clamped = percent > 0 ? max(30, min(100, Int(percent))) : 70
-            args += ["--upscaling", "\(clamped)"]
+            baseArgs += ["--upscaling", "\(clamped)"]
             print("[WallpaperEngineXBridge] 超分辨率模式已启用，缩放比例: \(clamped)%")
-
-            // 性能模式：进一步把 effect 中间 RT 按超分比例缩小
-            // 仅在超分启用时追加，与 CLI 语义一致（effect-reduction 与 upscaling 配套）
             if UserDefaults.standard.bool(forKey: "effect_reduction_enabled") {
-                args += ["--effect-reduction"]
+                baseArgs += ["--effect-reduction"]
                 print("[WallpaperEngineXBridge] 性能模式（effect-reduction）已启用")
             }
         }
 
-        // 用户属性覆盖（自动合并场景配置覆盖）
+        // 用户属性覆盖
         let effectiveUserProperties = Self.mergeSceneConfigOverrides(userProperties, wallpaperPath: resolvedPath)
         if let effectiveUserProperties, !effectiveUserProperties.isEmpty {
-            args += ["--user-properties", effectiveUserProperties]
             print("[WallpaperEngineXBridge] 用户属性已传入")
         }
 
-        print("[WallpaperEngineXBridge] 启动命令: \(cliURL.lastPathComponent) \(args.joined(separator: " "))")
+        // 是否需要启动新进程？（至少有一个屏幕无现有进程才生成新 launchGeneration）
+        let needsFreshLaunch = effectiveScreens.contains { screenProcesses[$0.wallpaperScreenIdentifier] == nil }
+        if needsFreshLaunch {
+            launchGeneration &+= 1
+        }
 
-        // 为每个目标屏幕启动独立的 wallpaper-wgpu 进程
+        // 5. 遍历目标屏幕 — 每条路径都先尝试热切换，失败或首次则启动新进程
+        var anyLaunchFailed = false
+        var lastLaunchError: Error?
+
         for screen in effectiveScreens {
             let f = screen.frame
             let scale = screen.backingScaleFactor
@@ -445,25 +443,149 @@ final class WallpaperEngineXBridge: ObservableObject {
             let screenY = Int(f.origin.y.rounded())
             let screenW = Int(f.width.rounded())
             let screenH = Int(f.height.rounded())
-            var perScreenArgs = args
+            let screenID = screen.wallpaperScreenIdentifier
+
+            // ── 情况 A：已有活跃进程且非强制重启 → 写控制文件热切换（不杀进程） ──
+            if !forceRestart, let existingInfo = screenProcesses[screenID],
+               let wcURL = existingInfo.wallpaperControlURL {
+                print("[WallpaperEngineXBridge] 屏幕 \(screenID) 已有活跃进程 (pid=\(existingInfo.pid))，通过控制文件热切换")
+
+                // ── 调试：打印热切换完整参数 ──
+                print("[WallpaperEngineXBridge] 📋 HOT-SWITCH PARAMS:")
+                print("[WallpaperEngineXBridge] 📋   screenID=\(screenID) pid=\(existingInfo.pid)")
+                print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
+                print("[WallpaperEngineXBridge] 📋   setWallpaper=\(resolvedPath)")
+                print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
+                print("[WallpaperEngineXBridge] 📋   upscaling=\(UserDefaults.standard.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
+                if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
+                    let percent = UserDefaults.standard.double(forKey: "upscaling_percent")
+                    let clamped = percent > 0 ? max(30, min(100, Int(percent))) : 70
+                    print("[WallpaperEngineXBridge] 📋   upscaling_percent=\(clamped)%")
+                    print("[WallpaperEngineXBridge] 📋   effect_reduction=\(UserDefaults.standard.bool(forKey: "effect_reduction_enabled"))")
+                }
+                print("[WallpaperEngineXBridge] 📋   userProperties=\(effectiveUserProperties ?? "nil")")
+                // crop/audio 控制文件路径
+                print("[WallpaperEngineXBridge] 📋   cropControlURL=\(existingInfo.cropControlURL?.path ?? "nil")")
+                print("[WallpaperEngineXBridge] 📋   audioControlURL=\(existingInfo.audioControlURL?.path ?? "nil")")
+                print("[WallpaperEngineXBridge] 📋   canvasSizeURL=\(existingInfo.canvasSizeURL?.path ?? "nil")")
+                print("[WallpaperEngineXBridge] 📋   wallpaperControlURL=\(wcURL.path)")
+
+                // 更新持久化状态
+                screenRenderStates[screenID] = ScreenRenderState(
+                    screenID: screenID,
+                    screenFingerprint: screen.wallpaperScreenFingerprint,
+                    path: resolvedPath,
+                    renderKind: renderKind,
+                    userProperties: userProperties
+                )
+
+                // 写壁纸控制文件触发热切换
+                writeWallpaperControl(
+                    url: wcURL,
+                    setWallpaper: resolvedPath,
+                    assets: resolvedAssets.isEmpty ? nil : resolvedAssets,
+                    setProperties: effectiveUserProperties
+                )
+
+                // 热切换时必须重置 crop-control 文件
+                // 注意：此时 canvas-size 文件还是旧壁纸的尺寸，不能 readCanvasSize！
+                // - 无裁切 → 写 null 清空
+                // - 有裁切 → 跳过初始写入，等异步 Task 拿到新 canvas_size 后重算
+                let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
+                if let ccURL = existingInfo.cropControlURL {
+                    if cropSettings.shouldApplyCrop {
+                        // 等 canvas_size 就绪后由下方的异步 Task 重算，这里先写 null 避免旧数据污染
+                        writeCropControl(url: ccURL, crop: nil, viewport: nil)
+                    } else {
+                        writeCropControl(url: ccURL, crop: nil, viewport: nil)
+                    }
+                }
+                if let acURL = existingInfo.audioControlURL {
+                    writeAudioControl(
+                        url: acURL,
+                        muted: VideoWallpaperManager.shared.isMuted,
+                        paused: isExternalPaused,
+                        volume: VideoWallpaperManager.shared.volume(for: screen)
+                    )
+                }
+
+                // 新壁纸 canvas 尺寸可能不同，等真实尺寸写出后更新 crop
+                if let ccURL = existingInfo.cropControlURL,
+                   let csURL = existingInfo.canvasSizeURL {
+                    let cropSettingsCopy = cropSettings
+                    let cropControlURLCopy = ccURL
+                    let canvasSizeURLCopy = csURL
+                    let screenW_c = screenW
+                    let screenH_c = screenH
+                    let screenIDCopy = screenID
+                    Task { @MainActor [weak self] in
+                        let deadline = Date().addingTimeInterval(5.0)
+                        while Date() < deadline {
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            guard let self else { return }
+                            guard self.screenProcesses[screenIDCopy]?.pid == existingInfo.pid else { return }
+                            if let realSize = self.readCanvasSize(url: canvasSizeURLCopy) {
+                                let layout = CropLayoutEngine.compute(
+                                    wallpaperSize: realSize,
+                                    screenSize: CGSize(width: screenW_c, height: screenH_c),
+                                    settings: cropSettingsCopy)
+                                let vp = layout.viewportRect
+                                let isFullVp = abs(vp.x) < 1e-4 && abs(vp.y) < 1e-4
+                                    && abs(vp.w - 1) < 1e-4 && abs(vp.h - 1) < 1e-4
+                                self.writeCropControl(url: cropControlURLCopy, crop: layout.wallpaperCropRect, viewport: isFullVp ? nil : vp)
+                                print("[WallpaperEngineXBridge] 屏幕 \(screenIDCopy) 热切换后 canvas_size 就绪，crop 已重算")
+                                return
+                            }
+                        }
+                    }
+                }
+
+                print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) 热切换完成 (pid=\(existingInfo.pid))")
+                continue
+            }
+
+            // ── 情况 B：首次启动该屏幕 → 清理旧状态后启动新进程 ──
+            print("[WallpaperEngineXBridge] 屏幕 \(screenID) 无活跃进程，准备首次启动")
+
+            // ── 调试：打印首次启动完整参数 ──
+            print("[WallpaperEngineXBridge] 📋 FRESH-LAUNCH PARAMS:")
+            print("[WallpaperEngineXBridge] 📋   screenID=\(screenID)")
+            print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
+            print("[WallpaperEngineXBridge] 📋   path=\(resolvedPath)")
+            print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
+            print("[WallpaperEngineXBridge] 📋   upscaling=\(UserDefaults.standard.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
+            if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
+                let up = UserDefaults.standard.double(forKey: "upscaling_percent")
+                let cl = up > 0 ? max(30, min(100, Int(up))) : 70
+                print("[WallpaperEngineXBridge] 📋   upscaling_percent=\(cl)%")
+                print("[WallpaperEngineXBridge] 📋   effect_reduction=\(UserDefaults.standard.bool(forKey: "effect_reduction_enabled"))")
+            }
+            print("[WallpaperEngineXBridge] 📋   userProperties=\(effectiveUserProperties ?? "nil")")
+
+            if screenProcesses[screenID] != nil {
+                await stopScreenProcess(screenID)
+            }
+
+            var perScreenArgs = baseArgs
             perScreenArgs += ["--screen", "\(screenX),\(screenY),\(screenW),\(screenH),\(scale)"]
 
-            // 渲染帧率：取用户设置与显示器刷新率的最小值
+            // 渲染帧率
             let userFPS = UserDefaults.standard.double(forKey: "wallpaper_engine_fps")
             let userFPSClamped = max(30, min(240, userFPS))
             let screenMaxFPS = screen.maxRefreshRate
             let effectiveFPS = min(Int(userFPSClamped), screenMaxFPS)
             perScreenArgs += ["--fps", String(effectiveFPS)]
 
-            // 可视区域裁切：始终预留 cropControlURL，wgpu 通过 50ms 轮询此 JSON 热更新；
-            // 启动时若已有裁切则同时传一次 --crop / --crop-viewport 作为兜底（避免首帧空窗）。
-            let screenID = screen.wallpaperScreenIdentifier
-            let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
+            // 控制文件路径（首次启动就创建，后续热切换复用）
             let cropControlURL = createCropControlURL(screenID: screenID)
             let canvasSizeURL = createCanvasSizeURL(screenID: screenID)
+            let audioControlURL = createAudioControlURL(screenID: screenID)
+            let wallpaperControlURL = createWallpaperControlURL(screenID: screenID)
+
+            // 初始裁切
+            let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
             let initialLayout: (crop: UnitRect, viewport: UnitRect)? = {
                 guard cropSettings.shouldApplyCrop else { return nil }
-                // 启动时 canvas 尺寸文件可能尚未写出，先 fallback 屏尺寸；handleCropDidChange 会重读。
                 let wallpaperSize = readCanvasSize(url: canvasSizeURL) ?? CGSize(width: screenW, height: screenH)
                 let layout = CropLayoutEngine.compute(
                     wallpaperSize: wallpaperSize,
@@ -475,36 +597,30 @@ final class WallpaperEngineXBridge: ObservableObject {
                 let cr = l.crop
                 perScreenArgs += ["--crop", "\(cr.x),\(cr.y),\(cr.w),\(cr.h)"]
                 let vp = l.viewport
-                // 全屏 viewport 等价于无 letterbox，跳过参数避免冗余
                 let isFullVp = abs(vp.x) < 1e-4 && abs(vp.y) < 1e-4 && abs(vp.w - 1) < 1e-4 && abs(vp.h - 1) < 1e-4
                 if !isFullVp {
                     perScreenArgs += ["--crop-viewport", "\(vp.x),\(vp.y),\(vp.w),\(vp.h)"]
                 }
                 print("[WallpaperEngineXBridge] 初始 crop=\(cr.x),\(cr.y),\(cr.w),\(cr.h) viewport=\(vp.x),\(vp.y),\(vp.w),\(vp.h)")
             }
-            writeCropControl(
-                url: cropControlURL,
-                crop: initialLayout?.crop,
-                viewport: initialLayout?.viewport
-            )
+            writeCropControl(url: cropControlURL, crop: initialLayout?.crop, viewport: initialLayout?.viewport)
             perScreenArgs += ["--crop-control", cropControlURL.path]
             perScreenArgs += ["--canvas-size-file", canvasSizeURL.path]
 
-            let audioControlURL = createAudioControlURL(screenID: screenID)
+            // 音频控制
             let audioVolume = VideoWallpaperManager.shared.volume(for: screen)
-            writeAudioControl(
-                url: audioControlURL,
-                muted: VideoWallpaperManager.shared.isMuted,
-                paused: isExternalPaused,
-                volume: audioVolume
-            )
+            writeAudioControl(url: audioControlURL, muted: VideoWallpaperManager.shared.isMuted, paused: isExternalPaused, volume: audioVolume)
             perScreenArgs += ["--audio-control", audioControlURL.path, "--volume", String(format: "%.4f", audioVolume)]
-            if VideoWallpaperManager.shared.isMuted {
-                perScreenArgs += ["--muted"]
+            if VideoWallpaperManager.shared.isMuted { perScreenArgs += ["--muted"] }
+            if isExternalPaused { perScreenArgs += ["--paused"] }
+
+            // ⭐ 壁纸控制文件（热切换入口，必传）
+            perScreenArgs += ["--wallpaper-control", wallpaperControlURL.path]
+
+            if let effectiveUserProperties, !effectiveUserProperties.isEmpty {
+                perScreenArgs += ["--user-properties", effectiveUserProperties]
             }
-            if isExternalPaused {
-                perScreenArgs += ["--paused"]
-            }
+
             print("[WallpaperEngineXBridge] 启动屏幕 \(screenID) 进程: \(cliURL.lastPathComponent) \(perScreenArgs.joined(separator: " "))")
 
             do {
@@ -523,7 +639,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     logFile: process.logFile,
                     audioControlURL: audioControlURL,
                     cropControlURL: cropControlURL,
-                    canvasSizeURL: canvasSizeURL
+                    canvasSizeURL: canvasSizeURL,
+                    wallpaperControlURL: wallpaperControlURL
                 )
                 screenRenderStates[screenID] = ScreenRenderState(
                     screenID: screenID,
@@ -534,9 +651,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
                 _deinitPIDs.insert(launchedPID)
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) wallpaper-wgpu 已启动 (pid=\(launchedPID))")
-                // 启动后异步等待 wgpu 写出真实 canvas_size，用真实壁纸尺寸重算 crop 并热更新一次。
-                // 启动时只能用 fallback 屏尺寸算 crop（canvas_size 文件还不存在），导致新壁纸
-                // 比例与屏不一致时被压扁。此处轮询读到真实 size 后重算并写 crop-control JSON。
+
+                // 异步等待 canvas_size 就绪后重算 crop
                 if cropSettings.shouldApplyCrop {
                     let cropSettingsCopy = cropSettings
                     let cropControlURLCopy = cropControlURL
@@ -546,12 +662,10 @@ final class WallpaperEngineXBridge: ObservableObject {
                     let genCopy = self.launchGeneration
                     let screenIDCopy = screenID
                     Task { @MainActor [weak self] in
-                        // 最多等 5 秒（典型 scene 加载 < 2 秒）
                         let deadline = Date().addingTimeInterval(5.0)
                         while Date() < deadline {
-                            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+                            try? await Task.sleep(nanoseconds: 100_000_000)
                             guard let self else { return }
-                            // 状态校验：进程 generation 必须匹配（壁纸再次切换后旧任务不应再写）
                             guard self.launchGeneration == genCopy,
                                   self.screenProcesses[screenIDCopy]?.generation == genCopy else { return }
                             if let realSize = self.readCanvasSize(url: canvasSizeURLCopy) {
@@ -562,10 +676,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                                 let vp = layout.viewportRect
                                 let isFullVp = abs(vp.x) < 1e-4 && abs(vp.y) < 1e-4
                                     && abs(vp.w - 1) < 1e-4 && abs(vp.h - 1) < 1e-4
-                                self.writeCropControl(
-                                    url: cropControlURLCopy,
-                                    crop: layout.wallpaperCropRect,
-                                    viewport: isFullVp ? nil : vp)
+                                self.writeCropControl(url: cropControlURLCopy, crop: layout.wallpaperCropRect, viewport: isFullVp ? nil : vp)
                                 print("[WallpaperEngineXBridge] 屏幕 \(screenIDCopy) canvas_size 就绪 (\(Int(realSize.width))×\(Int(realSize.height)))，crop 已按真实尺寸重算并热更新")
                                 return
                             }
@@ -577,15 +688,22 @@ final class WallpaperEngineXBridge: ObservableObject {
                 print("[WallpaperEngineXBridge] ❌ 屏幕 \(screenID) 启动失败: \(error.localizedDescription)")
                 removeScreenProcess(screenID)
                 screenRenderStates.removeValue(forKey: screenID)
-                // 如果没有任何屏幕成功启动，清除全局状态
-                updateControlStateFromScreenStates()
-                persistState()
-                throw WallpaperEngineError.executionFailed("屏幕 \(screenID) 启动 wallpaper-wgpu 失败: \(error.localizedDescription)")
+                anyLaunchFailed = true
+                lastLaunchError = error
             }
         }
 
+        // 所有屏幕都失败才抛异常；部分成功则继续
+        if anyLaunchFailed && screenProcesses.isEmpty {
+            updateControlStateFromScreenStates()
+            persistState()
+            throw WallpaperEngineError.executionFailed("所有屏幕 wallpaper-wgpu 启动均失败: \(lastLaunchError!.localizedDescription)")
+        } else if anyLaunchFailed {
+            print("[WallpaperEngineXBridge] ⚠️ 部分屏幕启动失败，但至少有一个屏幕成功")
+        }
+
         if effectiveScreens.count > 1 {
-            print("[WallpaperEngineXBridge] 多显示器模式: \(effectiveScreens.count) 个屏幕，各自独立进程")
+            print("[WallpaperEngineXBridge] 多显示器模式: \(effectiveScreens.count) 个屏幕")
         }
 
         updateControlStateFromScreenStates(preferredPath: resolvedPath, preferredKind: renderKind)
@@ -595,18 +713,19 @@ final class WallpaperEngineXBridge: ObservableObject {
         DynamicWallpaperAutoPauseManager.shared.clearForegroundPauseForWallpaperSwitch()
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
-        // 强制恢复 App 焦点（wallpaper-wgpu 启动会抢占焦点，导致渲染器不渲染）
+        // 强制恢复之前的焦点应用（wallpaper-wgpu 启动会抢占焦点）
         // 多次延迟尝试确保焦点恢复
-        func forceActivateApp() {
-            NSApp.activate(ignoringOtherApps: true)
-            NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        func restoreFocus() {
+            if let app = previousApp, !app.isTerminated {
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            forceActivateApp()
+            restoreFocus()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                forceActivateApp()
+                restoreFocus()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    forceActivateApp()
+                    restoreFocus()
                 }
             }
         }
@@ -624,17 +743,34 @@ final class WallpaperEngineXBridge: ObservableObject {
             throw WallpaperEngineError.executionFailed("当前壁纸不是场景类型")
         }
         print("[WallpaperEngineXBridge] refreshWallpaperProperties: 刷新壁纸属性 path=\(path)")
+        // 改为写壁纸控制文件热更新属性，不再重启进程
         let screens = activeTargetScreens().filter { screen in
             let screenID = screen.wallpaperScreenIdentifier
             let fingerprint = screen.wallpaperScreenFingerprint
             let state = screenRenderStates[screenID] ?? screenRenderStates.values.first { $0.screenFingerprint == fingerprint }
             return state?.path == path || screenRenderStates.isEmpty
         }
-        try await setWallpaper(
-            path: path,
-            targetScreens: screens.isEmpty ? nil : screens,
-            userProperties: userProperties
-        )
+        var anyWritten = false
+        for screen in screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard let info = screenProcesses[screenID], let wcURL = info.wallpaperControlURL else {
+                print("[WallpaperEngineXBridge] ⚠️ 屏幕 \(screenID) 无 wallpaperControlURL，无法热更新属性")
+                continue
+            }
+            // 合并用户属性（含场景配置覆盖 __-prefixed）
+            let effectiveProperties = Self.mergeSceneConfigOverrides(userProperties, wallpaperPath: path)
+            writeWallpaperControl(url: wcURL, setWallpaper: nil, assets: nil, setProperties: effectiveProperties)
+            print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) 属性已通过控制文件热更新")
+            anyWritten = true
+        }
+        if !anyWritten {
+            print("[WallpaperEngineXBridge] ⚠️ refreshWallpaperProperties: 无活跃进程可更新，回退到重启方式")
+            try await setWallpaper(
+                path: path,
+                targetScreens: screens.isEmpty ? nil : screens,
+                userProperties: userProperties
+            )
+        }
     }
 
     // MARK: - 暂停 / 恢复 / 停止
@@ -1702,6 +1838,14 @@ final class WallpaperEngineXBridge: ObservableObject {
             .appendingPathComponent("waifux-wallpaper-wgpu-canvas-size-\(String(safeID))-\(UUID().uuidString).json")
     }
 
+    private func createWallpaperControlURL(screenID: String) -> URL {
+        let safeID = screenID.map { ch -> Character in
+            ch.isLetter || ch.isNumber || ch == "-" || ch == "_" ? ch : "_"
+        }
+        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("waifux-wallpaper-wgpu-wallpaper-\(String(safeID))-\(UUID().uuidString).json")
+    }
+
     /// 读取 wgpu 写出的 canvas 尺寸 JSON。读不到/解析失败返回 nil（调用方 fallback 屏尺寸）。
     private func readCanvasSize(url: URL?) -> CGSize? {
         guard let url = url else { return nil }
@@ -1745,6 +1889,30 @@ final class WallpaperEngineXBridge: ObservableObject {
             try data.write(to: url, options: .atomic)
         } catch {
             print("[WallpaperEngineXBridge] ⚠️ 写入裁切控制文件失败: \(error.localizedDescription)")
+        }
+    }
+
+    /// 写入 `--wallpaper-control` JSON 文件，通知 wallpaper-wgpu 热切换壁纸或更新属性。
+    /// setWallpaper=nil 时不切换壁纸，只更新属性。assets=nil 时 wgpu 自动 fallback。
+    private func writeWallpaperControl(url: URL, setWallpaper: String?, assets: String?, setProperties: String?) {
+        var dict: [String: Any] = [:]
+        if let sw = setWallpaper {
+            dict["setWallpaper"] = sw
+        }
+        if let a = assets {
+            dict["assets"] = a
+        }
+        if let sp = setProperties, !sp.isEmpty,
+           let data = sp.data(using: .utf8),
+           let props = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            dict["setProperties"] = props
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict, options: [])
+            try data.write(to: url, options: .atomic)
+            print("[WallpaperEngineXBridge] 已写入壁纸控制文件: \(setWallpaper != nil ? "切换壁纸" : "仅更新属性")")
+        } catch {
+            print("[WallpaperEngineXBridge] ⚠️ 写入壁纸控制文件失败: \(error.localizedDescription)")
         }
     }
 
@@ -2302,11 +2470,11 @@ final class WallpaperEngineXBridge: ObservableObject {
                             continue
                         }
                         let userProps = state.userProperties ?? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: state.path)
-                        try? await self.setWallpaper(path: state.path, targetScreens: [screen], userProperties: userProps)
+                        try? await self.setWallpaper(path: state.path, targetScreens: [screen], userProperties: userProps, forceRestart: true)
                     }
                 } else if let path = self.lastWallpaperPath {
                     let userProps = SceneWallpaperPropertiesService.propertiesOverrideJSON(for: path)
-                    try? await self.setWallpaper(path: path, targetScreens: screens.isEmpty ? nil : screens, userProperties: userProps)
+                    try? await self.setWallpaper(path: path, targetScreens: screens.isEmpty ? nil : screens, userProperties: userProps, forceRestart: true)
                 }
             }
         }

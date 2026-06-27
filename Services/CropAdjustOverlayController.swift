@@ -67,7 +67,7 @@ final class CropAdjustOverlayController {
     }
 
     /// 按当前屏壁纸类型取真实尺寸，供 overlay 预览 crop 计算。
-    /// 视频→VideoWallpaperManager 缓存的 naturalSize；wgpu→Bridge 的 canvas 尺寸文件；取不到返回 nil。
+    /// 视频→VideoWallpaperManager 缓存的 naturalSize；wgpu→Bridge 的 canvas 尺寸文件；静态图→OverlayManager 缓存；取不到返回 nil。
     static func wallpaperSize(for screen: NSScreen) -> CGSize? {
         // 1) 视频壁纸：取 VideoWallpaperManager 缓存的 naturalSize
         if let size = VideoWallpaperManager.shared.videoSize(for: screen) {
@@ -77,7 +77,10 @@ final class CropAdjustOverlayController {
         if let size = WallpaperEngineXBridge.shared.canvasSize(for: screen) {
             return size
         }
-        // 3) 静态图片：暂无统一入口，fallback nil（调用方用屏尺寸）
+        // 3) 静态图片：取 StaticImageWallpaperOverlayManager 缓存的图片像素尺寸
+        if let size = StaticImageWallpaperOverlayManager.shared.imageSize(for: screen) {
+            return size
+        }
         return nil
     }
 }

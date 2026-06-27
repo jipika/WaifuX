@@ -51,12 +51,16 @@ struct MediaDetailSheet: View {
     @State private var isLoadingAuthorItems = false
     @State private var authorItemsPage = 1
     @State private var hasMoreAuthorItems = true
+    /// 已加载的作者 Steam ID，防止面板已打开时重复加载
+    @State private var authorLoadedSteamID: String?
 
     // MARK: - 键盘快捷键与滑动动画
     @State private var keyboardMonitor: Any?
     @State private var slideIncomingOffset: CGFloat = 0
     @State private var slideOutgoingOffset: CGFloat = 0
     @State private var isNavigating = false
+    /// 从作者面板切换时使用淡入淡出过渡（而非滑动）
+    @State private var isAuthorPanelFade = false
 
     private enum SlideDirection {
         case up, down
@@ -145,11 +149,13 @@ struct MediaDetailSheet: View {
                     fixedMediaBackground(width: viewW, height: viewH)
                         .id("media-bg-\(resolvedItem.id)-\(previewVideoURL?.path ?? heroImageURL.path)")
                         .transition(
-                            AnyTransition.asymmetric(
-                                insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
-                                removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
-                            )
-                            .animation(.easeInOut(duration: 0.3))
+                            isAuthorPanelFade
+                                ? AnyTransition.opacity.animation(.easeInOut(duration: 0.28))
+                                : AnyTransition.asymmetric(
+                                    insertion: .offset(y: slideIncomingOffset).combined(with: .opacity),
+                                    removal: .offset(y: slideOutgoingOffset).combined(with: .opacity)
+                                  )
+                                  .animation(.easeInOut(duration: 0.3))
                         )
                 }
 
@@ -3164,8 +3170,10 @@ struct MediaDetailSheet: View {
                     )
                     let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                     do {
+                        // 高码率/B帧视频自动转码，解决 seek 卡顿根本问题
+                        let optimizedURL = await VideoTranscodeService.ensureSeekFriendly(videoURL)
                         try wallpaperManager.applyVideoWallpaper(
-                            from: videoURL,
+                            from: optimizedURL,
                             posterURL: posterURL,
                             muted: isMuted,
                             targetScreens: selectedScreen.map { [$0] }
@@ -3189,8 +3197,10 @@ struct MediaDetailSheet: View {
                 )
                 let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                 do {
+                    // 高码率/B帧视频自动转码，解决 seek 卡顿根本问题
+                    let optimizedURL = await VideoTranscodeService.ensureSeekFriendly(videoURL)
                     try wallpaperManager.applyVideoWallpaper(
-                        from: videoURL,
+                        from: optimizedURL,
                         posterURL: posterURL,
                         muted: isMuted
                     )
@@ -3412,6 +3422,7 @@ struct MediaDetailSheet: View {
                 authorAvatarURL: resolvedItem.authorAvatarURL,
                 items: authorMediaItems,
                 isLoading: isLoadingAuthorItems,
+                activeItemID: resolvedItem.id,
                 onSelectItem: { selectedItem in
                     navigateToAuthorMedia(selectedItem)
                 },
@@ -3430,7 +3441,10 @@ struct MediaDetailSheet: View {
     /// 打开作者壁纸弹窗，开始加载该作者的 Workshop 壁纸列表
     private func openAuthorSheet() {
         guard let steamID = resolvedItem.authorSteamID else { return }
+        // 面板已打开且同一作者时，不重复加载
+        if showAuthorSheet && steamID == authorLoadedSteamID { return }
         showAuthorSheet = true
+        authorLoadedSteamID = steamID
         authorMediaItems = []
         authorItemsPage = 1
         hasMoreAuthorItems = true
@@ -3469,6 +3483,7 @@ struct MediaDetailSheet: View {
         authorItemsPage = 1
         hasMoreAuthorItems = true
         isLoadingAuthorItems = false
+        authorLoadedSteamID = nil
     }
 
     /// 加载更多作者壁纸（分页）
@@ -3502,26 +3517,25 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// 从作者壁纸弹窗导航到壁纸详情（关闭弹窗）
+    /// 从作者壁纸面板切换到新的壁纸详情（不关闭面板，原地替换数据，不做 NavigationStack 跳转）
     private func navigateToAuthorMedia(_ item: MediaItem) {
-        // 关闭作者弹窗
-        dismissAuthorSheet()
-
         // 作者列表所有项目同属一个作者，按字段补齐作者信息，避免只因 authorName 已存在就漏掉头像。
         let patchedItem = mediaItemByMergingAuthorMetadata(item, fallback: resolvedItem)
 
-        // 如果有 push 回调，使用 NavigationStack 入栈（保留当前详情页在栈中）
-        if let onNavigateToItem {
-            onNavigateToItem(patchedItem)
-            return
-        }
+        // 始终原地替换 resolvedItem，不走 onNavigateToItem push 路径
+        // 这样作者面板保持打开，详情页数据无缝切换
+        isAuthorPanelFade = true
+        isNavigating = true
 
-        // 否则在当前详情页内替换壁纸
         if let index = viewModel.items.firstIndex(where: { $0.id == patchedItem.id }) {
             navigateToIndex(index)
         } else {
-            prepareSlideTransition(direction: .down)
             reloadMedia(patchedItem)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            self.isNavigating = false
+            self.isAuthorPanelFade = false
         }
     }
 }
@@ -3745,6 +3759,7 @@ final class PreviewPlayer: ObservableObject, @unchecked Sendable {
     let player = AVPlayer()
     @Published var currentTime: TimeInterval = 0
     @Published var totalDuration: TimeInterval = 0
+    @Published var isPlaying: Bool = true
     nonisolated(unsafe) private var timeObserver: Any?
 
     func load(url: URL, isMuted: Bool) {
@@ -3752,8 +3767,13 @@ final class PreviewPlayer: ObservableObject, @unchecked Sendable {
 
         player.isMuted = isMuted
         let item = AVPlayerItem(url: url)
+        // 优化高码率/B帧视频的缓冲和 seek 性能
+        item.preferredForwardBufferDuration = 3.0
+        item.seekingWaitsForVideoCompositionRendering = false
+        player.automaticallyWaitsToMinimizeStalling = true
         player.replaceCurrentItem(with: item)
         player.play()
+        isPlaying = true
 
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor [weak self] in
@@ -3767,7 +3787,17 @@ final class PreviewPlayer: ObservableObject, @unchecked Sendable {
     }
 
     func seek(to time: TimeInterval) {
+        // 使用默认容差（snap 到最近关键帧），避免 B 帧视频逐帧解码卡顿
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+    }
+
+    func togglePlayPause() {
+        if isPlaying {
+            player.pause()
+        } else {
+            player.play()
+        }
+        isPlaying.toggle()
     }
 
     func cleanup() {
@@ -3805,6 +3835,95 @@ struct AVPlayerViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {}
+}
+
+// MARK: - 预览视频渲染层（AVPlayerLayer，避免 AVPlayerView 内部精确 seek）
+
+struct PreviewVideoLayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspect
+        layer.frame = view.bounds
+        layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        view.layer?.addSublayer(layer)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let layer = nsView.layer?.sublayers?.first as? AVPlayerLayer {
+            layer.frame = nsView.bounds
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        nsView.layer?.sublayers?.forEach { layer in
+            if let pl = layer as? AVPlayerLayer { pl.player = nil }
+            layer.removeFromSuperlayer()
+        }
+    }
+}
+
+// MARK: - 预览播放控制条
+
+struct PreviewPlayerControls: View {
+    @ObservedObject var player: PreviewPlayer
+    @State private var isDragging = false
+    @State private var dragValue: TimeInterval = 0
+
+    var body: some View {
+        HStack(spacing: 14) {
+            // 播放/暂停
+            Button { player.togglePlayPause() } label: {
+                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+
+            // 当前时间
+            Text(formatTime(isDragging ? dragValue : player.currentTime))
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.85))
+
+            // 进度条 — 关键：拖拽中暂停播放，松手后用默认容差 seek
+            Slider(
+                value: Binding(
+                    get: { isDragging ? dragValue : player.currentTime },
+                    set: { dragValue = $0 }
+                ),
+                in: 0...max(player.totalDuration, 0.1)
+            ) { editing in
+                isDragging = editing
+                if editing {
+                    player.player.pause()
+                } else {
+                    player.seek(to: dragValue)
+                    if player.isPlaying { player.player.play() }
+                }
+            }
+            .tint(.white)
+            .frame(height: 16)
+
+            // 总时长
+            Text(formatTime(player.totalDuration))
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.55)))
+    }
+
+    private func formatTime(_ t: TimeInterval) -> String {
+        guard t.isFinite, t >= 0 else { return "0:00" }
+        let m = Int(t) / 60
+        let s = Int(t) % 60
+        return String(format: "%d:%02d", m, s)
+    }
 }
 
 // MARK: - Web 壁纸预览 WebView

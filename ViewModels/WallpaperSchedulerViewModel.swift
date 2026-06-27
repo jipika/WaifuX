@@ -119,6 +119,10 @@ class WallpaperSchedulerViewModel: ObservableObject {
         schedulerService.updateDisplayFolderIDs(folderIDs, for: screenID)
     }
 
+    func updateDisplayWebSceneSwitchSeconds(_ seconds: Int?, for screenID: String) {
+        schedulerService.updateDisplayWebSceneSwitchSeconds(seconds, for: screenID)
+    }
+
     // MARK: - Computed Properties
 
     var intervalLabel: String {

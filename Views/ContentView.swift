@@ -264,11 +264,6 @@ struct ContentView: View {
     // 数据源切换提示由独立的 SourceSwitchToast / WorkshopSourceSwitchToast 子视图各自观察。
     @State private var detailPath: [MainDetailRoute] = []
 
-    // 更新弹窗状态
-    @State private var showUpdateSheet = false
-    @State private var updateRelease: GitHubRelease?
-    @State private var updateCommit: GitHubCommit?
-
     init(
         wallpaperViewModel: WallpaperViewModel,
         mediaViewModel: MediaExploreViewModel,
@@ -367,19 +362,7 @@ struct ContentView: View {
                 guessYouLikeVM.preload()
             }
 
-            // 延迟2秒后检查更新（自动检查，一天一次，避免每次启动都消耗 GitHub 配额）
-            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
-            let checker = UpdateChecker.shared
-            // 距上次自动检查不足 24h 则跳过（手动检查不受此限制）
-            guard checker.shouldAutoCheck() else { return }
-            let result = await checker.checkForUpdates(force: false)
-            checker.markAutoCheckDone()
-            // 只在有更新时显示弹窗，错误或频率限制时静默处理
-            if case .updateAvailable(current: _, latest: let release, commit: let commit) = result {
-                updateRelease = release
-                updateCommit = commit
-                showUpdateSheet = true
-            }
+            // Sparkle 自动按 SUScheduledCheckInterval (24h) 检查更新，无需手动触发
         }
         .ignoresSafeArea()
         .applyTheme()
@@ -387,20 +370,6 @@ struct ContentView: View {
 
     private var globalOverlayLayer: some View {
         ZStack {
-            // 更新弹窗 - ZStack overlay，不创建新窗口避免双层红绿灯
-            if showUpdateSheet, let release = updateRelease {
-                AutoUpdateSheet(
-                    currentVersion: UpdateChecker.shared.currentVersion,
-                    latestVersion: release.version,
-                    release: release,
-                    commit: updateCommit,
-                    onClose: { showUpdateSheet = false }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity.animation(.easeOut(duration: 0.25)))
-                .zIndex(600)
-            }
-
             // 下载进度与来源切换提示必须挂在 NavigationStack 外，保证详情页里也可见。
             VStack {
                 Spacer()
@@ -724,9 +693,6 @@ struct ContentView: View {
         animeViewModel.releaseForegroundMemory()
         detailPath.removeAll()
         navigationState.resetForMemoryRelease()
-        showUpdateSheet = false
-        updateRelease = nil
-        updateCommit = nil
     }
 
     private func handleDownloadToastDismiss(_ snapshot: DownloadToastSnapshot) {

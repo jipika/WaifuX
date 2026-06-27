@@ -2772,7 +2772,7 @@ private final class WallpaperVideoWindow: NSWindow {
 }
 
 private final class WallpaperVideoContainerView: NSView {
-    private var posterImageView: NSImageView?
+    private var storedPosterLayer: CALayer?
     private var grainOverlayView: NSView?
     private var transitionPlayerLayer: AVPlayerLayer?
 
@@ -2782,11 +2782,13 @@ private final class WallpaperVideoContainerView: NSView {
 
     /// 上一次 layout() 后的 viewport 矩形（容器 bounds 坐标系），用于 layout 时复用。
     private var currentViewportRect: CGRect?
+    /// 上一次 layout() 后的壁纸图层 frame（含 pan/zoom 偏移），用于 poster 同步。
+    private var currentLayerFrame: CGRect?
     /// 上一次 layout() 后的 wallpaperCropRect（归一化），用于 layout 时复用。
     private var currentWallpaperCropRect: UnitRect?
 
     var isShowingPoster: Bool {
-        posterImageView != nil
+        storedPosterLayer != nil
     }
 
     override init(frame frameRect: NSRect) {
@@ -2821,15 +2823,14 @@ private final class WallpaperVideoContainerView: NSView {
         let viewBounds = bounds
         guard let layout, viewBounds.width > 0, viewBounds.height > 0 else {
             currentViewportRect = nil
+            currentLayerFrame = nil
             currentWallpaperCropRect = nil
             avPlayerLayer.videoGravity = .resizeAspectFill
             avPlayerLayer.frame = viewBounds
             transitionPlayerLayer?.frame = avPlayerLayer.bounds
-            // 回退：mask 清除，poster/grain 恢复全 bounds + autoresize
+            // 回退：mask 清除，poster/grain 恢复全 bounds
             layer?.mask = nil
-            posterImageView?.autoresizingMask = [.width, .height]
-            posterImageView?.frame = viewBounds
-            posterImageView?.imageScaling = .scaleAxesIndependently
+            storedPosterLayer?.frame = viewBounds  // 无 crop 时 poster 也铺满
             grainOverlayView?.autoresizingMask = [.width, .height]
             grainOverlayView?.frame = viewBounds
             return
@@ -2855,7 +2856,9 @@ private final class WallpaperVideoContainerView: NSView {
         // cropRect.y 向下 → 翻转：从 wallpaper 顶部移除 (1-y-h) 高度 ⇔ layer 上沿移动到 viewport 顶之上 crop.y × layerH
         let layerX = vpX - crop.x * layerW
         let layerY = vpY - (1.0 - crop.y - crop.h) * layerH
-        avPlayerLayer.frame = CGRect(x: layerX, y: layerY, width: layerW, height: layerH)
+        let computedLayerFrame = CGRect(x: layerX, y: layerY, width: layerW, height: layerH)
+        avPlayerLayer.frame = computedLayerFrame
+        currentLayerFrame = computedLayerFrame
         transitionPlayerLayer?.frame = avPlayerLayer.bounds
 
         // ⚠️ 关键：当 cropRect 不是正方形时（如 viewport 比例窗口），avPlayerLayer 在某个方向
@@ -2874,11 +2877,9 @@ private final class WallpaperVideoContainerView: NSView {
             layer?.mask = mask
         }
 
-        // poster / grain 也同步到 viewport（subview 不被 backing layer 的 masksToBounds 裁剪）
-        // crop 模式下必须关 autoresize，否则 view 系统会把 frame 拉回 bounds
-        posterImageView?.autoresizingMask = []
-        posterImageView?.frame = viewport
-        posterImageView?.imageScaling = .scaleProportionallyUpOrDown
+        // poster 是 sublayer，和 avPlayerLayer 同级，容器 mask 自动裁剪。
+        // poster frame 必须和 avPlayerLayer 完全一致（含 pan/zoom 偏移），这样被 mask 裁后才能显示相同区域。
+        storedPosterLayer?.frame = computedLayerFrame
         grainOverlayView?.autoresizingMask = []
         grainOverlayView?.frame = viewport
     }
@@ -2922,26 +2923,25 @@ private final class WallpaperVideoContainerView: NSView {
     }
 
     /// 显示预览图（锁屏或无权限时使用）
+    /// 使用 CALayer（sublayer）而非 NSImageView（subview），确保被容器 layer mask 正确裁剪到 viewport。
     func showPoster(_ image: NSImage) {
         hidePoster()
 
-        // poster 限制在 viewport 区域（若存在 crop），否则铺满 bounds
-        let targetFrame = currentViewportRect ?? bounds
-        let imageView = NSImageView(frame: targetFrame)
-        imageView.image = image
-        // crop 时 viewport 已是目标比例的区域，poster 在框内 aspect-fill；
-        // 无 crop 时维持旧行为 scaleAxesIndependently 拉伸填满
-        imageView.imageScaling = currentViewportRect != nil ? .scaleProportionallyUpOrDown : .scaleAxesIndependently
-        // crop 模式下不能 autoresize（会被拉回 bounds），由 layout() 手动同步到 viewport
-        imageView.autoresizingMask = currentViewportRect != nil ? [] : [.width, .height]
-        addSubview(imageView)
-        posterImageView = imageView
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        let posterLayer = CALayer()
+        posterLayer.contentsGravity = .resizeAspectFill
+        posterLayer.contents = cg
+        // poster 必须和 avPlayerLayer 使用完全相同的 frame（含 pan/zoom 偏移），
+        // 这样被容器 mask 裁剪后才能显示一致的区域
+        posterLayer.frame = currentLayerFrame ?? bounds
+        layer?.addSublayer(posterLayer)
+        storedPosterLayer = posterLayer
     }
 
     /// 隐藏预览图
     func hidePoster() {
-        posterImageView?.removeFromSuperview()
-        posterImageView = nil
+        storedPosterLayer?.removeFromSuperlayer()
+        storedPosterLayer = nil
     }
 
     /// 显示噪点纹理叠加（Arc 磨砂质感，平铺实现）
@@ -2974,13 +2974,16 @@ private final class WallpaperVideoContainerView: NSView {
         }
         transitionPlayerLayer?.frame = avPlayerLayer.bounds
 
-        // poster 和 grain 是 subview（非 sublayer），容器 CALayer 的 masksToBounds 裁不到它们。
-        // crop 时把它们的 frame 限制到 viewport 区域，避免超出可视框渲染。
+        // poster 是 sublayer，和 avPlayerLayer 同级，容器 mask 自动裁剪。
+        // poster frame 必须和 avPlayerLayer 一致（含 pan/zoom 偏移），不能用 viewport。
+        if let lf = currentLayerFrame {
+            storedPosterLayer?.frame = lf
+        } else {
+            storedPosterLayer?.frame = bounds
+        }
         if let vp = currentViewportRect {
-            posterImageView?.frame = vp
             grainOverlayView?.frame = vp
         } else {
-            posterImageView?.frame = bounds
             grainOverlayView?.frame = bounds
         }
     }

@@ -181,12 +181,6 @@ class SettingsViewModel: ObservableObject {
     @Published var activeDataSourceProfileID: String = DataSourceProfileStore.builtinProfile.id
     @Published var dataSourceStatusMessage: String?
 
-    // MARK: - 更新检测相关
-    @Published var updateChecker = UpdateChecker.shared
-    @Published var updateCheckResult: UpdateCheckResult?
-    @Published var isCheckingUpdate = false
-    @Published var updateCheckError: String?
-
     private var cancellables = Set<AnyCancellable>()
 
     /// 批量更新标志。为 true 时，各 @Published 的 didSet 跳过单例副作用与 UserDefaults 写入，
@@ -409,51 +403,6 @@ class SettingsViewModel: ObservableObject {
     }
 
     // MARK: - 更新检测
-
-    /// 存储最新的 commit 信息
-    @Published var latestCommit: GitHubCommit?
-
-    func checkForUpdates(force: Bool = false) async {
-        isCheckingUpdate = true
-        updateCheckError = nil
-        latestCommit = nil
-
-        let result = await updateChecker.checkForUpdates(force: force)
-        updateCheckResult = result
-
-        // 提取 commit 信息
-        if case .updateAvailable(_, _, let commit) = result {
-            latestCommit = commit
-        }
-
-        if case .error(let message) = result {
-            updateCheckError = message
-        }
-
-        isCheckingUpdate = false
-    }
-
-    func openDownloadPage() {
-        if case .updateAvailable(_, let release, _) = updateCheckResult {
-            updateChecker.openDownloadPage(for: release)
-        } else {
-            updateChecker.openDownloadPage()
-        }
-    }
-
-    var hasUpdate: Bool {
-        if case .updateAvailable = updateCheckResult {
-            return true
-        }
-        return false
-    }
-
-    var latestVersion: String? {
-        if case .updateAvailable(_, let release, _) = updateCheckResult {
-            return release.version
-        }
-        return updateChecker.currentRelease?.version
-    }
 
     func updateCacheSize() async {
         // 获取 CacheService 缓存大小

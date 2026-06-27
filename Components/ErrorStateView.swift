@@ -99,7 +99,17 @@ struct ErrorStateView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
-            
+
+            // 网络排查提示（非空状态才显示）
+            if type != .empty {
+                Text(t("error.networkTroubleshoot"))
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 16)
+            }
+
             // 重试按钮
             if retryAction != nil {
                 Button {

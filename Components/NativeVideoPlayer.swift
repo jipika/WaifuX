@@ -91,6 +91,9 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
 
         let asset = AVAsset(url: url)
         let item = AVPlayerItem(asset: asset)
+        // 优化高码率/B帧视频的缓冲性能
+        item.preferredForwardBufferDuration = 3.0
+        item.seekingWaitsForVideoCompositionRendering = false
 
         // 清理旧观察者
         itemObservers.forEach { $0.invalidate() }

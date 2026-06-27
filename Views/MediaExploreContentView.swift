@@ -541,12 +541,23 @@ struct MediaExploreContentView: View {
                         }
                     }
                 } label: {
-                    Text(workshopSourceManager.activeSource.displayName)
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(arcSettings.primaryText.opacity(0.75))
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Image(systemName: "globe")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(arcSettings.primaryText.opacity(0.55))
+                        Text(workshopSourceManager.activeSource.displayName)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(arcSettings.primaryText.opacity(0.75))
+                    }
                 }
                 .menuStyle(.borderlessButton)
                 .offset(y: 1.5)
+                .background {
+                    SourceHintIcon()
+                        .fixedSize()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .offset(x: 18)
+                }
             }
 
             Text(t("exploreMedia"))

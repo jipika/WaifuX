@@ -703,8 +703,6 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.primaryPink
                 )
             } else {
-                batchDeleteToolbar(count: wallpaperItems.count + currentWallpaperFolders.count)
-
                 libraryWaterfallGrid(
                     entries: orderedWallpaperGridItems,
                     config: config,
@@ -873,6 +871,18 @@ struct MyLibraryContentView: View {
         return orderedGridEntries(entries)
     }
 
+    /// 当前内容类型下可选中的项目总数（用于全选/取消全选判断）
+    private var selectableItemCount: Int {
+        switch selectedContentType {
+        case .wallpaper:
+            return wallpaperItems.count + currentWallpaperFolders.count
+        case .video:
+            return mediaItems.count + currentMediaFolders.count
+        case .anime:
+            return currentAnimeItems.count
+        }
+    }
+
     private var currentWallpaperFolders: [LibraryFolder] {
         let collection: LibraryFolder.FolderCollection = selectedSubTab == .favorites ? .favorites : .downloads
         let folders = folderStore.folders(for: .wallpaper, parentID: currentWallpaperFolderID, collection: collection)
@@ -1005,8 +1015,6 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.secondaryViolet
                 )
             } else {
-                batchDeleteToolbar(count: mediaItems.count + currentMediaFolders.count)
-
                 libraryWaterfallGrid(
                     entries: orderedMediaGridItems,
                     config: config,
@@ -1420,8 +1428,6 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.tertiaryBlue
                 )
             } else {
-                batchDeleteToolbar(count: currentAnimeItems.count)
-
                 let animeCardHeight = config.cardWidth * 1.4 + 52
 
                 // ⚡ 改用 LazyVGrid：动漫卡片高度统一，不需要瀑布流多列对齐。
@@ -1836,6 +1842,59 @@ struct MyLibraryContentView: View {
 
     private func libraryToolbarActions(tint: Color) -> some View {
         HStack(spacing: 8) {
+            // 编辑模式下：全选 + 删除 放在完成左边
+            if isEditing {
+                let totalCount = selectableItemCount
+                // 全选/取消全选
+                Button {
+                    toggleSelectAll()
+                } label: {
+                    Text(selectedItems.count == totalCount ? t("deselect.all") : t("select.all"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(.regularMaterial)
+                                .opacity(0.5)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+
+                // 删除按钮
+                Button {
+                    deleteSelectedItems()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("\(t("delete")) (\(selectedItems.count))")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.red.opacity(0.7))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.red.opacity(0.4), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .disabled(selectedItems.isEmpty)
+                .opacity(selectedItems.isEmpty ? 0.5 : 1)
+            }
+
             toolbarCapsuleButton(
                 title: isEditing ? t("done") : t("edit"),
                 systemImage: isEditing ? "checkmark.circle.fill" : "checkmark.circle",
@@ -2079,48 +2138,6 @@ struct MyLibraryContentView: View {
             }
             .padding(.horizontal, 4)
         }
-    }
-
-    // MARK: - Batch Delete Toolbar
-    private func batchDeleteToolbar(count: Int) -> some View {
-        HStack {
-            if isEditing {
-                // 全选/取消全选
-                Button {
-                    toggleSelectAll()
-                } label: {
-                    Text(selectedItems.count == count ? t("deselect.all") : t("select.all"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.8))
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-
-                // 删除按钮
-                Button {
-                    deleteSelectedItems()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "trash")
-                        Text("\(t("delete")) (\(selectedItems.count))")
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.red.opacity(0.7))
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(selectedItems.isEmpty)
-            }
-        }
-        .frame(height: isEditing ? 36 : 0)
-        .opacity(isEditing ? 1 : 0)
-        .animation(.easeInOut(duration: 0.2), value: isEditing)
     }
 
     // MARK: - Empty State

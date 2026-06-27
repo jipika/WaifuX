@@ -359,9 +359,8 @@ final class StatusBarController: NSObject {
             // 该屏壁纸是否为 web（web 暂不支持可视区域调节）
             let isWebWallpaper = weBridge.isWebWallpaperOn(screen: screen)
 
-            // 该屏壁纸是否为静态图片（静态壁纸渲染走系统 setDesktopImageURL 或
-            // StaticImageWallpaperOverlayManager，二者均未消费 DisplayCropSettings，
-            // 暂不支持可视区域调节）。扩展模式 / web 由其它分支独立处理。
+            // 该屏壁纸是否为静态图片（StaticImageWallpaperOverlayManager 已支持 CropLayoutEngine，
+            // 可视区域调节已启用）。扩展模式 / web 由其它分支独立处理。
             let isStaticWallpaper: Bool = {
                 if isExtensionMode { return false }
                 if isWebWallpaper { return false }
@@ -422,9 +421,6 @@ final class StatusBarController: NSObject {
             if isWebWallpaper {
                 cropAdjustItem.isEnabled = false
                 cropAdjustItem.toolTip = t("statusbar.cropUnsupported")
-            } else if isStaticWallpaper {
-                cropAdjustItem.isEnabled = false
-                cropAdjustItem.toolTip = t("statusbar.cropStaticUnsupported")
             }
             screenSubMenu.addItem(cropAdjustItem)
 
@@ -440,16 +436,13 @@ final class StatusBarController: NSObject {
                 item.target = self
                 item.representedObject = CropAspectPayload(screen: screen, preset: preset)
                 item.state = (currentSettings.aspectPreset == preset) ? .on : .off
-                if isWebWallpaper || isStaticWallpaper { item.isEnabled = false }
+                if isWebWallpaper { item.isEnabled = false }
                 aspectMenu.addItem(item)
             }
             aspectItem.submenu = aspectMenu
             if isWebWallpaper {
                 aspectItem.isEnabled = false
                 aspectItem.toolTip = t("statusbar.cropUnsupported")
-            } else if isStaticWallpaper {
-                aspectItem.isEnabled = false
-                aspectItem.toolTip = t("statusbar.cropStaticUnsupported")
             }
             screenSubMenu.addItem(aspectItem)
 
@@ -463,9 +456,6 @@ final class StatusBarController: NSObject {
             if isWebWallpaper {
                 resetItem.isEnabled = false
                 resetItem.toolTip = t("statusbar.cropUnsupported")
-            } else if isStaticWallpaper {
-                resetItem.isEnabled = false
-                resetItem.toolTip = t("statusbar.cropStaticUnsupported")
             }
             screenSubMenu.addItem(resetItem)
 

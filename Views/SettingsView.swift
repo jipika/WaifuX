@@ -813,7 +813,7 @@ private struct SchedulerSettingsTab: View {
         MacSettingsForm {
             // 每屏配置
             MacSettingsSection(header: t("scheduleConfig")) {
-                ForEach(Array(screens.enumerated()), id: \.element.wallpaperScreenIdentifier) { index, screen in
+                ForEach(Array(screens.enumerated()), id: \.element.wallpaperScreenIdentifier) { (index: Int, screen: NSScreen) in
                     let screenID = screen.wallpaperScreenIdentifier
                     let displayConfig = viewModel.schedulerViewModel.displayConfig(for: screenID)
 
@@ -858,12 +858,9 @@ private struct SchedulerSettingsTab: View {
                                             viewModel.schedulerViewModel.updateDisplayInterval(minutes, for: screenID)
                                         }
                                     }
-                                    // 只有当内容类型包含媒体且当前不是 Web 壁纸时，才显示"播完即换"选项
-                                    if displayConfig.includeMedia && !isWebWallpaper {
-                                        Divider()
-                                        Button(intervalLabel(for: SchedulerConfig.intervalOnEndMinutes)) {
-                                            viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnEndMinutes, for: screenID)
-                                        }
+                                    Divider()
+                                    Button(intervalLabel(for: SchedulerConfig.intervalOnEndMinutes)) {
+                                        viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnEndMinutes, for: screenID)
                                     }
                                 } label: {
                                     Text(intervalLabel(for: displayConfig.intervalMinutes))
@@ -874,6 +871,47 @@ private struct SchedulerSettingsTab: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 12)
+
+                            // "播完即换"模式下的 Web/Scene 壁纸切换间隔滑块
+                            if displayConfig.isOnEndMode {
+                                dividerLine
+
+                                VStack(spacing: 8) {
+                                    HStack(spacing: 12) {
+                                        Text(t("webSceneSwitchInterval"))
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(Color.white.opacity(0.9))
+
+                                        Spacer()
+
+                                        let seconds = displayConfig.webSceneSwitchSeconds ?? 0
+                                        if seconds == 0 {
+                                            Text(t("intervalOnEnd"))
+                                                .font(.system(size: 12, weight: .regular))
+                                                .foregroundStyle(Color.white.opacity(0.6))
+                                        } else {
+                                            Text(seconds >= 60 ? "\(seconds / 60) \(t("minutes"))" : "\(seconds) \(t("seconds"))")
+                                                .font(.system(size: 12, weight: .regular))
+                                                .foregroundStyle(Color.white.opacity(0.6))
+                                        }
+                                    }
+
+                                    Slider(
+                                        value: Binding(
+                                            get: { Double(displayConfig.webSceneSwitchSeconds ?? 0) },
+                                            set: { newValue in
+                                                let intVal = Int(newValue)
+                                                viewModel.schedulerViewModel.updateDisplayWebSceneSwitchSeconds(intVal == 0 ? nil : intVal, for: screenID)
+                                            }
+                                        ),
+                                        in: 0...3600,
+                                        step: 10
+                                    )
+                                    .accentColor(.blue)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+                            }
 
                             dividerLine
 
@@ -924,11 +962,6 @@ private struct SchedulerSettingsTab: View {
                                     Toggle(isOn: Binding(
                                         get: { displayConfig.includeMedia },
                                         set: { newValue in
-                                            // 如果用户取消媒体选择且当前是"播完即换"模式，自动切换回默认间隔
-                                            // 因为"播完即换"只支持纯媒体模式
-                                            if !newValue && displayConfig.isOnEndMode {
-                                                viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOptions.first ?? 60, for: screenID)
-                                            }
                                             viewModel.schedulerViewModel.updateDisplayIncludeMedia(newValue, for: screenID)
                                         }
                                     )) {
@@ -947,7 +980,7 @@ private struct SchedulerSettingsTab: View {
                             // 文件夹选择
                             FolderPickerRow(
                                 folderIDs: displayConfig.folderIDs,
-                                includeWallpapers: displayConfig.includeWallpapers && !displayConfig.isOnEndMode,
+                                includeWallpapers: displayConfig.includeWallpapers && !(displayConfig.isOnEndMode && displayConfig.webSceneSwitchSeconds == nil),
                                 includeMedia: displayConfig.includeMedia,
                                 screenID: screenID,
                                 viewModel: viewModel
@@ -1077,7 +1110,6 @@ private struct SchedulerSettingsTab: View {
 // MARK: - 关于设置标签
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
-    @State private var showAutoUpdateSheet = false
     @State private var showResetAlert = false
 
     var body: some View {
@@ -1145,20 +1177,6 @@ private struct AboutSettingsTab: View {
             } message: {
                 Text(t("resetAllDataConfirm"))
             }
-
-            // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
-            if showAutoUpdateSheet,
-               case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
-                AutoUpdateSheet(
-                    currentVersion: current,
-                    latestVersion: release.version,
-                    release: release,
-                    commit: commit,
-                    onClose: { showAutoUpdateSheet = false }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity.animation(.easeOut(duration: 0.25)))
-            }
         }
     }
 
@@ -1172,13 +1190,13 @@ private struct AboutSettingsTab: View {
         }
     }
 
-    // MARK: - 自动更新区域
+    // MARK: - 自动更新区域（Sparkle 驱动）
 
     @ViewBuilder
     private var autoUpdateSection: some View {
         MacSettingsSection {
             VStack(alignment: .leading, spacing: 16) {
-                // 应用信息头部
+                // 应用信息头部 + 检查更新按钮
                 HStack(spacing: 14) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
@@ -1191,295 +1209,31 @@ private struct AboutSettingsTab: View {
                             .font(.system(size: 17, weight: .bold))
                             .foregroundStyle(Color.white.opacity(0.92))
 
-                        Text(viewModel.updateChecker.fullVersionString)
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                             .font(.system(size: 11.5, weight: .regular))
                             .foregroundStyle(Color.white.opacity(0.4))
                     }
 
                     Spacer()
 
-                    // 更新状态指示
-                    updateStatusIndicator
-                }
-
-                // 更新操作区域
-                HStack(spacing: 12) {
+                    // 检查更新按钮（委托 Sparkle 处理）
                     Button {
-                        Task {
-                            // 用户主动点击，强制检查
-                            await viewModel.checkForUpdates(force: true)
-                            // 如果有更新，显示弹窗
-                            if case .updateAvailable = viewModel.updateCheckResult {
-                                showAutoUpdateSheet = true
-                            }
-                        }
+                        AppDelegate.shared?.checkForUpdates()
                     } label: {
                         HStack(spacing: 6) {
-                            if viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 12))
-                            Text(viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking ? "检查中..." : "检查更新")
+                            Text("检查更新")
                                 .font(.system(size: 13))
                         }
                         .frame(height: 28)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(viewModel.isCheckingUpdate || viewModel.updateChecker.isChecking)
-
-                    if let lastCheck = viewModel.updateChecker.lastCheckDate {
-                        Text("上次检查: \(formatRelativeDate(lastCheck))")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-                }
-
-                // 已下载但未安装的提示
-                if case .downloaded = UpdateManager.shared.state {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("更新已下载")
-                            .font(.system(size: 13))
-                        Spacer()
-                        Button {
-                            UpdateManager.shared.installUpdate()
-                        } label: {
-                            Text("立即安装")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
-                    .padding(10)
-                    .background(Color.green.opacity(0.1))
-                    .cornerRadius(8)
                 }
             }
             .padding(14)
         }
     }
-
-    @ViewBuilder
-    private var updateStatusIndicator: some View {
-        switch viewModel.updateCheckResult {
-        case .updateAvailable(_, let release, _):
-            Button {
-                showAutoUpdateSheet = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .foregroundStyle(.blue)
-                    Text("v\(release.version) 可用")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.blue)
-                }
-            }
-            .buttonStyle(.plain)
-
-        case .noUpdate:
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text("已是最新")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-        case .error(let message):
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(message)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        default:
-            EmptyView()
-        }
-    }
-
-    private func formatRelativeDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-// MARK: - 设置页更新检查视图
-
-struct SettingsUpdateSection: View {
-    @ObservedObject var viewModel: SettingsViewModel
-    @ObservedObject var updateChecker = UpdateChecker.shared
-    @ObservedObject var updateManager = UpdateManager.shared
-    @State private var showUpdateSheet = false
-
-    var body: some View {
-        ZStack {
-            VStack(alignment: .leading, spacing: 16) {
-                // 版本信息
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("当前版本")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Text(viewModel.appVersion)
-                            .font(.system(size: 14, weight: .medium))
-                    }
-
-                    Spacer()
-
-                    // 更新状态指示
-                    updateStatusView
-                }
-
-                // 检查更新按钮
-                HStack(spacing: 12) {
-                    Button {
-                        Task {
-                            // 用户主动点击，强制检查
-                            await viewModel.checkForUpdates(force: true)
-                            // 如果有更新，自动显示弹窗
-                            if case .updateAvailable = viewModel.updateCheckResult {
-                                showUpdateSheet = true
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            if viewModel.isCheckingUpdate || updateChecker.isChecking {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12))
-                            Text(viewModel.isCheckingUpdate || updateChecker.isChecking ? "检查中..." : "检查更新")
-                                .font(.system(size: 13))
-                        }
-                        .frame(height: 28)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(viewModel.isCheckingUpdate || updateChecker.isChecking)
-
-                    if let lastCheck = updateChecker.lastCheckDate {
-                        Text("上次检查: \(formatRelativeDate(lastCheck))")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // 已下载但未安装的提示
-                if case .downloaded(_) = updateManager.state {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("更新已下载")
-                            .font(.system(size: 13))
-                        Spacer()
-                        Button {
-                            updateManager.installUpdate()
-                        } label: {
-                            Text("立即安装")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
-                    .padding(10)
-                    .background(Color.green.opacity(0.1))
-                    .cornerRadius(8)
-                }
-            }
-            .padding(16)
-            .background(Color.secondary.opacity(0.05))
-            .cornerRadius(12)
-
-            // 更新弹窗 - 使用 ZStack overlay，居中显示，不创建新窗口
-            if showUpdateSheet,
-               case .updateAvailable(let current, let release, let commit) = viewModel.updateCheckResult {
-                AutoUpdateSheet(
-                    currentVersion: current,
-                    latestVersion: release.version,
-                    release: release,
-                    commit: commit,
-                    onClose: { showUpdateSheet = false }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity.animation(.easeOut(duration: 0.25)))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var updateStatusView: some View {
-        switch viewModel.updateCheckResult {
-        case .updateAvailable(_, let release, _):
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .foregroundStyle(.blue)
-                Text("v\(release.version) 可用")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.blue)
-            }
-        case .noUpdate:
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text("已是最新版本")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-        case .error(let message):
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(message)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        default:
-            EmptyView()
-        }
-    }
-
-    private func formatRelativeDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-#Preview {
-    AutoUpdateSheet(
-        currentVersion: "38.0.22",
-        latestVersion: "38.0.25",
-        release: GitHubRelease(
-            tagName: "v38.0.25",
-            name: "WaifuX 38.0.25",
-            body: "修复了一些问题",
-            htmlUrl: "https://github.com/jipika/WaifuX/releases/tag/v38.0.25",
-            publishedAt: "2024-01-01T00:00:00Z",
-            prerelease: false,
-            draft: false,
-            targetCommitish: "abc1234"
-        ),
-        commit: GitHubCommit(
-            sha: "abc1234567890",
-            commit: GitHubCommit.CommitDetails(
-                message: "修复了内存泄漏问题\n\n优化了图片加载性能",
-                author: GitHubCommit.CommitDetails.AuthorInfo(
-                    name: "Developer",
-                    date: "2024-01-01T00:00:00Z"
-                )
-            )
-        ),
-        onClose: {}
-    )
-    .frame(width: 400, height: 500)
 }
 
 

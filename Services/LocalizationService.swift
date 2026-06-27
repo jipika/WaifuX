@@ -667,6 +667,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "replaceRhythmDesc": "Set rotation interval, playback order, and wallpaper source.",
         "replaceInterval": "REPLACE INTERVAL",
         "intervalOnEnd": "Play to End",
+        "webSceneSwitchInterval": "Web/Scene Switch Interval",
         "intervalDesc": "Determines auto-switch frequency.",
         "interval": "INTERVAL",
         "replaceOrder": "REPLACE ORDER",
@@ -708,6 +709,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "joinQQGroup": "JOIN QQ GROUP",
         "joinQQGroupDesc": "Join WaifuX user QQ group.",
         "minutes": "MINUTES",
+        "seconds": "SEC",
         "hour": "HOUR",
         "hours": "HOURS",
         // Status
@@ -1321,7 +1323,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.title": "Unapplied module changes",
         "settings.modules.closePending.message": "Restart now, apply later, or discard changes?",
         "settings.modules.closePending.later": "Later",
-        "settings.modules.closePending.discard": "Discard Changes"
+        "settings.modules.closePending.discard": "Discard Changes",
+        // Source switch hint
+        "sourceSwitchHint": "Click to switch between different data sources",
+        // Error network troubleshoot
+        "error.networkTroubleshoot": "Please check your network connection, make sure VPN is enabled, or try switching to a different node."
     ],
     .chinese: [
         // Launch at Login
@@ -1910,6 +1916,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "replaceRhythmDesc": "设置轮换间隔、播放顺序和壁纸来源。",
         "replaceInterval": "更换间隔",
         "intervalOnEnd": "播完即换",
+        "webSceneSwitchInterval": "Web/Scene 切换间隔",
         "intervalDesc": "决定自动切换的频率。",
         "interval": "间隔",
         "replaceOrder": "更换顺序",
@@ -1951,6 +1958,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "joinQQGroup": "加入 QQ 群",
         "joinQQGroupDesc": "加入 WaifuX 用户交流群。",
         "minutes": "分钟",
+        "seconds": "秒",
         "hour": "小时",
         "hours": "小时",
         // Status
@@ -2565,7 +2573,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.title": "有未应用的模块更改",
         "settings.modules.closePending.message": "立即重启、稍后应用，还是放弃更改？",
         "settings.modules.closePending.later": "稍后",
-        "settings.modules.closePending.discard": "放弃更改"
+        "settings.modules.closePending.discard": "放弃更改",
+        // Source switch hint
+        "sourceSwitchHint": "点击切换不同的数据源",
+        // Error network troubleshoot
+        "error.networkTroubleshoot": "请检查网络连接是否正常，是否正确开启 VPN，或尝试切换其他节点。"
     ],
     .japanese: [
         // Launch at Login
@@ -3145,6 +3157,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "replaceRhythmDesc": "ローテーション間隔、再生順序、壁纸ソースを設定。",
         "replaceInterval": "切り替え間隔",
         "intervalOnEnd": "再生終了時に切り替え",
+        "webSceneSwitchInterval": "Web/Scene 切り替え間隔",
         "intervalDesc": "自動切り替えの頻度を決定。",
         "interval": "間隔",
         "replaceOrder": "切り替え順序",
@@ -3186,6 +3199,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "joinQQGroup": "QQグループに参加",
         "joinQQGroupDesc": "WaifuXユーザーのQQグループに参加する。",
         "minutes": "分",
+        "seconds": "秒",
         "hour": "時間",
         "hours": "時間",
         // Status
@@ -3799,7 +3813,11 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.title": "未適用のモジュール変更があります",
         "settings.modules.closePending.message": "今すぐ再起動しますか？後で適用しますか？変更を破棄しますか？",
         "settings.modules.closePending.later": "後で",
-        "settings.modules.closePending.discard": "変更を破棄"
+        "settings.modules.closePending.discard": "変更を破棄",
+        // Source switch hint
+        "sourceSwitchHint": "クリックしてデータソースを切り替えます",
+        // Error network troubleshoot
+        "error.networkTroubleshoot": "ネットワーク接続を確認し、VPNが有効になっているか、または別のノードに切り替えてみてください。"
     ]
 ]
 

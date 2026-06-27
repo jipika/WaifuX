@@ -70,6 +70,12 @@ final class DesktopWallpaperSyncManager {
     ///   - screen: 目标屏幕；nil 表示注册到所有当前屏幕
     ///   - options: 设置选项
     func registerWallpaperSet(_ url: URL, for screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]) {
+        // 系统壁纸同步关闭时禁止注册，防止后续 Space 切换时绕开关闭状态重新写入系统壁纸。
+        guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
+            print("[DesktopWallpaperSyncManager] 🧊 系统壁纸同步已关闭，跳过注册")
+            return
+        }
+
         let targetScreens: [NSScreen]
         if let screen = screen {
             targetScreens = [screen]
@@ -260,6 +266,12 @@ final class DesktopWallpaperSyncManager {
         for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
             let fingerprint = screen.wallpaperScreenFingerprint
+
+            // 系统壁纸同步关闭时跳过本屏的同步，避免后续 Space 切换回写系统壁纸。
+            guard videoManager.isSystemWallpaperSyncEnabled else {
+                print("[DesktopWallpaperSyncManager] [\(source)] 🧊 系统壁纸同步已关闭，跳过同步 for screen \(screen.localizedName)")
+                continue
+            }
 
             // 如果该屏幕属于视频壁纸目标，同步其 poster（不再跳过，确保所有 Spaces 都正确）
             if videoManager.hasActiveWallpaper(on: screen),

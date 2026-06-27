@@ -617,7 +617,7 @@ class WallpaperViewModel: ObservableObject {
     ///   - page: 页码，从 1 开始
     ///   - limit: 每页数量，默认 20
     /// - Returns: 壁纸列表
-    func fetchWallpapersByAuthor(username: String, page: Int = 1, limit: Int = 20) async throws -> [Wallpaper] {
+    func fetchWallpapersByAuthor(username: String, page: Int = 1, limit: Int = 24) async throws -> [Wallpaper] {
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUsername.isEmpty else { return [] }
 
@@ -625,15 +625,15 @@ class WallpaperViewModel: ObservableObject {
             query: "@\(trimmedUsername)",
             page: page,
             perPage: limit,
-            categories: normalizedCategoryMask(),
-            purity: normalizedPurityMask(),
+            categories: "111",      // 不限分类，查全量
+            purity: "1100",         // SFW + Sketchy，排除 NSFW
             sorting: SortingOption.dateAdded.rawValue,
             order: "desc",
             topRange: nil,
-            atleast: atleastResolution,
-            resolutions: normalizedResolutions(),
-            ratios: normalizedRatios(),
-            colors: normalizedColors()
+            atleast: nil,           // 不限分辨率
+            resolutions: [],        // 不限分辨率列表
+            ratios: [],             // 不限比例
+            colors: []              // 不限颜色
         )
 
         let response = try await fetchWallpapers(parameters: parameters)

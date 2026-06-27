@@ -5,13 +5,13 @@ import Combine
 //
 // 把 SystemAudioCaptureService 产出的 mono 64 频段频谱，
 // 镜像成 WE 标准 128 frame（0..63=L, 64..127=R），节流到 ≤30fps，
-// 在持续静音时停推，通过 WallpaperEngineXBridge.sendAudioDataToWebDaemon
+// 在持续静音时低频推零保活，通过 WallpaperEngineXBridge.sendAudioDataToWebDaemon
 // 转发到 wallpaperengine-cli daemon。
 //
 // ═══════════════════════════════════════════════════════════
 // 设计要点：
 //   - 引用计数 start()/stop()：多次 start 只启动一次 SCK；归零才停。
-//   - 静音停推：averageEnergy < 0.01 持续 2s 后停止发送；
+//   - 静音保活：averageEnergy < 0.01 持续 2s 后降频发送全零帧；
 //     一旦能量回升立即恢复（重置静音计时）。
 //   - 节流：两次发送间隔必须 ≥ 33ms（30fps）。
 //   - 错误降级：屏幕录制权限被拒 → SCK 不启动，本类无副作用，
@@ -31,14 +31,18 @@ public final class WallpaperWebAudioRelay {
     /// 静音阈值：averageEnergy 低于此值视为静音
     private let silenceThreshold: Float = 0.01
 
-    /// 静音宽限：静音持续超过此值后停止推送
+    /// 静音宽限：静音持续超过此值后降频推送全零帧
     private let silenceGraceNs: UInt64 = 2_000_000_000
+
+    /// 静音保活间隔：防止 Web 端长时间重复旧频谱，保持可恢复的零输入。
+    private let silentKeepAliveNs: UInt64 = 1_000_000_000
 
     // MARK: - 状态
 
     private var referenceCount: Int = 0
     private var cancellable: AnyCancellable?
     private var lastSendNs: UInt64 = 0
+    private var lastSilentSendNs: UInt64 = 0
     private var silentSinceNs: UInt64? = nil
 
     private init() {}
@@ -65,6 +69,7 @@ public final class WallpaperWebAudioRelay {
         cancellable = nil
         SystemAudioCaptureService.shared.stop()
         lastSendNs = 0
+        lastSilentSendNs = 0
         silentSinceNs = nil
     }
 
@@ -76,18 +81,29 @@ public final class WallpaperWebAudioRelay {
         // 节流：30fps 上限
         if now - lastSendNs < throttleNs { return }
 
-        // 静音判定：能量持续低于阈值 ≥ silenceGraceNs 后停推
+        // 静音判定：能量持续低于阈值 ≥ silenceGraceNs 后降频推零。
+        // 不能直接停推，否则 Web shim 会持续重复最后一帧，Sonic Topography 这类壁纸会退回自循环。
         let energy = SystemAudioCaptureService.shared.averageEnergy
         if energy < silenceThreshold {
             if let since = silentSinceNs {
-                if now - since > silenceGraceNs { return }
+                if now - since > silenceGraceNs {
+                    if now - lastSilentSendNs < silentKeepAliveNs { return }
+                    lastSilentSendNs = now
+                    sendMirroredSpectrum(Array(repeating: 0, count: 64), at: now)
+                    return
+                }
             } else {
                 silentSinceNs = now
             }
         } else {
             silentSinceNs = nil
+            lastSilentSendNs = 0
         }
 
+        sendMirroredSpectrum(spectrum64, at: now)
+    }
+
+    private func sendMirroredSpectrum(_ spectrum64: [Float], at now: UInt64) {
         // mono → 128 镜像 + clamp 到 [0, 1]
         var buf = [Float](repeating: 0, count: 128)
         let count = min(64, spectrum64.count)

@@ -10,6 +10,10 @@ import Combine
 /// 窗口层级与 `VideoWallpaperManager` 的视频壁纸窗口一致（`CGWindowLevelForKey(.desktopWindow)`），
 /// 低于颗粒蒙层（`+1`）与时钟 overlay（`+20`），叠加顺序天然正确。
 ///
+/// 裁切逻辑与视频壁纸完全一致：使用 `CropLayoutEngine` 计算 viewport + wallpaperCropRect，
+/// 通过 CALayer frame + mask 实现 pan/zoom/letterbox。
+/// layer 结构与 `WallpaperVideoContainerView` 完全对齐：override backing layer + masksToBounds 容器。
+///
 /// 持久化：每屏静态图 URL 写入 UserDefaults（`static_image_overlay_state_v1`），
 /// App 启动时 `restoreIfNeeded()` 在 sync 关闭且无活跃动态壁纸时自动重建 overlay。
 @MainActor
@@ -21,6 +25,9 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 每个屏幕当前显示的图片 URL（内存镜像，供 refreshWindows 重建使用）
     private var imageByScreen: [String: URL] = [:]
+
+    /// 每个屏幕的图片原始像素尺寸（用于 CropLayoutEngine 计算）
+    private var imageSizes: [String: CGSize] = [:]
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -51,6 +58,14 @@ final class StaticImageWallpaperOverlayManager {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+
+        // crop 配置变化时实时刷新（与视频壁纸行为一致）
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleCropDidChange),
+            name: DisplayCropSettingsStore.cropDidChangeNotification,
+            object: nil
+        )
     }
 
     // MARK: - 显示 / 隐藏
@@ -72,9 +87,19 @@ final class StaticImageWallpaperOverlayManager {
         let screenID = screen.wallpaperScreenIdentifier
         imageByScreen[screenID] = imageURL
 
+        // 加载图片并记录原始像素尺寸（供 CropLayoutEngine 使用）
+        if let img = NSImage(contentsOf: imageURL), img.size.width > 0, img.size.height > 0 {
+            // NSImage.size 是 point 尺寸，需乘以 rep 像素比
+            if let rep = img.representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
+                imageSizes[screenID] = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+            } else {
+                imageSizes[screenID] = img.size
+            }
+        }
+
         if let existing = imageWindows[screenID] {
             // 复用窗口，只更新图片
-            updateContentView(of: existing, imageURL: imageURL, size: screen.frame.size)
+            updateContentView(of: existing, imageURL: imageURL, screenID: screenID, screen: screen)
             existing.orderFront(nil)
         } else {
             createWindow(for: screen, imageURL: imageURL)
@@ -103,8 +128,14 @@ final class StaticImageWallpaperOverlayManager {
     /// 彻底清除持久化状态（切到视频/场景/web 或系统壁纸时调用）。
     func clearState() {
         imageByScreen.removeAll()
+        imageSizes.removeAll()
         hideAll()
         UserDefaults.standard.removeObject(forKey: Self.stateKey)
+    }
+
+    /// 返回指定屏幕的静态图原始像素尺寸（供 CropAdjustOverlayController 预览使用）。
+    func imageSize(for screen: NSScreen) -> CGSize? {
+        imageSizes[screen.wallpaperScreenIdentifier]
     }
 
     // MARK: - 启动恢复
@@ -174,21 +205,42 @@ final class StaticImageWallpaperOverlayManager {
         window.isMovable = false
         window.animationBehavior = .none
 
-        updateContentView(of: window, imageURL: imageURL, size: frame.size)
+        updateContentView(of: window, imageURL: imageURL, screenID: screenID, screen: screen)
 
         imageWindows[screenID] = window
         window.orderFront(nil)
     }
 
-    /// 设置/更新窗口内容视图为指定图片（Aspect Fill 填满）。
-    private func updateContentView(of window: NSWindow, imageURL: URL, size: NSSize) {
-        let imageView = NSImageView(frame: CGRect(origin: .zero, size: size))
-        imageView.imageScaling = .scaleAxesIndependently  // 拉伸填满整个窗口（Aspect Fill 语义）
-        imageView.image = NSImage(contentsOf: imageURL)
-        window.contentView = imageView
+    /// 设置/更新窗口内容视图，使用 CropLayoutEngine 实现与视频壁纸一致的裁切逻辑。
+    private func updateContentView(of window: NSWindow, imageURL: URL, screenID: String, screen: NSScreen) {
+        let size = screen.frame.size
+        let cropView = StaticCropImageView(frame: CGRect(origin: .zero, size: size))
+        let img = NSImage(contentsOf: imageURL)
+        cropView.image = img
+        window.contentView = cropView
+        applyCropToWindow(window, screenID: screenID, screen: screen)
     }
 
-    // MARK: - 刷新（屏幕插拔）
+    /// 对指定屏幕的 overlay 窗口应用当前 crop 配置（与 VideoWallpaperManager.applyCropToScreen 逻辑一致）。
+    private func applyCropToWindow(_ window: NSWindow, screenID: String, screen: NSScreen) {
+        guard let cropView = window.contentView as? StaticCropImageView else { return }
+
+        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        guard settings.shouldApplyCrop else {
+            cropView.applyCropLayout(nil)
+            window.backgroundColor = .black
+            return
+        }
+        let wallpaperSize = imageSizes[screenID] ?? screen.frame.size
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: wallpaperSize,
+            screenSize: screen.frame.size,
+            settings: settings)
+        cropView.applyCropLayout(layout)
+        window.backgroundColor = NSColor(cgColor: layout.letterboxColor) ?? .black
+    }
+
+    // MARK: - 刷新（屏幕插拔 / crop 变更）
 
     func refreshWindows() {
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
@@ -198,6 +250,7 @@ final class StaticImageWallpaperOverlayManager {
                 window.orderOut(nil)
                 window.contentView = nil
                 imageWindows.removeValue(forKey: screenID)
+                imageSizes.removeValue(forKey: screenID)
             }
         }
         // 同步现有窗口帧 + 重建缺失窗口
@@ -206,6 +259,8 @@ final class StaticImageWallpaperOverlayManager {
             if let window = imageWindows[screenID] {
                 window.setFrame(screen.frame, display: true)
                 window.contentView?.frame = CGRect(origin: .zero, size: screen.frame.size)
+                // 刷新时也重新应用 crop（屏幕分辨率可能变了）
+                applyCropToWindow(window, screenID: screenID, screen: screen)
             } else if let imageURL = imageByScreen[screenID] {
                 // 屏幕重连且本管理器记录过该屏图片 → 重建
                 createWindow(for: screen, imageURL: imageURL)
@@ -259,6 +314,13 @@ final class StaticImageWallpaperOverlayManager {
             self?.refreshWindows()
         }
     }
+
+    @objc private func handleCropDidChange(_ note: Notification) {
+        guard let screenID = note.userInfo?["screenID"] as? String,
+              let window = imageWindows[screenID],
+              let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
+        applyCropToWindow(window, screenID: screenID, screen: screen)
+    }
 }
 
 // MARK: - 窗口子类
@@ -267,4 +329,109 @@ final class StaticImageWallpaperOverlayManager {
 private final class StaticImageOverlayWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+// MARK: - 裁切感知的静态图视图
+
+/// 使用与 `WallpaperVideoContainerView` 一致的裁切逻辑：
+/// imageLayer（aspectFill）+ layer.frame 偏移 + viewport mask。
+/// override backing layer 为 masksToBounds 容器，与视频壁纸 layer 结构完全对齐。
+private final class StaticCropImageView: NSView {
+    private let imageLayer = CALayer()
+
+    /// 保留 CGImage 强引用，防止 AppKit layer display cycle 清掉 contents 后无法恢复。
+    private var storedCGImage: CGImage?
+
+    /// 上一次应用的 wallpaperCropRect（归一化），用于 layout 时回退。
+    private var currentWallpaperCropRect: UnitRect?
+
+    var image: NSImage? {
+        didSet {
+            if let image {
+                let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                storedCGImage = cg
+                imageLayer.contents = cg
+            } else {
+                storedCGImage = nil
+                imageLayer.contents = nil
+            }
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        // 与 WallpaperVideoContainerView 完全对齐：override backing layer 为 masksToBounds 容器
+        let container = CALayer()
+        container.masksToBounds = true
+        layer = container
+        imageLayer.contentsGravity = .resizeAspectFill
+        // ⚠️ 不设置 needsDisplayOnBoundsChange：静态 CGImage 不需要 bounds 变化时触发 display。
+        // AppKit layer-backed view 在 display cycle 中可能清掉子层 contents，
+        // AVPlayerLayer 不受影响（播放器持续刷新），但静态 CGImage 一旦被清就无法恢复。
+        imageLayer.frame = bounds
+        container.addSublayer(imageLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        // 兜底：每次 layout 确保 imageLayer.contents 存在
+        // （AppKit display cycle 可能清掉子层 contents，这里及时恢复）
+        if imageLayer.contents == nil, let cg = storedCGImage {
+            imageLayer.contents = cg
+        }
+        // 无 crop 时保持 imageLayer 填满
+        if currentWallpaperCropRect == nil {
+            imageLayer.frame = bounds
+        }
+    }
+
+    /// 应用 CropLayout；nil 回退到 aspect-fill（与视频壁纸无 crop 时行为一致）。
+    /// 实现逻辑与 `WallpaperVideoContainerView.applyCropLayout` 完全对齐。
+    func applyCropLayout(_ layout: CropLayout?) {
+        // 兜底：确保 contents 存在（与 layout() 中的保护一致）
+        if imageLayer.contents == nil, let cg = storedCGImage {
+            imageLayer.contents = cg
+        }
+        let viewBounds = bounds
+        guard let layout, viewBounds.width > 0, viewBounds.height > 0 else {
+            currentWallpaperCropRect = nil
+            imageLayer.contentsGravity = .resizeAspectFill
+            imageLayer.frame = viewBounds
+            layer?.mask = nil
+            return
+        }
+
+        // 与 WallpaperVideoContainerView.applyCropLayout 完全一致的计算
+        let vpW = layout.viewportRect.w * viewBounds.width
+        let vpH = layout.viewportRect.h * viewBounds.height
+        let vpX = layout.viewportRect.x * viewBounds.width
+        let vpY = (1.0 - layout.viewportRect.y - layout.viewportRect.h) * viewBounds.height
+        let viewport = CGRect(x: vpX, y: vpY, width: vpW, height: vpH)
+        currentWallpaperCropRect = layout.wallpaperCropRect
+
+        let crop = layout.wallpaperCropRect
+        let cropW = max(0.0001, crop.w)
+        let cropH = max(0.0001, crop.h)
+        let layerW = vpW / cropW
+        let layerH = vpH / cropH
+        let layerX = vpX - crop.x * layerW
+        let layerY = vpY - (1.0 - crop.y - crop.h) * layerH
+        imageLayer.frame = CGRect(x: layerX, y: layerY, width: layerW, height: layerH)
+
+        let isFullViewport = abs(vpX) < 0.5 && abs(vpY) < 0.5
+            && abs(vpW - viewBounds.width) < 0.5 && abs(vpH - viewBounds.height) < 0.5
+        if isFullViewport {
+            layer?.mask = nil
+        } else {
+            let mask = (layer?.mask as? CALayer) ?? CALayer()
+            mask.backgroundColor = CGColor(gray: 1, alpha: 1)
+            mask.frame = viewport
+            layer?.mask = mask
+        }
+    }
 }

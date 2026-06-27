@@ -5,6 +5,7 @@ import Kingfisher
 import ExceptionHandling
 import WebKit
 import Darwin
+import Sparkle
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
@@ -196,6 +197,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindowController: NSWindowController?
     /// 窗口隐藏后延迟释放视图树的任务，用于回收 IOSurface / CoreAnimation 等系统图形缓存
     private var delayedReleaseTask: Task<Void, Never>?
+    /// Sparkle 自动更新控制器（检测 + 内置弹窗 + 自动安装）
+    private var updaterController: SPUStandardUpdaterController!
+    /// 静态访问器，供 Settings 等外部触发更新检查
+    static var shared: AppDelegate?
 
     // MARK: - 全局 ViewModel（生命周期与 App 一致）
     /// 这 3 个 ViewModel 由 AppDelegate 持有，传入 ContentView 时用普通 let 引用而非 @StateObject。
@@ -229,6 +234,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.shared = self
         AppResponsivenessMonitor.startIfNeeded()
         AppResponsivenessMonitor.noteScenePhase("didFinishLaunching")
         AppResponsivenessMonitor.noteAppActive(NSApp.isActive)
@@ -246,6 +252,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 捕获 macOS 布局循环异常（NSHostingView + NSCollectionView 混合布局的已知问题）
         // _postWindowNeedsLayout 在 _layoutViewTree 期间被触发时会抛出此异常
         setupLayoutExceptionHandler()
+
+        // 初始化 Sparkle 自动更新（检测 + 内置弹窗 + 自动安装）
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
 
         // 1. 初始化状态栏控制器（轻量级，不阻塞）
         StatusBarController.shared.configure(
@@ -344,7 +357,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 预先在后台线程解压内嵌 assets（wallpaper-wgpu 渲染依赖），避免首次设置壁纸时阻塞主线程
         WallpaperEngineEmbeddedAssets.prepareAssetsInBackground()
 
-        // 注：更新检查已移到 ContentView 中处理
+        // Sparkle 自动按 SUScheduledCheckInterval (24h) 检查更新，无需手动触发
+    }
+
+    /// 触发 Sparkle 更新检查（供 Settings "检查更新" 按钮调用）
+    func checkForUpdates() {
+        updaterController.checkForUpdates(nil)
     }
 
     // MARK: - 异步恢复所有数据（在窗口显示后执行，避免阻塞主线程）
@@ -432,7 +450,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                UpdateChecker.shared.restoreCachedState()
+                                // Sparkle 自动处理更新检查，无需手动恢复缓存状态
 
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     WallpaperViewModel().restoreAPIKeyState()
@@ -1228,391 +1246,6 @@ extension AppDelegate {
             return nil
         }
         return NSSize(width: width, height: height)
-    }
-}
-
-// MARK: - 自动更新弹窗
-struct AutoUpdateSheet: View {
-    @ObservedObject var updateChecker = UpdateChecker.shared
-    @ObservedObject var updateManager = UpdateManager.shared
-
-    let currentVersion: String
-    let latestVersion: String
-    let release: GitHubRelease
-    let commit: GitHubCommit?
-    let onClose: () -> Void
-
-    // release.body 为空时按需加载 commit 作为更新说明 fallback
-    @State private var loadedCommit: GitHubCommit?
-    @State private var isLoadingCommit: Bool = false
-
-    private var needsCommitFallback: Bool {
-        guard let body = release.body, !body.isEmpty else { return true }
-        return false
-    }
-
-    private var displayCommit: GitHubCommit? {
-        commit ?? loadedCommit
-    }
-
-    var body: some View {
-        // 半透明遮罩
-        Color.black.opacity(0.5)
-            .ignoresSafeArea()
-            .overlay {
-                // 居中毛玻璃卡片
-                VStack(spacing: 20) {
-                    // 标题图标
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 44))
-                        .foregroundStyle(Color.accentColor)
-                        .modifier(BounceSymbolModifier())
-
-                    // 标题
-                    Text(t("newVersionFound"))
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.96))
-
-                    // 版本信息
-                    HStack(spacing: 16) {
-                        // 当前版本
-                        VStack(spacing: 4) {
-                            Text(t("currentVersion"))
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                            Text(currentVersion)
-                                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.8))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.white.opacity(0.05))
-                        )
-
-                        // 箭头
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.3))
-
-                        // 最新版本
-                        VStack(spacing: 4) {
-                            Text(t("latestVersion"))
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                            Text(latestVersion)
-                                .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                .foregroundStyle(Color.accentColor)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.accentColor.opacity(0.08))
-                        )
-                    }
-
-                    // 更新内容
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(t("updateContent"))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.45))
-
-                        ScrollView(.vertical, showsIndicators: true) {
-                            VStack(alignment: .leading, spacing: 0) {
-                                if let body = release.body, !body.isEmpty {
-                                    formattedReleaseNotes(body)
-                                } else if let commit = displayCommit {
-                                    Text(commit.fullMessage)
-                                        .font(.system(size: 12, weight: .regular))
-                                        .foregroundStyle(.white.opacity(0.85))
-                                        .textSelection(.enabled)
-
-                                    Text(commit.shortSHA)
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.35))
-                                        .padding(.top, 4)
-                                } else if isLoadingCommit {
-                                    HStack(spacing: 6) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text(t("loading"))
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.white.opacity(0.5))
-                                    }
-                                } else {
-                                    Text(t("noReleaseNotes"))
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(.white.opacity(0.5))
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 280)
-                        .task {
-                            // release.body 为空且无可用 commit 时，按需拉取（避免每次检查更新都消耗配额）
-                            guard needsCommitFallback, displayCommit == nil, !isLoadingCommit else { return }
-                            isLoadingCommit = true
-                            loadedCommit = await updateChecker.fetchCommitIfNeeded(for: release)
-                            isLoadingCommit = false
-                        }
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(.white.opacity(0.04))
-                    )
-
-                    // 下载进度
-                    if updateManager.state.isDownloading || updateManager.state.isInstalling {
-                        VStack(spacing: 8) {
-                            LiquidGlassLinearProgressBar(
-                                progress: updateManager.progress,
-                                height: 6,
-                                tintColor: Color.accentColor,
-                                trackOpacity: 0.12
-                            )
-
-                            HStack {
-                                Text(statusText)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.55))
-                                Spacer()
-                                Text("\(Int(updateManager.progress * 100))%")
-                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    Spacer(minLength: 0)
-
-                    // 按钮行
-                    HStack(spacing: 12) {
-                        // 取消/关闭按钮
-                        Button {
-                            if updateManager.state.isDownloading {
-                                updateManager.reset()
-                            }
-                            onClose()
-                        } label: {
-                            Text(buttonText)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.7))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 38)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(.white.opacity(0.08))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(updateManager.state.isInstalling)
-
-                        // 主操作按钮
-                        if !updateManager.state.isDownloaded && !updateManager.state.isInstalling {
-                            Button {
-                                Task {
-                                    await updateManager.downloadUpdate(version: latestVersion)
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    if updateManager.state.isDownloading {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .scaleEffect(0.8)
-                                    }
-                                    Text(downloadButtonText)
-                                        .font(.system(size: 14, weight: .semibold))
-                                }
-                                .foregroundStyle(.white.opacity(0.95))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 38)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(Color.accentColor.opacity(0.3))
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(updateManager.state.isDownloading)
-                        } else if updateManager.state.isDownloaded {
-                            Button {
-                                updateManager.installUpdate()
-                            } label: {
-                                Text(t("installNow"))
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.95))
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 38)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(LiquidGlassColors.onlineGreen.opacity(0.3))
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(24)
-                .frame(width: 360, height: 500)
-                .background(
-                    DarkLiquidGlassBackground(
-                        cornerRadius: 20,
-                        isHovered: false
-                    )
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            }
-    }
-
-    // MARK: - 格式化 Release Notes
-
-    @ViewBuilder
-    private func formattedReleaseNotes(_ text: String) -> some View {
-        let lines = text.components(separatedBy: .newlines)
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty {
-                    // 空行作为段落分隔
-                    Spacer().frame(height: 6)
-                } else if trimmed.hasPrefix("## ") {
-                    // 二级标题
-                    Text(String(trimmed.dropFirst(3)))
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .padding(.top, 4)
-                } else if trimmed.hasPrefix("# ") {
-                    // 一级标题
-                    Text(String(trimmed.dropFirst(2)))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .padding(.top, 6)
-                } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-                    // 列表项
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("•")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .frame(width: 10)
-                        Text(String(trimmed.dropFirst(2)))
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .textSelection(.enabled)
-                    }
-                } else if trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil {
-                    // 有序列表
-                    let parts = trimmed.split(separator: " ", maxSplits: 1)
-                    if parts.count >= 2 {
-                        HStack(alignment: .top, spacing: 6) {
-                            Text(String(parts[0]))
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.5))
-                                .frame(width: 16, alignment: .trailing)
-                            Text(String(parts[1]))
-                                .font(.system(size: 12, weight: .regular))
-                                .foregroundStyle(.white.opacity(0.85))
-                                .textSelection(.enabled)
-                        }
-                    } else {
-                        normalText(trimmed)
-                    }
-                } else if trimmed.hasPrefix("> ") {
-                    // 引用
-                    HStack(spacing: 0) {
-                        Rectangle()
-                            .fill(Color.accentColor.opacity(0.5))
-                            .frame(width: 3)
-                            .padding(.trailing, 8)
-                        Text(String(trimmed.dropFirst(2)))
-                            .font(.system(size: 12, weight: .regular, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .italic()
-                            .textSelection(.enabled)
-                    }
-                    .padding(.vertical, 2)
-                } else if trimmed.hasPrefix("```") {
-                    // 代码块标记，跳过
-                    EmptyView()
-                } else {
-                    normalText(trimmed)
-                }
-            }
-        }
-    }
-
-    private func normalText(_ text: String) -> some View {
-        Text(parseInlineMarkdown(text))
-            .font(.system(size: 12, weight: .regular))
-            .foregroundStyle(.white.opacity(0.85))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    // MARK: - 内联 Markdown 解析
-
-    private func parseInlineMarkdown(_ text: String) -> AttributedString {
-        var result = AttributedString(text)
-
-        // 粗体 **text** 或 __text__
-        while let boldRange = result.range(of: #"\*\*(.+?)\*\*|__(.+?)__"#, options: .regularExpression) {
-            let matched = String(result[boldRange].characters)
-            let inner = matched.replacingOccurrences(of: "**", with: "")
-                                .replacingOccurrences(of: "__", with: "")
-            var replacement = AttributedString(inner)
-            replacement.font = .system(size: 12, weight: .bold)
-            replacement.foregroundColor = .white.opacity(0.95)
-            result.replaceSubrange(boldRange, with: replacement)
-        }
-
-        // 行内代码 `code`
-        while let codeRange = result.range(of: #"`([^`]+)`"#, options: .regularExpression) {
-            let matched = String(result[codeRange].characters)
-            let inner = matched.replacingOccurrences(of: "`", with: "")
-            var replacement = AttributedString(inner)
-            replacement.font = .system(size: 11, weight: .medium, design: .monospaced)
-            replacement.foregroundColor = Color.accentColor.opacity(0.9)
-            replacement.backgroundColor = .white.opacity(0.06)
-            result.replaceSubrange(codeRange, with: replacement)
-        }
-
-        return result
-    }
-
-    // MARK: - 辅助属性
-
-    private var statusText: String {
-        switch updateManager.state {
-        case .downloading:
-            return t("downloading")
-        case .installing:
-            return t("installing")
-        default:
-            return ""
-        }
-    }
-
-    private var buttonText: String {
-        switch updateManager.state {
-        case .downloading:
-            return t("cancel")
-        case .installing:
-            return t("installing")
-        default:
-            return t("later")
-        }
-    }
-
-    private var downloadButtonText: String {
-        switch updateManager.state {
-        case .downloading:
-            return t("downloading")
-        default:
-            return t("updateNow")
-        }
     }
 }
 

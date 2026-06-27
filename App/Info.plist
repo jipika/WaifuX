@@ -32,5 +32,13 @@
 	<false/>
 	<key>NSScreenCaptureDescription</key>
 	<string>WaifuX 需要屏幕录制权限来捕获动态壁纸的渲染窗口，用于实时桌面显示和视频烘焙导出。系统音频环回（音乐可视化柱状图）同样依赖此权限。</string>
+	<key>SUFeedURL</key>
+	<string>http://localhost:8765/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>cd8b1pVvA+/cJCrregOQXjQslbPfCTCZScpkU+3cnUg=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
