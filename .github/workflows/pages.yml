@@ -35,16 +35,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install dependencies
+      - name: Copy landing page to Docs
         run: |
-          cd landing
-          npm ci
-
-      - name: Build React app to Docs
-        run: |
-          cd landing
-          npm run build
-          cp -r dist/* ../Docs/
+          mkdir -p Docs
+          cp landing/index.html Docs/
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
