@@ -344,11 +344,11 @@ jobs:
                       fi
                       return 0
                     fi
-                    # 对 framework：先递归签内部嵌套代码（XPC services、.app 包、独立可执行文件），再签 framework 本身
+                    # 对 framework：先清除旧签名封印，再用 --deep 递归签全部内嵌组件
                     if [[ "$f" == *.framework ]]; then
-                      echo "  Signing nested code in: $(basename "$f")"
+                      echo "  Signing framework with --deep: $(basename "$f")"
 
-                      # 清除旧签名封印，避免 Sparkle 等预签名框架的旧 CodeResources 与我们的新签名冲突
+                      # 清除旧签名封印
                       local fw_vers_dir
                       fw_vers_dir="$f"
                       if [[ -d "$f/Versions" ]]; then
@@ -358,21 +358,27 @@ jobs:
                       echo "    Cleaning old code signature in: $(basename "$f")"
                       rm -rf "$fw_vers_dir/_CodeSignature" "$f/_CodeSignature" 2>/dev/null || true
 
-                      find "$f" -name "*.xpc" -type d 2>/dev/null | while read -r xpc; do
-                        echo "    XPC: ${xpc#"$f/"}"
-                        codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$xpc" || { echo "    ❌ Failed to sign XPC: ${xpc#"$f/"}"; exit 1; }
-                      done
-                      find "$f" -name "*.app" -type d 2>/dev/null | while read -r app; do
-                        echo "    App: ${app#"$f/"}"
-                        codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$app" || { echo "    ❌ Failed to sign App: ${app#"$f/"}"; exit 1; }
-                      done
-                      find "$f" -type f 2>/dev/null | while read -r exe; do
-                        case "$exe" in *.app/*|*.xpc/*) continue ;; esac
-                        if file "$exe" | grep -q "Mach-O"; then
-                          echo "    Executable: ${exe#"$f/"}"
-                          codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$exe" || { echo "    ❌ Failed to sign executable: ${exe#"$f/"}"; exit 1; }
-                        fi
-                      done
+                      # --deep 递归签名 framework 及其内嵌组件
+                      codesign --force --deep --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f" || {
+                        echo "    ❌ --deep failed, falling back to component-wise signing"
+                        find "$f" -name "*.xpc" -type d 2>/dev/null | while read -r xpc; do
+                          echo "    XPC: ${xpc#"$f/"}"
+                          codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$xpc" || exit 1
+                        done
+                        find "$f" -name "*.app" -type d 2>/dev/null | while read -r app; do
+                          echo "    App: ${app#"$f/"}"
+                          codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$app" || exit 1
+                        done
+                        while IFS= read -r -d '' vers_dir; do
+                          find "$vers_dir" -maxdepth 1 -type f -print0 2>/dev/null | while IFS= read -r -d '' exe; do
+                            if file "$exe" | grep -q "Mach-O"; then
+                              echo "    Executable: ${exe#"$f/"}"
+                              codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$exe" || exit 1
+                            fi
+                          done
+                        done < <(find "$f/Versions" -mindepth 1 -maxdepth 1 -type d ! -name "Current" ! -type l -print0 2>/dev/null)
+                        codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f"
+                      }
                     fi
                     SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
                     if [[ "$(basename "$f")" == "wallpaper-wgpu" && -f "WallpaperRenderer.entitlements" ]]; then
