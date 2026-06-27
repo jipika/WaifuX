@@ -310,6 +310,25 @@ jobs:
               fi
               return 0
             fi
+            # 对 framework：先递归签内部嵌套代码（XPC services、.app 包、独立可执行文件），再签 framework 本身
+            if [[ "$f" == *.framework ]]; then
+              echo "  Signing nested code in: $(basename "$f")"
+              find "$f" -name "*.xpc" -type d 2>/dev/null | while read -r xpc; do
+                echo "    XPC: ${xpc#"$f/"}"
+                codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$xpc" || echo "    ⚠️ Failed: ${xpc#"$f/"}"
+              done
+              find "$f" -name "*.app" -type d 2>/dev/null | while read -r app; do
+                echo "    App: ${app#"$f/"}"
+                codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$app" || echo "    ⚠️ Failed: ${app#"$f/"}"
+              done
+              find "$f" -type f 2>/dev/null | while read -r exe; do
+                case "$exe" in *.app/*|*.xpc/*) continue ;; esac
+                if file "$exe" | grep -q "Mach-O"; then
+                  echo "    Executable: ${exe#"$f/"}"
+                  codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$exe" || echo "    ⚠️ Failed: ${exe#"$f/"}"
+                fi
+              done
+            fi
             SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
             if [[ "$(basename "$f")" == "wallpaper-wgpu" && -f "WallpaperRenderer.entitlements" ]]; then
               SIGN_ARGS+=(--entitlements "WallpaperRenderer.entitlements")

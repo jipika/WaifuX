@@ -375,6 +375,28 @@ sign_exported_app() {
         return 1
       fi
     else
+      # 对 framework：先递归签内部嵌套代码（XPC services、.app 包、独立可执行文件），再签 framework 本身
+      if [[ "$code_path" == *.framework ]]; then
+        echo "  Signing nested code in: $(basename "$code_path")"
+        find "$code_path" -name "*.xpc" -type d 2>/dev/null | while read -r xpc; do
+          echo "    XPC: ${xpc#"$code_path/"}"
+          codesign --force --timestamp=none --options runtime -s "$identity" "$xpc" 2>/dev/null || \
+            codesign --force -s "$identity" "$xpc" 2>/dev/null || true
+        done
+        find "$code_path" -name "*.app" -type d 2>/dev/null | while read -r app; do
+          echo "    App: ${app#"$code_path/"}"
+          codesign --force --timestamp=none --options runtime -s "$identity" "$app" 2>/dev/null || \
+            codesign --force -s "$identity" "$app" 2>/dev/null || true
+        done
+        find "$code_path" -type f 2>/dev/null | while read -r exe; do
+          case "$exe" in *.app/*|*.xpc/*) continue ;; esac
+          if file "$exe" | grep -q "Mach-O"; then
+            echo "    Executable: ${exe#"$code_path/"}"
+            codesign --force --timestamp=none --options runtime -s "$identity" "$exe" 2>/dev/null || \
+              codesign --force -s "$identity" "$exe" 2>/dev/null || true
+          fi
+        done
+      fi
       codesign --force --timestamp=none --options runtime -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force -s "$identity" "$code_path" 2>/dev/null || true
     fi
