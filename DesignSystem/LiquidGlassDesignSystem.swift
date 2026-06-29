@@ -351,6 +351,7 @@ public struct LiquidGlassAtmosphereBackground: View {
     /// 轻量模式（减少特效层数）
     var lightweight: Bool = false
 
+    @MainActor
     public init(
         primary: Color = LiquidGlassColors.secondaryViolet,
         secondary: Color = LiquidGlassColors.primaryPink,
