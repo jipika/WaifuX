@@ -1293,15 +1293,13 @@ final class DynamicWallpaperAutoPauseManager {
             let screenIDs = Set(snapshot.screenFrames.keys)
 
             DispatchQueue.main.async { [weak self] in
-                self?.applyAXWindowCoverageRatios(ratios: ratios, screenIDs: screenIDs)
+                self?.applyWindowCoverageRatios(ratios: ratios, screenIDs: screenIDs)
             }
         }
     }
 
-    private func applyAXWindowCoverageRatios(ratios: [String: CGFloat], screenIDs: Set<String>) {
-        guard pauseWhenWindowCoverage && AXIsProcessTrusted() else { return }
-        pendingWindowCoverageScreenIDs = nil
-        pendingWindowCoverageSampleCount = 0
+    private func applyWindowCoverageRatios(ratios: [String: CGFloat], screenIDs: Set<String>) {
+        guard pauseWhenWindowCoverage else { return }
 
         let pauseThreshold = normalizedWindowCoverageThreshold
         let resumeThreshold = max(0.20, pauseThreshold - Self.windowCoverageHysteresisGap)
