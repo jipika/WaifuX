@@ -343,18 +343,10 @@ final class DynamicWallpaperAutoPauseManager {
             reevaluateForegroundCoverage()
         }
 
-        // 窗口覆盖比例检测（按屏，独立稳定性采样）
+        // 窗口覆盖比例检测（按屏）
         // 有 AX 权限时由 AXObserver 事件驱动，不走 timer 轮询
         if pauseWhenWindowCoverage && !AXIsProcessTrusted() {
-            let thresholdRatio = CGFloat(windowCoveragePauseThreshold / 100.0)
-            fullscreenDetectionQueue.async { [weak self] in
-                guard let self else { return }
-                let screens = self.getWindowCoverageCoveredScreens(threshold: thresholdRatio)
-                let ids = Set(screens.map { $0.wallpaperScreenIdentifier })
-                DispatchQueue.main.async { [weak self] in
-                    self?.applyWindowCoverageDetectionResult(newIDs: ids, screens: screens)
-                }
-            }
+            checkWindowCoverage()
         }
 
         // Timer 驱动的全屏覆盖检测
@@ -1359,16 +1351,20 @@ final class DynamicWallpaperAutoPauseManager {
         }
     }
 
-    /// 无 AX fallback 路径：检测窗口覆盖比例，保留网格采样和稳定确认。
+    /// 无 AX fallback 路径：检测窗口覆盖比例，使用 exact union 和迟滞状态机。
     private func checkWindowCoverage() {
         guard pauseWhenWindowCoverage else { return }
-        let thresholdRatio = CGFloat(windowCoveragePauseThreshold / 100.0)
-        fullscreenDetectionQueue.async { [weak self] in
+        let screenFrames = currentScreenFrames()
+        guard !screenFrames.isEmpty else { return }
+
+        fullscreenDetectionQueue.async { [weak self, screenFrames] in
             guard let self else { return }
-            let screens = self.getWindowCoverageCoveredScreens(threshold: thresholdRatio)
-            let ids = Set(screens.map { $0.wallpaperScreenIdentifier })
+            guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames) else { return }
+            let ratios = Self.windowCoverageRatios(in: snapshot)
+            let screenIDs = Set(snapshot.screenFrames.keys)
+
             DispatchQueue.main.async { [weak self] in
-                self?.applyWindowCoverageDetectionResult(newIDs: ids, screens: screens)
+                self?.applyWindowCoverageRatios(ratios: ratios, screenIDs: screenIDs)
             }
         }
     }
