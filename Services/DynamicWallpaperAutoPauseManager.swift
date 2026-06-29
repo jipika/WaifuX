@@ -70,7 +70,7 @@ final class DynamicWallpaperAutoPauseManager {
     private static let axCallbackLock = NSLock()
     private static var lastAXCallbackSignalTime: CFAbsoluteTime = 0
     private static let axCallbackSignalThrottle: CFTimeInterval = 0.05
-    private static let windowCoverageHysteresisGap: CGFloat = 0.05
+    private static let windowCoverageHysteresisGap: CGFloat = 0.03
 
     private let pauseWhenOtherAppKey = "pause_when_other_app_foreground"
     private let pauseWhenFullscreenKey = "pause_when_fullscreen_covers"
