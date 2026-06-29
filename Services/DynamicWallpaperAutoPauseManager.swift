@@ -40,8 +40,7 @@ final class DynamicWallpaperAutoPauseManager {
     private var windowCoveragePausedScreenIDs: Set<String> = []
     /// 当前满足"窗口覆盖比例 ≥ 阈值"的屏幕 ID
     private var windowCoverageCoveredScreenIDs: Set<String> = []
-    /// 当前满足"窗口覆盖比例 ≥ 阈值"的屏幕 ID
-    private var windowCoverageCoveredScreenIDs: Set<String> = []
+
     /// 前台应用变化观察者（用于替代 1s 轮询）
     private var appActivationObserver: Any?
     /// 前台应用切换防抖 Task，避免用户连击 Cmd-Tab 时连续触发暂停/恢复
@@ -489,7 +488,7 @@ final class DynamicWallpaperAutoPauseManager {
                     self.stopAXObserver()
                     self.checkWindowCoverageAX()
                 } else {
-                        // 无 AX 路径回退：Finder/本应用前台直接清除窗口覆盖暂停。
+                    // 无 AX 路径回退：Finder/本应用前台直接清除窗口覆盖暂停。
                     self.stopAXObserver()
                     self.clearWindowCoveragePause()
                 }
@@ -1325,6 +1324,7 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
 
+}
 
 private struct WindowSnapshot: @unchecked Sendable {
     struct Window: @unchecked Sendable {
