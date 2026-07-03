@@ -263,7 +263,6 @@ class SettingsViewModel: ObservableObject {
         VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
         VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
         FrameInterpolationQueueService.shared.autoEnqueueEnabled = effectiveFrameInterpolationAutoEnqueue
-        FrameInterpolationQueueService.shared.setMaxConcurrentExports(1)
         NotchOverlayManager.shared.setEnabled(hideNotch)
         if sceneRealtimeRenderingEnabled {
             LiquidGlassClockSettings.shared.update { $0.enabled = false }
@@ -469,7 +468,7 @@ class SettingsViewModel: ObservableObject {
             cacheProgress = 0
             return
         }
-        let urlCacheURL = cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache")
+        let urlCacheURL = cacheURL.appendingPathComponent("WaifuXImageCache")
         var urlCacheBytes = 0
         if let enumerator = FileManager.default.enumerator(at: urlCacheURL, includingPropertiesForKeys: [.fileSizeKey]) {
             while let fileURL = enumerator.nextObject() as? URL {
@@ -497,9 +496,8 @@ class SettingsViewModel: ObservableObject {
             await updateCacheSize()
             return
         }
-        let urlCacheURL = cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache")
+        let urlCacheURL = cacheURL.appendingPathComponent("WaifuXImageCache")
         try? FileManager.default.removeItem(at: urlCacheURL)
-        try? FileManager.default.createDirectory(at: cacheURL.appendingPathComponent("com.wallhaven.app"), withIntermediateDirectories: true)
 
         await updateCacheSize()
     }
@@ -520,9 +518,7 @@ class SettingsViewModel: ObservableObject {
         URLCache.shared.removeAllCachedResponses()
         if let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let targets = [
-                cacheURL.appendingPathComponent("com.waifux.app/WaifuXCache"),
-                cacheURL.appendingPathComponent("WallHaven/ImageCache"),
-                cacheURL.appendingPathComponent("com.waifux.app"),
+                cacheURL.appendingPathComponent("WaifuXImageCache"),
                 cacheURL.appendingPathComponent("org.onevcat.Kingfisher.ImageCache.default")
             ]
             for url in targets {

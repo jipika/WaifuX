@@ -222,7 +222,6 @@
 		DDA9519C500666EFB4DE29D7 /* DisplayCropSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 241C406FB2E706A93ABEB4EC /* DisplayCropSettings.swift */; };
 		DF5859029BC8D2872798FAB3 /* AppRelauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F78B7BE373C7A7F4094E0FE /* AppRelauncher.swift */; };
 		E14C8D6FB374C89B70996BEC /* SuperResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E901FF6D205414875FD5F4 /* SuperResolutionService.swift */; };
-		E1A2B3C4D5E6F7890A1B2C3D /* FrameInterpolationQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F7890A1B2C3D /* FrameInterpolationQueueView.swift */; };
 		E2E777395B775DE3457A9092 /* ExploreAtmosphere.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97EC9C6232E75963BB2CFA0 /* ExploreAtmosphere.swift */; };
 		E3103B14290C2916CC737246 /* AnimeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AD24D6CC8E7DEC9CE467C9E /* AnimeContentView.swift */; };
 		E43275292F288A1741936E4B /* BakeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A469DAE57B338D9BC55EAD6B /* BakeService.swift */; };
@@ -499,7 +498,6 @@
 		F0DB54C5C7E45559BC73B07D /* NotchOverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchOverlayManager.swift; sourceTree = "<group>"; };
 		F10D22664E97E9D4B1A5B73E /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		F3242C9320F0CB98E3F19C29 /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources; sourceTree = SOURCE_ROOT; };
-		F1A2B3C4D5E6F7890A1B2C3D /* FrameInterpolationQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameInterpolationQueueView.swift; sourceTree = "<group>"; };
 		F37BDF9740FAC2EF2BE6BEB8 /* AnimeCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeCardView.swift; sourceTree = "<group>"; };
 		F408E90D551BB1E10440130C /* AnimeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeViewModel.swift; sourceTree = "<group>"; };
 		F6F0547CAC2D1D59D8496AB8 /* GuessYouLikeCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeCardView.swift; sourceTree = "<group>"; };
@@ -789,7 +787,6 @@
 				515C4AEC66B49CF22219FE39 /* SettingsSharedComponents.swift */,
 				529BA816ECB669D20AAFD914 /* SettingsView.swift */,
 				DDACF870010A59BA3EC37538 /* SourceRulesSettingsView.swift */,
-				F1A2B3C4D5E6F7890A1B2C3D /* FrameInterpolationQueueView.swift */,
 				19A8887CFC60BA0605B2EDBD /* ViewExtensions.swift */,
 				CA65FFAE56365FA08F8C12B2 /* WallpaperDetailSheet.swift */,
 				E780D56A3F7FC9E4FB665ECC /* WallpaperExploreContentView.swift */,
@@ -1219,7 +1216,6 @@
 				DB8871BEB9E5BFA5DF65AA40 /* StatusBarController.swift in Sources */,
 				76DFAF3ABE568DDD785DC8F0 /* SteamLoginWebView.swift in Sources */,
 				E14C8D6FB374C89B70996BEC /* SuperResolutionService.swift in Sources */,
-				E1A2B3C4D5E6F7890A1B2C3D /* FrameInterpolationQueueView.swift in Sources */,
 				A02484214150398B99B2C811 /* SystemAudioCaptureService.swift in Sources */,
 				A990BE117560A6C5E30E7E24 /* SystemMemoryPressure.swift in Sources */,
 				6E73B225B2FD0E6943FB55FF /* TMDBService.swift in Sources */,

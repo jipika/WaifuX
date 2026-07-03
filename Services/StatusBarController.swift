@@ -140,7 +140,6 @@ final class StatusBarController: NSObject {
     private let videoWallpaperManager = VideoWallpaperManager.shared
     private let weBridge = WallpaperEngineXBridge.shared
     private var showWindowHandler: (() -> Void)?
-    private var showFrameInterpolationQueueHandler: (() -> Void)?
     private var releaseMemoryHandler: (() -> Void)?
     private var quitHandler: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
@@ -169,7 +168,6 @@ final class StatusBarController: NSObject {
     /// 配置处理程序（只能调用一次）
     func configure(
         showWindow: @escaping () -> Void,
-        showFrameInterpolationQueue: @escaping () -> Void,
         releaseMemory: @escaping () -> Void,
         quit: @escaping () -> Void
     ) {
@@ -178,7 +176,6 @@ final class StatusBarController: NSObject {
             return
         }
         self.showWindowHandler = showWindow
-        self.showFrameInterpolationQueueHandler = showFrameInterpolationQueue
         self.releaseMemoryHandler = releaseMemory
         self.quitHandler = quit
         self.isConfigured = true

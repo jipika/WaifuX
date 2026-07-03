@@ -269,8 +269,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showWindow: { [weak self] in
                 self?.showMainWindow()
             },
-            showFrameInterpolationQueue: {
-            },
             releaseMemory: { [weak self] in
                 self?.releaseForegroundMemoryNow()
             },

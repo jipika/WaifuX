@@ -9,69 +9,18 @@ import Vision
 
 enum FrameInterpolationTargetFPSResolver {
     static let defaultsKey = "frame_interpolation_target_fps"
-    static let automaticRawValue: Double = 0
-    static let halfDisplayRawValue: Double = -1
     static let allowedFixedFPSValues: [Int] = [30, 60, 90, 120]
 
     static var storedRawValue: Double {
         UserDefaults.standard.object(forKey: defaultsKey) as? Double ?? 60
     }
 
-    static var isAutomatic: Bool {
-        Int(storedRawValue.rounded()) == Int(automaticRawValue)
-    }
-
-    static var isHalfDisplay: Bool {
-        Int(storedRawValue.rounded()) == Int(halfDisplayRawValue)
-    }
-
     static func targetFPS(for screen: NSScreen?) -> Int {
-        let rounded = Int(storedRawValue.rounded())
-        if rounded == Int(automaticRawValue) {
-            return displayFPS(for: screen)
-        }
-        if rounded == Int(halfDisplayRawValue) {
-            return halfDisplayFPS(for: screen)
-        }
-        return nearestAllowedFixedFPS(rounded)
+        nearestAllowedFixedFPS(Int(storedRawValue.rounded()))
     }
 
     static func targetFPSForManualAction() -> Int {
-        if isAutomatic {
-            let maxDisplayFPS = NSScreen.screens.map(\.maxRefreshRate).max() ?? 60
-            return normalizeDisplayFPS(maxDisplayFPS)
-        }
-        if isHalfDisplay {
-            let maxDisplayFPS = NSScreen.screens.map(\.maxRefreshRate).max() ?? 60
-            return halfFPS(maxDisplayFPS)
-        }
         return targetFPS(for: NSScreen.main ?? NSScreen.screens.first)
-    }
-
-    static func possibleTargetFPSValuesForCurrentDisplays() -> Set<Int> {
-        var values: Set<Int> = [targetFPSForManualAction()]
-        for screen in NSScreen.screens {
-            values.insert(nearestAllowedFixedFPS(normalizeDisplayFPS(screen.maxRefreshRate)))
-            values.insert(nearestAllowedFixedFPS(halfFPS(screen.maxRefreshRate)))
-        }
-        values.insert(targetFPSForManualAction())
-        return values
-    }
-
-    private static func displayFPS(for screen: NSScreen?) -> Int {
-        normalizeDisplayFPS(screen?.maxRefreshRate ?? NSScreen.main?.maxRefreshRate ?? 60)
-    }
-
-    private static func halfDisplayFPS(for screen: NSScreen?) -> Int {
-        halfFPS(screen?.maxRefreshRate ?? NSScreen.main?.maxRefreshRate ?? 60)
-    }
-
-    private static func normalizeDisplayFPS(_ fps: Int) -> Int {
-        max(1, fps)
-    }
-
-    private static func halfFPS(_ fps: Int) -> Int {
-        max(1, Int((Double(normalizeDisplayFPS(fps)) / 2.0).rounded()))
     }
 
     static func nearestAllowedFixedFPS(_ fps: Int) -> Int {
@@ -153,7 +102,6 @@ final class VideoWallpaperManager: ObservableObject {
     /// 每屏原生视频补帧判断结果。补帧完成后会直接替换源视频文件。
     private var frameInterpolationDecisionsByScreen: [String: VideoFrameInterpolationDecision] = [:]
     private var frameInterpolationAnalysisTasks: [String: Task<VideoFrameInterpolationDecision, Never>] = [:]
-    private var frameInterpolationDecisionCache: [String: VideoFrameInterpolationDecision] = [:]
     private var frameInterpolationExportTasks: [String: Task<URL?, Never>] = [:]
     private var frameInterpolatedPlaybackURLByScreen: [String: URL] = [:]
     /// 延迟释放的工作项，用于取消上一次未执行的清理，避免快速切换时多组 AVPlayer 并发驻留
@@ -1145,30 +1093,9 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        let targetMode: String = {
-            if FrameInterpolationTargetFPSResolver.isAutomatic {
-                return "自动匹配显示器 \(screen.maxRefreshRate)Hz"
-            }
-            if FrameInterpolationTargetFPSResolver.isHalfDisplay {
-                return "半数显示器帧率 \(screen.maxRefreshRate)Hz/2"
-            }
-            return "固定"
-        }()
+        let targetMode = "固定档位"
         frameInterpolationDebugPrint("开始准备补帧：目标 FPS=\(targetFPS)，模式=\(targetMode)，屏幕=\(screen.localizedName)，视频：\(videoURL.path)")
 
-        let decisionKey = frameInterpolationDecisionKey(for: videoURL, targetFPS: targetFPS)
-        if let cached = frameInterpolationDecisionCache[decisionKey] {
-            frameInterpolationDebugPrint("命中 FPS 分析缓存：直接复用判断结果。")
-            applyFrameInterpolationDecision(
-                cached,
-                screenID: screenID,
-                videoURL: videoURL,
-                player: player,
-                item: item,
-                containerView: containerView
-            )
-            return
-        }
         guard frameInterpolationAnalysisTasks[screenID] == nil else {
             frameInterpolationDebugPrint("FPS 分析已在进行中：本次不重复启动。")
             return
@@ -1184,7 +1111,6 @@ final class VideoWallpaperManager: ObservableObject {
             let decision = await task.value
             guard let self else { return }
             self.frameInterpolationAnalysisTasks.removeValue(forKey: screenID)
-            self.frameInterpolationDecisionCache[decisionKey] = decision
 
             let currentScreen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID })
             let currentVideoURL = self.videoURLByScreen[screenID]
@@ -1394,10 +1320,6 @@ final class VideoWallpaperManager: ObservableObject {
            let containerView = window.contentView as? WallpaperVideoContainerView {
             containerView.markFrameInterpolationActive(false)
         }
-    }
-
-    private func frameInterpolationDecisionKey(for url: URL, targetFPS: Int) -> String {
-        "\(videoLetterboxCacheKey(for: url))|targetFPS=\(targetFPS)"
     }
 
     private func clearVideoLetterboxState() {
@@ -3608,7 +3530,6 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
         case waiting
         case analyzing
         case running
-        case paused
         case completed
         case failed(String)
 
@@ -3617,7 +3538,6 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
             case .waiting: return "等待中"
             case .analyzing: return "分析中"
             case .running: return "补帧中"
-            case .paused: return "已暂停"
             case .completed: return "已完成"
             case .failed: return "失败"
             }
@@ -3643,7 +3563,6 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
     var elapsedSeconds: TimeInterval
     var remainingSeconds: TimeInterval?
     var currentStage: String
-    var processingThumbnailURL: URL?
     var outputURL: URL?
     var addedAt: Date
 
@@ -3658,7 +3577,7 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
         switch status {
         case .completed, .failed:
             return true
-        case .waiting, .analyzing, .running, .paused:
+        case .waiting, .analyzing, .running:
             return false
         }
     }
@@ -3672,23 +3591,6 @@ struct FrameInterpolationExportProgress: Sendable {
     let elapsedSeconds: TimeInterval
     let remainingSeconds: TimeInterval?
     let currentStage: String
-}
-
-struct FrameInterpolationSuppressedItem: Identifiable, Equatable, Codable {
-    let id: String
-    let videoPath: String
-    let title: String
-    let targetFPS: Int
-    let suppressedAt: Date
-    let thumbnailPath: String?
-
-    var videoURL: URL {
-        URL(fileURLWithPath: videoPath)
-    }
-
-    var thumbnailURL: URL? {
-        thumbnailPath.map { URL(fileURLWithPath: $0) }
-    }
 }
 
 struct FrameInterpolationRecordItem: Identifiable, Equatable, Codable {
@@ -3708,20 +3610,13 @@ final class FrameInterpolationQueueService: ObservableObject {
     static let shared = FrameInterpolationQueueService()
 
     @Published private(set) var items: [FrameInterpolationQueueItem] = []
-    @Published private(set) var suppressedAutoQueueItems: [FrameInterpolationSuppressedItem] = []
     @Published private(set) var completedInterpolationItems: [FrameInterpolationRecordItem] = []
     @Published private(set) var blacklistedInterpolationItems: [FrameInterpolationRecordItem] = []
-    @Published var isQueuePaused = false {
-        didSet {
-            if !isQueuePaused { scheduleNext() }
-        }
-    }
     @Published var autoEnqueueEnabled: Bool {
         didSet {
             UserDefaults.standard.set(autoEnqueueEnabled, forKey: "frame_interpolation_auto_enqueue")
         }
     }
-    @Published private(set) var maxConcurrentExports: Int
 
     private var runningTasks: [UUID: Task<Void, Never>] = [:]
     private var heartbeatTasks: [UUID: Task<Void, Never>] = [:]
@@ -3736,19 +3631,6 @@ final class FrameInterpolationQueueService: ObservableObject {
         // 不在单例初始化阶段读取 UserDefaults。macOS 26+ 上启动早期读偏好设置
         // 可能触发 _CFXPreferences 递归；真实设置由 SettingsViewModel 延迟恢复后同步过来。
         self.autoEnqueueEnabled = false
-        self.maxConcurrentExports = 1
-    }
-
-    func setMaxConcurrentExports(_ value: Int) {
-        let clampedValue = 1
-        guard maxConcurrentExports != clampedValue else {
-            UserDefaults.standard.set(clampedValue, forKey: "frame_interpolation_queue_concurrency")
-            return
-        }
-        maxConcurrentExports = clampedValue
-        UserDefaults.standard.set(clampedValue, forKey: "frame_interpolation_queue_concurrency")
-        clearProgressForWaitingItems()
-        scheduleNext()
     }
 
     func hasPendingInterpolation(videoURL: URL, targetFPS: Int) -> Bool {
@@ -3811,15 +3693,6 @@ final class FrameInterpolationQueueService: ObservableObject {
         saveInterpolationRecords()
     }
 
-    func refreshSuppressedAutoQueueItems() {
-        suppressedAutoQueueItems = VideoFrameInterpolationExporter.suppressedAutoQueueItems()
-    }
-
-    func removeSuppressedAutoQueueItem(id: String) {
-        VideoFrameInterpolationExporter.removeAutoQueueSuppression(id: id)
-        refreshSuppressedAutoQueueItems()
-    }
-
     @discardableResult
     func enqueue(
         videoURL: URL,
@@ -3834,7 +3707,11 @@ final class FrameInterpolationQueueService: ObservableObject {
             return nil
         }
 
-        if let existingIndex = items.firstIndex(where: { $0.videoURL.standardizedFileURL == videoURL.standardizedFileURL && $0.targetFPS == targetFPS }) {
+        if let existingIndex = items.firstIndex(where: {
+            $0.videoURL.standardizedFileURL == videoURL.standardizedFileURL
+                && $0.targetFPS == targetFPS
+                && !$0.isTerminalForCleanup
+        }) {
             if let onCompleted {
                 completionHandlers[items[existingIndex].id, default: []].append(onCompleted)
             }
@@ -3858,12 +3735,10 @@ final class FrameInterpolationQueueService: ObservableObject {
             elapsedSeconds: 0,
             remainingSeconds: nil,
             currentStage: "等待开始",
-            processingThumbnailURL: nil,
             outputURL: nil,
             addedAt: Date()
         )
         items.append(item)
-        generateProcessingThumbnail(id: id, videoURL: videoURL)
         if let onCompleted {
             completionHandlers[id, default: []].append(onCompleted)
         }
@@ -3873,119 +3748,7 @@ final class FrameInterpolationQueueService: ObservableObject {
         return id
     }
 
-    private func removeTerminalItems(videoURL: URL, targetFPS: Int) {
-        let idsToRemove = items.compactMap { item -> UUID? in
-            guard item.videoURL.standardizedFileURL == videoURL.standardizedFileURL,
-                  item.targetFPS == targetFPS,
-                  item.isTerminalForCleanup else { return nil }
-            return item.id
-        }
-        for id in idsToRemove {
-            deleteItem(id: id)
-        }
-    }
-
-    func pauseQueue() {
-        isQueuePaused = true
-        let runningIDs = items.compactMap { item -> UUID? in
-            switch item.status {
-            case .analyzing, .running:
-                return item.id
-            default:
-                return nil
-            }
-        }
-        for id in runningIDs {
-            pauseItem(id: id)
-        }
-        for index in items.indices {
-            guard case .waiting = items[index].status else { continue }
-            items[index].status = .paused
-            items[index].currentStage = "队列已暂停，等待继续"
-        }
-        frameInterpolationDebugPrint("补帧队列：全部暂停。正在运行的任务已取消临时导出，继续时会从头开始。")
-    }
-
-    func resumeQueue() {
-        for index in items.indices {
-            guard case .paused = items[index].status else { continue }
-            items[index].status = .waiting
-            items[index].elapsedSeconds = 0
-            items[index].remainingSeconds = nil
-            items[index].currentStage = "等待开始"
-        }
-        isQueuePaused = false
-        frameInterpolationDebugPrint("补帧队列：全部继续。")
-    }
-
-    func pauseItem(id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        runningTasks[id]?.cancel()
-        runningTasks[id] = nil
-        stopHeartbeat(id: id)
-        items[index].status = .paused
-        items[index].progress = 0
-        items[index].writtenFrames = 0
-        items[index].totalFrames = nil
-        items[index].opticalFlowFrames = 0
-        items[index].remainingSeconds = nil
-        items[index].currentStage = "已暂停，继续后从头开始"
-        frameInterpolationDebugPrint("补帧队列：任务已暂停；继续时会从头开始。视频=\(items[index].videoURL.lastPathComponent)")
-        scheduleNext()
-    }
-
-    func resumeItem(id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index].status = .waiting
-        items[index].elapsedSeconds = 0
-        items[index].remainingSeconds = nil
-        items[index].currentStage = "等待开始"
-        frameInterpolationDebugPrint("补帧队列：任务已恢复等待。视频=\(items[index].videoURL.lastPathComponent)")
-        scheduleNext()
-    }
-
-    func retryItem(id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        stopHeartbeat(id: id)
-        items[index].status = .waiting
-        items[index].progress = 0
-        items[index].writtenFrames = 0
-        items[index].totalFrames = nil
-        items[index].opticalFlowFrames = 0
-        items[index].elapsedSeconds = 0
-        items[index].remainingSeconds = nil
-        items[index].currentStage = "等待开始"
-        items[index].outputURL = nil
-        scheduleNext()
-    }
-
-    func deleteItem(id: UUID) {
-        runningTasks[id]?.cancel()
-        runningTasks[id] = nil
-        stopHeartbeat(id: id)
-        completionHandlers[id] = nil
-        if let index = items.firstIndex(where: { $0.id == id }) {
-            frameInterpolationDebugPrint("补帧队列：删除任务。视频=\(items[index].videoURL.lastPathComponent)")
-            removeProcessingThumbnail(at: index)
-            items.remove(at: index)
-        }
-        scheduleNext()
-    }
-
-    func clearCompleted() {
-        for index in items.indices {
-            if items[index].isTerminalForCleanup {
-                removeProcessingThumbnail(at: index)
-            }
-        }
-        items.removeAll { item in
-            item.isTerminalForCleanup
-        }
-        clearProgressForWaitingItems()
-    }
-
     private func scheduleNext() {
-        guard !isQueuePaused else { return }
         clearProgressForWaitingItems()
         let runningCount = runningTasks.count
         let availableSlots = max(0, 1 - runningCount)
@@ -4008,7 +3771,7 @@ final class FrameInterpolationQueueService: ObservableObject {
 
     private func startItem(id: UUID) {
         guard runningTasks[id] == nil,
-              runningTasks.count < maxConcurrentExports,
+              runningTasks.count < 1,
               let index = items.firstIndex(where: { $0.id == id }) else { return }
 
         items[index].status = .analyzing
@@ -4156,10 +3919,13 @@ final class FrameInterpolationQueueService: ObservableObject {
         runningTasks[id] = nil
         stopHeartbeat(id: id)
         if let index = items.firstIndex(where: { $0.id == id }) {
+            let videoName = items[index].videoURL.lastPathComponent
             items[index].status = .completed
             items[index].progress = 1
-            frameInterpolationDebugPrint("补帧队列：无需补帧，标记完成。原因=\(reason)，视频=\(items[index].videoURL.lastPathComponent)")
+            items.remove(at: index)
+            frameInterpolationDebugPrint("补帧队列：无需补帧，任务已移除。原因=\(reason)，视频=\(videoName)")
         }
+        completionHandlers[id] = nil
         scheduleNext()
     }
 
@@ -4171,53 +3937,25 @@ final class FrameInterpolationQueueService: ObservableObject {
             return
         }
 
-        if Task.isCancelled {
-            items[index].status = .paused
-            scheduleNext()
-            return
-        }
-
         if let outputURL {
+            let title = items[index].title
+            let targetFPS = items[index].targetFPS
             items[index].status = .completed
             items[index].progress = 1
             items[index].outputURL = outputURL
-            markCompleted(videoURL: outputURL, title: items[index].title, targetFPS: items[index].targetFPS)
+            items.remove(at: index)
+            markCompleted(videoURL: outputURL, title: title, targetFPS: targetFPS)
             frameInterpolationDebugPrint("补帧队列：任务完成，已替换源视频。路径=\(outputURL.path)")
             completionHandlers[id]?.forEach { $0(sourceURL, outputURL) }
             completionHandlers[id] = nil
             VideoWallpaperManager.shared.reloadPlaybackAfterInPlaceInterpolation(videoURL: outputURL)
-        } else if case .paused = items[index].status {
-            frameInterpolationDebugPrint("补帧队列：任务已暂停，未替换源视频。")
         } else {
             items[index].status = .failed("optical-flow 导出失败")
+            items.remove(at: index)
+            completionHandlers[id] = nil
             frameInterpolationDebugPrint("补帧队列：任务失败。视频=\(sourceURL.lastPathComponent)")
         }
         scheduleNext()
-    }
-
-    private func removeProcessingThumbnail(at index: Array<FrameInterpolationQueueItem>.Index) {
-        guard let url = items[index].processingThumbnailURL else { return }
-        try? FileManager.default.removeItem(at: url)
-        items[index].processingThumbnailURL = nil
-    }
-
-    private func generateProcessingThumbnail(id: UUID, videoURL: URL) {
-        Task.detached(priority: .utility) {
-            let thumbnailURL = VideoFrameInterpolationExporter.makeQueueThumbnail(for: videoURL, taskID: id)
-            await FrameInterpolationQueueService.shared.applyGeneratedProcessingThumbnail(id: id, thumbnailURL: thumbnailURL)
-        }
-    }
-
-    private func applyGeneratedProcessingThumbnail(id: UUID, thumbnailURL: URL?) {
-        guard let thumbnailURL,
-              let index = items.firstIndex(where: { $0.id == id }) else {
-            if let thumbnailURL {
-                try? FileManager.default.removeItem(at: thumbnailURL)
-            }
-            return
-        }
-        removeProcessingThumbnail(at: index)
-        items[index].processingThumbnailURL = thumbnailURL
     }
 
     private static func formatSeconds(_ seconds: TimeInterval) -> String {
@@ -4345,27 +4083,6 @@ private actor VideoFrameInterpolationExportCoordinator {
 }
 
 enum VideoFrameInterpolationExporter {
-    private enum Algorithm: String, CaseIterable {
-        case opticalFlow = "optical-flow"
-        case frameBlending = "frame-blending"
-        case frameRepeat = "frame-repeat"
-
-        var fallbackDescription: String {
-            switch self {
-            case .opticalFlow:
-                return "Vision optical-flow"
-            case .frameBlending:
-                return "Frame Blending"
-            case .frameRepeat:
-                return "Frame Repeat"
-            }
-        }
-    }
-
-    static func removeAutoQueueSuppression(id: String) {}
-
-    static func suppressedAutoQueueItems() -> [FrameInterpolationSuppressedItem] { [] }
-
     static func exportIfNeeded(
         sourceURL: URL,
         targetFPS: Int,
@@ -4377,7 +4094,7 @@ enum VideoFrameInterpolationExporter {
             withIntermediateDirectories: true
         )
         frameInterpolationDebugPrint("导出服务：临时输出路径准备完成。输出：\(outputURL.path)")
-        let key = cacheKey(for: sourceURL, targetFPS: targetFPS)
+        let key = exportTaskKey(for: sourceURL, targetFPS: targetFPS)
         return await VideoFrameInterpolationExportCoordinator.shared.export(
             key: key,
             sourceURL: sourceURL,
@@ -4396,21 +4113,19 @@ enum VideoFrameInterpolationExporter {
         try? FileManager.default.removeItem(at: outputURL)
 
         let asset = AVURLAsset(url: sourceURL)
-        let algorithm = Algorithm.opticalFlow
-        frameInterpolationDebugPrint("导出任务：离线补帧开始。当前只使用算法=\(algorithm.rawValue)，不执行降级逻辑，目标 FPS=\(targetFPS)，视频=\(sourceURL.lastPathComponent)。")
-        guard let exportInfo = await makeFrameRepeatExportInfo(asset: asset, targetFPS: targetFPS) else {
+        frameInterpolationDebugPrint("导出任务：离线补帧开始。当前只使用算法=optical-flow，不执行降级逻辑，目标 FPS=\(targetFPS)，视频=\(sourceURL.lastPathComponent)。")
+        guard let exportInfo = await makeFrameInterpolationExportInfo(asset: asset, targetFPS: targetFPS) else {
             frameInterpolationDebugPrint("导出任务：读取视频轨道、尺寸、方向、码率或时长失败。")
             return nil
         }
 
         try? FileManager.default.removeItem(at: outputURL)
-        frameInterpolationDebugPrint("导出任务：当前使用算法：\(algorithm.rawValue)。")
+        frameInterpolationDebugPrint("导出任务：当前使用算法：optical-flow。")
         let succeeded = frameInterpolationExport(
             asset: asset,
             info: exportInfo,
             outputURL: outputURL,
             targetFPS: targetFPS,
-            algorithm: algorithm,
             progress: progress
         )
 
@@ -4422,7 +4137,7 @@ enum VideoFrameInterpolationExporter {
 
         do {
             try replaceSourceVideo(sourceURL, with: outputURL)
-            frameInterpolationDebugPrint("导出任务：补帧完成，已替换源视频。算法=\(algorithm.rawValue)，路径=\(sourceURL.path)")
+            frameInterpolationDebugPrint("导出任务：补帧完成，已替换源视频。算法=optical-flow，路径=\(sourceURL.path)")
             return sourceURL
         } catch {
             frameInterpolationDebugPrint("导出任务：替换源视频失败。\(error.localizedDescription)")
@@ -4431,7 +4146,7 @@ enum VideoFrameInterpolationExporter {
         }
     }
 
-    private struct FrameRepeatExportInfo {
+    private struct FrameInterpolationExportInfo {
         let videoTrack: AVAssetTrack
         let width: Int
         let height: Int
@@ -4441,7 +4156,7 @@ enum VideoFrameInterpolationExporter {
         let bitrate: Double
     }
 
-    private static func makeFrameRepeatExportInfo(asset: AVURLAsset, targetFPS: Int) async -> FrameRepeatExportInfo? {
+    private static func makeFrameInterpolationExportInfo(asset: AVURLAsset, targetFPS: Int) async -> FrameInterpolationExportInfo? {
         guard targetFPS > 0,
               let videoTrack = try? await asset.loadTracks(withMediaType: .video).first,
               let naturalSize = try? await videoTrack.load(.naturalSize),
@@ -4467,7 +4182,7 @@ enum VideoFrameInterpolationExporter {
         let bitrate = Double((try? await videoTrack.load(.estimatedDataRate)) ?? 0)
 
         frameInterpolationDebugPrint("导出任务：离线补帧参数已准备，源 FPS=\(String(format: "%.2f", sourceFPS))，输出尺寸=\(Int(renderSize.width))x\(Int(renderSize.height))。")
-        return FrameRepeatExportInfo(
+        return FrameInterpolationExportInfo(
             videoTrack: videoTrack,
             width: Int(renderSize.width.rounded()),
             height: Int(renderSize.height.rounded()),
@@ -4480,10 +4195,9 @@ enum VideoFrameInterpolationExporter {
 
     private static func frameInterpolationExport(
         asset: AVAsset,
-        info: FrameRepeatExportInfo,
+        info: FrameInterpolationExportInfo,
         outputURL: URL,
         targetFPS: Int,
-        algorithm: Algorithm,
         progress: (@Sendable (FrameInterpolationExportProgress) -> Void)? = nil
     ) -> Bool {
         do {
@@ -4605,7 +4319,7 @@ enum VideoFrameInterpolationExporter {
                     ? min(100, max(0, Double(writtenFrameCount) / Double(totalTargetFrames) * 100))
                     : min(100, max(0, seconds / durationSeconds * 100))
                 frameInterpolationDebugPrint(
-                    "导出进度：阶段=\(stage)，算法=\(algorithm.rawValue)，\(String(format: "%.1f", percent))%，已写=\(writtenFrameCount)/\(totalTargetFrames > 0 ? "\(totalTargetFrames)" : "未知") 帧，光流帧=\(opticalFlowFrameCount)，源帧对=\(sourcePairCount)，视频时间=\(formatSeconds(seconds))/\(formatSeconds(durationSeconds))，耗时=\(formatSeconds(elapsed))，速度=\(String(format: "%.1f", speed)) 帧/秒，预计剩余=\(eta > 0 ? formatSeconds(eta) : "未知")。"
+                    "导出进度：阶段=\(stage)，算法=optical-flow，\(String(format: "%.1f", percent))%，已写=\(writtenFrameCount)/\(totalTargetFrames > 0 ? "\(totalTargetFrames)" : "未知") 帧，光流帧=\(opticalFlowFrameCount)，源帧对=\(sourcePairCount)，视频时间=\(formatSeconds(seconds))/\(formatSeconds(durationSeconds))，耗时=\(formatSeconds(elapsed))，速度=\(String(format: "%.1f", speed)) 帧/秒，预计剩余=\(eta > 0 ? formatSeconds(eta) : "未知")。"
                 )
             }
 
@@ -4652,7 +4366,7 @@ enum VideoFrameInterpolationExporter {
                     let presentationTime = outputTime(for: outputFrameIndex)
                     let alpha = interpolationAlpha(currentPTS: currentPTS, nextPTS: nextPTS, outputPTS: presentationTime)
                     let pixelBuffer: CVPixelBuffer?
-                    if algorithm == .opticalFlow, alpha > 0.001, alpha < 0.999 {
+                    if alpha > 0.001, alpha < 0.999 {
                         opticalFlowFrameCount += 1
                         if opticalFlowBufferForPair == nil {
                             emitProgress(
@@ -4682,18 +4396,10 @@ enum VideoFrameInterpolationExporter {
                             adaptor: adaptor
                         )
                     } else {
-                        pixelBuffer = makeInterpolatedPixelBuffer(
-                            current: currentPixelBuffer,
-                            next: nextPixelBuffer,
-                            currentPTS: currentPTS,
-                            nextPTS: nextPTS,
-                            outputPTS: presentationTime,
-                            adaptor: adaptor,
-                            algorithm: algorithm
-                        )
+                        pixelBuffer = alpha >= 0.999 ? nextPixelBuffer : currentPixelBuffer
                     }
                     guard let pixelBuffer else {
-                        frameInterpolationDebugPrint("导出任务：算法 \(algorithm.rawValue) 生成帧失败。time=\(presentationTime.seconds)")
+                        frameInterpolationDebugPrint("导出任务：算法 optical-flow 生成帧失败。time=\(presentationTime.seconds)")
                         writer.cancelWriting()
                         reader.cancelReading()
                         return false
@@ -4735,34 +4441,11 @@ enum VideoFrameInterpolationExporter {
                 return false
             }
 
-            frameInterpolationDebugPrint("导出任务：算法 \(algorithm.rawValue) 导出完成，输出 FPS=\(targetFPS)，总帧数=\(writtenFrameCount)。")
+            frameInterpolationDebugPrint("导出任务：算法 optical-flow 导出完成，输出 FPS=\(targetFPS)，总帧数=\(writtenFrameCount)。")
             return true
         } catch {
             frameInterpolationDebugPrint("导出任务：异常失败。\(error.localizedDescription)")
             return false
-        }
-    }
-
-    private static func makeInterpolatedPixelBuffer(
-        current: CVPixelBuffer,
-        next: CVPixelBuffer,
-        currentPTS: CMTime,
-        nextPTS: CMTime,
-        outputPTS: CMTime,
-        adaptor: AVAssetWriterInputPixelBufferAdaptor,
-        algorithm: Algorithm
-    ) -> CVPixelBuffer? {
-        let alpha = interpolationAlpha(currentPTS: currentPTS, nextPTS: nextPTS, outputPTS: outputPTS)
-        if alpha <= 0.001 { return current }
-        if alpha >= 0.999 { return next }
-
-        switch algorithm {
-        case .opticalFlow:
-            return makeOpticalFlowPixelBuffer(current: current, next: next, alpha: alpha, adaptor: adaptor)
-        case .frameBlending:
-            return makeBlendedPixelBuffer(current: current, next: next, alpha: alpha, adaptor: adaptor)
-        case .frameRepeat:
-            return current
         }
     }
 
@@ -4772,75 +4455,6 @@ enum VideoFrameInterpolationExporter {
         let offset = outputPTS - currentPTS
         guard offset.seconds.isFinite else { return 0 }
         return min(1, max(0, offset.seconds / span.seconds))
-    }
-
-    private static func makeBlendedPixelBuffer(
-        current: CVPixelBuffer,
-        next: CVPixelBuffer,
-        alpha: Double,
-        adaptor: AVAssetWriterInputPixelBufferAdaptor
-    ) -> CVPixelBuffer? {
-        guard let output = makePixelBuffer(from: adaptor) else { return nil }
-        guard CVPixelBufferGetWidth(current) == CVPixelBufferGetWidth(next),
-              CVPixelBufferGetHeight(current) == CVPixelBufferGetHeight(next),
-              CVPixelBufferGetPixelFormatType(current) == kCVPixelFormatType_32BGRA,
-              CVPixelBufferGetPixelFormatType(next) == kCVPixelFormatType_32BGRA else {
-            return nil
-        }
-
-        CVPixelBufferLockBaseAddress(current, .readOnly)
-        CVPixelBufferLockBaseAddress(next, .readOnly)
-        CVPixelBufferLockBaseAddress(output, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(output, [])
-            CVPixelBufferUnlockBaseAddress(next, .readOnly)
-            CVPixelBufferUnlockBaseAddress(current, .readOnly)
-        }
-
-        guard let currentBase = CVPixelBufferGetBaseAddress(current),
-              let nextBase = CVPixelBufferGetBaseAddress(next),
-              let outputBase = CVPixelBufferGetBaseAddress(output) else {
-            return nil
-        }
-
-        let width = CVPixelBufferGetWidth(current)
-        let height = CVPixelBufferGetHeight(current)
-        let currentStride = CVPixelBufferGetBytesPerRow(current)
-        let nextStride = CVPixelBufferGetBytesPerRow(next)
-        let outputStride = CVPixelBufferGetBytesPerRow(output)
-        let a = Float(alpha)
-        let inverse = 1 - a
-
-        for y in 0..<height {
-            let currentRow = currentBase.advanced(by: y * currentStride).assumingMemoryBound(to: UInt8.self)
-            let nextRow = nextBase.advanced(by: y * nextStride).assumingMemoryBound(to: UInt8.self)
-            let outputRow = outputBase.advanced(by: y * outputStride).assumingMemoryBound(to: UInt8.self)
-            for x in 0..<width {
-                let index = x * 4
-                outputRow[index] = UInt8(min(255, max(0, Float(currentRow[index]) * inverse + Float(nextRow[index]) * a)))
-                outputRow[index + 1] = UInt8(min(255, max(0, Float(currentRow[index + 1]) * inverse + Float(nextRow[index + 1]) * a)))
-                outputRow[index + 2] = UInt8(min(255, max(0, Float(currentRow[index + 2]) * inverse + Float(nextRow[index + 2]) * a)))
-                outputRow[index + 3] = UInt8(min(255, max(0, Float(currentRow[index + 3]) * inverse + Float(nextRow[index + 3]) * a)))
-            }
-        }
-
-        return output
-    }
-
-    private static func makeOpticalFlowPixelBuffer(
-        current: CVPixelBuffer,
-        next: CVPixelBuffer,
-        alpha: Double,
-        adaptor: AVAssetWriterInputPixelBufferAdaptor
-    ) -> CVPixelBuffer? {
-        guard let flowBuffer = makeOpticalFlowBuffer(current: current, next: next) else { return nil }
-        return makeOpticalFlowWarpedPixelBuffer(
-            current: current,
-            next: next,
-            flow: flowBuffer,
-            alpha: alpha,
-            adaptor: adaptor
-        )
     }
 
     private static func makeOpticalFlowBuffer(
@@ -4914,43 +4528,6 @@ enum VideoFrameInterpolationExporter {
         return "\(minutes)m\(remainingSeconds)s"
     }
 
-    static func makeQueueThumbnail(for sourceURL: URL, taskID: UUID) -> URL? {
-        let outputURL = queueThumbnailDirectory
-            .appendingPathComponent(taskID.uuidString, isDirectory: false)
-            .appendingPathExtension("jpg")
-        return makeVideoThumbnail(for: sourceURL, outputURL: outputURL, purpose: "临时")
-    }
-
-    private static func makeVideoThumbnail(for sourceURL: URL, outputURL: URL, purpose: String) -> URL? {
-        do {
-            try FileManager.default.createDirectory(
-                at: outputURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try? FileManager.default.removeItem(at: outputURL)
-
-            let asset = AVURLAsset(url: sourceURL)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 320, height: 180)
-            generator.requestedTimeToleranceBefore = .zero
-            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
-
-            let cgImage = try generator.copyCGImage(at: .zero, actualTime: nil)
-            let bitmap = NSBitmapImageRep(cgImage: cgImage)
-            guard let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.76]) else {
-                return nil
-            }
-            try data.write(to: outputURL, options: .atomic)
-            frameInterpolationDebugPrint("补帧队列：已生成\(purpose)缩略图。视频=\(sourceURL.lastPathComponent)，缩略图=\(outputURL.path)")
-            return outputURL
-        } catch {
-            frameInterpolationDebugPrint("补帧队列：生成\(purpose)缩略图失败。视频=\(sourceURL.lastPathComponent)，错误=\(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: outputURL)
-            return nil
-        }
-    }
-
     private static func temporaryOutputURL(for sourceURL: URL) -> URL {
         sourceURL
             .deletingLastPathComponent()
@@ -4975,13 +4552,7 @@ enum VideoFrameInterpolationExporter {
         }
     }
 
-    private static var queueThumbnailDirectory: URL {
-        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("WaifuX", isDirectory: true)
-            .appendingPathComponent("FrameInterpolationQueueThumbnails", isDirectory: true)
-    }
-
-    private static func cacheKey(for sourceURL: URL, targetFPS: Int) -> String {
+    private static func exportTaskKey(for sourceURL: URL, targetFPS: Int) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
         let size = attrs?[.size] as? UInt64 ?? 0
         let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
