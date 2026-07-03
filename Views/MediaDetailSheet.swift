@@ -75,7 +75,12 @@ struct MediaDetailSheet: View {
     @State private var showCopyLinkToast = false
     @State private var showMoreOptionsPopover = false
     @State private var showDeleteBakeConfirm = false
+    @State private var showDeleteFrameInterpolationConfirm = false
+    @State private var showRemoveFrameInterpolationBlacklistConfirm = false
+    @State private var pendingDeleteFrameInterpolationURL: URL?
+    @State private var pendingRemoveFrameInterpolationBlacklistURL: URL?
     @State private var isDeletingBake = false
+    @State private var isDeletingFrameInterpolation = false
     @State private var isTranscodingVideo = false
     @State private var transcodeVideoProgress: Double = 0
 
@@ -301,20 +306,25 @@ struct MediaDetailSheet: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
                 }
-                if isTranscodingVideo {
-                    Text("转码中 \(Int(transcodeVideoProgress * 100))%")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule()
-                                .fill(.ultraThinMaterial)
-                                .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
+                VStack(spacing: 8) {
+                    if isTranscodingVideo {
+                        MediaProcessingToast(
+                            title: "转码中 \(Int(transcodeVideoProgress * 100))%",
+                            detail: nil,
+                            progress: transcodeVideoProgress
                         )
-                        .padding(.bottom, 48)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if let activeItem = frameInterpolationQueue.activeProcessingItem {
+                        MediaProcessingToast(
+                            title: "补帧中 \(Int((activeItem.progress * 100).rounded()))%",
+                            detail: frameInterpolationRemainingDetail,
+                            progress: activeItem.progress
+                        )
+                    }
                 }
+                .padding(.bottom, 48)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .ignoresSafeArea()
@@ -349,6 +359,30 @@ struct MediaDetailSheet: View {
             Button(t("cancel"), role: .cancel) {}
         } message: {
             Text("将删除该壁纸的离线烘焙视频，静态预览图保留。删除后会立即用静态图替换正在显示的锁屏/桌面壁纸。")
+        }
+        .alert("删除补帧文件？", isPresented: $showDeleteFrameInterpolationConfirm) {
+            Button("删除", role: .destructive) {
+                guard let url = pendingDeleteFrameInterpolationURL else { return }
+                Task { await deleteFrameInterpolationFileAndRedownload(videoURL: url) }
+            }
+            Button(t("cancel"), role: .cancel) {
+                pendingDeleteFrameInterpolationURL = nil
+            }
+        } message: {
+            Text("删除补帧文件后需要重新下载该视频文件，同时该视频将不再自动补帧")
+        }
+        .alert("是否移出黑名单？", isPresented: $showRemoveFrameInterpolationBlacklistConfirm) {
+            Button("移出", role: .destructive) {
+                if let url = pendingRemoveFrameInterpolationBlacklistURL {
+                    frameInterpolationQueue.removeBlacklisted(videoURL: url)
+                }
+                pendingRemoveFrameInterpolationBlacklistURL = nil
+            }
+            Button(t("cancel"), role: .cancel) {
+                pendingRemoveFrameInterpolationBlacklistURL = nil
+            }
+        } message: {
+            Text("移出黑名单后，该视频可以再次手动添加到补帧队列。")
         }
         .overlay {
             authorSheetOverlay
@@ -1473,18 +1507,86 @@ struct MediaDetailSheet: View {
                 .disabled(isTranscodingVideo)
             }
 
-            if let interpolationVideoURL = currentFrameInterpolationVideoURL {
+            if frameInterpolationSettingsEnabled,
+               let interpolationVideoURL = currentFrameInterpolationVideoURL {
                 let targetFPS = currentFrameInterpolationTargetFPS
-                if frameInterpolationQueue.hasAnyCachedInterpolation(videoURL: interpolationVideoURL) {
+                if let completedRecord = frameInterpolationQueue.completedRecord(videoURL: interpolationVideoURL) {
+                    Button {} label: {
+                        HStack {
+                            Image(systemName: "checkmark.circle")
+                            Text("已完成补帧")
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.white.opacity(0.46))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(true)
+
+                    if completedRecord.targetFPS < targetFPS {
+                        if frameInterpolationQueue.hasPendingInterpolation(videoURL: interpolationVideoURL, targetFPS: targetFPS) {
+                            Button {} label: {
+                                HStack {
+                                    Image(systemName: "clock")
+                                    Text("补帧队列处理中")
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(true)
+                        } else {
+                            Button {
+                                showMoreOptionsPopover = false
+                                frameInterpolationQueue.enqueue(
+                                    videoURL: interpolationVideoURL,
+                                    title: resolvedItem.title,
+                                    targetFPS: targetFPS,
+                                    source: .manual
+                                )
+                            } label: {
+                                HStack {
+                                    Image(systemName: "arrow.up.forward.circle")
+                                    Text("提高补帧帧率")
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
                     Button {
                         showMoreOptionsPopover = false
-                        frameInterpolationQueue.deleteAllCachedInterpolationsAndSuppressAutoQueue(videoURL: interpolationVideoURL)
+                        pendingDeleteFrameInterpolationURL = interpolationVideoURL
+                        showDeleteFrameInterpolationConfirm = true
                     } label: {
                         HStack {
                             Image(systemName: "trash")
-                            Text("删除补帧")
+                            Text("删除补帧文件")
                             Spacer()
                         }
+                        .foregroundStyle(Color(hex: "FF453A"))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isDeletingFrameInterpolation)
+                } else if frameInterpolationQueue.isBlacklisted(videoURL: interpolationVideoURL) {
+                    Button {
+                        showMoreOptionsPopover = false
+                        pendingRemoveFrameInterpolationBlacklistURL = interpolationVideoURL
+                        showRemoveFrameInterpolationBlacklistConfirm = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "nosign")
+                            Text("已加入补帧黑名单")
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.white.opacity(0.46))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                     }
@@ -1493,7 +1595,7 @@ struct MediaDetailSheet: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "clock")
-                            Text("已添加到队列，等待计算")
+                            Text("补帧队列处理中")
                             Spacer()
                         }
                         .padding(.horizontal, 12)
@@ -1552,8 +1654,17 @@ struct MediaDetailSheet: View {
         return findLocalWorkshopFile()
     }
 
+    private var frameInterpolationSettingsEnabled: Bool {
+        UserDefaults.standard.object(forKey: "frame_interpolation_enabled") as? Bool ?? false
+    }
+
     private var currentFrameInterpolationTargetFPS: Int {
         FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
+    }
+
+    private var frameInterpolationRemainingDetail: String? {
+        let count = frameInterpolationQueue.remainingWorkCount
+        return count > 0 ? "还有 \(count) 个" : nil
     }
 
     private func detailInfoBubble(width: CGFloat) -> some View {
@@ -2146,6 +2257,49 @@ struct MediaDetailSheet: View {
                     ["id": resolvedItem.id, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             }
+        }
+    }
+
+    private func deleteFrameInterpolationFileAndRedownload(videoURL: URL) async {
+        guard !isDeletingFrameInterpolation else { return }
+        isDeletingFrameInterpolation = true
+        isDownloading = true
+        errorMessage = ""
+        defer {
+            isDeletingFrameInterpolation = false
+            isDownloading = false
+            pendingDeleteFrameInterpolationURL = nil
+        }
+
+        let targetFPS = currentFrameInterpolationTargetFPS
+        frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+        frameInterpolationQueue.markBlacklisted(videoURL: videoURL, title: resolvedItem.title, targetFPS: targetFPS)
+
+        do {
+            if FileManager.default.fileExists(atPath: videoURL.path) {
+                try FileManager.default.removeItem(at: videoURL)
+            }
+
+            if resolvedItem.id.hasPrefix("workshop_") {
+                try await viewModel.downloadWorkshopWallpaper(resolvedItem)
+            } else {
+                try await viewModel.download(resolvedItem)
+            }
+
+            VideoWallpaperManager.shared.restoreOriginalVideoAfterDeletingFrameInterpolation(videoURL: videoURL, targetFPSs: [targetFPS])
+            sceneBakeStatusFlash = "已重新下载原文件"
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                sceneBakeStatusFlash = nil
+            }
+        } catch {
+            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+            showError = true
+            AppLogger.error(.download, "删除补帧文件后重新下载失败", metadata: [
+                "id": resolvedItem.id,
+                "video": videoURL.path,
+                "error": error.localizedDescription
+            ])
         }
     }
 
@@ -4409,6 +4563,47 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
         }
 
         return nil
+    }
+}
+
+private struct MediaProcessingToast: View {
+    let title: String
+    let detail: String?
+    let progress: Double
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .frame(minWidth: 92, alignment: .leading)
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 92, height: 5)
+
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.78))
+                    .frame(width: 92 * min(1, max(0, progress)), height: 5)
+            }
+
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .liquidGlassSurface(.prominent, tint: Color.white.opacity(0.06), in: Capsule(style: .continuous))
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
     }
 }
 

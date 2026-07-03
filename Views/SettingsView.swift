@@ -305,14 +305,6 @@ private struct GeneralSettingsTab: View {
         NSWorkspace.shared.open(url)
     }
 
-    private func openFrameInterpolationQueue() {
-        (NSApp.delegate as? AppDelegate)?.showFrameInterpolationQueueWindow(nil)
-    }
-
-    private func openSkippedFrameInterpolationQueue() {
-        (NSApp.delegate as? AppDelegate)?.showSkippedFrameInterpolationQueueWindow()
-    }
-
     var body: some View {
         MacSettingsForm {
             // 语言设置组
@@ -545,72 +537,17 @@ private struct GeneralSettingsTab: View {
 
                     MacSettingsRow(
                         title: t("frameInterpolationTargetFPS"),
-                        subtitle: t("frameInterpolationTargetFPSDesc"),
+                        subtitle: nil,
                         showDivider: true
                     ) {
-                        Menu {
-                            Button(t("frameInterpolationTargetFPSAuto")) {
-                                viewModel.frameInterpolationTargetFPS = FrameInterpolationTargetFPSResolver.automaticRawValue
+                        Picker("", selection: $viewModel.frameInterpolationTargetFPS) {
+                            ForEach(FrameInterpolationTargetFPSResolver.allowedFixedFPSValues, id: \.self) { fps in
+                                Text("\(fps)")
+                                    .tag(Double(fps))
                             }
-
-                            Button(t("frameInterpolationTargetFPSHalfDisplay")) {
-                                viewModel.frameInterpolationTargetFPS = FrameInterpolationTargetFPSResolver.halfDisplayRawValue
-                            }
-
-                            Divider()
-
-                            ForEach([30.0, 60.0, 120.0], id: \.self) { fps in
-                                Button("\(Int(fps)) FPS") {
-                                    viewModel.frameInterpolationTargetFPS = fps
-                                }
-                            }
-                        } label: {
-                            Text(frameInterpolationTargetFPSLabel)
-                                .font(.system(size: 12, weight: .regular))
-                                .foregroundStyle(Color.white.opacity(0.6))
                         }
-                        .menuStyle(.borderlessButton)
-                    }
-
-                    MacSettingsRow(
-                        title: t("frameInterpolationQueueConcurrency"),
-                        subtitle: t("frameInterpolationQueueConcurrencyDesc"),
-                        showDivider: true
-                    ) {
-                        HStack(spacing: 16) {
-                            Text("\(Int(viewModel.frameInterpolationQueueConcurrency)) 个")
-                                .font(.system(size: 12, weight: .regular))
-                                .foregroundStyle(Color.white.opacity(0.6))
-                                .frame(width: 48, alignment: .trailing)
-
-                            Slider(value: $viewModel.frameInterpolationQueueConcurrency, in: 1...4, step: 1)
-                                .frame(width: 110)
-                                .tint(Color(hex: "30D158"))
-                        }
-                    }
-
-                    MacSettingsRow(
-                        title: t("frameInterpolationOpenQueue"),
-                        subtitle: t("frameInterpolationOpenQueueDesc"),
-                        showDivider: true
-                    ) {
-                        Button(t("frameInterpolationOpenAction")) {
-                            openFrameInterpolationQueue()
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color(hex: "0A84FF"))
-                    }
-
-                    MacSettingsRow(
-                        title: t("frameInterpolationOpenSkipped"),
-                        subtitle: t("frameInterpolationOpenSkippedDesc"),
-                        showDivider: false
-                    ) {
-                        Button(t("frameInterpolationOpenAction")) {
-                            openSkippedFrameInterpolationQueue()
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color(hex: "0A84FF"))
+                        .pickerStyle(.segmented)
+                        .frame(width: 180)
                     }
                 }
             }
@@ -823,17 +760,6 @@ private struct GeneralSettingsTab: View {
         }
     }
 
-    private var frameInterpolationTargetFPSLabel: String {
-        let rawValue = viewModel.frameInterpolationTargetFPS
-        let rounded = Int(rawValue.rounded())
-        if rounded == Int(FrameInterpolationTargetFPSResolver.automaticRawValue) {
-            return t("frameInterpolationTargetFPSAuto")
-        }
-        if rounded == Int(FrameInterpolationTargetFPSResolver.halfDisplayRawValue) {
-            return t("frameInterpolationTargetFPSHalfDisplay")
-        }
-        return "\(rounded) FPS"
-    }
 }
 
 // MARK: - 下载设置标签

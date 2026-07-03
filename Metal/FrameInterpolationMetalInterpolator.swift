@@ -24,7 +24,7 @@ final class FrameInterpolationMetalInterpolator: @unchecked Sendable {
             self.commandQueue = nil
             self.pipelineState = nil
             self.textureCache = nil
-            frameInterpolationDebugPrint("Metal 光流插帧：Metal 设备不可用，将使用 CPU warp。")
+            frameInterpolationDebugPrint("Metal 光流插帧：Metal 设备不可用，GPU-only 补帧将失败。")
             return
         }
 
@@ -71,7 +71,7 @@ final class FrameInterpolationMetalInterpolator: @unchecked Sendable {
                 self.commandQueue = nil
                 self.pipelineState = nil
                 self.textureCache = nil
-                frameInterpolationDebugPrint("Metal 光流插帧：找不到 opticalFlowWarpKernel，将使用 CPU warp。")
+                frameInterpolationDebugPrint("Metal 光流插帧：找不到 opticalFlowWarpKernel，GPU-only 补帧将失败。")
                 return
             }
 
@@ -82,7 +82,7 @@ final class FrameInterpolationMetalInterpolator: @unchecked Sendable {
                 self.commandQueue = nil
                 self.pipelineState = nil
                 self.textureCache = nil
-                frameInterpolationDebugPrint("Metal 光流插帧：创建 CVMetalTextureCache 失败，状态=\(cacheStatus)，将使用 CPU warp。")
+                frameInterpolationDebugPrint("Metal 光流插帧：创建 CVMetalTextureCache 失败，状态=\(cacheStatus)，GPU-only 补帧将失败。")
                 return
             }
 
@@ -96,7 +96,7 @@ final class FrameInterpolationMetalInterpolator: @unchecked Sendable {
             self.commandQueue = nil
             self.pipelineState = nil
             self.textureCache = nil
-            frameInterpolationDebugPrint("Metal 光流插帧：着色器编译失败：\(error.localizedDescription)，将使用 CPU warp。")
+            frameInterpolationDebugPrint("Metal 光流插帧：着色器编译失败：\(error.localizedDescription)，GPU-only 补帧将失败。")
         }
     }
 
