@@ -7,6 +7,10 @@ import WebKit
 import Darwin
 import Sparkle
 
+func frameInterpolationDebugPrint(_ message: String) {
+    NSLog("[VideoWallpaperManager] [FrameInterpolation] \(message)")
+}
+
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
 
@@ -195,6 +199,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
     private var settingsViewModel: SettingsViewModel?
     private var settingsWindowController: NSWindowController?
+    private var frameInterpolationQueueWindowController: NSWindowController?
     /// 窗口隐藏后延迟释放视图树的任务，用于回收 IOSurface / CoreAnimation 等系统图形缓存
     private var delayedReleaseTask: Task<Void, Never>?
     /// Sparkle 自动更新控制器（检测 + 内置弹窗 + 自动安装）
@@ -264,6 +269,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         StatusBarController.shared.configure(
             showWindow: { [weak self] in
                 self?.showMainWindow()
+            },
+            showFrameInterpolationQueue: { [weak self] in
+                self?.showFrameInterpolationQueueWindow(nil)
             },
             releaseMemory: { [weak self] in
                 self?.releaseForegroundMemoryNow()
@@ -1160,6 +1168,69 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc func showFrameInterpolationQueueWindow(_ sender: Any?) {
+        showFrameInterpolationQueueWindow(sender, showsSkipped: false)
+    }
+
+    func showSkippedFrameInterpolationQueueWindow() {
+        showFrameInterpolationQueueWindow(nil, showsSkipped: true)
+    }
+
+    private func showFrameInterpolationQueueWindow(_ sender: Any?, showsSkipped: Bool) {
+        FrameInterpolationQueueWindowRoute.shared.showsSkipped = showsSkipped
+        if let queueWindow = frameInterpolationQueueWindowController?.window {
+            centerWindow(queueWindow, relativeTo: window)
+            queueWindow.makeKeyAndOrderFront(nil)
+            queueWindow.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let queueWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        queueWindow.title = "视频补帧队列"
+        queueWindow.titlebarAppearsTransparent = true
+        queueWindow.titleVisibility = .hidden
+        queueWindow.backgroundColor = .black
+        queueWindow.minSize = NSSize(width: 760, height: 420)
+        queueWindow.isReleasedWhenClosed = false
+        queueWindow.tabbingMode = .disallowed
+        queueWindow.delegate = self
+        centerWindow(queueWindow, relativeTo: window)
+
+        queueWindow.contentView = EdgeToEdgeHostingView(
+            rootView: FrameInterpolationQueueView(showsSkipped: showsSkipped)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+        )
+        positionFrameInterpolationQueueTrafficLights(in: queueWindow)
+
+        let controller = NSWindowController(window: queueWindow)
+        frameInterpolationQueueWindowController = controller
+        controller.showWindow(nil)
+        queueWindow.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func positionFrameInterpolationQueueTrafficLights(in window: NSWindow) {
+        let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let buttons = buttonTypes.compactMap { window.standardWindowButton($0) }
+        guard buttons.count == buttonTypes.count else { return }
+
+        let edgeInset: CGFloat = 26
+        let gap: CGFloat = 22
+        let buttonHeight = buttons[0].frame.height
+        let titlebarHeight = buttons[0].superview?.bounds.height ?? 64
+        let y = titlebarHeight - edgeInset - buttonHeight
+        for (index, button) in buttons.enumerated() {
+            button.setFrameOrigin(NSPoint(x: edgeInset + CGFloat(index) * gap, y: y))
+        }
+    }
+
     private func centerWindow(_ window: NSWindow, relativeTo parentWindow: NSWindow?) {
         if let parentWindow = parentWindow, parentWindow.isVisible {
             // 在主窗口中央显示
@@ -1181,6 +1252,10 @@ extension AppDelegate {
         // 设置窗口：有待应用的模块改动时弹三选项确认（立即重启/稍后/放弃更改）
         if sender === settingsWindowController?.window {
             return handleSettingsWindowClose(sender)
+        }
+        if sender === frameInterpolationQueueWindowController?.window {
+            frameInterpolationQueueWindowController = nil
+            return true
         }
         // 主窗口：点击关闭按钮时锁定所有加密文件夹并隐藏窗口
         FolderLockService.shared.lockAllFolders()

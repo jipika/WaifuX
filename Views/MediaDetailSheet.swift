@@ -17,6 +17,7 @@ struct MediaDetailSheet: View {
     @ObservedObject private var mediaLibrary = MediaLibraryService.shared
     @ObservedObject private var loopService = VideoLoopPreprocessingService.shared
     @ObservedObject private var displaySelectorManager = DisplaySelectorManager.shared
+    @ObservedObject private var frameInterpolationQueue = FrameInterpolationQueueService.shared
     @State private var resolvedItem: MediaItem
     @State private var isDownloading = false
     @State private var isSettingWallpaper = false
@@ -1472,6 +1473,56 @@ struct MediaDetailSheet: View {
                 .disabled(isTranscodingVideo)
             }
 
+            if let interpolationVideoURL = currentFrameInterpolationVideoURL {
+                let targetFPS = currentFrameInterpolationTargetFPS
+                if frameInterpolationQueue.hasAnyCachedInterpolation(videoURL: interpolationVideoURL) {
+                    Button {
+                        showMoreOptionsPopover = false
+                        frameInterpolationQueue.deleteAllCachedInterpolationsAndSuppressAutoQueue(videoURL: interpolationVideoURL)
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("删除补帧")
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                } else if frameInterpolationQueue.hasPendingInterpolation(videoURL: interpolationVideoURL, targetFPS: targetFPS) {
+                    Button {} label: {
+                        HStack {
+                            Image(systemName: "clock")
+                            Text("已添加到队列，等待计算")
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(true)
+                } else {
+                    Button {
+                        showMoreOptionsPopover = false
+                        frameInterpolationQueue.enqueue(
+                            videoURL: interpolationVideoURL,
+                            title: resolvedItem.title,
+                            targetFPS: targetFPS,
+                            source: .manual
+                        )
+                    } label: {
+                        HStack {
+                            Image(systemName: "rectangle.stack.badge.play")
+                            Text("添加到补帧队列")
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
             // 复制静态图片
             if isAlreadyDownloaded || WallpaperEngineXBridge.shared.isControllingExternalEngine {
                 Button {
@@ -1490,6 +1541,19 @@ struct MediaDetailSheet: View {
             }
         }
         .frame(width: 192)
+    }
+
+    private var currentFrameInterpolationVideoURL: URL? {
+        guard isAlreadyDownloaded else { return nil }
+        if let localURL = currentDownloadRecord?.localFileURL,
+           let videoURL = MediaItem.resolveLocalVideoFile(from: localURL) {
+            return videoURL
+        }
+        return findLocalWorkshopFile()
+    }
+
+    private var currentFrameInterpolationTargetFPS: Int {
+        FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
     }
 
     private func detailInfoBubble(width: CGFloat) -> some View {

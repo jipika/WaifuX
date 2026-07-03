@@ -54,6 +54,35 @@ class SettingsViewModel: ObservableObject {
             VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
         }
     }
+    @Published var frameInterpolationEnabled = false {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(frameInterpolationEnabled, forKey: "frame_interpolation_enabled")
+            VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
+        }
+    }
+    @Published var frameInterpolationTargetFPS: Double = 60 {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
+            VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
+        }
+    }
+    @Published var frameInterpolationAutoEnqueue = false {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(frameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_enqueue")
+            FrameInterpolationQueueService.shared.autoEnqueueEnabled = frameInterpolationAutoEnqueue
+        }
+    }
+    @Published var frameInterpolationQueueConcurrency: Double = 1 {
+        didSet {
+            guard !isBatchUpdating else { return }
+            let value = min(4, max(1, Int(frameInterpolationQueueConcurrency.rounded())))
+            UserDefaults.standard.set(value, forKey: "frame_interpolation_queue_concurrency")
+            FrameInterpolationQueueService.shared.setMaxConcurrentExports(value)
+        }
+    }
     @Published var showAllWorkshopContent = false { didSet { UserDefaults.standard.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
     /// 场景壁纸实时渲染模式开关
     /// 开启后，设置场景壁纸将使用 wallpaper-wgpu 实时渲染桌面，而非烘焙视频
@@ -217,6 +246,10 @@ class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(grainIntensity, forKey: "arc_grain_intensity")
         UserDefaults.standard.set(hideNotch, forKey: "hide_notch")
         UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
+        UserDefaults.standard.set(frameInterpolationEnabled, forKey: "frame_interpolation_enabled")
+        UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
+        UserDefaults.standard.set(frameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_enqueue")
+        UserDefaults.standard.set(Int(frameInterpolationQueueConcurrency.rounded()), forKey: "frame_interpolation_queue_concurrency")
         UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
         UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
         UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
@@ -227,6 +260,9 @@ class SettingsViewModel: ObservableObject {
         ArcBackgroundSettings.shared.grainIntensity = grainIntensity
         VideoWallpaperManager.shared.refreshGrainOverlay()
         VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
+        VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
+        FrameInterpolationQueueService.shared.autoEnqueueEnabled = frameInterpolationAutoEnqueue
+        FrameInterpolationQueueService.shared.setMaxConcurrentExports(Int(frameInterpolationQueueConcurrency.rounded()))
         NotchOverlayManager.shared.setEnabled(hideNotch)
         if sceneRealtimeRenderingEnabled {
             LiquidGlassClockSettings.shared.update { $0.enabled = false }
@@ -315,6 +351,10 @@ class SettingsViewModel: ObservableObject {
             windowCoveragePauseThreshold = savedThreshold > 0 ? savedThreshold : 50
             hdrEnabled = defaults.object(forKey: "hdr_enabled") as? Bool ?? true
             autoRemoveVideoLetterbox = defaults.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
+            frameInterpolationEnabled = defaults.object(forKey: "frame_interpolation_enabled") as? Bool ?? false
+            frameInterpolationTargetFPS = defaults.object(forKey: "frame_interpolation_target_fps") as? Double ?? 60.0
+            frameInterpolationAutoEnqueue = defaults.object(forKey: "frame_interpolation_auto_enqueue") as? Bool ?? false
+            frameInterpolationQueueConcurrency = Double(defaults.object(forKey: "frame_interpolation_queue_concurrency") as? Int ?? 1)
             showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
             sceneRealtimeRenderingEnabled = defaults.bool(forKey: "scene_realtime_rendering_enabled")
             upscalingEnabled = defaults.object(forKey: "upscaling_enabled") as? Bool ?? true
