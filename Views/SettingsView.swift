@@ -965,6 +965,9 @@ private struct SchedulerSettingsTab: View {
                                     Button(intervalLabel(for: SchedulerConfig.intervalOnEndMinutes)) {
                                         viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnEndMinutes, for: screenID)
                                     }
+                                    Button(intervalLabel(for: SchedulerConfig.intervalOnUnlockMinutes)) {
+                                        viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnUnlockMinutes, for: screenID)
+                                    }
                                 } label: {
                                     Text(intervalLabel(for: displayConfig.intervalMinutes))
                                         .font(.system(size: 12, weight: .regular))
@@ -1194,6 +1197,9 @@ private struct SchedulerSettingsTab: View {
     private func intervalLabel(for minutes: Int) -> String {
         if minutes == SchedulerConfig.intervalOnEndMinutes {
             return t("intervalOnEnd")
+        }
+        if minutes == SchedulerConfig.intervalOnUnlockMinutes {
+            return t("intervalOnUnlock")
         }
         switch minutes {
         case 1: return "1 \(t("minutes"))"

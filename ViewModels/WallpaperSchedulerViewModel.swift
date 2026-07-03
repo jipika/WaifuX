@@ -130,6 +130,12 @@ class WallpaperSchedulerViewModel: ObservableObject {
     }
 
     func intervalLabel(for minutes: Int) -> String {
+        if minutes == SchedulerConfig.intervalOnEndMinutes {
+            return "Play to End"
+        }
+        if minutes == SchedulerConfig.intervalOnUnlockMinutes {
+            return "Change on Unlock"
+        }
         switch minutes {
         case 1: return "1 min"
         case 3: return "3 min"

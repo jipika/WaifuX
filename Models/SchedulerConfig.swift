@@ -28,6 +28,11 @@ struct DisplaySchedulerConfig: Codable, Equatable {
         intervalMinutes == SchedulerConfig.intervalOnEndMinutes
     }
 
+    /// 判断是否为"解锁即换"模式
+    var isOnUnlockMode: Bool {
+        intervalMinutes == SchedulerConfig.intervalOnUnlockMinutes
+    }
+
     static func fromLegacy(_ config: SchedulerConfig) -> DisplaySchedulerConfig {
         DisplaySchedulerConfig(
             isEnabled: config.isEnabled,
@@ -118,6 +123,8 @@ struct SchedulerConfig: Codable {
 
     /// 特殊间隔值：播完即换（视频播放完毕后自动切换到下一个）
     static let intervalOnEndMinutes: Int = -1
+    /// 特殊间隔值：解锁即换（每次从锁屏解锁进入桌面后自动切换到下一个）
+    static let intervalOnUnlockMinutes: Int = -2
 
     static let `default` = SchedulerConfig(
         isEnabled: false,
