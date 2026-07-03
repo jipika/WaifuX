@@ -4275,7 +4275,7 @@ enum VideoFrameInterpolationExporter {
             var lastProgressLogFrame: Int64 = -Int64(max(1, targetFPS))
 
             frameInterpolationDebugPrint(
-                "导出任务：进度初始化。算法=\(algorithm.rawValue)，目标总帧数=\(totalTargetFrames > 0 ? "\(totalTargetFrames)" : "未知")，视频时长=\(formatSeconds(durationSeconds))，源 FPS=\(String(format: "%.2f", info.sourceFPS))，目标 FPS=\(targetFPS)。"
+                "导出任务：进度初始化。算法==Vision optical-flow + Metal GPU warp，目标总帧数=\(totalTargetFrames > 0 ? "\(totalTargetFrames)" : "未知")，视频时长=\(formatSeconds(durationSeconds))，源 FPS=\(String(format: "%.2f", info.sourceFPS))，目标 FPS=\(targetFPS)。"
             )
             frameInterpolationDebugPrint("导出任务：使用 Vision optical-flow + Metal GPU warp；Metal 不可用或 GPU 执行失败时终止本次补帧。")
 
