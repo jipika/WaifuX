@@ -2951,6 +2951,9 @@ final class VideoWallpaperManager: ObservableObject {
         window.alphaValue = 0
         window.orderBack(nil)
 
+        // 视频加载期间先显示封面图，避免黑屏（同步关闭时尤为关键）
+        showPosterImage(for: screenID)
+
         // 观察 playerItem 状态，就绪后播放并淡入
         let player = components.player
         let observer = components.item.observe(\.status, options: [.initial]) { [weak self] item, _ in
@@ -2962,6 +2965,8 @@ final class VideoWallpaperManager: ObservableObject {
                 self.playerItemObserverTokens.removeValue(forKey: screenID)
                 self.fadeInTimeouts[screenID]?.cancel()
                 self.fadeInTimeouts.removeValue(forKey: screenID)
+                // 视频就绪，隐藏封面图
+                self.hidePosterImage(for: screenID)
                 // 首帧 ready 后、真正播放前再次同步音频策略，覆盖 looper 后续插入的 item。
                 let screenVolume = self.volumeByScreen[screenID] ?? self.volume
                 self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
@@ -2986,6 +2991,8 @@ final class VideoWallpaperManager: ObservableObject {
             self.playerItemObservers.removeValue(forKey: screenID)
             self.playerItemObserverTokens.removeValue(forKey: screenID)
             self.fadeInTimeouts.removeValue(forKey: screenID)
+            // 超时兜底，隐藏封面图
+            self.hidePosterImage(for: screenID)
             // ready 超时时也会直接播放，所以这里同样要先禁用静音状态下的音频轨。
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)

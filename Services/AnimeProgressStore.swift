@@ -258,4 +258,38 @@ class AnimeProgressStore: ObservableObject {
         episodeProgress.removeValue(forKey: key)
         saveEpisodeProgress()
     }
+
+    // MARK: - 云同步导入方法
+
+    /// 同步导入单集进度（合并模式）
+    func syncImportEpisodeProgress(_ progress: [String: EpisodeProgress]) {
+        for (key, value) in progress {
+            episodeProgress[key] = value
+        }
+        saveEpisodeProgress()
+    }
+
+    /// 同步导入动漫摘要（合并模式）
+    func syncImportAnimeSummaries(_ summaries: [String: AnimeProgressSummary]) {
+        for (key, value) in summaries {
+            animeSummaries[key] = value
+        }
+        saveAnimeSummaries()
+    }
+
+    /// 同步删除单集进度（按 key 集合）
+    func syncRemoveEpisodeProgress(keys: Set<String>) {
+        for key in keys {
+            episodeProgress.removeValue(forKey: key)
+        }
+        saveEpisodeProgress()
+    }
+
+    /// 同步删除动漫摘要（按 key 集合）
+    func syncRemoveAnimeSummaries(keys: Set<String>) {
+        for key in keys {
+            animeSummaries.removeValue(forKey: key)
+        }
+        saveAnimeSummaries()
+    }
 }

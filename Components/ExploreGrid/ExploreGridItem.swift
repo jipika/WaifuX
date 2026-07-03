@@ -276,9 +276,12 @@ class ExploreGridItem: NSCollectionViewItem {
                 .requestModifier(AnyModifier { request in
                     var req = request
                     req.timeoutInterval = 30
-                    if let host = req.url?.host?.lowercased(),
-                       host.contains("steam") || host.contains("akamaihd") {
-                        req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                    if let host = req.url?.host?.lowercased() {
+                        if host.contains("steam") || host.contains("akamaihd") {
+                            req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                        } else if host.contains("pximg.net") {
+                            req.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+                        }
                     }
                     return req
                 })

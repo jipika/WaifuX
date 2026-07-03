@@ -87,7 +87,7 @@ class SettingsViewModel: ObservableObject {
     /// 场景壁纸实时渲染模式开关
     /// 开启后，设置场景壁纸将使用 wallpaper-wgpu 实时渲染桌面，而非烘焙视频
     /// 与桌面动态元素（时钟、音频柱状图等）互斥
-    @Published var sceneRealtimeRenderingEnabled = false {
+    @Published var sceneRealtimeRenderingEnabled = true {
         didSet {
             guard !isBatchUpdating else { return }
             UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")

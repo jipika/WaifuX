@@ -750,6 +750,39 @@ final class MediaLibraryService: ObservableObject {
             dlKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
         }
 
+        // --- 孤儿记录恢复 ---
+        // 扫描缓存目录，找回索引丢失但文件仍在磁盘上的记录（版本更新/异常退出可能导致索引不同步）
+        let orphanedData = cache.recoverOrphanedRecordData(for: [favCategory, dlCategory])
+        var favFixed = false
+        var dlFixed = false
+
+        if let favOrphans = orphanedData[favCategory], !favOrphans.isEmpty {
+            let recovered = favOrphans.compactMap { try? decoder.decode(MediaFavoriteRecord.self, from: $0) }
+            if !recovered.isEmpty {
+                let existingIDs = Set(favoriteRecords.map(\.id))
+                let newRecords = recovered.filter { !existingIDs.contains($0.id) }
+                if !newRecords.isEmpty {
+                    favoriteRecords.append(contentsOf: newRecords)
+                    favFixed = true
+                    print("[MediaLibraryService] Recovered \(newRecords.count) orphaned favorite records from disk")
+                }
+            }
+        }
+        if let dlOrphans = orphanedData[dlCategory], !dlOrphans.isEmpty {
+            let recovered = dlOrphans.compactMap { try? decoder.decode(MediaDownloadRecord.self, from: $0) }
+            if !recovered.isEmpty {
+                let existingIDs = Set(downloadRecords.map(\.id))
+                let newRecords = recovered.filter { !existingIDs.contains($0.id) }
+                if !newRecords.isEmpty {
+                    downloadRecords.append(contentsOf: newRecords)
+                    dlFixed = true
+                    print("[MediaLibraryService] Recovered \(newRecords.count) orphaned download records from disk")
+                }
+            }
+        }
+        if favFixed { rebuildFavCache() }
+        if dlFixed { rebuildDlCache() }
+
         // --- 最近浏览（量小，保留 UserDefaults）---
         if let data = defaults.data(forKey: recentsKey),
            let decoded = try? JSONDecoder().decode([MediaItem].self, from: data) {
@@ -787,6 +820,62 @@ final class MediaLibraryService: ObservableObject {
 
     /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
     func persistDownloads() {
+        rebuildDlCache()
+    }
+
+    // MARK: - 云同步导入方法
+
+    /// 同步导入收藏记录（合并模式）
+    func syncImportFavorites(_ records: [MediaFavoriteRecord]) {
+        for record in records {
+            let id = record.id
+            if let existingIndex = favoriteRecords.firstIndex(where: { $0.id == id }) {
+                favoriteRecords[existingIndex] = record
+                _ = saveFavToCache(record)
+            } else {
+                favoriteRecords.append(record)
+                _ = saveFavToCache(record)
+            }
+        }
+        _ = syncFavIndex()
+    }
+
+    /// 同步导入下载记录（合并模式）
+    func syncImportDownloads(_ records: [MediaDownloadRecord]) {
+        for record in records {
+            let id = record.id
+            if let existingIndex = downloadRecords.firstIndex(where: { $0.id == id }) {
+                downloadRecords[existingIndex] = record
+                _ = saveDlToCache(record)
+            } else {
+                downloadRecords.append(record)
+                _ = saveDlToCache(record)
+            }
+        }
+        rebuildDlCache()
+    }
+
+    /// 同步导入最近浏览记录
+    func syncImportRecents(_ items: [MediaItem]) {
+        recentItems = Array(deduplicated(items).prefix(18))
+        persistRecents()
+    }
+
+    /// 同步删除收藏（按 ID 集合）
+    func syncRemoveFavorites(ids: Set<String>) {
+        favoriteRecords.removeAll { ids.contains($0.id) }
+        for id in ids {
+            _ = deleteFavFromCache(id)
+        }
+        _ = syncFavIndex()
+    }
+
+    /// 同步删除下载（按 ID 集合）
+    func syncRemoveDownloads(ids: Set<String>) {
+        downloadRecords.removeAll { ids.contains($0.id) }
+        for id in ids {
+            _ = deleteDlFromCache(id)
+        }
         rebuildDlCache()
     }
 
@@ -1436,10 +1525,94 @@ final class WallpaperLibraryService: ObservableObject {
         if !migratedDls.isEmpty, rebuildDlCache() {
             dlKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
         }
+
+        // --- 孤儿记录恢复 ---
+        let orphanedData = cache.recoverOrphanedRecordData(for: [favCategory, dlCategory])
+        var favFixed = false
+        var dlFixed = false
+
+        if let favOrphans = orphanedData[favCategory], !favOrphans.isEmpty {
+            let recovered = favOrphans.compactMap { try? decoder.decode(WallpaperFavoriteRecord.self, from: $0) }
+            if !recovered.isEmpty {
+                let existingIDs = Set(favoriteRecords.map(\.id))
+                let newRecords = recovered.filter { !existingIDs.contains($0.id) }
+                if !newRecords.isEmpty {
+                    favoriteRecords.append(contentsOf: newRecords)
+                    favFixed = true
+                    print("[WallpaperLibraryService] Recovered \(newRecords.count) orphaned favorite records from disk")
+                }
+            }
+        }
+        if let dlOrphans = orphanedData[dlCategory], !dlOrphans.isEmpty {
+            let recovered = dlOrphans.compactMap { try? decoder.decode(WallpaperDownloadRecord.self, from: $0) }
+            if !recovered.isEmpty {
+                let existingIDs = Set(downloadRecords.map(\.id))
+                let newRecords = recovered.filter { !existingIDs.contains($0.id) }
+                if !newRecords.isEmpty {
+                    downloadRecords.append(contentsOf: newRecords)
+                    dlFixed = true
+                    print("[WallpaperLibraryService] Recovered \(newRecords.count) orphaned download records from disk")
+                }
+            }
+        }
+        if favFixed { rebuildFavCache() }
+        if dlFixed { rebuildDlCache() }
     }
 
     /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
     func persistDownloads() {
+        rebuildDlCache()
+    }
+
+    // MARK: - 云同步导入方法
+
+    /// 同步导入收藏记录（合并模式，不覆盖本地已有记录除非云端更新）
+    func syncImportFavorites(_ records: [WallpaperFavoriteRecord]) {
+        for record in records {
+            let id = record.id
+            if let existingIndex = favoriteRecords.firstIndex(where: { $0.id == id }) {
+                // 本地已存在，用云端更新覆盖
+                favoriteRecords[existingIndex] = record
+                _ = saveFavToCache(record)
+            } else {
+                // 本地不存在，新增
+                favoriteRecords.append(record)
+                _ = saveFavToCache(record)
+            }
+        }
+        _ = syncFavIndex()
+    }
+
+    /// 同步导入下载记录（合并模式）
+    func syncImportDownloads(_ records: [WallpaperDownloadRecord]) {
+        for record in records {
+            let id = record.id
+            if let existingIndex = downloadRecords.firstIndex(where: { $0.id == id }) {
+                downloadRecords[existingIndex] = record
+                _ = saveDlToCache(record)
+            } else {
+                downloadRecords.append(record)
+                _ = saveDlToCache(record)
+            }
+        }
+        rebuildDlCache()
+    }
+
+    /// 同步删除收藏（按 ID 集合）
+    func syncRemoveFavorites(ids: Set<String>) {
+        favoriteRecords.removeAll { ids.contains($0.id) }
+        for id in ids {
+            _ = deleteFavFromCache(id)
+        }
+        _ = syncFavIndex()
+    }
+
+    /// 同步删除下载（按 ID 集合）
+    func syncRemoveDownloads(ids: Set<String>) {
+        downloadRecords.removeAll { ids.contains($0.id) }
+        for id in ids {
+            _ = deleteDlFromCache(id)
+        }
         rebuildDlCache()
     }
 

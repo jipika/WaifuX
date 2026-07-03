@@ -53,7 +53,7 @@ public struct LiquidGlassClockConfiguration: Codable, Equatable {
 
     // MARK: - 基础开关
     /// 时钟 overlay 总开关
-    public var enabled: Bool = true
+    public var enabled: Bool = false
 
     // MARK: - 布局
     /// 屏幕角落定位

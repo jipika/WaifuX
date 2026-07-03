@@ -188,6 +188,8 @@ struct WaifuXApp {
             request.setValue("https://motionbgs.com/", forHTTPHeaderField: "Referer")
         } else if host.contains("wallhaven.cc") {
             request.setValue("https://wallhaven.cc/", forHTTPHeaderField: "Referer")
+        } else if host.contains("pximg.net") {
+            request.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
         }
     }
 }
@@ -736,6 +738,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         WallpaperEngineXBridge.shared.prepareForAppTermination()
+
+        // 应用退出时自动触发云同步（如果已启用）
+        CloudSyncService.shared.syncOnAppTerminate()
     }
 
     /// 捕获 macOS 窗口布局循环异常。

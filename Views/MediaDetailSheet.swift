@@ -3532,6 +3532,12 @@ struct MediaDetailSheet: View {
         let runSetWallpaper: (NSScreen?) -> Void = { [self] selectedScreen in
             applyingWallpaperStatusKey = statusKey
             isSettingWallpaper = true
+            // 5 秒 UI 超时：停止转圈圈，壁纸设置在后台继续
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
+                guard isSettingWallpaper else { return }
+                print("[MediaDetailSheet] ⏱ 设置壁纸 5s UI 超时，停止转圈（后台继续）")
+                isSettingWallpaper = false
+            }
             Task { @MainActor in
                 do {
                     let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")

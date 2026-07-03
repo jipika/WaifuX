@@ -98,6 +98,8 @@ class AnimeFavoriteStore: ObservableObject {
     // MARK: - 加载/保存
 
     private func loadFromDisk() {
+        let decoder = JSONDecoder()
+
         // 1) 优先从 Cache 加载
         let cachedFavs: [FavoriteAnime] = cache.loadAll(category: animeFavCategory)
         if !cachedFavs.isEmpty {
@@ -107,11 +109,25 @@ class AnimeFavoriteStore: ObservableObject {
             }
             favorites = dict
         } else if let data = defaults.data(forKey: favoritesKey),
-                  let decoded = try? JSONDecoder().decode([String: FavoriteAnime].self, from: data) {
+                  let decoded = try? decoder.decode([String: FavoriteAnime].self, from: data) {
             // 2) Cache 为空 → 从 UserDefaults 迁移
             favorites = decoded
             defaults.removeObject(forKey: favoritesKey)
             rebuildCache()
+        }
+
+        // 3) 孤儿记录恢复：扫描缓存目录找回索引丢失但文件仍在的记录
+        let orphanedData = cache.recoverOrphanedRecordData(for: [animeFavCategory])
+        if let orphans = orphanedData[animeFavCategory], !orphans.isEmpty {
+            let recovered = orphans.compactMap { try? decoder.decode(FavoriteAnime.self, from: $0) }
+            let newRecords = recovered.filter { favorites[$0.id] == nil }
+            if !newRecords.isEmpty {
+                for fav in newRecords {
+                    favorites[fav.id] = fav
+                }
+                rebuildCache()
+                print("[AnimeFavoriteStore] Recovered \(newRecords.count) orphaned favorite records from disk")
+            }
         }
 
         // 加载排序设置（量小，保留 UserDefaults）
@@ -214,6 +230,26 @@ class AnimeFavoriteStore: ObservableObject {
     /// 获取收藏
     func getFavorite(animeId: String) -> FavoriteAnime? {
         favorites[animeId]
+    }
+
+    // MARK: - 云同步导入方法
+
+    /// 同步导入收藏记录（合并模式）
+    func syncImportFavorites(_ records: [FavoriteAnime]) {
+        for record in records {
+            favorites[record.id] = record
+            saveFavToCache(record)
+        }
+        syncIndex()
+    }
+
+    /// 同步删除收藏（按 ID 集合）
+    func syncRemoveFavorites(ids: Set<String>) {
+        for id in ids {
+            favorites.removeValue(forKey: id)
+            deleteFavFromCache(id)
+        }
+        syncIndex()
     }
 
     // MARK: - 更新收藏

@@ -200,6 +200,30 @@ class PlaybackProgressCache: ObservableObject {
         }
         saveToDisk()
     }
+
+    // MARK: - 云同步
+
+    /// 同步导入播放进度（云同步使用）
+    func syncImportProgresses(_ newProgresses: [PlaybackProgress]) {
+        for newP in newProgresses {
+            progresses.removeAll { $0.id == newP.id }
+            progresses.insert(newP, at: 0)
+        }
+        progresses = progresses.sorted { $0.lastPlayedAt > $1.lastPlayedAt }
+        if progresses.count > 100 {
+            progresses = Array(progresses.prefix(100))
+        }
+        saveToDisk()
+        objectWillChange.send()
+    }
+
+    /// 同步删除播放进度（云同步使用）
+    func syncRemoveProgresses(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        progresses.removeAll { ids.contains($0.id) }
+        saveToDisk()
+        objectWillChange.send()
+    }
 }
 
 // MARK: - 播放进度跟踪器（用于 AVPlayer）

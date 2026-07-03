@@ -19,12 +19,14 @@ class WallpaperSourceManager: ObservableObject {
         case wallhaven = "wallhaven"
         case fourKWallpapers = "4kwallpapers"
         case konachan = "konachan"
+        case pixiv = "pixiv"
 
         var displayName: String {
             switch self {
             case .wallhaven: return "WallHaven"
             case .fourKWallpapers: return "4K Wallpapers"
             case .konachan: return "Konachan"
+            case .pixiv: return "Pixiv"
             }
         }
 
@@ -33,6 +35,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return t("source.official")
             case .fourKWallpapers: return t("source.fallback")
             case .konachan: return t("source.konachan")
+            case .pixiv: return t("source.pixiv")
             }
         }
 
@@ -42,6 +45,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return .fourKWallpapers
             case .fourKWallpapers: return .konachan
             case .konachan: return .konachan  // 已是最后一级
+            case .pixiv: return .konachan     // Pixiv 不参与自动降级链
             }
         }
 
@@ -51,6 +55,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return true
             case .fourKWallpapers: return false   // 4KWallpapers 不支持 NSFW
             case .konachan: return true
+            case .pixiv: return true              // Pixiv 登录后可用，具体检查在 ViewModel 层
             }
         }
 
@@ -60,6 +65,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return true
             case .fourKWallpapers: return false   // 4K 只支持 Recent / Popular
             case .konachan: return false
+            case .pixiv: return false             // Pixiv 使用自己的排序
             }
         }
 
@@ -69,6 +75,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return true
             case .fourKWallpapers: return false
             case .konachan: return false
+            case .pixiv: return false
             }
         }
 
@@ -78,6 +85,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return true
             case .fourKWallpapers: return false
             case .konachan: return false
+            case .pixiv: return false
             }
         }
 
@@ -87,6 +95,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return true
             case .fourKWallpapers: return false   // 4K 使用自己的 30 个分类
             case .konachan: return false
+            case .pixiv: return false
             }
         }
 
@@ -96,6 +105,7 @@ class WallpaperSourceManager: ObservableObject {
             case .wallhaven: return "blue"
             case .fourKWallpapers: return "orange"
             case .konachan: return "pink"
+            case .pixiv: return "cyan"
             }
         }
     }
@@ -192,7 +202,7 @@ class WallpaperSourceManager: ObservableObject {
     /// 当前活跃源是否支持分类筛选（任何形式的分类）
     var currentSourceSupportsCategories: Bool {
         switch activeSource {
-        case .wallhaven, .fourKWallpapers: return true
+        case .wallhaven, .fourKWallpapers, .pixiv: return true
         case .konachan: return false
         }
     }
@@ -220,7 +230,7 @@ class WallpaperSourceManager: ObservableObject {
         UserDefaults.standard.set(source.rawValue, forKey: selectedSourceKey)
         UserDefaults.standard.set(false, forKey: autoSwitchedKey)
 
-        lastSwitchMessage = "已切换到 \(source.displayName) \(source.subtitle)"
+        lastSwitchMessage = "已切换到 \(source.displayName)"
 
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
 

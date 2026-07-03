@@ -23,11 +23,17 @@ final class CachePersistenceService {
 
     private let storage: Storage<String, Data>
 
+    /// 缓存目录的磁盘路径（初始化时缓存，用于孤儿恢复扫描）
+    private let storageDiskPath: String
+
     private init() {
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("com.waifux.app/CachePersistence")
+
+        // DiskStorage.path = directory + "/" + name (与 hyperoslo/Cache DiskStorage 保持一致)
+        storageDiskPath = appSupport.appendingPathComponent("Records", isDirectory: true).path
 
         let diskConfig = DiskConfig(
             name: "Records",
@@ -144,5 +150,67 @@ final class CachePersistenceService {
         }
         let ids = filtered.map(\.id)
         return saveIndex(ids, key: "index/\(category)")
+    }
+
+    // MARK: - 孤儿记录恢复
+
+    /// 扫描缓存目录，恢复不在索引中但文件存在的孤儿记录。
+    ///
+    /// 原理：遍历缓存目录下所有文件 → 排除已知索引文件 → 对每个未匹配文件解码 JSON 提取 `id`
+    /// → 用 `MD5("{category}/{id}")` 计算期望的文件名 → 匹配则说明该记录属于此 category 但未被索引收录。
+    ///
+    /// - Parameter categories: 需要扫描的分类列表，如 `["media/dl", "media/fav"]`
+    /// - Returns: 按分类分组的孤儿记录原始 JSON 数据（调用方负责解码为具体类型）
+    func recoverOrphanedRecordData(for categories: [String]) -> [String: [Data]] {
+        let fm = FileManager.default
+        let dirPath = storageDiskPath
+
+        guard let allFiles = try? fm.contentsOfDirectory(atPath: dirPath) else {
+            return [:]
+        }
+
+        // 所有已知索引文件哈希（大写 MD5）
+        var knownIndexHashes = Set<String>()
+        for cat in categories {
+            knownIndexHashes.insert(MD5("index/\(cat)"))
+        }
+
+        // 已知记录文件哈希：从索引反推
+        var knownRecordHashes = Set<String>()
+        for cat in categories {
+            let ids = loadIndex(key: "index/\(cat)")
+            for id in ids {
+                knownRecordHashes.insert(MD5("\(cat)/\(id)"))
+            }
+        }
+
+        var result: [String: [Data]] = [:]
+        // 已被识别归属的文件，避免重复处理
+        var matchedFiles = knownIndexHashes.union(knownRecordHashes)
+
+        for fileName in allFiles {
+            guard !matchedFiles.contains(fileName) else { continue }
+
+            let filePath = "\(dirPath)/\(fileName)"
+            guard fm.fileExists(atPath: filePath),
+                  let fileData = fm.contents(atPath: filePath),
+                  let json = try? JSONSerialization.jsonObject(with: fileData) as? [String: Any],
+                  let id = (json["id"] as? String)
+                    ?? ((json["wallpaper"] as? [String: Any])?["id"] as? String)
+                    ?? ((json["item"] as? [String: Any])?["id"] as? String)
+            else { continue }
+
+            // 尝试每个分类：MD5("{category}/{id}") 与文件名匹配即归属该分类
+            for cat in categories {
+                let expectedHash = MD5("\(cat)/\(id)")
+                if expectedHash == fileName {
+                    result[cat, default: []].append(fileData)
+                    matchedFiles.insert(fileName)
+                    break
+                }
+            }
+        }
+
+        return result
     }
 }

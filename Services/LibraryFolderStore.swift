@@ -167,6 +167,20 @@ final class LibraryFolderStore: ObservableObject {
         )
     }
 
+    // MARK: - 云同步
+
+    /// 同步导入壁纸文件夹（云同步使用）
+    func syncImportWallpaperFolders(_ folders: [LibraryFolder]) {
+        wallpaperFolders = folders
+        persistWallpaperFolders()
+    }
+
+    /// 同步导入媒体文件夹（云同步使用）
+    func syncImportMediaFolders(_ folders: [LibraryFolder]) {
+        mediaFolders = folders
+        persistMediaFolders()
+    }
+
     // MARK: - 持久化
 
     private func persistWallpaperFolders() {
@@ -274,5 +288,18 @@ final class LibraryGridOrderStore: ObservableObject {
             defaults.set(data, forKey: orderKey)
         }
         revision += 1
+    }
+
+    // MARK: - 云同步
+
+    /// 导出全部排序数据（云同步使用）
+    func exportOrders() -> [String: [String]] {
+        return orders
+    }
+
+    /// 同步导入排序数据（云同步使用）
+    func syncImportOrders(_ newOrders: [String: [String]]) {
+        orders = newOrders
+        persist()
     }
 }

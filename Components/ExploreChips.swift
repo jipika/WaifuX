@@ -81,6 +81,81 @@ public struct CategoryChip: View {
     }
 }
 
+// MARK: - Pixiv 作品类型分类芯片
+
+public struct PixivWorkTypeChip: View {
+    let workType: PixivWorkType
+    let isSelected: Bool
+    let action: () -> Void
+
+    @Environment(\.arcIsLightMode) private var isLightMode
+    private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
+    @State private var isHovered = false
+
+    public init(
+        workType: PixivWorkType,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) {
+        self.workType = workType
+        self.isSelected = isSelected
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: workType.accentColors.map(Color.init(hex:)),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 22, height: 22)
+
+                    Image(systemName: workType.icon)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(isSelected ? .white : .black.opacity(0.78))
+                }
+
+                Text(workType.displayName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                ZStack {
+                    Capsule(style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    if let accentColor = workType.accentColors.first {
+                        Capsule(style: .continuous)
+                            .fill(Color(hex: accentColor).opacity(isSelected ? 0.15 : 0.08))
+                    }
+                }
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        (workType.accentColors.first.map { Color(hex: $0) } ?? Color.white)
+                            .opacity(isSelected ? 0.35 : 0.15),
+                        lineWidth: 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
+        .throttledHover(interval: 0.05) { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
 // MARK: - 通用标签芯片
 
 public struct TagChip: View {

@@ -65,6 +65,11 @@ class WallpaperViewModel: ObservableObject {
     @Published var selected4KCategorySlug: String? = nil  // 4K 源的分类 slug（如 "anime", "nature"）
     @Published var selected4KSorting: FourKSortingOption = .latest  // 4K 源的排序方式
     @Published var selectedKonachanSorting: KonachanSorting = .dateAdded  // Konachan 源的排序方式
+    @Published var selectedPixivRankingMode: PixivRankingMode = .weekly  // Pixiv 源的排行模式（默认周榜）
+    @Published var selectedPixivWorkType: PixivWorkType = .all  // Pixiv 作品类型筛选
+    @Published var selectedPixivSearchSort: PixivSearchSort = .dateD  // Pixiv 搜索排序
+    @Published var pixivHideAI: Bool = false  // Pixiv 屏蔽 AI 作品
+    @Published var pixivRelatedTags: [String] = []  // Pixiv 搜索相关标签
 
     // MARK: - 本地收藏与下载记录
     private let wallpaperLibrary = WallpaperLibraryService.shared
@@ -539,9 +544,8 @@ class WallpaperViewModel: ObservableObject {
         currentPage = 1
         currentRandomSeed = nil
 
-        // ⚠️ 不再清空 wallpapers，避免旧数据残留只是视觉上的取舍：
-        // 新数据到达前保持旧列表可见，防止 SwiftUI 全量销毁→重建视图树
-        // 导致的 AttributeGraph 主线程卡死。
+        // ✅ 清空旧数据，给用户即时反馈（避免筛选/搜索时旧数据残留的困惑）
+        wallpapers.removeAll()
 
         // 重置预加载状态
         preloadTask?.cancel()
@@ -563,7 +567,7 @@ class WallpaperViewModel: ObservableObject {
                 // 先更新壁纸库（后台操作）
                 wallpaperLibrary.upsertBatch(results.data)
 
-                // 一次性替换 wallpapers，避免 NSCollectionView 多次收缩-膨胀导致的抖动
+                // 一次性替换 wallpapers
                 wallpapers = results.data
 
                 hasMorePages = 1 < results.meta.lastPage
@@ -837,6 +841,8 @@ class WallpaperViewModel: ObservableObject {
             return try await fetchFromFallbackSource(.fourKWallpapers, parameters: parameters)
         case .konachan:
             return try await fetchFromKonachan(parameters: parameters)
+        case .pixiv:
+            return try await fetchFromPixiv(parameters: parameters)
         }
     }
 
@@ -911,6 +917,10 @@ class WallpaperViewModel: ObservableObject {
         case .konachan:
             // Konachan 不作为回退源的一部分
             throw NetworkError.invalidResponse
+
+        case .pixiv:
+            // Pixiv 不作为回退源的一部分
+            throw NetworkError.invalidResponse
         }
     }
 
@@ -935,6 +945,110 @@ class WallpaperViewModel: ObservableObject {
         )
     }
 
+    /// 从 Pixiv 源获取数据
+    private func fetchFromPixiv(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
+        print("[WallpaperVM] fetchFromPixiv called, query='\(parameters.query)', page=\(parameters.page), puritySFW=\(puritySFW), puritySketchy=\(puritySketchy), purityNSFW=\(purityNSFW)")
+        
+        // 每次请求前检查登录状态（从 WKWebView cookie 恢复到 HTTPCookieStorage）
+        await PixivAuthService.shared.checkLoginState()
+        
+        // 将 App 的 3 级纯度筛选映射为 Pixiv API 参数
+        // Pixiv API 只有 2 种模式：safe / r18 / all
+        // Sketchy 需要通过客户端过滤实现
+        let pixivMode: String = {
+            if puritySFW && !puritySketchy && !purityNSFW {
+                // 仅 SFW
+                return "safe"
+            } else if purityNSFW && !puritySFW && !puritySketchy {
+                // 仅 NSFW
+                return "r18"
+            } else {
+                // 其他组合（SFW+Sketchy, SFW+NSFW, Sketchy+NSFW, 全部）
+                return "all"
+            }
+        }()
+
+        let aiTypeParam: Int? = pixivHideAI ? 2 : nil
+
+        // 清空旧的相关标签
+        pixivRelatedTags = []
+
+        // 如果有搜索词，使用搜索 API
+        if !parameters.query.isEmpty {
+            let (response, relatedTags) = try await PixivService.shared.search(
+                word: parameters.query,
+                page: parameters.page,
+                sort: selectedPixivSearchSort.rawValue,
+                mode: pixivMode,
+                type: selectedPixivWorkType.rawValue,
+                aiType: aiTypeParam
+            )
+            // 存储相关标签供 UI 显示
+            pixivRelatedTags = relatedTags
+            
+            // 客户端过滤：根据纯度筛选结果
+            return filterPixivResponseByPurity(response)
+        }
+
+        // 排行榜：根据纯度选择对应的 R18/非R18 模式
+        let rankingMode: String
+        if purityNSFW && !puritySFW && !puritySketchy {
+            // 仅 NSFW：使用 R18 排行榜
+            switch selectedPixivRankingMode {
+            case .daily: rankingMode = "daily_r18"
+            case .weekly: rankingMode = "weekly_r18"
+            case .monthly: rankingMode = "monthly_r18"
+            case .rookie: rankingMode = "rookie_r18"
+            case .original: rankingMode = "original_r18"
+            case .male: rankingMode = "male_r18"
+            case .female: rankingMode = "female_r18"
+            }
+        } else {
+            // 其他组合：使用普通排行榜
+            rankingMode = selectedPixivRankingMode.rawValue
+        }
+
+        // 作品类型映射为 content 参数
+        let contentParam: String
+        switch selectedPixivWorkType {
+        case .all: contentParam = "illust"  // 默认插画（API 不支持 "all"）
+        case .illust: contentParam = "illust"
+        case .manga: contentParam = "manga"
+        case .ugoira: contentParam = "ugoira"
+        }
+
+        let response = try await PixivService.shared.ranking(
+            mode: rankingMode,
+            page: parameters.page,
+            date: nil,
+            content: contentParam
+        )
+
+        // 客户端过滤：根据纯度筛选结果
+        return filterPixivResponseByPurity(response)
+    }
+    
+    /// 根据纯度设置过滤 Pixiv 响应
+    private func filterPixivResponseByPurity(_ response: WallpaperSearchResponse) -> WallpaperSearchResponse {
+        let filtered = response.data.filter { wallpaper in
+            switch wallpaper.purity {
+            case "sfw":
+                return puritySFW
+            case "sketchy":
+                return puritySketchy
+            case "nsfw":
+                return purityNSFW
+            default:
+                return true
+            }
+        }
+        
+        return WallpaperSearchResponse(
+            meta: response.meta,
+            data: filtered
+        )
+    }
+
     /// 给 WallHaven 请求加上短超时保护，超时后立即取消并抛错以便触发降级
     private func withWallhavenTimeout<T: Sendable>(seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try await withThrowingTaskGroup(of: T.self) { group in
@@ -956,7 +1070,11 @@ class WallpaperViewModel: ObservableObject {
 
     /// 当前数据源是否支持 NSFW 筛选
     var currentSourceSupportsNSFW: Bool {
-        sourceManager.currentSourceSupportsNSFW
+        // Pixiv 需要登录后才能使用 NSFW 筛选
+        if sourceManager.activeSource == .pixiv {
+            return PixivAuthService.shared.isLoggedIn
+        }
+        return sourceManager.currentSourceSupportsNSFW
     }
 
     /// 当前数据源是否支持 WallHaven 风格排序
@@ -1089,6 +1207,19 @@ class WallpaperViewModel: ObservableObject {
 
     func downloadWallpaperData(_ wallpaper: Wallpaper, taskID: String? = nil) async throws -> Data {
         var downloadURL: URL?
+
+        // Pixiv 源壁纸：先解析原图 URL，再用 PixivService.downloadImage 下载
+        if wallpaper.source == "pixiv" {
+            // 从 wallpaper.id 提取 illust ID: "pixiv_12345" → "12345"
+            let rawID = wallpaper.id.replacingOccurrences(of: "pixiv_", with: "")
+            do {
+                let detail = try await PixivService.shared.illustDetail(id: rawID)
+                return try await PixivService.shared.downloadImage(url: detail.urls.original)
+            } catch {
+                AppLogger.warn(.wallpaper, "Pixiv 原图解析失败，使用预览图降级", metadata: ["id": rawID, "error": "\(error)"])
+                return try await PixivService.shared.downloadImage(url: wallpaper.path)
+            }
+        }
 
         // 4K 源壁纸：优先使用 thumbs.original（真正的原图 URL）
         // 因为 fullImageURL（path）现在存的是缩略图 URL，用于展示而非下载
@@ -1298,6 +1429,8 @@ class WallpaperViewModel: ObservableObject {
             return try await featuredFromMainSource()
         case .konachan:
             return try await KonachanService.shared.fetchFeatured(limit: 24)
+        case .pixiv:
+            return try await PixivService.shared.fetchFeatured(limit: 24)
         }
     }
 
@@ -1326,6 +1459,8 @@ class WallpaperViewModel: ObservableObject {
             return try await topFromMainSource()
         case .konachan:
             return try await KonachanService.shared.fetchTop(limit: 8)
+        case .pixiv:
+            return try await PixivService.shared.fetchTop(limit: 8)
         }
     }
 
@@ -1353,6 +1488,8 @@ class WallpaperViewModel: ObservableObject {
             return try await latestFromMainSource()
         case .konachan:
             return try await KonachanService.shared.fetchLatest(limit: 8)
+        case .pixiv:
+            return try await PixivService.shared.fetchLatest(limit: 8)
         }
     }
 

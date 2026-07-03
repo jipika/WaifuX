@@ -227,6 +227,7 @@ struct WallpaperExploreContentView: View {
     @State private var konachanCategory: KonachanService.KonachanCategory?
     @State private var konachanHotTagName: String? = nil
     @State private var konachanDynamicHotTags: [KonachanTag] = []
+    @State private var pixivDynamicHotTags: [PixivHotTag] = []
     @State private var hotTag: HotTag?
     @State private var searchText = ""
     @State private var isLoadingMore = false
@@ -647,17 +648,18 @@ struct WallpaperExploreContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             headerTitle
             searchRow
-            konachanHotTagsRow
-            hotTagsRow
+            sourceHotTagsRow
             konachanCategoriesRow
         }
         .frame(maxWidth: 700, alignment: .leading)
     }
 
     @ViewBuilder
-    private var konachanHotTagsRow: some View {
-        if WallpaperSourceManager.shared.activeSource == .konachan {
-            // 热门标签（紧接搜索框下方，不换行）
+    private var sourceHotTagsRow: some View {
+        let activeSource = WallpaperSourceManager.shared.activeSource
+        
+        if activeSource == .konachan && !konachanDynamicHotTags.isEmpty {
+            // Konachan 热门标签
             HStack(alignment: .center, spacing: 10) {
                 Text(t("hotWallpaper") + ":")
                     .font(.system(size: 12, weight: .semibold))
@@ -676,6 +678,31 @@ struct WallpaperExploreContentView: View {
                             } else {
                                 konachanHotTagName = tag.name
                                 konachanCategory = nil
+                                searchText = tag.name
+                                viewModel.searchQuery = tag.name
+                            }
+                            reloadData()
+                        }
+                    }
+                }
+            }
+        } else if activeSource == .pixiv && !pixivDynamicHotTags.isEmpty {
+            // Pixiv 热门标签
+            HStack(alignment: .center, spacing: 10) {
+                Text(t("hotWallpaper") + ":")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.65))
+
+                ForEach(pixivDynamicHotTags) { tag in
+                    TagChip(
+                        title: tag.name,
+                        isSelected: viewModel.searchQuery == tag.name
+                    ) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            if viewModel.searchQuery == tag.name {
+                                searchText = ""
+                                viewModel.searchQuery = ""
+                            } else {
                                 searchText = tag.name
                                 viewModel.searchQuery = tag.name
                             }
@@ -863,6 +890,19 @@ struct WallpaperExploreContentView: View {
                             }
                         }
                     }
+                } else if WallpaperSourceManager.shared.activeSource == .pixiv {
+                    // Pixiv 作品类型分类
+                    ForEach(PixivWorkType.allCases) { workType in
+                        PixivWorkTypeChip(
+                            workType: workType,
+                            isSelected: viewModel.selectedPixivWorkType == workType
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                viewModel.selectedPixivWorkType = workType
+                            }
+                            reloadData()
+                        }
+                    }
                 } else {
                     FourKCategoryChip(
                         category: nil,
@@ -885,6 +925,40 @@ struct WallpaperExploreContentView: View {
                 }
             }
             .padding(.vertical, 2)
+        }
+    }
+
+    @ViewBuilder
+    private var pixivRelatedTagsRow: some View {
+        if WallpaperSourceManager.shared.activeSource == .pixiv && !viewModel.pixivRelatedTags.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("相关标签")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
+                FlowLayout(spacing: 10) {
+                    ForEach(viewModel.pixivRelatedTags, id: \.self) { tag in
+                        FilterChip(
+                            title: tag,
+                            isSelected: viewModel.searchQuery == tag,
+                            tint: exploreAtmosphere.tint.primary
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                if viewModel.searchQuery == tag {
+                                    // 取消选择
+                                    searchText = ""
+                                    viewModel.searchQuery = ""
+                                    viewModel.pixivRelatedTags = []
+                                } else {
+                                    // 选择标签
+                                    searchText = tag
+                                    viewModel.searchQuery = tag
+                                }
+                            }
+                            reloadData()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -993,6 +1067,11 @@ struct WallpaperExploreContentView: View {
                 SortMenu(options: SortingOption.allCases, selected: $viewModel.sortingOption, tint: exploreAtmosphere.tint.primary)
             } else if WallpaperSourceManager.shared.activeSource == .konachan {
                 SortMenu(options: KonachanSorting.allCases, selected: $konachanSorting, tint: exploreAtmosphere.tint.primary)
+            } else if WallpaperSourceManager.shared.activeSource == .pixiv {
+                SortMenu(options: PixivRankingMode.allCases, selected: $viewModel.selectedPixivRankingMode, tint: exploreAtmosphere.tint.primary)
+                    .onChange(of: viewModel.selectedPixivRankingMode) { _, _ in
+                        reloadData()
+                    }
             } else {
                 SortMenu(options: FourKSortingOption.allCases, selected: $fourKSorting, tint: exploreAtmosphere.tint.primary)
             }
@@ -1026,6 +1105,7 @@ struct WallpaperExploreContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             heroSection
             categorySection
+            pixivRelatedTagsRow
             filterSection
             activeFiltersSection
             contentHeader
@@ -1328,8 +1408,13 @@ struct WallpaperExploreContentView: View {
         konachanSorting = .dateAdded
         konachanCategory = nil
         konachanHotTagName = nil
+        viewModel.selectedPixivRankingMode = .weekly
         category = .all
-        loadKonachanHotTags()
+        if WallpaperSourceManager.shared.activeSource == .konachan {
+            loadKonachanHotTags()
+        } else if WallpaperSourceManager.shared.activeSource == .pixiv {
+            loadPixivHotTags()
+        }
         // 数据源切换时必须清空旧数据，避免新旧源内容混在一起显示
         viewModel.wallpapers.removeAll()
         reloadData()
@@ -1400,6 +1485,20 @@ struct WallpaperExploreContentView: View {
                 }
             } catch {
                 print("[KonachanHotTags] failed: \(error)")
+            }
+        }
+    }
+    
+    private func loadPixivHotTags() {
+        guard WallpaperSourceManager.shared.activeSource == .pixiv else { return }
+        Task {
+            do {
+                let tags = try await PixivService.shared.fetchHotTags(limit: 6)
+                await MainActor.run {
+                    self.pixivDynamicHotTags = tags
+                }
+            } catch {
+                print("[PixivHotTags] failed: \(error)")
             }
         }
     }
@@ -1559,8 +1658,8 @@ struct WallpaperExploreContentView: View {
         lastSyncedFirstWallpaperID = nil
         loadMoreFailed = false
         viewModel.errorMessage = nil
-        // 不再手动清空 wallpapers，让旧数据保持在屏幕上直到 search() 一次性替换新数据，
-        // 避免根视图切换导致的抖动。
+        // ✅ 清空旧数据，给用户即时反馈
+        viewModel.wallpapers.removeAll()
         Task {
             await viewModel.search()
             await MainActor.run {
@@ -2282,4 +2381,24 @@ extension KonachanSorting: SortOptionProtocol {
     }
 
     public var menuTitle: String { title }
+}
+
+// MARK: - Pixiv Extensions
+
+extension PixivRankingMode: SortOptionProtocol {
+    public var id: String { rawValue }
+    public var title: String { displayName }
+    public var menuTitle: String { displayName }
+}
+
+extension PixivSearchSort: SortOptionProtocol {
+    public var id: String { rawValue }
+    public var title: String { displayName }
+    public var menuTitle: String { displayName }
+}
+
+extension PixivWorkType: SortOptionProtocol {
+    public var id: String { rawValue }
+    public var title: String { displayName }
+    public var menuTitle: String { displayName }
 }
