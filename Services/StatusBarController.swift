@@ -128,6 +128,7 @@ final class StatusBarController: NSObject {
 
     private lazy var openWindowItem = NSMenuItem(title: t("statusbar.showWindow"), action: #selector(showMainWindow), keyEquivalent: "")
     private lazy var openLibraryItem = NSMenuItem(title: t("statusbar.openMyLibrary"), action: #selector(openMyLibrary), keyEquivalent: "")
+    private lazy var openSettingsItem = NSMenuItem(title: t("settings"), action: #selector(openSettings), keyEquivalent: "")
     private lazy var releaseMemoryItem = NSMenuItem(title: t("statusbar.releaseMemory"), action: #selector(releaseForegroundMemory), keyEquivalent: "")
     private lazy var toggleWallpaperItem = NSMenuItem(title: t("statusbar.enableWallpaper"), action: #selector(toggleDynamicWallpaper), keyEquivalent: "")
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
@@ -214,6 +215,7 @@ final class StatusBarController: NSObject {
 
         openWindowItem.target = self
         openLibraryItem.target = self
+        openSettingsItem.target = self
         releaseMemoryItem.target = self
         muteItem.target = self
         desktopIconsItem.target = self
@@ -223,6 +225,7 @@ final class StatusBarController: NSObject {
 
         menu.addItem(openWindowItem)
         menu.addItem(openLibraryItem)
+        menu.addItem(openSettingsItem)
         menu.addItem(releaseMemoryItem)
         menu.addItem(.separator())
         menu.addItem(desktopIconsItem)
@@ -252,6 +255,14 @@ final class StatusBarController: NSObject {
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _, _ in
+                self?.refreshMenuState()
+            }
+            .store(in: &cancellables)
+
+        WallpaperSchedulerService.shared.$config
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
                 self?.refreshMenuState()
             }
             .store(in: &cancellables)
@@ -528,6 +539,28 @@ final class StatusBarController: NSObject {
             let screenMenuItem = NSMenuItem(title: screenName, action: nil, keyEquivalent: "")
             let screenSubMenu = NSMenu(title: screenName)
             screenMenuItem.submenu = screenSubMenu
+            let schedulerConfig = WallpaperSchedulerService.shared.config.resolvedDisplayConfig(for: screen.wallpaperScreenIdentifier)
+
+            // 自动切换开关
+            let autoSwitchItem = NSMenuItem(
+                title: schedulerConfig.isEnabled ? t("statusbar.disableAutoSwitch") : t("statusbar.enableAutoSwitch"),
+                action: #selector(togglePerScreenAutoSwitch(_:)),
+                keyEquivalent: "")
+            autoSwitchItem.target = self
+            autoSwitchItem.representedObject = screen
+            screenSubMenu.addItem(autoSwitchItem)
+
+            // 切换下一张壁纸
+            let nextWallpaperItem = NSMenuItem(
+                title: t("statusbar.nextWallpaper"),
+                action: #selector(nextWallpaperForScreen(_:)),
+                keyEquivalent: "")
+            nextWallpaperItem.target = self
+            nextWallpaperItem.representedObject = screen
+            nextWallpaperItem.isEnabled = WallpaperSchedulerService.shared.hasSchedulableItems(for: screen.wallpaperScreenIdentifier)
+            screenSubMenu.addItem(nextWallpaperItem)
+
+            screenSubMenu.addItem(.separator())
 
             // 暂停 / 继续
             let pauseItem = NSMenuItem(
@@ -639,6 +672,11 @@ final class StatusBarController: NSObject {
         }
     }
 
+    @objc private func openSettings() {
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+        appDelegate.showSettingsWindow(nil)
+    }
+
     @objc private func releaseForegroundMemory() {
         releaseMemoryHandler?()
     }
@@ -669,6 +707,19 @@ final class StatusBarController: NSObject {
         guard let screen = sender.representedObject as? NSScreen else { return }
         DisplayCropSettingsStore.shared.reset(for: screen)
         refreshMenuState()
+    }
+
+    @objc private func togglePerScreenAutoSwitch(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen else { return }
+        let screenID = screen.wallpaperScreenIdentifier
+        let isEnabled = WallpaperSchedulerService.shared.config.resolvedDisplayConfig(for: screenID).isEnabled
+        WallpaperSchedulerService.shared.updateDisplayEnabled(!isEnabled, for: screenID)
+        refreshMenuState()
+    }
+
+    @objc private func nextWallpaperForScreen(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen else { return }
+        WallpaperSchedulerService.shared.triggerNextWallpaperNow(for: screen.wallpaperScreenIdentifier)
     }
 
     @objc private func perScreenTogglePlayback(_ sender: NSMenuItem) {

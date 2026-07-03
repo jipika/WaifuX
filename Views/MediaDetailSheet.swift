@@ -81,6 +81,9 @@ struct MediaDetailSheet: View {
     @State private var pendingRemoveFrameInterpolationBlacklistURL: URL?
     @State private var isDeletingBake = false
     @State private var isDeletingFrameInterpolation = false
+    @State private var frameInterpolationNeedCheckKey: String?
+    @State private var frameInterpolationNeedsInterpolation: Bool?
+    @State private var frameInterpolationNeedCheckTask: Task<Void, Never>?
     @State private var isTranscodingVideo = false
     @State private var transcodeVideoProgress: Double = 0
 
@@ -375,6 +378,7 @@ struct MediaDetailSheet: View {
             Button("移出", role: .destructive) {
                 if let url = pendingRemoveFrameInterpolationBlacklistURL {
                     frameInterpolationQueue.removeBlacklisted(videoURL: url)
+                    refreshFrameInterpolationNeedCheck(force: true)
                 }
                 pendingRemoveFrameInterpolationBlacklistURL = nil
             }
@@ -432,6 +436,13 @@ struct MediaDetailSheet: View {
             // 避免下载完成后对已关闭的 sheet 执行壁纸应用造成竞态
             autoDownloadTask?.cancel()
             autoDownloadTask = nil
+            frameInterpolationNeedCheckTask?.cancel()
+            frameInterpolationNeedCheckTask = nil
+        }
+        .onChange(of: showMoreOptionsPopover) { _, isShown in
+            if isShown {
+                refreshFrameInterpolationNeedCheck()
+            }
         }
     }
 
@@ -1510,7 +1521,19 @@ struct MediaDetailSheet: View {
             if frameInterpolationSettingsEnabled,
                let interpolationVideoURL = currentFrameInterpolationVideoURL {
                 let targetFPS = currentFrameInterpolationTargetFPS
-                if let completedRecord = frameInterpolationQueue.completedRecord(videoURL: interpolationVideoURL) {
+                if frameInterpolationQueue.hasActiveInterpolation(videoURL: interpolationVideoURL, satisfying: targetFPS) {
+                    Button {} label: {
+                        HStack {
+                            Image(systemName: "clock")
+                            Text("补帧队列处理中")
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(true)
+                } else if frameInterpolationQueue.completedRecord(videoURL: interpolationVideoURL, satisfying: targetFPS) != nil {
                     Button {} label: {
                         HStack {
                             Image(systemName: "checkmark.circle")
@@ -1524,39 +1547,68 @@ struct MediaDetailSheet: View {
                     .buttonStyle(.plain)
                     .disabled(true)
 
-                    if completedRecord.targetFPS < targetFPS {
-                        if frameInterpolationQueue.hasPendingInterpolation(videoURL: interpolationVideoURL, targetFPS: targetFPS) {
-                            Button {} label: {
-                                HStack {
-                                    Image(systemName: "clock")
-                                    Text("补帧队列处理中")
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(true)
-                        } else {
-                            Button {
-                                showMoreOptionsPopover = false
-                                frameInterpolationQueue.enqueue(
-                                    videoURL: interpolationVideoURL,
-                                    title: resolvedItem.title,
-                                    targetFPS: targetFPS,
-                                    source: .manual
-                                )
-                            } label: {
-                                HStack {
-                                    Image(systemName: "arrow.up.forward.circle")
-                                    Text("提高补帧帧率")
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
-                            }
-                            .buttonStyle(.plain)
+                    Button {
+                        showMoreOptionsPopover = false
+                        pendingDeleteFrameInterpolationURL = interpolationVideoURL
+                        showDeleteFrameInterpolationConfirm = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("删除补帧文件")
+                            Spacer()
                         }
+                        .foregroundStyle(Color(hex: "FF453A"))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isDeletingFrameInterpolation)
+                } else if frameInterpolationQueue.completedRecord(videoURL: interpolationVideoURL) != nil {
+                    if frameInterpolationNeedsInterpolation == false {
+                        Button {} label: {
+                            HStack {
+                                Image(systemName: "checkmark.circle")
+                                Text("无需补帧")
+                                Spacer()
+                            }
+                            .foregroundStyle(Color.white.opacity(0.46))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(true)
+                    } else if frameInterpolationNeedsInterpolation == nil {
+                        Button {} label: {
+                            HStack {
+                                Image(systemName: "hourglass")
+                                Text("检测补帧需求")
+                                Spacer()
+                            }
+                            .foregroundStyle(Color.white.opacity(0.46))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(true)
+                    } else {
+                        Button {
+                            showMoreOptionsPopover = false
+                            frameInterpolationQueue.enqueue(
+                                videoURL: interpolationVideoURL,
+                                title: resolvedItem.title,
+                                targetFPS: targetFPS,
+                                source: .manual
+                            )
+                        } label: {
+                            HStack {
+                                Image(systemName: "arrow.up.forward.circle")
+                                Text("提高补帧帧率")
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     Button {
@@ -1591,13 +1643,27 @@ struct MediaDetailSheet: View {
                         .padding(.vertical, 10)
                     }
                     .buttonStyle(.plain)
-                } else if frameInterpolationQueue.hasPendingInterpolation(videoURL: interpolationVideoURL, targetFPS: targetFPS) {
+                } else if frameInterpolationNeedsInterpolation == false {
                     Button {} label: {
                         HStack {
-                            Image(systemName: "clock")
-                            Text("补帧队列处理中")
+                            Image(systemName: "checkmark.circle")
+                            Text("无需补帧")
                             Spacer()
                         }
+                        .foregroundStyle(Color.white.opacity(0.46))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(true)
+                } else if frameInterpolationNeedsInterpolation == nil {
+                    Button {} label: {
+                        HStack {
+                            Image(systemName: "hourglass")
+                            Text("检测补帧需求")
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.white.opacity(0.46))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                     }
@@ -1665,6 +1731,60 @@ struct MediaDetailSheet: View {
     private var frameInterpolationRemainingDetail: String? {
         let count = frameInterpolationQueue.remainingWorkCount
         return count > 0 ? "还有 \(count) 个" : nil
+    }
+
+    private func refreshFrameInterpolationNeedCheck(force: Bool = false) {
+        guard frameInterpolationSettingsEnabled,
+              let videoURL = currentFrameInterpolationVideoURL else {
+            clearFrameInterpolationNeedCheck()
+            return
+        }
+
+        let targetFPS = currentFrameInterpolationTargetFPS
+        if frameInterpolationQueue.hasActiveInterpolation(videoURL: videoURL, satisfying: targetFPS)
+            || frameInterpolationQueue.isBlacklisted(videoURL: videoURL) {
+            clearFrameInterpolationNeedCheck()
+            return
+        }
+        if frameInterpolationQueue.completedRecord(videoURL: videoURL, satisfying: targetFPS) != nil {
+            clearFrameInterpolationNeedCheck()
+            return
+        }
+
+        let key = "\(videoURL.standardizedFileURL.path)#\(targetFPS)"
+        guard force || frameInterpolationNeedCheckKey != key else { return }
+
+        frameInterpolationNeedCheckTask?.cancel()
+        frameInterpolationNeedCheckKey = key
+        frameInterpolationNeedsInterpolation = nil
+        frameInterpolationNeedCheckTask = Task {
+            let needsInterpolation = await FrameInterpolationQueueService.shared.needsInterpolation(
+                videoURL: videoURL,
+                targetFPS: targetFPS
+            )
+            await MainActor.run {
+                guard frameInterpolationNeedCheckKey == key else { return }
+                if !needsInterpolation,
+                   frameInterpolationQueue.completedRecord(videoURL: videoURL) != nil {
+                    frameInterpolationQueue.markCompleted(
+                        videoURL: videoURL,
+                        title: resolvedItem.title,
+                        targetFPS: targetFPS
+                    )
+                    clearFrameInterpolationNeedCheck()
+                    return
+                }
+                frameInterpolationNeedsInterpolation = needsInterpolation
+                frameInterpolationNeedCheckTask = nil
+            }
+        }
+    }
+
+    private func clearFrameInterpolationNeedCheck() {
+        frameInterpolationNeedCheckTask?.cancel()
+        frameInterpolationNeedCheckTask = nil
+        frameInterpolationNeedCheckKey = nil
+        frameInterpolationNeedsInterpolation = nil
     }
 
     private func detailInfoBubble(width: CGFloat) -> some View {

@@ -167,6 +167,11 @@ final class FrameInterpolationMetalInterpolator: @unchecked Sendable {
         return commandBuffer.status == .completed && commandBuffer.error == nil
     }
 
+    func flushTextureCache() {
+        guard let textureCache else { return }
+        CVMetalTextureCacheFlush(textureCache, 0)
+    }
+
     private func makeTexture(
         from pixelBuffer: CVPixelBuffer,
         pixelFormat: MTLPixelFormat,

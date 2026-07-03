@@ -73,16 +73,33 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// 为指定屏幕触发下一次壁纸更换（用于"播完即换"模式）
     private func triggerNextWallpaper(for screenID: String) {
+        applyNextWallpaper(for: screenID, requireEnabledAndOnEndMode: true)
+    }
+
+    /// 手动为指定屏幕切换下一张壁纸。即使该屏幕暂时关闭自动切换，也允许使用
+    /// 已保存的轮换范围、顺序和文件夹过滤来选取下一张。
+    func triggerNextWallpaperNow(for screenID: String) {
+        applyNextWallpaper(for: screenID, requireEnabledAndOnEndMode: false)
+    }
+
+    func hasSchedulableItems(for screenID: String) -> Bool {
+        let displayConfig = config.resolvedDisplayConfig(for: screenID)
+        return !getSchedulableItems(for: displayConfig, screenID: screenID).isEmpty
+    }
+
+    private func applyNextWallpaper(for screenID: String, requireEnabledAndOnEndMode: Bool) {
         guard !isScreenLocked else { return }
         guard NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }) else {
             return
         }
         let displayConfig = config.resolvedDisplayConfig(for: screenID)
-        guard displayConfig.isEnabled && displayConfig.isOnEndMode else { return }
+        if requireEnabledAndOnEndMode {
+            guard displayConfig.isEnabled && displayConfig.isOnEndMode else { return }
+        }
 
-        let items = getSchedulableItems(for: displayConfig)
+        let items = getSchedulableItems(for: displayConfig, screenID: screenID)
         guard !items.isEmpty else {
-            print("\(logTag) Screen \(screenID): no schedulable items for on-end mode")
+            print("\(logTag) Screen \(screenID): no schedulable items for next-wallpaper request")
             return
         }
 
@@ -100,9 +117,9 @@ class WallpaperSchedulerService: ObservableObject {
                 self.lastChangeTimes[screenID] = now
                 self.lastChangedItemIDs[screenID] = item.id
                 self.persistSchedulerState()
-                print("\(logTag) On-end mode: applied '\(item.title)' to screen \(screenID)")
+                print("\(logTag) Applied next wallpaper '\(item.title)' to screen \(screenID)")
             } else {
-                print("\(logTag) On-end mode: failed to apply '\(item.title)' to screen \(screenID), trying next item")
+                print("\(logTag) Failed to apply next wallpaper '\(item.title)' to screen \(screenID), trying next item")
                 // 尝试其他可用项，避免因选中不支持的壁纸类型导致黑屏
                 var remaining = items.filter { $0.id != item.id }
                 while !remaining.isEmpty {
@@ -113,12 +130,12 @@ class WallpaperSchedulerService: ObservableObject {
                         self.lastChangeTimes[screenID] = now
                         self.lastChangedItemIDs[screenID] = retryItem.id
                         self.persistSchedulerState()
-                        print("\(logTag) On-end mode: retry applied '\(retryItem.title)' to screen \(screenID)")
+                        print("\(logTag) Retry applied next wallpaper '\(retryItem.title)' to screen \(screenID)")
                         return
                     }
-                    print("\(logTag) On-end mode: retry failed for '\(retryItem.title)', trying next")
+                    print("\(logTag) Retry failed for next wallpaper '\(retryItem.title)', trying next")
                 }
-                print("\(logTag) On-end mode: all items exhausted for screen \(screenID), no wallpaper applied")
+                print("\(logTag) All next-wallpaper candidates exhausted for screen \(screenID), no wallpaper applied")
             }
         }
     }
