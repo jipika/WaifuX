@@ -108,11 +108,11 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
         alert.alertStyle = .informational
         alert.messageText = "检测到新外接显示器"
         alert.informativeText = "\(display.name) 已连接。要为这块显示器设置动态壁纸吗？"
-        alert.addButton(withTitle: "使用库里的随机壁纸")
+        alert.addButton(withTitle: "使用随机壁纸")
         alert.addButton(withTitle: "去挑选壁纸")
-        alert.addButton(withTitle: "不使用随机壁纸")
+        alert.addButton(withTitle: "不使用壁纸")
 
-        let autoSwitchCheckbox = NSButton(checkboxWithTitle: "此显示器之后是否自动切换", target: nil, action: nil)
+        let autoSwitchCheckbox = NSButton(checkboxWithTitle: "此显示器连接后自动切换", target: nil, action: nil)
         let displayScreen = NSScreen.screens.first { $0.wallpaperScreenIdentifier == display.screenID }
         let displayConfig = displayScreen.map {
             WallpaperSchedulerService.shared.resolvedDisplayConfig(for: $0)
