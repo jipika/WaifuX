@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import ImageIO
+import UniformTypeIdentifiers
 
 /// 静态壁纸独立显示 Overlay 管理器
 ///
@@ -25,14 +27,22 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 每个屏幕当前显示的图片 URL（内存镜像，供 refreshWindows 重建使用）
     private var imageByScreen: [String: URL] = [:]
+    /// 按物理显示器指纹索引的静态图 URL，用于外接屏重插后 screenID 变化时恢复。
+    private var imageByScreenFingerprint: [String: URL] = [:]
 
     /// 每个屏幕的图片原始像素尺寸（用于 CropLayoutEngine 计算）
     private var imageSizes: [String: CGSize] = [:]
+    /// 每屏静态图源文件自带黑边的内容裁切框。只在全屏自动铺满模式下叠加。
+    private var imageLetterboxContentCrops: [String: UnitRect] = [:]
+    private var imageLetterboxAnalysisTasks: [String: Task<UnitRect?, Never>] = [:]
+    private var imageLetterboxCropCache: [String: UnitRect] = [:]
+    private var imageLetterboxNoCropCache = Set<String>()
 
     private var cancellables = Set<AnyCancellable>()
 
     /// 持久化键：`{screenID: imageURLString}` JSON
     private static let stateKey = "static_image_overlay_state_v1"
+    private static let fingerprintStateKey = "static_image_overlay_fingerprint_state_v1"
 
     private init() {
         // Space 切换后重新显示 overlay（desktop 级窗口可能被系统重排）
@@ -72,20 +82,43 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 为所有屏幕显示同一张静态图，并持久化状态。
     func showAll(imageURL: URL) {
+        Task { @MainActor in
+            await showAllPrepared(imageURL: imageURL)
+        }
+    }
+
+    /// 为所有屏幕显示同一张静态图：先完成黑边分析，再真正更新 overlay。
+    func showAllPrepared(imageURL: URL) async {
         for screen in NSScreen.screens {
-            show(imageURL: imageURL, for: screen)
+            await showPrepared(imageURL: imageURL, for: screen)
         }
         persistState()
     }
 
     /// 为指定屏幕显示静态图（覆盖已有窗口），并持久化状态。
     func show(imageURL: URL, for screen: NSScreen) {
+        Task { @MainActor in
+            await showPrepared(imageURL: imageURL, for: screen)
+        }
+    }
+
+    /// 为指定屏幕显示静态图：先完成黑边分析，再真正更新 overlay。
+    func showPrepared(imageURL: URL, for screen: NSScreen) async {
         guard FileManager.default.fileExists(atPath: imageURL.path) else {
             print("[StaticImageOverlay] ⚠️ 图片不存在，跳过 overlay 显示: \(imageURL.path)")
             return
         }
         let screenID = screen.wallpaperScreenIdentifier
+        let screenFingerprint = screen.wallpaperScreenFingerprint
+        guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
+            print("[StaticImageOverlay] ⚠️ 屏幕已断开，跳过 overlay 显示: \(screen.localizedName)")
+            return
+        }
         imageByScreen[screenID] = imageURL
+        imageByScreenFingerprint[screenFingerprint] = imageURL
+        imageLetterboxContentCrops.removeValue(forKey: screenID)
+        imageLetterboxAnalysisTasks[screenID]?.cancel()
+        imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
 
         // 加载图片并记录原始像素尺寸（供 CropLayoutEngine 使用）
         if let img = NSImage(contentsOf: imageURL), img.size.width > 0, img.size.height > 0 {
@@ -95,6 +128,22 @@ final class StaticImageWallpaperOverlayManager {
             } else {
                 imageSizes[screenID] = img.size
             }
+        }
+
+        let contentCrop = await imageLetterboxCropIfNeeded(screenID: screenID, imageURL: imageURL)
+        guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
+            imageLetterboxContentCrops.removeValue(forKey: screenID)
+            imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
+            print("[StaticImageOverlay] ⚠️ 黑边分析完成时屏幕已断开，跳过 overlay 更新: \(screen.localizedName)")
+            return
+        }
+        guard imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL else {
+            return
+        }
+        if let contentCrop {
+            imageLetterboxContentCrops[screenID] = contentCrop
+        } else {
+            imageLetterboxContentCrops.removeValue(forKey: screenID)
         }
 
         if let existing = imageWindows[screenID] {
@@ -128,9 +177,14 @@ final class StaticImageWallpaperOverlayManager {
     /// 彻底清除持久化状态（切到视频/场景/web 或系统壁纸时调用）。
     func clearState() {
         imageByScreen.removeAll()
+        imageByScreenFingerprint.removeAll()
         imageSizes.removeAll()
+        imageLetterboxContentCrops.removeAll()
+        for task in imageLetterboxAnalysisTasks.values { task.cancel() }
+        imageLetterboxAnalysisTasks.removeAll()
         hideAll()
         UserDefaults.standard.removeObject(forKey: Self.stateKey)
+        UserDefaults.standard.removeObject(forKey: Self.fingerprintStateKey)
     }
 
     /// 返回指定屏幕的静态图原始像素尺寸（供 CropAdjustOverlayController 预览使用）。
@@ -163,22 +217,53 @@ final class StaticImageWallpaperOverlayManager {
         }
 
         guard let saved = loadState(), !saved.isEmpty else {
+            restoreCurrentScreensFromFingerprintStateIfNeeded()
             return
         }
 
         // 按当前屏幕匹配已保存的图片 URL；匹配不到（屏幕已拔）的记录跳过。
         let currentScreens = NSScreen.screens
+        let savedByFingerprint = loadFingerprintState() ?? [:]
         var restored = 0
         for screen in currentScreens {
             let screenID = screen.wallpaperScreenIdentifier
-            guard let urlString = saved[screenID], let url = URL(string: urlString) else { continue }
+            let urlString = saved[screenID] ?? savedByFingerprint[screen.wallpaperScreenFingerprint]
+            guard let urlString, let url = URL(string: urlString) else { continue }
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            show(imageURL: url, for: screen)
+            Task { @MainActor in
+                await showPrepared(imageURL: url, for: screen)
+            }
             restored += 1
         }
         if restored > 0 {
             print("[StaticImageOverlay] ✅ 启动恢复 \(restored) 屏静态图 overlay")
         }
+    }
+
+    @discardableResult
+    func restorePreviousImageIfAvailable(for screen: NSScreen) -> Bool {
+        guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else { return false }
+        guard !VideoWallpaperManager.shared.isVideoWallpaperActive else { return false }
+        guard !WallpaperEngineXBridge.shared.isControllingExternalEngine,
+              !WallpaperEngineXBridge.shared.hasPersistedRestoreState(for: screen) else {
+            return false
+        }
+
+        let screenID = screen.wallpaperScreenIdentifier
+        let fingerprint = screen.wallpaperScreenFingerprint
+        let url = imageByScreen[screenID]
+            ?? imageByScreenFingerprint[fingerprint]
+            ?? loadState().flatMap { $0[screenID] }.flatMap(URL.init(string:))
+            ?? loadFingerprintState().flatMap { $0[fingerprint] }.flatMap(URL.init(string:))
+        guard let url, FileManager.default.fileExists(atPath: url.path) else {
+            return false
+        }
+
+        Task { @MainActor in
+            await showPrepared(imageURL: url, for: screen)
+        }
+        print("[StaticImageOverlay] Restored previous static wallpaper for reconnected display: \(screen.localizedName)")
+        return true
     }
 
     // MARK: - 窗口创建
@@ -226,18 +311,53 @@ final class StaticImageWallpaperOverlayManager {
         guard let cropView = window.contentView as? StaticCropImageView else { return }
 
         let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        let contentCrop = autoRemoveImageLetterboxEnabled ? imageLetterboxContentCrops[screenID] : nil
         guard settings.shouldApplyCrop else {
-            cropView.applyCropLayout(nil)
             window.backgroundColor = .black
+            if let contentCrop {
+                let layout = CropLayout(
+                    wallpaperCropRect: contentCrop,
+                    viewportRect: .full,
+                    letterboxColor: CGColor(gray: 0, alpha: 1)
+                )
+                cropView.applyCropLayout(layout)
+            } else {
+                cropView.applyCropLayout(nil)
+            }
             return
         }
         let wallpaperSize = imageSizes[screenID] ?? screen.frame.size
+        let layoutWallpaperSize: CGSize
+        if let contentCrop {
+            layoutWallpaperSize = CGSize(
+                width: max(1, wallpaperSize.width * contentCrop.w),
+                height: max(1, wallpaperSize.height * contentCrop.h)
+            )
+        } else {
+            layoutWallpaperSize = wallpaperSize
+        }
         let layout = CropLayoutEngine.compute(
-            wallpaperSize: wallpaperSize,
+            wallpaperSize: layoutWallpaperSize,
             screenSize: screen.frame.size,
             settings: settings)
-        cropView.applyCropLayout(layout)
+        cropView.applyCropLayout(applyingSourceContentCrop(contentCrop, to: layout))
         window.backgroundColor = NSColor(cgColor: layout.letterboxColor) ?? .black
+    }
+
+    private func applyingSourceContentCrop(_ contentCrop: UnitRect?, to layout: CropLayout) -> CropLayout {
+        guard let contentCrop else { return layout }
+        let crop = layout.wallpaperCropRect
+        let combinedCrop = UnitRect(
+            x: contentCrop.x + crop.x * contentCrop.w,
+            y: contentCrop.y + crop.y * contentCrop.h,
+            w: crop.w * contentCrop.w,
+            h: crop.h * contentCrop.h
+        )
+        return CropLayout(
+            wallpaperCropRect: combinedCrop,
+            viewportRect: layout.viewportRect,
+            letterboxColor: layout.letterboxColor
+        )
     }
 
     // MARK: - 刷新（屏幕插拔 / crop 变更）
@@ -245,7 +365,7 @@ final class StaticImageWallpaperOverlayManager {
     func refreshWindows() {
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
         // 移除已断开屏幕的窗口
-        for (screenID, window) in imageWindows {
+        for (screenID, window) in Array(imageWindows) {
             if !currentScreenIDs.contains(screenID) {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -263,20 +383,132 @@ final class StaticImageWallpaperOverlayManager {
                 applyCropToWindow(window, screenID: screenID, screen: screen)
             } else if let imageURL = imageByScreen[screenID] {
                 // 屏幕重连且本管理器记录过该屏图片 → 重建
-                createWindow(for: screen, imageURL: imageURL)
+                Task { @MainActor in
+                    await showPrepared(imageURL: imageURL, for: screen)
+                }
+            } else if let imageURL = imageByScreenFingerprint[screen.wallpaperScreenFingerprint] {
+                Task { @MainActor in
+                    await showPrepared(imageURL: imageURL, for: screen)
+                }
             }
         }
+    }
+
+    private static func currentScreenExists(screenID: String, fingerprint: String) -> Bool {
+        NSScreen.screens.contains { screen in
+            screen.wallpaperScreenIdentifier == screenID ||
+            screen.wallpaperScreenFingerprint == fingerprint
+        }
+    }
+
+    func refreshAutoRemoveImageLetterbox() {
+        guard autoRemoveImageLetterboxEnabled else {
+            for task in imageLetterboxAnalysisTasks.values { task.cancel() }
+            imageLetterboxAnalysisTasks.removeAll()
+            imageLetterboxContentCrops.removeAll()
+            for screen in NSScreen.screens {
+                let screenID = screen.wallpaperScreenIdentifier
+                if let window = imageWindows[screenID] {
+                    applyCropToWindow(window, screenID: screenID, screen: screen)
+                }
+            }
+            return
+        }
+
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard let imageURL = imageByScreen[screenID] else { continue }
+            Task { @MainActor in
+                _ = await self.refreshImageLetterboxCrop(screenID: screenID, imageURL: imageURL)
+            }
+        }
+    }
+
+    private var autoRemoveImageLetterboxEnabled: Bool {
+        UserDefaults.standard.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
+    }
+
+    func preparedSystemWallpaperURL(for imageURL: URL) async -> URL {
+        guard autoRemoveImageLetterboxEnabled else {
+            return imageURL
+        }
+        return await StaticImageLetterboxAnalyzer.croppedImageFileURL(for: imageURL) ?? imageURL
+    }
+
+    private func imageLetterboxCropIfNeeded(screenID: String, imageURL: URL) async -> UnitRect? {
+        guard autoRemoveImageLetterboxEnabled else { return nil }
+        let cacheKey = imageLetterboxCacheKey(for: imageURL)
+        if let cached = imageLetterboxCropCache[cacheKey] {
+            return cached
+        }
+        if imageLetterboxNoCropCache.contains(cacheKey) {
+            return nil
+        }
+        if let existingTask = imageLetterboxAnalysisTasks[screenID] {
+            return await existingTask.value
+        }
+
+        let task = Task.detached(priority: .utility) {
+            await StaticImageLetterboxAnalyzer.analyze(url: imageURL)
+        }
+        imageLetterboxAnalysisTasks[screenID] = task
+        let crop = await task.value
+
+        if imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL {
+            self.imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
+        }
+        if let crop {
+            imageLetterboxCropCache[cacheKey] = crop
+        } else {
+            imageLetterboxNoCropCache.insert(cacheKey)
+        }
+        return crop
+    }
+
+    private func refreshImageLetterboxCrop(screenID: String, imageURL: URL) async -> UnitRect? {
+        let crop = await imageLetterboxCropIfNeeded(screenID: screenID, imageURL: imageURL)
+        guard autoRemoveImageLetterboxEnabled else { return crop }
+        guard imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL else {
+            return crop
+        }
+        if let crop {
+            imageLetterboxContentCrops[screenID] = crop
+        } else {
+            imageLetterboxContentCrops.removeValue(forKey: screenID)
+        }
+        if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
+           let window = imageWindows[screenID] {
+            applyCropToWindow(window, screenID: screenID, screen: screen)
+        }
+        return crop
+    }
+
+    private func imageLetterboxCacheKey(for url: URL) -> String {
+        guard url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+            return url.standardizedFileURL.absoluteString
+        }
+        let size = values.fileSize ?? 0
+        let mtime = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(url.standardizedFileURL.path)|\(size)|\(mtime)"
     }
 
     // MARK: - 持久化
 
     private func persistState() {
         let dict = imageByScreen.mapValues { $0.absoluteString }
+        let fpDict = imageByScreenFingerprint.mapValues { $0.absoluteString }
         if dict.isEmpty {
             UserDefaults.standard.removeObject(forKey: Self.stateKey)
         } else if let data = try? JSONSerialization.data(withJSONObject: dict),
                   let str = String(data: data, encoding: .utf8) {
             UserDefaults.standard.set(str, forKey: Self.stateKey)
+        }
+        if fpDict.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.fingerprintStateKey)
+        } else if let data = try? JSONSerialization.data(withJSONObject: fpDict),
+                  let str = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.set(str, forKey: Self.fingerprintStateKey)
         }
     }
 
@@ -287,6 +519,33 @@ final class StaticImageWallpaperOverlayManager {
             return nil
         }
         return dict
+    }
+
+    private func loadFingerprintState() -> [String: String]? {
+        guard let str = UserDefaults.standard.string(forKey: Self.fingerprintStateKey),
+              let data = str.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            return nil
+        }
+        return dict
+    }
+
+    private func restoreCurrentScreensFromFingerprintStateIfNeeded() {
+        guard let savedByFingerprint = loadFingerprintState(), !savedByFingerprint.isEmpty else { return }
+        var restored = 0
+        for screen in NSScreen.screens {
+            let fingerprint = screen.wallpaperScreenFingerprint
+            guard let urlString = savedByFingerprint[fingerprint],
+                  let url = URL(string: urlString),
+                  FileManager.default.fileExists(atPath: url.path) else { continue }
+            Task { @MainActor in
+                await showPrepared(imageURL: url, for: screen)
+            }
+            restored += 1
+        }
+        if restored > 0 {
+            print("[StaticImageOverlay] ✅ 按显示器指纹恢复 \(restored) 屏静态图 overlay")
+        }
     }
 
     // MARK: - 通知
@@ -320,6 +579,243 @@ final class StaticImageWallpaperOverlayManager {
               let window = imageWindows[screenID],
               let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
         applyCropToWindow(window, screenID: screenID, screen: screen)
+    }
+}
+
+private enum StaticImageLetterboxAnalyzer {
+    private static let blackLumaThreshold: UInt8 = 28
+    private static let edgeBlackRatioThreshold = 0.94
+    private static let maxRemovedArea = 0.36
+    private static let minRemovedArea = 0.01
+    private static let minPairInsetRatio = 0.012
+    private static let overscanPixels = 2
+
+    static func analyze(url: URL) async -> UnitRect? {
+        await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                return nil
+            }
+            return detectCropRect(in: image)
+        }.value
+    }
+
+    static func croppedImageFileURL(for url: URL) async -> URL? {
+        await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                  let crop = detectCropRect(in: image) else {
+                return nil
+            }
+
+            let cropRect = pixelCropRect(from: crop, imageWidth: image.width, imageHeight: image.height)
+            guard let cropped = image.cropping(to: cropRect) else {
+                return nil
+            }
+
+            let outputExtension = normalizedOutputExtension(for: url.pathExtension)
+            let cacheURL = systemWallpaperCacheURL(for: url, crop: crop, fileExtension: outputExtension)
+            if FileManager.default.fileExists(atPath: cacheURL.path) {
+                return cacheURL
+            }
+
+            do {
+                try FileManager.default.createDirectory(
+                    at: cacheURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                print("[StaticImageOverlay] ⚠️ 创建系统壁纸裁剪缓存目录失败: \(error)")
+                return nil
+            }
+
+            guard writeImage(cropped, to: cacheURL, fileExtension: outputExtension) else {
+                return nil
+            }
+            print("[StaticImageOverlay] 🖼️ 系统静态壁纸已生成去黑边缓存: \(cacheURL.lastPathComponent)")
+            return cacheURL
+        }.value
+    }
+
+    private static func detectCropRect(in image: CGImage) -> UnitRect? {
+        let width = image.width
+        let height = image.height
+        guard width > 16, height > 16 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let didDraw = pixels.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let ctx = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard didDraw else { return nil }
+
+        let top = edgeInset(limit: height / 2) { y in
+            blackRatioInRow(y, width: width, bytesPerRow: bytesPerRow, pixels: pixels)
+        }
+        let bottom = edgeInset(limit: height / 2) { offset in
+            blackRatioInRow(height - 1 - offset, width: width, bytesPerRow: bytesPerRow, pixels: pixels)
+        }
+        let left = edgeInset(limit: width / 2) { x in
+            blackRatioInColumn(x, height: height, bytesPerRow: bytesPerRow, pixels: pixels)
+        }
+        let right = edgeInset(limit: width / 2) { offset in
+            blackRatioInColumn(width - 1 - offset, height: height, bytesPerRow: bytesPerRow, pixels: pixels)
+        }
+
+        let horizontalPair = Double(top + bottom) / Double(height) >= minPairInsetRatio
+            && top > 0 && bottom > 0
+        let verticalPair = Double(left + right) / Double(width) >= minPairInsetRatio
+            && left > 0 && right > 0
+        guard horizontalPair || verticalPair else { return nil }
+
+        let rawCropTop = horizontalPair ? top : 0
+        let rawCropBottom = horizontalPair ? bottom : 0
+        let rawCropLeft = verticalPair ? left : 0
+        let rawCropRight = verticalPair ? right : 0
+
+        let rawCropW = max(1, width - rawCropLeft - rawCropRight)
+        let rawCropH = max(1, height - rawCropTop - rawCropBottom)
+        let removedArea = 1.0 - (Double(rawCropW * rawCropH) / Double(width * height))
+        guard removedArea >= minRemovedArea, removedArea <= maxRemovedArea else { return nil }
+
+        let cropTop = horizontalPair ? min(height - 1, rawCropTop + overscanPixels) : 0
+        let cropBottom = horizontalPair ? min(height - cropTop - 1, rawCropBottom + overscanPixels) : 0
+        let cropLeft = verticalPair ? min(width - 1, rawCropLeft + overscanPixels) : 0
+        let cropRight = verticalPair ? min(width - cropLeft - 1, rawCropRight + overscanPixels) : 0
+
+        let cropW = max(1, width - cropLeft - cropRight)
+        let cropH = max(1, height - cropTop - cropBottom)
+        return UnitRect(
+            x: Double(cropLeft) / Double(width),
+            y: Double(cropTop) / Double(height),
+            w: Double(cropW) / Double(width),
+            h: Double(cropH) / Double(height)
+        )
+    }
+
+    private static func edgeInset(limit: Int, ratioAt: (Int) -> Double) -> Int {
+        var inset = 0
+        for i in 0..<limit {
+            if ratioAt(i) >= edgeBlackRatioThreshold {
+                inset += 1
+            } else {
+                break
+            }
+        }
+        return inset
+    }
+
+    private static func blackRatioInRow(_ y: Int, width: Int, bytesPerRow: Int, pixels: [UInt8]) -> Double {
+        let step = max(1, width / 360)
+        var black = 0
+        var total = 0
+        let row = y * bytesPerRow
+        var x = 0
+        while x < width {
+            if isBlackPixel(at: row + x * 4, pixels: pixels) {
+                black += 1
+            }
+            total += 1
+            x += step
+        }
+        return total > 0 ? Double(black) / Double(total) : 0
+    }
+
+    private static func blackRatioInColumn(_ x: Int, height: Int, bytesPerRow: Int, pixels: [UInt8]) -> Double {
+        let step = max(1, height / 360)
+        var black = 0
+        var total = 0
+        var y = 0
+        while y < height {
+            if isBlackPixel(at: y * bytesPerRow + x * 4, pixels: pixels) {
+                black += 1
+            }
+            total += 1
+            y += step
+        }
+        return total > 0 ? Double(black) / Double(total) : 0
+    }
+
+    private static func isBlackPixel(at index: Int, pixels: [UInt8]) -> Bool {
+        guard index + 2 < pixels.count else { return false }
+        let r = pixels[index]
+        let g = pixels[index + 1]
+        let b = pixels[index + 2]
+        let luma = (UInt16(r) * 54 + UInt16(g) * 183 + UInt16(b) * 19) >> 8
+        return luma <= blackLumaThreshold
+    }
+
+    private static func pixelCropRect(from crop: UnitRect, imageWidth: Int, imageHeight: Int) -> CGRect {
+        let x = max(0, min(imageWidth - 1, Int((crop.x * Double(imageWidth)).rounded(.down))))
+        let y = max(0, min(imageHeight - 1, Int((crop.y * Double(imageHeight)).rounded(.down))))
+        let right = max(x + 1, min(imageWidth, Int(((crop.x + crop.w) * Double(imageWidth)).rounded(.up))))
+        let bottom = max(y + 1, min(imageHeight, Int(((crop.y + crop.h) * Double(imageHeight)).rounded(.up))))
+        return CGRect(x: x, y: y, width: right - x, height: bottom - y)
+    }
+
+    private static func normalizedOutputExtension(for sourceExtension: String) -> String {
+        switch sourceExtension.lowercased() {
+        case "png":
+            return "png"
+        default:
+            return "jpg"
+        }
+    }
+
+    private static func writeImage(_ image: CGImage, to url: URL, fileExtension: String) -> Bool {
+        let outputUTI: CFString = fileExtension == "png"
+            ? UTType.png.identifier as CFString
+            : UTType.jpeg.identifier as CFString
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, outputUTI, 1, nil) else {
+            return false
+        }
+
+        let options: [CFString: Any] = fileExtension == "jpg"
+            ? [kCGImageDestinationLossyCompressionQuality: 0.95]
+            : [:]
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        return CGImageDestinationFinalize(destination)
+    }
+
+    private static func systemWallpaperCacheURL(for url: URL, crop: UnitRect, fileExtension: String) -> URL {
+        let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = cacheRoot
+            .appendingPathComponent("WaifuX", isDirectory: true)
+            .appendingPathComponent("StaticSystemWallpapers", isDirectory: true)
+        let key = "\(imageCacheKey(for: url))|\(crop.x),\(crop.y),\(crop.w),\(crop.h)"
+        return directory.appendingPathComponent("\(stableHashHex(key)).\(fileExtension)")
+    }
+
+    private static func imageCacheKey(for url: URL) -> String {
+        guard url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+            return url.standardizedFileURL.absoluteString
+        }
+        let size = values.fileSize ?? 0
+        let mtime = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(url.standardizedFileURL.path)|\(size)|\(mtime)"
+    }
+
+    private static func stableHashHex(_ string: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in string.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 }
 

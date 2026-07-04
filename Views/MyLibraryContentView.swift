@@ -145,6 +145,7 @@ struct MyLibraryContentView: View {
 
     // 子标签：收藏 / 已下载
     @State private var selectedSubTab: SubTab = .downloads
+    @State private var didRestoreLastLibraryPage = false
     @State private var librarySearchQuery = ""
     @State private var isLibrarySearchExpanded = false
     @FocusState private var isLibrarySearchFocused: Bool
@@ -243,6 +244,28 @@ struct MyLibraryContentView: View {
     private struct FolderDisplayInfo {
         let previewURLs: [URL]
         let itemCount: Int
+    }
+
+    private enum LastLibraryPageStore {
+        private static let contentTypeKey = "my_library_last_content_type_v1"
+        private static let subTabKey = "my_library_last_sub_tab_v1"
+
+        static func load() -> (contentType: ContentType, subTab: SubTab)? {
+            let defaults = UserDefaults.standard
+            guard let contentValue = defaults.string(forKey: contentTypeKey),
+                  let contentType = ContentType(rawValue: contentValue) else {
+                return nil
+            }
+            let subTabValue = defaults.string(forKey: subTabKey)
+            let subTab = subTabValue.flatMap(SubTab.init(rawValue:)) ?? .downloads
+            return (contentType, subTab)
+        }
+
+        static func save(contentType: ContentType, subTab: SubTab) {
+            let defaults = UserDefaults.standard
+            defaults.set(contentType.rawValue, forKey: contentTypeKey)
+            defaults.set(subTab.rawValue, forKey: subTabKey)
+        }
     }
 
     private var libraryAtmosphereTint: ExploreAtmosphereTint {
@@ -354,6 +377,7 @@ struct MyLibraryContentView: View {
             }
         }
         .onAppear {
+            restoreLastLibraryPageIfNeeded()
             // ✅ 从详情返回时触发 ScrollView 滚动位置恢复
             if savedLibraryScrollOffset > 0 {
                 libraryScrollRestoreToken += 1
@@ -372,6 +396,9 @@ struct MyLibraryContentView: View {
         .onChange(of: isVisible) { _, visible in
             if !visible {
                 isLibrarySearchExpanded = false
+                persistLastLibraryPage()
+            } else {
+                restoreLastLibraryPageIfNeeded()
             }
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in
@@ -381,6 +408,7 @@ struct MyLibraryContentView: View {
             debouncedUpdateMediaItems()
         }
         .onChange(of: selectedSubTab) { _, _ in
+            persistLastLibraryPage()
             // 切换子标签时重置文件夹导航和滚动位置
             savedLibraryScrollOffset = -1
             currentWallpaperFolderID = nil
@@ -415,6 +443,7 @@ struct MyLibraryContentView: View {
             stopLibraryPrefetchers()
         }
         .onChange(of: selectedContentType) { _, _ in
+            persistLastLibraryPage()
             // 切换内容类型时重置编辑状态、文件夹导航和滚动位置
             savedLibraryScrollOffset = -1
             isEditing = false
@@ -529,6 +558,40 @@ struct MyLibraryContentView: View {
         for (idx, anime) in animeFavorites.enumerated() { idMap[anime.id] = idx }
         animeIDIndexCache = idMap
         syncSelectionWithVisibleItems()
+    }
+
+    private func restoreLastLibraryPageIfNeeded() {
+        guard isVisible, !didRestoreLastLibraryPage else { return }
+        didRestoreLastLibraryPage = true
+        guard let lastPage = LastLibraryPageStore.load() else {
+            persistLastLibraryPage()
+            return
+        }
+
+        var didChange = false
+        if selectedContentType != lastPage.contentType {
+            selectedContentType = lastPage.contentType
+            didChange = true
+        }
+        if selectedSubTab != lastPage.subTab {
+            selectedSubTab = lastPage.subTab
+            didChange = true
+        }
+        if didChange {
+            savedLibraryScrollOffset = -1
+            currentWallpaperFolderID = nil
+            currentMediaFolderID = nil
+            wallpaperFolderStack.removeAll()
+            mediaFolderStack.removeAll()
+            isEditing = false
+            selectedItems.removeAll()
+            updateWallpaperItems()
+            updateMediaItems()
+        }
+    }
+
+    private func persistLastLibraryPage() {
+        LastLibraryPageStore.save(contentType: selectedContentType, subTab: selectedSubTab)
     }
 
     private func releaseForegroundMemory() {

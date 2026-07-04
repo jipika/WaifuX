@@ -416,6 +416,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             PlaybackProgressCache.shared.restoreSavedData()
                             DownloadTaskService.shared.restoreSavedTasks()
                             WallpaperSchedulerService.shared.restoreSavedConfig()
+                            ExternalDisplayConnectionCoordinator.shared.start()
 
                             // 启动锁屏扩展 Socket IPC 服务端（仅 macOS 26+）
                             if #available(macOS 26.0, *) {

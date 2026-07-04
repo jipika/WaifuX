@@ -666,10 +666,8 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func openMyLibrary() {
+        MainNavigationRequestStore.requestLibraryTab()
         showWindowHandler?()
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: .switchToLibraryTab, object: nil)
-        }
     }
 
     @objc private func openSettings() {

@@ -319,3 +319,25 @@ extension Notification.Name {
     static let appDidReceiveMemoryPressure = Notification.Name("appDidReceiveMemoryPressure")
     static let switchToLibraryTab = Notification.Name("switchToLibraryTab")
 }
+
+enum MainNavigationRequestStore {
+    private static let pendingTabKey = "mainNavigation.pendingTab"
+    private static let libraryTabValue = "myMedia"
+
+    static func requestLibraryTab() {
+        UserDefaults.standard.set(libraryTabValue, forKey: pendingTabKey)
+        NotificationCenter.default.post(name: .switchToLibraryTab, object: nil)
+    }
+
+    static func consumeLibraryTabRequest() -> Bool {
+        guard UserDefaults.standard.string(forKey: pendingTabKey) == libraryTabValue else {
+            return false
+        }
+        UserDefaults.standard.removeObject(forKey: pendingTabKey)
+        return true
+    }
+
+    static func clearLibraryTabRequest() {
+        UserDefaults.standard.removeObject(forKey: pendingTabKey)
+    }
+}

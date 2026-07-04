@@ -52,6 +52,7 @@ class SettingsViewModel: ObservableObject {
             guard !isBatchUpdating else { return }
             UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
             VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
+            StaticImageWallpaperOverlayManager.shared.refreshAutoRemoveImageLetterbox()
         }
     }
     @Published var frameInterpolationEnabled = false {
@@ -261,6 +262,7 @@ class SettingsViewModel: ObservableObject {
         ArcBackgroundSettings.shared.grainIntensity = grainIntensity
         VideoWallpaperManager.shared.refreshGrainOverlay()
         VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
+        StaticImageWallpaperOverlayManager.shared.refreshAutoRemoveImageLetterbox()
         VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
         FrameInterpolationQueueService.shared.autoEnqueueEnabled = effectiveFrameInterpolationAutoEnqueue
         NotchOverlayManager.shared.setEnabled(hideNotch)

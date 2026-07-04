@@ -17,6 +17,38 @@ extension NSScreen {
         return localizedName + ":\(frame.origin.x):\(frame.origin.y)"
     }
 
+    var isBuiltInDisplay: Bool {
+        guard let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return false
+        }
+        return CGDisplayIsBuiltin(CGDirectDisplayID(screenNumber.uint32Value)) != 0
+    }
+
+    /// 热插拔检测使用的连接指纹。不要包含分辨率/缩放，否则外接屏刚接入时
+    /// macOS 的模式协商会把同一块显示器误判成多次新连接。
+    var externalConnectionFingerprint: String {
+        guard let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return "fallback:\(localizedName)"
+        }
+
+        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+        let vendor = CGDisplayVendorNumber(displayID)
+        let model = CGDisplayModelNumber(displayID)
+        let serial = CGDisplaySerialNumber(displayID)
+        let builtin = CGDisplayIsBuiltin(displayID) != 0 ? "builtin" : "external"
+
+        if serial != 0 {
+            return "cg:\(vendor):\(model):\(serial):\(builtin)"
+        }
+        return "cg:\(vendor):\(model):noserial:\(localizedName):\(builtin)"
+    }
+
+    /// 调度器配置使用的物理显示器指纹。这里复用连接指纹，避免同一块外接屏
+    /// 在缩放/分辨率变化或重插后被当作另一块屏幕。
+    var schedulerConfigFingerprint: String {
+        externalConnectionFingerprint
+    }
+
     /// 尽量稳定的物理显示器指纹，用于外接屏断开 / 重连后 `NSScreenNumber` 变化时找回目标屏。
     var wallpaperScreenFingerprint: String {
         guard let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {

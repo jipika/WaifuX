@@ -438,7 +438,11 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
                 releaseForegroundMemory()
             }
+            .onAppear {
+                consumePendingLibraryTabRequest()
+            }
             .onReceive(NotificationCenter.default.publisher(for: .switchToLibraryTab)) { _ in
+                MainNavigationRequestStore.clearLibraryTabRequest()
                 navigationState.selectedTab = .myMedia
             }
             .id(localization.currentLanguage)
@@ -468,6 +472,13 @@ struct ContentView: View {
     private func maximizeWindow() {
         guard let window = NSApp.mainWindow else { return }
         window.toggleFullScreen(nil)
+    }
+
+    private func consumePendingLibraryTabRequest() {
+        guard MainNavigationRequestStore.consumeLibraryTabRequest() else {
+            return
+        }
+        navigationState.selectedTab = .myMedia
     }
 
     @ViewBuilder

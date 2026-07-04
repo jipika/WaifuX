@@ -93,6 +93,7 @@ final class VideoThumbnailCache {
         if fileManager.fileExists(atPath: outURL.path),
            let attrs = try? fileManager.attributesOfItem(atPath: outURL.path),
            let sz = attrs[.size] as? NSNumber, sz.intValue > 500 {
+            await Self.cropExistingPosterIfNeeded(outURL)
             return outURL
         }
 
@@ -113,6 +114,7 @@ final class VideoThumbnailCache {
         let outURL = sceneBakePosterCacheURL(itemID: itemID)
         if !forceRegenerate,
            let existing = cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
+            await Self.cropExistingPosterIfNeeded(existing)
             return existing
         }
 
@@ -180,7 +182,8 @@ final class VideoThumbnailCache {
                 let t = CMTime(seconds: seconds, preferredTimescale: 600)
                 do {
                     let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
-                    let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    let posterImage = Self.croppingImageLetterboxIfNeeded(cgImage)
+                    let image = NSImage(cgImage: posterImage, size: NSSize(width: posterImage.width, height: posterImage.height))
                     guard let tiff = image.tiffRepresentation,
                           let rep = NSBitmapImageRep(data: tiff),
                           let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
@@ -198,6 +201,147 @@ final class VideoThumbnailCache {
             print("[VideoThumbnailCache] All poster frame attempts exhausted for \(videoURL.lastPathComponent)")
             return nil
         }.value
+    }
+
+    nonisolated private static func cropExistingPosterIfNeeded(_ url: URL) async {
+        await Task.detached(priority: .utility) {
+            guard let image = NSImage(contentsOf: url),
+                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let cropped = croppedImageLetterbox(cgImage),
+                  cropped.width != cgImage.width || cropped.height != cgImage.height else {
+                return
+            }
+            let nsImage = NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
+            guard let tiff = nsImage.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
+                return
+            }
+            do {
+                try jpeg.write(to: url, options: .atomic)
+                print("[VideoThumbnailCache] Cropped existing poster letterbox: \(url.path)")
+            } catch {
+                print("[VideoThumbnailCache] Failed to rewrite cropped poster: \(error)")
+            }
+        }.value
+    }
+
+    nonisolated private static func croppingImageLetterboxIfNeeded(_ image: CGImage) -> CGImage {
+        croppedImageLetterbox(image) ?? image
+    }
+
+    nonisolated private static func croppedImageLetterbox(_ image: CGImage) -> CGImage? {
+        guard let crop = detectBlackBorderCropRect(in: image) else { return nil }
+        return image.cropping(to: crop)
+    }
+
+    nonisolated private static func detectBlackBorderCropRect(in image: CGImage) -> CGRect? {
+        let width = image.width
+        let height = image.height
+        guard width > 16, height > 16 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let didDraw = pixels.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let ctx = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard didDraw else { return nil }
+
+        let blackLumaThreshold: UInt8 = 28
+        let edgeBlackRatioThreshold = 0.94
+        let maxRemovedArea = 0.36
+        let minRemovedArea = 0.001
+        let minPairInsetRatio = 0.001
+        let overscanPixels = 2
+
+        func isBlackPixel(at index: Int) -> Bool {
+            guard index + 2 < pixels.count else { return false }
+            let r = pixels[index]
+            let g = pixels[index + 1]
+            let b = pixels[index + 2]
+            let luma = (UInt16(r) * 54 + UInt16(g) * 183 + UInt16(b) * 19) >> 8
+            return luma <= blackLumaThreshold
+        }
+
+        func blackRatioInRow(_ y: Int) -> Double {
+            let step = max(1, width / 720)
+            var black = 0
+            var total = 0
+            let row = y * bytesPerRow
+            var x = 0
+            while x < width {
+                if isBlackPixel(at: row + x * 4) { black += 1 }
+                total += 1
+                x += step
+            }
+            return total > 0 ? Double(black) / Double(total) : 0
+        }
+
+        func blackRatioInColumn(_ x: Int) -> Double {
+            let step = max(1, height / 720)
+            var black = 0
+            var total = 0
+            var y = 0
+            while y < height {
+                if isBlackPixel(at: y * bytesPerRow + x * 4) { black += 1 }
+                total += 1
+                y += step
+            }
+            return total > 0 ? Double(black) / Double(total) : 0
+        }
+
+        func edgeInset(limit: Int, ratioAt: (Int) -> Double) -> Int {
+            var inset = 0
+            for i in 0..<limit {
+                if ratioAt(i) >= edgeBlackRatioThreshold {
+                    inset += 1
+                } else {
+                    break
+                }
+            }
+            return inset
+        }
+
+        let top = edgeInset(limit: height / 2) { blackRatioInRow($0) }
+        let bottom = edgeInset(limit: height / 2) { blackRatioInRow(height - 1 - $0) }
+        let left = edgeInset(limit: width / 2) { blackRatioInColumn($0) }
+        let right = edgeInset(limit: width / 2) { blackRatioInColumn(width - 1 - $0) }
+
+        let horizontalPair = Double(top + bottom) / Double(height) >= minPairInsetRatio
+            && top > 0 && bottom > 0
+        let verticalPair = Double(left + right) / Double(width) >= minPairInsetRatio
+            && left > 0 && right > 0
+        guard horizontalPair || verticalPair else { return nil }
+
+        let rawCropTop = horizontalPair ? top : 0
+        let rawCropBottom = horizontalPair ? bottom : 0
+        let rawCropLeft = verticalPair ? left : 0
+        let rawCropRight = verticalPair ? right : 0
+        let rawCropW = max(1, width - rawCropLeft - rawCropRight)
+        let rawCropH = max(1, height - rawCropTop - rawCropBottom)
+        let removedArea = 1.0 - (Double(rawCropW * rawCropH) / Double(width * height))
+        guard removedArea >= minRemovedArea, removedArea <= maxRemovedArea else { return nil }
+
+        let cropTop = horizontalPair ? min(height - 1, rawCropTop + overscanPixels) : 0
+        let cropBottom = horizontalPair ? min(height - cropTop - 1, rawCropBottom + overscanPixels) : 0
+        let cropLeft = verticalPair ? min(width - 1, rawCropLeft + overscanPixels) : 0
+        let cropRight = verticalPair ? min(width - cropLeft - 1, rawCropRight + overscanPixels) : 0
+        let cropW = max(1, width - cropLeft - cropRight)
+        let cropH = max(1, height - cropTop - cropBottom)
+
+        return CGRect(x: cropLeft, y: cropTop, width: cropW, height: cropH)
     }
 
     /// 获取缩略图图片
@@ -368,4 +512,3 @@ extension String {
         return hash.map { String(format: "%02hhx", $0) }.joined()
     }
 }
-

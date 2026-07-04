@@ -2224,6 +2224,38 @@ final class WallpaperEngineXBridge: ObservableObject {
             && UserDefaults.standard.string(forKey: lastWallpaperPathKey) != nil
     }
 
+    func hasPersistedRestoreState(for screen: NSScreen) -> Bool {
+        let screenID = screen.wallpaperScreenIdentifier
+        let fingerprint = screen.wallpaperScreenFingerprint
+        if let data = UserDefaults.standard.data(forKey: screenRenderStatesKey),
+           let states = try? JSONDecoder().decode([ScreenRenderState].self, from: data),
+           states.contains(where: { $0.screenID == screenID || $0.screenFingerprint == fingerprint }) {
+            return true
+        }
+
+        guard UserDefaults.standard.bool(forKey: controllingExternalKey),
+              UserDefaults.standard.string(forKey: lastWallpaperPathKey) != nil else {
+            return false
+        }
+        let targetIDs = Set(UserDefaults.standard.stringArray(forKey: targetScreenIDsKey) ?? [])
+        let targetFingerprints = Set(UserDefaults.standard.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
+        return targetIDs.contains(screenID) || targetFingerprints.contains(fingerprint)
+    }
+
+    func restorePreviousWallpaperIfAvailable(for screen: NSScreen) async -> Bool {
+        guard hasPersistedRestoreState(for: screen) || isManaging(screen: screen) else {
+            return false
+        }
+        if !isManaging(screen: screen) {
+            await restoreIfNeeded()
+        }
+        let restored = isManaging(screen: screen)
+        if restored {
+            print("[WallpaperEngineXBridge] Restored previous live wallpaper for reconnected display: \(screen.localizedName)")
+        }
+        return restored
+    }
+
     // MARK: - 二进制查找
 
     /// 解析 bundled `wallpaper-wgpu` 可执行文件路径

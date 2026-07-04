@@ -1321,7 +1321,7 @@ class WallpaperViewModel: ObservableObject {
         // 颗粒蒙层独立于系统壁纸，仍正常更新。
         if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
             print("[WallpaperViewModel] 🧊 系统壁纸同步已关闭，走独立静态图 overlay 显示")
-            StaticImageWallpaperOverlayManager.shared.showAll(imageURL: imageURL)
+            await StaticImageWallpaperOverlayManager.shared.showAllPrepared(imageURL: imageURL)
             StaticWallpaperGrainManager.shared.updateOverlay()
             return
         }
@@ -1330,12 +1330,13 @@ class WallpaperViewModel: ObservableObject {
             .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
             .allowClipping: true
         ]
+        let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(for: imageURL)
         for screen in screens {
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen, options: fillOptions)
+            try workspace.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: screen, options: fillOptions)
         }
 
         // 注册壁纸以便跨 Space 同步
-        DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
+        DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL)
 
         // 互斥：走系统壁纸时关闭并清除静态图 overlay 持久化状态
         StaticImageWallpaperOverlayManager.shared.clearState()
@@ -1387,7 +1388,7 @@ class WallpaperViewModel: ObservableObject {
             // mp4/场景/web 动态壁纸不受影响；颗粒蒙层独立于系统壁纸，仍正常更新。
             if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
                 print("[WallpaperViewModel] 🧊 系统壁纸同步已关闭，走单屏独立静态图 overlay 显示")
-                StaticImageWallpaperOverlayManager.shared.show(imageURL: imageURL, for: targetScreen)
+                await StaticImageWallpaperOverlayManager.shared.showPrepared(imageURL: imageURL, for: targetScreen)
                 StaticWallpaperGrainManager.shared.updateOverlay()
                 return
             }
@@ -1396,8 +1397,9 @@ class WallpaperViewModel: ObservableObject {
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
                 .allowClipping: true
             ]
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen, options: fillOptions)
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: targetScreen)
+            let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(for: imageURL)
+            try workspace.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: targetScreen, options: fillOptions)
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL, for: targetScreen)
 
             // 互斥：走系统壁纸时关闭并清除静态图 overlay 持久化状态
             StaticImageWallpaperOverlayManager.shared.clearState()

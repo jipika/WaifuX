@@ -238,6 +238,37 @@ final class VideoWallpaperManager: ObservableObject {
         currentVideoURL
     }
 
+    /// 外接屏重连时按物理指纹恢复之前分配给这块屏的视频壁纸。
+    func restorePreviousVideoWallpaperIfAvailable(for screen: NSScreen) -> Bool {
+        let screenID = screen.wallpaperScreenIdentifier
+        let fingerprint = screen.wallpaperScreenFingerprint
+        let hasPreviousState = videoTargetScreenIDs.contains(screenID)
+            || videoTargetScreenFingerprints.contains(fingerprint)
+            || videoURLByScreen[screenID] != nil
+            || videoURLByScreenFingerprint[fingerprint] != nil
+        guard hasPreviousState else { return false }
+
+        relinkDisplayStateForCurrentScreens()
+        videoTargetScreenIDs.insert(screenID)
+        videoTargetScreenFingerprints.insert(fingerprint)
+
+        guard videoURLByScreen[screenID] != nil
+            || videoURLByScreenFingerprint[fingerprint] != nil
+            || currentVideoURL != nil else {
+            return false
+        }
+
+        do {
+            try rebuildWindows(targetScreen: screen)
+            persistState()
+            print("[VideoWallpaperManager] Restored previous video wallpaper for reconnected display: \(screen.localizedName)")
+            return true
+        } catch {
+            print("[VideoWallpaperManager] Failed to restore previous video wallpaper for \(screen.localizedName): \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// 是否有任何屏幕正在运行视频壁纸（内部 guard 使用，不依赖全局单例）
     private var hasActiveVideoWallpaper: Bool {
         !videoURLByScreen.isEmpty || !videoURLByScreenFingerprint.isEmpty
@@ -2468,9 +2499,17 @@ final class VideoWallpaperManager: ObservableObject {
         // 如果指定了目标屏幕，只重建该屏幕的窗口
         let screensToRebuild: [NSScreen]
         if let targetScreen = targetScreen {
+            let targetScreenID = targetScreen.wallpaperScreenIdentifier
+            let targetFingerprint = targetScreen.wallpaperScreenFingerprint
+            guard NSScreen.screens.contains(where: { screen in
+                screen.wallpaperScreenIdentifier == targetScreenID ||
+                screen.wallpaperScreenFingerprint == targetFingerprint
+            }) else {
+                NSLog("[VideoWallpaperManager] Skipped rebuild because target screen is disconnected: \(targetScreenID)")
+                return
+            }
             screensToRebuild = [targetScreen]
             // 保留其他屏幕的窗口
-            let targetScreenID = targetScreen.wallpaperScreenIdentifier
             for (screenID, _) in windows {
                 if screenID != targetScreenID {
                     // 保留非目标窗口，稍后重新添加

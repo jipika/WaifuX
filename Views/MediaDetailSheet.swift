@@ -3772,12 +3772,13 @@ struct MediaDetailSheet: View {
                         // 系统壁纸同步关闭时走独立静态图 overlay，不写系统壁纸
                         if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
                             for screen in targetScreens {
-                                StaticImageWallpaperOverlayManager.shared.show(imageURL: imageURL, for: screen)
+                                await StaticImageWallpaperOverlayManager.shared.showPrepared(imageURL: imageURL, for: screen)
                             }
                         } else {
+                            let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(for: imageURL)
                             for screen in targetScreens {
-                                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-                                DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
+                                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: screen)
+                                DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL, for: screen)
                             }
                             // 互斥：走系统壁纸时关闭并清除静态图 overlay 持久化状态
                             StaticImageWallpaperOverlayManager.shared.clearState()
@@ -3800,10 +3801,11 @@ struct MediaDetailSheet: View {
                     if let mainScreen = screens.first {
                         // 系统壁纸同步关闭时走独立静态图 overlay，不写系统壁纸
                         if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
-                            StaticImageWallpaperOverlayManager.shared.show(imageURL: imageURL, for: mainScreen)
+                            await StaticImageWallpaperOverlayManager.shared.showPrepared(imageURL: imageURL, for: mainScreen)
                         } else {
-                            try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: mainScreen)
-                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: mainScreen)
+                            let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(for: imageURL)
+                            try NSWorkspace.shared.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: mainScreen)
+                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL, for: mainScreen)
                             // 互斥：走系统壁纸时关闭并清除静态图 overlay 持久化状态
                             StaticImageWallpaperOverlayManager.shared.clearState()
                         }

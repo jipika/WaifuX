@@ -10,6 +10,7 @@ import AVFoundation
 import Foundation
 import AppKit
 import ImageIO
+import UniformTypeIdentifiers
 import notify
 
 /// 锁屏镜像实例管理服务
@@ -164,22 +165,25 @@ final class LockScreenWallpaperService {
             throw LockScreenError.appGroupNotAvailable
         }
 
-        let imageData: Data
+        let originalImageData: Data
         if imageURL.isFileURL {
             guard FileManager.default.fileExists(atPath: imageURL.path) else {
                 throw LockScreenError.fileNotFound
             }
-            imageData = try Data(contentsOf: imageURL)
+            originalImageData = try Data(contentsOf: imageURL)
         } else {
             let (data, _) = try await URLSession.shared.data(from: imageURL)
-            imageData = data
+            originalImageData = data
         }
 
         let imageDir = container.appendingPathComponent(imageDirName, isDirectory: true)
         try FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
 
-        let ext = normalizedImageExtension(from: imageURL)
+        let preparedImage = prepareStaticLockScreenImageData(originalImageData, sourceURL: imageURL)
+        let imageData = preparedImage.data
+        let ext = preparedImage.fileExtension
         var lastPath: String?
+        var deployedImagePaths: [UInt32: String] = [:]
         for displayID in displayIDs {
             let sourceID = Self.displayInstanceID(displayID)
             let destURL = imageDir.appendingPathComponent("\(sourceID).\(ext)")
@@ -191,6 +195,7 @@ final class LockScreenWallpaperService {
                 IPCCommand(action: "switch_image", videoID: sourceID, displayID: displayID)
             )
             lastPath = destURL.path
+            deployedImagePaths[displayID] = destURL.path
             print("[LockScreenWallpaper] 🖼️ 已部署静态图 display=\(displayID) source=\(destURL.lastPathComponent)")
         }
 
@@ -206,8 +211,8 @@ final class LockScreenWallpaperService {
             prefs.currentRealtimeSourceKind = nil
             // Per-display: 本批 displayIDs 全部指向该图片
             var imageMap = prefs.currentImagePaths ?? [:]
-            for displayID in displayIDs {
-                imageMap["display-\(displayID)"] = lastPath
+            for (displayID, path) in deployedImagePaths {
+                imageMap["display-\(displayID)"] = path
             }
             prefs.currentImagePaths = imageMap
             // 该图片覆盖这些屏的视频路径
@@ -412,6 +417,166 @@ final class LockScreenWallpaperService {
                 print("[LockScreenWallpaper] 🗑️ 清理旧视频: \(name)")
             }
         }
+    }
+
+    private func prepareStaticLockScreenImageData(_ data: Data, sourceURL: URL) -> (data: Data, fileExtension: String) {
+        let fallbackExtension = normalizedImageExtension(from: sourceURL)
+        guard UserDefaults.standard.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let cropRect = detectBlackBorderCropRect(in: image) else {
+            return (data, fallbackExtension)
+        }
+
+        guard let croppedImage = image.cropping(to: cropRect),
+              let encodedData = encodeLockScreenImage(croppedImage, preferredExtension: fallbackExtension) else {
+            return (data, fallbackExtension)
+        }
+
+        print("[LockScreenWallpaper] 🖼️ 静态锁屏图已自动去黑边 crop=\(Int(cropRect.width))x\(Int(cropRect.height))")
+        return (encodedData, normalizedOutputExtension(fallbackExtension))
+    }
+
+    private func encodeLockScreenImage(_ image: CGImage, preferredExtension: String) -> Data? {
+        let outputUTI: CFString
+        switch preferredExtension.lowercased() {
+        case "jpg", "jpeg":
+            outputUTI = UTType.jpeg.identifier as CFString
+        default:
+            outputUTI = UTType.png.identifier as CFString
+        }
+
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, outputUTI, 1, nil) else {
+            return nil
+        }
+
+        let options: [CFString: Any] = outputUTI == UTType.jpeg.identifier as CFString
+            ? [kCGImageDestinationLossyCompressionQuality: 0.95]
+            : [:]
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            return nil
+        }
+        return data as Data
+    }
+
+    private func normalizedOutputExtension(_ preferredExtension: String) -> String {
+        switch preferredExtension.lowercased() {
+        case "jpg", "jpeg":
+            return "jpg"
+        default:
+            return "png"
+        }
+    }
+
+    private func detectBlackBorderCropRect(in image: CGImage) -> CGRect? {
+        let width = image.width
+        let height = image.height
+        guard width > 16, height > 16 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let didDraw = pixels.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let ctx = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard didDraw else { return nil }
+
+        let blackLumaThreshold: UInt8 = 28
+        let edgeBlackRatioThreshold = 0.94
+        let maxRemovedArea = 0.36
+        let minRemovedArea = 0.01
+        let minPairInsetRatio = 0.012
+        let overscanPixels = 2
+
+        func isBlackPixel(at index: Int) -> Bool {
+            guard index + 2 < pixels.count else { return false }
+            let r = pixels[index]
+            let g = pixels[index + 1]
+            let b = pixels[index + 2]
+            let luma = (UInt16(r) * 54 + UInt16(g) * 183 + UInt16(b) * 19) >> 8
+            return luma <= blackLumaThreshold
+        }
+
+        func blackRatioInRow(_ y: Int) -> Double {
+            let step = max(1, width / 360)
+            var black = 0
+            var total = 0
+            let row = y * bytesPerRow
+            var x = 0
+            while x < width {
+                if isBlackPixel(at: row + x * 4) { black += 1 }
+                total += 1
+                x += step
+            }
+            return total > 0 ? Double(black) / Double(total) : 0
+        }
+
+        func blackRatioInColumn(_ x: Int) -> Double {
+            let step = max(1, height / 360)
+            var black = 0
+            var total = 0
+            var y = 0
+            while y < height {
+                if isBlackPixel(at: y * bytesPerRow + x * 4) { black += 1 }
+                total += 1
+                y += step
+            }
+            return total > 0 ? Double(black) / Double(total) : 0
+        }
+
+        func edgeInset(limit: Int, ratioAt: (Int) -> Double) -> Int {
+            var inset = 0
+            for i in 0..<limit {
+                if ratioAt(i) >= edgeBlackRatioThreshold {
+                    inset += 1
+                } else {
+                    break
+                }
+            }
+            return inset
+        }
+
+        let top = edgeInset(limit: height / 2) { blackRatioInRow($0) }
+        let bottom = edgeInset(limit: height / 2) { blackRatioInRow(height - 1 - $0) }
+        let left = edgeInset(limit: width / 2) { blackRatioInColumn($0) }
+        let right = edgeInset(limit: width / 2) { blackRatioInColumn(width - 1 - $0) }
+
+        let horizontalPair = Double(top + bottom) / Double(height) >= minPairInsetRatio
+            && top > 0 && bottom > 0
+        let verticalPair = Double(left + right) / Double(width) >= minPairInsetRatio
+            && left > 0 && right > 0
+        guard horizontalPair || verticalPair else { return nil }
+
+        let rawCropTop = horizontalPair ? top : 0
+        let rawCropBottom = horizontalPair ? bottom : 0
+        let rawCropLeft = verticalPair ? left : 0
+        let rawCropRight = verticalPair ? right : 0
+        let rawCropW = max(1, width - rawCropLeft - rawCropRight)
+        let rawCropH = max(1, height - rawCropTop - rawCropBottom)
+        let removedArea = 1.0 - (Double(rawCropW * rawCropH) / Double(width * height))
+        guard removedArea >= minRemovedArea, removedArea <= maxRemovedArea else { return nil }
+
+        let cropTop = horizontalPair ? min(height - 1, rawCropTop + overscanPixels) : 0
+        let cropBottom = horizontalPair ? min(height - cropTop - 1, rawCropBottom + overscanPixels) : 0
+        let cropLeft = verticalPair ? min(width - 1, rawCropLeft + overscanPixels) : 0
+        let cropRight = verticalPair ? min(width - cropLeft - 1, rawCropRight + overscanPixels) : 0
+        let cropW = max(1, width - cropLeft - cropRight)
+        let cropH = max(1, height - cropTop - cropBottom)
+
+        return CGRect(x: cropLeft, y: cropTop, width: cropW, height: cropH)
     }
 
     // MARK: - Display Instances
