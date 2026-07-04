@@ -51,6 +51,20 @@ class PixivAuthService: ObservableObject {
             cookieDomains.contains(where: { cookie.domain.hasSuffix($0) || cookie.domain == $0 })
         }
 
+        // 调试日志：打印 Pixiv 域下所有 cookie 的名称和长度
+        // 仅 DEBUG 构建启用；不打印 value 以防 cookie 泄露到系统日志。
+        // 若调试需要 PHPSESSID 明文，可从 ~/Library/HTTPStorages/com.waifux.app.binarycookies 提取。
+        #if DEBUG
+        if !pixivCookies.isEmpty {
+            print("🍪 [PixivAuthService] Pixiv cookies in HTTPCookieStorage.shared (\(pixivCookies.count) total):")
+            for c in pixivCookies {
+                print("🍪   - domain=\(c.domain) name=\(c.name) valueLen=\(c.value.lengthOfBytes(using: .utf8))")
+            }
+        } else {
+            print("🍪 [PixivAuthService] No Pixiv cookies in HTTPCookieStorage.shared")
+        }
+        #endif
+
         // 检查是否有 PHPSESSID 或 device_token 等关键 cookie
         let hasSessionCookie = pixivCookies.contains { cookie in
             cookie.name == userIDCookieName || cookie.name == "device_token" || cookie.name == "login_remember"
@@ -170,9 +184,22 @@ class PixivAuthService: ObservableObject {
         let cookieStore = WKWebsiteDataStore.default().httpCookieStore
         let cookies = await cookieStore.allCookies()
 
-        let hasSessionCookie = cookies.contains { cookie in
-            (cookie.domain.hasSuffix("pixiv.net") || cookie.domain == "pixiv.net") &&
-            (cookie.name == userIDCookieName || cookie.name == "device_token")
+        let pixivCookies = cookies.filter { cookie in
+            cookie.domain.hasSuffix("pixiv.net") || cookie.domain == "pixiv.net"
+        }
+
+        // 调试日志：打印 WKWebsiteDataStore 中 Pixiv 域下的所有 cookie 名称
+        #if DEBUG
+        if !pixivCookies.isEmpty {
+            print("🍪 [PixivAuthService] Pixiv cookies in WKWebsiteDataStore (\(pixivCookies.count) total):")
+            for c in pixivCookies {
+                print("🍪   - domain=\(c.domain) name=\(c.name) valueLen=\(c.value.lengthOfBytes(using: .utf8))")
+            }
+        }
+        #endif
+
+        let hasSessionCookie = pixivCookies.contains { cookie in
+            cookie.name == userIDCookieName || cookie.name == "device_token"
         }
 
         if hasSessionCookie {

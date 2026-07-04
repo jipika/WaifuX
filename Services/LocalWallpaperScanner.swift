@@ -425,6 +425,7 @@ struct LocalWallpaperItem: Identifiable, Hashable {
     func toWallpaper() -> Wallpaper {
         Wallpaper(
             id: id,
+            title: nil,
             url: fileURL.absoluteString,
             shortUrl: nil,
             views: 0,

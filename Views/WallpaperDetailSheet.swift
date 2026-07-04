@@ -1228,6 +1228,7 @@ struct WallpaperDetailSheet: View {
                         // 通过重新创建 Wallpaper 来更新 uploader（保持其他字段不变）
                         let newWallpaper = Wallpaper(
                             id: updated.id,
+                            title: updated.title,
                             url: updated.url,
                             shortUrl: updated.shortUrl,
                             views: updated.views,

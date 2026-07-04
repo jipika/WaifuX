@@ -454,6 +454,29 @@ jobs:
           cd /tmp && tar xJf Sparkle.tar.xz
           echo "/tmp/Sparkle/bin" >> $GITHUB_PATH
 
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # 获取上一个 tag（用于生成变更日志）
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            # 从上一个 tag 到当前提交的 commit messages 生成日志
+            CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
+            echo "Generated changelog from $PREV_TAG to $GITHUB_REF_NAME:"
+            echo "$CHANGELOG"
+          else
+            CHANGELOG="- Initial release"
+            echo "No previous tag found, using default changelog"
+          fi
+
+          # 写入 GITHUB_OUTPUT 供后续 step 使用
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Sign DMG and generate appcast.xml
         if: github.event_name != 'workflow_dispatch'
         env:
@@ -519,29 +542,6 @@ jobs:
           echo "✅ Generated Docs/appcast.xml:"
           cat Docs/appcast.xml
 
-      - name: Generate Changelog
-        id: changelog
-        run: |
-          # 获取上一个 tag（用于生成变更日志）
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-          if [ -n "$PREV_TAG" ]; then
-            # 从上一个 tag 到当前提交的 commit messages 生成日志
-            CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
-            echo "Generated changelog from $PREV_TAG to $GITHUB_REF_NAME:"
-            echo "$CHANGELOG"
-          else
-            CHANGELOG="- Initial release"
-            echo "No previous tag found, using default changelog"
-          fi
-
-          # 写入 GITHUB_OUTPUT 供后续 step 使用
-          {
-            echo "changelog<<EOF"
-            echo "$CHANGELOG"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Upload Release Asset
         # workflow_dispatch 仅用于测试构建/签名，不发布 release
         if: github.event_name != 'workflow_dispatch'
@@ -574,7 +574,7 @@ jobs:
             </p>
 
             **给项目点个 Star ⭐️** 同样是对开发者最大的鼓励！每一份支持都是我继续维护和迭代这款应用的动力。感谢使用 WaifuX 💜
-          draft: true
+          draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

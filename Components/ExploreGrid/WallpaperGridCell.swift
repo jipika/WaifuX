@@ -118,7 +118,7 @@ final class WallpaperGridCell: ExploreGridItem {
         applyTheme()
         applyBorder(for: wallpaper)
 
-        titleLabel.stringValue = wallpaper.uploader?.username ?? wallpaper.categoryDisplayName
+        titleLabel.stringValue = wallpaper.title ?? wallpaper.uploader?.username ?? wallpaper.categoryDisplayName
         categoryBadge.configure(text: wallpaper.categoryDisplayName)
         purityBadge.configure(text: wallpaper.purityDisplayName)
         resolutionBadge.configure(text: wallpaper.effectiveResolutionLabel.replacingOccurrences(of: "x", with: "×"))

@@ -199,6 +199,7 @@ extension KonachanPost {
 
         return Wallpaper(
             id: "konachan-\(id)",
+            title: nil,
             url: "https://konachan.net/post/show/\(id)",
             shortUrl: nil,
             views: 0,

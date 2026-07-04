@@ -372,6 +372,7 @@ final class ImportService: ObservableObject {
 
         return Wallpaper(
             id: id,
+            title: nil,
             url: localPath,
             shortUrl: nil,
             views: 0,

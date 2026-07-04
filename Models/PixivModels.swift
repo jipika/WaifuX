@@ -172,17 +172,43 @@ struct PixivRankingItem: Decodable {
         } else {
             illustContentType = PixivContentType.defaultSFW
         }
-        illustSeries = try container.decode(Bool.self, forKey: .illustSeries)
-        width = try container.decode(Int.self, forKey: .width)
-        height = try container.decode(Int.self, forKey: .height)
-        userId = try container.decode(Int.self, forKey: .userId)
-        rank = try container.decode(Int.self, forKey: .rank)
-        yesRank = try container.decode(Int.self, forKey: .yesRank)
-        ratingCount = try container.decode(Int.self, forKey: .ratingCount)
-        viewCount = try container.decode(Int.self, forKey: .viewCount)
-        illustUploadTimestamp = try container.decode(Int.self, forKey: .illustUploadTimestamp)
+        illustSeries = try Self.decodeBoolPolymorphic(container, forKey: .illustSeries)
+        width = try Self.decodeIntOrString(container, forKey: .width)
+        height = try Self.decodeIntOrString(container, forKey: .height)
+        userId = try Self.decodeIntOrString(container, forKey: .userId)
+        rank = try Self.decodeIntOrString(container, forKey: .rank)
+        yesRank = try Self.decodeIntOrString(container, forKey: .yesRank)
+        ratingCount = try Self.decodeIntOrString(container, forKey: .ratingCount)
+        viewCount = try Self.decodeIntOrString(container, forKey: .viewCount)
+        illustUploadTimestamp = try Self.decodeIntOrString(container, forKey: .illustUploadTimestamp)
         attr = try container.decode(String.self, forKey: .attr)
-        isMasked = try container.decode(Bool.self, forKey: .isMasked)
+        isMasked = try Self.decodeBoolPolymorphic(container, forKey: .isMasked)
+    }
+
+    /// Pixiv API 字段多态解码：Bool / 整数(0|1) / 字符串("0"|"1") / 非空容器（字典或数组，视为 true）
+    /// 用于 illust_series / is_masked 等在登录态下会升级为字典的字段
+    /// 注：Pixiv 在登录态下会把 illust_series 升级为系列元数据字典（{ series_id, title, ... }），
+    /// 导致原本 `Bool` 解码直接失败、整页排行榜白屏（见 Xcode console 日志 `DecodingError.typeMismatch`）。
+    private static func decodeBoolPolymorphic(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Bool {
+        // 优先 Bool
+        if let b = try? container.decode(Bool.self, forKey: key) { return b }
+        // 次选 Int（0/1）
+        if let i = try? container.decode(Int.self, forKey: key) { return i != 0 }
+        // 字符串形式 "0" / "1" / "true" / "false"
+        if let s = try? container.decode(String.self, forKey: key) {
+            switch s.lowercased() {
+            case "1", "true", "yes": return true
+            case "0", "false", "no", "": return false
+            default: return true  // 非空未知字符串视为 true
+            }
+        }
+        // 兜底：Pixiv 在登录态下把 illust_series 升级为系列元数据字典，
+        // 此时该字段存在且非 null 即表示"属于某系列"，视为 true
+        if container.contains(key),
+           (try? container.decodeNil(forKey: key)) != true {
+            return true
+        }
+        return false
     }
 
     private static func decodeIntOrString(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Int {
@@ -265,6 +291,91 @@ struct PixivSeriesNavData: Decodable {
     let order: Int?
 }
 
+/// /ajax/illust/{id}/pages 单页条目
+/// - 真实返回：`{"urls":{"thumb_mini":..,"small":..,"regular":..,"original":..},"width":..,"height":..}`
+struct PixivMangaPageEntry: Decodable {
+    let urls: PixivMangaPageURLs
+    let width: Int
+    let height: Int
+}
+
+struct PixivMangaPageURLs: Decodable {
+    let thumbMini: String
+    let small: String
+    let regular: String
+    let original: String
+
+    enum CodingKeys: String, CodingKey {
+        case thumbMini = "thumb_mini"
+        case small, regular, original
+    }
+}
+
+/// /ajax/illust/{id}/pages 响应
+struct PixivMangaPagesResponse: Decodable {
+    let error: Bool
+    let body: [PixivMangaPageEntry]
+}
+
+/// 系列作品条目（/ajax/series/{id} 列表项）
+struct PixivSeriesIllustEntry: Decodable {
+    let id: String
+    let title: String
+    let order: Int
+    let coverUrl: String?
+    let createDate: String?
+    let pageCount: Int?
+
+    /// 兼容 Pixiv 命名（驼峰 cover_url / coverUrl 都可能出现）
+    enum CodingKeys: String, CodingKey {
+        case id, title, order
+        case coverUrl = "coverUrl"
+        case createDate = "createDate"
+        case pageCount = "pageCount"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        order = try c.decode(Int.self, forKey: .order)
+        coverUrl = try c.decodeIfPresent(String.self, forKey: .coverUrl)
+        createDate = try c.decodeIfPresent(String.self, forKey: .createDate)
+        // pageCount 可能缺失，兜底 0
+        pageCount = (try? c.decodeIfPresent(Int.self, forKey: .pageCount)) ?? 0
+    }
+}
+
+/// /ajax/series/{id} 响应
+struct PixivSeriesResponse: Decodable {
+    let error: Bool
+    let body: PixivSeriesBody
+}
+
+struct PixivSeriesBody: Decodable {
+    /// 系列元信息
+    let series: PixivSeriesMeta?
+    /// 章节列表（按 order 排序）
+    let page: PixivSeriesPage
+}
+
+struct PixivSeriesMeta: Decodable {
+    let id: String
+    let title: String
+    let caption: String?
+    let coverImage: String?
+    let userId: String
+}
+
+struct PixivSeriesPage: Decodable {
+    let series: PixivSeriesIllustWrapper?
+}
+
+struct PixivSeriesIllustWrapper: Decodable {
+    let data: [PixivSeriesIllustEntry]
+}
+
+
 /// 搜索响应（/ajax/search/artworks/{word}）
 struct PixivSearchResponse: Decodable {
     let error: Bool
@@ -272,8 +383,31 @@ struct PixivSearchResponse: Decodable {
 }
 
 struct PixivSearchBody: Decodable {
+    /// 搜索结果数据块
+    /// 注意：`/ajax/search/artworks/{word}` 返回键名为 `illustManga`，
+    /// 而 `/ajax/search/manga/{word}` 返回键名为 `manga`；Pixiv Web 搜索 API 在不同 path
+    /// 下键名不同，这里做兼容解码（优先 illustManga → 回退 manga）。
     let illustManga: PixivSearchResultBlock
     let relatedTags: [String]?
+
+    private enum BodyKey: String, CodingKey {
+        case illustManga, manga, relatedTags
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: BodyKey.self)
+        // 优先 illustManga（artworks path），回退 manga（manga path）
+        if let block = try c.decodeIfPresent(PixivSearchResultBlock.self, forKey: .illustManga) {
+            illustManga = block
+        } else if let block = try c.decodeIfPresent(PixivSearchResultBlock.self, forKey: .manga) {
+            illustManga = block
+        } else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: c.codingPath,
+                                      debugDescription: "Missing illustManga / manga block in Pixiv search body"))
+        }
+        relatedTags = try c.decodeIfPresent([String].self, forKey: .relatedTags)
+    }
 }
 
 struct PixivSearchResultBlock: Decodable {
@@ -394,6 +528,7 @@ extension PixivRankingItem {
 
         return Wallpaper(
             id: "pixiv_\(illustId)",
+            title: title,
             url: "https://www.pixiv.net/artworks/\(illustId)",
             shortUrl: nil,
             views: viewCount,
@@ -401,7 +536,10 @@ extension PixivRankingItem {
             downloads: nil,
             source: "pixiv",
             purity: illustContentType.purityString,
-            category: illustType == 1 ? "anime" : "general",
+            // Pixiv illustType: 0=illust（插画）/ 1=manga（漫画）/ 2=ugoira（动图）
+            // 映射到 Wallhaven 风格 category 以走各自详情分支：
+            //   0 → general, 1 → manga（命中 MangaDetailSheet 分流）, 2 → anime
+            category: illustType == 1 ? "manga" : (illustType == 2 ? "anime" : "general"),
             dimensionX: width,
             dimensionY: height,
             resolution: resolution,
@@ -444,6 +582,7 @@ extension PixivSearchItem {
 
         return Wallpaper(
             id: "pixiv_\(id)",
+            title: title,
             url: "https://www.pixiv.net/artworks/\(id)",
             shortUrl: nil,
             views: 0,
@@ -451,7 +590,10 @@ extension PixivSearchItem {
             downloads: nil,
             source: "pixiv",
             purity: purity,
-            category: illustType == 1 ? "anime" : "general",
+            // Pixiv illustType: 0=illust（插画）/ 1=manga（漫画）/ 2=ugoira（动图）
+            // 映射到 Wallhaven 风格 category 以走各自详情分支：
+            //   0 → general, 1 → manga（命中 MangaDetailSheet 分流）, 2 → anime
+            category: illustType == 1 ? "manga" : (illustType == 2 ? "anime" : "general"),
             dimensionX: width,
             dimensionY: height,
             resolution: resolution,
@@ -494,6 +636,7 @@ extension PixivIllustDetailBody {
 
         return Wallpaper(
             id: "pixiv_\(illustId)",
+            title: illustTitle,
             url: "https://www.pixiv.net/artworks/\(illustId)",
             shortUrl: nil,
             views: viewCount,
@@ -501,7 +644,10 @@ extension PixivIllustDetailBody {
             downloads: nil,
             source: "pixiv",
             purity: purity,
-            category: illustType == 1 ? "anime" : "general",
+            // Pixiv illustType: 0=illust（插画）/ 1=manga（漫画）/ 2=ugoira（动图）
+            // 映射到 Wallhaven 风格 category 以走各自详情分支：
+            //   0 → general, 1 → manga（命中 MangaDetailSheet 分流）, 2 → anime
+            category: illustType == 1 ? "manga" : (illustType == 2 ? "anime" : "general"),
             dimensionX: width,
             dimensionY: height,
             resolution: resolution,
@@ -600,6 +746,9 @@ public enum PixivWorkType: String, CaseIterable, Sendable {
 // MARK: - Pixiv 搜索排序
 
 /// Pixiv 搜索时的排序方式
+/// 注意：Pixiv Web 搜索 API 实际只支持 `date` / `date_d` / `popular_d` / `popular_male_d`。
+/// `popular_week_d` / `popular_month_d` 并不是 Pixiv 合法参数；保留是为了向后兼容已保存的用户偏好，
+/// 实际发送请求前由 PixivService 映射为 `popular_d`（未登录时 Pixiv 也会静默降级为 `date_d`）。
 enum PixivSearchSort: String, CaseIterable, Sendable {
     case dateD = "date_d"
     case popularD = "popular_d"
@@ -609,9 +758,19 @@ enum PixivSearchSort: String, CaseIterable, Sendable {
     var displayName: String {
         switch self {
         case .dateD: return "最新"
-        case .popularD: return "日人气"
+        case .popularD: return "人气"
         case .popularWeekD: return "周人气"
         case .popularMonthD: return "月人气"
+        }
+    }
+
+    /// 发送给 Pixiv Web API 的真实 `order` 参数值
+    var apiValue: String {
+        switch self {
+        case .dateD: return "date_d"
+        case .popularD, .popularWeekD, .popularMonthD:
+            // Pixiv Web 只接受 popular_d；其余 popular_* 会被忽略
+            return "popular_d"
         }
     }
 }

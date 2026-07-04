@@ -1049,8 +1049,30 @@ struct WallpaperExploreContentView: View {
                 emptyState
                     .transition(.opacity.animation(.easeInOut(duration: 0.25)))
             } else {
-                wallpaperGrid(config: config)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ZStack(alignment: .top) {
+                    wallpaperGrid(config: config)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    // 顶部轻量加载指示条：筛选/重置时旧数据保留到新一轮结果到达，
+                    // 用顶部的 ProgressView 提示"正在加载"，避免闪现"暂无数据"。
+                    if viewModel.isLoading {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .controlSize(.small)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color.black.opacity(0.35), .clear],
+                                    startPoint: .top, endPoint: .bottom
+                                )
+                                .frame(height: 28)
+                                .allowsHitTesting(false)
+                            )
+                            .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                    }
+                }
             }
         }
     }

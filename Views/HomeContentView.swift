@@ -428,6 +428,7 @@ struct HomeContentView: View {
                 HomeShelfSection(
                     title: t("latestWallpaper"),
                     wallpapers: recentWallpapers,
+                    favoriteIDs: viewModel.favoriteIDSet,
                     atmospherePrimary: atmosphereController.primary,
                     atmosphereSecondary: atmosphereController.secondary,
                     onSelect: { wallpaper in
@@ -1193,6 +1194,7 @@ private struct HeroPaginationDots: View {
 private struct HomeShelfSection: View {
     let title: String
     let wallpapers: [Wallpaper]
+    let favoriteIDs: Set<Wallpaper.ID>
     let atmospherePrimary: Color
     let atmosphereSecondary: Color
     let onSelect: (Wallpaper) -> Void
@@ -1228,6 +1230,7 @@ private struct HomeShelfSection: View {
                         ForEach(wallpapers) { wallpaper in
                             HomeShelfCard(
                                 wallpaper: wallpaper,
+                                isFavorite: favoriteIDs.contains(wallpaper.id),
                                 onTap: { onSelect(wallpaper) }
                             )
                             .onAppear {
@@ -1252,6 +1255,7 @@ private struct HomeShelfSection: View {
 
 struct HomeShelfCard: View {
     let wallpaper: Wallpaper
+    let isFavorite: Bool
     let onTap: () -> Void
 
     @State private var isHovered = false
@@ -1300,7 +1304,11 @@ struct HomeShelfCard: View {
                         Spacer()
 
                         HStack(spacing: 8) {
-                            statLabel(systemImage: "heart.fill", value: compactNumber(wallpaper.favorites), tint: Color(hex: "FF5A7D"))
+                            statLabel(
+                                systemImage: isFavorite ? "heart.fill" : "heart",
+                                value: compactNumber(wallpaper.favorites),
+                                tint: isFavorite ? Color(hex: "FF5A7D") : .white.opacity(0.7)
+                            )
                             statLabel(systemImage: "eye.fill", value: compactNumber(wallpaper.views), tint: .white.opacity(0.7))
                         }
                     }

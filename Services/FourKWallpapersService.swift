@@ -176,6 +176,7 @@ actor FourKWallpapersService {
 
         return Wallpaper(
             id: "4k_\(w.id)",
+            title: nil,
             url: w.detailURL,
             shortUrl: nil,
             views: 0,

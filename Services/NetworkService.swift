@@ -200,6 +200,16 @@ actor NetworkService {
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
+                // Cloudflare 挑战页检测：通过响应头识别
+                let cfMitigated = httpResponse.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
+                if cfMitigated == "challenge" || httpResponse.statusCode == 503 {
+                    let server = httpResponse.value(forHTTPHeaderField: "server")?.lowercased() ?? ""
+                    if server.contains("cloudflare") || cfMitigated == "challenge" {
+                        throw NetworkError.loginRequired(
+                            message: "请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。"
+                        )
+                    }
+                }
                 throw NetworkError.httpError(httpResponse.statusCode)
             }
 
@@ -258,7 +268,23 @@ actor NetworkService {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            throw NetworkError.httpError(httpResponse.statusCode)
+            // Cloudflare 挑战页检测（响应头或响应体）
+            let statusCode = httpResponse.statusCode
+            if statusCode == 403 || statusCode == 503 {
+                let cfMitigated = httpResponse.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
+                let server = httpResponse.value(forHTTPHeaderField: "server")?.lowercased() ?? ""
+                let isCloudflare = server.contains("cloudflare") || cfMitigated == "challenge"
+                let bodyHintsCF: Bool = {
+                    guard let text = String(data: data.prefix(2048), encoding: .utf8) else { return false }
+                    return text.contains("Just a moment") || text.contains("challenges.cloudflare")
+                }()
+                if isCloudflare || bodyHintsCF {
+                    throw NetworkError.loginRequired(
+                        message: "请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。"
+                    )
+                }
+            }
+            throw NetworkError.httpError(statusCode)
         }
 
         return data

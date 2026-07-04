@@ -179,7 +179,7 @@ extension NetworkError: RetryableError {
         case .networkError:
             // 网络错误通常可重试，除了明确的离线情况
             return true
-        case .invalidResponse, .decodingError, .serverError:
+        case .invalidResponse, .decodingError, .serverError, .loginRequired:
             return false
         }
     }

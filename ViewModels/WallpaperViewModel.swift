@@ -544,8 +544,12 @@ class WallpaperViewModel: ObservableObject {
         currentPage = 1
         currentRandomSeed = nil
 
-        // ✅ 清空旧数据，给用户即时反馈（避免筛选/搜索时旧数据残留的困惑）
-        wallpapers.removeAll()
+        // ⚠️ 不再在此处清空 wallpapers：
+        // 旧数据继续保留到本次搜索结果到达后被一次性替换（见 wallpapers = results.data）。
+        // 这样可避免"加载中 → 暂无数据 → 数据出现"的中间闪烁：
+        // View 层判断 `isLoading && visibleWallpapers.isEmpty` 才会显示加载指示器，
+        // 若清空则有一帧会走到 else 分支展示 emptyState。
+        // 真正的"清空"语义在 reset()/deinit 里已保留。
 
         // 重置预加载状态
         preloadTask?.cancel()
@@ -968,7 +972,8 @@ class WallpaperViewModel: ObservableObject {
             }
         }()
 
-        let aiTypeParam: Int? = pixivHideAI ? 2 : nil
+        // Pixiv Web 搜索 ai_type 仅接受 1（屏蔽 AI）；其余值（包括 0/2）均视为不过滤
+        let aiTypeParam: Int? = pixivHideAI ? 1 : nil
 
         // 清空旧的相关标签
         pixivRelatedTags = []
@@ -978,9 +983,9 @@ class WallpaperViewModel: ObservableObject {
             let (response, relatedTags) = try await PixivService.shared.search(
                 word: parameters.query,
                 page: parameters.page,
-                sort: selectedPixivSearchSort.rawValue,
+                sort: selectedPixivSearchSort.apiValue,
                 mode: pixivMode,
-                type: selectedPixivWorkType.rawValue,
+                workType: selectedPixivWorkType,
                 aiType: aiTypeParam
             )
             // 存储相关标签供 UI 显示
@@ -1008,10 +1013,14 @@ class WallpaperViewModel: ObservableObject {
             rankingMode = selectedPixivRankingMode.rawValue
         }
 
-        // 作品类型映射为 content 参数
-        let contentParam: String
+        // 作品类型映射为 content 参数（排行榜 API）
+        //   - .all   → 不传 content（API 默认返回 illust+manga 混合，无 ugoira）
+        //   - .illust → content=illust
+        //   - .manga  → content=manga
+        //   - .ugoira → content=ugoira（独立 ugoira 排行榜）
+        let contentParam: String?
         switch selectedPixivWorkType {
-        case .all: contentParam = "illust"  // 默认插画（API 不支持 "all"）
+        case .all: contentParam = nil
         case .illust: contentParam = "illust"
         case .manga: contentParam = "manga"
         case .ugoira: contentParam = "ugoira"

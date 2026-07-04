@@ -821,8 +821,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let currentAppURL = appURL.standardizedFileURL
 
         // 第 2 步：Process 系统调用派发到后台，不阻塞主线程。
-        // 先清理旧注册，再注册当前正在运行的 App/appex，避免 WallpaperAgent 继续命中 Debug/临时构建产物。
+        // 先注册当前正在运行的 App/appex，再清理旧注册。
+        // 这样即使旧路径文件已不存在（如 brew 更新后移到废纸篓）导致清理失败，
+        // 系统也已持有新路径的有效注册，WallpaperAgent 能正常发现扩展。
         DispatchQueue.global(qos: .utility).async { [appURL, extensionURL, currentAppURL] in
+            // —— 优先注册当前 bundle ——
+            self.registerBundleWithLaunchServices(appURL)
+            self.registerBundleWithPlugInKit(extensionURL)
+            print("[WaifuXApp] Registered current wallpaper extension: \(extensionURL.path)")
+
+            // —— 再清理过期注册 ——
             let staleCandidates = self.computeStaleWallpaperExtensionCandidates(
                 currentExtensionURL: extensionURL,
                 currentAppURL: currentAppURL
@@ -837,9 +845,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 print("[WaifuXApp] Removed stale wallpaper extension registration: \(candidate.path)")
             }
 
-            self.registerBundleWithLaunchServices(appURL)
-            self.registerBundleWithPlugInKit(extensionURL)
-            print("[WaifuXApp] Registered current wallpaper extension: \(extensionURL.path)")
+            // 重启 WallpaperAgent，强制其从更新后的 PlugInKit 数据库重新加载扩展列表。
+            // 解决 brew 更新后 WallpaperAgent 内存缓存仍指向旧扩展的问题。
+            self.runRegistrationTool("/usr/bin/killall", arguments: ["WallpaperAgent"], label: "killall WallpaperAgent")
 
             self.terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: currentAppURL)
 
@@ -873,6 +881,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     nonisolated private func registerBundleWithPlugInKit(_ url: URL) {
         runRegistrationTool("/usr/bin/pluginkit", arguments: ["-a", url.path], label: "pluginkit add")
+        // brew 更新会先删旧 bundle 再拷新 bundle，macOS 在此过程中会重置扩展的启用状态。
+        // pluginkit -a 只注册不启用，必须显式 -e use 才能让 WallpaperAgent 加载扩展。
+        runRegistrationTool(
+            "/usr/bin/pluginkit",
+            arguments: ["-e", "use", "-i", "com.waifux.app.wallpaperextension"],
+            label: "pluginkit enable"
+        )
     }
 
     nonisolated private func wallpaperExtensionRegistrationCandidates(currentAppURL: URL) -> [URL] {

@@ -178,6 +178,8 @@ public struct TagChip: View {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(txt.primary.opacity(isSelected ? 0.95 : 0.78))
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .padding(.horizontal, 14)
                 .frame(height: 32)
                 .background(

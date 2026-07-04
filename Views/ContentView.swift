@@ -77,6 +77,7 @@ private enum MainDetailRoute: Hashable {
     case wallpaper(Wallpaper, context: [Wallpaper]?)
     case media(MediaItem, context: [MediaItem]?)
     case anime(AnimeSearchResult)
+    case manga(MangaRoutePayload)
 }
 
 @MainActor
@@ -303,7 +304,17 @@ struct ContentView: View {
         }
         .onChange(of: navigationState.selectedWallpaper) { _, wallpaper in
             guard let wallpaper else { return }
-            openDetail(.wallpaper(wallpaper, context: nil))
+            if wallpaper.isPixivManga {
+                let route = MangaRoutePayload(
+                    source: .pixiv,
+                    illustId: String(wallpaper.id.dropFirst("pixiv_".count)),
+                    seedTitle: wallpaper.title,
+                    seedCoverURL: wallpaper.path
+                )
+                openDetail(.manga(route))
+            } else {
+                openDetail(.wallpaper(wallpaper, context: nil))
+            }
         }
         .onChange(of: navigationState.selectedMedia) { _, item in
             guard let item else { return }
@@ -315,8 +326,18 @@ struct ContentView: View {
         }
         .onChange(of: navigationState.librarySelectedWallpaper) { _, wallpaper in
             guard let wallpaper else { return }
-            let context = navigationState.libraryWallpaperContext.isEmpty ? nil : navigationState.libraryWallpaperContext
-            openDetail(.wallpaper(wallpaper, context: context))
+            if wallpaper.isPixivManga {
+                let route = MangaRoutePayload(
+                    source: .pixiv,
+                    illustId: String(wallpaper.id.dropFirst("pixiv_".count)),
+                    seedTitle: wallpaper.title,
+                    seedCoverURL: wallpaper.path
+                )
+                openDetail(.manga(route))
+            } else {
+                let context = navigationState.libraryWallpaperContext.isEmpty ? nil : navigationState.libraryWallpaperContext
+                openDetail(.wallpaper(wallpaper, context: context))
+            }
         }
         .onChange(of: navigationState.librarySelectedMedia) { _, item in
             guard let item else { return }
@@ -524,6 +545,13 @@ struct ContentView: View {
             .ignoresSafeArea()
             .navigationBarBackButtonHidden(true)
             .toolbar(.hidden, for: .automatic)
+
+        case .manga(let route):
+            MangaDetailSheet(route: route)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+                .navigationBarBackButtonHidden(true)
+                .toolbar(.hidden, for: .automatic)
         }
     }
 
@@ -537,6 +565,8 @@ struct ContentView: View {
             navigationState.selectedMedia = nil
         case .anime:
             navigationState.selectedAnime = nil
+        case .manga:
+            break // 漫画入口不走 navigationState，无需清理
         }
     }
 
@@ -556,6 +586,7 @@ struct ContentView: View {
         let imageURL = item.imageURL
         return Wallpaper(
             id: item.id,
+            title: nil,
             url: item.destination,
             shortUrl: nil,
             views: 0,

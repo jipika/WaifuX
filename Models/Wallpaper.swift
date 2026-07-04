@@ -2,6 +2,9 @@ import Foundation
 
 struct Wallpaper: Identifiable, Codable, Hashable {
     let id: String
+    /// 卡片标题（作品名）。Pixiv 等第三方数据源直接填充作品名；
+    /// Wallhaven API 未提供该字段（解码为 nil），UI 回退到 uploader / category。
+    let title: String?
     var url: String
     let shortUrl: String?
     let views: Int
@@ -170,9 +173,16 @@ struct Wallpaper: Identifiable, Codable, Hashable {
             return t("anime")
         case "people":
             return t("people")
+        case "manga":
+            return "漫画"
         default:
             return category.capitalized
         }
+    }
+
+    /// Pixiv 漫画（用于卡片点击分流到 MangaDetailSheet）
+    var isPixivManga: Bool {
+        source == "pixiv" && category.lowercased() == "manga"
     }
 
     var purityDisplayName: String {
@@ -238,7 +248,7 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, url
+        case id, title, url
         case shortUrl = "short_url"
         case views, favorites, downloads, source, purity, category
         case dimensionX = "dimension_x"
