@@ -9,12 +9,19 @@ import AppKit
 enum AppRelauncher {
     static func relaunch() {
         let bundleURL = Bundle.main.bundleURL
+        AppDelegate.shared?.markIntentionalTermination(reason: "relaunch")
+        AppExitDiagnostics.record("relaunchRequested", metadata: [
+            "bundle": bundleURL.path
+        ])
+
         let task = Process()
         task.launchPath = "/usr/bin/open"
         task.arguments = ["-n", bundleURL.path]
         try? task.run()
         // 稍延迟 terminate，保证 open 已发出
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            AppDelegate.shared?.markIntentionalTermination(reason: "relaunchTerminate")
+            AppExitDiagnostics.record("relaunchTerminate")
             NSApp.terminate(nil)
         }
     }

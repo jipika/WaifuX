@@ -81,26 +81,23 @@ final class DesktopIconManager {
 
     /// 读取当前 `CreateDesktop` 偏好值
     private func readCurrentState() -> Bool {
-        let task = Process()
-        task.launchPath = "/usr/bin/defaults"
-        task.arguments = ["read", finderDomain, createDesktopKey]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        task.launch()
-        task.waitUntilExit()
-
-        guard task.terminationStatus == 0 else {
+        guard let value = CFPreferencesCopyAppValue(createDesktopKey as CFString, finderDomain as CFString) else {
             // 如果键不存在，默认桌面图标是显示的
             return false
         }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let boolValue = value as? Bool {
+            return !boolValue
+        }
 
-        // `defaults read` 输出 "1" 或 "0"
-        return output == "0"
+        if let numberValue = value as? NSNumber {
+            return !numberValue.boolValue
+        }
+
+        if let stringValue = value as? String {
+            return stringValue == "0" || stringValue.lowercased() == "false"
+        }
+
+        return false
     }
 }

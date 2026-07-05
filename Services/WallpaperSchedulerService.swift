@@ -868,7 +868,7 @@ class WallpaperSchedulerService: ObservableObject {
 
     private func waitBeforeApplyingBatchedWallpaper(index: Int) async {
         guard index > 0 else { return }
-        let delayNanoseconds = UInt64(index) * 450_000_000
+        let delayNanoseconds = UInt64(index) * 1_200_000_000
         try? await Task.sleep(nanoseconds: delayNanoseconds)
     }
 

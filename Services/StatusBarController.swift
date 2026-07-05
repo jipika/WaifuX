@@ -134,8 +134,8 @@ final class StatusBarController: NSObject {
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
     private lazy var muteItem = NSMenuItem(title: t("statusbar.muteWallpaper"), action: #selector(toggleMute), keyEquivalent: "")
     private lazy var desktopIconsItem = NSMenuItem(title: t("statusbar.hideDesktopIcons"), action: #selector(toggleDesktopIcons), keyEquivalent: "")
-    private lazy var designWallpaperItem = NSMenuItem(title: "设计壁纸", action: #selector(openWebWallpaperDesignPanel), keyEquivalent: "")
-    private lazy var sceneConfigItem = NSMenuItem(title: "场景高级设置", action: #selector(openSceneConfigPanel), keyEquivalent: "")
+    private lazy var designWallpaperItem = NSMenuItem(title: t("design.designWallpaper"), action: #selector(openWebWallpaperDesignPanel), keyEquivalent: "")
+    private lazy var sceneConfigItem = NSMenuItem(title: t("statusbar.sceneAdvancedSettings"), action: #selector(openSceneConfigPanel), keyEquivalent: "")
     private lazy var quitItem = NSMenuItem(title: t("statusbar.quit"), action: #selector(quitApplication), keyEquivalent: "q")
 
     private let videoWallpaperManager = VideoWallpaperManager.shared
@@ -163,6 +163,7 @@ final class StatusBarController: NSObject {
         configureStatusItem()
         bindWallpaperState()
         bindDownloadState()
+        bindLocalizationState()
         refreshMenuState()
     }
 
@@ -238,6 +239,19 @@ final class StatusBarController: NSObject {
 
         statusItem.menu = menu
         menu.delegate = self
+    }
+
+    private func bindLocalizationState() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleLanguageDidChange),
+            name: .appLanguageDidChange,
+            object: nil
+        )
+    }
+
+    @objc private func handleLanguageDidChange() {
+        refreshMenuState()
     }
 
     private func bindWallpaperState() {
@@ -424,6 +438,8 @@ final class StatusBarController: NSObject {
     }
 
     private func refreshMenuState() {
+        refreshLocalizedTitles()
+
         let hasNativeWallpaper = videoWallpaperManager.isVideoWallpaperActive
         let hasExternalWallpaper = weBridge.isControllingExternalEngine
         let hasWallpaper = hasNativeWallpaper || hasExternalWallpaper
@@ -515,15 +531,6 @@ final class StatusBarController: NSObject {
 
             // 该屏壁纸是否为 web（web 暂不支持可视区域调节）
             let isWebWallpaper = weBridge.isWebWallpaperOn(screen: screen)
-
-            // 该屏壁纸是否为静态图片（StaticImageWallpaperOverlayManager 已支持 CropLayoutEngine，
-            // 可视区域调节已启用）。扩展模式 / web 由其它分支独立处理。
-            let isStaticWallpaper: Bool = {
-                if isExtensionMode { return false }
-                if isWebWallpaper { return false }
-                if weBridge.isManaging(screen: screen) { return false }
-                return !videoWallpaperManager.hasActiveWallpaper(on: screen)
-            }()
 
             // 暂停状态
             let isScreenPaused: Bool
@@ -659,6 +666,20 @@ final class StatusBarController: NSObject {
         // 全局静音开关
         muteItem.isEnabled = hasNativeWallpaper || hasExternalWallpaper
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+    }
+
+    private func refreshLocalizedTitles() {
+        openWindowItem.title = t("statusbar.showWindow")
+        openLibraryItem.title = t("statusbar.openMyLibrary")
+        openSettingsItem.title = t("settings")
+        releaseMemoryItem.title = t("statusbar.releaseMemory")
+        toggleWallpaperItem.title = t("statusbar.enableWallpaper")
+        playPauseItem.title = t("statusbar.pauseWallpaper")
+        desktopIconsItem.title = t("statusbar.hideDesktopIcons")
+        muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+        designWallpaperItem.title = t("design.designWallpaper")
+        sceneConfigItem.title = t("statusbar.sceneAdvancedSettings")
+        quitItem.title = t("statusbar.quit")
     }
 
     @objc private func showMainWindow() {

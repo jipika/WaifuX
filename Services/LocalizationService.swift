@@ -8,6 +8,7 @@ class LocalizationService: ObservableObject {
     @Published var currentLanguage: Language {
         didSet {
             UserDefaults.standard.set(currentLanguage.rawValue, forKey: "app_language")
+            NotificationCenter.default.post(name: .appLanguageDidChange, object: nil)
         }
     }
 
@@ -272,6 +273,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.cropReset": "Reset Crop Region",
         "statusbar.cropUnsupported": "Web wallpapers do not support crop adjustment",
         "statusbar.cropStaticUnsupported": "Static image wallpapers do not support crop adjustment",
+        "statusbar.sceneAdvancedSettings": "Advanced Scene Settings",
         // Tabs
         "tab.all": "ALL",
         "tab.nature": "NATURE",
@@ -1617,6 +1619,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.cropReset": "重置可视区域",
         "statusbar.cropUnsupported": "Web 壁纸暂不支持可视区域调节",
         "statusbar.cropStaticUnsupported": "静态图片壁纸暂不支持可视区域调节",
+        "statusbar.sceneAdvancedSettings": "场景高级设置",
         "statusbar.quit": "退出",
         // Tabs
         "tab.all": "全部",
@@ -2966,6 +2969,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.cropReset": "表示範囲をリセット",
         "statusbar.cropUnsupported": "Web壁紙は表示範囲調整に対応していません",
         "statusbar.cropStaticUnsupported": "静止画壁紙は表示範囲調整に対応していません",
+        "statusbar.sceneAdvancedSettings": "シーン詳細設定",
         // Tabs
         "tab.all": "すべて",
         "tab.nature": "自然",
@@ -4126,6 +4130,10 @@ private let translations: [LocalizationService.Language: [String: String]] = [
 // MARK: - 本地化字符串获取
 func t(_ key: String) -> String {
     LocalizationService.shared.t(key)
+}
+
+extension Notification.Name {
+    static let appLanguageDidChange = Notification.Name("appLanguageDidChange")
 }
 
 // MARK: - View Extensions
