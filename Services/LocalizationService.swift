@@ -204,6 +204,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "go": "GO",
         "searching": "SEARCHING...",
         "no.results": "NO RESULTS",
+        "explore.noResults": "No wallpapers found",
         "filter.all": "ALL",
         "filter.general": "GENERAL",
         "filter.anime": "ANIME",
@@ -1351,6 +1352,14 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.message": "Restart now, apply later, or discard changes?",
         "settings.modules.closePending.later": "Later",
         "settings.modules.closePending.discard": "Discard Changes",
+        // External displays
+        "externalDisplay.connected.title": "New External Display Detected",
+        "externalDisplay.connected.message": "%@ is connected. Do you want to set a dynamic wallpaper for this display?",
+        "externalDisplay.useRandomWallpaper": "Use Random Wallpaper",
+        "externalDisplay.chooseWallpaper": "Choose Wallpaper",
+        "externalDisplay.doNotUseWallpaper": "Do Not Use Wallpaper",
+        "externalDisplay.autoSwitchOnConnect": "Auto-switch when this display connects",
+        "externalDisplay.autoSwitchOnConnectDesc": "When this external display connects, randomly pick one wallpaper from its own auto-switch range.",
         // Source switch hint
         "sourceSwitchHint": "Click to switch between different data sources",
         // Error network troubleshoot
@@ -2690,6 +2699,14 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.message": "立即重启、稍后应用，还是放弃更改？",
         "settings.modules.closePending.later": "稍后",
         "settings.modules.closePending.discard": "放弃更改",
+        // 外接显示器
+        "externalDisplay.connected.title": "检测到新外接显示器",
+        "externalDisplay.connected.message": "%@ 已连接。要为这块显示器设置动态壁纸吗？",
+        "externalDisplay.useRandomWallpaper": "使用随机壁纸",
+        "externalDisplay.chooseWallpaper": "去挑选壁纸",
+        "externalDisplay.doNotUseWallpaper": "不使用壁纸",
+        "externalDisplay.autoSwitchOnConnect": "此显示器连接后自动切换",
+        "externalDisplay.autoSwitchOnConnectDesc": "这块外接屏接入时，从它自己的自动更换范围里随机挑选一张。",
         // Source switch hint
         "sourceSwitchHint": "点击切换不同的数据源",
         // Error network troubleshoot
@@ -2872,6 +2889,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "source.official": "公式ソース",
         "source.fallback": "フォールバック",
         "source.konachan": "Konachan",
+        "source.pixiv": "Pixivイラスト",
         "startup": "起動設定",
         "clearCache": "キャッシュをクリア",
         "status": "状態",
@@ -2939,6 +2957,15 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.hideDesktopIcons": "デスクトップアイコンを隠す",
         "statusbar.showDesktopIcons": "デスクトップアイコンを表示",
         "statusbar.quit": "終了",
+        "statusbar.displays": "ディスプレイ",
+        "statusbar.cropAdjust": "表示範囲を調整…",
+        "statusbar.cropExit": "表示範囲調整を終了",
+        "statusbar.cropAspect": "アスペクト比",
+        "statusbar.cropAspectAutoFill": "自動（塗りつぶし）",
+        "statusbar.cropAspectCustom": "カスタム…",
+        "statusbar.cropReset": "表示範囲をリセット",
+        "statusbar.cropUnsupported": "Web壁紙は表示範囲調整に対応していません",
+        "statusbar.cropStaticUnsupported": "静止画壁紙は表示範囲調整に対応していません",
         // Tabs
         "tab.all": "すべて",
         "tab.nature": "自然",
@@ -2955,6 +2982,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "player.speed": "速度",
         "player.favorite": "お気に入り",
         "player.unfavorite": "お気に入り解除",
+        "player.backToSearch": "戻る",
         // Loading
         "loading": "読み込み中...",
         "loading.simple": "読み込み中",
@@ -4018,6 +4046,14 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "settings.modules.closePending.message": "今すぐ再起動しますか？後で適用しますか？変更を破棄しますか？",
         "settings.modules.closePending.later": "後で",
         "settings.modules.closePending.discard": "変更を破棄",
+        // 外部ディスプレイ
+        "externalDisplay.connected.title": "新しい外部ディスプレイを検出",
+        "externalDisplay.connected.message": "%@ が接続されました。このディスプレイに動的壁紙を設定しますか？",
+        "externalDisplay.useRandomWallpaper": "ランダム壁紙を使用",
+        "externalDisplay.chooseWallpaper": "壁紙を選ぶ",
+        "externalDisplay.doNotUseWallpaper": "壁紙を使用しない",
+        "externalDisplay.autoSwitchOnConnect": "このディスプレイ接続時に自動切替",
+        "externalDisplay.autoSwitchOnConnectDesc": "この外部ディスプレイが接続されたとき、専用の自動切替範囲からランダムに選択します。",
         // Source switch hint
         "sourceSwitchHint": "クリックしてデータソースを切り替えます",
         // Error network troubleshoot

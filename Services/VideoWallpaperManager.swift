@@ -2155,6 +2155,12 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSNotification 回调可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            AppLogger.error(.wallpaper, "Video wallpaper screen parameters changed", metadata: [
+                "active": self.hasActiveVideoWallpaper,
+                "windows": self.windows.keys.sorted().joined(separator: ","),
+                "targetIDs": self.videoTargetScreenIDs.sorted().joined(separator: ","),
+                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+            ])
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
             }
@@ -2505,6 +2511,11 @@ final class VideoWallpaperManager: ObservableObject {
                 screen.wallpaperScreenIdentifier == targetScreenID ||
                 screen.wallpaperScreenFingerprint == targetFingerprint
             }) else {
+                AppLogger.error(.wallpaper, "Video rebuild skipped because target screen disconnected", metadata: [
+                    "targetScreenID": targetScreenID,
+                    "targetFingerprint": targetFingerprint,
+                    "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+                ])
                 NSLog("[VideoWallpaperManager] Skipped rebuild because target screen is disconnected: \(targetScreenID)")
                 return
             }

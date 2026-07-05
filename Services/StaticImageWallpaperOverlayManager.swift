@@ -111,6 +111,12 @@ final class StaticImageWallpaperOverlayManager {
         let screenID = screen.wallpaperScreenIdentifier
         let screenFingerprint = screen.wallpaperScreenFingerprint
         guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
+            AppLogger.error(.wallpaper, "Static overlay skipped because screen disconnected before prepare", metadata: [
+                "screenID": screenID,
+                "fingerprint": screenFingerprint,
+                "image": imageURL.lastPathComponent,
+                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+            ])
             print("[StaticImageOverlay] ⚠️ 屏幕已断开，跳过 overlay 显示: \(screen.localizedName)")
             return
         }
@@ -134,6 +140,12 @@ final class StaticImageWallpaperOverlayManager {
         guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
             imageLetterboxContentCrops.removeValue(forKey: screenID)
             imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
+            AppLogger.error(.wallpaper, "Static overlay skipped because screen disconnected after letterbox analysis", metadata: [
+                "screenID": screenID,
+                "fingerprint": screenFingerprint,
+                "image": imageURL.lastPathComponent,
+                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+            ])
             print("[StaticImageOverlay] ⚠️ 黑边分析完成时屏幕已断开，跳过 overlay 更新: \(screen.localizedName)")
             return
         }
@@ -364,9 +376,15 @@ final class StaticImageWallpaperOverlayManager {
 
     func refreshWindows() {
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
+        AppLogger.error(.wallpaper, "Static overlay refresh windows", metadata: [
+            "currentScreens": currentScreenIDs.joined(separator: ","),
+            "windowScreens": imageWindows.keys.sorted().joined(separator: ","),
+            "imageScreens": imageByScreen.keys.sorted().joined(separator: ",")
+        ])
         // 移除已断开屏幕的窗口
         for (screenID, window) in Array(imageWindows) {
             if !currentScreenIDs.contains(screenID) {
+                AppLogger.error(.wallpaper, "Static overlay removing disconnected window", metadata: ["screenID": screenID])
                 window.orderOut(nil)
                 window.contentView = nil
                 imageWindows.removeValue(forKey: screenID)

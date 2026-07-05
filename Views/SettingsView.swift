@@ -929,10 +929,10 @@ private struct SchedulerSettingsTab: View {
                             if !screen.isBuiltInDisplay {
                                 HStack(spacing: 12) {
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text("连接此显示器自动换动态壁纸")
+                                        Text(t("externalDisplay.autoSwitchOnConnect"))
                                             .font(.system(size: 13, weight: .medium))
                                             .foregroundStyle(Color.white.opacity(0.9))
-                                        Text("这块外接屏接入时，从它自己的自动更换范围里随机挑选一张。")
+                                        Text(t("externalDisplay.autoSwitchOnConnectDesc"))
                                             .font(.system(size: 11))
                                             .foregroundStyle(Color.white.opacity(0.48))
                                     }

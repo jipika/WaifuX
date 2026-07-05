@@ -34,6 +34,10 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
     }
 
     @objc private func handleScreenParametersChanged() {
+        AppLogger.error(.wallpaper, "ExternalDisplay screen parameters changed", metadata: [
+            "previousExternalFingerprints": previousExternalFingerprints.count,
+            "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+        ])
         pendingWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
@@ -50,6 +54,14 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
         let screensByFingerprint = Self.currentExternalScreensByFingerprint()
         let currentFingerprints = Set(screensByFingerprint.keys)
         let connectedFingerprints = currentFingerprints.subtracting(previousExternalFingerprints)
+        let disconnectedFingerprints = previousExternalFingerprints.subtracting(currentFingerprints)
+        AppLogger.error(.wallpaper, "ExternalDisplay processed display change", metadata: [
+            "currentExternal": currentFingerprints.count,
+            "connected": connectedFingerprints.count,
+            "disconnected": disconnectedFingerprints.count,
+            "connectedFingerprints": connectedFingerprints.joined(separator: ","),
+            "disconnectedFingerprints": disconnectedFingerprints.joined(separator: ",")
+        ])
         previousExternalFingerprints = currentFingerprints
 
         guard !connectedFingerprints.isEmpty else { return }
@@ -106,13 +118,13 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
 
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "检测到新外接显示器"
-        alert.informativeText = "\(display.name) 已连接。要为这块显示器设置动态壁纸吗？"
-        alert.addButton(withTitle: "使用随机壁纸")
-        alert.addButton(withTitle: "去挑选壁纸")
-        alert.addButton(withTitle: "不使用壁纸")
+        alert.messageText = t("externalDisplay.connected.title")
+        alert.informativeText = String(format: t("externalDisplay.connected.message"), display.name)
+        alert.addButton(withTitle: t("externalDisplay.useRandomWallpaper"))
+        alert.addButton(withTitle: t("externalDisplay.chooseWallpaper"))
+        alert.addButton(withTitle: t("externalDisplay.doNotUseWallpaper"))
 
-        let autoSwitchCheckbox = NSButton(checkboxWithTitle: "此显示器连接后自动切换", target: nil, action: nil)
+        let autoSwitchCheckbox = NSButton(checkboxWithTitle: t("externalDisplay.autoSwitchOnConnect"), target: nil, action: nil)
         let displayScreen = NSScreen.screens.first { $0.wallpaperScreenIdentifier == display.screenID }
         let displayConfig = displayScreen.map {
             WallpaperSchedulerService.shared.resolvedDisplayConfig(for: $0)
