@@ -20,7 +20,6 @@
 		07C90ED5BCAD970E5FF0AA8C /* SceneWallpaperPropertiesPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D07F6F44CB59BB826B491E /* SceneWallpaperPropertiesPanel.swift */; };
 		0863B78CDAC1E93E1DEAFECC /* LiquidGlassMetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A57F1B7402811BEA53CACDC /* LiquidGlassMetalRenderer.swift */; };
 		08FA9B44D1C442F09112AF01 /* FrameInterpolationMetalInterpolator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08FA9B43D1C442F09112AF01 /* FrameInterpolationMetalInterpolator.swift */; };
-		091A2B3C4D5E6F708192A3B4 /* PixivLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293A4B5C6D7E8F /* PixivLoginView.swift */; };
 		08DB34C96094F5F0DEE97744 /* CloudSyncWebDAVClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA8D96EADBCE058B7A28C68A /* CloudSyncWebDAVClient.swift */; };
 		096533F7CEAED68394886EA2 /* ContentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE3727E57F3F09F93DF5B40C /* ContentModels.swift */; };
 		09B152328D1774208B7A5FF3 /* GuessYouLikeCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F0547CAC2D1D59D8496AB8 /* GuessYouLikeCardView.swift */; };

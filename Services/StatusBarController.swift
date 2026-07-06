@@ -128,7 +128,7 @@ final class StatusBarController: NSObject {
 
     private lazy var openWindowItem = NSMenuItem(title: t("statusbar.showWindow"), action: #selector(showMainWindow), keyEquivalent: "")
     private lazy var openLibraryItem = NSMenuItem(title: t("statusbar.openMyLibrary"), action: #selector(openMyLibrary), keyEquivalent: "")
-    private lazy var openSettingsItem = NSMenuItem(title: t("settings"), action: #selector(openSettings), keyEquivalent: "")
+    private lazy var openSettingsItem = NSMenuItem(title: t("settings"), action: #selector(openAppSettingsPanel), keyEquivalent: "")
     private lazy var releaseMemoryItem = NSMenuItem(title: t("statusbar.releaseMemory"), action: #selector(releaseForegroundMemory), keyEquivalent: "")
     private lazy var toggleWallpaperItem = NSMenuItem(title: t("statusbar.enableWallpaper"), action: #selector(toggleDynamicWallpaper), keyEquivalent: "")
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
@@ -226,8 +226,8 @@ final class StatusBarController: NSObject {
 
         menu.addItem(openWindowItem)
         menu.addItem(openLibraryItem)
-        menu.addItem(openSettingsItem)
         menu.addItem(releaseMemoryItem)
+        menu.addItem(openSettingsItem)
         menu.addItem(.separator())
         menu.addItem(desktopIconsItem)
         menu.addItem(designWallpaperItem)
@@ -691,7 +691,7 @@ final class StatusBarController: NSObject {
         showWindowHandler?()
     }
 
-    @objc private func openSettings() {
+    @objc private func openAppSettingsPanel() {
         guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
         appDelegate.showSettingsWindow(nil)
     }

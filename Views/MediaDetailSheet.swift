@@ -312,7 +312,7 @@ struct MediaDetailSheet: View {
                 VStack(spacing: 8) {
                     if isTranscodingVideo {
                         MediaProcessingToast(
-                            title: "转码中 \(Int(transcodeVideoProgress * 100))%",
+                            title: String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100)),
                             detail: nil,
                             progress: transcodeVideoProgress
                         )
@@ -320,7 +320,7 @@ struct MediaDetailSheet: View {
 
                     if let activeItem = frameInterpolationQueue.activeProcessingItem {
                         MediaProcessingToast(
-                            title: "补帧中 \(Int((activeItem.progress * 100).rounded()))%",
+                            title: String(format: t("frameInterpolationToastRunning"), Int((activeItem.progress * 100).rounded())),
                             detail: frameInterpolationRemainingDetail,
                             progress: activeItem.progress
                         )
@@ -363,8 +363,8 @@ struct MediaDetailSheet: View {
         } message: {
             Text("将删除该壁纸的离线烘焙视频，静态预览图保留。删除后会立即用静态图替换正在显示的锁屏/桌面壁纸。")
         }
-        .alert("删除补帧文件？", isPresented: $showDeleteFrameInterpolationConfirm) {
-            Button("删除", role: .destructive) {
+        .alert(t("frameInterpolationDeleteConfirmTitle"), isPresented: $showDeleteFrameInterpolationConfirm) {
+            Button(t("frameInterpolationDeleteButton"), role: .destructive) {
                 guard let url = pendingDeleteFrameInterpolationURL else { return }
                 Task { await deleteFrameInterpolationFileAndRedownload(videoURL: url) }
             }
@@ -372,10 +372,10 @@ struct MediaDetailSheet: View {
                 pendingDeleteFrameInterpolationURL = nil
             }
         } message: {
-            Text("删除补帧文件后需要重新下载该视频文件，同时该视频将不再自动补帧")
+            Text(t("frameInterpolationDeleteConfirmMessage"))
         }
-        .alert("是否移出黑名单？", isPresented: $showRemoveFrameInterpolationBlacklistConfirm) {
-            Button("移出", role: .destructive) {
+        .alert(t("frameInterpolationBlacklistRemoveConfirmTitle"), isPresented: $showRemoveFrameInterpolationBlacklistConfirm) {
+            Button(t("frameInterpolationBlacklistRemoveButton"), role: .destructive) {
                 if let url = pendingRemoveFrameInterpolationBlacklistURL {
                     frameInterpolationQueue.removeBlacklisted(videoURL: url)
                     refreshFrameInterpolationNeedCheck(force: true)
@@ -386,7 +386,7 @@ struct MediaDetailSheet: View {
                 pendingRemoveFrameInterpolationBlacklistURL = nil
             }
         } message: {
-            Text("移出黑名单后，该视频可以再次手动添加到补帧队列。")
+            Text(t("frameInterpolationBlacklistRemoveConfirmMessage"))
         }
         .overlay {
             authorSheetOverlay
@@ -1508,7 +1508,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: isTranscodingVideo ? "arrow.triangle.2.circlepath" : "film")
-                        Text(isTranscodingVideo ? "转码中 \(Int(transcodeVideoProgress * 100))%" : "视频转码")
+                        Text(isTranscodingVideo ? String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100)) : t("transcodingVideo"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -1525,7 +1525,7 @@ struct MediaDetailSheet: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "clock")
-                            Text("补帧队列处理中")
+                            Text(t("frameInterpolationQueueProcessing"))
                             Spacer()
                         }
                         .padding(.horizontal, 12)
@@ -1537,7 +1537,7 @@ struct MediaDetailSheet: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "checkmark.circle")
-                            Text("已完成补帧")
+                            Text(t("frameInterpolationAlreadyCompleted"))
                             Spacer()
                         }
                         .foregroundStyle(Color.white.opacity(0.46))
@@ -1554,7 +1554,7 @@ struct MediaDetailSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "trash")
-                            Text("删除补帧文件")
+                            Text(t("frameInterpolationDeleteFile"))
                             Spacer()
                         }
                         .foregroundStyle(Color(hex: "FF453A"))
@@ -1568,7 +1568,7 @@ struct MediaDetailSheet: View {
                         Button {} label: {
                             HStack {
                                 Image(systemName: "checkmark.circle")
-                                Text("无需补帧")
+                                Text(t("frameInterpolationNotNeeded"))
                                 Spacer()
                             }
                             .foregroundStyle(Color.white.opacity(0.46))
@@ -1581,7 +1581,7 @@ struct MediaDetailSheet: View {
                         Button {} label: {
                             HStack {
                                 Image(systemName: "hourglass")
-                                Text("检测补帧需求")
+                                Text(t("frameInterpolationChecking"))
                                 Spacer()
                             }
                             .foregroundStyle(Color.white.opacity(0.46))
@@ -1602,7 +1602,7 @@ struct MediaDetailSheet: View {
                         } label: {
                             HStack {
                                 Image(systemName: "arrow.up.forward.circle")
-                                Text("提高补帧帧率")
+                                Text(t("frameInterpolationIncreaseFPS"))
                                 Spacer()
                             }
                             .padding(.horizontal, 12)
@@ -1618,7 +1618,7 @@ struct MediaDetailSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "trash")
-                            Text("删除补帧文件")
+                            Text(t("frameInterpolationDeleteFile"))
                             Spacer()
                         }
                         .foregroundStyle(Color(hex: "FF453A"))
@@ -1635,7 +1635,7 @@ struct MediaDetailSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "nosign")
-                            Text("已加入补帧黑名单")
+                            Text(t("frameInterpolationBlacklisted"))
                             Spacer()
                         }
                         .foregroundStyle(Color.white.opacity(0.46))
@@ -1647,7 +1647,7 @@ struct MediaDetailSheet: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "checkmark.circle")
-                            Text("无需补帧")
+                            Text(t("frameInterpolationNotNeeded"))
                             Spacer()
                         }
                         .foregroundStyle(Color.white.opacity(0.46))
@@ -1660,7 +1660,7 @@ struct MediaDetailSheet: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "hourglass")
-                            Text("检测补帧需求")
+                            Text(t("frameInterpolationChecking"))
                             Spacer()
                         }
                         .foregroundStyle(Color.white.opacity(0.46))
@@ -1681,7 +1681,7 @@ struct MediaDetailSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "rectangle.stack.badge.play")
-                            Text("添加到补帧队列")
+                            Text(t("frameInterpolationAddToQueue"))
                             Spacer()
                         }
                         .padding(.horizontal, 12)
@@ -1730,7 +1730,7 @@ struct MediaDetailSheet: View {
 
     private var frameInterpolationRemainingDetail: String? {
         let count = frameInterpolationQueue.remainingWorkCount
-        return count > 0 ? "还有 \(count) 个" : nil
+        return count > 0 ? String(format: t("frameInterpolationRemainingCount"), count) : nil
     }
 
     private func refreshFrameInterpolationNeedCheck(force: Bool = false) {
@@ -2026,7 +2026,7 @@ struct MediaDetailSheet: View {
             return t(applyingWallpaperStatusKey)
         }
         if isTranscodingVideo {
-            return "转码中 \(Int(transcodeVideoProgress * 100))%"
+            return String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100))
         }
         if isDownloading {
             return t("downloadingMedia")

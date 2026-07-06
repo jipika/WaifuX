@@ -3760,11 +3760,11 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
 
         var label: String {
             switch self {
-            case .waiting: return "等待中"
-            case .analyzing: return "分析中"
-            case .running: return "补帧中"
-            case .completed: return "已完成"
-            case .failed: return "失败"
+            case .waiting: return t("frameInterpolationStatusWaiting")
+            case .analyzing: return t("frameInterpolationStatusAnalyzing")
+            case .running: return t("frameInterpolationStatusRunning")
+            case .completed: return t("frameInterpolationStatusCompleted")
+            case .failed: return t("frameInterpolationStatusFailed")
             }
         }
     }
@@ -4025,7 +4025,7 @@ final class FrameInterpolationQueueService: ObservableObject {
             opticalFlowFrames: 0,
             elapsedSeconds: 0,
             remainingSeconds: nil,
-            currentStage: "等待开始",
+            currentStage: t("frameInterpolationStageWaiting"),
             outputURL: nil,
             addedAt: Date()
         )
@@ -4072,7 +4072,7 @@ final class FrameInterpolationQueueService: ObservableObject {
         items[index].opticalFlowFrames = 0
         items[index].elapsedSeconds = 0
         items[index].remainingSeconds = nil
-        items[index].currentStage = "正在读取视频原始 FPS"
+        items[index].currentStage = t("frameInterpolationStageReadingFPS")
         let videoURL = items[index].videoURL
         let targetFPS = items[index].targetFPS
         startHeartbeat(id: id)
@@ -4085,7 +4085,7 @@ final class FrameInterpolationQueueService: ObservableObject {
                       let itemIndex = self.items.firstIndex(where: { $0.id == id }) else { return }
                 self.items[itemIndex].sourceFPS = decision.sourceFPS
                 self.items[itemIndex].status = .running
-                self.items[itemIndex].currentStage = "FPS 分析完成，准备离线导出"
+                self.items[itemIndex].currentStage = t("frameInterpolationStagePreparingExport")
             }
 
             guard !Task.isCancelled else {
@@ -4213,7 +4213,7 @@ final class FrameInterpolationQueueService: ObservableObject {
         items[index].opticalFlowFrames = 0
         items[index].elapsedSeconds = 0
         items[index].remainingSeconds = nil
-        items[index].currentStage = "等待开始"
+        items[index].currentStage = t("frameInterpolationStageWaiting")
     }
 
     private func finishWithoutExport(id: UUID, reason: String) {
