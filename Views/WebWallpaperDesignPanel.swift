@@ -301,6 +301,7 @@ final class WebWallpaperDesignViewModel: ObservableObject {
 
 struct WebWallpaperDesignPanel: View {
     @ObservedObject var viewModel: WebWallpaperDesignViewModel
+    @ObservedObject private var localization = LocalizationService.shared
     private let accentTint = Color(nsColor: .controlAccentColor)
     private let labelWidth: CGFloat = 88
 

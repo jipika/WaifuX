@@ -318,11 +318,24 @@ extension Notification.Name {
     static let appShouldReleaseForegroundMemory = Notification.Name("appShouldReleaseForegroundMemory")
     static let appDidReceiveMemoryPressure = Notification.Name("appDidReceiveMemoryPressure")
     static let switchToLibraryTab = Notification.Name("switchToLibraryTab")
+    static let openCurrentWallpaperDetail = Notification.Name("openCurrentWallpaperDetail")
+}
+
+enum MainWallpaperDetailRequest {
+    case wallpaper(Wallpaper)
+    case media(MediaItem)
 }
 
 enum MainNavigationRequestStore {
     private static let pendingTabKey = "mainNavigation.pendingTab"
     private static let libraryTabValue = "myMedia"
+    private static let pendingWallpaperDetailKindKey = "mainNavigation.pendingWallpaperDetail.kind"
+    private static let pendingWallpaperDetailPayloadKey = "mainNavigation.pendingWallpaperDetail.payload"
+
+    private enum WallpaperDetailKind: String {
+        case wallpaper
+        case media
+    }
 
     static func requestLibraryTab() {
         UserDefaults.standard.set(libraryTabValue, forKey: pendingTabKey)
@@ -339,5 +352,46 @@ enum MainNavigationRequestStore {
 
     static func clearLibraryTabRequest() {
         UserDefaults.standard.removeObject(forKey: pendingTabKey)
+    }
+
+    static func requestWallpaperDetail(_ request: MainWallpaperDetailRequest) {
+        let kind: WallpaperDetailKind
+        let payload: Data?
+
+        switch request {
+        case .wallpaper(let wallpaper):
+            kind = .wallpaper
+            payload = try? JSONEncoder().encode(wallpaper)
+        case .media(let media):
+            kind = .media
+            payload = try? JSONEncoder().encode(media)
+        }
+
+        guard let payload else { return }
+        UserDefaults.standard.set(kind.rawValue, forKey: pendingWallpaperDetailKindKey)
+        UserDefaults.standard.set(payload, forKey: pendingWallpaperDetailPayloadKey)
+        NotificationCenter.default.post(name: .openCurrentWallpaperDetail, object: nil)
+    }
+
+    static func consumeWallpaperDetailRequest() -> MainWallpaperDetailRequest? {
+        defer { clearWallpaperDetailRequest() }
+
+        guard let rawKind = UserDefaults.standard.string(forKey: pendingWallpaperDetailKindKey),
+              let kind = WallpaperDetailKind(rawValue: rawKind),
+              let payload = UserDefaults.standard.data(forKey: pendingWallpaperDetailPayloadKey) else {
+            return nil
+        }
+
+        switch kind {
+        case .wallpaper:
+            return (try? JSONDecoder().decode(Wallpaper.self, from: payload)).map(MainWallpaperDetailRequest.wallpaper)
+        case .media:
+            return (try? JSONDecoder().decode(MediaItem.self, from: payload)).map(MainWallpaperDetailRequest.media)
+        }
+    }
+
+    static func clearWallpaperDetailRequest() {
+        UserDefaults.standard.removeObject(forKey: pendingWallpaperDetailKindKey)
+        UserDefaults.standard.removeObject(forKey: pendingWallpaperDetailPayloadKey)
     }
 }

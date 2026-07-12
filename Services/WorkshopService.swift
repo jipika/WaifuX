@@ -1754,23 +1754,32 @@ class WorkshopService: ObservableObject {
             task.standardOutput = outputPipe
             task.standardError = errorPipe
 
-            // steamcmd 创意工坊下载不创建中间文件，无法轮询字节数。
-            // 进度通过时间估算：假设下载速度不低于 200KB/s，按已耗时推算进度，上限 99%。
-            var lastReportedProgress: Double = 0
-            let startTime = Date()
-            let minSpeed: Double = 500 * 1024  // 500KB/s 最低预估速度
-            let pollingTask = Task { @MainActor in
+            // SteamCMD 不稳定地输出下载进度，但会把已收到的内容写入当前
+            // force_install_dir 下的 workshop 缓存。进度只使用这些实际字节数，
+            // 不再按照耗时或假定网速预测，避免慢速下载虚报进度。
+            final class ProgressBox: @unchecked Sendable {
+                private var lastReportedProgress: Double = 0
+                private let lock = NSLock()
+
+                func shouldReport(_ progress: Double) -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard progress > lastReportedProgress + 0.001 else { return false }
+                    lastReportedProgress = progress
+                    return true
+                }
+            }
+            let progressBox = ProgressBox()
+            let pollingTask = Task.detached(priority: .utility) {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
                     guard totalSize > 0 else { continue }
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    // 基于时间的估算进度 = min(已下载估算 / 总大小, 0.99)
-                    // 已下载估算 = max(实际字节数, elapsed * minSpeed)
-                    let currentBytes = Self.dirSize(downloadDir.appendingPathComponent("steamapps"))
-                    let estimatedBytes = max(Double(currentBytes), elapsed * minSpeed)
-                    let progress = min(estimatedBytes / Double(totalSize), 0.99)
-                    if progress > lastReportedProgress + 0.001 {
-                        lastReportedProgress = progress
+                    let receivedBytes = Self.workshopDownloadPayloadSize(
+                        in: downloadDir,
+                        workshopID: workshopID
+                    )
+                    let progress = min(Double(receivedBytes) / Double(totalSize), 0.99)
+                    if progressBox.shouldReport(progress) {
                         progressHandler?(progress)
                     }
                 }
@@ -2053,27 +2062,6 @@ class WorkshopService: ObservableObject {
         }
     }
 
-    /// 从 SteamCMD 输出中解析下载进度
-    /// 支持旧格式 "[ 10%]" 和新格式 "[Progress] X.X% (Y / Z bytes)"
-    nonisolated private static func extractSteamCMDProgress(from output: String) -> Double? {
-        // 旧格式: "[  0%]", "[ 10%]", "[100%]" 等
-        let legacyPattern = #"\[\s*(\d+)%\]"#
-        // 新格式 (2023+): "[Progress] 45.2% (1024000 / 2270464 bytes)"
-        let progressPattern = #"\[Progress\]\s*(\d+(?:\.\d+)?)%"#
-
-        for pattern in [progressPattern, legacyPattern] {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(output.startIndex..., in: output)
-            // 取最后一处匹配（最新的进度）
-            guard let match = regex.matches(in: output, options: [], range: range).last,
-                  let numberRange = Range(match.range(at: 1), in: output),
-                  let percent = Double(output[numberRange]) else { continue }
-            // 旧格式是 0-100，新格式可能是 0.0-100.0
-            return percent > 1 ? percent / 100.0 : percent
-        }
-        return nil
-    }
-
     /// 递归计算目录下所有文件的总大小（字节），用于轮询下载进度
     /// 注意：不跳过隐藏文件，因为 steamcmd 下载时可能创建隐藏临时文件
     nonisolated private static func dirSize(_ url: URL) -> Int64 {
@@ -2096,6 +2084,25 @@ class WorkshopService: ObservableObject {
             }
         }
         return total
+    }
+
+    /// SteamCMD 的单个 Workshop 下载临时数据会落在 `workshop/downloads`、
+    /// `downloading` 或最终 `workshop/content` 下。只统计这些载荷目录，排除
+    /// appmanifest / 日志等元数据，得到可与 Steam API `file_size` 直接相除的字节数。
+    nonisolated private static func workshopDownloadPayloadSize(in downloadDir: URL, workshopID: String) -> Int64 {
+        let steamapps = downloadDir.appendingPathComponent("steamapps", isDirectory: true)
+        let candidates = [
+            steamapps.appendingPathComponent("workshop/downloads/431960/\(workshopID)", isDirectory: true),
+            steamapps.appendingPathComponent("workshop/content/431960/\(workshopID)", isDirectory: true),
+            steamapps.appendingPathComponent("downloading/431960/\(workshopID)", isDirectory: true),
+            steamapps.appendingPathComponent("downloading/\(workshopID)", isDirectory: true)
+        ]
+        let targetedSize = candidates.reduce(Int64(0)) { $0 + dirSize($1) }
+        if targetedSize > 0 { return targetedSize }
+
+        // SteamCMD 在不同版本会使用未公开的中间目录；目标目录尚未出现时，
+        // 回退统计当前 downloadDir 下的 steamapps 载荷，仍不把时间估算混入进度。
+        return dirSize(steamapps)
     }
 
     /// 清理 steamcmd 错误输出

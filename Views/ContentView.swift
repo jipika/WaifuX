@@ -462,10 +462,14 @@ struct ContentView: View {
             }
             .onAppear {
                 consumePendingLibraryTabRequest()
+                consumePendingWallpaperDetailRequest()
             }
             .onReceive(NotificationCenter.default.publisher(for: .switchToLibraryTab)) { _ in
                 MainNavigationRequestStore.clearLibraryTabRequest()
                 navigationState.selectedTab = .myMedia
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openCurrentWallpaperDetail)) { _ in
+                consumePendingWallpaperDetailRequest()
             }
             .id(localization.currentLanguage)
         }
@@ -501,6 +505,30 @@ struct ContentView: View {
             return
         }
         navigationState.selectedTab = .myMedia
+    }
+
+    private func consumePendingWallpaperDetailRequest() {
+        guard let request = MainNavigationRequestStore.consumeWallpaperDetailRequest() else {
+            return
+        }
+
+        navigationState.selectedTab = .myMedia
+        switch request {
+        case .media(let item):
+            openDetail(.media(item, context: [item]))
+        case .wallpaper(let wallpaper):
+            if wallpaper.isPixivManga {
+                let route = MangaRoutePayload(
+                    source: .pixiv,
+                    illustId: String(wallpaper.id.dropFirst("pixiv_".count)),
+                    seedTitle: wallpaper.title,
+                    seedCoverURL: wallpaper.path
+                )
+                openDetail(.manga(route))
+            } else {
+                openDetail(.wallpaper(wallpaper, context: [wallpaper]))
+            }
+        }
     }
 
     @ViewBuilder

@@ -394,6 +394,7 @@ final class SceneWallpaperDesignViewModel: ObservableObject {
 
 struct SceneWallpaperDesignPanel: View {
     @ObservedObject var viewModel: SceneWallpaperDesignViewModel
+    @ObservedObject private var localization = LocalizationService.shared
     private let accentTint = Color(nsColor: .controlAccentColor)
 
     var body: some View {

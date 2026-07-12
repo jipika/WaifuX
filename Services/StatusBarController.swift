@@ -421,20 +421,22 @@ final class StatusBarController: NSObject {
         return tasks.reduce(0.0) { $0 + $1.progress } / Double(tasks.count)
     }
 
-    /// 为指定屏幕构建音量滑块菜单项
-    private func buildVolumeMenuItem(for screen: NSScreen) -> NSMenuItem {
-        let controlView = ScreenVolumeControlView(screenName: screen.localizedName)
+    /// 为指定屏幕或全局共享播放器构建音量滑块菜单项。
+    private func buildVolumeMenuItem(for screen: NSScreen, isGlobal: Bool = false) -> NSMenuItem {
+        let controlView = ScreenVolumeControlView(
+            screenName: isGlobal ? t("statusbar.globalDisplaySettings") : screen.localizedName
+        )
         controlView.onVolumeChanged = { [weak self] volume in
             guard let self = self else { return }
-            // 只设该屏幕的音量，不触及其他屏幕，也不动全局静音
-            self.videoWallpaperManager.setVolume(volume, for: screen)
+            let targetScreen: NSScreen? = isGlobal ? nil : screen
+            self.videoWallpaperManager.setVolume(volume, for: targetScreen)
             if self.weBridge.isControllingExternalEngine {
-                self.weBridge.setVolume(volume, for: screen)
+                self.weBridge.setVolume(volume, for: targetScreen)
             }
         }
         let item = NSMenuItem()
         item.view = controlView
-        let vol = videoWallpaperManager.volume(for: screen)
+        let vol = isGlobal ? videoWallpaperManager.volume : videoWallpaperManager.volume(for: screen)
         // 显示实际音量，不受全局 isMuted 影响
         controlView.setVolume(vol, isMuted: false)
         return item
@@ -516,15 +518,21 @@ final class StatusBarController: NSObject {
             ? (NSScreen.screens.isEmpty ? [] : [NSScreen.screens[0]])
             : screensToShow
 
-        // 每屏一个顶层子菜单（多屏直接平铺，无外层「显示器」包裹）
+        // 每屏一个顶层子菜单；全局同步时折叠成单一的全局设置入口。
         let hasWallpaperOnAnyScreen = hasWallpaper || hasNativeWallpaper || hasExternalWallpaper
+        let usesGlobalDisplaySettings = WallpaperSchedulerService.shared.config.syncAllDisplays
+        let menuScreens = usesGlobalDisplaySettings
+            ? Array(NSScreen.screens.prefix(1))
+            : displayScreens
 
-        for screen in displayScreens {
-            let screenName = screen.localizedName
+        for screen in menuScreens {
+            let screenName = usesGlobalDisplaySettings
+                ? t("statusbar.globalDisplaySettings")
+                : screen.localizedName
 
             // 该屏是否有壁纸（决定控件是否启用）
             let screenHasWallpaper: Bool
-            if isExtensionMode {
+            if usesGlobalDisplaySettings || isExtensionMode {
                 screenHasWallpaper = hasWallpaperOnAnyScreen
             } else if weBridge.isManaging(screen: screen) {
                 screenHasWallpaper = true
@@ -572,29 +580,41 @@ final class StatusBarController: NSObject {
 
             screenSubMenu.addItem(.separator())
 
-            // 暂停 / 继续
-            let pauseItem = NSMenuItem(
-                title: isScreenPaused ? t("statusbar.resumeWallpaper") : t("statusbar.pauseWallpaper"),
-                action: #selector(perScreenTogglePlayback(_:)),
-                keyEquivalent: "")
-            pauseItem.target = self
-            pauseItem.representedObject = screen
-            pauseItem.isEnabled = screenHasWallpaper
-            screenSubMenu.addItem(pauseItem)
-
-            // 关闭
+            // 动态壁纸开关始终位于暂停/继续上方；关闭后保留入口用于恢复。
             let disableItem = NSMenuItem(
-                title: t("statusbar.disableWallpaper"),
+                title: screenHasWallpaper
+                    ? t("statusbar.disableWallpaper")
+                    : t("statusbar.enableWallpaper"),
                 action: #selector(perScreenToggleDynamicWallpaper(_:)),
                 keyEquivalent: "")
             disableItem.target = self
             disableItem.representedObject = screen
-            disableItem.isEnabled = screenHasWallpaper
+            disableItem.isEnabled = true
             screenSubMenu.addItem(disableItem)
+
+            // 只有动态壁纸正在运行时才显示暂停 / 继续。
+            if screenHasWallpaper {
+                let pauseItem = NSMenuItem(
+                    title: isScreenPaused ? t("statusbar.resumeWallpaper") : t("statusbar.pauseWallpaper"),
+                    action: #selector(perScreenTogglePlayback(_:)),
+                    keyEquivalent: "")
+                pauseItem.target = self
+                pauseItem.representedObject = screen
+                screenSubMenu.addItem(pauseItem)
+            }
+
+            let openCurrentWallpaperItem = NSMenuItem(
+                title: t("statusbar.openCurrentWallpaper"),
+                action: #selector(openCurrentWallpaper(_:)),
+                keyEquivalent: "")
+            openCurrentWallpaperItem.target = self
+            openCurrentWallpaperItem.representedObject = screen
+            openCurrentWallpaperItem.isEnabled = currentWallpaperDetailRequest(for: screen) != nil
+            screenSubMenu.addItem(openCurrentWallpaperItem)
 
             // 音量（扩展模式跳过，与原逻辑一致）
             if !isExtensionMode {
-                screenSubMenu.addItem(buildVolumeMenuItem(for: screen))
+                screenSubMenu.addItem(buildVolumeMenuItem(for: screen, isGlobal: usesGlobalDisplaySettings))
             }
 
             screenSubMenu.addItem(.separator())
@@ -745,9 +765,74 @@ final class StatusBarController: NSObject {
         WallpaperSchedulerService.shared.triggerNextWallpaperNow(for: screen.wallpaperScreenIdentifier)
     }
 
+    @objc private func openCurrentWallpaper(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen,
+              let request = currentWallpaperDetailRequest(for: screen) else { return }
+        MainNavigationRequestStore.requestWallpaperDetail(request)
+        showWindowHandler?()
+    }
+
+    private func currentWallpaperDetailRequest(for screen: NSScreen) -> MainWallpaperDetailRequest? {
+        guard let url = currentWallpaperURL(for: screen) else { return nil }
+
+        if let record = matchingMediaDownloadRecord(for: url) {
+            return .media(record.item)
+        }
+        if let record = matchingWallpaperDownloadRecord(for: url) {
+            return .wallpaper(record.wallpaper)
+        }
+        return nil
+    }
+
+    private func matchingMediaDownloadRecord(for currentURL: URL) -> MediaDownloadRecord? {
+        MediaLibraryService.shared.downloadedItems.first { record in
+            let candidatePaths = [
+                record.localFilePath,
+                record.resolvedVideoFileURL?.path,
+                record.sceneBakeArtifact?.videoPath
+            ].compactMap { $0 }
+            return candidatePaths.contains { matchesWallpaperPath(currentURL, recordPath: $0) }
+        }
+    }
+
+    private func matchingWallpaperDownloadRecord(for currentURL: URL) -> WallpaperDownloadRecord? {
+        WallpaperLibraryService.shared.downloadedWallpapers.first { record in
+            matchesWallpaperPath(currentURL, recordPath: record.localFilePath)
+        }
+    }
+
+    private func matchesWallpaperPath(_ currentURL: URL, recordPath: String) -> Bool {
+        guard currentURL.isFileURL else { return false }
+
+        let currentPath = currentURL.standardizedFileURL.path
+        let storedPath = URL(fileURLWithPath: recordPath).standardizedFileURL.path
+        return currentPath == storedPath
+            || currentPath.hasPrefix(storedPath + "/")
+            || storedPath.hasPrefix(currentPath + "/")
+    }
+
+    private func currentWallpaperURL(for screen: NSScreen) -> URL? {
+        if let videoURL = videoWallpaperManager.videoURL(for: screen) {
+            return videoURL
+        }
+        if let rendererPath = weBridge.currentWallpaperPath(for: screen) {
+            return URL(fileURLWithPath: rendererPath)
+        }
+        if let imageURL = StaticImageWallpaperOverlayManager.shared.imageURL(for: screen) {
+            return imageURL
+        }
+        return DesktopWallpaperSyncManager.shared.imageURL(for: screen)
+    }
+
     @objc private func perScreenTogglePlayback(_ sender: NSMenuItem) {
         guard let screen = sender.representedObject as? NSScreen else {
             togglePlayback()
+            return
+        }
+
+        if WallpaperSchedulerService.shared.config.syncAllDisplays {
+            toggleGlobalPlayback()
+            refreshMenuState()
             return
         }
 
@@ -781,6 +866,12 @@ final class StatusBarController: NSObject {
     @objc private func perScreenToggleDynamicWallpaper(_ sender: NSMenuItem) {
         guard let screen = sender.representedObject as? NSScreen else {
             toggleDynamicWallpaper()
+            return
+        }
+
+        if WallpaperSchedulerService.shared.config.syncAllDisplays {
+            toggleDynamicWallpaper()
+            refreshMenuState()
             return
         }
 
@@ -847,6 +938,32 @@ final class StatusBarController: NSObject {
             } else {
                 videoWallpaperManager.pauseWallpaper()
             }
+        }
+    }
+
+    /// 全局显示器菜单使用共享播放状态，不再弹出显示器选择器。
+    private func toggleGlobalPlayback() {
+        if weBridge.isControllingExternalEngine {
+            if weBridge.isExternalPaused {
+                weBridge.resumeWallpaper()
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            } else {
+                weBridge.pauseWallpaper()
+            }
+            return
+        }
+
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
+            LockScreenWallpaperService.shared.setPaused(!videoWallpaperManager.isPaused)
+            videoWallpaperManager.toggleExtensionGlobalPause()
+            return
+        }
+
+        if videoWallpaperManager.isPaused {
+            videoWallpaperManager.resumeWallpaper()
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+        } else {
+            videoWallpaperManager.pauseWallpaper()
         }
     }
 

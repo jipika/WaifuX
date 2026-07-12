@@ -418,6 +418,7 @@ private func translatedLabel(for property: SceneWallpaperProperty) -> String {
 
 struct SceneWallpaperPropertiesPanel: View {
     @ObservedObject var viewModel: SceneWallpaperPropertiesViewModel
+    @ObservedObject private var localization = LocalizationService.shared
     private let accentTint = Color(nsColor: .controlAccentColor)
     private let labelWidth: CGFloat = 88
 

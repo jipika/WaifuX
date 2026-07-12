@@ -75,7 +75,9 @@ class LocalizationService: ObservableObject {
 
     // 本地化字符串
     func t(_ key: String) -> String {
-        translations[currentLanguage]?[key] ?? key
+        translations[currentLanguage]?[key]
+            ?? translations[.chinese]?[key]
+            ?? key
     }
 }
 
@@ -153,6 +155,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "copy.url": "COPY URL",
         "showInFinder": "SHOW IN FINDER",
         "copied": "COPIED!",
+        "preview": "PREVIEW",
         // Detail
         "wallpaper.detail": "WALLPAPER DETAIL",
         "resolution": "RESOLUTION",
@@ -258,6 +261,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.enableAutoSwitch": "Enable Auto-switch",
         "statusbar.disableAutoSwitch": "Disable Auto-switch",
         "statusbar.nextWallpaper": "Next Wallpaper",
+        "statusbar.openCurrentWallpaper": "Open Current Wallpaper",
         "wallpaper.currentlyActive": "On Desktop",
         "statusbar.muteWallpaper": "Mute Wallpaper",
         "statusbar.unmuteWallpaper": "Unmute Wallpaper",
@@ -267,6 +271,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.showDesktopIcons": "Show Desktop Icons",
         "statusbar.quit": "Quit",
         "statusbar.displays": "Displays",
+        "statusbar.globalDisplaySettings": "Global Display Settings",
         "statusbar.cropAdjust": "Adjust Crop Region…",
         "statusbar.cropExit": "Exit Crop Adjustment",
         "statusbar.cropAspect": "Aspect Ratio",
@@ -429,6 +434,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "workshop.sort.created": "Newest",
         "workshop.sort.topRated": "Top Rated",
         "workshop.type.all": "ALL TYPES",
+        "workshop": "WORKSHOP",
         "workshop.type.scene": "SCENE",
         "workshop.type.video": "VIDEO",
         "workshop.type.web": "WEB",
@@ -622,7 +628,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "transcodingToast": "Transcoding %d%%",
         "transcodingVideo": "Transcode Video",
         "loopPointAnalysis": "Loop Point Analysis",
-        "loopPointAnalysisDesc": "Find the first visible frame and trim repeated tail frames so video wallpapers loop cleanly.",
+        "loopPointAnalysisDesc": "Find the first visible frame and trim repeated tail frames so video wallpapers loop cleanly. For Scene wallpapers, set the bake duration to 30 seconds or longer for better rendering quality.",
         "autoAnalyzeLoopPoint": "Auto Analyze Loop Point",
         "autoAnalyzeLoopPointDesc": "When setting a video wallpaper, analyze and apply the loop point automatically after other video optimization tasks finish.",
         "loopAnalysis.toastRunning": "Analyzing loop point %d%%",
@@ -1213,6 +1219,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sourceRules.ruleUrl": "Rule URL",
         "sourceRules.version": "Version",
         "animeRules.installed": "Installed",
+        "animeRules.install": "Install",
+        "animeRules.uninstall": "Uninstall",
         "animeRules.installAll": "Install All",
         // Purity Detail
         "purity.sfw.detail": "Safe",
@@ -1549,6 +1557,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "copy.url": "复制链接",
         "showInFinder": "在 Finder 中显示",
         "copied": "已复制!",
+        "preview": "预览",
         // Detail
         "wallpaper.detail": "壁纸详情",
         "resolution": "分辨率",
@@ -1653,6 +1662,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.enableAutoSwitch": "开启壁纸自动切换",
         "statusbar.disableAutoSwitch": "关闭壁纸自动切换",
         "statusbar.nextWallpaper": "切换下一张壁纸",
+        "statusbar.openCurrentWallpaper": "打开当前壁纸",
         "wallpaper.currentlyActive": "正在使用",
         "statusbar.muteWallpaper": "静音动态壁纸",
         "statusbar.unmuteWallpaper": "取消静音",
@@ -1661,6 +1671,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.hideDesktopIcons": "隐藏桌面图标",
         "statusbar.showDesktopIcons": "显示桌面图标",
         "statusbar.displays": "显示器",
+        "statusbar.globalDisplaySettings": "全局显示器设置",
         "statusbar.cropAdjust": "可视区域调节…",
         "statusbar.cropExit": "退出可视区域调节",
         "statusbar.cropAspect": "比例",
@@ -1826,6 +1837,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "workshop.sort.created": "最新发布",
         "workshop.sort.topRated": "最受好评",
         "workshop.type.all": "全部类型",
+        "workshop": "创意工坊",
         "workshop.type.scene": "场景",
         "workshop.type.video": "视频",
         "workshop.type.web": "网页",
@@ -2019,7 +2031,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "transcodingToast": "转码中 %d%%",
         "transcodingVideo": "视频转码",
         "loopPointAnalysis": "循环点分析",
-        "loopPointAnalysisDesc": "查找首个有效画面并裁掉尾部重复帧，让动态壁纸循环更自然。",
+        "loopPointAnalysisDesc": "查找首个有效画面并裁掉尾部重复帧，让动态壁纸循环更自然。如果壁纸为 Scene 壁纸，为获得更好的渲染效果，请将烘焙时长调整至 30 秒或以上。",
         "autoAnalyzeLoopPoint": "自动分析循环点",
         "autoAnalyzeLoopPointDesc": "设置视频壁纸时，在其他视频优化任务结束后自动分析并应用循环点。",
         "systemWallpaperSync": "系统壁纸同步",
@@ -2609,6 +2621,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sourceRules.ruleUrl": "规则 URL",
         "sourceRules.version": "版本",
         "animeRules.installed": "已安装",
+        "animeRules.install": "安装",
+        "animeRules.uninstall": "卸载",
         "animeRules.installAll": "安装全部",
         // Purity Detail
         "purity.sfw.detail": "安全",
@@ -2944,6 +2958,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "copy.url": "URLをコピー",
         "showInFinder": "Finderで表示",
         "copied": "コピーしました!",
+        "preview": "プレビュー",
         // Detail
         "wallpaper.detail": "壁紙の詳細",
         "resolution": "解像度",
@@ -3048,6 +3063,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.enableAutoSwitch": "自動切り替えを有効にする",
         "statusbar.disableAutoSwitch": "自動切り替えを無効にする",
         "statusbar.nextWallpaper": "次の壁紙に切り替え",
+        "statusbar.openCurrentWallpaper": "現在の壁紙を開く",
         "wallpaper.currentlyActive": "デスクトップに設定中",
         "statusbar.muteWallpaper": "動的壁紙をミュート",
         "statusbar.unmuteWallpaper": "ミュートを解除",
@@ -3059,6 +3075,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "statusbar.showDesktopIcons": "デスクトップアイコンを表示",
         "statusbar.quit": "終了",
         "statusbar.displays": "ディスプレイ",
+        "statusbar.globalDisplaySettings": "グローバルディスプレイ設定",
         "statusbar.cropAdjust": "表示範囲を調整…",
         "statusbar.cropExit": "表示範囲調整を終了",
         "statusbar.cropAspect": "アスペクト比",
@@ -3222,6 +3239,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "workshop.sort.created": "新着",
         "workshop.sort.topRated": "高評価",
         "workshop.type.all": "すべてのタイプ",
+        "workshop": "ワークショップ",
         "workshop.type.scene": "シーン",
         "workshop.type.video": "動画",
         "workshop.type.web": "Web",
@@ -3422,7 +3440,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "transcodingToast": "トランスコード中 %d%%",
         "transcodingVideo": "動画をトランスコード",
         "loopPointAnalysis": "ループポイント解析",
-        "loopPointAnalysisDesc": "最初の有効フレームを見つけ、末尾の重複フレームを切り詰めて自然にループさせます。",
+        "loopPointAnalysisDesc": "最初の有効フレームを見つけ、末尾の重複フレームを切り詰めて自然にループさせます。Scene 壁紙の場合は、より良い描画結果のため、焼き付け時間を30秒以上に設定してください。",
         "autoAnalyzeLoopPoint": "ループポイントを自動解析",
         "autoAnalyzeLoopPointDesc": "動画壁紙を設定するとき、他の動画最適化タスクの完了後にループポイントを自動解析して適用します。",
         "loopAnalysis.toastRunning": "ループポイント解析中 %d%%",
@@ -4005,6 +4023,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sourceRules.ruleUrl": "ルール URL",
         "sourceRules.version": "バージョン",
         "animeRules.installed": "インストール済み",
+        "animeRules.install": "インストール",
+        "animeRules.uninstall": "アンインストール",
         "animeRules.installAll": "すべてインストール",
         // Purity Detail
         "purity.sfw.detail": "セーフ",

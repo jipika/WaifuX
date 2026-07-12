@@ -399,7 +399,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             for state in targetWebStates {
                 // 通过 daemon 的 stop 命令按屏幕停止 web 壁纸
                 let screenIdx = NSScreen.screens.firstIndex(where: { $0.wallpaperScreenIdentifier == state.screenID }) ?? 0
-                try? await Self.runLegacyCLIClientCommand(["stop", String(screenIdx)])
+                _ = try? await Self.runLegacyCLIClientCommand(["stop", String(screenIdx)])
             }
             webRenderer.stop()
             for state in targetWebStates {
@@ -482,6 +482,13 @@ final class WallpaperEngineXBridge: ObservableObject {
             launchGeneration &+= 1
         }
 
+        // 全局同步的 Scene 会为每块屏幕启动独立 renderer。逐屏等到上一块屏
+        // 写出 canvas-size（代表场景已完成初始化）再继续，避免多条重型加载同时
+        // 抢占 GPU / 内存并导致后续屏幕启动不稳定。
+        let shouldSerializeGlobalSceneLoading = renderKind == .scene
+            && WallpaperSchedulerService.shared.config.syncAllDisplays
+            && effectiveScreens.count > 1
+
         // 5. 遍历目标屏幕 — 每条路径都先尝试热切换，失败或首次则启动新进程
         var anyLaunchFailed = false
         var lastLaunchError: Error?
@@ -539,6 +546,11 @@ final class WallpaperEngineXBridge: ObservableObject {
                     return percent > 0 ? max(30, min(100, Int(percent))) : 70
                 }() : nil
                 let effectReductionEnabled = upscalingEnabled ? UserDefaults.standard.bool(forKey: "effect_reduction_enabled") : false
+
+                if shouldSerializeGlobalSceneLoading,
+                   let canvasSizeURL = existingInfo.canvasSizeURL {
+                    try? FileManager.default.removeItem(at: canvasSizeURL)
+                }
 
                 writeWallpaperControl(
                     url: wcURL,
@@ -606,6 +618,13 @@ final class WallpaperEngineXBridge: ObservableObject {
                 }
 
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) 热切换完成 (pid=\(existingInfo.pid))")
+                if shouldSerializeGlobalSceneLoading {
+                    await waitForSceneRendererReady(
+                        screenID: screenID,
+                        expectedPID: existingInfo.pid,
+                        canvasSizeURL: existingInfo.canvasSizeURL
+                    )
+                }
                 continue
             }
 
@@ -755,6 +774,13 @@ final class WallpaperEngineXBridge: ObservableObject {
                         }
                         print("[WallpaperEngineXBridge] ⚠️ 屏幕 \(screenIDCopy) 等待 canvas_size 超时，沿用 fallback crop")
                     }
+                }
+                if shouldSerializeGlobalSceneLoading {
+                    await waitForSceneRendererReady(
+                        screenID: screenID,
+                        expectedPID: launchedPID,
+                        canvasSizeURL: canvasSizeURL
+                    )
                 }
             } catch {
                 print("[WallpaperEngineXBridge] ❌ 屏幕 \(screenID) 启动失败: \(error.localizedDescription)")
@@ -1937,6 +1963,29 @@ final class WallpaperEngineXBridge: ObservableObject {
               let w = obj["width"] as? Double, let h = obj["height"] as? Double,
               w > 0, h > 0 else { return nil }
         return CGSize(width: w, height: h)
+    }
+
+    /// `canvas-size-file` 由 renderer 在实际加载场景并拥有可用画布后写出。
+    /// 超时仅作为异常进程的安全阀，不会把下一块屏当作已经加载完成。
+    private func waitForSceneRendererReady(
+        screenID: String,
+        expectedPID: pid_t,
+        canvasSizeURL: URL?
+    ) async {
+        guard let canvasSizeURL else { return }
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            guard let info = screenProcesses[screenID], info.pid == expectedPID else { return }
+            if readCanvasSize(url: canvasSizeURL) != nil {
+                print("[WallpaperEngineXBridge] 全局 Scene 屏幕 \(screenID) 已就绪，继续下一块屏幕")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        AppLogger.error(.wallpaper, "Global Scene renderer readiness timed out", metadata: [
+            "screenID": screenID,
+            "pid": expectedPID
+        ])
     }
 
     /// 供 overlay 预览取 wgpu canvas 尺寸（scene 就绪后才有值）。

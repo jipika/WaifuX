@@ -74,6 +74,12 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
 
     private func handleConnectedExternalDisplay(_ screen: NSScreen) {
         Task { @MainActor in
+            // 全局同步优先级最高：新显示器直接加入显示器 1 的同步组，不恢复旧状态、不随机切换，也不弹窗。
+            if await WallpaperSchedulerService.shared.syncConnectedDisplayToPrimary(screen) {
+                print("[ExternalDisplay] Global sync applied display 1 wallpaper to connected display: \(screen.localizedName)")
+                return
+            }
+
             if await restorePreviousDisplayStateIfAvailable(for: screen) {
                 return
             }

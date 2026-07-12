@@ -26,6 +26,7 @@ class WallpaperSchedulerService: ObservableObject {
     private let logTag = "[WallpaperScheduler]"
     private var isScreenLocked = false
     private var lastUnlockSwitchTime: Date?
+    private var isApplyingSynchronizedItem = false
 
     /// Persists screenID → fingerprint mapping so that display configs can be
     /// relinked after sleep/wake when CGDirectDisplayID may change on external monitors.
@@ -522,6 +523,28 @@ class WallpaperSchedulerService: ObservableObject {
         let screens = NSScreen.screens
         guard screens.count > 1 else { return }
 
+        let prefersRealtimeScene = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+
+        if prefersRealtimeScene,
+           WallpaperEngineXBridge.shared.isCurrentWallpaperScene,
+           let scenePath = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign {
+            Task { @MainActor in
+                let userProperties = SceneWallpaperPropertiesService.propertiesOverrideJSON(for: scenePath)
+                try? await WallpaperEngineXBridge.shared.setWallpaper(
+                    path: scenePath,
+                    targetScreens: screens,
+                    userProperties: userProperties
+                )
+                // 配套烘焙仅供锁屏与后续切换使用，不会替换实时桌面。
+                SceneOfflineBakeService.scheduleRealtimeCompanionBake(
+                    path: scenePath,
+                    targetScreens: screens,
+                    reason: "globalSyncEnabled"
+                )
+            }
+            return
+        }
+
         if WallpaperEngineXBridge.shared.isCurrentWallpaperScene,
            let scenePath = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign,
            let record = downloadedSceneRecord(for: scenePath),
@@ -554,6 +577,113 @@ class WallpaperSchedulerService: ObservableObject {
             targetScreens: screens
         )
         print("\(logTag) Global display sync enabled: \(videoURL.lastPathComponent) on \(screens.count) displays")
+    }
+
+    /// 将显示器 1 当前的壁纸同步到新接入的显示器。
+    ///
+    /// 该入口只用于全局同步模式下的热接入，不触发调度随机选择，也不显示“接入新显示器”弹窗。
+    /// 视频和烘焙 Scene 会通过全局视频入口复用同一个播放器，避免新屏幕额外创建解码流程。
+    @discardableResult
+    func syncConnectedDisplayToPrimary(_ screen: NSScreen) async -> Bool {
+        guard config.syncAllDisplays else { return false }
+        let screens = NSScreen.screens
+        guard let primary = screens.first,
+              !screens.isEmpty,
+              screen.wallpaperScreenIdentifier != primary.wallpaperScreenIdentifier else {
+            return false
+        }
+
+        let prefersRealtimeScene = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+
+        if prefersRealtimeScene,
+           WallpaperEngineXBridge.shared.isCurrentWallpaperScene,
+           let path = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign,
+           FileManager.default.fileExists(atPath: path) {
+            do {
+                let userProperties = SceneWallpaperPropertiesService.propertiesOverrideJSON(for: path)
+                try await WallpaperEngineXBridge.shared.setWallpaper(
+                    path: path,
+                    targetScreens: screens,
+                    userProperties: userProperties
+                )
+                SceneOfflineBakeService.scheduleRealtimeCompanionBake(
+                    path: path,
+                    targetScreens: screens,
+                    reason: "globalSyncConnectedDisplay"
+                )
+                return true
+            } catch {
+                print("\(logTag) Failed to sync realtime Scene to connected display: \(error)")
+            }
+        }
+
+        if let videoURL = VideoWallpaperManager.shared.videoURL(for: primary),
+           FileManager.default.fileExists(atPath: videoURL.path) {
+            let posterURL = VideoWallpaperManager.shared.posterURL(for: primary)
+            do {
+                try VideoWallpaperManager.shared.applyVideoWallpaper(
+                    from: videoURL,
+                    posterURL: posterURL,
+                    muted: VideoWallpaperManager.shared.isMuted,
+                    targetScreens: screens
+                )
+                return true
+            } catch {
+                print("\(logTag) Failed to sync shared video to connected display: \(error)")
+            }
+        }
+
+        if WallpaperEngineXBridge.shared.isControllingExternalEngine,
+           let path = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign,
+           FileManager.default.fileExists(atPath: path) {
+            if !prefersRealtimeScene,
+               WallpaperEngineXBridge.shared.isCurrentWallpaperScene,
+               let record = downloadedSceneRecord(for: path),
+               let artifact = record.sceneBakeArtifact {
+                let bakedURL = URL(fileURLWithPath: artifact.videoPath)
+                if SceneOfflineBakeService.isUsableBakedVideo(at: bakedURL) {
+                    let posterURL = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
+                        forLocalVideo: bakedURL,
+                        itemID: record.item.id
+                    )
+                    do {
+                        try VideoWallpaperManager.shared.applyVideoWallpaper(
+                            from: bakedURL,
+                            posterURL: posterURL,
+                            muted: VideoWallpaperManager.shared.isMuted,
+                            targetScreens: screens
+                        )
+                        return true
+                    } catch {
+                        print("\(logTag) Failed to sync baked Scene to connected display: \(error)")
+                    }
+                }
+            }
+
+            do {
+                let userProps = SceneWallpaperPropertiesService.propertiesOverrideJSON(for: path)
+                let engineTargets = WallpaperEngineXBridge.shared.isCurrentWallpaperWeb ? [screen] : screens
+                try await WallpaperEngineXBridge.shared.setWallpaper(
+                    path: path,
+                    targetScreens: engineTargets,
+                    userProperties: userProps
+                )
+                return true
+            } catch {
+                print("\(logTag) Failed to sync live wallpaper engine content: \(error)")
+            }
+        }
+
+        if let imageURL = StaticImageWallpaperOverlayManager.shared.imageURL(for: primary) {
+            return StaticImageWallpaperOverlayManager.shared.applyImage(imageURL, to: screen)
+        }
+
+        if let imageURL = DesktopWallpaperSyncManager.shared.imageURL(for: primary) {
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
+            return true
+        }
+
+        return false
     }
 
     private func downloadedSceneRecord(for path: String) -> MediaDownloadRecord? {
@@ -983,19 +1113,29 @@ class WallpaperSchedulerService: ObservableObject {
 
     @discardableResult
     private func applySynchronizedItem(_ item: SchedulableItem, at date: Date) async -> Bool {
-        var appliedAny = false
+        guard let primaryScreen = NSScreen.screens.first else { return false }
+        guard !isApplyingSynchronizedItem,
+              !VideoWallpaperManager.shared.isPreparingSharedGlobalReplacement else {
+            print("\(logTag) Skipping overlapping synchronized switch while the next video is preparing")
+            return false
+        }
+        isApplyingSynchronizedItem = true
+        defer { isApplyingSynchronizedItem = false }
+
+        // 全局同步是一次原子切换。applyItem 会把目标提升为全部显示器；这里不能逐屏重复调用，
+        // 否则同一视频会被重复预热、重复换层，Scene/Web 还会重复重启渲染器。
+        guard await applyItem(item, toScreenID: primaryScreen.wallpaperScreenIdentifier) else {
+            return false
+        }
+
         for screen in NSScreen.screens {
             let screenID = screen.wallpaperScreenIdentifier
-            guard await applyItem(item, toScreenID: screenID) else { continue }
             lastChangeTimes[screenID] = date
             lastChangedItemIDs[screenID] = item.id
-            appliedAny = true
         }
-        if appliedAny {
-            persistSchedulerState()
-            print("\(logTag) Applied synchronized wallpaper '\(item.title)' to all displays")
-        }
-        return appliedAny
+        persistSchedulerState()
+        print("\(logTag) Applied synchronized wallpaper '\(item.title)' as one global transaction")
+        return true
     }
 
     private func waitBeforeApplyingBatchedWallpaper(index: Int) async {
@@ -1013,6 +1153,7 @@ class WallpaperSchedulerService: ObservableObject {
         let isOnEndMode = displayConfig.isOnEndMode
         // Web/Scene 壁纸在播完即换模式下是否启用了定时切换
         let webSceneSwitchEnabled = isOnEndMode && displayConfig.webSceneSwitchSeconds != nil
+        let targetScreens = config.syncAllDisplays ? NSScreen.screens : [screen]
 
         let fileURL = item.fileURL
         let ext = fileURL.pathExtension.lowercased()
@@ -1025,8 +1166,6 @@ class WallpaperSchedulerService: ObservableObject {
             // 桌面实时渲染（否则会变成播放固定时长 MP4 循环而非 wallpaper-wgpu 实时渲染）。
             // on-end 模式下：如果设置了 webSceneSwitchSeconds（走定时器而非视频通知），允许实时渲染。
             let preferRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
-                && !config.syncAllDisplays
-                && (!isOnEndMode || webSceneSwitchEnabled)
             if let bakedPath = item.bakedVideoPath,
                !preferRealtime,
                SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)) {
@@ -1048,11 +1187,13 @@ class WallpaperSchedulerService: ObservableObject {
                     from: bakedURL,
                     posterURL: posterURL,
                     muted: true,
-                    targetScreen: screen,
+                    targetScreens: targetScreens,
                     animatedTransition: true
                 )
                 if let posterURL = posterURL {
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                    for targetScreen in targetScreens {
+                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: targetScreen)
+                    }
                 }
             } else if isDirectory || ext == "pkg" {
                 // 2. Workshop 目录 → 根据 project.json 类型分发
@@ -1088,10 +1229,12 @@ class WallpaperSchedulerService: ObservableObject {
                             )
                             print("\(logTag) Generated preset HTML slideshow: \(images.count) images, interval=\(switchTime)s")
                             // 通过 CLI web 渲染器渲染
-                            try await WallpaperEngineXBridge.shared.setWallpaper(
-                                path: resolvedRoot.path,
-                                targetScreens: [screen]
-                            )
+                            for targetScreen in targetScreens {
+                                try await WallpaperEngineXBridge.shared.setWallpaper(
+                                    path: resolvedRoot.path,
+                                    targetScreens: [targetScreen]
+                                )
+                            }
                             // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                             return true
                         }
@@ -1112,11 +1255,13 @@ class WallpaperSchedulerService: ObservableObject {
                                 from: videoURL,
                                 posterURL: posterURL,
                                 muted: true,
-                                targetScreen: screen,
+                                targetScreens: targetScreens,
                                 animatedTransition: true
                             )
                             if let posterURL = posterURL {
-                                DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                                for targetScreen in targetScreens {
+                                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: targetScreen)
+                                }
                             }
                         } else {
                             print("\(logTag) Video type but no video file found in project, falling back to CLI")
@@ -1128,7 +1273,7 @@ class WallpaperSchedulerService: ObservableObject {
                             }
                             try await WallpaperEngineXBridge.shared.setWallpaper(
                                 path: resolvedRoot.path,
-                                targetScreens: [screen]
+                                targetScreens: targetScreens
                             )
                             // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                         }
@@ -1145,16 +1290,27 @@ class WallpaperSchedulerService: ObservableObject {
                         let userProps = isRealtime
                             ? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: resolvedRoot.path)
                             : nil
-                        try await WallpaperEngineXBridge.shared.setWallpaper(
-                            path: resolvedRoot.path,
-                            targetScreens: [screen],
-                            userProperties: userProps
-                        )
+                        if type == "web" && config.syncAllDisplays {
+                            // Web CLI 一次只消费一个目标屏幕；沿用原有逐屏调用语义。
+                            for targetScreen in targetScreens {
+                                try await WallpaperEngineXBridge.shared.setWallpaper(
+                                    path: resolvedRoot.path,
+                                    targetScreens: [targetScreen],
+                                    userProperties: userProps
+                                )
+                            }
+                        } else {
+                            try await WallpaperEngineXBridge.shared.setWallpaper(
+                                path: resolvedRoot.path,
+                                targetScreens: targetScreens,
+                                userProperties: userProps
+                            )
+                        }
                         // 实时渲染模式下，后台生成离线 MP4；完成后若动态锁屏开启，则推送到当前屏幕实例。
                         if isRealtime {
                             SceneOfflineBakeService.scheduleRealtimeCompanionBake(
                                 path: resolvedRoot.path,
-                                targetScreens: [screen],
+                                targetScreens: targetScreens,
                                 reason: "scheduler"
                             )
                         }
@@ -1168,7 +1324,9 @@ class WallpaperSchedulerService: ObservableObject {
                     }
                     print("\(logTag) Using static image from directory: \(fileURL.path)")
                     let vm = WallpaperViewModel()
-                    try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
+                    for targetScreen in targetScreens {
+                        try await vm.setWallpaper(from: fileURL, option: .desktop, for: targetScreen)
+                    }
                 }
             } else if videoExtensions.contains(ext) {
                 // 3. 视频文件 → VideoWallpaperManager
@@ -1181,11 +1339,13 @@ class WallpaperSchedulerService: ObservableObject {
                     from: fileURL,
                     posterURL: posterURL,
                     muted: true,
-                    targetScreen: screen,
+                    targetScreens: targetScreens,
                     animatedTransition: true
                 )
                 if let posterURL = posterURL {
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                    for targetScreen in targetScreens {
+                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: targetScreen)
+                    }
                 }
             } else {
                 // 4. 静态图 → WallpaperViewModel
@@ -1195,7 +1355,9 @@ class WallpaperSchedulerService: ObservableObject {
                 }
                 print("\(logTag) Using static image: \(fileURL.lastPathComponent)")
                 let vm = WallpaperViewModel()
-                try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
+                for targetScreen in targetScreens {
+                    try await vm.setWallpaper(from: fileURL, option: .desktop, for: targetScreen)
+                }
             }
             // com.apple.desktop 通知已由 setDesktopImageURLForAllSpaces 内部发送，无需重复触发
             return true
@@ -1496,7 +1658,27 @@ class WallpaperSchedulerService: ObservableObject {
             }
         }
 
-        return items
+        return stableSchedulableItems(from: items)
+    }
+
+    /// 构建候选时会同时读取资料库记录和下载目录扫描结果。后者由文件系统返回，
+    /// 顺序没有稳定性保证；而同一已下载文件也会在两处出现。先按规范路径去重、
+    /// 再采用自然排序，才能让“顺序”模式在扫描、重启和同步恢复后持续沿同一序列推进。
+    private func stableSchedulableItems(from items: [SchedulableItem]) -> [SchedulableItem] {
+        var seenPaths = Set<String>()
+        let uniqueItems = items.filter { item in
+            seenPaths.insert(item.fileURL.standardizedFileURL.path).inserted
+        }
+
+        return uniqueItems.sorted { lhs, rhs in
+            let lhsPath = lhs.fileURL.standardizedFileURL.path
+            let rhsPath = rhs.fileURL.standardizedFileURL.path
+            let comparison = lhsPath.localizedStandardCompare(rhsPath)
+            if comparison == .orderedSame {
+                return lhs.id < rhs.id
+            }
+            return comparison == .orderedAscending
+        }
     }
 
     private func selectSequential(from items: [SchedulableItem], lastID: String?) -> SchedulableItem? {

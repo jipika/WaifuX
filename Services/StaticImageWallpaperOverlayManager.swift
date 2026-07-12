@@ -213,6 +213,16 @@ final class StaticImageWallpaperOverlayManager {
         return imageByScreen[screenID] ?? imageByScreenFingerprint[fingerprint]
     }
 
+    /// 将指定图片应用到新接入的显示器，供全局同步接入流程复用显示器 1 的静态壁纸。
+    @discardableResult
+    func applyImage(_ imageURL: URL, to screen: NSScreen) -> Bool {
+        guard FileManager.default.fileExists(atPath: imageURL.path) else { return false }
+        Task { @MainActor in
+            await showPrepared(imageURL: imageURL, for: screen)
+        }
+        return true
+    }
+
     /// 返回指定屏幕的静态图原始像素尺寸（供 CropAdjustOverlayController 预览使用）。
     func imageSize(for screen: NSScreen) -> CGSize? {
         imageSizes[screen.wallpaperScreenIdentifier]

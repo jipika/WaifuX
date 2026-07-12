@@ -183,7 +183,7 @@ struct MediaDetailSheet: View {
 
     private var isLoopAnalysisPipelineActive: Bool {
         switch optimizationStage {
-        case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+        case .loopQueued, .loopAnalyzing:
             return true
         default:
             return false
@@ -967,10 +967,10 @@ struct MediaDetailSheet: View {
 
     private var loopPointAnalysisIconName: String {
         switch optimizationStage {
-        case .frameQueued, .interpolating:
-            return "checkmark.circle.fill"
-        case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+        case .loopQueued, .loopAnalyzing:
             return "hourglass"
+        case .restoringOriginal:
+            return "arrow.down.circle"
         default:
             break
         }
@@ -997,16 +997,32 @@ struct MediaDetailSheet: View {
             if succeeded {
                 VideoWallpaperManager.shared.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
                 optimizationPipeline.set(.idle, for: resolvedItem.id)
-            } else if case .failed(let message) = VideoLoopPreprocessingService.shared.state(for: completedURL) {
-                optimizationPipeline.set(.failed(message), for: resolvedItem.id)
-                errorMessage = Self.truncateErrorMessage(message)
-                showError = true
+            } else {
+                if case .failed(let message) = VideoLoopPreprocessingService.shared.state(for: completedURL) {
+                    optimizationPipeline.set(.failed(message), for: resolvedItem.id)
+                    errorMessage = Self.truncateErrorMessage(message)
+                    showError = true
+                } else {
+                    // 队列被重置或源文件被删除时，不能让详情页永久停在“分析中”。
+                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                }
             }
         }
     }
 
     private func requestLoopPointAnalysis() {
         guard let videoURL = loopPointAnalysisVideoURL else { return }
+
+        // 已裁剪的视频不再保留原始帧。可重新下载的普通视频必须先恢复原视频，
+        // 再重新执行“循环点分析 → 补帧”串行流程，不能直接对裁剪结果二次分析。
+        if loopPointAnalysisState == .applied,
+           !isLocalFile,
+           cachedSceneBakeVideoURL?.standardizedFileURL != videoURL.standardizedFileURL {
+            pendingLoopReoptimizationURL = videoURL
+            showOriginalVideoRequiredConfirm = true
+            return
+        }
+
         guard frameInterpolationQueue.completedRecord(videoURL: videoURL) != nil else {
             runLoopPointAnalysis(force: true)
             return
@@ -1084,7 +1100,13 @@ struct MediaDetailSheet: View {
         optimizationPipeline.set(.loopQueued, for: resolvedItem.id)
         LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, force: forceLoopAnalysis) { completedURL, succeeded in
             guard succeeded else {
-                optimizationPipeline.set(.failed("循环点分析失败"), for: resolvedItem.id)
+                let message: String
+                if case .failed(let detail) = VideoLoopPreprocessingService.shared.state(for: completedURL) {
+                    message = detail
+                } else {
+                    message = "循环点分析失败"
+                }
+                optimizationPipeline.set(.failed(message), for: resolvedItem.id)
                 return
             }
             optimizationPipeline.set(.checkingInterpolation, for: resolvedItem.id)
@@ -1105,12 +1127,19 @@ struct MediaDetailSheet: View {
                     title: resolvedItem.title,
                     targetFPS: targetFPS,
                     source: .manual,
+                    onFinished: { succeeded in
+                        if succeeded {
+                            optimizationPipeline.set(.idle, for: itemID)
+                        } else {
+                            optimizationPipeline.set(.failed("视频补帧失败"), for: itemID)
+                        }
+                    },
                     onCompleted: { _, _ in
                         optimizationPipeline.set(.idle, for: itemID)
                     }
                 )
                 if taskID != nil {
-                    optimizationPipeline.set(.interpolating, for: itemID)
+                    optimizationPipeline.set(.frameQueued, for: itemID)
                 } else {
                     optimizationPipeline.set(.idle, for: itemID)
                 }
@@ -2037,9 +2066,9 @@ struct MediaDetailSheet: View {
 
     private var loopPointAnalysisMenuForegroundStyle: Color {
         switch optimizationStage {
-        case .frameQueued, .interpolating:
-            return Color.white.opacity(0.46)
         case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+            return Color.white.opacity(0.55)
+        case .restoringOriginal:
             return Color.white.opacity(0.55)
         default:
             break
@@ -2063,12 +2092,8 @@ struct MediaDetailSheet: View {
             return t("optimization.restoringOriginal")
         }
         switch optimizationStage {
-        case .frameQueued, .interpolating:
-            return t("loopAnalysis.applied")
         case .loopQueued, .loopAnalyzing:
             return t("loopAnalysis.analyzing")
-        case .checkingInterpolation:
-            return t("loopAnalysis.applied")
         default:
             break
         }
@@ -3061,10 +3086,9 @@ struct MediaDetailSheet: View {
 
         switch contentType {
         case .scene:
-            // wallpaper-wgpu 的 --screen 仅支持单屏窗口。全局同步时统一使用烘焙 MP4，
-            // 再由 VideoWallpaperManager 的共享播放器输出到所有显示器。
+            // 实时渲染开关优先于全局同步：开启时每块屏幕实时渲染同一 Scene；
+            // 关闭时才使用烘焙 MP4 的共享播放器。
             let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
-                && !WallpaperSchedulerService.shared.config.syncAllDisplays
             AppLogger.error(.wallpaper, "applyWorkshopWallpaperFromLocalURL 路由: scene", metadata: [
                 "realtime": isRealtime,
                 "contentRoot": contentRoot.lastPathComponent
@@ -3986,7 +4010,7 @@ struct MediaDetailSheet: View {
             return
         }
         let screens = NSScreen.screens
-        if screens.count > 1 {
+        if screens.count > 1 && !WallpaperSchedulerService.shared.config.syncAllDisplays {
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")
@@ -4114,6 +4138,8 @@ struct MediaDetailSheet: View {
             return
         }
 
+        let isWebWallpaper = statusKey == "applyingWallpaper.web"
+        let usesGlobalDisplaySync = WallpaperSchedulerService.shared.config.syncAllDisplays
         let runSetWallpaper: (NSScreen?) -> Void = { [self] selectedScreen in
             applyingWallpaperStatusKey = statusKey
             isSettingWallpaper = true
@@ -4132,19 +4158,32 @@ struct MediaDetailSheet: View {
                         "selectedScreen": selectedScreen?.localizedName ?? "全部",
                         "realtime": isRealtime
                     ])
-                    try await WallpaperEngineXBridge.shared.setWallpaper(
-                        path: path,
-                        targetScreens: selectedScreen.map { [$0] },
-                        userProperties: userProps
-                    )
+                    if usesGlobalDisplaySync && isWebWallpaper {
+                        // Web CLI 按单屏目标工作；全局同步时逐屏设置同一个 Web 项目。
+                        for screen in screens {
+                            try await WallpaperEngineXBridge.shared.setWallpaper(
+                                path: path,
+                                targetScreens: [screen],
+                                userProperties: userProps
+                            )
+                        }
+                    } else {
+                        try await WallpaperEngineXBridge.shared.setWallpaper(
+                            path: path,
+                            targetScreens: selectedScreen.map { [$0] },
+                            userProperties: userProps
+                        )
+                    }
                     print("[MediaDetailSheet] ✅ 壁纸设置成功")
-                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
+                    WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                        screenID: usesGlobalDisplaySync ? nil : selectedScreen?.wallpaperScreenIdentifier
+                    )
 
                     // 实时渲染模式下，后台触发烘焙；完成后若动态锁屏开启，则推送到对应锁屏实例。
                     if isRealtime {
                         SceneOfflineBakeService.scheduleRealtimeCompanionBake(
                             path: path,
-                            targetScreens: selectedScreen.map { [$0] },
+                            targetScreens: usesGlobalDisplaySync ? screens : selectedScreen.map { [$0] },
                             reason: "manual-apply"
                         )
                     }
@@ -4157,7 +4196,7 @@ struct MediaDetailSheet: View {
             }
         }
 
-        if screens.count > 1 {
+        if screens.count > 1 && !usesGlobalDisplaySync {
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")

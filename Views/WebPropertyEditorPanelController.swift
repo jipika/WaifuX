@@ -774,7 +774,7 @@ final class WebPropertyEditorPanelController {
                 return Array(Set(keys))
             }
 
-            var group: [String: Any] = [
+            let group: [String: Any] = [
                 "id": siblings.first?.id ?? row.id,
                 "displayName": groupName,
                 "entries": entriesData,

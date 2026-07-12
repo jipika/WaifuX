@@ -4,6 +4,7 @@ import SwiftUI
 // 与 Kazumi 对齐：显示全部可用规则，让用户选择安装
 
 struct AnimeRulesMarketView: View {
+    @ObservedObject private var localization = LocalizationService.shared
     @State private var availableRules: [AnimeRuleInfo] = []
     @State private var installedRuleIds: Set<String> = []
     @State private var isLoading = false

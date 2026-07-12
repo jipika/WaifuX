@@ -309,8 +309,8 @@ final class VideoWallpaperManager: ObservableObject {
     private var fadeInTimeouts: [String: DispatchWorkItem] = [:]
     /// 全局共享播放器切换期间保留新 item 的观察器，确保旧视频持续播放到新首帧就绪。
     private var sharedReplacementObserver: NSKeyValueObservation?
+    private var sharedReplacementReadyTimeout: DispatchWorkItem?
     private var sharedReplacementToken: UUID?
-    private var sharedReplacementPreparationTask: Task<Void, Never>?
     private var sharedReplacementPreparingVideoURL: URL?
 
     /// "播完即换"模式下的播放器播放结束观察者（key: screenID）
@@ -380,6 +380,10 @@ final class VideoWallpaperManager: ObservableObject {
     /// AVPlayerItem/AVQueuePlayer，才能让 VideoToolbox 仅保留一条硬件解码管线。
     private var usesSharedGlobalVideoPlayer: Bool {
         WallpaperSchedulerService.shared.config.syncAllDisplays && NSScreen.screens.count > 1
+    }
+
+    var isPreparingSharedGlobalReplacement: Bool {
+        sharedReplacementToken != nil
     }
 
     private func frameInterpolationTargetFPS(for screen: NSScreen?) -> Int {
@@ -1297,16 +1301,22 @@ final class VideoWallpaperManager: ObservableObject {
 
         let cacheKey = videoLetterboxCacheKey(for: videoURL)
         if let cached = videoLetterboxCropCache[cacheKey] {
-            videoLetterboxContentCrops[screenID] = cached
-            if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
-                applyCropToScreen(screen)
+            let targetScreenIDs = videoLetterboxTargetScreenIDs(for: screenID)
+            for targetScreenID in targetScreenIDs {
+                videoLetterboxContentCrops[targetScreenID] = cached
+                if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == targetScreenID }) {
+                    applyCropToScreen(screen)
+                }
             }
             return
         }
         if videoLetterboxNoCropCache.contains(cacheKey) {
-            videoLetterboxContentCrops.removeValue(forKey: screenID)
-            if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
-                applyCropToScreen(screen)
+            let targetScreenIDs = videoLetterboxTargetScreenIDs(for: screenID)
+            for targetScreenID in targetScreenIDs {
+                videoLetterboxContentCrops.removeValue(forKey: targetScreenID)
+                if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == targetScreenID }) {
+                    applyCropToScreen(screen)
+                }
             }
             return
         }
@@ -1328,9 +1338,7 @@ final class VideoWallpaperManager: ObservableObject {
                 return
             }
 
-            let targetScreenIDs = self.usesSharedGlobalVideoPlayer
-                ? Array(self.windows.keys)
-                : [screenID]
+            let targetScreenIDs = self.videoLetterboxTargetScreenIDs(for: screenID)
             if let crop {
                 self.videoLetterboxCropCache[cacheKey] = crop
                 for targetID in targetScreenIDs {
@@ -1349,6 +1357,14 @@ final class VideoWallpaperManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 全局共享播放器的去黑边结果按所有当前显示器保存。不能只依赖已创建的 window，
+    /// 否则在新屏窗口尚未完成挂载时命中缓存，会遗漏该屏的裁切状态。
+    private func videoLetterboxTargetScreenIDs(for screenID: String) -> [String] {
+        guard usesSharedGlobalVideoPlayer else { return [screenID] }
+        let screenIDs = NSScreen.screens.map(\.wallpaperScreenIdentifier)
+        return screenIDs.isEmpty ? Array(windows.keys) : screenIDs
     }
 
     private func videoLetterboxCacheKey(for url: URL) -> String {
@@ -1531,6 +1547,11 @@ final class VideoWallpaperManager: ObservableObject {
             if let self {
                 if succeeded {
                     self.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
+                    // 全局共享播放器的刷新是异步黑场热替换。替换提交后会由新播放器
+                    // 再次进入 prepareFrameInterpolation，届时才开始补帧，保证任务严格串行。
+                    if self.usesSharedGlobalVideoPlayer {
+                        return
+                    }
                 } else {
                     frameInterpolationDebugPrint("循环点分析失败：\(completedURL.lastPathComponent)")
                 }
@@ -1543,7 +1564,7 @@ final class VideoWallpaperManager: ObservableObject {
     private func replacePlayerWithInterpolatedVideoIfNeeded(screenID: String, sourceURL: URL, outputURL: URL) {
         if usesSharedGlobalVideoPlayer {
             guard screenID == NSScreen.screens.first?.wallpaperScreenIdentifier else { return }
-            try? rebuildWindows()
+            try? rebuildWindows(animatedTransition: true)
             return
         }
         guard frameInterpolationEnabled,
@@ -1647,7 +1668,7 @@ final class VideoWallpaperManager: ObservableObject {
     private func replacePlayerWithOriginalVideoIfNeeded(screenID: String, sourceURL: URL) {
         if usesSharedGlobalVideoPlayer {
             guard screenID == NSScreen.screens.first?.wallpaperScreenIdentifier else { return }
-            try? rebuildWindows()
+            try? rebuildWindows(animatedTransition: true)
             return
         }
         guard let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
@@ -3307,7 +3328,7 @@ final class VideoWallpaperManager: ObservableObject {
         NSLog("[VideoWallpaperManager] Windows rebuilt successfully")
     }
 
-    /// 全局同步切换：旧播放器持续播放，新视频的优化与预滚全部完成后才进入黑场换层。
+    /// 全局同步切换：先按单屏条件加载原视频；接管后再串行执行循环点分析与补帧。
     @discardableResult
     private func scheduleSharedGlobalPlayerReplacement(for screens: [NSScreen]) throws -> Bool {
         guard let primaryScreen = screens.first,
@@ -3322,8 +3343,8 @@ final class VideoWallpaperManager: ObservableObject {
 
         sharedReplacementObserver?.invalidate()
         sharedReplacementObserver = nil
-        sharedReplacementPreparationTask?.cancel()
-        sharedReplacementPreparationTask = nil
+        sharedReplacementReadyTimeout?.cancel()
+        sharedReplacementReadyTimeout = nil
 
         let primaryID = primaryScreen.wallpaperScreenIdentifier
         let schedulerConfig = WallpaperSchedulerService.shared.config.resolvedDisplayConfig(for: primaryID)
@@ -3332,95 +3353,14 @@ final class VideoWallpaperManager: ObservableObject {
         sharedReplacementToken = token
         sharedReplacementPreparingVideoURL = videoURL
 
-        sharedReplacementPreparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let prepared = await self.prepareSharedGlobalVideoForReplacement(
-                videoURL: videoURL,
-                primaryScreen: primaryScreen,
-                token: token
-            )
-            guard prepared, !Task.isCancelled else {
-                if self.sharedReplacementToken == token {
-                    self.sharedReplacementToken = nil
-                    self.sharedReplacementPreparingVideoURL = nil
-                    self.sharedReplacementPreparationTask = nil
-                }
-                return
-            }
-            guard self.sharedReplacementToken == token else { return }
-            self.sharedReplacementPreparationTask = nil
-            self.startPreparedSharedGlobalPlayerReplacement(
-                videoURL: videoURL,
-                targets: targetContainers,
-                primaryScreen: primaryScreen,
-                isOnEndMode: isOnEndMode,
-                token: token
-            )
-        }
+        startPreparedSharedGlobalPlayerReplacement(
+            videoURL: videoURL,
+            targets: targetContainers,
+            primaryScreen: primaryScreen,
+            isOnEndMode: isOnEndMode,
+            token: token
+        )
         return true
-    }
-
-    private func prepareSharedGlobalVideoForReplacement(
-        videoURL: URL,
-        primaryScreen: NSScreen,
-        token: UUID
-    ) async -> Bool {
-        if autoAnalyzeLoopPointEnabled,
-           !VideoLoopPreprocessingService.shared.hasCompletedAnalysis(videoURL) {
-            let succeeded = await withCheckedContinuation { continuation in
-                LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL) { _, succeeded in
-                    continuation.resume(returning: succeeded)
-                }
-            }
-            guard succeeded,
-                  !Task.isCancelled,
-                  sharedReplacementToken == token else { return false }
-        }
-
-        let targetFPS = frameInterpolationTargetFPS(for: primaryScreen)
-        if frameInterpolationEnabled,
-           targetFPS > 0,
-           FrameInterpolationQueueService.shared.autoEnqueueEnabled,
-           !FrameInterpolationQueueService.shared.isBlacklisted(videoURL: videoURL),
-           FrameInterpolationQueueService.shared.completedRecord(videoURL: videoURL, satisfying: targetFPS) == nil {
-            let decision = await VideoFrameInterpolationAnalyzer.decision(for: videoURL, targetFPS: targetFPS)
-            guard !Task.isCancelled, sharedReplacementToken == token else { return false }
-            if decision.shouldInterpolate {
-                let succeeded = await withCheckedContinuation { continuation in
-                    FrameInterpolationQueueService.shared.enqueue(
-                        videoURL: videoURL,
-                        title: videoURL.deletingPathExtension().lastPathComponent,
-                        targetFPS: targetFPS,
-                        source: .automatic,
-                        onFinished: { succeeded in
-                            continuation.resume(returning: succeeded)
-                        }
-                    )
-                }
-                guard succeeded,
-                      !Task.isCancelled,
-                      sharedReplacementToken == token else { return false }
-            }
-        }
-
-        await precomputeVideoLetterboxAnalysisIfNeeded(videoURL: videoURL)
-        return !Task.isCancelled && sharedReplacementToken == token
-    }
-
-    private func precomputeVideoLetterboxAnalysisIfNeeded(videoURL: URL) async {
-        guard autoRemoveVideoLetterboxEnabled else { return }
-        let cacheKey = videoLetterboxCacheKey(for: videoURL)
-        guard videoLetterboxCropCache[cacheKey] == nil,
-              !videoLetterboxNoCropCache.contains(cacheKey) else { return }
-
-        let crop = await Task.detached(priority: .utility) {
-            await VideoLetterboxAnalyzer.analyze(url: videoURL)
-        }.value
-        if let crop {
-            videoLetterboxCropCache[cacheKey] = crop
-        } else {
-            videoLetterboxNoCropCache.insert(cacheKey)
-        }
     }
 
     private func startPreparedSharedGlobalPlayerReplacement(
@@ -3448,6 +3388,23 @@ final class VideoWallpaperManager: ObservableObject {
             isOnEndMode: isOnEndMode
         )
 
+        let commitReplacement: @MainActor () -> Void = { [weak self, context] in
+            guard let self, self.sharedReplacementToken == token else { return }
+            self.sharedReplacementObserver?.invalidate()
+            self.sharedReplacementObserver = nil
+            self.sharedReplacementReadyTimeout?.cancel()
+            self.sharedReplacementReadyTimeout = nil
+            self.sharedReplacementToken = nil
+            self.sharedReplacementPreparingVideoURL = nil
+            self.performSharedGlobalPlayerReplacement(
+                components: context.components,
+                videoURL: context.videoURL,
+                targets: context.targets,
+                primaryScreen: context.primaryScreen,
+                isOnEndMode: context.isOnEndMode
+            )
+        }
+
         sharedReplacementObserver = components.item.observe(\.status, options: [.initial, .new]) { [weak self, context] item, _ in
             guard item.status == .readyToPlay else {
                 if item.status == .failed {
@@ -3456,6 +3413,8 @@ final class VideoWallpaperManager: ObservableObject {
                         guard let self, self.sharedReplacementToken == token else { return }
                         self.sharedReplacementObserver?.invalidate()
                         self.sharedReplacementObserver = nil
+                        self.sharedReplacementReadyTimeout?.cancel()
+                        self.sharedReplacementReadyTimeout = nil
                         self.sharedReplacementToken = nil
                         self.sharedReplacementPreparingVideoURL = nil
                         AppLogger.error(.wallpaper, "Prepared global replacement failed", metadata: [
@@ -3466,34 +3425,20 @@ final class VideoWallpaperManager: ObservableObject {
                 }
                 return
             }
-            Task { @MainActor [weak self, context] in
+            Task { @MainActor [weak self] in
                 guard let self, self.sharedReplacementToken == token else { return }
-                self.sharedReplacementObserver?.invalidate()
-                self.sharedReplacementObserver = nil
-                context.components.player.preroll(atRate: 1) { [weak self, context] succeeded in
-                    Task { @MainActor [weak self, context] in
-                        guard let self, self.sharedReplacementToken == token else { return }
-                        guard succeeded else {
-                            self.sharedReplacementToken = nil
-                            self.sharedReplacementPreparingVideoURL = nil
-                            AppLogger.error(.wallpaper, "Prepared global replacement preroll failed", metadata: [
-                                "video": context.videoURL.lastPathComponent
-                            ])
-                            return
-                        }
-                        self.sharedReplacementToken = nil
-                        self.sharedReplacementPreparingVideoURL = nil
-                        self.performSharedGlobalPlayerReplacement(
-                            components: context.components,
-                            videoURL: context.videoURL,
-                            targets: context.targets,
-                            primaryScreen: context.primaryScreen,
-                            isOnEndMode: context.isOnEndMode
-                        )
-                    }
-                }
+                commitReplacement()
             }
         }
+
+        // 与单屏切换一致：正常等待 readyToPlay，同时保留同样的就绪超时兜底，
+        // 防止异常媒体永远停在 unknown 状态并锁死后续自动/手动切换。
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.sharedReplacementToken == token else { return }
+            commitReplacement()
+        }
+        sharedReplacementReadyTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + automaticSwitchReadyTimeout, execute: timeout)
     }
 
     private func performSharedGlobalPlayerReplacement(
@@ -3547,6 +3492,19 @@ final class VideoWallpaperManager: ObservableObject {
                 }
 
                 self.scheduleVideoLetterboxAnalysis(screenID: primaryID, videoURL: videoURL)
+                if let primaryContainer = targets.first(where: {
+                    $0.0.wallpaperScreenIdentifier == primaryID
+                })?.1 {
+                    self.prepareFrameInterpolation(
+                        screenID: primaryID,
+                        screen: primaryScreen,
+                        videoURL: videoURL,
+                        player: components.player,
+                        item: components.item,
+                        containerView: primaryContainer,
+                        triggeredByWallpaperSetup: true
+                    )
+                }
                 targets.forEach { $0.1.revealFromBlack(duration: self.automaticSwitchTransitionDuration) }
 
                 for looper in oldLoopers where looper !== components.looper {
@@ -3911,11 +3869,11 @@ final class VideoWallpaperManager: ObservableObject {
         activeDisplaySwitchScreenID = nil
         pendingDisplaySwitches.removeAll()
         sharedReplacementToken = nil
-        sharedReplacementPreparationTask?.cancel()
-        sharedReplacementPreparationTask = nil
         sharedReplacementPreparingVideoURL = nil
         sharedReplacementObserver?.invalidate()
         sharedReplacementObserver = nil
+        sharedReplacementReadyTimeout?.cancel()
+        sharedReplacementReadyTimeout = nil
         // 清理启动淡入相关的 observer 和超时
         playerItemObservers.values.forEach { $0.invalidate() }
         playerItemObservers.removeAll()
@@ -6353,9 +6311,7 @@ final class VideoLoopPreprocessingService: ObservableObject {
             throw NSError(domain: "VideoLoop", code: 7, userInfo: [NSLocalizedDescriptionKey: "No non-black frame found"])
         }
 
-        guard let matchedCandidate = selectLastReliableCandidate(from: verifiedCandidates),
-              matchedCandidate.frame > firstReferenceFrame.frame,
-              CMTimeCompare(matchedCandidate.time, firstReferenceFrame.time) > 0 else {
+        guard !verifiedCandidates.isEmpty else {
             // 未出现可裁的重复尾帧时，只在首尾高度相似的情况下认定为天然循环。
             // 其余情况不是处理错误，保留文件并交给后续补帧流程。
             return lastSignature?.isLoopBoundarySimilar(to: firstReferenceFrame.signature) == true
@@ -6363,42 +6319,76 @@ final class VideoLoopPreprocessingService: ObservableObject {
                 : .noReliablePoint
         }
 
-        var startFrame = firstReferenceFrame.frame
-        var startTime = firstReferenceFrame.time
-        var endFrame = matchedCandidate.frame
-        var endTime = matchedCandidate.time
+        // 循环时长以首个有效画面为起点，避免片头黑帧影响判断。
+        // 超过 10 秒的视频不接受短循环点；短视频只保留时间最靠后的循环点。
+        let minimumAcceptedLoopDuration: Double = 10
+        let candidatesForRefinement: [LoopCandidate]
+        if durationSeconds <= minimumAcceptedLoopDuration {
+            candidatesForRefinement = verifiedCandidates.max { lhs, rhs in
+                CMTimeCompare(lhs.time, rhs.time) < 0
+            }.map { [$0] } ?? []
+        } else {
+            candidatesForRefinement = verifiedCandidates.filter { candidate in
+                CMTimeGetSeconds(CMTimeSubtract(candidate.time, firstReferenceFrame.time)) >= minimumAcceptedLoopDuration
+            }
+        }
+
+        guard !candidatesForRefinement.isEmpty else {
+            print("[VideoLoopPreprocessing] No loop candidates passed the 10s minimum duration filter")
+            return .noReliablePoint
+        }
+
+        let fallbackCandidate = selectLastReliableCandidate(from: candidatesForRefinement)
+        var refinedBoundaries: [RefinedLoopBoundary] = []
+        refinedBoundaries.reserveCapacity(candidatesForRefinement.count)
+        for (index, candidate) in candidatesForRefinement.enumerated() {
+            do {
+                if let refinedBoundary = try await refineLoopBoundary(
+                    in: asset,
+                    videoTrack: videoTrack,
+                    duration: duration,
+                    referenceFrames: referenceFrames,
+                    candidate: candidate
+                ) {
+                    refinedBoundaries.append(refinedBoundary)
+                }
+            } catch {
+                // 单个候选点读取失败不影响其他候选点。
+                print("[VideoLoopPreprocessing] Candidate refinement skipped: frame=\(candidate.frame), error=\(error.localizedDescription)")
+            }
+            progress(0.70 + 0.07 * Double(index + 1) / Double(max(1, candidatesForRefinement.count)))
+        }
+
+        let bestRefinedBoundary = refinedBoundaries.min { lhs, rhs in
+            if lhs.difference.qualityScore == rhs.difference.qualityScore {
+                return lhs.end.time > rhs.end.time
+            }
+            return lhs.difference.qualityScore < rhs.difference.qualityScore
+        }
+        guard let selectedBoundary = bestRefinedBoundary ?? fallbackCandidate.map({
+            RefinedLoopBoundary(
+                start: firstReferenceFrame,
+                end: TimedFrameSignature(frame: $0.frame, time: $0.time, signature: firstReferenceFrame.signature),
+                difference: $0.difference
+            )
+        }),
+        selectedBoundary.end.frame > selectedBoundary.start.frame,
+        CMTimeCompare(selectedBoundary.end.time, selectedBoundary.start.time) > 0 else {
+            return .noReliablePoint
+        }
+
+        let startFrame = selectedBoundary.start.frame
+        let startTime = selectedBoundary.start.time
+        let endFrame = selectedBoundary.end.frame
+        let endTime = selectedBoundary.end.time
         print(
             "[VideoLoopPreprocessing] Loop candidate selected: frame=\(endFrame), " +
             "time=\(String(format: "%.3f", endTime.seconds))s, " +
-            "windowMAE=\(String(format: "%.2f", matchedCandidate.difference.meanAbsoluteDifference)), " +
-            "windowRMSE=\(String(format: "%.2f", matchedCandidate.difference.rootMeanSquareDifference)), " +
-            "strongDelta=\(String(format: "%.2f%%", matchedCandidate.difference.strongDifferenceRatio * 100))"
+            "windowMAE=\(String(format: "%.2f", selectedBoundary.difference.meanAbsoluteDifference)), " +
+            "windowRMSE=\(String(format: "%.2f", selectedBoundary.difference.rootMeanSquareDifference)), " +
+            "strongDelta=\(String(format: "%.2f%%", selectedBoundary.difference.strongDifferenceRatio * 100)), " +
+            "verifiedCandidates=\(verifiedCandidates.count), eligibleCandidates=\(candidatesForRefinement.count), refinedCandidates=\(refinedBoundaries.count)"
         )
-
-        do {
-            if let refinedBoundary = try await refineLoopBoundary(
-                in: asset,
-                videoTrack: videoTrack,
-                duration: duration,
-                referenceFrames: referenceFrames,
-                candidate: matchedCandidate
-            ) {
-                startFrame = refinedBoundary.start.frame
-                startTime = refinedBoundary.start.time
-                endFrame = refinedBoundary.end.frame
-                endTime = refinedBoundary.end.time
-                print(
-                    "[VideoLoopPreprocessing] Loop boundary refined: start=\(startFrame) " +
-                    "(\(String(format: "%.3f", startTime.seconds))s), end=\(endFrame) " +
-                    "(\(String(format: "%.3f", endTime.seconds))s), " +
-                    "windowMAE=\(String(format: "%.2f", refinedBoundary.difference.meanAbsoluteDifference)), " +
-                    "windowRMSE=\(String(format: "%.2f", refinedBoundary.difference.rootMeanSquareDifference))"
-                )
-            }
-        } catch {
-            // 局部精修是对全局候选的增强；读取失败时仍使用已验证的全局循环点。
-            print("[VideoLoopPreprocessing] Loop boundary refinement skipped: \(error.localizedDescription)")
-        }
 
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
@@ -6480,22 +6470,24 @@ final class VideoLoopPreprocessingService: ObservableObject {
 
         let frameRate = try await videoTrack.load(.nominalFrameRate)
         let fps = frameRate > 0 ? Double(frameRate) : 30
-        let windowDurationSeconds = min(max(0.75, 14.0 / fps), durationSeconds * 0.25)
+        // 读取更宽的首尾窗口：首段取最早有效帧，尾段取真正结束前的帧。
+        // 之前只读 14 帧时，尾段实际比较的是“尾窗口的开头”，会漏掉真实循环边界。
+        let windowDurationSeconds = min(max(0.75, 42.0 / fps), durationSeconds * 0.25)
         let windowDuration = CMTime(seconds: windowDurationSeconds, preferredTimescale: 600_000)
         let tailStart = CMTimeMaximum(.zero, CMTimeSubtract(duration, windowDuration))
 
-        let firstFrames = try readLoopSignatures(
+        let firstFrames = Array(try readLoopSignatures(
             from: asset,
             videoTrack: videoTrack,
             timeRange: CMTimeRange(start: .zero, duration: windowDuration),
-            maximumCount: 14
-        ).filter { !$0.isPureBlack }
-        let lastFrames = try readLoopSignatures(
+            maximumCount: 28
+        ).filter { !$0.isPureBlack }.prefix(14))
+        let lastFrames = Array(try readLoopSignatures(
             from: asset,
             videoTrack: videoTrack,
             timeRange: CMTimeRange(start: tailStart, duration: CMTimeSubtract(duration, tailStart)),
-            maximumCount: 14
-        ).filter { !$0.isPureBlack }
+            maximumCount: 42
+        ).filter { !$0.isPureBlack }.suffix(14))
 
         guard firstFrames.count >= 4, lastFrames.count >= 4 else { return false }
 
@@ -6551,8 +6543,8 @@ final class VideoLoopPreprocessingService: ObservableObject {
         return signatures
     }
 
-    /// 全局扫描确定循环相位后，在两个局部窗口里精修首尾边界。
-    /// 新首帧从首个有效帧后的 20 帧中选取；新循环点从全局候选后的 20 帧中选取。
+    /// 全局扫描确定候选循环点后，在每个候选点前后各 20 帧里精修首尾边界。
+    /// 首段使用首个有效帧后连续 20 帧，并与当前候选点周围的 40 帧逐一比对，最后使用所有候选点中误差最小的一对。
     /// 导出时采用 `[start, end)`，因此 end 匹配帧不会被包含，成片末帧自然是它的前一帧。
     nonisolated private static func refineLoopBoundary(
         in asset: AVAsset,
@@ -6568,7 +6560,10 @@ final class VideoLoopPreprocessingService: ObservableObject {
         let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
         let framesPerSecond = nominalFrameRate > 0 ? Double(nominalFrameRate) : 30
         let frameDuration = CMTime(seconds: 1 / framesPerSecond, preferredTimescale: 600_000)
-        let readerStart = CMTimeMaximum(.zero, CMTimeSubtract(candidate.time, frameDuration))
+        let readerStart = CMTimeMaximum(
+            .zero,
+            CMTimeSubtract(candidate.time, CMTimeMultiply(frameDuration, multiplier: Int32(localFrameCount)))
+        )
         let readerEnd = CMTimeMinimum(
             duration,
             CMTimeAdd(candidate.time, CMTimeMultiply(frameDuration, multiplier: Int32(localFrameCount + 1)))
@@ -6590,13 +6585,12 @@ final class VideoLoopPreprocessingService: ObservableObject {
         }
 
         var candidateFrames: [TimedFrameSignature] = []
-        while candidateFrames.count < localFrameCount,
+        while candidateFrames.count < localFrameCount * 2 + 1,
               let sampleBuffer = output.copyNextSampleBuffer() {
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { continue }
             let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            guard CMTimeCompare(presentationTime, candidate.time) >= 0 else { continue }
             candidateFrames.append(TimedFrameSignature(
-                frame: candidate.frame + candidateFrames.count,
+                frame: candidate.frame - localFrameCount + candidateFrames.count,
                 time: presentationTime,
                 signature: try FrameSignature(pixelBuffer: pixelBuffer)
             ))
@@ -6617,6 +6611,7 @@ final class VideoLoopPreprocessingService: ObservableObject {
             for endIndex in candidateFrames.indices {
                 let availableFrames = min(starts.count - startIndex, candidateFrames.count - endIndex)
                 guard availableFrames >= validationFrameCount else { continue }
+                guard CMTimeCompare(candidateFrames[endIndex].time, starts[startIndex].time) > 0 else { continue }
 
                 var difference = FrameWindowDifference()
                 for offset in 0..<validationFrameCount {
@@ -6642,6 +6637,14 @@ final class VideoLoopPreprocessingService: ObservableObject {
             }
         }
 
+        if let bestBoundary {
+            print(
+                "[VideoLoopPreprocessing] Candidate boundary refined: start=\(bestBoundary.start.frame) " +
+                "(\(String(format: "%.3f", bestBoundary.start.time.seconds))s), end=\(bestBoundary.end.frame) " +
+                "(\(String(format: "%.3f", bestBoundary.end.time.seconds))s), " +
+                "MAE=\(String(format: "%.2f", bestBoundary.difference.meanAbsoluteDifference))"
+            )
+        }
         return bestBoundary
     }
 

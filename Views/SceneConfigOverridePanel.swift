@@ -182,6 +182,7 @@ final class SceneConfigOverrideViewModel: ObservableObject {
 
 struct SceneConfigOverridePanel: View {
     @ObservedObject var viewModel: SceneConfigOverrideViewModel
+    @ObservedObject private var localization = LocalizationService.shared
     private let accentTint = Color(nsColor: .controlAccentColor)
     private let labelWidth: CGFloat = 100
 

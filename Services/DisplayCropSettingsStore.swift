@@ -63,14 +63,24 @@ final class DisplayCropSettingsStore: ObservableObject {
     }
 
     func update(for screen: NSScreen, interactive: Bool = false, _ mutate: (inout DisplayCropSettings) -> Void) {
-        let screenID = screen.wallpaperScreenIdentifier
-        update(forScreenID: screenID, interactive: interactive, mutate)
-        // 同步 fingerprint 映射（落定态才持久化）
-        let fp = screen.wallpaperScreenFingerprint
-        if !fp.isEmpty {
-            fingerprints[screenID] = fp
-            settingsByFingerprint[fp] = settingsByScreen[screenID]
-            if !interactive { persistFingerprints() }
+        var updatedSettings = settings(for: screen)
+        mutate(&updatedSettings)
+        let targetScreens = synchronizedTargetScreens(for: screen)
+        for targetScreen in targetScreens {
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            settingsByScreen[screenID] = updatedSettings
+            let fingerprint = targetScreen.wallpaperScreenFingerprint
+            if !fingerprint.isEmpty {
+                fingerprints[screenID] = fingerprint
+                settingsByFingerprint[fingerprint] = updatedSettings
+            }
+        }
+        if !interactive {
+            persist()
+            persistFingerprints()
+        }
+        for targetScreen in targetScreens {
+            notifyChange(screenID: targetScreen.wallpaperScreenIdentifier, interactive: interactive)
         }
     }
 
@@ -81,7 +91,20 @@ final class DisplayCropSettingsStore: ObservableObject {
     }
 
     func reset(for screen: NSScreen) {
-        reset(forScreenID: screen.wallpaperScreenIdentifier)
+        let targetScreens = synchronizedTargetScreens(for: screen)
+        for targetScreen in targetScreens {
+            settingsByScreen[targetScreen.wallpaperScreenIdentifier] = .defaultSettings
+            let fingerprint = targetScreen.wallpaperScreenFingerprint
+            if !fingerprint.isEmpty {
+                fingerprints[targetScreen.wallpaperScreenIdentifier] = fingerprint
+                settingsByFingerprint[fingerprint] = .defaultSettings
+            }
+        }
+        persist()
+        persistFingerprints()
+        for targetScreen in targetScreens {
+            notifyChange(screenID: targetScreen.wallpaperScreenIdentifier, interactive: false)
+        }
     }
 
     func clear(forScreenID screenID: String) {
@@ -98,15 +121,26 @@ final class DisplayCropSettingsStore: ObservableObject {
     /// 拖拽结束时手动调用一次"落定"：把当前内存状态持久化 + 广播一次 Darwin + 通知 wgpu 重启。
     /// overlay 在 mouseUp / ESC 退出时调用。
     func commitInteractive(for screen: NSScreen) {
-        let screenID = screen.wallpaperScreenIdentifier
+        let targetScreens = synchronizedTargetScreens(for: screen)
         persist()
-        let fp = screen.wallpaperScreenFingerprint
-        if !fp.isEmpty {
-            fingerprints[screenID] = fp
-            settingsByFingerprint[fp] = settingsByScreen[screenID]
-            persistFingerprints()
+        for targetScreen in targetScreens {
+            let screenID = targetScreen.wallpaperScreenIdentifier
+            let fingerprint = targetScreen.wallpaperScreenFingerprint
+            if !fingerprint.isEmpty, let settings = settingsByScreen[screenID] {
+                fingerprints[screenID] = fingerprint
+                settingsByFingerprint[fingerprint] = settings
+            }
         }
-        notifyChange(screenID: screenID, interactive: false)
+        persistFingerprints()
+        for targetScreen in targetScreens {
+            notifyChange(screenID: targetScreen.wallpaperScreenIdentifier, interactive: false)
+        }
+    }
+
+    private func synchronizedTargetScreens(for screen: NSScreen) -> [NSScreen] {
+        guard WallpaperSchedulerService.shared.config.syncAllDisplays else { return [screen] }
+        let screens = NSScreen.screens
+        return screens.isEmpty ? [screen] : screens
     }
 
     // MARK: - Persistence (App 端)
