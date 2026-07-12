@@ -128,6 +128,7 @@ struct SchedulerConfig: Codable {
     var includeWallpapers: Bool
     var includeMedia: Bool
     var displayConfigs: [String: DisplaySchedulerConfig]
+    var syncAllDisplays: Bool
 
     /// 特殊间隔值：播完即换（视频播放完毕后自动切换到下一个）
     static let intervalOnEndMinutes: Int = -1
@@ -140,7 +141,8 @@ struct SchedulerConfig: Codable {
         order: .random,
         includeWallpapers: true,
         includeMedia: true,
-        displayConfigs: [:]
+        displayConfigs: [:],
+        syncAllDisplays: false
     )
 
     static let intervalOptions: [Int] = [1, 3, 5, 15, 30, 60, 360, 1440]
@@ -153,6 +155,7 @@ struct SchedulerConfig: Codable {
         case includeWallpapers
         case includeMedia
         case displayConfigs
+        case syncAllDisplays
     }
 
     init(
@@ -161,7 +164,8 @@ struct SchedulerConfig: Codable {
         order: ScheduleOrder,
         includeWallpapers: Bool,
         includeMedia: Bool,
-        displayConfigs: [String: DisplaySchedulerConfig] = [:]
+        displayConfigs: [String: DisplaySchedulerConfig] = [:],
+        syncAllDisplays: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.intervalMinutes = intervalMinutes
@@ -169,6 +173,7 @@ struct SchedulerConfig: Codable {
         self.includeWallpapers = includeWallpapers
         self.includeMedia = includeMedia
         self.displayConfigs = displayConfigs
+        self.syncAllDisplays = syncAllDisplays
     }
 
     init(from decoder: Decoder) throws {
@@ -177,6 +182,7 @@ struct SchedulerConfig: Codable {
         intervalMinutes = try container.decode(Int.self, forKey: .intervalMinutes)
         order = try container.decode(ScheduleOrder.self, forKey: .order)
         displayConfigs = try container.decodeIfPresent([String: DisplaySchedulerConfig].self, forKey: .displayConfigs) ?? [:]
+        syncAllDisplays = try container.decodeIfPresent(Bool.self, forKey: .syncAllDisplays) ?? false
 
         // Backward compatibility: read new fields, or infer from legacy source
         if let includeWallpapers = try? container.decode(Bool.self, forKey: .includeWallpapers),
@@ -206,6 +212,7 @@ struct SchedulerConfig: Codable {
         try container.encode(includeWallpapers, forKey: .includeWallpapers)
         try container.encode(includeMedia, forKey: .includeMedia)
         try container.encode(displayConfigs, forKey: .displayConfigs)
+        try container.encode(syncAllDisplays, forKey: .syncAllDisplays)
     }
 
     func resolvedDisplayConfig(for screenID: String) -> DisplaySchedulerConfig {

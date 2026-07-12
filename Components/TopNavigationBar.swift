@@ -151,6 +151,18 @@ struct CustomWindowControls: View {
     }
 }
 
+/// 详情页与主页面共用同一尺寸和窗口行为的交通灯。
+struct DetailWindowControls: View {
+    var body: some View {
+        CustomWindowControls(
+            onClose: { AppDelegate.shared?.hideMainWindow() },
+            onMinimize: { NSApp.mainWindow?.miniaturize(nil) },
+            onMaximize: { NSApp.mainWindow?.toggleFullScreen(nil) }
+        )
+        .frame(width: 80, height: 34, alignment: .center)
+    }
+}
+
 struct WindowControlButton: View {
     let fillColor: Color
     let symbol: String

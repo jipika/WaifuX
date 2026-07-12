@@ -132,6 +132,12 @@ class WallpaperSchedulerService: ObservableObject {
         overrideOrder: ScheduleOrder? = nil
     ) {
         guard !isScreenLocked else { return }
+        if config.syncAllDisplays,
+           let primaryScreenID = NSScreen.screens.first?.wallpaperScreenIdentifier,
+           screenID != primaryScreenID {
+            applyNextWallpaper(for: primaryScreenID, requiredMode: requiredMode, overrideOrder: overrideOrder)
+            return
+        }
         guard NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }) else {
             return
         }
@@ -155,6 +161,13 @@ class WallpaperSchedulerService: ObservableObject {
         let order = overrideOrder ?? displayConfig.order
         guard let item = selectNextItem(from: items, lastID: lastChangedItemID, screenID: screenID, order: order) else {
             print("\(logTag) Screen \(screenID): item selection returned nil for on-end mode")
+            return
+        }
+
+        if config.syncAllDisplays {
+            Task { @MainActor in
+                _ = await self.applySynchronizedItem(item, at: now)
+            }
             return
         }
 
@@ -500,6 +513,61 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
+    func updateSyncAllDisplays(_ enabled: Bool) {
+        var newConfig = config
+        newConfig.syncAllDisplays = enabled
+        updateConfig(newConfig)
+        guard enabled else { return }
+
+        let screens = NSScreen.screens
+        guard screens.count > 1 else { return }
+
+        if WallpaperEngineXBridge.shared.isCurrentWallpaperScene,
+           let scenePath = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign,
+           let record = downloadedSceneRecord(for: scenePath),
+           let artifact = record.sceneBakeArtifact {
+            let videoURL = URL(fileURLWithPath: artifact.videoPath)
+            guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else { return }
+            Task { @MainActor in
+                let posterURL = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
+                    forLocalVideo: videoURL,
+                    itemID: record.item.id
+                )
+                try? VideoWallpaperManager.shared.applyVideoWallpaper(
+                    from: videoURL,
+                    posterURL: posterURL,
+                    muted: VideoWallpaperManager.shared.isMuted,
+                    targetScreens: screens,
+                    animatedTransition: true
+                )
+            }
+            return
+        }
+
+        guard let source = screens.first,
+              let videoURL = VideoWallpaperManager.shared.videoURL(for: source) else { return }
+        let posterURL = VideoWallpaperManager.shared.posterURL(for: source)
+        try? VideoWallpaperManager.shared.applyVideoWallpaper(
+            from: videoURL,
+            posterURL: posterURL,
+            muted: VideoWallpaperManager.shared.isMuted,
+            targetScreens: screens
+        )
+        print("\(logTag) Global display sync enabled: \(videoURL.lastPathComponent) on \(screens.count) displays")
+    }
+
+    private func downloadedSceneRecord(for path: String) -> MediaDownloadRecord? {
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: URL(fileURLWithPath: path)
+        ).standardizedFileURL.path
+        return MediaLibraryService.shared.downloadedItems.first { record in
+            let recordRoot = WorkshopService.resolveWallpaperEngineProjectRoot(
+                startingAt: URL(fileURLWithPath: record.localFilePath)
+            ).standardizedFileURL.path
+            return record.isActive && recordRoot == contentRoot
+        }
+    }
+
     /// 校验 folderIDs 是否仍属于当前启用的内容类型。
     /// - on-end 模式仅消费媒体，壁纸文件夹视为失效。
     /// - 已删除（在两类文件夹存储中均查不到）的 ID 一并剔除。
@@ -681,7 +749,7 @@ class WallpaperSchedulerService: ObservableObject {
     /// 注意：特殊模式（intervalMinutes < 0）不参与定时器调度；
     /// 但如果设置了 webSceneSwitchSeconds（Web/Scene 壁纸切换间隔），则仍需定时器。
     private func effectiveCheckInterval() -> TimeInterval {
-        let screens = NSScreen.screens
+        let screens = config.syncAllDisplays ? Array(NSScreen.screens.prefix(1)) : NSScreen.screens
         let intervals = screens.compactMap { screen -> TimeInterval? in
             let screenID = screen.wallpaperScreenIdentifier
             let displayConfig = config.resolvedDisplayConfig(for: screenID)
@@ -727,6 +795,34 @@ class WallpaperSchedulerService: ObservableObject {
         }
         let screens = NSScreen.screens
         let now = Date()
+
+        if config.syncAllDisplays {
+            guard let primaryScreen = screens.first else { return }
+            let screenID = primaryScreen.wallpaperScreenIdentifier
+            let displayConfig = config.resolvedDisplayConfig(for: screenID)
+            guard displayConfig.isEnabled, !displayConfig.isOnUnlockMode else { return }
+
+            if displayConfig.isOnEndMode {
+                guard let seconds = displayConfig.webSceneSwitchSeconds,
+                      WallpaperEngineXBridge.shared.isManaging(screen: primaryScreen),
+                      lastChangeTimes[screenID].map({ now.timeIntervalSince($0) >= TimeInterval(seconds) - 0.5 }) ?? true else {
+                    return
+                }
+            }
+
+            let items = getSchedulableItems(for: displayConfig, screenID: screenID)
+            guard let item = selectNextItem(
+                from: items,
+                lastID: lastChangedItemIDs[screenID],
+                screenID: screenID,
+                order: displayConfig.order
+            ) else { return }
+
+            Task { @MainActor in
+                _ = await self.applySynchronizedItem(item, at: now)
+            }
+            return
+        }
 
         // 收集所有需要切换的屏幕及其选中项，然后在一个 Task 内依次执行，
         // 避免多屏同时切换时各自 Task 的 @MainActor 片段互相打断导致状态不一致。
@@ -820,6 +916,25 @@ class WallpaperSchedulerService: ObservableObject {
             return
         }
 
+        if config.syncAllDisplays {
+            guard let primaryScreen = NSScreen.screens.first else { return }
+            let screenID = primaryScreen.wallpaperScreenIdentifier
+            let displayConfig = config.resolvedDisplayConfig(for: screenID)
+            guard displayConfig.isEnabled, displayConfig.isOnUnlockMode else { return }
+            let items = getSchedulableItems(for: displayConfig, screenID: screenID)
+            guard let item = selectNextItem(
+                from: items,
+                lastID: lastChangedItemIDs[screenID],
+                screenID: screenID,
+                order: displayConfig.order
+            ) else { return }
+            lastUnlockSwitchTime = now
+            Task { @MainActor in
+                _ = await self.applySynchronizedItem(item, at: now)
+            }
+            return
+        }
+
         typealias PendingChange = (screenID: String, item: SchedulableItem)
         var pending: [PendingChange] = []
 
@@ -866,6 +981,23 @@ class WallpaperSchedulerService: ObservableObject {
 
     // MARK: - Item Application
 
+    @discardableResult
+    private func applySynchronizedItem(_ item: SchedulableItem, at date: Date) async -> Bool {
+        var appliedAny = false
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard await applyItem(item, toScreenID: screenID) else { continue }
+            lastChangeTimes[screenID] = date
+            lastChangedItemIDs[screenID] = item.id
+            appliedAny = true
+        }
+        if appliedAny {
+            persistSchedulerState()
+            print("\(logTag) Applied synchronized wallpaper '\(item.title)' to all displays")
+        }
+        return appliedAny
+    }
+
     private func waitBeforeApplyingBatchedWallpaper(index: Int) async {
         guard index > 0 else { return }
         let delayNanoseconds = UInt64(index) * 1_200_000_000
@@ -893,6 +1025,7 @@ class WallpaperSchedulerService: ObservableObject {
             // 桌面实时渲染（否则会变成播放固定时长 MP4 循环而非 wallpaper-wgpu 实时渲染）。
             // on-end 模式下：如果设置了 webSceneSwitchSeconds（走定时器而非视频通知），允许实时渲染。
             let preferRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+                && !config.syncAllDisplays
                 && (!isOnEndMode || webSceneSwitchEnabled)
             if let bakedPath = item.bakedVideoPath,
                !preferRealtime,

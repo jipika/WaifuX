@@ -97,6 +97,11 @@ struct WallpaperDetailSheet: View {
                     .ignoresSafeArea()
                     .coordinateSpace(name: "scroll")
 
+                DetailWindowControls()
+                    .padding(.leading, 12)
+                    .padding(.top, 12)
+                    .zIndex(20)
+
                 // 固定背景：宽 100% 高度按比例 + 不足处模糊渐变，不随 ScrollView 滚动
                 if isVisible {
                     fixedWallpaperBackground(width: viewW, height: viewH)
@@ -254,6 +259,11 @@ struct WallpaperDetailSheet: View {
             Text(errorMessage)
         }
         .alert(t("delete"), isPresented: $showDeleteConfirm) {
+            if !isLocalFile {
+                Button("重新下载") {
+                    redownloadWallpaperFromScratch()
+                }
+            }
             Button(t("delete"), role: .destructive) {
                 viewModel.removeWallpaperDownloads(withIDs: [wallpaper.id])
                 onClose()
@@ -1290,6 +1300,17 @@ struct WallpaperDetailSheet: View {
             }
             isDownloading = false
         }
+    }
+
+    private func redownloadWallpaperFromScratch() {
+        if let localURL = viewModel.localFileURLIfAvailable(for: wallpaper) {
+            LoopPointAnalysisQueueService.shared.reset(videoURL: localURL)
+            VideoLoopPreprocessingService.shared.resetState(for: localURL)
+            FrameInterpolationQueueService.shared.reset(videoURL: localURL)
+        }
+        VideoOptimizationPipelineStateService.shared.reset(itemID: wallpaper.id)
+        viewModel.removeWallpaperDownloads(withIDs: [wallpaper.id])
+        downloadWallpaper()
     }
 
     private func setAsDesktopWallpaper() {

@@ -131,6 +131,8 @@ struct MacToggle: View {
 
 /// 干净简洁的开关样式
 struct CleanToggleStyle: ToggleStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     func makeBody(configuration: Configuration) -> some View {
         Button {
             configuration.isOn.toggle()
@@ -138,7 +140,7 @@ struct CleanToggleStyle: ToggleStyle {
             ZStack {
                 // 轨道
                 Capsule()
-                    .fill(configuration.isOn
+                    .fill(isEnabled && configuration.isOn
                           ? Color(hex: "30D158")
                           : Color.white.opacity(0.2))
                     .frame(width: 44, height: 24)
@@ -154,6 +156,7 @@ struct CleanToggleStyle: ToggleStyle {
         }
         .buttonStyle(.plain)
         .frame(width: 46, height: 26)
+        .opacity(isEnabled ? 1 : 0.48)
     }
 }
 

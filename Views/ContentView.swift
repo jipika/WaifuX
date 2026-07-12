@@ -405,6 +405,7 @@ struct ContentView: View {
                         handleDownloadToastRetry(snapshot)
                     }
                 )
+                BackgroundDownloadProgressToastHost()
                 WallpaperSourceSwitchToast()
                     .padding(.horizontal, 24)
                     .padding(.bottom, 8)
@@ -681,7 +682,7 @@ struct ContentView: View {
                             collectionTitle: item.sourceName,
                             sourceName: item.sourceName
                         )
-                        try await mediaViewModel.downloadWorkshopWallpaper(workshopItem)
+                        try await mediaViewModel.downloadWorkshopWallpaper(workshopItem, suppressToast: true)
                         return
                     }
 
@@ -696,8 +697,8 @@ struct ContentView: View {
                     }) else {
                         throw NetworkError.invalidResponse
                     }
-                    // 3. 走标准下载流程，自动触发 DownloadProgressToastHost
-                    _ = try await mediaViewModel.downloadMedia(resolved, option: best)
+                    // 3. 自动下载只使用底部紧凑进度条，不打断用户浏览。
+                    _ = try await mediaViewModel.downloadMedia(resolved, option: best, suppressToast: true)
                 } catch {
                     AppLogger.error(.download, "猜你喜欢下载媒体失败",
                         metadata: ["id": media.id, "error": error.localizedDescription])
@@ -967,6 +968,80 @@ private struct DownloadProgressToastHost: View {
     }
 }
 
+// MARK: - 后台下载紧凑进度条
+private struct BackgroundDownloadProgressToastHost: View {
+    @ObservedObject private var downloadService = DownloadTaskService.shared
+    @ObservedObject private var optimizationPipeline = VideoOptimizationPipelineStateService.shared
+
+    private var backgroundTasks: [DownloadTask] {
+        downloadService.runningTasks.filter { downloadService.isToastSuppressed(for: $0.id) }
+    }
+
+    var body: some View {
+        if let task = backgroundTasks.first {
+            BackgroundDownloadProgressToast(
+                title: progressTitle(for: task),
+                detail: backgroundTasks.count > 1
+                    ? String(format: t("download.backgroundRemaining"), backgroundTasks.count - 1)
+                    : nil,
+                progress: task.progress
+            )
+            .padding(.bottom, 14)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+    }
+
+    private func progressTitle(for task: DownloadTask) -> String {
+        let percent = Int((task.progress * 100).rounded())
+        if case .restoringOriginal = optimizationPipeline.stage(for: task.itemID) {
+            return String(format: t("optimization.restoringOriginalProgress"), percent)
+        }
+        return String(format: t("download.backgroundProgress"), percent)
+    }
+}
+
+private struct BackgroundDownloadProgressToast: View {
+    let title: String
+    let detail: String?
+    let progress: Double
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .fixedSize(horizontal: true, vertical: false)
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 92, height: 5)
+
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.78))
+                    .frame(width: 92 * min(1, max(0, progress)), height: 5)
+            }
+
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .monospacedDigit()
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .liquidGlassSurface(.prominent, tint: Color.white.opacity(0.06), in: Capsule(style: .continuous))
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+    }
+}
+
 // MARK: - iOS 丝滑风格下载进度 Toast
 private struct DownloadProgressToast: View {
     let snapshot: DownloadToastSnapshot
@@ -1135,7 +1210,7 @@ private struct DownloadProgressToast: View {
             if showsCancel || showsRetry {
                 HStack(spacing: 10) {
                     toastActionButton(
-                        title: showsCancel ? "后台继续" : "关闭",
+                        title: showsCancel ? "后台下载" : "关闭",
                         icon: showsCancel ? "arrow.down.circle" : "xmark",
                         role: .secondary,
                         action: onDismiss

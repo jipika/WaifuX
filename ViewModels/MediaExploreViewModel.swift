@@ -151,7 +151,7 @@ final class MediaExploreViewModel: ObservableObject {
             forName: .appDidReceiveMemoryPressure,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.handleMemoryPressure()
             }
@@ -1018,8 +1018,12 @@ final class MediaExploreViewModel: ObservableObject {
     /// 缓存值在 init 时读取，避免后台线程访问 UserDefaults.standard 触发 _CFXPreferences 递归崩溃。
     private let persistDownloadedMediaToAppLibrary: Bool
 
-    func download(_ item: MediaItem, preferredOption: MediaDownloadOption? = nil) async throws {
-        let task = downloadTaskService.addTask(mediaItem: item)
+    func download(
+        _ item: MediaItem,
+        preferredOption: MediaDownloadOption? = nil,
+        suppressToast: Bool = false
+    ) async throws {
+        let task = downloadTaskService.addTask(mediaItem: item, suppressToast: suppressToast)
 
         let downloadTask = Task { [weak self] in
             guard let self else { throw CancellationError() }
@@ -1072,8 +1076,15 @@ final class MediaExploreViewModel: ObservableObject {
     ///   - item: 媒体项
     ///   - option: 下载选项
     /// - Returns: 下载后的本地文件 URL
-    func downloadMedia(_ item: MediaItem, option: MediaDownloadOption) async throws -> URL {
-        let task = downloadTaskService.addTask(mediaItem: item)
+    func downloadMedia(
+        _ item: MediaItem,
+        option: MediaDownloadOption,
+        suppressToast: Bool = false,
+        forceRefresh: Bool = false,
+        saveToDownloadsOverride: Bool? = nil
+    ) async throws -> URL {
+        let task = downloadTaskService.addTask(mediaItem: item, suppressToast: suppressToast)
+        let saveToDownloads = saveToDownloadsOverride ?? persistDownloadedMediaToAppLibrary
 
         // 创建真正执行下载逻辑的 Task（有返回值）
         let valueTask = Task { [weak self] () -> URL in
@@ -1082,8 +1093,9 @@ final class MediaExploreViewModel: ObservableObject {
             let localURL = try await ensureLocalVideoFile(
                 for: item,
                 preferredOption: option,
-                saveToDownloads: persistDownloadedMediaToAppLibrary,
-                taskID: task.id
+                saveToDownloads: saveToDownloads,
+                taskID: task.id,
+                forceRefresh: forceRefresh
             )
             downloadTaskService.markCompleted(id: task.id)
             return localURL
@@ -1112,9 +1124,10 @@ final class MediaExploreViewModel: ObservableObject {
         // Workshop 项：优先查找本地已下载的视频文件
         if item.id.hasPrefix("workshop_"),
            let localVideoURL = findLocalWorkshopVideo(for: item) {
-            print("[MediaExploreViewModel] Using downloaded Workshop video: \(localVideoURL.path)")
-            let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: localVideoURL, fallbackPosterURL: item.posterURL)
-            try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, posterURL: posterURL, muted: muted, targetScreens: targetScreen.map { [$0] })
+            let sourceURL = try await restoreOriginalVideoForAutomaticLoopAnalysisIfNeeded(item: item, videoURL: localVideoURL)
+            print("[MediaExploreViewModel] Using downloaded Workshop video: \(sourceURL.path)")
+            let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: sourceURL, fallbackPosterURL: item.posterURL)
+            try videoWallpaperManager.applyVideoWallpaper(from: sourceURL, posterURL: posterURL, muted: muted, targetScreens: targetScreen.map { [$0] })
             return
         }
 
@@ -1135,8 +1148,23 @@ final class MediaExploreViewModel: ObservableObject {
             preferredOption: preferredWallpaperOption(for: item),
             saveToDownloads: false
         )
-        let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: localVideoURL, fallbackPosterURL: item.posterURL)
-        try videoWallpaperManager.applyVideoWallpaper(from: localVideoURL, posterURL: posterURL, muted: muted, targetScreens: targetScreen.map { [$0] })
+        let sourceURL = try await restoreOriginalVideoForAutomaticLoopAnalysisIfNeeded(item: item, videoURL: localVideoURL)
+        let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: sourceURL, fallbackPosterURL: item.posterURL)
+        try videoWallpaperManager.applyVideoWallpaper(from: sourceURL, posterURL: posterURL, muted: muted, targetScreens: targetScreen.map { [$0] })
+    }
+
+    private func restoreOriginalVideoForAutomaticLoopAnalysisIfNeeded(item: MediaItem, videoURL: URL) async throws -> URL {
+        let loopAnalysisEnabled = UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true
+        let autoAnalyzeLoopPoint = UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
+        guard loopAnalysisEnabled,
+              autoAnalyzeLoopPoint,
+              FrameInterpolationQueueService.shared.completedRecord(videoURL: videoURL) != nil else {
+            return videoURL
+        }
+
+        // 本地源无法恢复时按降级规则直接分析当前文件。
+        guard !item.id.hasPrefix("local_") else { return videoURL }
+        return try await redownloadOriginalVideoForOptimization(item)
     }
 
     /// Workshop 内容类型
@@ -1379,7 +1407,8 @@ final class MediaExploreViewModel: ObservableObject {
         for item: MediaItem,
         preferredOption: MediaDownloadOption?,
         saveToDownloads: Bool,
-        taskID: String? = nil
+        taskID: String? = nil,
+        forceRefresh: Bool = false
     ) async throws -> URL {
         let resolvedItem = try await loadDetail(for: item)
         if let taskID {
@@ -1404,7 +1433,7 @@ final class MediaExploreViewModel: ObservableObject {
         )
 
         // 如果文件已存在（在新位置或旧位置），直接返回
-        if fileLocation.foundIn != .notFound {
+        if !forceRefresh, fileLocation.foundIn != .notFound {
             print("[MediaExploreViewModel] File found at: \(fileLocation.url.path) (location: \(fileLocation.foundIn))")
             if let taskID {
                 updateDownloadProgress(taskID: taskID, progress: saveToDownloads ? 0.72 : 1.0)
@@ -1427,7 +1456,8 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         let cachedURL: URL
-        if let existingCachedURL = await cacheService.cachedFileURL(named: fileURL.lastPathComponent, in: "Media") {
+        if !forceRefresh,
+           let existingCachedURL = await cacheService.cachedFileURL(named: fileURL.lastPathComponent, in: "Media") {
             cachedURL = existingCachedURL
             if let taskID {
                 updateDownloadProgress(taskID: taskID, progress: saveToDownloads ? 0.72 : 1.0)
@@ -1447,7 +1477,7 @@ final class MediaExploreViewModel: ObservableObject {
 
         if saveToDownloads {
             // 复制到应用内媒体库目录（Application Support 下 WaifuX/Media）
-            if !FileManager.default.fileExists(atPath: fileURL.path) {
+            if forceRefresh || !FileManager.default.fileExists(atPath: fileURL.path) {
                 do {
                     // 确保目标目录存在
                     let directory = fileURL.deletingLastPathComponent()
@@ -1481,6 +1511,45 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         return cachedURL
+    }
+
+    /// 不保存备份：重新从来源获取原始视频，覆盖当前派生产物后由优化链继续处理。
+    func redownloadOriginalVideoForOptimization(_ item: MediaItem) async throws -> URL {
+        guard !item.id.hasPrefix("local_") else {
+            throw NSError(domain: "VideoOptimization", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "原始文件不可用，无法重新下载本地视频。"
+            ])
+        }
+
+        if item.id.hasPrefix("workshop_") {
+            try await downloadWorkshopWallpaper(item, suppressToast: true)
+            guard let localVideoURL = findLocalWorkshopVideo(for: item) else {
+                throw NSError(domain: "VideoOptimization", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "重新下载完成，但未找到原始视频文件。"
+                ])
+            }
+            FrameInterpolationQueueService.shared.removeCompleted(videoURL: localVideoURL)
+            MediaLibraryService.shared.clearLooped(localFilePath: localVideoURL.path)
+            return localVideoURL
+        }
+
+        // 详情页已登记的壁纸必须在原位置覆盖下载：循环分析、补帧队列、详情菜单
+        // 都通过该记录解析视频。若在此改用仅缓存的临时路径，队列虽会运行，UI 却仍会查询旧文件。
+        let hasRegisteredLocalSource = MediaLibraryService.shared.downloadRecord(for: item.id) != nil
+        let resolvedItem = try await loadDetail(for: item)
+        guard let option = preferredWallpaperOption(for: resolvedItem) else {
+            throw NetworkError.invalidResponse
+        }
+        let videoURL = try await downloadMedia(
+            resolvedItem,
+            option: option,
+            suppressToast: true,
+            forceRefresh: true,
+            saveToDownloadsOverride: hasRegisteredLocalSource || persistDownloadedMediaToAppLibrary
+        )
+        FrameInterpolationQueueService.shared.removeCompleted(videoURL: videoURL)
+        MediaLibraryService.shared.clearLooped(localFilePath: videoURL.path)
+        return videoURL
     }
 
     private func updateDownloadProgress(taskID: String, progress: Double) {
@@ -2258,7 +2327,11 @@ final class MediaExploreViewModel: ObservableObject {
     // MARK: - Workshop 下载
 
     /// 下载 Workshop 壁纸（通过 SteamCMD）
-    func downloadWorkshopWallpaper(_ item: MediaItem, guardCode: String? = nil) async throws {
+    func downloadWorkshopWallpaper(
+        _ item: MediaItem,
+        guardCode: String? = nil,
+        suppressToast: Bool = false
+    ) async throws {
         guard item.id.hasPrefix("workshop_") else {
             throw WorkshopError.workshopNotSupported
         }
@@ -2269,7 +2342,7 @@ final class MediaExploreViewModel: ObservableObject {
             "workshopID": workshopID,
             "title": item.title
         ])
-        let task = downloadTaskService.addTask(workshopWallpaper: item)
+        let task = downloadTaskService.addTask(workshopWallpaper: item, suppressToast: suppressToast)
         let taskID = task.id
         downloadTaskService.markDownloading(id: taskID)
 

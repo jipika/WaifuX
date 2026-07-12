@@ -84,6 +84,21 @@ class SettingsViewModel: ObservableObject {
             FrameInterpolationQueueService.shared.autoEnqueueEnabled = frameInterpolationAutoEnqueue
         }
     }
+    @Published var loopPointAnalysisEnabled = true {
+        didSet {
+            guard !isBatchUpdating else { return }
+            if !loopPointAnalysisEnabled {
+                autoAnalyzeLoopPoint = false
+            }
+            UserDefaults.standard.set(loopPointAnalysisEnabled, forKey: "loop_point_analysis_enabled")
+        }
+    }
+    @Published var autoAnalyzeLoopPoint = false {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(autoAnalyzeLoopPoint, forKey: "auto_analyze_loop_point")
+        }
+    }
     @Published var showAllWorkshopContent = false { didSet { UserDefaults.standard.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
     /// 场景壁纸实时渲染模式开关
     /// 开启后，设置场景壁纸将使用 wallpaper-wgpu 实时渲染桌面，而非烘焙视频
@@ -252,6 +267,7 @@ class SettingsViewModel: ObservableObject {
         let effectiveFrameInterpolationAutoEnqueue = frameInterpolationEnabled && frameInterpolationAutoEnqueue
         frameInterpolationAutoEnqueue = effectiveFrameInterpolationAutoEnqueue
         UserDefaults.standard.set(effectiveFrameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_enqueue")
+        let effectiveAutoAnalyzeLoopPoint = loopPointAnalysisEnabled && autoAnalyzeLoopPoint
         UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
         UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
         UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
@@ -273,6 +289,8 @@ class SettingsViewModel: ObservableObject {
 
         // 纯 UserDefaults 属性（批量期间 didSet 被跳过，统一补写）
         UserDefaults.standard.set(autoBakeScene, forKey: "auto_bake_scene")
+        UserDefaults.standard.set(loopPointAnalysisEnabled, forKey: "loop_point_analysis_enabled")
+        UserDefaults.standard.set(effectiveAutoAnalyzeLoopPoint, forKey: "auto_analyze_loop_point")
         UserDefaults.standard.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
     }
 
@@ -356,6 +374,8 @@ class SettingsViewModel: ObservableObject {
             frameInterpolationEnabled = defaults.object(forKey: "frame_interpolation_enabled") as? Bool ?? false
             frameInterpolationTargetFPS = Double(FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(Int((defaults.object(forKey: "frame_interpolation_target_fps") as? Double ?? 60.0).rounded())))
             frameInterpolationAutoEnqueue = frameInterpolationEnabled && (defaults.object(forKey: "frame_interpolation_auto_enqueue") as? Bool ?? false)
+            loopPointAnalysisEnabled = defaults.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true
+            autoAnalyzeLoopPoint = defaults.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
             showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
             sceneRealtimeRenderingEnabled = defaults.bool(forKey: "scene_realtime_rendering_enabled")
             upscalingEnabled = defaults.object(forKey: "upscaling_enabled") as? Bool ?? true

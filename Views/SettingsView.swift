@@ -514,11 +514,10 @@ private struct GeneralSettingsTab: View {
                 ) {
                     MacToggle(isOn: $viewModel.hdrEnabled)
                 }
-
             }
 
-            // 动态壁纸补帧设置组
-            MacSettingsSection(header: t("frameInterpolationSection")) {
+            // 动态壁纸优化设置组
+            MacSettingsSection(header: t("videoWallpaperOptimization")) {
                 MacSettingsRow(
                     title: t("frameInterpolation"),
                     subtitle: t("frameInterpolationDesc"),
@@ -539,7 +538,7 @@ private struct GeneralSettingsTab: View {
                     MacSettingsRow(
                         title: t("frameInterpolationTargetFPS"),
                         subtitle: nil,
-                        showDivider: false
+                        showDivider: true
                     ) {
                         Picker("", selection: $viewModel.frameInterpolationTargetFPS) {
                             ForEach(FrameInterpolationTargetFPSResolver.allowedFixedFPSValues, id: \.self) { fps in
@@ -549,6 +548,24 @@ private struct GeneralSettingsTab: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 180)
+                    }
+                }
+
+                MacSettingsRow(
+                    title: t("loopPointAnalysis"),
+                    subtitle: t("loopPointAnalysisDesc"),
+                    showDivider: viewModel.loopPointAnalysisEnabled
+                ) {
+                    MacToggle(isOn: $viewModel.loopPointAnalysisEnabled)
+                }
+
+                if viewModel.loopPointAnalysisEnabled {
+                    MacSettingsRow(
+                        title: t("autoAnalyzeLoopPoint"),
+                        subtitle: t("autoAnalyzeLoopPointDesc"),
+                        showDivider: false
+                    ) {
+                        MacToggle(isOn: $viewModel.autoAnalyzeLoopPoint)
                     }
                 }
             }
@@ -891,11 +908,32 @@ private struct SchedulerSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
+            MacSettingsSection(header: "全局调度配置") {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("同步所有显示器壁纸")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        Text("设置所有显示器为同一壁纸以降低cpu与内存消耗，其他显示器将与显示器1保持一致。Scene 壁纸将在全局同步时改用烘焙 MP4，不再为每块屏幕启动独立的 wallpaper-wgpu")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.white.opacity(0.48))
+                    }
+                    Spacer()
+                    MacToggle(isOn: Binding(
+                        get: { viewModel.schedulerViewModel.config.syncAllDisplays },
+                        set: { viewModel.schedulerViewModel.updateSyncAllDisplays($0) }
+                    ))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+
             // 每屏配置
             MacSettingsSection(header: t("scheduleConfig")) {
                 ForEach(Array(screens.enumerated()), id: \.element.wallpaperScreenIdentifier) { (index: Int, screen: NSScreen) in
                     let screenID = screen.wallpaperScreenIdentifier
                     let displayConfig = viewModel.schedulerViewModel.displayConfig(for: screen)
+                    let isFollowingPrimaryDisplay = viewModel.schedulerViewModel.config.syncAllDisplays && index > 0
 
                     VStack(spacing: 0) {
                         HStack(spacing: 12) {
@@ -909,11 +947,12 @@ private struct SchedulerSettingsTab: View {
                                 get: { displayConfig.isEnabled },
                                 set: { viewModel.schedulerViewModel.updateDisplayEnabled($0, for: screenID) }
                             ))
+                            .disabled(isFollowingPrimaryDisplay)
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
 
-                        if displayConfig.isEnabled {
+                        if displayConfig.isEnabled && !isFollowingPrimaryDisplay {
                             dividerLine
 
                             if !screen.isBuiltInDisplay {
@@ -939,14 +978,6 @@ private struct SchedulerSettingsTab: View {
 
                                 dividerLine
                             }
-
-                            // 检查当前壁纸是否是 Web 壁纸
-                            let isWebWallpaper: Bool = {
-                                if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
-                                    return WallpaperEngineXBridge.shared.isManaging(screen: screen)
-                                }
-                                return false
-                            }()
 
                             // 间隔选择
                             HStack(spacing: 12) {

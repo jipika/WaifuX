@@ -166,9 +166,9 @@ final class DownloadToastViewModel: ObservableObject {
     }
 
     private func makePresentationState(from tasks: [DownloadTask]) -> (snapshot: DownloadToastSnapshot?, activeCount: Int) {
-        let activeCount = tasks.filter(\.isRunning).count
         let runningTasks = tasks.filter(\.isRunning)
         let visibleRunningTasks = runningTasks.filter { !downloadService.isToastSuppressed(for: $0.id) }
+        let activeCount = visibleRunningTasks.count
 
         // 如果被抑制的偏好任务重新可见了，清除偏好让它能被再次选中
         if let preferredID = preferredRunningTaskID,
@@ -196,7 +196,9 @@ final class DownloadToastViewModel: ObservableObject {
             .filter({ task in
                 let referenceDate = task.completedAt ?? task.lastUpdatedAt
                 let isActionable = task.status == .failed || task.status == .cancelled || task.status == .paused
-                return isActionable && Date().timeIntervalSince(referenceDate) < 30
+                return isActionable
+                    && !downloadService.isToastSuppressed(for: task.id)
+                    && Date().timeIntervalSince(referenceDate) < 30
             })
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
             return emit(DownloadToastSnapshot(task: actionableTask), activeCount: activeCount)
@@ -206,7 +208,8 @@ final class DownloadToastViewModel: ObservableObject {
             .filter({ task in
                 guard task.status == .completed else { return false }
                 let referenceDate = task.completedAt ?? task.lastUpdatedAt
-                return Date().timeIntervalSince(referenceDate) < 1.8
+                return !downloadService.isToastSuppressed(for: task.id)
+                    && Date().timeIntervalSince(referenceDate) < 1.8
             })
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
             return emit(DownloadToastSnapshot(task: recentCompletedTask), activeCount: activeCount)

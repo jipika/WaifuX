@@ -69,16 +69,22 @@ class DownloadTaskService: ObservableObject {
 
     // MARK: - Task Management
 
-    func addTask(wallpaper: Wallpaper) -> DownloadTask {
-        upsertTask(DownloadTask(wallpaper: wallpaper))
+    func addTask(wallpaper: Wallpaper, suppressToast: Bool = false) -> DownloadTask {
+        let task = DownloadTask(wallpaper: wallpaper)
+        configureToastSuppression(for: task.id, suppressToast: suppressToast)
+        return upsertTask(task)
     }
 
-    func addTask(mediaItem: MediaItem) -> DownloadTask {
-        upsertTask(DownloadTask(mediaItem: mediaItem))
+    func addTask(mediaItem: MediaItem, suppressToast: Bool = false) -> DownloadTask {
+        let task = DownloadTask(mediaItem: mediaItem)
+        configureToastSuppression(for: task.id, suppressToast: suppressToast)
+        return upsertTask(task)
     }
 
-    func addTask(workshopWallpaper: MediaItem) -> DownloadTask {
-        upsertTask(DownloadTask(workshopWallpaper: workshopWallpaper))
+    func addTask(workshopWallpaper: MediaItem, suppressToast: Bool = false) -> DownloadTask {
+        let task = DownloadTask(workshopWallpaper: workshopWallpaper)
+        configureToastSuppression(for: task.id, suppressToast: suppressToast)
+        return upsertTask(task)
     }
 
     func updateWallpaper(_ wallpaper: Wallpaper, id: String? = nil) {
@@ -225,18 +231,22 @@ class DownloadTaskService: ObservableObject {
     }
 
     func markToastSuppressed(for id: String) {
-        suppressedToastTaskIDs.insert(id)
+        guard suppressedToastTaskIDs.insert(id).inserted else { return }
+        objectWillChange.send()
     }
 
-    /// 批量抑制所有正在运行的下载任务的 toast（"后台继续"按钮使用）
+    /// 批量抑制所有正在运行的下载任务的弹窗（“后台下载”按钮使用）。
     func suppressAllRunningToasts() {
+        var changed = false
         for task in tasks where task.isRunning {
-            suppressedToastTaskIDs.insert(task.id)
+            changed = suppressedToastTaskIDs.insert(task.id).inserted || changed
         }
+        if changed { objectWillChange.send() }
     }
 
     func clearToastSuppression(for id: String) {
-        suppressedToastTaskIDs.remove(id)
+        guard suppressedToastTaskIDs.remove(id) != nil else { return }
+        objectWillChange.send()
     }
 
     func isToastSuppressed(for id: String) -> Bool {
@@ -281,7 +291,6 @@ class DownloadTaskService: ObservableObject {
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
         lastProgressUpdateTimes.removeValue(forKey: id)
-        suppressedToastTaskIDs.remove(id)
         persistTasks()
         scheduleVisibilityRefresh()
     }
@@ -301,8 +310,15 @@ class DownloadTaskService: ObservableObject {
         tasks[index].completedAt = Date()
         tasks[index].lastUpdatedAt = .now
         lastProgressUpdateTimes.removeValue(forKey: id)
-        suppressedToastTaskIDs.remove(id)
         persistTasks()
+    }
+
+    private func configureToastSuppression(for id: String, suppressToast: Bool) {
+        if suppressToast {
+            suppressedToastTaskIDs.insert(id)
+        } else {
+            suppressedToastTaskIDs.remove(id)
+        }
     }
 
     // MARK: - Persistence

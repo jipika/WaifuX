@@ -16,6 +16,8 @@ struct MediaDetailSheet: View {
     @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var mediaLibrary = MediaLibraryService.shared
     @ObservedObject private var loopService = VideoLoopPreprocessingService.shared
+    @ObservedObject private var loopAnalysisQueue = LoopPointAnalysisQueueService.shared
+    @ObservedObject private var optimizationPipeline = VideoOptimizationPipelineStateService.shared
     @ObservedObject private var displaySelectorManager = DisplaySelectorManager.shared
     @ObservedObject private var frameInterpolationQueue = FrameInterpolationQueueService.shared
     @State private var resolvedItem: MediaItem
@@ -76,8 +78,10 @@ struct MediaDetailSheet: View {
     @State private var showMoreOptionsPopover = false
     @State private var showDeleteBakeConfirm = false
     @State private var showDeleteFrameInterpolationConfirm = false
+    @State private var showOriginalVideoRequiredConfirm = false
     @State private var showRemoveFrameInterpolationBlacklistConfirm = false
     @State private var pendingDeleteFrameInterpolationURL: URL?
+    @State private var pendingLoopReoptimizationURL: URL?
     @State private var pendingRemoveFrameInterpolationBlacklistURL: URL?
     @State private var isDeletingBake = false
     @State private var isDeletingFrameInterpolation = false
@@ -144,6 +148,48 @@ struct MediaDetailSheet: View {
         return true
     }
 
+    private var loopPointAnalysisVideoURL: URL? {
+        guard UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true,
+              let record = currentDownloadRecord,
+              let videoURL = record.resolvedVideoFileURL else {
+            return nil
+        }
+        let ext = videoURL.pathExtension.lowercased()
+        guard ["mp4", "mov", "m4v", "webm", "mkv"].contains(ext) else { return nil }
+        return videoURL
+    }
+
+    private var loopPointAnalysisVisible: Bool {
+        loopPointAnalysisVideoURL != nil
+    }
+
+    private var optimizationStage: VideoOptimizationPipelineStateService.Stage {
+        optimizationPipeline.stage(for: resolvedItem.id)
+    }
+
+    private var isRestoringOriginalVideo: Bool {
+        if case .restoringOriginal = optimizationStage { return true }
+        return false
+    }
+
+    private var isPipelineFrameInterpolationActive: Bool {
+        switch optimizationStage {
+        case .frameQueued, .interpolating:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var isLoopAnalysisPipelineActive: Bool {
+        switch optimizationStage {
+        case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+            return true
+        default:
+            return false
+        }
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let horizontalPadding = max(28, min(72, geometry.size.width * 0.05))
@@ -157,6 +203,11 @@ struct MediaDetailSheet: View {
                 Color(hex: "0A0A0C")
                     .ignoresSafeArea()
                     .coordinateSpace(name: "scroll")
+
+                DetailWindowControls()
+                    .padding(.leading, 12)
+                    .padding(.top, 12)
+                    .zIndex(20)
 
                 if isVisible {
                     fixedMediaBackground(width: viewW, height: viewH)
@@ -318,6 +369,14 @@ struct MediaDetailSheet: View {
                         )
                     }
 
+                    if let activeItem = loopAnalysisQueue.activeProcessingItem {
+                        MediaProcessingToast(
+                            title: String(format: t("loopAnalysis.toastRunning"), Int((activeItem.progress * 100).rounded())),
+                            detail: loopAnalysisRemainingDetail,
+                            progress: activeItem.progress
+                        )
+                    }
+
                     if let activeItem = frameInterpolationQueue.activeProcessingItem {
                         MediaProcessingToast(
                             title: String(format: t("frameInterpolationToastRunning"), Int((activeItem.progress * 100).rounded())),
@@ -347,6 +406,11 @@ struct MediaDetailSheet: View {
             Text("当前账号启用了 Steam Guard，请输入 Authenticator 应用中的验证码以继续下载。")
         }
         .alert(t("delete"), isPresented: $showDeleteConfirm) {
+            if !isLocalFile {
+                Button("重新下载") {
+                    redownloadMediaFromScratch()
+                }
+            }
             Button(t("delete"), role: .destructive) {
                 viewModel.removeDownloads(withIDs: [resolvedItem.id])
                 onClose()
@@ -373,6 +437,17 @@ struct MediaDetailSheet: View {
             }
         } message: {
             Text(t("frameInterpolationDeleteConfirmMessage"))
+        }
+        .alert("原始文件不可用", isPresented: $showOriginalVideoRequiredConfirm) {
+            Button("重新下载并优化") {
+                guard let videoURL = pendingLoopReoptimizationURL else { return }
+                Task { await redownloadOriginalAndOptimize(videoURL: videoURL) }
+            }
+            Button(t("cancel"), role: .cancel) {
+                pendingLoopReoptimizationURL = nil
+            }
+        } message: {
+            Text("原始文件不可用，需要重新下载原视频。重新下载后将先进行循环点分析，再重新补帧。")
         }
         .alert(t("frameInterpolationBlacklistRemoveConfirmTitle"), isPresented: $showRemoveFrameInterpolationBlacklistConfirm) {
             Button(t("frameInterpolationBlacklistRemoveButton"), role: .destructive) {
@@ -463,6 +538,30 @@ struct MediaDetailSheet: View {
             return localURL
         }
         return resolvedItem.previewVideoURL
+    }
+
+    private var finderRevealURL: URL? {
+        if let cachedSceneBakeVideoURL {
+            return cachedSceneBakeVideoURL
+        }
+        if let videoURL = currentDownloadRecord?.resolvedVideoFileURL,
+           FileManager.default.fileExists(atPath: videoURL.path) {
+            return videoURL
+        }
+        if let workshopURL = findLocalWorkshopFile() {
+            return workshopURL
+        }
+        if isLocalFile,
+           resolvedItem.coverImageURL.isFileURL,
+           FileManager.default.fileExists(atPath: resolvedItem.coverImageURL.path) {
+            return resolvedItem.coverImageURL
+        }
+        if let previewVideoURL,
+           previewVideoURL.isFileURL,
+           FileManager.default.fileExists(atPath: previewVideoURL.path) {
+            return previewVideoURL
+        }
+        return nil
     }
 
     private func detailScrollTopInset(viewportHeight: CGFloat, heroHidden: Bool) -> CGFloat {
@@ -864,6 +963,159 @@ struct MediaDetailSheet: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private var loopPointAnalysisIconName: String {
+        switch optimizationStage {
+        case .frameQueued, .interpolating:
+            return "checkmark.circle.fill"
+        case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+            return "hourglass"
+        default:
+            break
+        }
+        switch loopPointAnalysisState {
+        case .applied:
+            return "checkmark.circle.fill"
+        case .notNeeded:
+            return "checkmark.circle"
+        case .noReliablePoint:
+            return "questionmark.circle"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        default:
+            return "point.topleft.down.curvedto.point.bottomright.up"
+        }
+    }
+
+    private func runLoopPointAnalysis(force: Bool = false) {
+        guard let videoURL = loopPointAnalysisVideoURL else { return }
+
+        optimizationPipeline.set(.loopQueued, for: resolvedItem.id)
+
+        LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, force: force) { completedURL, succeeded in
+            if succeeded {
+                VideoWallpaperManager.shared.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
+                optimizationPipeline.set(.idle, for: resolvedItem.id)
+            } else if case .failed(let message) = VideoLoopPreprocessingService.shared.state(for: completedURL) {
+                optimizationPipeline.set(.failed(message), for: resolvedItem.id)
+                errorMessage = Self.truncateErrorMessage(message)
+                showError = true
+            }
+        }
+    }
+
+    private func requestLoopPointAnalysis() {
+        guard let videoURL = loopPointAnalysisVideoURL else { return }
+        guard frameInterpolationQueue.completedRecord(videoURL: videoURL) != nil else {
+            runLoopPointAnalysis(force: true)
+            return
+        }
+
+        if cachedSceneBakeVideoURL?.standardizedFileURL == videoURL.standardizedFileURL {
+            Task { await rebuildSceneBakeAndOptimize(videoURL: videoURL) }
+        } else if isLocalFile {
+            // 本地源无法恢复，按降级规则直接分析当前文件；已补帧则不重复补帧。
+            runLoopPointAnalysis(force: true)
+        } else {
+            pendingLoopReoptimizationURL = videoURL
+            showOriginalVideoRequiredConfirm = true
+        }
+    }
+
+    private func redownloadOriginalAndOptimize(videoURL: URL) async {
+        guard !isDownloading else { return }
+        isDownloading = true
+        optimizationPipeline.set(.restoringOriginal, for: resolvedItem.id)
+        errorMessage = ""
+        defer {
+            isDownloading = false
+            pendingLoopReoptimizationURL = nil
+        }
+
+        do {
+            let originalURL = try await viewModel.redownloadOriginalVideoForOptimization(resolvedItem)
+            frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+            frameInterpolationQueue.removeCompleted(videoURL: originalURL)
+            runLoopThenFrameInterpolation(videoURL: originalURL, forceLoopAnalysis: true)
+        } catch {
+            optimizationPipeline.set(.failed(error.localizedDescription), for: resolvedItem.id)
+            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+            showError = true
+        }
+    }
+
+    private func rebuildSceneBakeAndOptimize(videoURL: URL) async {
+        guard let record = currentDownloadRecord,
+              let artifact = record.sceneBakeArtifact,
+              !isBakingScene else { return }
+        isBakingScene = true
+        bakeProgress = 0
+        errorMessage = ""
+        defer {
+            isBakingScene = false
+            bakeProgress = 0
+        }
+
+        do {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: artifact.videoPath))
+            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+            frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+
+            guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else {
+                throw NSError(domain: "VideoOptimization", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "未找到 Scene 烘焙记录。"
+                ])
+            }
+            let rebuiltArtifact = try await SceneOfflineBakeService.bake(record: refreshedRecord) { progress in
+                updateSceneBakeProgress(progress)
+            }
+            let rebuiltURL = URL(fileURLWithPath: rebuiltArtifact.videoPath)
+            frameInterpolationQueue.removeCompleted(videoURL: rebuiltURL)
+            runLoopThenFrameInterpolation(videoURL: rebuiltURL, forceLoopAnalysis: true)
+        } catch {
+            optimizationPipeline.set(.failed(error.localizedDescription), for: resolvedItem.id)
+            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+            showError = true
+        }
+    }
+
+    private func runLoopThenFrameInterpolation(videoURL: URL, forceLoopAnalysis: Bool) {
+        optimizationPipeline.set(.loopQueued, for: resolvedItem.id)
+        LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, force: forceLoopAnalysis) { completedURL, succeeded in
+            guard succeeded else {
+                optimizationPipeline.set(.failed("循环点分析失败"), for: resolvedItem.id)
+                return
+            }
+            optimizationPipeline.set(.checkingInterpolation, for: resolvedItem.id)
+            VideoWallpaperManager.shared.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
+            Task { @MainActor in
+                guard frameInterpolationSettingsEnabled else {
+                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                    return
+                }
+                let targetFPS = currentFrameInterpolationTargetFPS
+                guard await FrameInterpolationQueueService.shared.needsInterpolation(videoURL: completedURL, targetFPS: targetFPS) else {
+                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                    return
+                }
+                let itemID = resolvedItem.id
+                let taskID = FrameInterpolationQueueService.shared.enqueue(
+                    videoURL: completedURL,
+                    title: resolvedItem.title,
+                    targetFPS: targetFPS,
+                    source: .manual,
+                    onCompleted: { _, _ in
+                        optimizationPipeline.set(.idle, for: itemID)
+                    }
+                )
+                if taskID != nil {
+                    optimizationPipeline.set(.interpolating, for: itemID)
+                } else {
+                    optimizationPipeline.set(.idle, for: itemID)
+                }
+            }
+        }
     }
 
     private var sceneBakeRendererOverlay: some View {
@@ -1419,10 +1671,10 @@ struct MediaDetailSheet: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .opacity(hasValidSteamPageURL ? 1 : 0.4)
+                    .opacity(hasValidPageURL ? 1 : 0.4)
                 }
                 .buttonStyle(.plain)
-                .disabled(!hasValidSteamPageURL)
+                .disabled(!hasValidPageURL)
             } else {
                 Button {
                     showMoreOptionsPopover = false
@@ -1441,10 +1693,26 @@ struct MediaDetailSheet: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .opacity(hasValidSteamPageURL ? 1 : 0.4)
+                    .opacity(hasValidPageURL ? 1 : 0.4)
                 }
                 .buttonStyle(.plain)
-                .disabled(!hasValidSteamPageURL)
+                .disabled(!hasValidPageURL)
+            }
+
+            if finderRevealURL != nil {
+                Button {
+                    showMoreOptionsPopover = false
+                    revealCurrentMediaInFinder()
+                } label: {
+                    HStack {
+                        Image(systemName: "folder")
+                        Text(t("showInFinder"))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
             }
 
             // 重新烘焙（仅 Scene 类型已下载壁纸）
@@ -1518,7 +1786,45 @@ struct MediaDetailSheet: View {
                 .disabled(isTranscodingVideo)
             }
 
-            if frameInterpolationSettingsEnabled,
+            if isRestoringOriginalVideo {
+                Button {} label: {
+                    HStack {
+                        Image(systemName: "arrow.down.circle")
+                        Text(t("optimization.restoringOriginal"))
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
+            } else if isLoopAnalysisPipelineActive {
+                Button {} label: {
+                    HStack {
+                        Image(systemName: "hourglass")
+                        Text(t("frameInterpolationWaitingForLoop"))
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
+            } else if isPipelineFrameInterpolationActive {
+                Button {} label: {
+                    HStack {
+                        Image(systemName: "clock")
+                        Text(t("frameInterpolationQueueProcessing"))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
+            } else if frameInterpolationSettingsEnabled,
                let interpolationVideoURL = currentFrameInterpolationVideoURL {
                 let targetFPS = currentFrameInterpolationTargetFPS
                 if frameInterpolationQueue.hasActiveInterpolation(videoURL: interpolationVideoURL, satisfying: targetFPS) {
@@ -1691,6 +1997,24 @@ struct MediaDetailSheet: View {
                 }
             }
 
+            if loopPointAnalysisVisible {
+                Button {
+                    showMoreOptionsPopover = false
+                    requestLoopPointAnalysis()
+                } label: {
+                    HStack {
+                        Image(systemName: loopPointAnalysisQueued ? "hourglass" : loopPointAnalysisIconName)
+                        Text(loopPointAnalysisButtonTitle)
+                        Spacer()
+                    }
+                    .foregroundStyle(loopPointAnalysisMenuForegroundStyle)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(loopPointAnalysisQueued || isSettingWallpaper || isBakingScene || isRestoringOriginalVideo || isPipelineFrameInterpolationActive)
+            }
+
             // 复制静态图片
             if isAlreadyDownloaded || WallpaperEngineXBridge.shared.isControllingExternalEngine {
                 Button {
@@ -1709,6 +2033,75 @@ struct MediaDetailSheet: View {
             }
         }
         .frame(width: 192)
+    }
+
+    private var loopPointAnalysisMenuForegroundStyle: Color {
+        switch optimizationStage {
+        case .frameQueued, .interpolating:
+            return Color.white.opacity(0.46)
+        case .loopQueued, .loopAnalyzing, .checkingInterpolation:
+            return Color.white.opacity(0.55)
+        default:
+            break
+        }
+        switch loopPointAnalysisState {
+        case .applied:
+            return Color.white.opacity(0.46)
+        case .notNeeded:
+            return Color.white.opacity(0.58)
+        case .noReliablePoint:
+            return Color(hex: "FF9F0A")
+        case .failed:
+            return Color(hex: "FF9F0A")
+        default:
+            return Color.white.opacity(0.9)
+        }
+    }
+
+    private var loopPointAnalysisButtonTitle: String {
+        if isRestoringOriginalVideo {
+            return t("optimization.restoringOriginal")
+        }
+        switch optimizationStage {
+        case .frameQueued, .interpolating:
+            return t("loopAnalysis.applied")
+        case .loopQueued, .loopAnalyzing:
+            return t("loopAnalysis.analyzing")
+        case .checkingInterpolation:
+            return t("loopAnalysis.applied")
+        default:
+            break
+        }
+        switch loopPointAnalysisState {
+        case .analyzing:
+            return t("loopAnalysis.analyzing")
+        case .applied:
+            return t("loopAnalysis.applied")
+        case .notNeeded:
+            return t("loopAnalysis.notNeeded")
+        case .noReliablePoint:
+            return t("loopAnalysis.noReliablePoint")
+        case .failed:
+            return t("loopAnalysis.failed")
+        case .idle:
+            return t("loopAnalysis.button")
+        }
+    }
+
+    private var loopAnalysisRemainingDetail: String? {
+        let count = loopAnalysisQueue.remainingWorkCount
+        return count > 0 ? String(format: t("loopAnalysis.remainingCount"), count) : nil
+    }
+
+    private var loopPointAnalysisQueued: Bool {
+        guard let videoURL = loopPointAnalysisVideoURL else { return false }
+        return loopAnalysisQueue.isQueued(videoURL: videoURL)
+    }
+
+    private var loopPointAnalysisState: VideoLoopPreprocessingService.LoopPointState {
+        guard let videoURL = loopPointAnalysisVideoURL else { return .idle }
+        if loopAnalysisQueue.isQueued(videoURL: videoURL) { return .analyzing }
+        return loopService.state(for: videoURL)
     }
 
     private var currentFrameInterpolationVideoURL: URL? {
@@ -2334,6 +2727,18 @@ struct MediaDetailSheet: View {
         }
     }
 
+    private func redownloadMediaFromScratch() {
+        if let record = currentDownloadRecord {
+            let localURL = URL(fileURLWithPath: record.localFilePath)
+            LoopPointAnalysisQueueService.shared.reset(videoURL: localURL)
+            VideoLoopPreprocessingService.shared.resetState(for: localURL)
+            FrameInterpolationQueueService.shared.reset(videoURL: localURL)
+        }
+        VideoOptimizationPipelineStateService.shared.reset(itemID: resolvedItem.id)
+        viewModel.removeDownloads(withIDs: [resolvedItem.id])
+        downloadMedia()
+    }
+
     private func downloadWorkshop(guardCode: String? = nil) {
         AppLogger.info(.download, "开始下载 Workshop 内容", metadata:
             ["id": resolvedItem.id, "title": resolvedItem.title, "guardCode": guardCode != nil ? "provided" : "nil"])
@@ -2401,9 +2806,9 @@ struct MediaDetailSheet: View {
             }
 
             if resolvedItem.id.hasPrefix("workshop_") {
-                try await viewModel.downloadWorkshopWallpaper(resolvedItem)
+                try await viewModel.downloadWorkshopWallpaper(resolvedItem, suppressToast: true)
             } else {
-                try await viewModel.download(resolvedItem)
+                try await viewModel.download(resolvedItem, suppressToast: true)
             }
 
             VideoWallpaperManager.shared.restoreOriginalVideoAfterDeletingFrameInterpolation(videoURL: videoURL, targetFPSs: [targetFPS])
@@ -2491,7 +2896,7 @@ struct MediaDetailSheet: View {
                 do {
                     AppLogger.info(.download, "自动下载 Workshop 内容后设置壁纸", metadata:
                         ["id": resolvedItem.id, "title": resolvedItem.title])
-                    try await viewModel.downloadWorkshopWallpaper(resolvedItem)
+                    try await viewModel.downloadWorkshopWallpaper(resolvedItem, suppressToast: true)
                     // 下载被取消则不再继续设置壁纸
                     if Task.isCancelled { return }
                     // 下载完成后，查找本地文件并设置壁纸
@@ -2656,7 +3061,10 @@ struct MediaDetailSheet: View {
 
         switch contentType {
         case .scene:
+            // wallpaper-wgpu 的 --screen 仅支持单屏窗口。全局同步时统一使用烘焙 MP4，
+            // 再由 VideoWallpaperManager 的共享播放器输出到所有显示器。
             let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+                && !WallpaperSchedulerService.shared.config.syncAllDisplays
             AppLogger.error(.wallpaper, "applyWorkshopWallpaperFromLocalURL 路由: scene", metadata: [
                 "realtime": isRealtime,
                 "contentRoot": contentRoot.lastPathComponent
@@ -2884,6 +3292,11 @@ struct MediaDetailSheet: View {
                 print("[MediaDetailSheet] ✅ 已复制静态图片到剪贴板")
             }
         }
+    }
+
+    private func revealCurrentMediaInFinder() {
+        guard let targetURL = finderRevealURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([targetURL])
     }
 
     private func resolvedShareableFileFromRecordOrCover() -> URL? {
@@ -3525,6 +3938,19 @@ struct MediaDetailSheet: View {
         hasValidSteamPageURL(resolvedItem)
     }
 
+    /// 所有线上来源通用的详情页链接校验，不能复用 Steam Workshop 专用校验。
+    private var hasValidPageURL: Bool {
+        let url = resolvedItem.pageURL
+        guard !url.isFileURL,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host,
+              !host.isEmpty else {
+            return false
+        }
+        return true
+    }
+
     private func scheduleSceneBakeSuccessFlash() {
         sceneBakeStatusFlash = t("sceneBake.success")
         Task { @MainActor in
@@ -3568,14 +3994,18 @@ struct MediaDetailSheet: View {
                 applyingWallpaperStatusKey = "applyingWallpaper.video"
                 isSettingWallpaper = true
                 Task { @MainActor in
+                    guard let optimizationInputURL = await rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: videoURL) else {
+                        isSettingWallpaper = false
+                        return
+                    }
                     let posterFromVideo = await preferredPosterFrame(
-                        for: videoURL,
+                        for: optimizationInputURL,
                         preferPosterFrameFromVideo: preferPosterFrameFromVideo
                     )
                     let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                     do {
                         try wallpaperManager.applyVideoWallpaper(
-                            from: videoURL,
+                            from: optimizationInputURL,
                             posterURL: posterURL,
                             muted: isMuted,
                             targetScreens: selectedScreen.map { [$0] }
@@ -3593,14 +4023,18 @@ struct MediaDetailSheet: View {
             applyingWallpaperStatusKey = "applyingWallpaper.video"
             isSettingWallpaper = true
             Task { @MainActor in
+                guard let optimizationInputURL = await rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: videoURL) else {
+                    isSettingWallpaper = false
+                    return
+                }
                 let posterFromVideo = await preferredPosterFrame(
-                    for: videoURL,
+                    for: optimizationInputURL,
                     preferPosterFrameFromVideo: preferPosterFrameFromVideo
                 )
                 let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                 do {
                     try wallpaperManager.applyVideoWallpaper(
-                        from: videoURL,
+                        from: optimizationInputURL,
                         posterURL: posterURL,
                         muted: isMuted
                     )
@@ -3614,6 +4048,37 @@ struct MediaDetailSheet: View {
                 }
                 isSettingWallpaper = false
             }
+        }
+    }
+
+    private func rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: URL) async -> URL? {
+        let loopEnabled = UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true
+        let autoLoopEnabled = UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
+        guard loopEnabled,
+              autoLoopEnabled,
+              let record = currentDownloadRecord,
+              let artifact = record.sceneBakeArtifact,
+              URL(fileURLWithPath: artifact.videoPath).standardizedFileURL == videoURL.standardizedFileURL,
+              frameInterpolationQueue.completedRecord(videoURL: videoURL) != nil else {
+            return videoURL
+        }
+
+        do {
+            // 不保留备份：旧烘焙成品删除后，直接从 Scene 工程生成新的原始视频。
+            try? FileManager.default.removeItem(at: videoURL)
+            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+            frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+            guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else {
+                throw NSError(domain: "VideoOptimization", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "未找到 Scene 烘焙记录。"
+                ])
+            }
+            let rebuilt = try await SceneOfflineBakeService.bake(record: refreshedRecord)
+            return URL(fileURLWithPath: rebuilt.videoPath)
+        } catch {
+            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+            showError = true
+            return nil
         }
     }
 
@@ -4705,7 +5170,7 @@ private struct MediaProcessingToast: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
                 .monospacedDigit()
-                .frame(minWidth: 92, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
 
             ZStack(alignment: .leading) {
                 Capsule(style: .continuous)
