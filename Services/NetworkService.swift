@@ -297,13 +297,19 @@ actor NetworkService {
 
     func fetchImage(
         from url: URL,
+        headers: [String: String] = [:],
         progressHandler: (@Sendable (Double) -> Void)? = nil,
         retryConfig: RetryConfiguration? = nil
     ) async throws -> Data {
         let config = effectiveRetryConfiguration(retryConfig)
 
         return try await executeWithRetry(config: config) { attempt in
-            let data = try await self.fetchDataInternal(from: url, attempt: attempt, progressHandler: progressHandler)
+            let data = try await self.fetchDataInternal(
+                from: url,
+                headers: headers,
+                attempt: attempt,
+                progressHandler: progressHandler
+            )
             return data
         }
     }

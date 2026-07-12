@@ -459,7 +459,7 @@ struct WebWallpaperDesignPanel: View {
                 fieldRow(viewModel.displayLabel(for: property)) {
                     Picker("", selection: viewModel.comboSelection(for: property)) {
                         ForEach(property.options) { option in
-                            Text(option.label).tag(option.value.stableString)
+                            Text(WallpaperEnginePropertyLocalizer.label(for: option.label)).tag(option.value.stableString)
                         }
                     }
                     .labelsHidden()

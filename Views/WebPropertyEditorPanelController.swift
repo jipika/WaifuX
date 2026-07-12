@@ -19,6 +19,9 @@ final class WebPropertyEditorPanelController {
     private var currentTitle: String = "设计场景"
     private var applyTask: Task<Void, Never>?
     private var pendingInject: String?
+    private var navigationDelegate: PropertyEditorNavigationDelegate?
+    private var pageIsReady = false
+    private var activeLoadID = UUID()
 
     private init() {}
 
@@ -52,6 +55,11 @@ final class WebPropertyEditorPanelController {
     }
 
     func closePanel() {
+        activeLoadID = UUID()
+        pendingInject = nil
+        pageIsReady = false
+        webView?.navigationDelegate = nil
+        navigationDelegate = nil
         webView = nil
         windowController?.close()
         windowController = nil
@@ -107,6 +115,8 @@ final class WebPropertyEditorPanelController {
         let webView = WKWebView(frame: window.contentView!.bounds, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.setValue(false, forKey: "drawsBackground")
+        let navigationDelegate = PropertyEditorNavigationDelegate(target: self)
+        webView.navigationDelegate = navigationDelegate
 
         window.contentView = webView
         // Round corners to match the existing panel style
@@ -122,6 +132,7 @@ final class WebPropertyEditorPanelController {
         currentType = type
         currentTitle = title
         self.webView = webView
+        self.navigationDelegate = navigationDelegate
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
 
@@ -132,6 +143,10 @@ final class WebPropertyEditorPanelController {
 
     private func loadAndInjectData() async {
         guard let webView = webView, let wallpaperPath = currentPath else { return }
+        let loadID = UUID()
+        activeLoadID = loadID
+        pageIsReady = false
+        pendingInject = nil
 
         let htmlContent = loadHTMLEditorContent()
 
@@ -156,17 +171,10 @@ final class WebPropertyEditorPanelController {
             pendingInject = injectScript
             webView.loadHTMLString(htmlContent, baseURL: nil)
 
-            // Safety timeout
+            // Safety timeout if the navigation callback is not delivered.
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled else { return }
-            if let script = pendingInject {
-                pendingInject = nil
-                webView.evaluateJavaScript(script) { _, error in
-                    if let error = error {
-                        print("[WebPropertyEditor] JS fallback inject failed: \(error)")
-                    }
-                }
-            }
+            guard !Task.isCancelled, activeLoadID == loadID, self.webView === webView else { return }
+            injectPendingDataIfPossible(force: true)
             return
         }
 
@@ -213,26 +221,29 @@ final class WebPropertyEditorPanelController {
         // Load HTML — the page will post "editorReady" when DOM is ready
         webView.loadHTMLString(htmlContent, baseURL: nil)
 
-        // Safety timeout: if editorReady never arrives (e.g. JS error), inject after 3s
+        // Safety timeout if the navigation callback is not delivered.
         try? await Task.sleep(nanoseconds: 3_000_000_000)
-        guard !Task.isCancelled else { return }
-        if let script = pendingInject {
-            pendingInject = nil
-            webView.evaluateJavaScript(script) { _, error in
-                if let error = error {
-                    print("[WebPropertyEditor] JS fallback inject failed: \(error)")
-                }
-            }
-        }
+        guard !Task.isCancelled, activeLoadID == loadID, self.webView === webView else { return }
+        injectPendingDataIfPossible(force: true)
     }
 
     /// Called when HTML page signals DOM is ready
     func handleEditorReady() {
-        guard let webView = webView, let script = pendingInject else { return }
+        injectPendingDataIfPossible()
+    }
+
+    func handlePageFinishedLoading(_ webView: WKWebView) {
+        guard self.webView === webView else { return }
+        pageIsReady = true
+        injectPendingDataIfPossible()
+    }
+
+    private func injectPendingDataIfPossible(force: Bool = false) {
+        guard (pageIsReady || force), let webView = webView, let script = pendingInject else { return }
         pendingInject = nil
         webView.evaluateJavaScript(script) { _, error in
             if let error = error {
-                print("[WebPropertyEditor] JS inject failed: \(error)")
+                print("[WebPropertyEditor] JS inject failed: \(error.localizedDescription)")
             }
         }
     }
@@ -514,7 +525,7 @@ final class WebPropertyEditorPanelController {
             let item = PropertyEditorItem(
                 key: key,
                 type: normalizedType,
-                text: text,
+                text: text.map { WallpaperEnginePropertyLocalizer.label(for: $0) },
                 defaultValue: defaultValue,
                 options: options,
                 min: min,
@@ -950,11 +961,11 @@ final class WebPropertyEditorPanelController {
         if let array = raw as? [[String: Any]] {
             return array.compactMap { item in
                 guard let value = item["value"], let label = item["label"] as? String else { return nil }
-                return ["value": String(describing: value), "label": label]
+                return ["value": String(describing: value), "label": WallpaperEnginePropertyLocalizer.label(for: label)]
             }
         }
         if let dict = raw as? [String: String] {
-            return dict.map { ["value": $0.key, "label": $0.value] }
+            return dict.map { ["value": $0.key, "label": WallpaperEnginePropertyLocalizer.label(for: $0.value)] }
         }
         return []
     }
@@ -1020,6 +1031,21 @@ struct PropertyEditorItem {
         if fraction { dict["fraction"] = true }
         if let precision = precision { dict["precision"] = precision }
         return dict
+    }
+}
+
+private final class PropertyEditorNavigationDelegate: NSObject, WKNavigationDelegate {
+    weak var target: WebPropertyEditorPanelController?
+
+    init(target: WebPropertyEditorPanelController) {
+        self.target = target
+        super.init()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in
+            self?.target?.handlePageFinishedLoading(webView)
+        }
     }
 }
 

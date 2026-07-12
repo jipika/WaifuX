@@ -74,6 +74,9 @@ final class MediaLibraryService: ObservableObject {
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
         loadPersistedState()
+        Task { [weak self] in
+            await self?.rebuildManagedMediaLibrary()
+        }
     }
 
     private func rebuildFavoriteIndex() {
@@ -257,14 +260,302 @@ final class MediaLibraryService: ObservableObject {
         }
     }
 
+    /// Ensure an existing local media file has a persistent library record.
+    /// Applying a wallpaper is an explicit user action, so it must not remain cache-only.
+    func ensureDownloadRecord(item: MediaItem, localFileURL: URL) {
+        if let existing = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }),
+           existing.hasSameLocalContent(as: localFileURL) {
+            return
+        }
+        recordDownload(item: item, localFileURL: localFileURL)
+    }
+
+    /// 以用户当前下载根为准重建媒体库。目录迁移完成后，`DownloadPathManager` 指向的
+    /// Media 目录是唯一权威数据源；不移动文件，也不把 Cache 当成下载库。
+    private func rebuildManagedMediaLibrary() async {
+        let fileManager = FileManager.default
+        let mediaFolder = DownloadPathManager.shared.mediaFolderURL.standardizedFileURL
+        guard fileManager.fileExists(atPath: mediaFolder.path) else { return }
+
+        var restored = 0
+
+        // 1. 已存在于当前数据源中的旧记录即使曾被错误地标为删除，也重新激活。
+        for record in downloadRecords {
+            let recordedURL = record.localFileURL.standardizedFileURL
+            guard fileManager.fileExists(atPath: recordedURL.path), !record.isActive else { continue }
+            restoreDownloadRecord(recordID: record.item.id, localFileURL: recordedURL)
+            restored += 1
+        }
+
+        // 2. 恢复无索引的顶层视频和 Wallpaper Engine 工程。每 24 项让出一次主线程，
+        // 避免包含数百个 Workshop 项的用户目录拖慢启动首帧。
+        let entries = (try? fileManager.contentsOfDirectory(
+            at: mediaFolder,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let recordIDsByFileName = Dictionary(grouping: downloadRecords.compactMap { record -> (String, String)? in
+                let fileName = record.localFileURL.lastPathComponent
+                return fileName.isEmpty ? nil : (fileName, record.item.id)
+            }, by: { $0.0 })
+        var recoveredFromDisk = 0
+        for (offset, url) in entries.enumerated() {
+            if offset > 0, offset.isMultiple(of: 24) {
+                await Task.yield()
+            }
+
+            let normalizedPath = url.standardizedFileURL.path
+            if downloadRecords.contains(where: {
+                ($0.localFilePath as NSString).standardizingPath == normalizedPath
+            }) {
+                continue
+            }
+
+            // 文件名在下载时由各来源决定；迁移后路径改变时用它回连原有记录，
+            // 以完整保留 MotionBGs、DongTai、Wallsflow、导入等来源的详情与 ID。
+            if let matches = recordIDsByFileName[url.lastPathComponent],
+               matches.count == 1,
+               let recordID = matches.first?.1 {
+                restoreDownloadRecord(recordID: recordID, localFileURL: url)
+                attachRecoveredBakeArtifactIfNeeded(itemID: recordID)
+                restored += 1
+                continue
+            }
+
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+
+            if isDirectory.boolValue,
+               url.lastPathComponent.hasPrefix("workshop_"),
+               let record = downloadRecords.first(where: { $0.item.id == url.lastPathComponent }) {
+                restoreDownloadRecord(recordID: record.item.id, localFileURL: url)
+                attachRecoveredBakeArtifactIfNeeded(itemID: record.item.id)
+                restored += 1
+                continue
+            }
+
+            let item: MediaItem?
+            if isDirectory.boolValue, url.lastPathComponent.hasPrefix("workshop_") {
+                item = recoveredWorkshopItem(at: url)
+            } else if !isDirectory.boolValue, Self.recoverableVideoExtensions.contains(url.pathExtension.lowercased()) {
+                item = recoveredVideoItem(at: url)
+            } else {
+                item = nil
+            }
+
+            guard let item else { continue }
+            if downloadRecords.contains(where: { $0.item.id == item.id }) {
+                // Workshop 等目录路径可能从 Steam 的 content 子目录变成 workshop 根目录；
+                // ID 一致时只修路径，不能用低保真磁盘元数据覆盖原始来源详情。
+                restoreDownloadRecord(recordID: item.id, localFileURL: url)
+            } else {
+                recordDownload(item: item, localFileURL: url)
+            }
+            attachRecoveredBakeArtifactIfNeeded(itemID: item.id)
+            recoveredFromDisk += 1
+        }
+
+        // 已有记录也可能来自早期版本，彼时烘焙文件没有回写 artifact。
+        for record in downloadedItems {
+            attachRecoveredBakeArtifactIfNeeded(itemID: record.item.id)
+        }
+
+        if restored > 0 || recoveredFromDisk > 0 {
+            print("[MediaLibraryService] Rebuilt media library: restored=\(restored), recoveredFromDisk=\(recoveredFromDisk)")
+        }
+    }
+
+    private static let recoverableVideoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
+
+    private func recoveredWorkshopItem(at directoryURL: URL) -> MediaItem? {
+        let projectRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: directoryURL)
+        let projectURL = projectRoot.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let project = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let slug = directoryURL.lastPathComponent
+        let workshopID = String(slug.dropFirst("workshop_".count))
+        let hasSteamID = !workshopID.isEmpty && workshopID.allSatisfy(\.isNumber)
+        let title = (project["title"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let type = ((project["type"] as? String) ?? "scene")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let previewURL = recoveredWorkshopPreviewURL(in: projectRoot)
+        let fallbackURL = previewURL ?? projectRoot.appendingPathComponent("preview.gif")
+        let pageURL = hasSteamID
+            ? URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(workshopID)")!
+            : directoryURL
+
+        return MediaItem(
+            slug: slug,
+            title: title?.isEmpty == false ? title! : slug.replacingOccurrences(of: "_", with: " "),
+            pageURL: pageURL,
+            thumbnailURL: fallbackURL,
+            resolutionLabel: type.capitalized,
+            collectionTitle: "Wallpaper Engine",
+            summary: nil,
+            previewVideoURL: nil,
+            posterURL: previewURL,
+            tags: ["workshop", type],
+            exactResolution: nil,
+            durationSeconds: nil,
+            downloadOptions: [],
+            sourceName: "Wallpaper Engine",
+            isAnimatedImage: previewURL?.pathExtension.lowercased() == "gif"
+        )
+    }
+
+    private func recoveredWorkshopPreviewURL(in projectRoot: URL) -> URL? {
+        let fileManager = FileManager.default
+        let projectURL = projectRoot.appendingPathComponent("project.json")
+        if let data = try? Data(contentsOf: projectURL),
+           let project = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let previewName = project["preview"] as? String {
+            let candidate = projectRoot.appendingPathComponent(previewName)
+            if fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        for name in ["preview.jpg", "preview.jpeg", "preview.png", "preview.webp", "preview.gif"] {
+            let candidate = projectRoot.appendingPathComponent(name)
+            if fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private func recoveredVideoItem(at fileURL: URL) -> MediaItem {
+        let fileName = fileURL.deletingPathExtension().lastPathComponent
+        let components = fileName.split(separator: "-").map(String.init)
+        let slug: String
+        let sourceName: String
+
+        if components.count >= 5,
+           components[0] == "motionbgs", components[1] == "dongtai",
+           ["col", "exc"].contains(components[2]), components[3].allSatisfy(\.isNumber) {
+            slug = "dongtai_\(components[2])_\(components[3])"
+            sourceName = "DongTai"
+        } else if components.count >= 4,
+                  components[0] == "motionbgs", components[1] == "wf",
+                  components[2].allSatisfy(\.isNumber) {
+            slug = "wf_\(components[2])"
+            sourceName = "Wallsflow"
+        } else if fileName.hasPrefix("motionbgs-") {
+            var value = String(fileName.dropFirst("motionbgs-".count))
+            for suffix in ["-4k", "-hd", "-original"] where value.hasSuffix(suffix) {
+                value.removeLast(suffix.count)
+                break
+            }
+            slug = value
+            sourceName = "MotionBGs"
+        } else {
+            slug = "local_\(fileName)_\(fileURL.pathExtension.lowercased())"
+            sourceName = "Local"
+        }
+
+        return MediaItem(
+            slug: slug,
+            title: fileName.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " "),
+            pageURL: fileURL,
+            thumbnailURL: fileURL,
+            resolutionLabel: "Video",
+            collectionTitle: sourceName,
+            summary: nil,
+            previewVideoURL: fileURL,
+            posterURL: nil,
+            tags: ["local", fileURL.pathExtension.lowercased()],
+            exactResolution: nil,
+            durationSeconds: nil,
+            downloadOptions: [],
+            sourceName: sourceName,
+            isAnimatedImage: false
+        )
+    }
+
+    private func attachRecoveredBakeArtifactIfNeeded(itemID: String) {
+        guard let record = downloadRecords.first(where: { $0.item.id == itemID && $0.isActive }),
+              itemID.hasPrefix("workshop_") else {
+            return
+        }
+
+        if let existingArtifact = record.sceneBakeArtifact,
+           SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: existingArtifact.videoPath)) {
+            return
+        }
+
+        let bakeDirectory = DownloadPathManager.shared.sceneBakesFolderURL
+            .appendingPathComponent(itemID, isDirectory: true)
+        let fileManager = FileManager.default
+        guard let candidates = try? fileManager.contentsOfDirectory(
+            at: bakeDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let videoURL = candidates
+            .filter {
+                $0.pathExtension.lowercased() == "mp4"
+                    && !$0.lastPathComponent.hasPrefix(".")
+                    && ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 1_024
+            }
+            .max {
+                ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                    < ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+            }
+        guard let videoURL else { return }
+
+        let attributes = try? fileManager.attributesOfItem(atPath: videoURL.path)
+        let bakedAt = attributes?[.creationDate] as? Date ?? .now
+        let artifact = SceneBakeArtifact(
+            analysisId: record.sceneBakeEligibility?.analysisId ?? UUID(),
+            videoPath: videoURL.path,
+            width: 0,
+            height: 0,
+            fps: 0,
+            durationSeconds: 0,
+            bakedAt: bakedAt,
+            renderer: .wallpaperWgpu
+        )
+        attachSceneBakeArtifact(itemID: itemID, artifact: artifact, regeneratePoster: false)
+    }
+
+    private func restoreDownloadRecord(recordID: String, localFileURL: URL) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == recordID }) else { return }
+
+        downloadRecords[index].localFilePath = localFileURL.path
+        downloadRecords[index].metadata.markLocalMutation(deleted: false)
+        fileCache.markExisting(atPath: localFileURL.path)
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
+        downloadRecords = Array(downloadRecords)
+    }
+
     /// 由 `SceneBakeEligibilityAnalyzer` 在后台线程完成后调用，写入带 UUID 的分析快照。
     /// - Parameter triggerAutoBake: 为 false 时不在此触发后台自动烘焙（例如用户正在「设为壁纸」流程里同步烘焙）。
     func attachSceneBakeEligibility(itemID: String, snapshot: SceneBakeEligibilitySnapshot, triggerAutoBake: Bool = true) {
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
             return
         }
-        if let art = downloadRecords[index].sceneBakeArtifact, art.analysisId != snapshot.analysisId {
-            downloadRecords[index].sceneBakeArtifact = nil
+        let record = downloadRecords[index]
+        if let artifact = record.sceneBakeArtifact, artifact.analysisId != snapshot.analysisId {
+            let isRecoveringLegacyAssociation = record.sceneBakeEligibility == nil
+                && record.hasSameLocalContent(as: URL(fileURLWithPath: snapshot.contentRootPath))
+                && SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: artifact.videoPath))
+            if isRecoveringLegacyAssociation {
+                var reboundArtifact = artifact
+                reboundArtifact.analysisId = snapshot.analysisId
+                downloadRecords[index].sceneBakeArtifact = reboundArtifact
+                print("[MediaLibraryService] Rebound recovered scene bake artifact for \(itemID)")
+            } else {
+                downloadRecords[index].sceneBakeArtifact = nil
+            }
         }
         downloadRecords[index].sceneBakeEligibility = snapshot
         saveDlToCache(downloadRecords[index])

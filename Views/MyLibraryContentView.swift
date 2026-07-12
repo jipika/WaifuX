@@ -1551,14 +1551,7 @@ struct MyLibraryContentView: View {
             let fid = r.folderID ?? ""
             favoriteByFolder[fid, default: []].append(r)
         }
-        // ⚡ 预建 itemID → record 索引，避免 poster 生成循环内 O(N) 线性查找
-        let downloadRecordByItemID = MediaLibraryService.shared.downloadRecords
-            .filter(\.isActive)
-            .reduce(into: [String: MediaDownloadRecord]()) { $0[$1.item.id] = $1 }
-
         var next: [String: FolderDisplayInfo] = [:]
-        // 收集需要异步生成 poster 的任务，统一完成后单次刷新（避免递归触发 O(F*N) 重算）
-        var pendingPosterTasks: [Task<Void, Never>] = []
 
         for folder in folders {
             let records = downloadedByFolder[folder.id, default: []]
@@ -1579,50 +1572,9 @@ struct MyLibraryContentView: View {
             for item in favoriteItems where seen.insert(item.id).inserted {
                 items.append(item)
             }
-            // 使用与卡片封面完全一致的解析链（抽帧 > 本地静图 > 海报 > 站点封面）
+            // 文件夹只读取已有封面；不得在刷新时扫描所有媒体或批量抽帧。
             let previewURLs = items.prefix(3).map { item in
-                item.libraryGridThumbnailURL(localFileURL: localPaths[item.id])
-            }
-            // 异步生成尚未缓存的抽帧（与 MediaVideoCard.onAppear 逻辑一致）
-            for (itemID, localURL) in localPaths {
-                guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
-                // 第一步：尝试常规视频文件解析
-                let resolvedVideo = MediaItem.resolveLocalVideoFile(from: localURL) ?? (
-                    ["mp4", "mov", "webm", "m4v", "mkv"].contains(localURL.pathExtension.lowercased()) ? localURL : nil
-                )
-                // 第二步：若常规解析失败，尝试查找烘焙产物（Scene 项目）— 使用预建索引 O(1)
-                let bakeVideoURL: URL? = (resolvedVideo == nil)
-                    ? downloadRecordByItemID[itemID]?
-                        .sceneBakeArtifact
-                        .flatMap { URL(fileURLWithPath: $0.videoPath) }
-                    : nil
-                let videoURL = resolvedVideo ?? bakeVideoURL
-                let hasCachedPoster: Bool = {
-                    if resolvedVideo == nil {
-                        return VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) != nil
-                    }
-                    guard let videoURL else { return false }
-                    return VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: videoURL) != nil
-                }()
-                if let videoURL,
-                   !hasCachedPoster,
-                   ["mp4", "mov", "webm", "m4v", "mkv"].contains(videoURL.pathExtension.lowercased()) {
-                    let task = Task { @MainActor in
-                        let posterURL: URL?
-                        if resolvedVideo == nil {
-                            posterURL = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
-                                forLocalVideo: videoURL,
-                                itemID: itemID
-                            )
-                        } else {
-                            posterURL = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL)
-                        }
-                        if posterURL != nil {
-                            // ⚡ 不再递归调用 refreshMediaFolderDisplay()，由外层统一刷新
-                        }
-                    }
-                    pendingPosterTasks.append(task)
-                }
+                item.libraryFolderThumbnailURL(localFileURL: localPaths[item.id])
             }
             next[folder.id] = FolderDisplayInfo(
                 previewURLs: previewURLs,
@@ -1630,16 +1582,6 @@ struct MyLibraryContentView: View {
             )
         }
         mediaFolderDisplay = next
-
-        // ⚡ 所有 poster 任务完成后统一刷新一次（替代原来的逐个递归刷新）
-        if !pendingPosterTasks.isEmpty {
-            Task { @MainActor in
-                for task in pendingPosterTasks {
-                    _ = await task.value
-                }
-                self.refreshMediaFolderDisplay()
-            }
-        }
     }
 
     // MARK: - Anime Section

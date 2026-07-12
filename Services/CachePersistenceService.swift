@@ -160,7 +160,8 @@ final class CachePersistenceService {
     /// → 用 `MD5("{category}/{id}")` 计算期望的文件名 → 匹配则说明该记录属于此 category 但未被索引收录。
     ///
     /// - Parameter categories: 需要扫描的分类列表，如 `["media/dl", "media/fav"]`
-    /// - Returns: 按分类分组的孤儿记录原始 JSON 数据（调用方负责解码为具体类型）
+    /// - Returns: 按分类分组的孤儿记录原始 JSON 数据（调用方负责解码为具体类型）。
+    ///   已确认归属的孤儿记录会同步回填分类索引，避免下次启动再次遗漏。
     func recoverOrphanedRecordData(for categories: [String]) -> [String: [Data]] {
         let fm = FileManager.default
         let dirPath = storageDiskPath
@@ -185,6 +186,7 @@ final class CachePersistenceService {
         }
 
         var result: [String: [Data]] = [:]
+        var recoveredIDs: [String: Set<String>] = [:]
         // 已被识别归属的文件，避免重复处理
         var matchedFiles = knownIndexHashes.union(knownRecordHashes)
 
@@ -205,10 +207,21 @@ final class CachePersistenceService {
                 let expectedHash = MD5("\(cat)/\(id)")
                 if expectedHash == fileName {
                     result[cat, default: []].append(fileData)
+                    recoveredIDs[cat, default: []].insert(id)
                     matchedFiles.insert(fileName)
                     break
                 }
             }
+        }
+
+        // A record can be durably written just before the app exits, while the separate
+        // category index write has not happened yet. Repair that index in the same scan.
+        for (category, ids) in recoveredIDs where !ids.isEmpty {
+            let currentIDs = loadIndex(key: "index/\(category)")
+            let knownIDs = Set(currentIDs)
+            let missingIDs = ids.filter { !knownIDs.contains($0) }.sorted()
+            guard !missingIDs.isEmpty else { continue }
+            _ = saveIndex(currentIDs + missingIDs, key: "index/\(category)")
         }
 
         return result

@@ -12,7 +12,7 @@ struct WallpaperDetailSheet: View {
     let onNavigateToWallpaper: ((Wallpaper) -> Void)?
 
     @State private var resolvedWallpaper: Wallpaper
-    @State private var isDownloading = false
+    @State private var downloadActivity = DetailDownloadActivity()
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var isSettingWallpaper = false
@@ -82,6 +82,10 @@ struct WallpaperDetailSheet: View {
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { resolvedWallpaper }
+
+    private var isDownloading: Bool {
+        downloadActivity.isDownloading(itemID: wallpaper.id)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -1274,31 +1278,35 @@ struct WallpaperDetailSheet: View {
 
     // MARK: - 操作方法
     private func downloadWallpaper() {
+        let downloadingWallpaper = wallpaper
+        let wallpaperID = downloadingWallpaper.id
+
         // 本地文件无需下载
         if isLocalFile {
-            AppLogger.debug(.download, "跳过下载：本地文件", metadata: ["id": wallpaper.id])
+            AppLogger.debug(.download, "跳过下载：本地文件", metadata: ["id": wallpaperID])
             return
         }
 
         AppLogger.info(.download, "开始下载壁纸",
-            metadata: ["id": wallpaper.id, "分辨率": wallpaper.resolution, "大小": wallpaper.fileSize.map { "\($0)B" } ?? "未知"])
-        isDownloading = true
+            metadata: ["id": wallpaperID, "分辨率": downloadingWallpaper.resolution, "大小": downloadingWallpaper.fileSize.map { "\($0)B" } ?? "未知"])
+        downloadActivity.start(itemID: wallpaperID)
         errorMessage = ""
         let start = Date()
-        Task {
+        Task { @MainActor in
+            defer { downloadActivity.finish(itemID: wallpaperID) }
+
             do {
-                try await viewModel.downloadWallpaper(wallpaper)
+                try await viewModel.downloadWallpaper(downloadingWallpaper)
                 AppLogger.info(.download, "下载成功",
-                    metadata: ["id": wallpaper.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
+                    metadata: ["id": wallpaperID, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             } catch {
                 errorMessage = "\(t("error")): \(error.localizedDescription)"
                 showError = true
                 AppLogger.error(.download, "下载失败",
-                    metadata: ["id": wallpaper.id, "error": error.localizedDescription,
+                    metadata: ["id": wallpaperID, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
                 print("Download error: \(error)")
             }
-            isDownloading = false
         }
     }
 

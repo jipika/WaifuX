@@ -33,9 +33,9 @@ jobs:
               with:
                   fetch-depth: 0
 
-            - name: Select Xcode 26.4
+            - name: Select Xcode 26.6
               run: |
-                  sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
+                  sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
                   echo "Xcode Path: $(xcode-select -p)"
                   xcodebuild -version
                   swift --version

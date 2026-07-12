@@ -200,6 +200,9 @@ struct WaifuXApp {
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 180
+        configuration.httpCookieStorage = HTTPCookieStorage.shared
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
         downloader.sessionConfiguration = configuration
         downloader.downloadTimeout = 60.0
         // ⚠️ 不设置全局 .backgroundDecode：
@@ -265,8 +268,11 @@ struct WaifuXApp {
     private static func applyImageRequestHeaders(to request: inout URLRequest) {
         guard let host = request.url?.host?.lowercased() else { return }
 
+        let isKonachan = host.contains("konachan.net") || host.contains("konachan.com")
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            isKonachan
+                ? KonachanRequestConfiguration.browserUserAgent
+                : "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
@@ -278,12 +284,14 @@ struct WaifuXApp {
             request.setValue("https://wallhaven.cc/", forHTTPHeaderField: "Referer")
         } else if host.contains("pximg.net") {
             request.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+        } else if isKonachan {
+            request.setValue("\(KonachanRequestConfiguration.siteURL.absoluteString)/", forHTTPHeaderField: "Referer")
         }
     }
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcurrency SPUStandardUserDriverDelegate {
     var window: NSWindow?
     // ⚠️ 延迟初始化 SettingsViewModel，不在 AppDelegate 属性初始化阶段创建
     // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
@@ -293,9 +301,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var delayedReleaseTask: Task<Void, Never>?
     /// Sparkle 自动更新控制器（检测 + 内置弹窗 + 自动安装）
     private var updaterController: SPUStandardUpdaterController!
-    /// 仅手动退出/显式重启路径会设置；用于拦截外部工具误发的 Quit AppleEvent。
-    private var intentionalTerminationReason: String?
-    private var intentionalTerminationDeadline: Date?
+    /// 更新检查期间暂时隐藏设置窗口，避免其浮动层级遮挡 Sparkle 的状态或结果窗口。
+    private var shouldRestoreSettingsWindowAfterUpdateCheck = false
     /// 静态访问器，供 Settings 等外部触发更新检查
     static var shared: AppDelegate?
 
@@ -354,7 +361,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil
+            userDriverDelegate: self
         )
 
         // 1. 初始化状态栏控制器（轻量级，不阻塞）
@@ -459,7 +466,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 触发 Sparkle 更新检查（供 Settings "检查更新" 按钮调用）
     func checkForUpdates() {
+        if let settingsWindow = settingsWindowController?.window, settingsWindow.isVisible {
+            shouldRestoreSettingsWindowAfterUpdateCheck = true
+            settingsWindow.orderOut(nil)
+        }
         updaterController.checkForUpdates(nil)
+    }
+
+    func standardUserDriverWillShowModalAlert() {
+        hideSettingsWindowForUpdateCheck()
+    }
+
+    func standardUserDriverDidShowModalAlert() {
+        restoreSettingsWindowAfterUpdateCheck()
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        guard handleShowingUpdate else { return }
+        hideSettingsWindowForUpdateCheck()
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        restoreSettingsWindowAfterUpdateCheck()
+    }
+
+    private func hideSettingsWindowForUpdateCheck() {
+        guard let settingsWindow = settingsWindowController?.window, settingsWindow.isVisible else { return }
+        shouldRestoreSettingsWindowAfterUpdateCheck = true
+        settingsWindow.orderOut(nil)
+    }
+
+    private func restoreSettingsWindowAfterUpdateCheck() {
+        guard shouldRestoreSettingsWindowAfterUpdateCheck else { return }
+        shouldRestoreSettingsWindowAfterUpdateCheck = false
+        guard let settingsWindow = settingsWindowController?.window else { return }
+        settingsWindow.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - 异步恢复所有数据（在窗口显示后执行，避免阻塞主线程）
@@ -600,32 +645,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let now = Date()
-        let intentional = intentionalTerminationReason != nil
-            && (intentionalTerminationDeadline.map { now <= $0 } ?? false)
-        let dynamicRendering = isDynamicWallpaperRendering
         let frontmost = NSWorkspace.shared.frontmostApplication
-        var metadata: [String: Any] = [
-            "intentional": intentional,
-            "intentionalReason": intentionalTerminationReason ?? "nil",
-            "dynamicRendering": dynamicRendering,
+        let metadata: [String: Any] = [
+            "dynamicRendering": isDynamicWallpaperRendering,
             "frontmostApp": frontmost?.localizedName ?? "nil",
             "frontmostBundle": frontmost?.bundleIdentifier ?? "nil",
             "appActive": NSApp.isActive,
             "appHidden": NSApp.isHidden,
             "mainWindowVisible": window?.isVisible ?? false,
-            "settingsWindowVisible": settingsWindowController?.window?.isVisible ?? false
+            "settingsWindowVisible": settingsWindowController?.window?.isVisible ?? false,
+            "decision": "allow"
         ]
-
-        if intentional || !dynamicRendering {
-            metadata["decision"] = "allow"
-            AppExitDiagnostics.record("applicationShouldTerminate", metadata: metadata)
-            return .terminateNow
-        }
-
-        metadata["decision"] = "cancelExternalQuit"
         AppExitDiagnostics.record("applicationShouldTerminate", metadata: metadata)
-        return .terminateCancel
+        // Dynamic renderers belong to the main app and are stopped in applicationWillTerminate.
+        return .terminateNow
     }
 
     func showMainWindow() {
@@ -849,9 +882,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
+    /// Records application-controlled exits for diagnostics without altering termination policy.
     func markIntentionalTermination(reason: String) {
-        intentionalTerminationReason = reason
-        intentionalTerminationDeadline = Date().addingTimeInterval(20)
         AppExitDiagnostics.record("intentionalTerminationMarked", metadata: [
             "reason": reason
         ])
@@ -1269,7 +1301,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let settingsWindow = settingsWindowController?.window {
             centerWindow(settingsWindow, relativeTo: window)
             settingsWindow.makeKeyAndOrderFront(nil)
-            settingsWindow.orderFrontRegardless()
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -1320,7 +1351,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let windowController = NSWindowController(window: settingsWindow)
         settingsWindowController = windowController
         windowController.showWindow(nil)
-        settingsWindow.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 

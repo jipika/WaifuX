@@ -4,6 +4,57 @@ import AppKit
 import CryptoKit
 import Kingfisher
 
+/// 串行化高成本的 AVFoundation 抽帧，并将同一输出文件的请求合并为一个任务。
+/// 海报生成会解码高分辨率视频帧，允许多个任务同时运行会迅速耗尽 CPU 和内存。
+private actor VideoPosterGenerationCoordinator {
+    static let shared = VideoPosterGenerationCoordinator()
+
+    private let maxConcurrentGenerations = 1
+    private var activeGenerations = 0
+    private var waitingGenerations: [CheckedContinuation<Void, Never>] = []
+    private var tasks: [String: Task<URL?, Never>] = [:]
+
+    func generate(
+        key: String,
+        operation: @escaping @Sendable () async -> URL?
+    ) async -> URL? {
+        if let task = tasks[key] {
+            return await task.value
+        }
+
+        let task = Task.detached(priority: .utility) { [operation] () -> URL? in
+            await self.acquireSlot()
+            let result = await operation()
+            await self.releaseSlot()
+            return result
+        }
+        tasks[key] = task
+
+        let result = await task.value
+        tasks.removeValue(forKey: key)
+        return result
+    }
+
+    private func acquireSlot() async {
+        if activeGenerations < maxConcurrentGenerations {
+            activeGenerations += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waitingGenerations.append(continuation)
+        }
+    }
+
+    private func releaseSlot() {
+        if let next = waitingGenerations.first {
+            waitingGenerations.removeFirst()
+            next.resume()
+        } else {
+            activeGenerations = max(0, activeGenerations - 1)
+        }
+    }
+}
+
 /// 视频缩略图缓存服务
 /// 为本地视频文件生成并缓存缩略图
 @MainActor
@@ -148,59 +199,62 @@ final class VideoThumbnailCache {
     }
 
     private func generatePosterJPEGFile(from videoURL: URL, outputURL: URL) async -> URL? {
-        await Task.detached(priority: .utility) {
-            let asset = AVAsset(url: videoURL)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 3840, height: 2160)
+        await VideoPosterGenerationCoordinator.shared.generate(key: outputURL.path) {
+            await Task.detached(priority: .utility) {
+                let asset = AVAsset(url: videoURL)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 3840, height: 2160)
 
-            // 计算候选时间点：优先中间帧，回退到 30%/70%/1s，避免第一帧（可能是黑屏/过渡）
-            var candidates: [Double] = []
-            if let duration = try? await asset.load(.duration) {
-                let d = CMTimeGetSeconds(duration)
-                if d.isFinite, d > 0 {
-                    // 主候选：中间时间点；回退：30%、70%、1秒
-                    candidates = [d * 0.5, d * 0.3, d * 0.7, min(d * 0.1, 2.0)]
-                        .filter { $0 >= 0.2 }  // 过滤掉太靠前的（避免第一帧）
-                    // 去重并保持顺序
-                    var seen = Set<Double>()
-                    candidates = candidates.compactMap {
-                        let rounded = (($0 * 10).rounded() / 10)
-                        guard !seen.contains(rounded) else { return nil }
-                        seen.insert(rounded)
-                        return $0
+                // 计算候选时间点：优先中间帧，回退到 30%/70%/1s，避免第一帧（可能是黑屏/过渡）
+                var candidates: [Double] = []
+                if let duration = try? await asset.load(.duration) {
+                    let d = CMTimeGetSeconds(duration)
+                    if d.isFinite, d > 0 {
+                        // 主候选：中间时间点；回退：30%、70%、1秒
+                        candidates = [d * 0.5, d * 0.3, d * 0.7, min(d * 0.1, 2.0)]
+                            .filter { $0 >= 0.2 }  // 过滤掉太靠前的（避免第一帧）
+                        // 去重并保持顺序
+                        var seen = Set<Double>()
+                        candidates = candidates.compactMap {
+                            let rounded = (($0 * 10).rounded() / 10)
+                            guard !seen.contains(rounded) else { return nil }
+                            seen.insert(rounded)
+                            return $0
+                        }
                     }
                 }
-            }
-            // 兜底：如果所有候选都被过滤（如超短视频），回退到第一帧
-            if candidates.isEmpty {
-                candidates = [0.0]
-            }
 
-            // 多点尝试，任一成功即返回
-            for seconds in candidates {
-                let t = CMTime(seconds: seconds, preferredTimescale: 600)
-                do {
-                    let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
-                    let posterImage = Self.croppingImageLetterboxIfNeeded(cgImage)
-                    let image = NSImage(cgImage: posterImage, size: NSSize(width: posterImage.width, height: posterImage.height))
-                    guard let tiff = image.tiffRepresentation,
-                          let rep = NSBitmapImageRep(data: tiff),
-                          let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
+                // 兜底：如果所有候选都被过滤（如超短视频），回退到第一帧
+                if candidates.isEmpty {
+                    candidates = [0.0]
+                }
+
+                // 多点尝试，任一成功即返回
+                for seconds in candidates {
+                    let t = CMTime(seconds: seconds, preferredTimescale: 600)
+                    do {
+                        let cgImage = try generator.copyCGImage(at: t, actualTime: nil)
+                        let posterImage = Self.croppingImageLetterboxIfNeeded(cgImage)
+                        let image = NSImage(cgImage: posterImage, size: NSSize(width: posterImage.width, height: posterImage.height))
+                        guard let tiff = image.tiffRepresentation,
+                              let rep = NSBitmapImageRep(data: tiff),
+                              let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else {
+                            continue
+                        }
+                        try jpeg.write(to: outputURL, options: .atomic)
+                        print("[VideoThumbnailCache] Poster frame at \(String(format: "%.1f", seconds))s for wallpaper: \(outputURL.path)")
+                        return outputURL
+                    } catch {
+                        print("[VideoThumbnailCache] Poster try at \(String(format: "%.1f", seconds))s failed: \(error)")
                         continue
                     }
-                    try jpeg.write(to: outputURL, options: .atomic)
-                    print("[VideoThumbnailCache] Poster frame at \(String(format: "%.1f", seconds))s for wallpaper: \(outputURL.path)")
-                    return outputURL
-                } catch {
-                    print("[VideoThumbnailCache] Poster try at \(String(format: "%.1f", seconds))s failed: \(error)")
-                    continue
                 }
-            }
 
-            print("[VideoThumbnailCache] All poster frame attempts exhausted for \(videoURL.lastPathComponent)")
-            return nil
-        }.value
+                print("[VideoThumbnailCache] All poster frame attempts exhausted for \(videoURL.lastPathComponent)")
+                return nil
+            }.value
+        }
     }
 
     nonisolated private static func cropExistingPosterIfNeeded(_ url: URL) async {

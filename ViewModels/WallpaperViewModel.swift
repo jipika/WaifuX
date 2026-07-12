@@ -1267,7 +1267,11 @@ class WallpaperViewModel: ObservableObject {
             return try Data(contentsOf: downloadURL)
         }
 
-        return try await networkService.fetchImage(from: downloadURL) { progress in
+        let headers = wallpaper.source == "konachan"
+            ? KonachanRequestConfiguration.imageHeaders
+            : [:]
+
+        return try await networkService.fetchImage(from: downloadURL, headers: headers) { progress in
             guard let taskID else { return }
             Task { @MainActor in
                 DownloadTaskService.shared.updateProgress(id: taskID, progress: min(progress * 0.9, 0.9))

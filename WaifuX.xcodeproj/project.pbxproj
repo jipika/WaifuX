@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		004FF2C864E3876EBE274AB0 /* KonachanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1823EAC90BA4264646D4E1D3 /* KonachanService.swift */; };
+		B4C6D8E0F2A4680C1E3F5A7B /* KonachanSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B5C7D9E1F246809B1D3F57 /* KonachanSettingsTab.swift */; };
+		C2D4E6F8091A4B5C6D7E8F90 /* KonachanAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A803E0B5C94A06B79F7C21 /* KonachanAuthService.swift */; };
 		00789A48296E22343CD1FCC3 /* AnimeDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE340CF2EF289C67261EF588 /* AnimeDetailSheet.swift */; };
 		01B60DB90F73D58721413052 /* DirectoryMigrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71F280593ACA1323B52459B /* DirectoryMigrationService.swift */; };
 		028A4B3B320CDBDEED28EC8C /* AnimeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F408E90D551BB1E10440130C /* AnimeViewModel.swift */; };
@@ -294,6 +296,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A3B5C7D9E1F246809B1D3F57 /* KonachanSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanSettingsTab.swift; sourceTree = "<group>"; };
+		F1A803E0B5C94A06B79F7C21 /* KonachanAuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanAuthService.swift; sourceTree = "<group>"; };
 		022419AE7625C356EBA50082 /* MangaDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MangaDetailSheet.swift; sourceTree = "<group>"; };
 		02E3788AB0F9EC18D14604A4 /* BounceSymbolModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BounceSymbolModifier.swift; sourceTree = "<group>"; };
 		0536692A0BF2778A553D8E82 /* SleepPreventer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepPreventer.swift; sourceTree = "<group>"; };
@@ -629,6 +633,7 @@
 		0AD39A2929EBC59FA2F8ECAB /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				A3B5C7D9E1F246809B1D3F57 /* KonachanSettingsTab.swift */,
 				C7443AC63532A05488FF1BE4 /* PixivSettingsTab.swift */,
 				D824E8097B5FCF9DB139FB72 /* SyncSettingsTab.swift */,
 			);
@@ -740,6 +745,7 @@
 				8D47711E7464F497AF7C6D86 /* HTMLXPathParser.swift */,
 				BAE578A6C10A347B2106E12E /* ImportService.swift */,
 				25E12659F1FE1871F19A9D9E /* KazumiRuleLoader.swift */,
+				F1A803E0B5C94A06B79F7C21 /* KonachanAuthService.swift */,
 				1823EAC90BA4264646D4E1D3 /* KonachanService.swift */,
 				6CA001EDF005B2FC12DC4043 /* LibraryFolderStore.swift */,
 				7161F6D026FC623EB6D42B01 /* LiquidGlassClockOverlayManager.swift */,
@@ -1230,8 +1236,10 @@
 				05E92BFCB32FAA1323074275 /* ImportProgressView.swift in Sources */,
 				882297A396569C8F33FF528C /* ImportService.swift in Sources */,
 				3245726014C5A7F6F90732EA /* KazumiRuleLoader.swift in Sources */,
+				C2D4E6F8091A4B5C6D7E8F90 /* KonachanAuthService.swift in Sources */,
 				81AB5AA8F403A0E0FD99B5E1 /* KonachanModels.swift in Sources */,
 				004FF2C864E3876EBE274AB0 /* KonachanService.swift in Sources */,
+				B4C6D8E0F2A4680C1E3F5A7B /* KonachanSettingsTab.swift in Sources */,
 				665C80997AFFE13CF895B7BA /* KonachanTagSearchField.swift in Sources */,
 				293C846F46D6A8FD15010F50 /* LibraryCards.swift in Sources */,
 				8A8ED8229FA48E7F289F409A /* LibraryFolder.swift in Sources */,

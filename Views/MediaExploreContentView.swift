@@ -378,13 +378,14 @@ struct MediaExploreContentView: View {
                     ScrollToTopButton {
                         outerScrollToTopToken &+= 1
                     }
-                    .padding(.trailing, 28)
-                    .padding(.bottom, 120)
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 112)
                     .transition(.scale.combined(with: .opacity))
                 }
             }
         }
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
+        .zIndex(1)
     }
 
     // MARK: - Header

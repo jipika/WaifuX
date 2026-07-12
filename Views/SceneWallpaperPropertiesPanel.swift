@@ -402,7 +402,7 @@ private let scenePropertyKeyTranslations: [String: String] = [
 
 private func translatedLabel(for property: SceneWallpaperProperty) -> String {
     if let text = property.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return text
+        return WallpaperEnginePropertyLocalizer.label(for: text)
     }
     let keyLower = property.key.lowercased()
     if let translated = scenePropertyKeyTranslations[keyLower] {
@@ -567,10 +567,10 @@ struct SceneWallpaperPropertiesPanel: View {
         let label = translatedLabel(for: row.property)
         switch row.property.type {
         case "group":
-            sectionHeader(row.property.text ?? row.property.key)
+            sectionHeader(WallpaperEnginePropertyLocalizer.label(for: row.property.text ?? row.property.key))
         case "description", "label":
             if let text = row.property.text, !text.isEmpty {
-                descriptionRow(text)
+                descriptionRow(WallpaperEnginePropertyLocalizer.label(for: text))
             }
         case "slider":
             glassCard {
@@ -595,7 +595,7 @@ struct SceneWallpaperPropertiesPanel: View {
                 fieldRow(label) {
                     Picker("", selection: comboBinding(for: row)) {
                         ForEach(Array((row.property.options ?? [:]).keys.sorted()), id: \.self) { key in
-                            Text(row.property.options?[key] ?? key).tag(key)
+                            Text(WallpaperEnginePropertyLocalizer.label(for: row.property.options?[key] ?? key)).tag(key)
                         }
                     }
                     .labelsHidden()

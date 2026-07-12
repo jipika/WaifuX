@@ -10,6 +10,70 @@ import QuartzCore
 extension CALayer: @unchecked @retroactive Sendable {}
 extension CAContext: @unchecked @retroactive Sendable {}
 
+/// Darwin notifications do not retain their observer context. Keep the C callback
+/// bound to this process-lifetime object and retain XPC handlers only while dispatching.
+private final class WallpaperPrefsChangeObserver: @unchecked Sendable {
+    private final class WeakHandler {
+        weak var value: WallpaperXPCHandler?
+
+        init(_ value: WallpaperXPCHandler) {
+            self.value = value
+        }
+    }
+
+    static let shared = WallpaperPrefsChangeObserver()
+
+    private let lock = NSLock()
+    private var handlers: [ObjectIdentifier: WeakHandler] = [:]
+    private var isRegistered = false
+
+    private init() {}
+
+    func register(_ handler: WallpaperXPCHandler) {
+        let shouldRegister: Bool
+        lock.lock()
+        handlers = handlers.filter { $0.value.value != nil }
+        handlers[ObjectIdentifier(handler)] = WeakHandler(handler)
+        shouldRegister = !isRegistered
+        isRegistered = true
+        lock.unlock()
+
+        guard shouldRegister else { return }
+
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let dispatcher = Unmanaged<WallpaperPrefsChangeObserver>
+                    .fromOpaque(observer)
+                    .takeUnretainedValue()
+                dispatcher.dispatchPrefsChanged()
+            },
+            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    func unregister(_ handler: WallpaperXPCHandler) {
+        lock.lock()
+        handlers.removeValue(forKey: ObjectIdentifier(handler))
+        lock.unlock()
+    }
+
+    private func dispatchPrefsChanged() {
+        lock.lock()
+        let activeHandlers = handlers.values.compactMap(\.value)
+        handlers = handlers.filter { $0.value.value != nil }
+        lock.unlock()
+
+        activeHandlers.forEach { $0.handlePrefsChanged() }
+    }
+}
+
 final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     var agentProxy: (any WallpaperExtensionProxyXPCProtocol)?
     private var previousPresentationMode = "default"
@@ -978,25 +1042,20 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     /// 开始监听 App 部署新视频的 Darwin 通知，并通知系统刷新壁纸设置。
     /// 在 agentProxy 设置后调用。
     func startObservingPrefs() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        let observer = Unmanaged.passUnretained(self).toOpaque()
-        CFNotificationCenterAddObserver(
-            center,
-            observer,
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                let handler = Unmanaged<WallpaperXPCHandler>.fromOpaque(observer).takeUnretainedValue()
-                handler.handlePrefsChanged()
-            },
-            "com.waifux.app.wallpaper.prefsChanged" as CFString,
-            nil,
-            .deliverImmediately
-        )
+        WallpaperPrefsChangeObserver.shared.register(self)
         extLog("[XPCHandler] 已注册 prefs 变化监听")
     }
 
+    func stopObservingPrefs() {
+        WallpaperPrefsChangeObserver.shared.unregister(self)
+    }
+
+    deinit {
+        stopObservingPrefs()
+    }
+
     /// prefs 变化时：通知系统刷新壁纸设置，促使系统选中最新部署的视频
-    private func handlePrefsChanged() {
+    fileprivate func handlePrefsChanged() {
         extLog("[XPCHandler] prefs 已变化，通知系统刷新壁纸设置...")
 
         // 先清除缓存，确保证 SettingsProvider 扫描到最新文件

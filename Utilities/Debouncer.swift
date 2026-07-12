@@ -157,3 +157,24 @@ final class LeadingTrailingCoalescer: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+// MARK: - Detail download activity
+
+/// Keeps transient detail-screen download state scoped to the item that owns it.
+/// A detail screen can remain alive while its selected item changes, so a single
+/// Boolean would incorrectly show one item's activity on another item.
+struct DetailDownloadActivity: Equatable {
+    private var activeItemIDs = Set<String>()
+
+    mutating func start(itemID: String) {
+        activeItemIDs.insert(itemID)
+    }
+
+    mutating func finish(itemID: String) {
+        activeItemIDs.remove(itemID)
+    }
+
+    func isDownloading(itemID: String) -> Bool {
+        activeItemIDs.contains(itemID)
+    }
+}

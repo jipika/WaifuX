@@ -93,6 +93,17 @@ extension MediaItem {
     @MainActor
     func libraryGridThumbnailURL(localFileURL: URL?) -> URL {
         let fileCache = FileExistenceCache.shared
+        // Scene 烘焙视频是此项目的最终可播放产物，必须压过原始 GIF/preview。
+        // 该优先级不依赖原工程目录仍存在，旧路径失效时也可以继续显示已烘焙的封面。
+        if let record = MediaLibraryService.shared.downloadRecords.first(where: {
+            $0.item.id == id && $0.isActive
+        }),
+        let bakedPath = record.sceneBakeArtifact?.videoPath,
+        SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)),
+        let extracted = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: id) {
+            return extracted
+        }
+
         if let local = localFileURL,
            local.isFileURL,
            fileCache.fileExists(atPath: local.path) {
@@ -111,18 +122,43 @@ extension MediaItem {
             if Self.libraryLocalRasterExtensions.contains(ext) {
                 return resolved
             }
-            // Workshop 项目（Scene/Web）已烘焙产物：尝试使用烘焙产物的 MP4 抽帧缓存
-            if let record = MediaLibraryService.shared.downloadRecords.first(where: { $0.item.id == id }),
-               let bakedPath = record.sceneBakeArtifact?.videoPath,
-               SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)) {
-                if let extracted = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: id) {
-                    return extracted
-                }
-            }
             if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
                 return localPreview
             }
         }
+        if let poster = posterURL, poster.isFileURL, fileCache.fileExists(atPath: poster.path) {
+            return poster
+        }
+        return coverImageURL
+    }
+
+    /// 文件夹卡片只读取已存在的封面，不扫描 Workshop 目录或触发视频抽帧。
+    /// 打开文件夹后，由可见的媒体卡片按需生成缺失的海报。
+    @MainActor
+    func libraryFolderThumbnailURL(localFileURL: URL?) -> URL {
+        let fileCache = FileExistenceCache.shared
+        if let record = MediaLibraryService.shared.downloadRecords.first(where: {
+            $0.item.id == id && $0.isActive
+        }),
+        let bakedPath = record.sceneBakeArtifact?.videoPath,
+        SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)),
+        let extracted = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: id) {
+            return extracted
+        }
+
+        if let local = localFileURL,
+           local.isFileURL,
+           fileCache.fileExists(atPath: local.path) {
+            let ext = local.pathExtension.lowercased()
+            if Self.libraryLocalRasterExtensions.contains(ext) {
+                return local
+            }
+            if Self.videoFileExtensions.contains(ext),
+               let extracted = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: local) {
+                return extracted
+            }
+        }
+
         if let poster = posterURL, poster.isFileURL, fileCache.fileExists(atPath: poster.path) {
             return poster
         }
@@ -180,6 +216,8 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
         lhs.isSelected == rhs.isSelected &&
         lhs.cardWidth == rhs.cardWidth &&
         lhs.localMediaFileURL == rhs.localMediaFileURL &&
+        lhs.thumbnailURL == rhs.thumbnailURL &&
+        lhs.resolvedVideoFileURL == rhs.resolvedVideoFileURL &&
         lhs.isCurrentWallpaper == rhs.isCurrentWallpaper
     }
 
@@ -433,16 +471,28 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
 
     @MainActor
     private func triggerThumbnailIfNeeded() {
+        if let bakedVideo = usableBakedSceneVideoURL() {
+            if let cached = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: item.id) {
+                resolvedThumbnailURL = cached
+                cachedListThumbnailURL = cached
+                return
+            }
+            Task { @MainActor in
+                if let poster = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
+                    forLocalVideo: bakedVideo,
+                    itemID: item.id
+                ) {
+                    resolvedThumbnailURL = poster
+                    cachedListThumbnailURL = poster
+                }
+            }
+            return
+        }
+
         guard resolvedThumbnailURL == nil,
               let local = localMediaFileURL,
               local.isFileURL,
               FileExistenceCache.shared.fileExists(atPath: local.path) else { return }
-
-        if let thumbnailURL,
-           thumbnailURL.isFileURL,
-           !Self.videoExtensions.contains(thumbnailURL.pathExtension.lowercased()) {
-            return
-        }
 
         let isWebWorkshop = MediaItem.localWorkshopProjectType(from: local) == "web"
         if isWebWorkshop, let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
@@ -470,25 +520,9 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
             return
         }
 
-        if let record = MediaLibraryService.shared.downloadRecords.first(where: { $0.item.id == item.id }),
-           let bakedVideo = record.sceneBakeArtifact.flatMap({ $0.videoPath }).map({ URL(fileURLWithPath: $0) }),
-           SceneOfflineBakeService.isUsableBakedVideo(at: bakedVideo) {
-            if let cached = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: item.id) {
-                resolvedThumbnailURL = cached
-                cachedListThumbnailURL = cached
-                return
-            }
-            if Self.videoExtensions.contains(bakedVideo.pathExtension.lowercased()) {
-                Task { @MainActor in
-                    if let poster = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
-                        forLocalVideo: bakedVideo,
-                        itemID: item.id
-                    ) {
-                        resolvedThumbnailURL = poster
-                        cachedListThumbnailURL = poster
-                    }
-                }
-            }
+        if let thumbnailURL,
+           thumbnailURL.isFileURL,
+           !Self.videoExtensions.contains(thumbnailURL.pathExtension.lowercased()) {
             return
         }
 
@@ -496,6 +530,18 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
             resolvedThumbnailURL = localPreview
             cachedListThumbnailURL = localPreview
         }
+    }
+
+    @MainActor
+    private func usableBakedSceneVideoURL() -> URL? {
+        guard let record = MediaLibraryService.shared.downloadRecords.first(where: {
+            $0.item.id == item.id && $0.isActive
+        }),
+        let artifact = record.sceneBakeArtifact else {
+            return nil
+        }
+        let videoURL = URL(fileURLWithPath: artifact.videoPath)
+        return SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) ? videoURL : nil
     }
 
     @MainActor

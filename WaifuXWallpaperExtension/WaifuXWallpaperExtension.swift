@@ -100,6 +100,7 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
 
         connection.interruptionHandler = { extLog("XPC interrupted") }
         connection.invalidationHandler = { [weak handler] in
+            handler?.stopObservingPrefs()
             handler?.agentProxy = nil
             let removed = WallpaperState.shared.removeAllContexts()
             guard !removed.isEmpty else {

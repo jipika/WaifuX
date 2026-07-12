@@ -279,6 +279,8 @@ final class VideoWallpaperManager: ObservableObject {
     private var displaySwitchReleaseWorkItem: DispatchWorkItem?
     /// 每个屏幕独立的 poster 设置任务，避免一块屏的新任务取消掉另一块屏的恢复。
     private var posterTasks: [String: Task<Void, Never>] = [:]
+    /// 每个屏幕当前有效的 poster 加载令牌，防止旧封面在异步加载完成后盖回新播放器。
+    private var posterDisplayTokens: [String: UUID] = [:]
     /// 每个屏幕的独立音量（key 为 screenID），未设置时回退到全局 `volume`
     private var volumeByScreen: [String: Double] = [:]
     /// 音量的物理显示器指纹索引，用于 screenID 变化后的恢复。
@@ -1178,6 +1180,26 @@ final class VideoWallpaperManager: ObservableObject {
             }
         }
         persistState()
+    }
+
+    /// Restores the just-finished video when the scheduler cannot apply any valid
+    /// successor in "Play to End" mode. The poster stays visible until the first frame
+    /// is ready, so a failed rotation cannot leave the desktop black.
+    func resumeOnEndVideoAfterFailedSwitch(for targetScreen: NSScreen) {
+        let screenID = targetScreen.wallpaperScreenIdentifier
+        guard let player = players[screenID] else { return }
+
+        showPosterImage(for: screenID)
+        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
+            guard let player else { return }
+            DispatchQueue.main.async {
+                guard let self, self.players[screenID] === player else { return }
+                guard !self.isPaused else { return }
+
+                player.play()
+                self.hidePosterImage(for: screenID)
+            }
+        }
     }
 
     /// 获取当前正在播放动态壁纸的显示器
@@ -2234,7 +2256,7 @@ final class VideoWallpaperManager: ObservableObject {
 
         if let activeDisplaySwitchScreenID {
             pendingDisplaySwitches[screenID] = pending
-            AppLogger.error(.wallpaper, "Video switch cached while another display is stabilizing", metadata: [
+            AppLogger.debug(.wallpaper, "Video switch cached while another display is stabilizing", metadata: [
                 "activeScreenID": activeDisplaySwitchScreenID,
                 "queuedScreenID": screenID,
                 "queuedScreen": targetScreen.localizedName,
@@ -2246,7 +2268,7 @@ final class VideoWallpaperManager: ObservableObject {
 
         activeDisplaySwitchScreenID = screenID
         scheduleDisplaySwitchRelease(screenID: screenID, delay: displaySwitchTimeout, reason: "timeout")
-        AppLogger.error(.wallpaper, "Video switch gate acquired", metadata: [
+        AppLogger.debug(.wallpaper, "Video switch gate acquired", metadata: [
             "screenID": screenID,
             "screen": targetScreen.localizedName,
             "video": videoURL.lastPathComponent
@@ -2274,7 +2296,7 @@ final class VideoWallpaperManager: ObservableObject {
         displaySwitchReleaseWorkItem = nil
         activeDisplaySwitchScreenID = nil
 
-        AppLogger.error(.wallpaper, "Video switch gate released", metadata: [
+        AppLogger.debug(.wallpaper, "Video switch gate released", metadata: [
             "screenID": screenID,
             "reason": reason,
             "queueSize": pendingDisplaySwitches.count
@@ -2304,7 +2326,7 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        AppLogger.error(.wallpaper, "Applying cached video switch", metadata: [
+        AppLogger.debug(.wallpaper, "Applying cached video switch", metadata: [
             "screenID": screen.wallpaperScreenIdentifier,
             "screen": screen.localizedName,
             "video": next.videoURL.lastPathComponent,
@@ -3194,11 +3216,14 @@ final class VideoWallpaperManager: ObservableObject {
 
                 // 2. 更新字典
                 players[targetScreenID] = components.player
+                // 播放器替换后，先让已在途的旧 poster 加载失效；现有封面保留到淡入结束再移除。
+                invalidatePosterDisplay(for: targetScreenID)
 
                 let finalizeReplacement: @MainActor @Sendable () -> Void = { [weak self, weak containerView] in
                     guard let self, let containerView else { return }
                     containerView.playerLayer.player = components.player
                     containerView.playerLayer.videoGravity = .resizeAspectFill
+                    self.hidePosterImage(for: targetScreenID)
                     self.applyCropToScreen(targetScreen)
                     self.scheduleVideoLetterboxAnalysis(screenID: targetScreenID, videoURL: videoURL)
                     self.prepareFrameInterpolation(
@@ -3842,18 +3867,29 @@ final class VideoWallpaperManager: ObservableObject {
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
             queue: .main
-        ) { _ in
-            // 立即将播放器 seek 到第一帧并暂停，作为静态占位帧。
-            // 避免异步切换新壁纸期间（triggerNextWallpaper → applyItem）屏幕无内容导致黑屏。
-            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
-            player.pause()
-            // 发送视频播放完成通知
-            DistributedNotificationCenter.default().postNotificationName(
-                notificationName,
-                object: nil,
-                userInfo: ["screenID": screenID],
-                deliverImmediately: true
-            )
+        ) { [weak self, weak player] _ in
+            Task { @MainActor [weak self, weak player] in
+                guard let self, let player, self.players[screenID] === player else { return }
+
+                // 结束帧的 AVPlayerLayer 可能清空为黑色。先盖上 poster，再等待 seek
+                // 真正完成后派发切换事件；不能在异步 seek 发起后立即暂停。
+                self.showPosterImage(for: screenID)
+                player.pause()
+                player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
+                    guard let player else { return }
+                    DispatchQueue.main.async {
+                        guard let self, self.players[screenID] === player else { return }
+                        player.pause()
+                        // 发送视频播放完成通知
+                        DistributedNotificationCenter.default().postNotificationName(
+                            notificationName,
+                            object: nil,
+                            userInfo: ["screenID": screenID],
+                            deliverImmediately: true
+                        )
+                    }
+                }
+            }
         }
         playbackEndObservers[screenID] = observer
     }
@@ -3980,22 +4016,33 @@ final class VideoWallpaperManager: ObservableObject {
         // 如果已经显示了预览图，不再重复加载
         guard !containerView.isShowingPoster else { return }
 
+        let token = UUID()
+        posterDisplayTokens[screenID] = token
+
         // 异步加载预览图
-        Task {
-            if let image = await loadPosterImage(from: posterURL) {
-                await MainActor.run {
-                    containerView.showPoster(image)
-                }
+        Task { [weak self, weak containerView] in
+            guard let self,
+                  let image = await self.loadPosterImage(from: posterURL),
+                  self.posterDisplayTokens[screenID] == token,
+                  let containerView,
+                  self.windows[screenID]?.contentView === containerView else {
+                return
             }
+            containerView.showPoster(image)
         }
     }
 
     /// 隐藏预览图
     private func hidePosterImage(for screenID: String) {
+        invalidatePosterDisplay(for: screenID)
         guard let window = windows[screenID],
               let containerView = window.contentView as? WallpaperVideoContainerView else { return }
 
         containerView.hidePoster()
+    }
+
+    private func invalidatePosterDisplay(for screenID: String) {
+        posterDisplayTokens[screenID] = UUID()
     }
 
     /// 从 URL 加载预览图

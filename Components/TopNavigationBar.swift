@@ -320,7 +320,12 @@ struct HelpPopoverView: View {
                         title: t("tutorial.settings.title"),
                         lines: [
                             t("tutorial.settings.l1"),
-                            t("tutorial.settings.l2")
+                            t("tutorial.settings.l2"),
+                            t("tutorial.settings.l3"),
+                            t("tutorial.settings.l4"),
+                            t("tutorial.settings.l5"),
+                            t("tutorial.settings.l6"),
+                            t("tutorial.settings.l7")
                         ]
                     )
 
@@ -363,7 +368,8 @@ struct HelpPopoverView: View {
                             t("tutorial.sceneWeb.l2"),
                             t("tutorial.sceneWeb.l3"),
                             t("tutorial.sceneWeb.l4"),
-                            t("tutorial.sceneWeb.l5")
+                            t("tutorial.sceneWeb.l5"),
+                            t("tutorial.sceneWeb.l6")
                         ]
                     )
 

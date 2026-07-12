@@ -411,10 +411,7 @@ final class WebWallpaperDesignService {
 
     func displayLabel(for property: WebWallpaperProperty) -> String {
         let stripped = Self.stripHTML(property.rawLabel)
-        if stripped == "ui_browse_properties_scheme_color" {
-            return "Scheme Color"
-        }
-        return stripped.isEmpty ? property.key : stripped
+        return WallpaperEnginePropertyLocalizer.label(for: stripped, fallback: property.key)
     }
 
     private nonisolated static func defaultValueMapStatic(for properties: [WebWallpaperProperty]) -> [String: WebWallpaperPropertyValue] {

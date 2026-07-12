@@ -1,6 +1,13 @@
 import AppKit
 import CoreGraphics
 
+enum WallpaperScreenIdentity {
+    static func fingerprint(legacyFingerprint: String, hasHardwareSerial: Bool, position: CGPoint) -> String {
+        guard !hasHardwareSerial else { return legacyFingerprint }
+        return "\(legacyFingerprint):position:\(Int(position.x.rounded()))x\(Int(position.y.rounded()))"
+    }
+}
+
 extension NSScreen {
     /// 返回稳定的屏幕标识符，用于跨模块的屏幕级状态字典 key。
     ///
@@ -49,8 +56,10 @@ extension NSScreen {
         externalConnectionFingerprint
     }
 
-    /// 尽量稳定的物理显示器指纹，用于外接屏断开 / 重连后 `NSScreenNumber` 变化时找回目标屏。
-    var wallpaperScreenFingerprint: String {
+    /// 旧版显示器指纹格式，仅用于迁移已保存的状态。
+    ///
+    /// 无硬件序列号的同型号显示器在旧格式下会共享同一指纹，不能再用于新的持久化键。
+    var legacyWallpaperScreenFingerprint: String {
         guard let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
             return "fallback:\(localizedName):\(Int(frame.width))x\(Int(frame.height))"
         }
@@ -67,6 +76,25 @@ extension NSScreen {
             return "cg:\(vendor):\(model):\(serial):\(builtin)"
         }
         return "cg:\(vendor):\(model):noserial:\(localizedName):\(pixelWidth)x\(pixelHeight):\(builtin)"
+    }
+
+    /// 尽量稳定的物理显示器指纹，用于外接屏断开 / 重连后 `NSScreenNumber` 变化时找回目标屏。
+    ///
+    /// 当显示器未提供硬件序列号时，厂商/型号/分辨率不足以区分两块同型号屏幕。
+    /// 加入桌面排列位置可在重启后的相同显示器布局中保留独立恢复记录。
+    var wallpaperScreenFingerprint: String {
+        let legacyFingerprint = legacyWallpaperScreenFingerprint
+        let hasHardwareSerial: Bool
+        if let screenNumber = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            hasHardwareSerial = CGDisplaySerialNumber(CGDirectDisplayID(screenNumber.uint32Value)) != 0
+        } else {
+            hasHardwareSerial = false
+        }
+        return WallpaperScreenIdentity.fingerprint(
+            legacyFingerprint: legacyFingerprint,
+            hasHardwareSerial: hasHardwareSerial,
+            position: frame.origin
+        )
     }
 
     /// 当前显示器的主刷新率（Hz），取整。

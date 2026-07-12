@@ -21,7 +21,7 @@ struct MediaDetailSheet: View {
     @ObservedObject private var displaySelectorManager = DisplaySelectorManager.shared
     @ObservedObject private var frameInterpolationQueue = FrameInterpolationQueueService.shared
     @State private var resolvedItem: MediaItem
-    @State private var isDownloading = false
+    @State private var downloadActivity = DetailDownloadActivity()
     @State private var isSettingWallpaper = false
     @State private var showError = false
     @State private var errorMessage = ""
@@ -105,6 +105,10 @@ struct MediaDetailSheet: View {
 
     // 计算属性：当前媒体项
     var item: MediaItem { resolvedItem }
+
+    private var isDownloading: Bool {
+        downloadActivity.isDownloading(itemID: resolvedItem.id)
+    }
 
     init(item: MediaItem, viewModel: MediaExploreViewModel, contextItems: [MediaItem]? = nil, onClose: @escaping () -> Void, onNavigateToItem: ((MediaItem) -> Void)? = nil) {
         self.initialItem = item
@@ -1040,12 +1044,13 @@ struct MediaDetailSheet: View {
     }
 
     private func redownloadOriginalAndOptimize(videoURL: URL) async {
-        guard !isDownloading else { return }
-        isDownloading = true
-        optimizationPipeline.set(.restoringOriginal, for: resolvedItem.id)
+        let itemID = resolvedItem.id
+        guard !downloadActivity.isDownloading(itemID: itemID) else { return }
+        downloadActivity.start(itemID: itemID)
+        optimizationPipeline.set(.restoringOriginal, for: itemID)
         errorMessage = ""
         defer {
-            isDownloading = false
+            downloadActivity.finish(itemID: itemID)
             pendingLoopReoptimizationURL = nil
         }
 
@@ -2704,51 +2709,53 @@ struct MediaDetailSheet: View {
     }
 
     private func downloadMedia() {
+        let downloadingItem = resolvedItem
+        let itemID = downloadingItem.id
+
         // 本地文件无需下载
         if isLocalFile {
-            AppLogger.debug(.download, "跳过下载：本地媒体", metadata: ["id": resolvedItem.id])
+            AppLogger.debug(.download, "跳过下载：本地媒体", metadata: ["id": itemID])
             return
         }
 
         // Workshop 下载
-        if resolvedItem.id.hasPrefix("workshop_") {
+        if itemID.hasPrefix("workshop_") {
             downloadWorkshop()
             return
         }
 
         AppLogger.info(.download, "开始下载媒体", metadata:
-            ["id": resolvedItem.id, "title": resolvedItem.title,
-             "选项数": resolvedItem.downloadOptions.count])
-        isDownloading = true
+            ["id": itemID, "title": downloadingItem.title,
+             "选项数": downloadingItem.downloadOptions.count])
+        downloadActivity.start(itemID: itemID)
         errorMessage = ""
         let start = Date()
-        Task {
+        Task { @MainActor in
+            defer { downloadActivity.finish(itemID: itemID) }
+
             do {
                 // 默认选择最高画质（与设为壁纸逻辑一致）
-                let targetOption = resolvedItem.downloadOptions.max { lhs, rhs in
+                let targetOption = downloadingItem.downloadOptions.max { lhs, rhs in
                     if lhs.qualityRank == rhs.qualityRank {
                         return lhs.fileSizeMegabytes < rhs.fileSizeMegabytes
                     }
                     return lhs.qualityRank < rhs.qualityRank
                 }
                 if let targetOption {
-                    _ = try await viewModel.downloadMedia(resolvedItem, option: targetOption)
+                    _ = try await viewModel.downloadMedia(downloadingItem, option: targetOption)
                     AppLogger.info(.download, "媒体下载成功", metadata:
-                        ["id": resolvedItem.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
+                        ["id": itemID, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start)),
                          "选中选项": targetOption.label])
                 } else {
                     throw NetworkError.invalidResponse
                 }
             } catch {
-                await MainActor.run {
-                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                    showError = true
-                }
+                errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                showError = true
                 AppLogger.error(.download, "媒体下载失败", metadata:
-                    ["id": resolvedItem.id, "error": error.localizedDescription,
+                    ["id": itemID, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             }
-            isDownloading = false
         }
     }
 
@@ -2765,46 +2772,43 @@ struct MediaDetailSheet: View {
     }
 
     private func downloadWorkshop(guardCode: String? = nil) {
+        let downloadingItem = resolvedItem
+        let itemID = downloadingItem.id
+
         AppLogger.info(.download, "开始下载 Workshop 内容", metadata:
-            ["id": resolvedItem.id, "title": resolvedItem.title, "guardCode": guardCode != nil ? "provided" : "nil"])
-        isDownloading = true
+            ["id": itemID, "title": downloadingItem.title, "guardCode": guardCode != nil ? "provided" : "nil"])
+        downloadActivity.start(itemID: itemID)
         errorMessage = ""
         let start = Date()
         Task { @MainActor in
+            defer { downloadActivity.finish(itemID: itemID) }
+
             do {
-                try await viewModel.downloadWorkshopWallpaper(resolvedItem, guardCode: guardCode)
-                isDownloading = false
+                try await viewModel.downloadWorkshopWallpaper(downloadingItem, guardCode: guardCode)
                 AppLogger.info(.download, "Workshop 下载成功", metadata:
-                    ["id": resolvedItem.id, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
+                    ["id": itemID, "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             } catch let error as WorkshopError {
                 switch error {
                 case .guardCodeRequired:
-                    isDownloading = false
                     pendingSteamGuardCode = ""
                     showSteamGuardAlert = true
                 case .confirmationRequired(let msg):
-                    isDownloading = false
                     errorMessage = msg
                     showError = true
                 case .sessionExpired:
-                    isDownloading = false
                     showSessionExpiredAlert = true
                     AppLogger.error(.download, "Workshop 会话过期，已清除凭据", metadata:
-                        ["id": resolvedItem.id])
+                        ["id": itemID])
                 default:
-                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                    showError = true
-                    isDownloading = false
+                    presentWorkshopDownloadError(error.localizedDescription)
                     AppLogger.error(.download, "Workshop 下载失败", metadata:
-                        ["id": resolvedItem.id, "error": error.localizedDescription,
+                        ["id": itemID, "error": error.localizedDescription,
                          "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
                 }
             } catch {
-                errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                showError = true
-                isDownloading = false
+                presentWorkshopDownloadError(error.localizedDescription)
                 AppLogger.error(.download, "Workshop 下载失败", metadata:
-                    ["id": resolvedItem.id, "error": error.localizedDescription,
+                    ["id": itemID, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
             }
         }
@@ -2812,28 +2816,31 @@ struct MediaDetailSheet: View {
 
     private func deleteFrameInterpolationFileAndRedownload(videoURL: URL) async {
         guard !isDeletingFrameInterpolation else { return }
+        let downloadingItem = resolvedItem
+        let itemID = downloadingItem.id
         isDeletingFrameInterpolation = true
-        isDownloading = true
+        downloadActivity.start(itemID: itemID)
         errorMessage = ""
         defer {
             isDeletingFrameInterpolation = false
-            isDownloading = false
+            downloadActivity.finish(itemID: itemID)
             pendingDeleteFrameInterpolationURL = nil
         }
 
         let targetFPS = currentFrameInterpolationTargetFPS
         frameInterpolationQueue.removeCompleted(videoURL: videoURL)
-        frameInterpolationQueue.markBlacklisted(videoURL: videoURL, title: resolvedItem.title, targetFPS: targetFPS)
+        frameInterpolationQueue.markBlacklisted(videoURL: videoURL, title: downloadingItem.title, targetFPS: targetFPS)
 
         do {
             if FileManager.default.fileExists(atPath: videoURL.path) {
                 try FileManager.default.removeItem(at: videoURL)
             }
 
-            if resolvedItem.id.hasPrefix("workshop_") {
-                try await viewModel.downloadWorkshopWallpaper(resolvedItem, suppressToast: true)
+
+            if itemID.hasPrefix("workshop_") {
+                try await viewModel.downloadWorkshopWallpaper(downloadingItem, suppressToast: true)
             } else {
-                try await viewModel.download(resolvedItem, suppressToast: true)
+                try await viewModel.download(downloadingItem, suppressToast: true)
             }
 
             VideoWallpaperManager.shared.restoreOriginalVideoAfterDeletingFrameInterpolation(videoURL: videoURL, targetFPSs: [targetFPS])
@@ -2846,7 +2853,7 @@ struct MediaDetailSheet: View {
             errorMessage = Self.truncateErrorMessage(error.localizedDescription)
             showError = true
             AppLogger.error(.download, "删除补帧文件后重新下载失败", metadata: [
-                "id": resolvedItem.id,
+                "id": itemID,
                 "video": videoURL.path,
                 "error": error.localizedDescription
             ])
@@ -2859,9 +2866,15 @@ struct MediaDetailSheet: View {
         return String(message[..<endIndex]) + "\n\n[日志已截断，完整错误请查看控制台]"
     }
 
+    private func presentWorkshopDownloadError(_ message: String) {
+        errorMessage = "\(t("workshopDownloadTroubleshooting"))\n\n\(Self.truncateErrorMessage(message))"
+        showError = true
+    }
+
     private func setAsDesktopWallpaper() {
         // Wallpaper Engine 类内容：Workshop 与本地入库（同一套路径解析）
         if let localURL = findLocalWorkshopFile(for: resolvedItem) {
+            viewModel.ensureMediaIsInLibrary(resolvedItem, localFileURL: localURL)
             let contentRoot = sceneEngineContentRoot(for: localURL)
 
             // 检查并自动下载 Workshop 依赖项（预设壁纸的母壁纸）
@@ -2891,14 +2904,12 @@ struct MediaDetailSheet: View {
                             default:
                                 msg = "依赖项下载失败: \(error.localizedDescription)"
                             }
-                            self.errorMessage = msg
-                            self.showError = true
+                            self.presentWorkshopDownloadError(msg)
                             self.isSettingWallpaper = false
                         }
                     } catch {
                         await MainActor.run {
-                            self.errorMessage = "依赖项下载失败: \(error.localizedDescription)"
-                            self.showError = true
+                            self.presentWorkshopDownloadError("依赖项下载失败: \(error.localizedDescription)")
                             self.isSettingWallpaper = false
                         }
                     }
@@ -2947,13 +2958,11 @@ struct MediaDetailSheet: View {
                     case .sessionExpired:
                         showSessionExpiredAlert = true
                     default:
-                        errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                        showError = true
+                        presentWorkshopDownloadError(error.localizedDescription)
                     }
                 } catch {
                     isSettingWallpaper = false
-                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                    showError = true
+                    presentWorkshopDownloadError(error.localizedDescription)
                 }
             }
             return

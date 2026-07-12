@@ -2685,6 +2685,36 @@ extension WorkshopService {
 // MARK: - SteamCMD 解压目录 → 真实 WE 工程根
 
 extension WorkshopService {
+    /// Canonicalize both SteamCMD's outer download directory and the nested content directory.
+    /// This keeps media-library registration stable when callers resolve the playable project root.
+    nonisolated static func canonicalWorkshopContentURL(for workshopID: String, startingAt url: URL) -> URL {
+        let fileManager = FileManager.default
+        let standardizedURL = url.standardizedFileURL
+
+        if standardizedURL.pathComponents.suffix(2) == ["431960", workshopID] {
+            return standardizedURL
+        }
+
+        let workshopRootName = "workshop_\(workshopID)"
+        var candidate = standardizedURL
+        while true {
+            if candidate.lastPathComponent == workshopRootName {
+                let contentURL = candidate
+                    .appendingPathComponent("steamapps/workshop/content/431960/\(workshopID)")
+                    .standardizedFileURL
+                if fileManager.fileExists(atPath: contentURL.path) {
+                    return contentURL
+                }
+            }
+
+            let parent = candidate.deletingLastPathComponent()
+            guard parent.path != candidate.path else { break }
+            candidate = parent
+        }
+
+        return resolveWallpaperEngineProjectRoot(startingAt: standardizedURL).standardizedFileURL
+    }
+
     /// SteamCMD 解压路径常为 `.../steamapps/workshop/content/431960/<id>/`，但 `project.json` 往往在**唯一子目录**或**多子目录之一**内。
     /// 在根目录没有 `project.json`、`.pkg`、视频文件时向下解析，避免类型检测与 CLI 加载失败。
     nonisolated static func resolveWallpaperEngineProjectRoot(startingAt base: URL, maxDescend: UInt = 8) -> URL {

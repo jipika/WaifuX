@@ -971,7 +971,9 @@ struct ScrollToTopButton: View {
     @Environment(\.isScrollInteracting) private var isScrollInteracting
     @State private var isHovered = false
 
-    private let buttonSize: CGFloat = 44
+    private let buttonSize: CGFloat = 48
+    // Keep the circular visual compact while giving the pointer a forgiving target.
+    private let hitTargetSize: CGFloat = 64
 
     private var useLightweight: Bool {
         forceLightweight || isScrollInteracting
@@ -1001,6 +1003,8 @@ struct ScrollToTopButton: View {
                                 .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
                         )
                 )
+                .frame(width: hitTargetSize, height: hitTargetSize)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovered ? 1.1 : 1.0)

@@ -381,6 +381,25 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         URL(fileURLWithPath: localFilePath)
     }
 
+    /// A Workshop download may be registered at either its SteamCMD root or its nested content root.
+    /// Treat those representations as the same source so applying it does not re-register the download.
+    func hasSameLocalContent(as candidateURL: URL) -> Bool {
+        guard item.id.hasPrefix("workshop_") else {
+            return localFileURL.standardizedFileURL.path == candidateURL.standardizedFileURL.path
+        }
+
+        let workshopID = String(item.id.dropFirst("workshop_".count))
+        let recordedContentURL = WorkshopService.canonicalWorkshopContentURL(
+            for: workshopID,
+            startingAt: localFileURL
+        )
+        let candidateContentURL = WorkshopService.canonicalWorkshopContentURL(
+            for: workshopID,
+            startingAt: candidateURL
+        )
+        return recordedContentURL.path == candidateContentURL.path
+    }
+
     /// 解析后的视频文件 URL：优先烘焙产物，其次目录内视频文件，最后原始路径
     var resolvedVideoFileURL: URL? {
         // 优先使用烘焙产物的视频

@@ -221,33 +221,12 @@ actor KonachanService {
     }
     // MARK: - Private
 
-    /// 默认请求头 — 使用真实 Safari UA + Referer 避免 403
-    /// Konachan 对缺少 Referer 或非浏览器 UA 的请求可能返回 403。
+    /// 默认请求头与 Konachan 登录 WebView 共享同一个 User-Agent。
+    ///
+    /// Cloudflare 的 `cf_clearance` 会绑定浏览器标识；两端不一致会导致
+    /// 用户完成验证后 API 仍被 challenge。
     private var defaultHeaders: [String: String] {
-        [
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Encoding": "gzip, deflate",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,ja;q=0.6",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
-            "Referer": "https://konachan.com/",
-            "Origin": "https://konachan.com",
-            "Connection": "keep-alive",
-            "DNT": "1"
-        ]
-    }
-
-    /// 当标准请求头返回 403 时的备用请求头（更简化的伪装）
-    private var fallbackHeaders: [String: String] {
-        [
-            "Accept": "application/json",
-            "User-Agent": "WaifuX/\(appVersion) (macOS; https://github.com/...)",
-            "Referer": "https://konachan.com/"
-        ]
-    }
-
-    /// App 版本号
-    private var appVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0"
+        KonachanRequestConfiguration.apiHeaders
     }
 
     /// 限速控制：保证两次请求之间至少有 minimumRequestInterval 间隔
@@ -283,11 +262,20 @@ actor KonachanService {
             )
         } catch {
             print("[KonachanService] Primary API failed (\(primaryURL.host ?? "unknown")): \(error). Retrying fallback...")
-            return try await networkService.fetch(
-                T.self,
-                from: fallbackURL,
-                headers: defaultHeaders
-            )
+            do {
+                return try await networkService.fetch(
+                    T.self,
+                    from: fallbackURL,
+                    headers: defaultHeaders
+                )
+            } catch let fallbackError as NetworkError {
+                if case .loginRequired = fallbackError {
+                    throw NetworkError.loginRequired(
+                        message: "Konachan 请求被 Cloudflare 拦截。请在「设置 → Konachan」完成登录或人机验证后重试。"
+                    )
+                }
+                throw fallbackError
+            }
         }
     }
 }

@@ -153,6 +153,7 @@ class WallpaperSchedulerService: ObservableObject {
         let items = getSchedulableItems(for: displayConfig, screenID: screenID)
         guard !items.isEmpty else {
             print("\(logTag) Screen \(screenID): no schedulable items for next-wallpaper request")
+            recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             return
         }
 
@@ -162,6 +163,7 @@ class WallpaperSchedulerService: ObservableObject {
         let order = overrideOrder ?? displayConfig.order
         guard let item = selectNextItem(from: items, lastID: lastChangedItemID, screenID: screenID, order: order) else {
             print("\(logTag) Screen \(screenID): item selection returned nil for on-end mode")
+            recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             return
         }
 
@@ -197,8 +199,24 @@ class WallpaperSchedulerService: ObservableObject {
                     print("\(logTag) Retry failed for next wallpaper '\(retryItem.title)', trying next")
                 }
                 print("\(logTag) All next-wallpaper candidates exhausted for screen \(screenID), no wallpaper applied")
+                self.recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             }
         }
+    }
+
+    /// An on-end rotation has already paused the current video. If no candidate can
+    /// replace it, start that player again instead of leaving its window black.
+    private func recoverCurrentVideoAfterFailedOnEndSwitch(
+        for screenID: String,
+        requiredMode: RequiredSwitchMode?
+    ) {
+        guard case .onEnd? = requiredMode,
+              let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+            return
+        }
+
+        print("\(logTag) Restoring current video after failed on-end switch for screen \(screenID)")
+        VideoWallpaperManager.shared.resumeOnEndVideoAfterFailedSwitch(for: screen)
     }
 
     @objc private func handleScreenLocked() {
@@ -1394,6 +1412,25 @@ class WallpaperSchedulerService: ObservableObject {
         return nil
     }
 
+    /// Validates a Workshop directory before it enters an event-driven rotation.
+    /// Scene and web projects have no AVPlayer completion event, so selecting either
+    /// after a video ends would leave the finished player paused without a successor.
+    private func workshopDirectoryContainsPlayableVideo(
+        at directory: URL,
+        allowedExtensions: Set<String>
+    ) -> Bool {
+        let root = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: directory)
+        let projectURL = root.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let project = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (project["type"] as? String)?.lowercased() == "video",
+              let videoURL = findVideoFileInProject(projectJSON: project, root: root) else {
+            return false
+        }
+
+        return allowedExtensions.contains(videoURL.pathExtension.lowercased())
+    }
+
     private let videoExtensions: Set<String> = ["mp4", "mov", "webm", "mkv", "avi", "m4v", "flv"]
     private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
 
@@ -1619,16 +1656,19 @@ class WallpaperSchedulerService: ObservableObject {
 
                 // "播完即换"模式下只保留可通过 VideoWallpaperManager 播放的视频项：
                 // 1. 有 bakedVideoPath 的烘焙 mp4 项
-                // 2. 直接是 mp4/m4v 视频文件的非 Workshop 项
-                // 3. Workshop 目录项（包含可提取的视频文件，由 applyItem 运行时判断）
+                // 2. 直接的视频文件
+                // 3. 声明为 video 类型且包含可播放视频的 Workshop 目录
                 // 如果设置了 webSceneSwitchSeconds，则放宽限制，允许所有 Workshop 项
                 if onEndMode && !webSceneSwitchEnabled {
                     if bakedVideoPath != nil {
                         // 有烘焙视频产物，可播放
-                    } else if !isWorkshop && isAllowedExt && !isDirectory {
-                        // 本地 mp4/m4v 视频文件，可播放
-                    } else if isWorkshop && isDirectory {
-                        // Workshop 目录项，由 applyItem 在运行时根据 project.json 类型分发
+                    } else if isAllowedExt && !isDirectory {
+                        // 可由 AVFoundation 直接播放的视频文件
+                    } else if isWorkshop && isDirectory && workshopDirectoryContainsPlayableVideo(
+                        at: url,
+                        allowedExtensions: allowedMediaExts
+                    ) {
+                        // 候选阶段已验证，避免结束后选到 scene/web 再黑屏。
                     } else {
                         continue
                     }

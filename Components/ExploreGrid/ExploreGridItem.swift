@@ -281,6 +281,9 @@ class ExploreGridItem: NSCollectionViewItem {
                             req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
                         } else if host.contains("pximg.net") {
                             req.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+                        } else if host.contains("konachan.net") || host.contains("konachan.com") {
+                            req.setValue(KonachanRequestConfiguration.browserUserAgent, forHTTPHeaderField: "User-Agent")
+                            req.setValue("\(KonachanRequestConfiguration.siteURL.absoluteString)/", forHTTPHeaderField: "Referer")
                         }
                     }
                     return req

@@ -1,5 +1,99 @@
 import Foundation
 
+/// Resolves the Wallpaper Engine localization tokens that are embedded in
+/// `project.json` user properties.
+enum WallpaperEnginePropertyLocalizer {
+    private static let bundledChineseLabels = loadBundledChineseLabels()
+
+    private static let fallbackChineseLabels: [String: String] = [
+        // Wallpaper Engine Android mapping reference: browse property labels.
+        "ui_browse_properties_playback_rate": "播放速度",
+        "ui_browse_properties_audio_recording": "音频监听",
+        "ui_browse_properties_alignment": "对齐方式",
+        "ui_browse_properties_alignment_cover": "覆盖",
+        "ui_browse_properties_alignment_fill": "填充",
+        "ui_browse_properties_alignment_free": "自由",
+        "ui_browse_properties_alignment_center": "居中",
+        "ui_browse_properties_alignment_stretch": "拉伸",
+        "ui_browse_properties_alignment_horizontal": "水平",
+        "ui_browse_properties_alignment_vertical": "垂直",
+        "ui_browse_properties_alignment_zoom": "缩放",
+        "ui_browse_properties_alignment_position": "位置",
+        "ui_browse_properties_alignment_flip_horizontally": "翻转",
+        "ui_browse_properties_parallax": "对运动作出反应",
+        "ui_browse_properties_parallax_strength": "运动强度",
+        "ui_browse_properties_parallax_disabled": "已禁用",
+        "ui_browse_properties_parallax_gyro": "设备运动",
+        "ui_browse_properties_parallax_scroll": "主屏幕滚动",
+        "ui_browse_properties_brightness": "亮度",
+        "ui_browse_properties_contrast": "对比度",
+        "ui_browse_properties_saturation": "饱和度",
+        "ui_browse_properties_hue_shift": "色调偏移",
+        "ui_browse_properties_show_color_options": "显示颜色选项",
+        "ui_browse_properties_pixel_art_optimization": "像素画优化",
+        "ui_browse_properties_background_color": "背景色",
+        "ui_browse_properties_scheme_color": "主题配色",
+        "ui_browse_properties_volume": "音量",
+        "ui_browse_properties_mouse_parallax": "鼠标视差",
+        "ui_browse_properties_image_filter": "图片筛选器",
+        "ui_browse_properties_filter_strength": "筛选器强度",
+        "ui_browse_properties_accent_color": "强调色",
+        "ui_browse_properties_clouds": "云朵",
+        "ui_browse_properties_sun_bottom": "太阳底部",
+        "ui_browse_properties_sun_top": "太阳顶部",
+        "ui_browse_properties_grid_background": "网格（背景）",
+        "ui_browse_properties_grid_far": "网格（远处）",
+        "ui_browse_properties_grid_near": "网格（近处）",
+        "ui_browse_properties_horizon": "地平线",
+        "ui_browse_properties_mountain_scale": "山脉比例",
+        "ui_browse_properties_noise_fx": "噪声效果",
+        "ui_browse_properties_shading": "着色",
+        "ui_browse_properties_count": "计数",
+        "ui_browse_properties_glow": "发光",
+        "ui_browse_properties_style": "风格",
+        "ui_browse_properties_large": "大",
+        "ui_browse_properties_small": "小",
+        "ui_browse_playlist_modal_settings_order_random": "随机",
+        "ui_browse_playlist_modal_settings_order_sorted": "有序",
+
+        // Verified against the APK's assets/locale/ui_zh-chs.json.
+        "ui_close": "关闭",
+        "ui_editor_preset_clock_title": "时间",
+        "ui_editor_preset_snow_particles_variant_2": "平整积雪",
+        "ui_editor_preset_snow_particles_variant_3": "暴风雪",
+        "ui_workshop_tags_asset_type_text": "文本",
+        "ui_editor_user_properties_type_textinput": "文本框",
+        "ui_editor_properties_alpha": "透明度",
+        "ui_editor_properties_fog": "雾",
+        "ui_settings_theme": "主题:",
+        "ui_workshop_tags_blur": "模糊",
+        "ui_workshop_tags_music": "音乐",
+    ]
+
+    static func label(for rawLabel: String, fallback: String? = nil) -> String {
+        let trimmed = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback ?? "" }
+        return bundledChineseLabels[trimmed] ?? fallbackChineseLabels[trimmed] ?? fallback ?? trimmed
+    }
+
+    private static func loadBundledChineseLabels() -> [String: String] {
+        guard let resourceURL = Bundle.main.resourceURL else { return [:] }
+        let candidates = [
+            resourceURL.appendingPathComponent("WallpaperEngineLocale.zh-Hans.json"),
+            resourceURL.appendingPathComponent("Resources/WallpaperEngineLocale.zh-Hans.json"),
+        ]
+
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let labels = try? JSONDecoder().decode([String: String].self, from: data) else {
+                continue
+            }
+            return labels
+        }
+        return [:]
+    }
+}
+
 /// 属性展示方式
 public enum ScenePropertyPresentation: String, Codable, Sendable {
     case control    // 可编辑控件

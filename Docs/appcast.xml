@@ -6,25 +6,18 @@
     <description>WaifuX Updates</description>
     <language>zh</language>
     <item>
-      <title>Version 38.0.129</title>
-      <sparkle:version>38.0.129</sparkle:version>
-      <sparkle:shortVersionString>38.0.129</sparkle:shortVersionString>
-      <pubDate>Thu, 09 Jul 2026 19:04:23 +0800</pubDate>
+      <title>Version 38.0.131</title>
+      <sparkle:version>38.0.131</sparkle:version>
+      <sparkle:shortVersionString>38.0.131</sparkle:shortVersionString>
+      <pubDate>Sun, 12 Jul 2026 18:45:52 +0800</pubDate>
       <description><![CDATA[
-        <h3>WaifuX 38.0.129</h3>
+        <h3>WaifuX 38.0.131</h3>
         <ul>
-          <li>fix: 修复场景壁纸部分时钟文字被截断的问题</li>
-          <li>fix: 修复部分场景壁纸参数修改不生效的问题</li>
-          <li>feat: 库卡片新增绿色"正在使用"角标</li>
-          <li>feat: 外接显示器断开重连后自动恢复壁纸，不再弹出"显示器接入"提示</li>
-          <li>feat: 猜你喜欢卡片改用 NSTrackingArea 追踪光标，修复悬停时阻断列表滚动的问题</li>
-          <li>perf: 文件夹缩略图添加降采样，减少全图解码的内存开销</li>
-          <li>feat: 我的库新增触摸板双指右滑返回上级文件夹</li>
-          <li>feat: 设置窗口恢复红绿灯按钮，支持拖拽调整大小并置为浮动层级</li>
+          <li>feat: 完善壁纸设计与媒体体验 (4be8686)</li>
         </ul>
       ]]></description>
       <enclosure
-        url="https://github.com/jipika/WaifuX/releases/download/v38.0.129/WaifuX.dmg"
+        url="https://github.com/jipika/WaifuX/releases/download/v38.0.131/WaifuX.dmg"
         type="application/octet-stream"
         length="0"
       />
