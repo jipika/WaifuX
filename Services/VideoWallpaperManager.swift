@@ -7200,7 +7200,11 @@ final class VideoLoopPreprocessingService: ObservableObject {
                     for sampleX in 0..<sampleWidth {
                         let sourceX = min(width - 1, (sampleX * width + sampleWidth / 2) / sampleWidth)
                         let pixel = row.advanced(by: sourceX * 4)
-                        let value = UInt8((77 * Int(pixel[2]) + 150 * Int(pixel[1]) + 29 * Int(pixel[0]) + 128) >> 8)
+                        let blue = Int(pixel[2])
+                        let green = Int(pixel[1])
+                        let red = Int(pixel[0])
+                        let luminance = 77 * blue + 150 * green + 29 * red + 128
+                        let value = UInt8(luminance >> 8)
                         sampledLuma.append(value)
                         sum += Int(value)
                     }
