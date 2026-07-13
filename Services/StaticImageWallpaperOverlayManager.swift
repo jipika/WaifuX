@@ -302,6 +302,22 @@ final class StaticImageWallpaperOverlayManager {
         return true
     }
 
+    /// 删除未保留外接显示器的静态 overlay 恢复记录。
+    func discardPersistedImageState(screenID: String, fingerprint: String) {
+        if let window = imageWindows.removeValue(forKey: screenID) {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        imageByScreen.removeValue(forKey: screenID)
+        imageByScreenFingerprint.removeValue(forKey: fingerprint)
+        imageSizes.removeValue(forKey: screenID)
+        imageLetterboxContentCrops.removeValue(forKey: screenID)
+        imageLetterboxAnalysisTasks[screenID]?.cancel()
+        imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
+        persistState()
+        stateChangeSignal &+= 1
+    }
+
     // MARK: - 窗口创建
 
     private func createWindow(for screen: NSScreen, imageURL: URL) {

@@ -296,7 +296,6 @@ class SettingsViewModel: ObservableObject {
 
     // MARK: - 调度器相关（延迟初始化，避免启动时阻塞）
     private var _schedulerViewModel: WallpaperSchedulerViewModel?
-    private var _downloadTaskViewModel: DownloadTaskViewModel?
 
     var schedulerViewModel: WallpaperSchedulerViewModel {
         if _schedulerViewModel == nil {
@@ -308,13 +307,6 @@ class SettingsViewModel: ObservableObject {
                 .store(in: &cancellables)
         }
         return _schedulerViewModel!
-    }
-
-    var downloadTaskViewModel: DownloadTaskViewModel {
-        if _downloadTaskViewModel == nil {
-            _downloadTaskViewModel = DownloadTaskViewModel()
-        }
-        return _downloadTaskViewModel!
     }
 
     // API Key - 使用静态缓存，避免在 getter 中读 UserDefaults

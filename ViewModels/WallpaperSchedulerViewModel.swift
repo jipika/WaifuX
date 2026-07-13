@@ -52,7 +52,4 @@ class WallpaperSchedulerViewModel: ObservableObject {
         schedulerService.updateDisplayWebSceneSwitchSeconds(seconds, for: screenID)
     }
 
-    func updateDisplayAutoChangeOnExternalConnect(_ enabled: Bool, for screen: NSScreen) {
-        schedulerService.updateDisplayAutoChangeOnExternalConnect(enabled, for: screen)
-    }
 }

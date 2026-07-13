@@ -1038,8 +1038,10 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         // 注册任务以便支持取消
-        downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
-        defer { downloadTaskService.unregisterDownloadTask(id: task.id) }
+        let registrationToken = downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
+        defer {
+            downloadTaskService.unregisterDownloadTask(id: task.id, token: registrationToken)
+        }
 
         do {
             try await downloadTask.value
@@ -1086,8 +1088,9 @@ final class MediaExploreViewModel: ObservableObject {
         let task = downloadTaskService.addTask(mediaItem: item, suppressToast: suppressToast)
         let saveToDownloads = saveToDownloadsOverride ?? persistDownloadedMediaToAppLibrary
 
-        // 创建真正执行下载逻辑的 Task（有返回值）
-        let valueTask = Task { [weak self] () -> URL in
+        // Store this transfer task itself in DownloadTaskService so cancellation
+        // reaches the network operation instead of a wrapper awaiting it.
+        let downloadTask = Task<URL, Error> { [weak self] in
             guard let self else { throw CancellationError() }
 
             let localURL = try await ensureLocalVideoFile(
@@ -1101,17 +1104,14 @@ final class MediaExploreViewModel: ObservableObject {
             return localURL
         }
 
-        // 包装为 Void Task 用于注册（DownloadTaskStorage 要求 Task<Void, Error>）
-        let downloadTask = Task<Void, Error> {
-            _ = try await valueTask.value
+        // 注册任务以便支持取消
+        let registrationToken = downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
+        defer {
+            downloadTaskService.unregisterDownloadTask(id: task.id, token: registrationToken)
         }
 
-        // 注册任务以便支持取消
-        downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
-        defer { downloadTaskService.unregisterDownloadTask(id: task.id) }
-
         do {
-            return try await valueTask.value
+            return try await downloadTask.value
         } catch {
             if !(error is CancellationError) {
                 downloadTaskService.markFailed(id: task.id)
@@ -2372,13 +2372,21 @@ final class MediaExploreViewModel: ObservableObject {
             )
             let normalizedURL = normalizeWorkshopDownloadLocation(localURL, workshopID: workshopID)
             mediaLibrary.recordDownload(item: item, localFileURL: normalizedURL)
+            if let videoURL = findLocalWorkshopVideo(for: item) {
+                VideoOptimizationRecordService.shared.append(.sourceDownloaded, for: videoURL, metadata: [
+                    "itemID": item.id,
+                    "source": "steamWorkshop"
+                ])
+            }
             downloadTaskService.markCompleted(id: taskID)
             print("[MediaExploreViewModel] downloadWorkshopWallpaper completed: \(normalizedURL)")
         }
 
         // 注册任务以便支持取消
-        downloadTaskService.registerDownloadTask(id: taskID, task: downloadTask)
-        defer { downloadTaskService.unregisterDownloadTask(id: taskID) }
+        let registrationToken = downloadTaskService.registerDownloadTask(id: taskID, task: downloadTask)
+        defer {
+            downloadTaskService.unregisterDownloadTask(id: taskID, token: registrationToken)
+        }
 
         do {
             try await downloadTask.value

@@ -1,62 +1,35 @@
 import Foundation
 import Combine
 
-// MARK: - Actor 隔离的下载任务存储
-private actor DownloadTaskStorage {
-    var activeDownloads: [String: Task<Void, Error>] = [:]
-    var cancellationFlags: [String: Bool] = [:]
-
-    func register(id: String, task: Task<Void, Error>) {
-        activeDownloads[id] = task
-        cancellationFlags[id] = false
-    }
-
-    func unregister(id: String) {
-        activeDownloads.removeValue(forKey: id)
-        cancellationFlags.removeValue(forKey: id)
-    }
-
-    func cancel(id: String) {
-        activeDownloads[id]?.cancel()
-        activeDownloads.removeValue(forKey: id)
-        cancellationFlags[id] = true
-    }
-
-    func cancelAll() {
-        for (_, task) in activeDownloads {
-            task.cancel()
-        }
-        for id in activeDownloads.keys {
-            cancellationFlags[id] = true
-        }
-        activeDownloads.removeAll()
-    }
-
-    func isCancelled(id: String) -> Bool {
-        cancellationFlags[id] ?? false
-    }
-
-    func resetCancellationFlag(id: String) {
-        cancellationFlags[id] = false
-    }
-}
-
 @MainActor
 class DownloadTaskService: ObservableObject {
     static let shared = DownloadTaskService()
 
     @Published var tasks: [DownloadTask] = []
+    /// 下载弹窗前后台切换不会改变任务本身，单独发布此版本号以刷新展示层。
+    @Published private(set) var toastPresentationRevision = 0
 
     private let userDefaultsKey = "download_tasks"
     private var saveTask: Task<Void, Never>?
     private var lastProgressUpdateTimes: [String: Date] = [:]
     private let progressUpdateMinInterval: TimeInterval = 0.08
     private var suppressedToastTaskIDs = Set<String>()
+    /// A retry can reuse the same user-facing task id. The token keeps late
+    /// cancellation/unregistration from an older transfer away from the retry.
+    private var downloadRegistrationTokens: [String: UUID] = [:]
+
+    private struct ActiveDownload {
+        let token: UUID
+        let cancel: @Sendable () -> Void
+    }
+
+    /// `DownloadTaskService` is main-actor isolated, so keeping the actual
+    /// transfer handles here preserves strict registration/cancellation order.
+    /// Crossing to a second actor made a late old registration capable of
+    /// displacing a newer retry for the same user-facing task id.
+    private var activeDownloads: [String: ActiveDownload] = [:]
 
     // MARK: - Active Download Tasks Management
-    /// 使用 actor 隔离存储确保线程安全
-    private let taskStorage = DownloadTaskStorage()
-
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 任务列表通过 restoreSavedTasks() 延迟恢复
@@ -70,21 +43,35 @@ class DownloadTaskService: ObservableObject {
     // MARK: - Task Management
 
     func addTask(wallpaper: Wallpaper, suppressToast: Bool = false) -> DownloadTask {
-        let task = DownloadTask(wallpaper: wallpaper)
-        configureToastSuppression(for: task.id, suppressToast: suppressToast)
-        return upsertTask(task)
+        enqueueTask(DownloadTask(wallpaper: wallpaper), suppressToast: suppressToast)
     }
 
     func addTask(mediaItem: MediaItem, suppressToast: Bool = false) -> DownloadTask {
-        let task = DownloadTask(mediaItem: mediaItem)
-        configureToastSuppression(for: task.id, suppressToast: suppressToast)
-        return upsertTask(task)
+        enqueueTask(DownloadTask(mediaItem: mediaItem), suppressToast: suppressToast)
     }
 
     func addTask(workshopWallpaper: MediaItem, suppressToast: Bool = false) -> DownloadTask {
-        let task = DownloadTask(workshopWallpaper: workshopWallpaper)
+        enqueueTask(DownloadTask(workshopWallpaper: workshopWallpaper), suppressToast: suppressToast)
+    }
+
+    /// 用户新增前台下载时，将已有的紧凑后台条恢复为大下载框。
+    /// 自动触发的下载显式传入 `suppressToast: true`，继续保持不打断浏览。
+    private func enqueueTask(_ task: DownloadTask, suppressToast: Bool) -> DownloadTask {
+        let existingTask = tasks.first { $0.id == task.id }
+        let isNewTask = existingTask == nil
+        let hasBackgroundDownload = tasks.contains {
+            $0.isRunning && suppressedToastTaskIDs.contains($0.id)
+        }
+        if existingTask?.isRunning != true {
+            downloadRegistrationTokens[task.id] = UUID()
+        }
         configureToastSuppression(for: task.id, suppressToast: suppressToast)
-        return upsertTask(task)
+        let queuedTask = upsertTask(task)
+
+        if isNewTask, !suppressToast, hasBackgroundDownload {
+            restoreAllRunningToasts()
+        }
+        return queuedTask
     }
 
     func updateWallpaper(_ wallpaper: Wallpaper, id: String? = nil) {
@@ -116,43 +103,12 @@ class DownloadTaskService: ObservableObject {
         return task
     }
 
-    func pauseTask(id: String) {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
-
-        // 取消正在进行的下载任务（但保留进度）
-        Task {
-            await taskStorage.cancel(id: id)
-        }
-
-        objectWillChange.send()
-        tasks[index].status = .paused
-        tasks[index].lastUpdatedAt = .now
-        persistTasks()
-
-        print("[DownloadTaskService] Task \(id) paused")
-    }
-
-    func resumeTask(id: String) {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
-        guard tasks[index].status == .paused else { return }
-
-        objectWillChange.send()
-        tasks[index].status = .downloading
-        tasks[index].lastUpdatedAt = .now
-        persistTasks()
-
-        // 注意：实际的下载恢复需要由调用方（如 WallpaperViewModel）重新启动下载
-        // 这里只是更新状态，实际的下载逻辑在调用方处理
-        print("[DownloadTaskService] Task \(id) marked for resume")
-    }
-
     func cancelTask(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
 
         // 取消正在进行的下载任务
-        Task {
-            await taskStorage.cancel(id: id)
-        }
+        let token = registrationToken(for: id)
+        cancelRegisteredDownload(id: id, token: token)
 
         objectWillChange.send()
         tasks[index].status = .cancelled
@@ -167,59 +123,52 @@ class DownloadTaskService: ObservableObject {
     // MARK: - Active Download Management
 
     /// 注册一个活动的下载任务
-    func registerDownloadTask(id: String, task: Task<Void, Error>) {
-        Task {
-            await taskStorage.register(id: id, task: task)
+    @discardableResult
+    func registerDownloadTask<Success>(id: String, task: Task<Success, Error>) -> UUID {
+        let token = registrationToken(for: id)
+        if let previous = activeDownloads[id], previous.token != token {
+            previous.cancel()
         }
+        activeDownloads[id] = ActiveDownload(token: token, cancel: { task.cancel() })
+        return token
     }
 
     /// 注销一个活动的下载任务
-    func unregisterDownloadTask(id: String) {
-        Task {
-            await taskStorage.unregister(id: id)
-        }
-    }
-
-    /// 检查下载是否被取消（异步版本，避免主线程信号量死锁）
-    func isDownloadCancelled(id: String) async -> Bool {
-        await taskStorage.isCancelled(id: id)
-    }
-
-    /// 检查下载是否被取消（同步版本，仅用于非主线程场景）
-    /// ⚠️ 不要在 @MainActor 上下文中调用此方法，会导致死锁
-    nonisolated func isDownloadCancelledSync(id: String) -> Bool {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = ResultBox<Bool>(value: false)
-        Task { [box] in
-            let result = await self.taskStorage.isCancelled(id: id)
-            box.value = result
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return box.value
-    }
-
-    /// 用于跨并发域传递可变状态的盒子
-    private final class ResultBox<T>: @unchecked Sendable {
-        var value: T
-        init(value: T) {
-            self.value = value
-        }
-    }
-
-    /// 取消所有活动的下载
-    func cancelAllActiveDownloads() {
-        Task {
-            await taskStorage.cancelAll()
+    func unregisterDownloadTask(id: String, token: UUID) {
+        if activeDownloads[id]?.token == token {
+            activeDownloads[id] = nil
         }
     }
 
     func removeTask(id: String) {
+        let shouldCancelTransfer = tasks.first(where: { $0.id == id })?.isRunning == true
+        let token = downloadRegistrationTokens[id]
+        if shouldCancelTransfer, let token {
+            cancelRegisteredDownload(id: id, token: token)
+        }
         objectWillChange.send()
         tasks.removeAll { $0.id == id }
         lastProgressUpdateTimes.removeValue(forKey: id)
         suppressedToastTaskIDs.remove(id)
+        downloadRegistrationTokens[id] = nil
         persistTasks()
+    }
+
+    private func registrationToken(for id: String) -> UUID {
+        if let token = downloadRegistrationTokens[id] {
+            return token
+        }
+        let token = UUID()
+        downloadRegistrationTokens[id] = token
+        return token
+    }
+
+    private func cancelRegisteredDownload(id: String, token: UUID) {
+        guard let activeDownload = activeDownloads[id], activeDownload.token == token else {
+            return
+        }
+        activeDownloads[id] = nil
+        activeDownload.cancel()
     }
 
     func task(for id: String) -> DownloadTask? {
@@ -232,7 +181,7 @@ class DownloadTaskService: ObservableObject {
 
     func markToastSuppressed(for id: String) {
         guard suppressedToastTaskIDs.insert(id).inserted else { return }
-        objectWillChange.send()
+        publishToastPresentationChange()
     }
 
     /// 批量抑制所有正在运行的下载任务的弹窗（“后台下载”按钮使用）。
@@ -241,12 +190,21 @@ class DownloadTaskService: ObservableObject {
         for task in tasks where task.isRunning {
             changed = suppressedToastTaskIDs.insert(task.id).inserted || changed
         }
-        if changed { objectWillChange.send() }
+        if changed { publishToastPresentationChange() }
+    }
+
+    /// 将后台紧凑进度条恢复为完整下载弹窗。
+    func restoreAllRunningToasts() {
+        var changed = false
+        for task in tasks where task.isRunning {
+            changed = suppressedToastTaskIDs.remove(task.id) != nil || changed
+        }
+        if changed { publishToastPresentationChange() }
     }
 
     func clearToastSuppression(for id: String) {
         guard suppressedToastTaskIDs.remove(id) != nil else { return }
-        objectWillChange.send()
+        publishToastPresentationChange()
     }
 
     func isToastSuppressed(for id: String) -> Bool {
@@ -255,6 +213,7 @@ class DownloadTaskService: ObservableObject {
 
     func updateProgress(id: String, progress: Double) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        guard !tasks[index].isTerminal else { return }
         let clampedProgress = min(max(progress, 0.0), 1.0)
 
         // 防抖优化：如果进度变化小于 0.5% 且不是开始/结束，跳过更新
@@ -285,6 +244,7 @@ class DownloadTaskService: ObservableObject {
 
     func markCompleted(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        guard !tasks[index].isTerminal else { return }
         objectWillChange.send()
         tasks[index].status = .completed
         tasks[index].progress = 1.0
@@ -297,6 +257,7 @@ class DownloadTaskService: ObservableObject {
 
     func markDownloading(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        guard !tasks[index].isTerminal else { return }
         objectWillChange.send()
         tasks[index].status = .downloading
         tasks[index].lastUpdatedAt = .now
@@ -305,6 +266,7 @@ class DownloadTaskService: ObservableObject {
 
     func markFailed(id: String) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        guard !tasks[index].isTerminal else { return }
         objectWillChange.send()
         tasks[index].status = .failed
         tasks[index].completedAt = Date()
@@ -315,10 +277,18 @@ class DownloadTaskService: ObservableObject {
 
     private func configureToastSuppression(for id: String, suppressToast: Bool) {
         if suppressToast {
-            suppressedToastTaskIDs.insert(id)
+            if suppressedToastTaskIDs.insert(id).inserted {
+                publishToastPresentationChange()
+            }
         } else {
-            suppressedToastTaskIDs.remove(id)
+            if suppressedToastTaskIDs.remove(id) != nil {
+                publishToastPresentationChange()
+            }
         }
+    }
+
+    private func publishToastPresentationChange() {
+        toastPresentationRevision &+= 1
     }
 
     // MARK: - Persistence
@@ -381,32 +351,42 @@ class DownloadTaskService: ObservableObject {
             .sorted { $0.lastUpdatedAt > $1.lastUpdatedAt }
     }
 
+    /// The compact overlay represents one stable video task. Concurrent tasks
+    /// retain their own progress in the status menu instead of replacing this bar
+    /// whenever they happen to emit a newer progress update.
+    var compactOverlayTask: DownloadTask? {
+        let suppressedTasks = tasks.filter {
+            $0.isRunning && suppressedToastTaskIDs.contains($0.id)
+        }
+
+        func firstTask(
+            matching kinds: Set<DownloadTaskKind>,
+            with status: DownloadStatus
+        ) -> DownloadTask? {
+            suppressedTasks
+                .filter { kinds.contains($0.kind) && $0.status == status }
+                .sorted(by: compactOverlayOrder)
+                .first
+        }
+
+        let videoKinds: Set<DownloadTaskKind> = [.media, .workshop]
+        return firstTask(matching: videoKinds, with: .downloading)
+            ?? firstTask(matching: videoKinds, with: .pending)
+            ?? firstTask(matching: Set(DownloadTaskKind.allCases), with: .downloading)
+            ?? firstTask(matching: Set(DownloadTaskKind.allCases), with: .pending)
+    }
+
+    private func compactOverlayOrder(_ lhs: DownloadTask, _ rhs: DownloadTask) -> Bool {
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id < rhs.id
+    }
+
     var libraryVisibleTasks: [DownloadTask] {
         tasks
             .filter(\.shouldAppearInLibrary)
             .sorted { $0.lastUpdatedAt > $1.lastUpdatedAt }
     }
 
-    var latestOverlayTask: DownloadTask? {
-        if let runningTask = runningTasks.first {
-            return runningTask
-        }
-
-        return tasks
-            .filter { $0.status == .completed }
-            .sorted { $0.lastUpdatedAt > $1.lastUpdatedAt }
-            .first(where: { Date().timeIntervalSince($0.lastUpdatedAt) < 1.8 })
-    }
-
-    var completedTasks: [DownloadTask] {
-        tasks.filter { $0.status == .completed }
-    }
-
-    var failedTasks: [DownloadTask] {
-        tasks.filter { $0.status == .failed }
-    }
-
-    var latestTask: DownloadTask? {
-        tasks.max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt })
-    }
 }

@@ -20,6 +20,7 @@ struct MediaDetailSheet: View {
     @ObservedObject private var optimizationPipeline = VideoOptimizationPipelineStateService.shared
     @ObservedObject private var displaySelectorManager = DisplaySelectorManager.shared
     @ObservedObject private var frameInterpolationQueue = FrameInterpolationQueueService.shared
+    @ObservedObject private var sceneBakeQueue = SceneBakeQueueService.shared
     @State private var resolvedItem: MediaItem
     @State private var downloadActivity = DetailDownloadActivity()
     @State private var isSettingWallpaper = false
@@ -36,13 +37,13 @@ struct MediaDetailSheet: View {
     @State private var showSteamGuardAlert = false
     @State private var showSessionExpiredAlert = false
     @State private var pendingSteamGuardCode = ""
-    @State private var isBakingScene = false
     @State private var showSceneBakeRendererDialog = false
     @State private var sceneBakeDialogAnimating = false
     @State private var sceneBakeShouldClearCachedArtifact = false
+    /// Re-baking may use a one-off duration without changing the user's global
+    /// Scene bake preference.
+    @State private var temporaryRebakeDuration: Double = 15
     @State private var activeScenePreviewRenderer: SceneBakeRenderer?
-    /// 烘焙进度 0.0 ~ 1.0
-    @State private var bakeProgress: Double = 0
 
     /// Workshop 自动下载后设置壁纸的后台任务引用。
     /// 持有它以便在重新发起设置 / 视图消失时取消，避免 sheet 关闭后仍执行壁纸应用造成竞态。
@@ -138,8 +139,45 @@ struct MediaDetailSheet: View {
         mediaLibrary.downloadedItems.first { $0.item.id == resolvedItem.id }
     }
 
+    private var sceneBakeStatus: SceneBakeQueueService.WallpaperStatus {
+        sceneBakeQueue.status(for: currentDownloadRecord)
+    }
+
+    private var isBakingScene: Bool {
+        sceneBakeQueue.isActive(for: currentDownloadRecord)
+    }
+
+    private var bakeProgress: Double {
+        if case .baking(let progress) = sceneBakeStatus {
+            return progress
+        }
+        return 0
+    }
+
+    private var isSceneBakePreparing: Bool {
+        if case .preparing = sceneBakeStatus { return true }
+        return false
+    }
+
+    private var sceneBakeQueueLabel: String {
+        switch sceneBakeStatus {
+        case .preparing:
+            return t("sceneBake.queued")
+        case .baking(let progress):
+            return String(format: t("sceneBake.toastRunning"), Int((progress * 100).rounded()))
+        case .failed(let message):
+            return message.isEmpty ? t("sceneBake.failed") : "\(t("sceneBake.failed")) · \(message)"
+        case .ready:
+            return t("sceneBake.cached")
+        case .idle:
+            return t("sceneBake.tierHint")
+        }
+    }
+
     private var cachedSceneBakeVideoURL: URL? {
-        guard let art = currentDownloadRecord?.sceneBakeArtifact else { return nil }
+        guard let record = currentDownloadRecord,
+              SceneOfflineBakeService.hasCachedArtifact(record: record),
+              let art = record.sceneBakeArtifact else { return nil }
         let url = URL(fileURLWithPath: art.videoPath)
         guard SceneOfflineBakeService.isUsableBakedVideo(at: url) else { return nil }
         return url
@@ -147,17 +185,22 @@ struct MediaDetailSheet: View {
 
     private var sceneOfflineBakeButtonVisible: Bool {
         guard isAlreadyDownloaded,
-              let record = currentDownloadRecord,
-              record.sceneBakeEligibility != nil else { return false }
-        return true
+              let record = currentDownloadRecord else { return false }
+        return record.sceneBakeEligibility != nil || sceneBakeStatus != .idle
     }
 
     private var loopPointAnalysisVideoURL: URL? {
         guard UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true,
-              let record = currentDownloadRecord,
-              let videoURL = record.resolvedVideoFileURL else {
+              currentDownloadRecord != nil else {
             return nil
         }
+        // A Scene's optimization sidecar belongs to its baked MP4, not the
+        // project directory. Prefer it so the detail menu reflects the actual
+        // queue and durable loop state after automatic baking.
+        if let cachedSceneBakeVideoURL {
+            return cachedSceneBakeVideoURL
+        }
+        guard let videoURL = currentDownloadRecord?.resolvedVideoFileURL else { return nil }
         let ext = videoURL.pathExtension.lowercased()
         guard ["mp4", "mov", "m4v", "webm", "mkv"].contains(ext) else { return nil }
         return videoURL
@@ -300,7 +343,7 @@ struct MediaDetailSheet: View {
                 }
 
                 floatingBackButton
-                    .padding(.top, topBarTopInset + 18)
+                    .padding(.top, topBarTopInset + 42)
                     .padding(.leading, 28)
                     .zIndex(100)
 
@@ -364,33 +407,15 @@ struct MediaDetailSheet: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
                 }
-                VStack(spacing: 8) {
-                    if isTranscodingVideo {
-                        MediaProcessingToast(
-                            title: String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100)),
-                            detail: nil,
-                            progress: transcodeVideoProgress
-                        )
-                    }
-
-                    if let activeItem = loopAnalysisQueue.activeProcessingItem {
-                        MediaProcessingToast(
-                            title: String(format: t("loopAnalysis.toastRunning"), Int((activeItem.progress * 100).rounded())),
-                            detail: loopAnalysisRemainingDetail,
-                            progress: activeItem.progress
-                        )
-                    }
-
-                    if let activeItem = frameInterpolationQueue.activeProcessingItem {
-                        MediaProcessingToast(
-                            title: String(format: t("frameInterpolationToastRunning"), Int((activeItem.progress * 100).rounded())),
-                            detail: frameInterpolationRemainingDetail,
-                            progress: activeItem.progress
-                        )
-                    }
+                if isTranscodingVideo {
+                    MediaProcessingToast(
+                        title: String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100)),
+                        detail: nil,
+                        progress: transcodeVideoProgress
+                    )
+                    .padding(.bottom, 48)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(.bottom, 48)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .ignoresSafeArea()
@@ -492,22 +517,11 @@ struct MediaDetailSheet: View {
             setupKeyboardMonitor()
             await loadDetailIfNeeded()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeProgressDidUpdate)) { notification in
-            guard let notifItemID = notification.object as? String,
-                  notifItemID == resolvedItem.id else { return }
-            if let progress = notification.userInfo?["progress"] as? Double {
-                if !isBakingScene {
-                    isBakingScene = true
-                }
-                updateSceneBakeProgress(progress)
-                if progress >= 1.0 {
-                    isBakingScene = false
-                    bakeProgress = 0
-                }
-            }
-        }
         .onDisappear {
             isVisible = false
+            // 退出详情页时将仍在运行的大下载提示收起为全局底部小进度条。
+            // 仅改变展示状态，不会暂停、取消或重排下载队列。
+            DownloadTaskService.shared.suppressAllRunningToasts()
             ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
             removeKeyboardMonitor()
             SceneOfflineBakeService.stopPreview()
@@ -778,7 +792,7 @@ struct MediaDetailSheet: View {
                     )
             }
         }
-        .padding(.top, topBarTopInset + 18)
+        .padding(.top, topBarTopInset + 42)
         .padding(.trailing, 28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         .zIndex(2)
@@ -886,9 +900,9 @@ struct MediaDetailSheet: View {
 
     private var sceneBakeActionRow: some View {
         VStack(spacing: 8) {
-            Text(isBakingScene ? sceneBakeProgressSubtitle : t("sceneBake.tierHint"))
+            Text(isBakingScene || isSceneBakeFailed ? sceneBakeQueueLabel : t("sceneBake.tierHint"))
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(isSceneBakeFailed ? Color(hex: "FF9F0A") : .white.opacity(0.5))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 520)
 
@@ -902,16 +916,13 @@ struct MediaDetailSheet: View {
 
             Button {
                 if let cachedSceneBakeVideoURL {
-                    applyWorkshopVideoWallpaper(
-                        videoURL: cachedSceneBakeVideoURL,
-                        preferPosterFrameFromVideo: true
-                    )
+                    applySceneBakedVideoWallpaper(cachedSceneBakeVideoURL)
                 } else {
                     presentSceneBakeRendererDialog(clearCachedArtifact: false)
                 }
             } label: {
                 HStack(spacing: 8) {
-                    if isBakingScene {
+                    if isBakingScene, !isSceneBakePreparing {
                         // 圆形进度条
                         ZStack {
                             // 背景圆圈
@@ -928,12 +939,15 @@ struct MediaDetailSheet: View {
                                 .animation(.easeInOut(duration: 0.2), value: bakeProgress)
                         }
                         .frame(width: 16, height: 16)
+                    } else if isSceneBakePreparing {
+                        Image(systemName: "hourglass")
+                            .font(.system(size: 14, weight: .semibold))
                     } else {
                         Image(systemName: "film.stack")
                             .font(.system(size: 14, weight: .semibold))
                     }
                     if isBakingScene {
-                        Text("\(Int(bakeProgress * 100))%")
+                        Text(isSceneBakePreparing ? t("sceneBake.queued") : "\(Int(bakeProgress * 100))%")
                             .font(.system(size: 14, weight: .semibold))
                             .monospacedDigit()
                     } else {
@@ -969,6 +983,11 @@ struct MediaDetailSheet: View {
         .padding(.top, 4)
     }
 
+    private var isSceneBakeFailed: Bool {
+        if case .failed = sceneBakeStatus { return true }
+        return false
+    }
+
     private var loopPointAnalysisIconName: String {
         switch optimizationStage {
         case .loopQueued, .loopAnalyzing:
@@ -994,21 +1013,20 @@ struct MediaDetailSheet: View {
 
     private func runLoopPointAnalysis(force: Bool = false) {
         guard let videoURL = loopPointAnalysisVideoURL else { return }
+        let itemID = resolvedItem.id
 
-        optimizationPipeline.set(.loopQueued, for: resolvedItem.id)
+        optimizationPipeline.set(.loopQueued, for: itemID)
 
         LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, force: force) { completedURL, succeeded in
             if succeeded {
                 VideoWallpaperManager.shared.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
-                optimizationPipeline.set(.idle, for: resolvedItem.id)
+                VideoOptimizationPipelineStateService.shared.set(.idle, for: itemID)
             } else {
                 if case .failed(let message) = VideoLoopPreprocessingService.shared.state(for: completedURL) {
-                    optimizationPipeline.set(.failed(message), for: resolvedItem.id)
-                    errorMessage = Self.truncateErrorMessage(message)
-                    showError = true
+                    VideoOptimizationPipelineStateService.shared.set(.failed(message), for: itemID)
                 } else {
                     // 队列被重置或源文件被删除时，不能让详情页永久停在“分析中”。
-                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                    VideoOptimizationPipelineStateService.shared.set(.idle, for: itemID)
                 }
             }
         }
@@ -1045,8 +1063,10 @@ struct MediaDetailSheet: View {
 
     private func redownloadOriginalAndOptimize(videoURL: URL) async {
         let itemID = resolvedItem.id
+        let itemTitle = resolvedItem.title
         guard !downloadActivity.isDownloading(itemID: itemID) else { return }
         downloadActivity.start(itemID: itemID)
+        VideoOptimizationRecordService.shared.resetAllOptimizationState(for: videoURL)
         optimizationPipeline.set(.restoringOriginal, for: itemID)
         errorMessage = ""
         defer {
@@ -1058,9 +1078,14 @@ struct MediaDetailSheet: View {
             let originalURL = try await viewModel.redownloadOriginalVideoForOptimization(resolvedItem)
             frameInterpolationQueue.removeCompleted(videoURL: videoURL)
             frameInterpolationQueue.removeCompleted(videoURL: originalURL)
-            runLoopThenFrameInterpolation(videoURL: originalURL, forceLoopAnalysis: true)
+            runLoopThenFrameInterpolation(
+                videoURL: originalURL,
+                forceLoopAnalysis: true,
+                itemID: itemID,
+                title: itemTitle
+            )
         } catch {
-            optimizationPipeline.set(.failed(error.localizedDescription), for: resolvedItem.id)
+            optimizationPipeline.set(.failed(error.localizedDescription), for: itemID)
             errorMessage = Self.truncateErrorMessage(error.localizedDescription)
             showError = true
         }
@@ -1070,39 +1095,54 @@ struct MediaDetailSheet: View {
         guard let record = currentDownloadRecord,
               let artifact = record.sceneBakeArtifact,
               !isBakingScene else { return }
-        isBakingScene = true
-        bakeProgress = 0
+        let itemID = resolvedItem.id
+        let itemTitle = resolvedItem.title
         errorMessage = ""
-        defer {
-            isBakingScene = false
-            bakeProgress = 0
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: artifact.videoPath))
+        mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+        frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+
+        guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else {
+            let error = NSError(domain: "VideoOptimization", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "未找到 Scene 烘焙记录。"
+            ])
+            optimizationPipeline.set(.failed(error.localizedDescription), for: itemID)
+            errorMessage = error.localizedDescription
+            showError = true
+            return
         }
 
-        do {
-            try? FileManager.default.removeItem(at: URL(fileURLWithPath: artifact.videoPath))
-            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
-            frameInterpolationQueue.removeCompleted(videoURL: videoURL)
-
-            guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else {
-                throw NSError(domain: "VideoOptimization", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "未找到 Scene 烘焙记录。"
-                ])
+        SceneBakeQueueService.shared.enqueue(
+            record: refreshedRecord,
+            forceRebake: true
+        ) { result in
+            switch result {
+            case .success(let rebuiltArtifact):
+                let rebuiltURL = URL(fileURLWithPath: rebuiltArtifact.videoPath)
+                self.frameInterpolationQueue.removeCompleted(videoURL: rebuiltURL)
+                self.runLoopThenFrameInterpolation(
+                    videoURL: rebuiltURL,
+                    forceLoopAnalysis: true,
+                    itemID: itemID,
+                    title: itemTitle
+                )
+            case .failure(let error):
+                self.optimizationPipeline.set(.failed(error.localizedDescription), for: itemID)
+                self.errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                self.showError = true
             }
-            let rebuiltArtifact = try await SceneOfflineBakeService.bake(record: refreshedRecord) { progress in
-                updateSceneBakeProgress(progress)
-            }
-            let rebuiltURL = URL(fileURLWithPath: rebuiltArtifact.videoPath)
-            frameInterpolationQueue.removeCompleted(videoURL: rebuiltURL)
-            runLoopThenFrameInterpolation(videoURL: rebuiltURL, forceLoopAnalysis: true)
-        } catch {
-            optimizationPipeline.set(.failed(error.localizedDescription), for: resolvedItem.id)
-            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-            showError = true
         }
     }
 
-    private func runLoopThenFrameInterpolation(videoURL: URL, forceLoopAnalysis: Bool) {
-        optimizationPipeline.set(.loopQueued, for: resolvedItem.id)
+    private func runLoopThenFrameInterpolation(
+        videoURL: URL,
+        forceLoopAnalysis: Bool,
+        itemID: String? = nil,
+        title: String? = nil
+    ) {
+        let pipelineItemID = itemID ?? resolvedItem.id
+        let pipelineTitle = title ?? resolvedItem.title
+        optimizationPipeline.set(.loopQueued, for: pipelineItemID)
         LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, force: forceLoopAnalysis) { completedURL, succeeded in
             guard succeeded else {
                 let message: String
@@ -1111,42 +1151,41 @@ struct MediaDetailSheet: View {
                 } else {
                     message = "循环点分析失败"
                 }
-                optimizationPipeline.set(.failed(message), for: resolvedItem.id)
+                optimizationPipeline.set(.failed(message), for: pipelineItemID)
                 return
             }
-            optimizationPipeline.set(.checkingInterpolation, for: resolvedItem.id)
+            optimizationPipeline.set(.checkingInterpolation, for: pipelineItemID)
             VideoWallpaperManager.shared.reloadPlaybackAfterLoopPointAnalysis(videoURL: completedURL)
             Task { @MainActor in
                 guard frameInterpolationSettingsEnabled else {
-                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                    optimizationPipeline.set(.idle, for: pipelineItemID)
                     return
                 }
                 let targetFPS = currentFrameInterpolationTargetFPS
                 guard await FrameInterpolationQueueService.shared.needsInterpolation(videoURL: completedURL, targetFPS: targetFPS) else {
-                    optimizationPipeline.set(.idle, for: resolvedItem.id)
+                    optimizationPipeline.set(.idle, for: pipelineItemID)
                     return
                 }
-                let itemID = resolvedItem.id
                 let taskID = FrameInterpolationQueueService.shared.enqueue(
                     videoURL: completedURL,
-                    title: resolvedItem.title,
+                    title: pipelineTitle,
                     targetFPS: targetFPS,
                     source: .manual,
                     onFinished: { succeeded in
                         if succeeded {
-                            optimizationPipeline.set(.idle, for: itemID)
+                            optimizationPipeline.set(.idle, for: pipelineItemID)
                         } else {
-                            optimizationPipeline.set(.failed("视频补帧失败"), for: itemID)
+                            optimizationPipeline.set(.failed("视频补帧失败"), for: pipelineItemID)
                         }
                     },
                     onCompleted: { _, _ in
-                        optimizationPipeline.set(.idle, for: itemID)
+                        optimizationPipeline.set(.idle, for: pipelineItemID)
                     }
                 )
                 if taskID != nil {
-                    optimizationPipeline.set(.frameQueued, for: itemID)
+                    optimizationPipeline.set(.frameQueued, for: pipelineItemID)
                 } else {
-                    optimizationPipeline.set(.idle, for: itemID)
+                    optimizationPipeline.set(.idle, for: pipelineItemID)
                 }
             }
         }
@@ -1202,6 +1241,28 @@ struct MediaDetailSheet: View {
                         }
 
                         VStack(spacing: 12) {
+                            if sceneBakeShouldClearCachedArtifact {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text(t("workshop.bakeDuration"))
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(LiquidGlassColors.textPrimary)
+                                        Spacer()
+                                        Text("\(Int(temporaryRebakeDuration.rounded())) \(t("seconds"))")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .monospacedDigit()
+                                            .foregroundStyle(LiquidGlassColors.accentCyan)
+                                    }
+
+                                    Slider(value: $temporaryRebakeDuration, in: 15...60, step: 1)
+                                        .tint(LiquidGlassColors.accentCyan)
+                                }
+                                .padding(14)
+                                .liquidGlassSurface(
+                                    .regular,
+                                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                )
+                            }
                             sceneBakeRendererRow(renderer: .wallpaperWgpu)
                         }
                     }
@@ -1237,9 +1298,14 @@ struct MediaDetailSheet: View {
             Button {
                 let chosenRenderer = renderer
                 let chosenClear = sceneBakeShouldClearCachedArtifact
+                let chosenDuration = chosenClear ? temporaryRebakeDuration : nil
                 dismissSceneBakeRendererDialog()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    runSceneOfflineBake(renderer: chosenRenderer, clearCachedArtifact: chosenClear)
+                    runSceneOfflineBake(
+                        renderer: chosenRenderer,
+                        clearCachedArtifact: chosenClear,
+                        durationSeconds: chosenDuration
+                    )
                 }
             } label: {
                 HStack(spacing: 12) {
@@ -1379,6 +1445,11 @@ struct MediaDetailSheet: View {
     private func presentSceneBakeRendererDialog(clearCachedArtifact: Bool) {
         guard currentDownloadRecord != nil else { return }
         sceneBakeShouldClearCachedArtifact = clearCachedArtifact
+        if clearCachedArtifact {
+            let configuredDuration = UserDefaults.standard.double(forKey: "scene_bake_duration")
+            let existingDuration = currentDownloadRecord?.sceneBakeArtifact?.durationSeconds
+            temporaryRebakeDuration = min(max(existingDuration ?? configuredDuration, 15), 60)
+        }
         sceneBakeDialogAnimating = false
         showSceneBakeRendererDialog = true
     }
@@ -1403,104 +1474,70 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private func updateSceneBakeProgress(_ progress: Double) {
-        guard progress.isFinite else { return }
-        let clamped = min(max(progress, 0.0), 0.99)
-        bakeProgress = max(bakeProgress, clamped)
-    }
-
-    private func runSceneOfflineBake(renderer: SceneBakeRenderer, clearCachedArtifact: Bool) {
+    private func runSceneOfflineBake(
+        renderer: SceneBakeRenderer,
+        clearCachedArtifact: Bool,
+        durationSeconds: Double? = nil
+    ) {
         guard let record = currentDownloadRecord else { return }
         if isBakingScene { return }
-        guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
-            errorMessage = t("sceneBake.error.insufficientMemory.bake")
-            showError = true
-            return
-        }
-        isBakingScene = true
-        bakeProgress = 0
         errorMessage = ""
         let shouldAutoApplyAfterBake = NSScreen.screens.count <= 1
-        Task {
-            if clearCachedArtifact {
-                await MainActor.run {
-                    mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
-                }
+        if clearCachedArtifact {
+            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+        }
+        guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else { return }
+        SceneBakeQueueService.shared.enqueue(
+            record: refreshedRecord,
+            renderer: renderer,
+            durationSeconds: durationSeconds,
+            forceRebake: clearCachedArtifact
+        ) { result in
+            switch result {
+            case .success(let artifact):
+                self.handleCompletedSceneBake(
+                    artifact,
+                    shouldAutoApplyAfterBake: shouldAutoApplyAfterBake
+                )
+            case .failure(let error):
+                self.errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                self.showError = true
             }
-            if !clearCachedArtifact, SceneOfflineBakeService.hasCachedArtifact(record: record, renderer: renderer) {
-                if let artifact = record.sceneBakeArtifact {
-                    let videoURL = URL(fileURLWithPath: artifact.videoPath)
-                    _ = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
-                        forLocalVideo: videoURL,
-                        itemID: record.item.id
-                    )
-                    await MainActor.run {
-                        isBakingScene = false
-                        bakeProgress = 0
-                        if shouldAutoApplyAfterBake {
-                            applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
-                        } else {
-                            sceneBakeStatusFlash = t("sceneBake.cached")
-                        }
-                    }
-                    return
-                }
-                // 缓存记录不一致：hasCachedArtifact 返回 true 但 sceneBakeArtifact 为 nil，回退到重新烘焙
-                print("[MediaDetailSheet] WARN: hasCachedArtifact true but sceneBakeArtifact nil, falling back to re-bake")
-            }
-            do {
-                let artifact = try await SceneOfflineBakeService.bake(record: record, renderer: renderer) { progress in
-                    updateSceneBakeProgress(progress)
-                }
-                let videoURL = URL(fileURLWithPath: artifact.videoPath)
+        }
+    }
 
-                await MainActor.run {
-                    isBakingScene = false
-                    bakeProgress = 0
-                    if shouldAutoApplyAfterBake {
-                        // 实时渲染模式下，烘焙产物不自动设置到桌面（已由 wallpaper-wgpu 实时渲染）
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
-                            if #available(macOS 26.0, *), !VideoWallpaperManager.shared.isLockScreenEnabled {
-                                // 动态锁屏关闭：用烘焙产物的静态帧设置桌面 poster（不启动视频播放器）
-                                Task {
-                                    if let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: videoURL, fallbackPosterURL: nil) {
-                                        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                                            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                                            .allowClipping: true
-                                        ]
-                                        for screen in NSScreen.screens {
-                                            try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
-                                        }
-                                        print("[MediaDetailSheet] 实时渲染模式：烘焙完成，已设置桌面 poster")
-                                    }
-                                }
-                                scheduleSceneBakeSuccessFlash()
-                            } else {
-                                sceneBakeStatusFlash = t("sceneBake.cached")
-                                print("[MediaDetailSheet] 实时渲染模式：烘焙完成，产物已缓存用于锁屏推送")
-                            }
-                        } else {
-                            scheduleSceneBakeSuccessFlash()
-                            applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
-                        }
-                    } else {
-                        sceneBakeStatusFlash = t("sceneBake.cached")
+    private func handleCompletedSceneBake(
+        _ artifact: SceneBakeArtifact,
+        shouldAutoApplyAfterBake: Bool
+    ) {
+        guard shouldAutoApplyAfterBake else {
+            sceneBakeStatusFlash = t("sceneBake.cached")
+            return
+        }
+        let videoURL = URL(fileURLWithPath: artifact.videoPath)
+        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+            if #available(macOS 26.0, *), !VideoWallpaperManager.shared.isLockScreenEnabled {
+                Task {
+                    guard let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
+                        forLocalVideo: videoURL,
+                        fallbackPosterURL: nil
+                    ) else { return }
+                    let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                        .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                        .allowClipping: true
+                    ]
+                    for screen in NSScreen.screens {
+                        try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
+                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
                     }
                 }
-            } catch let error as BakeError where error == .cancelled {
-                await MainActor.run {
-                    isBakingScene = false
-                    bakeProgress = 0
-                }
-            } catch {
-                await MainActor.run {
-                    isBakingScene = false
-                    bakeProgress = 0
-                    errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                    showError = true
-                }
+                scheduleSceneBakeSuccessFlash()
+            } else {
+                sceneBakeStatusFlash = t("sceneBake.cached")
             }
+        } else {
+            scheduleSceneBakeSuccessFlash()
+            applySceneBakedVideoWallpaper(videoURL)
         }
     }
 
@@ -1837,7 +1874,7 @@ struct MediaDetailSheet: View {
                 Button {} label: {
                     HStack {
                         Image(systemName: "hourglass")
-                        Text(t("frameInterpolationWaitingForLoop"))
+                        Text(t("loopAnalysis.analyzing"))
                         Spacer()
                     }
                     .foregroundStyle(Color.white.opacity(0.55))
@@ -1967,6 +2004,20 @@ struct MediaDetailSheet: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isDeletingFrameInterpolation)
+                } else if let failureMessage = frameInterpolationQueue.failureMessage(videoURL: interpolationVideoURL) {
+                    Button {} label: {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                            Text(t("frameInterpolationStatusFailed"))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .foregroundStyle(Color(hex: "FF9F0A"))
+                    .buttonStyle(.plain)
+                    .disabled(true)
+                    .help(failureMessage)
                 } else if frameInterpolationQueue.isBlacklisted(videoURL: interpolationVideoURL) {
                     Button {
                         showMoreOptionsPopover = false
@@ -2118,11 +2169,6 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private var loopAnalysisRemainingDetail: String? {
-        let count = loopAnalysisQueue.remainingWorkCount
-        return count > 0 ? String(format: t("loopAnalysis.remainingCount"), count) : nil
-    }
-
     private var loopPointAnalysisQueued: Bool {
         guard let videoURL = loopPointAnalysisVideoURL else { return false }
         return loopAnalysisQueue.isQueued(videoURL: videoURL)
@@ -2136,6 +2182,9 @@ struct MediaDetailSheet: View {
 
     private var currentFrameInterpolationVideoURL: URL? {
         guard isAlreadyDownloaded else { return nil }
+        if let cachedSceneBakeVideoURL {
+            return cachedSceneBakeVideoURL
+        }
         if let localURL = currentDownloadRecord?.localFileURL,
            let videoURL = MediaItem.resolveLocalVideoFile(from: localURL) {
             return videoURL
@@ -2149,11 +2198,6 @@ struct MediaDetailSheet: View {
 
     private var currentFrameInterpolationTargetFPS: Int {
         FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
-    }
-
-    private var frameInterpolationRemainingDetail: String? {
-        let count = frameInterpolationQueue.remainingWorkCount
-        return count > 0 ? String(format: t("frameInterpolationRemainingCount"), count) : nil
     }
 
     private func refreshFrameInterpolationNeedCheck(force: Bool = false) {
@@ -2762,9 +2806,12 @@ struct MediaDetailSheet: View {
     private func redownloadMediaFromScratch() {
         if let record = currentDownloadRecord {
             let localURL = URL(fileURLWithPath: record.localFilePath)
-            LoopPointAnalysisQueueService.shared.reset(videoURL: localURL)
-            VideoLoopPreprocessingService.shared.resetState(for: localURL)
-            FrameInterpolationQueueService.shared.reset(videoURL: localURL)
+            VideoOptimizationRecordService.shared.resetAllOptimizationState(for: localURL)
+            if let artifact = record.sceneBakeArtifact {
+                VideoOptimizationRecordService.shared.resetAllOptimizationState(
+                    for: URL(fileURLWithPath: artifact.videoPath)
+                )
+            }
         }
         VideoOptimizationPipelineStateService.shared.reset(itemID: resolvedItem.id)
         viewModel.removeDownloads(withIDs: [resolvedItem.id])
@@ -2828,7 +2875,7 @@ struct MediaDetailSheet: View {
         }
 
         let targetFPS = currentFrameInterpolationTargetFPS
-        frameInterpolationQueue.removeCompleted(videoURL: videoURL)
+        VideoOptimizationRecordService.shared.resetAllOptimizationState(for: videoURL)
         frameInterpolationQueue.markBlacklisted(videoURL: videoURL, title: downloadingItem.title, targetFPS: targetFPS)
 
         do {
@@ -3111,7 +3158,7 @@ struct MediaDetailSheet: View {
                 )
             } else {
                 // 非实时渲染模式：走烘焙产物
-                applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot, cliPath: localURL.path)
+                applySceneWallpaperPreferringBake(sceneContentRoot: contentRoot)
             }
         case .web:
             applyWorkshopWebWallpaper(webDirPath: localURL.path, posterURL: preferredWorkshopPosterForVideo)
@@ -3138,130 +3185,74 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// Scene 壁纸设置：优先使用烘焙产物，无缓存时自动用 wallpaper-wgpu 烘焙后应用
-    /// 不再使用 wallpaper-wgpu 实时渲染
-    private func applySceneWallpaperPreferringBake(sceneContentRoot: URL, cliPath: String) {
-        let itemID = resolvedItem.id
-        let fm = FileManager.default
-        let hasBakeArtifact = currentDownloadRecord?.sceneBakeArtifact != nil
-            && currentDownloadRecord?.sceneBakeArtifact?.analysisId == currentDownloadRecord?.sceneBakeEligibility?.analysisId
+    /// Scene 壁纸设置：命中烘焙产物时直接播放；否则先立即显示 Scene，
+    /// 再在全局烘焙队列中生成 MP4，避免设置动作和详情页被长时间阻塞。
+    private func applySceneWallpaperPreferringBake(sceneContentRoot: URL) {
+        let bakedVideoURL = SceneOfflineBakeService.usableBakedVideoURL(
+            forSceneContentRoot: sceneContentRoot
+        )
         AppLogger.error(.wallpaper, "applySceneWallpaperPreferringBake", metadata: [
             "contentRoot": sceneContentRoot.lastPathComponent,
-            "hasBakeArtifact": hasBakeArtifact
+            "hasBakeArtifact": bakedVideoURL != nil
         ])
 
-        // 1. 已有烘焙产物 → 直接应用
-        if let record = currentDownloadRecord,
-           let art = record.sceneBakeArtifact,
-           art.analysisId == record.sceneBakeEligibility?.analysisId {
-            // 优先使用 .web 组合目录（视频背景 + Web overlay）
-            let webDirPath = art.videoPath.replacingOccurrences(of: ".mp4", with: ".web")
-            if fm.fileExists(atPath: webDirPath) {
-                applyWorkshopWebWallpaper(webDirPath: webDirPath, posterURL: preferredWorkshopPosterForVideo)
-                return
-            }
-            // 回退到纯视频
-            if fm.fileExists(atPath: art.videoPath) {
-                applyWorkshopVideoWallpaper(
-                    videoURL: URL(fileURLWithPath: art.videoPath),
-                    preferPosterFrameFromVideo: true
-                )
-                return
-            }
+        // 1. 已有有效烘焙产物 → 直接走视频播放器；不能回退至 .web 实时渲染。
+        if let bakedVideoURL {
+            applySceneBakedVideoWallpaper(bakedVideoURL)
+            return
         }
 
-        // 2. 无烘焙产物 → 自动用 wallpaper-wgpu 烘焙后应用
-        guard !isBakingScene else { return }
-        isBakingScene = true
-        bakeProgress = 0
-        applyingWallpaperStatusKey = "applyingWallpaper.video"
-        isSettingWallpaper = true
+        // 2. 无成片时不等待烘焙：先使用同一个 Scene 直接渲染，再排入后台。
+        applyWorkshopRendererWallpaper(
+            path: sceneContentRoot.path,
+            posterURL: preferredWorkshopPosterForVideo,
+            statusKey: "applyingWallpaper.realtime"
+        )
 
-        Task {
-            do {
-                // 获取或分析烘焙资格
-                let snapshotRecord = await MainActor.run {
-                    mediaLibrary.downloadedItems.first { $0.item.id == itemID }
-                }
-                let eligibility: SceneBakeEligibilitySnapshot
-                if let existing = snapshotRecord?.sceneBakeEligibility,
-                   existing.contentRootPath == sceneContentRoot.path {
-                    eligibility = existing
-                } else {
-                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
-                        await MainActor.run {
-                            isBakingScene = false
-                            isSettingWallpaper = false
-                            errorMessage = t("sceneBake.error.insufficientMemory.analysis")
-                            showError = true
-                        }
-                        return
-                    }
-                    eligibility = try await Task.detached(priority: .userInitiated) {
-                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: sceneContentRoot)
-                    }.value
-                    await MainActor.run {
-                        MediaLibraryService.shared.attachSceneBakeEligibility(
-                            itemID: itemID,
-                            snapshot: eligibility,
-                            triggerAutoBake: false
-                        )
-                    }
-                }
-
-                guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
-                    await MainActor.run {
-                        isBakingScene = false
-                        isSettingWallpaper = false
-                        errorMessage = t("sceneBake.error.insufficientMemory.bake")
-                        showError = true
-                    }
-                    return
-                }
-
-                let persistID = await MainActor.run {
-                    mediaLibrary.downloadedItems.first { $0.item.id == itemID && $0.isActive }?.id
-                }
-                let cacheKey = persistID ?? SceneOfflineBakeService.stableOrphanCacheItemID(contentRootPath: sceneContentRoot.path)
-
-                // 使用 wallpaper-wgpu bake 子命令烘焙
-                let artifact = try await SceneOfflineBakeService.bake(
-                    eligibility: eligibility,
-                    contentRoot: sceneContentRoot,
-                    cacheItemID: cacheKey,
-                    renderer: .wallpaperWgpu,
-                    persistArtifactToItemID: persistID,
-                    progress: { [self] progress in
-                        Task { @MainActor in
-                            updateSceneBakeProgress(progress)
-                        }
-                    }
+        let completion: SceneBakeQueueService.Completion = { result in
+            guard case .success(let artifact) = result else { return }
+            let bakedVideoURL = URL(fileURLWithPath: artifact.videoPath)
+            guard !UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled"),
+                  self.isSceneStillActive(sceneContentRoot) else {
+                // The user may have enabled realtime rendering or already switched
+                // away while baking. Keep optimizing the newly created MP4, but do
+                // not replace whatever wallpaper is now active.
+                VideoWallpaperManager.shared.enqueueAutomaticOptimizationForBakedScene(
+                    videoURL: bakedVideoURL,
+                    title: self.resolvedItem.title,
+                    pipelineItemID: self.resolvedItem.id
                 )
-
-                let webDirPath = artifact.videoPath.replacingOccurrences(of: ".mp4", with: ".web")
-                await MainActor.run {
-                    isBakingScene = false
-                    isSettingWallpaper = false
-                    scheduleSceneBakeSuccessFlash()
-                    if fm.fileExists(atPath: webDirPath) {
-                        applyWorkshopWebWallpaper(webDirPath: webDirPath, posterURL: preferredWorkshopPosterForVideo)
-                    } else {
-                        applyWorkshopVideoWallpaper(
-                            videoURL: URL(fileURLWithPath: artifact.videoPath),
-                            preferPosterFrameFromVideo: true
-                        )
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    isBakingScene = false
-                    isSettingWallpaper = false
-                    let detail = Self.truncateErrorMessage(error.localizedDescription)
-                    errorMessage = detail
-                    showError = true
-                    print("[SceneWallpaper] 离线烘焙失败: \(error.localizedDescription)")
-                }
+                return
             }
+            self.scheduleSceneBakeSuccessFlash()
+            self.applySceneBakedVideoWallpaper(bakedVideoURL)
+        }
+        if let record = currentDownloadRecord {
+            SceneBakeQueueService.shared.enqueue(record: record, completion: completion)
+        } else {
+            SceneBakeQueueService.shared.enqueue(
+                sceneContentRoot: sceneContentRoot,
+                cacheItemID: SceneOfflineBakeService.stableOrphanCacheItemID(
+                    contentRootPath: sceneContentRoot.path
+                ),
+                itemID: resolvedItem.id,
+                title: resolvedItem.title,
+                completion: completion
+            )
+        }
+    }
+
+    private func isSceneStillActive(_ sceneContentRoot: URL) -> Bool {
+        let expectedPath = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: sceneContentRoot
+        ).standardizedFileURL.path
+        return NSScreen.screens.contains { screen in
+            guard let activePath = WallpaperEngineXBridge.shared.currentWallpaperPath(for: screen) else {
+                return false
+            }
+            return WorkshopService.resolveWallpaperEngineProjectRoot(
+                startingAt: URL(fileURLWithPath: activePath)
+            ).standardizedFileURL.path == expectedPath
         }
     }
 
@@ -3992,11 +3983,18 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private var sceneBakeProgressSubtitle: String {
-        if NSScreen.screens.count > 1 {
-            return t("sceneBake.progressSubtitleMultiDisplay")
+    /// 将烘焙 Scene 交给视频播放器。设置壁纸的关键路径不再抽帧或重烘焙，
+    /// 以免已完成的 MP4 被删除后长时间停在“正在应用”。
+    private func applySceneBakedVideoWallpaper(_ videoURL: URL) {
+        guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else {
+            errorMessage = t("sceneBake.error.outputMissing")
+            showError = true
+            return
         }
-        return t("sceneBake.progressSubtitle")
+        applyWorkshopVideoWallpaper(
+            videoURL: videoURL,
+            preferPosterFrameFromVideo: false
+        )
     }
 
     /// 直接应用 Workshop / 烘焙 MP4 视频壁纸（须在主线程调用；内部 `Task` 使用 `@MainActor` 以匹配 `VideoWallpaperManager`）
@@ -4027,18 +4025,14 @@ struct MediaDetailSheet: View {
                 applyingWallpaperStatusKey = "applyingWallpaper.video"
                 isSettingWallpaper = true
                 Task { @MainActor in
-                    guard let optimizationInputURL = await rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: videoURL) else {
-                        isSettingWallpaper = false
-                        return
-                    }
                     let posterFromVideo = await preferredPosterFrame(
-                        for: optimizationInputURL,
+                        for: videoURL,
                         preferPosterFrameFromVideo: preferPosterFrameFromVideo
                     )
                     let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                     do {
                         try wallpaperManager.applyVideoWallpaper(
-                            from: optimizationInputURL,
+                            from: videoURL,
                             posterURL: posterURL,
                             muted: isMuted,
                             targetScreens: selectedScreen.map { [$0] }
@@ -4056,18 +4050,14 @@ struct MediaDetailSheet: View {
             applyingWallpaperStatusKey = "applyingWallpaper.video"
             isSettingWallpaper = true
             Task { @MainActor in
-                guard let optimizationInputURL = await rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: videoURL) else {
-                    isSettingWallpaper = false
-                    return
-                }
                 let posterFromVideo = await preferredPosterFrame(
-                    for: optimizationInputURL,
+                    for: videoURL,
                     preferPosterFrameFromVideo: preferPosterFrameFromVideo
                 )
                 let posterURL = posterFromVideo ?? preferredWorkshopPosterForVideo
                 do {
                     try wallpaperManager.applyVideoWallpaper(
-                        from: optimizationInputURL,
+                        from: videoURL,
                         posterURL: posterURL,
                         muted: isMuted
                     )
@@ -4081,37 +4071,6 @@ struct MediaDetailSheet: View {
                 }
                 isSettingWallpaper = false
             }
-        }
-    }
-
-    private func rebuildSceneBakeForAutomaticOptimizationIfNeeded(videoURL: URL) async -> URL? {
-        let loopEnabled = UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true
-        let autoLoopEnabled = UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
-        guard loopEnabled,
-              autoLoopEnabled,
-              let record = currentDownloadRecord,
-              let artifact = record.sceneBakeArtifact,
-              URL(fileURLWithPath: artifact.videoPath).standardizedFileURL == videoURL.standardizedFileURL,
-              frameInterpolationQueue.completedRecord(videoURL: videoURL) != nil else {
-            return videoURL
-        }
-
-        do {
-            // 不保留备份：旧烘焙成品删除后，直接从 Scene 工程生成新的原始视频。
-            try? FileManager.default.removeItem(at: videoURL)
-            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
-            frameInterpolationQueue.removeCompleted(videoURL: videoURL)
-            guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else {
-                throw NSError(domain: "VideoOptimization", code: 4, userInfo: [
-                    NSLocalizedDescriptionKey: "未找到 Scene 烘焙记录。"
-                ])
-            }
-            let rebuilt = try await SceneOfflineBakeService.bake(record: refreshedRecord)
-            return URL(fileURLWithPath: rebuilt.videoPath)
-        } catch {
-            errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-            showError = true
-            return nil
         }
     }
 

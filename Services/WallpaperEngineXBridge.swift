@@ -956,6 +956,11 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
+    /// 指定屏幕是否处于暂停状态。全局暂停对所有屏幕生效。
+    func isPaused(on screen: NSScreen) -> Bool {
+        isExternalPaused || perScreenPausedScreenIDs.contains(screen.wallpaperScreenIdentifier)
+    }
+
     /// 检查指定 screenID 是否被外部引擎管理且有活跃渲染进程
     func isManaging(screenID: String) -> Bool {
         screenProcesses[screenID] != nil
@@ -1151,6 +1156,14 @@ final class WallpaperEngineXBridge: ObservableObject {
         targetScreenFingerprints.removeAll()
         screenRenderStates.removeAll()
         lastAppliedScreenConfigurations.removeAll()
+        preserveRestoreState(statesToRestore)
+    }
+
+    /// 单屏关闭动态壁纸时保留该屏的 Scene/Web 恢复状态，不影响其他显示器。
+    func disableWallpaperKeepingRestoreState(for screen: NSScreen) {
+        guard isManaging(screen: screen) else { return }
+        let statesToRestore = Array(screenRenderStates.values)
+        ensureStoppedForNonCLIWallpaper(for: screen)
         preserveRestoreState(statesToRestore)
     }
 
@@ -2302,13 +2315,42 @@ final class WallpaperEngineXBridge: ObservableObject {
             return false
         }
         if !isManaging(screen: screen) {
-            await restoreIfNeeded()
+            if let state = persistedScreenRenderStates()?.first(where: {
+                $0.screenID == screen.wallpaperScreenIdentifier
+                    || $0.screenFingerprint == screen.wallpaperScreenFingerprint
+            }), FileManager.default.fileExists(atPath: state.path) {
+                let userProperties = state.userProperties
+                    ?? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: state.path)
+                do {
+                    try await setWallpaper(
+                        path: state.path,
+                        targetScreens: [screen],
+                        userProperties: userProperties
+                    )
+                } catch {
+                    print("[WallpaperEngineXBridge] Failed to restore live wallpaper for (screen.localizedName): (error.localizedDescription)")
+                    return false
+                }
+            } else {
+                await restoreIfNeeded()
+            }
         }
         let restored = isManaging(screen: screen)
         if restored {
             print("[WallpaperEngineXBridge] Restored previous live wallpaper for reconnected display: \(screen.localizedName)")
         }
         return restored
+    }
+
+    /// 删除一块未保留外接显示器的 Scene/Web 恢复记录，避免重连时后台自行重启 renderer。
+    func discardPersistedWallpaperState(screenID: String, fingerprint: String) async {
+        await stopScreenProcess(screenID)
+        screenRenderStates = screenRenderStates.filter { id, state in
+            id != screenID && state.screenFingerprint != fingerprint
+        }
+        targetScreenIDs.remove(screenID)
+        targetScreenFingerprints.remove(fingerprint)
+        persistState()
     }
 
     // MARK: - 二进制查找

@@ -9,7 +9,7 @@ enum DownloadStatus: String, Codable {
     case cancelled
 }
 
-enum DownloadTaskKind: String, Codable {
+enum DownloadTaskKind: String, Codable, CaseIterable {
     case wallpaper
     case media
     case workshop

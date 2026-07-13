@@ -69,6 +69,7 @@
 		378F8D6878222C1121DCE84F /* ArcBackgroundSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE736888A84E23833953C49 /* ArcBackgroundSettings.swift */; };
 		37F59B1CD348D187E96DCD3E /* SceneConfigOverrideService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F844D3946D7D634FFBE47D3 /* SceneConfigOverrideService.swift */; };
 		3AB9CA4DC78C3EE5C05B81F2 /* VideoWallpaperManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9269D131C8EB8763B1E9471C /* VideoWallpaperManager.swift */; };
+		D7F3A15C2E6B4C3F8D1207A1 /* VideoOptimizationRecordService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7F3A15C2E6B4C3F8D1207A0 /* VideoOptimizationRecordService.swift */; };
 		3BCAAE449E23F411D5BCFEB7 /* Danmaku.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1909660C314E363CB12A5857 /* Danmaku.swift */; };
 		3C167FEA842C4C6D02F8CE64 /* WallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0420F76E4897B34782FAF6 /* WallpaperViewModel.swift */; };
 		3C3D1D709E6DD0518BC81253 /* WallpaperGridCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B4DF44A83DE72A33A8BE3F /* WallpaperGridCell.swift */; };
@@ -250,6 +251,7 @@
 		E721812719872412E439B046 /* VideoToolboxProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D9714C3DBCF062B148341C8 /* VideoToolboxProcessor.swift */; };
 		E94CC926C75FA43F41FECEFD /* BounceSymbolModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02E3788AB0F9EC18D14604A4 /* BounceSymbolModifier.swift */; };
 		E989D6EC4EC646557E114D01 /* SceneOfflineBakeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F629610BC109E8BDF65491C /* SceneOfflineBakeService.swift */; };
+		D7F3A15C2E6B4C3F8D1207A3 /* SceneBakeQueueService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7F3A15C2E6B4C3F8D1207A2 /* SceneBakeQueueService.swift */; };
 		ED8CC76A6300E215C960C06E /* AnimeRules in Resources */ = {isa = PBXBuildFile; fileRef = 222C8AA50BDCFF9AD85ABF2C /* AnimeRules */; };
 		F0448F711A615AC3653D7D60 /* DynamicWallpaperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C8922986259825170C5975 /* DynamicWallpaperService.swift */; };
 		F0CD11A67E854F0FC8892F46 /* AnimeSearchHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F811DCEB4E7240A71F2AFC97 /* AnimeSearchHeuristics.swift */; };
@@ -415,6 +417,7 @@
 		6DA2FF2BF95D650BD6997B2A /* WallsflowService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallsflowService.swift; sourceTree = "<group>"; };
 		6E21497D08143F54A2DF436D /* DownloadTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadTaskService.swift; sourceTree = "<group>"; };
 		6F629610BC109E8BDF65491C /* SceneOfflineBakeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneOfflineBakeService.swift; sourceTree = "<group>"; };
+		D7F3A15C2E6B4C3F8D1207A2 /* SceneBakeQueueService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneBakeQueueService.swift; sourceTree = "<group>"; };
 		6F844D3946D7D634FFBE47D3 /* SceneConfigOverrideService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneConfigOverrideService.swift; sourceTree = "<group>"; };
 		6F9A4187FED2F381BE10E4B5 /* WorkshopSourceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopSourceManager.swift; sourceTree = "<group>"; };
 		6FCC0C608F584DA039E7092E /* BMPCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BMPCache.swift; sourceTree = "<group>"; };
@@ -448,6 +451,7 @@
 		91E6D95488469530050E4E91 /* GuessYouLikeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeViewModel.swift; sourceTree = "<group>"; };
 		92360DB7D61D511F712E8CC6 /* DownloadError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadError.swift; sourceTree = "<group>"; };
 		9269D131C8EB8763B1E9471C /* VideoWallpaperManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoWallpaperManager.swift; sourceTree = "<group>"; };
+		D7F3A15C2E6B4C3F8D1207A0 /* VideoOptimizationRecordService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoOptimizationRecordService.swift; sourceTree = "<group>"; };
 		92926695BBCFC62936A5FADE /* WorkshopViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopViewModel.swift; sourceTree = "<group>"; };
 		92F7E4EFC4F9FF86BBDC4354 /* CloudSyncModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncModels.swift; sourceTree = "<group>"; };
 		93B2EB16B350D0A586479BD5 /* NetworkState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkState.swift; sourceTree = "<group>"; };
@@ -769,6 +773,7 @@
 				304B848F37E8916539F5D7C0 /* SceneBakeEligibilityService.swift */,
 				6F844D3946D7D634FFBE47D3 /* SceneConfigOverrideService.swift */,
 				6F629610BC109E8BDF65491C /* SceneOfflineBakeService.swift */,
+				D7F3A15C2E6B4C3F8D1207A2 /* SceneBakeQueueService.swift */,
 				7E50322DB4E41F88D665BEC8 /* SceneWallpaperDesignService.swift */,
 				E5F6B4BDD94FAADCF0C47210 /* SceneWallpaperPropertiesService.swift */,
 				B15A8B186373E1E4F65348F7 /* SearchTranslationService.swift */,
@@ -785,6 +790,7 @@
 				45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */,
 				2D9714C3DBCF062B148341C8 /* VideoToolboxProcessor.swift */,
 				D658BC393B2A381F062DE3F5 /* VideoTranscodeService.swift */,
+				D7F3A15C2E6B4C3F8D1207A0 /* VideoOptimizationRecordService.swift */,
 				9269D131C8EB8763B1E9471C /* VideoWallpaperManager.swift */,
 				9EB00ACA846F3DBC547A2F3A /* WallpaperDynamicTextParser.swift */,
 				2934909A6169304E41884812 /* WallpaperEngineXBridge.swift */,
@@ -1301,6 +1307,7 @@
 				1750A0E5F95C9ECD90EAD7F2 /* SceneConfigOverridePanel.swift in Sources */,
 				37F59B1CD348D187E96DCD3E /* SceneConfigOverrideService.swift in Sources */,
 				E989D6EC4EC646557E114D01 /* SceneOfflineBakeService.swift in Sources */,
+				D7F3A15C2E6B4C3F8D1207A3 /* SceneBakeQueueService.swift in Sources */,
 				B790F4E3B85754D0249F2203 /* SceneWallpaperDesignPanel.swift in Sources */,
 				7343F89CDCC99040C1C36BB1 /* SceneWallpaperDesignService.swift in Sources */,
 				07C90ED5BCAD970E5FF0AA8C /* SceneWallpaperPropertiesPanel.swift in Sources */,
@@ -1335,6 +1342,7 @@
 				DB540D9F6379FDAEFB285F76 /* VideoThumbnailCache.swift in Sources */,
 				E721812719872412E439B046 /* VideoToolboxProcessor.swift in Sources */,
 				E516A5F7AB176EAABEECE5AD /* VideoTranscodeService.swift in Sources */,
+				D7F3A15C2E6B4C3F8D1207A1 /* VideoOptimizationRecordService.swift in Sources */,
 				3AB9CA4DC78C3EE5C05B81F2 /* VideoWallpaperManager.swift in Sources */,
 				71CA95FCFE98D1F5968921DE /* ViewExtensions.swift in Sources */,
 				1A9632409BCF492AB4FDA6E2 /* WaifuXApp.swift in Sources */,

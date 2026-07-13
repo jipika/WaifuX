@@ -12,14 +12,14 @@ struct DownloadToastSnapshot: Equatable, Identifiable {
     let lastUpdatedAt: Date
 
     init(task: DownloadTask) {
-        self.id = task.id
-        self.kind = task.kind
-        self.title = task.title
-        self.subtitle = task.subtitle
-        self.badgeText = task.badgeText
-        self.progress = task.progress
-        self.status = task.status
-        self.lastUpdatedAt = task.lastUpdatedAt
+        id = task.id
+        kind = task.kind
+        title = task.title
+        subtitle = task.subtitle
+        badgeText = task.badgeText
+        progress = task.progress
+        status = task.status
+        lastUpdatedAt = task.lastUpdatedAt
     }
 
     var isRunning: Bool {
@@ -36,93 +36,10 @@ struct DownloadToastSnapshot: Equatable, Identifiable {
 }
 
 @MainActor
-class DownloadTaskViewModel: ObservableObject {
-    @Published var tasks: [DownloadTask] = []
-
-    private let downloadService = DownloadTaskService.shared
-
-    init() {
-        // 仅桥接 tasks，避免重复 objectWillChange 转发导致全局重绘频率过高
-        downloadService.$tasks
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$tasks)
-    }
-
-    // MARK: - Task Actions
-
-    func addTask(wallpaper: Wallpaper) {
-        _ = downloadService.addTask(wallpaper: wallpaper)
-    }
-
-    func addTask(mediaItem: MediaItem) {
-        _ = downloadService.addTask(mediaItem: mediaItem)
-    }
-
-    func pauseTask(_ task: DownloadTask) {
-        downloadService.pauseTask(id: task.id)
-    }
-
-    func resumeTask(_ task: DownloadTask) {
-        downloadService.resumeTask(id: task.id)
-    }
-
-    func cancelTask(_ task: DownloadTask) {
-        downloadService.cancelTask(id: task.id)
-    }
-
-    func removeTask(_ task: DownloadTask) {
-        downloadService.removeTask(id: task.id)
-    }
-
-    func retryTask(_ task: DownloadTask) {
-        downloadService.removeTask(id: task.id)
-        if let wallpaper = task.wallpaper {
-            _ = downloadService.addTask(wallpaper: wallpaper)
-        } else if let mediaItem = task.mediaItem {
-            _ = downloadService.addTask(mediaItem: mediaItem)
-        }
-    }
-
-    // MARK: - Computed Properties
-
-    var activeTasks: [DownloadTask] {
-        tasks.filter { $0.status == .pending || $0.status == .downloading || $0.status == .paused }
-    }
-
-    var libraryVisibleTasks: [DownloadTask] {
-        downloadService.libraryVisibleTasks
-    }
-
-    var wallpaperTasks: [DownloadTask] {
-        libraryVisibleTasks.filter { $0.kind == .wallpaper }
-    }
-
-    var mediaTasks: [DownloadTask] {
-        libraryVisibleTasks.filter { $0.kind == .media }
-    }
-
-    var completedTasks: [DownloadTask] {
-        tasks.filter { $0.status == .completed }
-    }
-
-    var failedTasks: [DownloadTask] {
-        tasks.filter { $0.status == .failed }
-    }
-
-    var hasActiveTasks: Bool {
-        !activeTasks.isEmpty
-    }
-
-    var latestTask: DownloadTask? {
-        downloadService.latestOverlayTask
-    }
-}
-
-@MainActor
 final class DownloadToastViewModel: ObservableObject {
     @Published private(set) var snapshot: DownloadToastSnapshot?
-    @Published private(set) var activeTaskCount: Int = 0
-    @Published private(set) var steamCMDQueuedCount: Int = 0
+    @Published private(set) var activeTaskCount = 0
+    @Published private(set) var steamCMDQueuedCount = 0
 
     private let downloadService: DownloadTaskService
     private let workshopService: WorkshopService
@@ -170,24 +87,19 @@ final class DownloadToastViewModel: ObservableObject {
         let visibleRunningTasks = runningTasks.filter { !downloadService.isToastSuppressed(for: $0.id) }
         let activeCount = visibleRunningTasks.count
 
-        // 如果被抑制的偏好任务重新可见了，清除偏好让它能被再次选中
         if let preferredID = preferredRunningTaskID,
            !runningTasks.contains(where: { $0.id == preferredID }) {
             preferredRunningTaskID = nil
         }
 
-        // 固定显示当前偏好的 running 任务，避免多个任务同时下载时弹窗来回闪烁
         if let preferredID = preferredRunningTaskID,
            let task = visibleRunningTasks.first(where: { $0.id == preferredID }) {
-            let snapshot = coalescedRunningSnapshot(for: task)
-            return emit(snapshot, activeCount: activeCount)
+            return emit(coalescedRunningSnapshot(for: task), activeCount: activeCount)
         }
 
-        // 选择最新的 running 任务并记住它
         if let runningTask = visibleRunningTasks.max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
             preferredRunningTaskID = runningTask.id
-            let snapshot = coalescedRunningSnapshot(for: runningTask)
-            return emit(snapshot, activeCount: activeCount)
+            return emit(coalescedRunningSnapshot(for: runningTask), activeCount: activeCount)
         }
 
         preferredRunningTaskID = nil

@@ -122,7 +122,6 @@ struct MyLibraryContentView: View {
     // 等需要响应式），但不再有冗余实例。
     @ObservedObject var viewModel: WallpaperViewModel
     @ObservedObject var mediaViewModel: MediaExploreViewModel
-    @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
     @ObservedObject private var folderStore = LibraryFolderStore.shared
     @ObservedObject private var gridOrderStore = LibraryGridOrderStore.shared

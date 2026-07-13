@@ -264,6 +264,10 @@ struct ContentView: View {
     // 顶层仅在 .task 中一次性轮询 isInitialSourceSelectionComplete，无需响应式；
     // 数据源切换提示由独立的 SourceSwitchToast / WorkshopSourceSwitchToast 子视图各自观察。
     @State private var detailPath: [MainDetailRoute] = []
+    /// 菜单栏命令可以在详情页已经可见时再次请求另一个详情。
+    /// 除了清空 path，还需要真正重建 NavigationStack，避免 SwiftUI 复用旧 destination。
+    @State private var detailNavigationStackID = UUID()
+    @State private var pendingCurrentWallpaperRoute: MainDetailRoute?
 
     init(
         wallpaperViewModel: WallpaperViewModel,
@@ -287,6 +291,7 @@ struct ContentView: View {
                         detailDestination(for: route)
                     }
             }
+            .id(detailNavigationStackID)
 
             globalOverlayLayer
         }
@@ -295,12 +300,23 @@ struct ContentView: View {
             AppResponsivenessMonitor.noteTabChange(navigationState.selectedTab.title)
             AppResponsivenessMonitor.noteDetailDepth(detailPath.count)
             AppResponsivenessMonitor.noteScenePhase("contentViewVisible")
+            consumePendingLibraryTabRequest()
+            consumePendingWallpaperDetailRequest()
         }
         .onChange(of: navigationState.selectedTab) { _, tab in
             AppResponsivenessMonitor.noteTabChange(tab.title)
         }
         .onChange(of: detailPath.count) { _, depth in
             AppResponsivenessMonitor.noteDetailDepth(depth)
+        }
+        // 必须挂在 NavigationStack 外层：详情页显示时 MainTabContainerView 已不在前台，
+        // 不能依赖它接收菜单栏的“打开当前壁纸”通知。
+        .onReceive(NotificationCenter.default.publisher(for: .switchToLibraryTab)) { _ in
+            MainNavigationRequestStore.clearLibraryTabRequest()
+            navigationState.selectedTab = .myMedia
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openCurrentWallpaperDetail)) { _ in
+            consumePendingWallpaperDetailRequest()
         }
         .onChange(of: navigationState.selectedWallpaper) { _, wallpaper in
             guard let wallpaper else { return }
@@ -392,7 +408,7 @@ struct ContentView: View {
     private var globalOverlayLayer: some View {
         ZStack {
             // 下载进度与来源切换提示必须挂在 NavigationStack 外，保证详情页里也可见。
-            VStack {
+            VStack(spacing: 8) {
                 Spacer()
                 DownloadProgressToastHost(
                     onDismiss: { snapshot in
@@ -405,14 +421,16 @@ struct ContentView: View {
                         handleDownloadToastRetry(snapshot)
                     }
                 )
-                BackgroundDownloadProgressToastHost()
+                BackgroundDownloadProgressToastHost(
+                    onExpand: { DownloadTaskService.shared.restoreAllRunningToasts() }
+                )
+                VideoOptimizationProgressToastHost()
                 WallpaperSourceSwitchToast()
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 8)
                 WorkshopSourceSwitchToast()
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 20)
             }
+            .padding(.bottom, 20)
             .zIndex(400)
 
             // 显示器选择弹窗覆盖层
@@ -460,17 +478,6 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
                 releaseForegroundMemory()
             }
-            .onAppear {
-                consumePendingLibraryTabRequest()
-                consumePendingWallpaperDetailRequest()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .switchToLibraryTab)) { _ in
-                MainNavigationRequestStore.clearLibraryTabRequest()
-                navigationState.selectedTab = .myMedia
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openCurrentWallpaperDetail)) { _ in
-                consumePendingWallpaperDetailRequest()
-            }
             .id(localization.currentLanguage)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -515,7 +522,7 @@ struct ContentView: View {
         navigationState.selectedTab = .myMedia
         switch request {
         case .media(let item):
-            openDetail(.media(item, context: [item]))
+            replaceDetailWithCurrentWallpaper(.media(item, context: [item]))
         case .wallpaper(let wallpaper):
             if wallpaper.isPixivManga {
                 let route = MangaRoutePayload(
@@ -524,10 +531,25 @@ struct ContentView: View {
                     seedTitle: wallpaper.title,
                     seedCoverURL: wallpaper.path
                 )
-                openDetail(.manga(route))
+                replaceDetailWithCurrentWallpaper(.manga(route))
             } else {
-                openDetail(.wallpaper(wallpaper, context: [wallpaper]))
+                replaceDetailWithCurrentWallpaper(.wallpaper(wallpaper, context: [wallpaper]))
             }
+        }
+    }
+
+    /// 菜单栏“打开当前壁纸”可能在已有详情页上再次触发。直接替换同长度 path
+    /// 会让 NavigationStack 复用旧 destination，因此先销毁导航栈、再在下一次事件循环
+    /// 推入目标页面，等价于退出旧详情后重新进入新详情。
+    private func replaceDetailWithCurrentWallpaper(_ route: MainDetailRoute) {
+        pendingCurrentWallpaperRoute = route
+        detailPath.removeAll()
+        detailNavigationStackID = UUID()
+        Task { @MainActor in
+            await Task.yield()
+            guard pendingCurrentWallpaperRoute == route else { return }
+            pendingCurrentWallpaperRoute = nil
+            openDetail(route)
         }
     }
 
@@ -854,7 +876,6 @@ private struct DownloadProgressToastHost: View {
                     }
                 )
                 .frame(maxWidth: 440)
-                .padding(.bottom, 26)
                 .opacity(toastOpacity)
                 .scaleEffect(toastScale, anchor: .bottom)
                 .offset(y: toastOffset)
@@ -1000,22 +1021,41 @@ private struct DownloadProgressToastHost: View {
 private struct BackgroundDownloadProgressToastHost: View {
     @ObservedObject private var downloadService = DownloadTaskService.shared
     @ObservedObject private var optimizationPipeline = VideoOptimizationPipelineStateService.shared
+    let onExpand: () -> Void
+    @State private var preferredTaskID: String?
 
     private var backgroundTasks: [DownloadTask] {
         downloadService.runningTasks.filter { downloadService.isToastSuppressed(for: $0.id) }
     }
 
+    private var displayedTask: DownloadTask? {
+        if let preferredTaskID,
+           let task = backgroundTasks.first(where: { $0.id == preferredTaskID }) {
+            return task
+        }
+        return downloadService.compactOverlayTask
+    }
+
     var body: some View {
-        if let task = backgroundTasks.first {
-            BackgroundDownloadProgressToast(
-                title: progressTitle(for: task),
-                detail: backgroundTasks.count > 1
-                    ? String(format: t("download.backgroundRemaining"), backgroundTasks.count - 1)
-                    : nil,
-                progress: task.progress
-            )
-            .padding(.bottom, 14)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        Group {
+            if let task = displayedTask {
+                BackgroundDownloadProgressToast(
+                    title: progressTitle(for: task),
+                    detail: remainingDetail(count: backgroundTasks.count - 1),
+                    progress: task.progress,
+                    onTap: onExpand
+                )
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .onChange(of: backgroundTasks.map(\.id)) { _, taskIDs in
+            if let preferredTaskID, taskIDs.contains(preferredTaskID) {
+                return
+            }
+            preferredTaskID = displayedTask?.id
+        }
+        .onAppear {
+            preferredTaskID = displayedTask?.id
         }
     }
 
@@ -1026,12 +1066,64 @@ private struct BackgroundDownloadProgressToastHost: View {
         }
         return String(format: t("download.backgroundProgress"), percent)
     }
+
+    private func remainingDetail(count: Int) -> String? {
+        count > 0 ? String(format: t("progress.remainingCount"), count) : nil
+    }
+}
+
+/// 补帧与循环点分析和后台下载共用同一底部进度层，确保从详情页返回资料库后任务状态仍可见。
+private struct VideoOptimizationProgressToastHost: View {
+    @ObservedObject private var loopQueue = LoopPointAnalysisQueueService.shared
+    @ObservedObject private var interpolationQueue = FrameInterpolationQueueService.shared
+    @ObservedObject private var sceneBakeQueue = SceneBakeQueueService.shared
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let item = loopQueue.activeProcessingItem {
+                BackgroundDownloadProgressToast(
+                    title: String(format: t("loopAnalysis.toastRunning"), Int((item.progress * 100).rounded())),
+                    detail: remainingDetail(count: loopQueue.remainingWorkCount),
+                    progress: item.progress
+                )
+            }
+
+            if let item = interpolationQueue.activeProcessingItem {
+                BackgroundDownloadProgressToast(
+                    title: String(format: t("frameInterpolationToastRunning"), Int((item.progress * 100).rounded())),
+                    detail: remainingDetail(count: interpolationQueue.remainingWorkCount),
+                    progress: item.progress
+                )
+            }
+
+            if let item = sceneBakeQueue.activeProcessingItem {
+                BackgroundDownloadProgressToast(
+                    title: sceneBakeTitle(for: item),
+                    detail: remainingDetail(count: sceneBakeQueue.remainingWorkCount),
+                    progress: item.progress
+                )
+            }
+        }
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+
+    private func remainingDetail(count: Int) -> String? {
+        count > 0 ? String(format: t("progress.remainingCount"), count) : nil
+    }
+
+    private func sceneBakeTitle(for item: SceneBakeQueueService.QueueItem) -> String {
+        if item.state == .preparing {
+            return t("sceneBake.queued")
+        }
+        return String(format: t("sceneBake.toastRunning"), Int((item.progress * 100).rounded()))
+    }
 }
 
 private struct BackgroundDownloadProgressToast: View {
     let title: String
     let detail: String?
     let progress: Double
+    var onTap: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1067,6 +1159,11 @@ private struct BackgroundDownloadProgressToast: View {
                 .stroke(Color.white.opacity(0.16), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture {
+            onTap?()
+        }
+        .accessibilityAddTraits(onTap == nil ? [] : .isButton)
     }
 }
 

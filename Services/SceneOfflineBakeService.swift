@@ -34,12 +34,8 @@ enum SceneBakeRenderer: String, CaseIterable, Codable, Hashable, Sendable {
 }
 
 extension Notification.Name {
-    /// Scene 离线烘焙完成（成功或失败）。`object` 为 `SceneBakeArtifact?`，失败时为 `nil`。
-    static let sceneOfflineBakeDidComplete = Notification.Name("sceneOfflineBakeDidComplete")
     /// 烘焙视频抽帧封面已生成。`object` 为 `String`（itemID），`userInfo["thumbnailURL"]` 为 `URL`。
     static let sceneOfflineBakeThumbnailDidUpdate = Notification.Name("sceneOfflineBakeThumbnailDidUpdate")
-    /// 烘焙进度更新。`object` 为 `String`（itemID），`userInfo["progress"]` 为 `Double`（0.0 ~ 1.0）。
-    static let sceneOfflineBakeProgressDidUpdate = Notification.Name("sceneOfflineBakeProgressDidUpdate")
 }
 
 @discardableResult
@@ -171,15 +167,51 @@ enum SceneOfflineBakeService {
         }
     }
 
+    /// 返回与 Scene 工程根目录对应、且仍通过完整性校验的烘焙视频。
+    /// 详情页的 `resolvedItem.id` 在不同来源间可能与下载记录不完全一致，
+    /// 因此必须按工程根目录查找，不能只依赖页面 item ID。
+    @MainActor
+    static func usableBakedVideoURL(forSceneContentRoot contentRoot: URL) -> URL? {
+        guard let artifact = usableArtifact(from: downloadedRecord(forResolvedContentRoot: contentRoot)) else {
+            return nil
+        }
+        return URL(fileURLWithPath: artifact.videoPath)
+    }
+
+    /// Ensures that a Scene currently selected as wallpaper has a bake job.
+    ///
+    /// `auto_bake_scene` controls opportunistic baking after import. Explicitly
+    /// setting a Scene is different: it must always receive a background job so
+    /// non-realtime playback can eventually use the MP4 without blocking setup.
+    @MainActor
+    static func enqueueBakeForAppliedScene(
+        path: String,
+        completion: SceneBakeQueueService.Completion? = nil
+    ) {
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: URL(fileURLWithPath: path)
+        )
+        guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(
+            localFileURL: contentRoot
+        ) != nil else {
+            return
+        }
+
+        if let record = downloadedRecord(forResolvedContentRoot: contentRoot) {
+            SceneBakeQueueService.shared.enqueue(record: record, completion: completion)
+        } else {
+            SceneBakeQueueService.shared.enqueue(
+                sceneContentRoot: contentRoot,
+                cacheItemID: stableOrphanCacheItemID(contentRootPath: contentRoot.path),
+                completion: completion
+            )
+        }
+    }
+
     /// 实时渲染桌面后配套生成离线 MP4。
     /// 该 MP4 不会反向替换桌面实时渲染；如果动态锁屏开启，则烘焙完成后推送给对应显示器实例。
     @MainActor
     static func scheduleRealtimeCompanionBake(path: String, targetScreens: [NSScreen]? = nil, reason: String) {
-        guard #available(macOS 26.0, *) else { return }
-        guard UserDefaults.standard.bool(forKey: "auto_bake_scene") else {
-            print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): auto_bake_scene is disabled")
-            return
-        }
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
         guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
             print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): not a scene project \(contentRoot.path)")
@@ -188,65 +220,27 @@ enum SceneOfflineBakeService {
 
         let displayIDs = displayIDs(for: targetScreens)
 
-        Task(priority: .utility) {
-            do {
-                let record = await MainActor.run {
-                    downloadedRecord(forResolvedContentRoot: contentRoot)
-                }
-
-                if let artifact = usableArtifact(from: record) {
-                    await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: record?.item.id, displayIDs: displayIDs, reason: reason)
-                    print("[SceneOfflineBake] realtime companion bake cache hit (\(reason)): \(artifact.videoPath)")
-                    return
-                }
-
-                let eligibility: SceneBakeEligibilitySnapshot
-                if let existing = record?.sceneBakeEligibility,
-                   existing.contentRootPath == contentRoot.path {
-                    eligibility = existing
-                } else {
-                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
-                        print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): insufficient memory for analysis")
-                        return
-                    }
-                    eligibility = try await Task.detached(priority: .utility) {
-                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: contentRoot, intent: .desktopLoop, strict: false)
-                    }.value
-                    if let itemID = record?.item.id {
-                        await MainActor.run {
-                            MediaLibraryService.shared.attachSceneBakeEligibility(
-                                itemID: itemID,
-                                snapshot: eligibility,
-                                triggerAutoBake: false
-                            )
-                        }
-                    }
-                }
-
-                let itemID = record?.item.id
-                let cacheItemID = itemID ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
-                let artifact = try await bake(
-                    eligibility: eligibility,
-                    contentRoot: contentRoot,
-                    cacheItemID: cacheItemID,
-                    renderer: .wallpaperWgpu,
-                    persistArtifactToItemID: itemID
-                ) { @MainActor progress in
-                    guard let itemID else { return }
-                    NotificationCenter.default.post(
-                        name: .sceneOfflineBakeProgressDidUpdate,
-                        object: itemID,
-                        userInfo: ["progress": progress]
+        let record = downloadedRecord(forResolvedContentRoot: contentRoot)
+        let completion: SceneBakeQueueService.Completion = { result in
+            guard case .success(let artifact) = result else { return }
+            let videoURL = URL(fileURLWithPath: artifact.videoPath)
+            VideoWallpaperManager.shared.enqueueAutomaticOptimizationForBakedScene(
+                videoURL: videoURL,
+                title: record?.item.title ?? contentRoot.lastPathComponent,
+                pipelineItemID: record?.item.id
+            )
+            if #available(macOS 26.0, *) {
+                Task {
+                    await syncRealtimeBakeToLockScreen(
+                        artifact: artifact,
+                        itemID: record?.item.id,
+                        displayIDs: displayIDs,
+                        reason: reason
                     )
                 }
-                print("[SceneOfflineBake] realtime companion bake finished (\(reason)): \(artifact.videoPath)")
-                await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: itemID, displayIDs: displayIDs, reason: reason)
-            } catch SceneOfflineBakeError.concurrentBakeInProgress {
-                print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): another bake is running")
-            } catch {
-                print("[SceneOfflineBake] realtime companion bake failed (\(reason)): \(error.localizedDescription)")
             }
         }
+        enqueueBakeForAppliedScene(path: contentRoot.path, completion: completion)
     }
 
     @available(macOS 26.0, *)
@@ -451,15 +445,9 @@ enum SceneOfflineBakeService {
                 progress: progress
             )
             await SceneOfflineBakeConcurrencyGate.shared.leave()
-            await MainActor.run {
-                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: result)
-            }
             return result
         } catch {
             await SceneOfflineBakeConcurrencyGate.shared.leave()
-            await MainActor.run {
-                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: nil)
-            }
             throw error
         }
     }
@@ -994,20 +982,14 @@ enum SceneOfflineBakeService {
                isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
                 return
             }
-            do {
-                _ = try await bake(record: record) { @MainActor progress in
-                    NotificationCenter.default.post(
-                        name: .sceneOfflineBakeProgressDidUpdate,
-                        object: itemID,
-                        userInfo: ["progress": progress]
-                    )
-                }
-                print("[SceneOfflineBake] auto-bake finished \(itemID)")
-            } catch {
-                if case SceneOfflineBakeError.concurrentBakeInProgress = error {
-                    print("[SceneOfflineBake] auto-bake skipped (busy) \(itemID)")
-                } else {
-                    print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
+            await MainActor.run {
+                SceneBakeQueueService.shared.enqueue(record: record) { result in
+                    switch result {
+                    case .success(let artifact):
+                        print("[SceneOfflineBake] auto-bake finished \(itemID): \(artifact.videoPath)")
+                    case .failure(let error):
+                        print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
+                    }
                 }
             }
         }

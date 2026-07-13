@@ -127,6 +127,15 @@ final class DesktopWallpaperSyncManager {
         persistFingerprintState()
     }
 
+    /// 清除已经断开且未选择保留状态的外接显示器注册，防止它下次接入时被系统壁纸同步器复原。
+    func clearRegistration(screenID: String, fingerprint: String) {
+        lastSetImageURLByScreen.removeValue(forKey: screenID)
+        lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
+        lastOptionsByScreen.removeValue(forKey: screenID)
+        lastOptionsByFingerprint.removeValue(forKey: fingerprint)
+        persistFingerprintState()
+    }
+
     /// 应用变为活跃时的备用同步入口（处理 activeSpaceDidChangeNotification 丢失的情况）
     func syncOnAppActivation() {
         let screenCount = NSScreen.screens.count

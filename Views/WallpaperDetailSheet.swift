@@ -197,7 +197,7 @@ struct WallpaperDetailSheet: View {
                 }
 
                 floatingBackButton
-                    .padding(.top, topBarTopInset + 18)
+                    .padding(.top, topBarTopInset + 42)
                     .padding(.leading, 28)
 
                 floatingInfoOverlay(
@@ -590,7 +590,7 @@ struct WallpaperDetailSheet: View {
                     )
             }
         }
-        .padding(.top, topBarTopInset + 18)
+        .padding(.top, topBarTopInset + 42)
         .padding(.trailing, 28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         .zIndex(2)
@@ -1312,9 +1312,7 @@ struct WallpaperDetailSheet: View {
 
     private func redownloadWallpaperFromScratch() {
         if let localURL = viewModel.localFileURLIfAvailable(for: wallpaper) {
-            LoopPointAnalysisQueueService.shared.reset(videoURL: localURL)
-            VideoLoopPreprocessingService.shared.resetState(for: localURL)
-            FrameInterpolationQueueService.shared.reset(videoURL: localURL)
+            VideoOptimizationRecordService.shared.resetAllOptimizationState(for: localURL)
         }
         VideoOptimizationPipelineStateService.shared.reset(itemID: wallpaper.id)
         viewModel.removeWallpaperDownloads(withIDs: [wallpaper.id])

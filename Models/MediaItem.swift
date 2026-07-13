@@ -350,6 +350,8 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     var sceneBakeEligibility: SceneBakeEligibilitySnapshot?
     /// 已成功烘焙的循环视频路径（与下载库 `DownloadPathManager.rootFolderURL` 下同级的 `SceneBakes/...`；默认即 Application Support 下 WaifuX）；与 eligibility 的 analysisId 一致时视为命中缓存
     var sceneBakeArtifact: SceneBakeArtifact?
+    /// 最近一次 Scene 离线烘焙失败原因。队列本身可在重启后消失，但该终态应继续在详情页可见。
+    var sceneBakeFailure: String?
     /// 是否已完成 crossfade 循环预处理（替换原始文件后标记为 true）
     var isLooped: Bool?
 
@@ -361,6 +363,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         folderID: String? = nil,
         sceneBakeEligibility: SceneBakeEligibilitySnapshot? = nil,
         sceneBakeArtifact: SceneBakeArtifact? = nil,
+        sceneBakeFailure: String? = nil,
         isLooped: Bool? = nil
     ) {
         self.id = item.id
@@ -374,6 +377,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
         self.folderID = folderID
         self.sceneBakeEligibility = sceneBakeEligibility
         self.sceneBakeArtifact = sceneBakeArtifact
+        self.sceneBakeFailure = sceneBakeFailure
         self.isLooped = isLooped
     }
 
@@ -420,7 +424,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, item, localFilePath, downloadedAt, metadata, folderID, sceneBakeEligibility, sceneBakeArtifact, isLooped
+        case id, item, localFilePath, downloadedAt, metadata, folderID, sceneBakeEligibility, sceneBakeArtifact, sceneBakeFailure, isLooped
     }
 
     init(from decoder: Decoder) throws {
@@ -437,6 +441,7 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
             forKey: .sceneBakeEligibility
         )
         sceneBakeArtifact = try container.decodeIfPresent(SceneBakeArtifact.self, forKey: .sceneBakeArtifact)
+        sceneBakeFailure = try container.decodeIfPresent(String.self, forKey: .sceneBakeFailure)
         isLooped = try container.decodeIfPresent(Bool.self, forKey: .isLooped)
     }
 }

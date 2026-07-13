@@ -199,6 +199,16 @@ struct SettingsView: View {
         }
         .background(Color(hex: "1C1C1E"))
         .id(localization.currentLanguage)
+        .onAppear(perform: consumePendingSchedulerTabRequest)
+        .onReceive(NotificationCenter.default.publisher(for: .openSchedulerSettings)) { _ in
+            selectedTab = .scheduler
+        }
+    }
+
+    private func consumePendingSchedulerTabRequest() {
+        guard UserDefaults.standard.bool(forKey: "settings.openSchedulerOnNextAppearance") else { return }
+        UserDefaults.standard.removeObject(forKey: "settings.openSchedulerOnNextAppearance")
+        selectedTab = .scheduler
     }
 
     // MARK: 左侧导航栏
@@ -988,30 +998,6 @@ private struct SchedulerSettingsTab: View {
 
                         if displayConfig.isEnabled {
                             dividerLine
-
-                            if !screen.isBuiltInDisplay {
-                                HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(t("externalDisplay.autoSwitchOnConnect"))
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(Color.white.opacity(0.9))
-                                        Text(t("externalDisplay.autoSwitchOnConnectDesc"))
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(Color.white.opacity(0.48))
-                                    }
-
-                                    Spacer()
-
-                                    MacToggle(isOn: Binding(
-                                        get: { viewModel.schedulerViewModel.displayConfig(for: screen).autoChangeOnExternalConnect },
-                                        set: { viewModel.schedulerViewModel.updateDisplayAutoChangeOnExternalConnect($0, for: screen) }
-                                    ))
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
-
-                                dividerLine
-                            }
 
                             // 间隔选择
                             HStack(spacing: 12) {

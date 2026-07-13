@@ -240,6 +240,9 @@ final class MediaLibraryService: ObservableObject {
         if let record = downloadRecords.first(where: { $0.item.id == item.id }) {
             saveDlToCache(record)
         }
+        VideoOptimizationRecordService.shared.append(.sourceDownloaded, for: localFileURL, metadata: [
+            "itemID": item.id
+        ])
         syncDlIndex()
         upsert(item)
 
@@ -558,6 +561,7 @@ final class MediaLibraryService: ObservableObject {
             }
         }
         downloadRecords[index].sceneBakeEligibility = snapshot
+        downloadRecords[index].sceneBakeFailure = nil
         saveDlToCache(downloadRecords[index])
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
@@ -576,6 +580,7 @@ final class MediaLibraryService: ObservableObject {
             return
         }
         downloadRecords[index].sceneBakeArtifact = artifact
+        downloadRecords[index].sceneBakeFailure = nil
         saveDlToCache(downloadRecords[index])
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
@@ -791,6 +796,7 @@ final class MediaLibraryService: ObservableObject {
         )
         objectWillChange.send()
         downloadRecords[index].sceneBakeArtifact = nil
+        downloadRecords[index].sceneBakeFailure = nil
         saveDlToCache(downloadRecords[index])
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
@@ -812,6 +818,7 @@ final class MediaLibraryService: ObservableObject {
         // 保留 scene_bake_<itemID.md5>.jpg 供调用方用于锁屏/桌面重设
         objectWillChange.send()
         downloadRecords[index].sceneBakeArtifact = nil
+        downloadRecords[index].sceneBakeFailure = nil
         saveDlToCache(downloadRecords[index])
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
@@ -820,6 +827,27 @@ final class MediaLibraryService: ObservableObject {
             object: record.item.id,
             userInfo: [:]
         )
+    }
+
+    func markSceneBakeFailed(itemID: String, message: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
+            return
+        }
+        downloadRecords[index].sceneBakeFailure = message
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
+        downloadRecords = Array(downloadRecords)
+    }
+
+    func clearSceneBakeFailure(itemID: String) {
+        guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }),
+              downloadRecords[index].sceneBakeFailure != nil else {
+            return
+        }
+        downloadRecords[index].sceneBakeFailure = nil
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
+        downloadRecords = Array(downloadRecords)
     }
 
     /// 删除与下载记录关联的 Scene 烘焙产物
@@ -1463,6 +1491,9 @@ final class WallpaperLibraryService: ObservableObject {
         // 单条写入 Cache
         let record = downloadRecords.first { $0.wallpaper.id == wallpaper.id }
         if let record { saveDlToCache(record) }
+        VideoOptimizationRecordService.shared.append(.sourceDownloaded, for: fileURL, metadata: [
+            "wallpaperID": wallpaper.id
+        ])
         syncDlIndex()
         upsert(wallpaper)
     }

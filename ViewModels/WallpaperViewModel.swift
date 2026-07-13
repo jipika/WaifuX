@@ -1199,9 +1199,11 @@ class WallpaperViewModel: ObservableObject {
         }
 
         // 注册任务以便支持取消
-        downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
+        let registrationToken = downloadTaskService.registerDownloadTask(id: task.id, task: downloadTask)
 
-        defer { downloadTaskService.unregisterDownloadTask(id: task.id) }
+        defer {
+            downloadTaskService.unregisterDownloadTask(id: task.id, token: registrationToken)
+        }
 
         do {
             try await downloadTask.value
