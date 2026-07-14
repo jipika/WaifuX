@@ -708,7 +708,13 @@ class WallpaperSchedulerService: ObservableObject {
             if isScene,
                !prefersRealtimeScene,
                let record = downloadedSceneRecord(for: path),
-               let artifact = record.sceneBakeArtifact {
+               let artifact = record.sceneBakeArtifact,
+               SceneOfflineBakeService.hasCachedArtifact(
+                record: record,
+                renderer: .wallpaperWgpu,
+                durationSeconds: SceneOfflineBakeService.resolvedBakeDuration(),
+                fps: SceneOfflineBakeService.resolvedBakeFPS()
+               ) {
                 let bakedURL = URL(fileURLWithPath: artifact.videoPath)
                 if SceneOfflineBakeService.isUsableBakedVideo(at: bakedURL) {
                     return .video(bakedURL, posterURL: nil)
@@ -2113,7 +2119,12 @@ class WallpaperSchedulerService: ObservableObject {
                 var bakedVideoPath: String? = nil
                 var sceneBakeItemID: String? = nil
                 if isWorkshop, !preferRealtimeForScene, let art = record.sceneBakeArtifact {
-                    if SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
+                    if SceneOfflineBakeService.hasCachedArtifact(
+                        record: record,
+                        renderer: .wallpaperWgpu,
+                        durationSeconds: SceneOfflineBakeService.resolvedBakeDuration(),
+                        fps: SceneOfflineBakeService.resolvedBakeFPS()
+                    ) {
                         bakedVideoPath = art.videoPath
                         sceneBakeItemID = record.item.id
                     }

@@ -171,8 +171,21 @@ enum SceneOfflineBakeService {
     /// 详情页的 `resolvedItem.id` 在不同来源间可能与下载记录不完全一致，
     /// 因此必须按工程根目录查找，不能只依赖页面 item ID。
     @MainActor
-    static func usableBakedVideoURL(forSceneContentRoot contentRoot: URL) -> URL? {
-        guard let artifact = usableArtifact(from: downloadedRecord(forResolvedContentRoot: contentRoot)) else {
+    static func usableBakedVideoURL(
+        forSceneContentRoot contentRoot: URL,
+        matchingCurrentBakeSettings: Bool = false
+    ) -> URL? {
+        guard let record = downloadedRecord(forResolvedContentRoot: contentRoot),
+              let artifact = usableArtifact(from: record) else {
+            return nil
+        }
+        if matchingCurrentBakeSettings,
+           !hasCachedArtifact(
+            record: record,
+            renderer: .wallpaperWgpu,
+            durationSeconds: resolvedBakeDuration(),
+            fps: resolvedBakeFPS()
+           ) {
             return nil
         }
         return URL(fileURLWithPath: artifact.videoPath)
@@ -414,20 +427,8 @@ enum SceneOfflineBakeService {
         persistArtifactToItemID: String? = nil,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
-        let effectiveFPS: Int32
-        if let fps {
-            effectiveFPS = fps
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_fps")
-            effectiveFPS = saved >= 15 ? Int32(min(max(saved, 15), 60)) : 30
-        }
-        let effectiveDuration: Double
-        if let durationSeconds {
-            effectiveDuration = durationSeconds
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
-            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
-        }
+        let effectiveFPS = resolvedBakeFPS(fps)
+        let effectiveDuration = resolvedBakeDuration(durationSeconds)
         // 并发门控：防止多个烘焙同时运行
         let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
         guard entered else {
@@ -913,13 +914,43 @@ enum SceneOfflineBakeService {
         )
     }
 
-    /// 检查是否有缓存（不触发实际烘焙）
-    static func hasCachedArtifact(record: MediaDownloadRecord, renderer: SceneBakeRenderer? = nil) -> Bool {
+    /// 解析本次烘焙应使用的帧率。未指定时读取当前全局设置。
+    static func resolvedBakeFPS(_ requestedFPS: Int32? = nil) -> Int32 {
+        if let requestedFPS {
+            return Int32(min(max(requestedFPS, 15), 60))
+        }
+        let saved = UserDefaults.standard.double(forKey: "scene_bake_fps")
+        return saved >= 15 ? Int32(min(max(saved, 15), 60)) : 30
+    }
+
+    /// 解析本次烘焙应使用的时长。未指定时读取当前全局设置。
+    static func resolvedBakeDuration(_ requestedDuration: Double? = nil) -> Double {
+        if let requestedDuration {
+            return min(max(requestedDuration, 5), 60)
+        }
+        let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+        return saved >= 5 ? min(max(saved, 5), 60) : 15
+    }
+
+    /// 检查是否有缓存（不触发实际烘焙）。传入时长或帧率时，必须与成片元数据匹配。
+    static func hasCachedArtifact(
+        record: MediaDownloadRecord,
+        renderer: SceneBakeRenderer? = nil,
+        durationSeconds: Double? = nil,
+        fps: Int32? = nil
+    ) -> Bool {
         guard let art = record.sceneBakeArtifact,
               art.analysisId == record.sceneBakeEligibility?.analysisId,
               isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) else { return false }
         if let renderer {
-            return art.renderer == renderer
+            guard art.renderer == renderer else { return false }
+        }
+        if let durationSeconds,
+           abs(art.durationSeconds - resolvedBakeDuration(durationSeconds)) > 0.01 {
+            return false
+        }
+        if let fps, art.fps != Int(resolvedBakeFPS(fps)) {
+            return false
         }
         return true
     }
@@ -933,20 +964,8 @@ enum SceneOfflineBakeService {
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
-        let effectiveFPS: Int32
-        if let fps {
-            effectiveFPS = fps
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_fps")
-            effectiveFPS = saved >= 15 ? Int32(min(max(saved, 15), 60)) : 30
-        }
-        let effectiveDuration: Double
-        if let durationSeconds {
-            effectiveDuration = durationSeconds
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
-            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
-        }
+        let effectiveFPS = resolvedBakeFPS(fps)
+        let effectiveDuration = resolvedBakeDuration(durationSeconds)
         guard let eligibility = record.sceneBakeEligibility else {
             throw SceneOfflineBakeError.ineligible
         }
@@ -976,10 +995,12 @@ enum SceneOfflineBakeService {
                 print("[SceneOfflineBake] auto-bake skipped: insufficient reclaimable memory")
                 return
             }
-            if let art = record.sceneBakeArtifact,
-               art.analysisId == eligibility.analysisId,
-               (art.renderer == nil || art.renderer == .wallpaperWgpu),
-               isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
+            if hasCachedArtifact(
+                record: record,
+                renderer: .wallpaperWgpu,
+                durationSeconds: resolvedBakeDuration(),
+                fps: resolvedBakeFPS()
+            ) {
                 return
             }
             await MainActor.run {

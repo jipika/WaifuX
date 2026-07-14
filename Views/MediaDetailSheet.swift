@@ -183,6 +183,22 @@ struct MediaDetailSheet: View {
         return url
     }
 
+    /// 仅用于“设为壁纸”路径：配置变更后的旧成片可以保留和查看，
+    /// 但不能继续阻止新的烘焙任务读取当前时长与帧率设置。
+    private var configuredSceneBakeVideoURL: URL? {
+        guard let record = currentDownloadRecord,
+              SceneOfflineBakeService.hasCachedArtifact(
+                record: record,
+                renderer: .wallpaperWgpu,
+                durationSeconds: SceneOfflineBakeService.resolvedBakeDuration(),
+                fps: SceneOfflineBakeService.resolvedBakeFPS()
+              ),
+              let artifact = record.sceneBakeArtifact else {
+            return nil
+        }
+        return URL(fileURLWithPath: artifact.videoPath)
+    }
+
     private var sceneOfflineBakeButtonVisible: Bool {
         guard isAlreadyDownloaded,
               let record = currentDownloadRecord else { return false }
@@ -915,8 +931,10 @@ struct MediaDetailSheet: View {
             }
 
             Button {
-                if let cachedSceneBakeVideoURL {
-                    applySceneBakedVideoWallpaper(cachedSceneBakeVideoURL)
+                if let configuredSceneBakeVideoURL {
+                    applySceneBakedVideoWallpaper(configuredSceneBakeVideoURL)
+                } else if cachedSceneBakeVideoURL != nil {
+                    runSceneOfflineBake(renderer: .wallpaperWgpu, clearCachedArtifact: false)
                 } else {
                     presentSceneBakeRendererDialog(clearCachedArtifact: false)
                 }
@@ -3189,7 +3207,8 @@ struct MediaDetailSheet: View {
     /// 再在全局烘焙队列中生成 MP4，避免设置动作和详情页被长时间阻塞。
     private func applySceneWallpaperPreferringBake(sceneContentRoot: URL) {
         let bakedVideoURL = SceneOfflineBakeService.usableBakedVideoURL(
-            forSceneContentRoot: sceneContentRoot
+            forSceneContentRoot: sceneContentRoot,
+            matchingCurrentBakeSettings: true
         )
         AppLogger.error(.wallpaper, "applySceneWallpaperPreferringBake", metadata: [
             "contentRoot": sceneContentRoot.lastPathComponent,
@@ -3986,6 +4005,20 @@ struct MediaDetailSheet: View {
     /// 将烘焙 Scene 交给视频播放器。设置壁纸的关键路径不再抽帧或重烘焙，
     /// 以免已完成的 MP4 被删除后长时间停在“正在应用”。
     private func applySceneBakedVideoWallpaper(_ videoURL: URL) {
+        // 详情页的“已烘焙视频”入口也必须遵守实时渲染开关，不能因为
+        // 成片已存在就把用户主动选择的实时 Scene 静默替换成 MP4。
+        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled"),
+           let record = currentDownloadRecord {
+            let sceneRoot = sceneEngineContentRoot(
+                for: URL(fileURLWithPath: record.localFilePath)
+            )
+            applyWorkshopRendererWallpaper(
+                path: sceneRoot.path,
+                posterURL: preferredWorkshopPosterForVideo,
+                statusKey: "applyingWallpaper.realtime"
+            )
+            return
+        }
         guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else {
             errorMessage = t("sceneBake.error.outputMissing")
             showError = true

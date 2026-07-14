@@ -66,16 +66,19 @@ struct MacSettingsRow<Trailing: View>: View {
     let subtitle: String?
     let trailing: Trailing
     let showDivider: Bool
+    let subtitleLineLimit: Int?
 
     init(
         title: String,
         subtitle: String? = nil,
         showDivider: Bool = true,
+        subtitleLineLimit: Int? = 3,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.title = title
         self.subtitle = subtitle
         self.showDivider = showDivider
+        self.subtitleLineLimit = subtitleLineLimit
         self.trailing = trailing()
     }
 
@@ -104,7 +107,7 @@ struct MacSettingsRow<Trailing: View>: View {
                     Text(subtitle)
                         .font(.system(size: 11.5, weight: .regular))
                         .foregroundStyle(Color.white.opacity(0.4))
-                        .lineLimit(3)
+                        .lineLimit(subtitleLineLimit)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

@@ -32,6 +32,7 @@ final class SceneBakeQueueService: ObservableObject {
         let cacheItemID: String
         let renderer: SceneBakeRenderer
         let durationSeconds: Double?
+        let fps: Int32?
         let forceRebake: Bool
         var state: JobState
         var progress: Double
@@ -44,6 +45,7 @@ final class SceneBakeQueueService: ObservableObject {
             cacheItemID: String,
             renderer: SceneBakeRenderer,
             durationSeconds: Double?,
+            fps: Int32?,
             forceRebake: Bool
         ) {
             id = UUID()
@@ -54,6 +56,7 @@ final class SceneBakeQueueService: ObservableObject {
             self.cacheItemID = cacheItemID
             self.renderer = renderer
             self.durationSeconds = durationSeconds
+            self.fps = fps
             self.forceRebake = forceRebake
             state = .preparing
             progress = 0
@@ -90,7 +93,12 @@ final class SceneBakeQueueService: ObservableObject {
                 return .baking(progress: item.progress)
             }
         }
-        if SceneOfflineBakeService.hasCachedArtifact(record: record) {
+        if SceneOfflineBakeService.hasCachedArtifact(
+            record: record,
+            renderer: .wallpaperWgpu,
+            durationSeconds: SceneOfflineBakeService.resolvedBakeDuration(),
+            fps: SceneOfflineBakeService.resolvedBakeFPS()
+        ) {
             return .ready
         }
         if let failure = record.sceneBakeFailure {
@@ -111,11 +119,20 @@ final class SceneBakeQueueService: ObservableObject {
         record: MediaDownloadRecord,
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         durationSeconds: Double? = nil,
+        fps: Int32? = nil,
         forceRebake: Bool = false,
         completion: Completion? = nil
     ) {
         let queueKey = record.id
-        if !forceRebake, SceneOfflineBakeService.hasCachedArtifact(record: record, renderer: renderer),
+        let resolvedDuration = SceneOfflineBakeService.resolvedBakeDuration(durationSeconds)
+        let resolvedFPS = SceneOfflineBakeService.resolvedBakeFPS(fps)
+        if !forceRebake,
+           SceneOfflineBakeService.hasCachedArtifact(
+            record: record,
+            renderer: renderer,
+            durationSeconds: resolvedDuration,
+            fps: resolvedFPS
+           ),
            let artifact = record.sceneBakeArtifact {
             writeBakeRecord(
                 artifact: artifact,
@@ -135,7 +152,8 @@ final class SceneBakeQueueService: ObservableObject {
                 sourcePath: record.localFilePath,
                 cacheItemID: record.id,
                 renderer: renderer,
-                durationSeconds: durationSeconds,
+                durationSeconds: resolvedDuration,
+                fps: resolvedFPS,
                 forceRebake: forceRebake
             ),
             completion: completion
@@ -151,6 +169,7 @@ final class SceneBakeQueueService: ObservableObject {
         title: String? = nil,
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         durationSeconds: Double? = nil,
+        fps: Int32? = nil,
         completion: Completion? = nil
     ) {
         let queueKey = itemID ?? cacheItemID
@@ -162,7 +181,8 @@ final class SceneBakeQueueService: ObservableObject {
                 sourcePath: sceneContentRoot.path,
                 cacheItemID: cacheItemID,
                 renderer: renderer,
-                durationSeconds: durationSeconds,
+                durationSeconds: SceneOfflineBakeService.resolvedBakeDuration(durationSeconds),
+                fps: SceneOfflineBakeService.resolvedBakeFPS(fps),
                 forceRebake: false
             ),
             completion: completion
@@ -206,7 +226,12 @@ final class SceneBakeQueueService: ObservableObject {
         if let itemID = item.itemID,
            var record = MediaLibraryService.shared.downloadRecord(for: itemID) {
             if !item.forceRebake,
-               SceneOfflineBakeService.hasCachedArtifact(record: record, renderer: item.renderer),
+               SceneOfflineBakeService.hasCachedArtifact(
+                record: record,
+                renderer: item.renderer,
+                durationSeconds: item.durationSeconds,
+                fps: item.fps
+               ),
                let artifact = record.sceneBakeArtifact {
                 writeBakeRecord(
                     artifact: artifact,
@@ -249,6 +274,7 @@ final class SceneBakeQueueService: ObservableObject {
             let artifact = try await SceneOfflineBakeService.bake(
                 record: record,
                 durationSeconds: item.durationSeconds,
+                fps: item.fps,
                 renderer: item.renderer
             ) { [weak self] progress in
                 self?.setState(.baking, for: queueItemID, progress: progress)
@@ -284,6 +310,7 @@ final class SceneBakeQueueService: ObservableObject {
             contentRoot: contentRoot,
             cacheItemID: item.cacheItemID,
             durationSeconds: item.durationSeconds,
+            fps: item.fps,
             renderer: item.renderer,
             persistArtifactToItemID: nil
         ) { [weak self] progress in

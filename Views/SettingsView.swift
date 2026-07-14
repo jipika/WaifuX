@@ -593,7 +593,8 @@ private struct GeneralSettingsTab: View {
                 MacSettingsRow(
                     title: t("loopPointAnalysis"),
                     subtitle: t("loopPointAnalysisDesc"),
-                    showDivider: viewModel.loopPointAnalysisEnabled
+                    showDivider: viewModel.loopPointAnalysisEnabled,
+                    subtitleLineLimit: nil
                 ) {
                     MacToggle(isOn: $viewModel.loopPointAnalysisEnabled)
                 }
