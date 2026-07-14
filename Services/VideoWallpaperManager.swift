@@ -1638,6 +1638,7 @@ final class VideoWallpaperManager: ObservableObject {
         videoURL: URL,
         onFinished: @escaping () -> Void = {}
     ) -> Bool {
+        let autoAnalyzeLoopPointEnabled = UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
         guard autoAnalyzeLoopPointEnabled,
               FileManager.default.fileExists(atPath: videoURL.path),
               !VideoLoopPreprocessingService.shared.hasCompletedAnalysis(videoURL) else { return false }
@@ -1658,6 +1659,47 @@ final class VideoWallpaperManager: ObservableObject {
             onFinished()
         }
         return true
+    }
+
+    /// 烘焙完成后的 Scene MP4 视为一份新生成的视频资源，沿用下载完成后的
+    /// 优化顺序：循环点分析先行，之后才按“自动补帧”设置入队。
+    /// 该路径不直接切换壁纸；调度器仍会先确认该 Scene 是否还是当前壁纸。
+    func enqueueAutomaticOptimizationForBakedScene(
+        videoURL: URL,
+        title: String,
+        pipelineItemID: String?
+    ) {
+        guard FileManager.default.fileExists(atPath: videoURL.path) else { return }
+
+        let enqueueInterpolation = { [videoURL, title, pipelineItemID] in
+            if let pipelineItemID {
+                VideoOptimizationPipelineStateService.shared.set(.checkingInterpolation, for: pipelineItemID)
+            }
+            _ = FrameInterpolationQueueService.shared.enqueueAfterDownloadIfNeeded(
+                videoURL: videoURL,
+                title: title
+            )
+        }
+
+        let autoAnalyzeLoopPoint = UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
+        guard autoAnalyzeLoopPoint,
+              !VideoLoopPreprocessingService.shared.hasCompletedAnalysis(videoURL) else {
+            enqueueInterpolation()
+            return
+        }
+
+        if let pipelineItemID {
+            VideoOptimizationPipelineStateService.shared.set(.loopQueued, for: pipelineItemID)
+        }
+        LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL) { completedURL, _ in
+            if let pipelineItemID {
+                VideoOptimizationPipelineStateService.shared.set(.checkingInterpolation, for: pipelineItemID)
+            }
+            _ = FrameInterpolationQueueService.shared.enqueueAfterDownloadIfNeeded(
+                videoURL: completedURL,
+                title: title
+            )
+        }
     }
 
     private func replacePlayerWithInterpolatedVideoIfNeeded(screenID: String, sourceURL: URL, outputURL: URL) {

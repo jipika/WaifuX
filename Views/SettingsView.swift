@@ -1162,6 +1162,141 @@ private struct SchedulerSettingsTab: View {
         }
     }
 
+    @ViewBuilder
+    private func globalSchedulerOptions(for screen: NSScreen) -> some View {
+        let screenID = screen.wallpaperScreenIdentifier
+        let displayConfig = viewModel.schedulerViewModel.displayConfig(for: screen)
+
+        HStack(spacing: 12) {
+            Text(t("replaceInterval"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.9))
+            Spacer()
+            Menu {
+                ForEach(SchedulerConfig.intervalOptions, id: \.self) { minutes in
+                    Button(intervalLabel(for: minutes)) {
+                        viewModel.schedulerViewModel.updateDisplayInterval(minutes, for: screenID)
+                    }
+                }
+                Divider()
+                Button(intervalLabel(for: SchedulerConfig.intervalOnEndMinutes)) {
+                    viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnEndMinutes, for: screenID)
+                }
+                Button(intervalLabel(for: SchedulerConfig.intervalOnUnlockMinutes)) {
+                    viewModel.schedulerViewModel.updateDisplayInterval(SchedulerConfig.intervalOnUnlockMinutes, for: screenID)
+                }
+            } label: {
+                Text(intervalLabel(for: displayConfig.intervalMinutes))
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(Color.white.opacity(0.6))
+            }
+            .menuStyle(.borderlessButton)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+
+        if displayConfig.isOnEndMode {
+            dividerLine
+            VStack(spacing: 8) {
+                HStack(spacing: 12) {
+                    Text(t("webSceneSwitchInterval"))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    Spacer()
+                    let seconds = displayConfig.webSceneSwitchSeconds ?? 0
+                    Text(webSceneIntervalLabel(for: seconds))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.6))
+                }
+                Slider(
+                    value: snappedSliderBinding(
+                        Binding(
+                            get: { Double(displayConfig.webSceneSwitchSeconds ?? 0) },
+                            set: { value in
+                                let seconds = Int(value)
+                                viewModel.schedulerViewModel.updateDisplayWebSceneSwitchSeconds(
+                                    seconds == 0 ? nil : seconds,
+                                    for: screenID
+                                )
+                            }
+                        ),
+                        in: 0...3600,
+                        step: 10
+                    ),
+                    in: 0...3600
+                )
+                .tint(settingsSliderTint)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+
+        dividerLine
+
+        HStack(spacing: 12) {
+            Text(t("replaceOrder"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.9))
+            Spacer()
+            Picker("", selection: Binding(
+                get: { displayConfig.order },
+                set: { viewModel.schedulerViewModel.updateDisplayOrder($0, for: screenID) }
+            )) {
+                Text(t("sequential")).tag(ScheduleOrder.sequential)
+                Text(t("random")).tag(ScheduleOrder.random)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 130, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+
+        dividerLine
+
+        HStack(spacing: 12) {
+            Text(t("contentTypes"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.9))
+            Spacer()
+            HStack(spacing: 16) {
+                Toggle(isOn: Binding(
+                    get: { displayConfig.includeWallpapers },
+                    set: { viewModel.schedulerViewModel.updateDisplayIncludeWallpapers($0, for: screenID) }
+                )) {
+                    Text(t("wallpapers"))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.8))
+                }
+                .toggleStyle(.checkbox)
+
+                Toggle(isOn: Binding(
+                    get: { displayConfig.includeMedia },
+                    set: { viewModel.schedulerViewModel.updateDisplayIncludeMedia($0, for: screenID) }
+                )) {
+                    Text(t("media"))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.8))
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+
+        dividerLine
+
+        FolderPickerRow(
+            folderIDs: displayConfig.folderIDs,
+            includeWallpapers: displayConfig.includeWallpapers
+                && !(displayConfig.isOnEndMode && displayConfig.webSceneSwitchSeconds == nil),
+            includeMedia: displayConfig.includeMedia,
+            screenID: screenID,
+            viewModel: viewModel
+        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
     // MARK: - 文件夹选择组件（支持多选）
     private struct FolderPickerRow: View {
         let folderIDs: [String]?
@@ -1323,6 +1458,12 @@ private struct SchedulerSettingsTab: View {
         case 1440: return "24 \(t("hours"))"
         default: return "\(minutes) \(t("minutes"))"
         }
+    }
+
+    private func webSceneIntervalLabel(for seconds: Int) -> String {
+        if seconds == 0 { return t("intervalOnEnd") }
+        if seconds >= 60 { return "\(seconds / 60) \(t("minutes"))" }
+        return "\(seconds) \(t("seconds"))"
     }
 }
 

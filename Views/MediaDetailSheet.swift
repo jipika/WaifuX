@@ -424,8 +424,12 @@ struct MediaDetailSheet: View {
                         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
                 }
                 if isTranscodingVideo {
+                    let transcodeTitle = String(
+                        format: t("transcodingToast"),
+                        Int(transcodeVideoProgress * 100)
+                    )
                     MediaProcessingToast(
-                        title: String(format: t("transcodingToast"), Int(transcodeVideoProgress * 100)),
+                        title: transcodeTitle,
                         detail: nil,
                         progress: transcodeVideoProgress
                     )
@@ -529,36 +533,9 @@ struct MediaDetailSheet: View {
             AppLogger.info(.media, "媒体详情页 onAppear",
                 metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
-            restoreSceneBakeProgressIfNeeded()
             setupNextItemDataSource()
             setupKeyboardMonitor()
             await loadDetailIfNeeded()
-        }
-        .onChange(of: resolvedItem.id) { _, _ in
-            restoreSceneBakeProgressIfNeeded()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeProgressDidUpdate)) { notification in
-            guard let notifItemID = notification.object as? String,
-                  notifItemID == resolvedItem.id else { return }
-            if let progress = notification.userInfo?["progress"] as? Double {
-                if progress >= 1.0 {
-                    isBakingScene = false
-                    bakeProgress = 0
-                    return
-                }
-                if !isBakingScene {
-                    isBakingScene = true
-                }
-                updateSceneBakeProgress(progress)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeDidComplete)) { _ in
-            // 失败时不会推 progress=1.0，用完成通知兜底清掉本页烘焙态
-            if isBakingScene,
-               SceneOfflineBakeProgressTracker.shared.progress(for: resolvedItem.id) == nil {
-                isBakingScene = false
-                bakeProgress = 0
-            }
         }
         .onDisappear {
             isVisible = false
@@ -623,6 +600,11 @@ struct MediaDetailSheet: View {
             return previewVideoURL
         }
         return nil
+    }
+
+    private func revealCurrentMediaInFinder() {
+        guard let url = finderRevealURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func detailScrollTopInset(viewportHeight: CGFloat, heroHidden: Bool) -> CGFloat {
@@ -1519,81 +1501,39 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private func updateSceneBakeProgress(_ progress: Double) {
-        guard progress.isFinite else { return }
-        let clamped = min(max(progress, 0.0), 0.99)
-        bakeProgress = max(bakeProgress, clamped)
-    }
-
-    /// 详情页重建后从全局 tracker 恢复进行中的烘焙 UI（关闭再进入不会丢进度条）
-    private func restoreSceneBakeProgressIfNeeded() {
-        if let progress = SceneOfflineBakeProgressTracker.shared.progress(for: resolvedItem.id) {
-            isBakingScene = true
-            bakeProgress = progress
-        } else if isBakingScene {
-            // 切换到别的 item 或烘焙已结束：清掉陈旧本地态
-            isBakingScene = false
-            bakeProgress = 0
-        }
-    }
-
-    private func runSceneOfflineBake(renderer: SceneBakeRenderer, clearCachedArtifact: Bool) {
+    private func runSceneOfflineBake(
+        renderer: SceneBakeRenderer,
+        clearCachedArtifact: Bool,
+        durationSeconds: Double? = nil
+    ) {
         guard let record = currentDownloadRecord else { return }
-        if isBakingScene { return }
-        errorMessage = ""
-        // 仅首次烘焙 + 单显示器时自动设壁纸；「重新烘焙」只更新缓存，不改当前壁纸
-        let shouldAutoApplyAfterBake = !clearCachedArtifact && NSScreen.screens.count <= 1
-        Task {
-            if clearCachedArtifact {
-                await MainActor.run {
-                    mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
-                }
-            }
+        guard !isBakingScene else { return }
+        guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
+            errorMessage = t("sceneBake.error.insufficientMemory.bake")
+            showError = true
+            return
         }
-    }
 
-                await MainActor.run {
-                    isBakingScene = false
-                    bakeProgress = 0
-                    if shouldAutoApplyAfterBake {
-                        // 实时渲染模式下，烘焙产物不自动设置到桌面（已由 wallpaper-wgpu 实时渲染）
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
-                            if #available(macOS 26.0, *), !VideoWallpaperManager.shared.isLockScreenEnabled {
-                                // 动态锁屏关闭：用烘焙产物的静态帧设置桌面 poster（不启动视频播放器）
-                                Task {
-                                    if let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: videoURL, fallbackPosterURL: nil) {
-                                        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                                            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                                            .allowClipping: true
-                                        ]
-                                        for screen in NSScreen.screens {
-                                            try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
-                                        }
-                                        print("[MediaDetailSheet] 实时渲染模式：烘焙完成，已设置桌面 poster")
-                                    }
-                                }
-                                scheduleSceneBakeSuccessFlash()
-                            } else {
-                                sceneBakeStatusFlash = t("sceneBake.cached")
-                                print("[MediaDetailSheet] 实时渲染模式：烘焙完成，产物已缓存用于锁屏推送")
-                            }
-                        } else {
-                            scheduleSceneBakeSuccessFlash()
-                            applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
-                        }
-                    } else {
-                        // 重新烘焙 / 多显示器：只缓存，不自动改壁纸
-                        scheduleSceneBakeSuccessFlash()
-                    }
-                }
-                scheduleSceneBakeSuccessFlash()
-            } else {
-                sceneBakeStatusFlash = t("sceneBake.cached")
+        errorMessage = ""
+
+        if clearCachedArtifact {
+            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+        }
+
+        SceneBakeQueueService.shared.enqueue(
+            record: record,
+            renderer: renderer,
+            durationSeconds: durationSeconds,
+            fps: SceneOfflineBakeService.resolvedBakeFPS(),
+            forceRebake: clearCachedArtifact
+        ) { result in
+            switch result {
+            case .success:
+                self.scheduleSceneBakeSuccessFlash()
+            case .failure(let error):
+                self.errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                self.showError = true
             }
-        } else {
-            scheduleSceneBakeSuccessFlash()
-            applySceneBakedVideoWallpaper(videoURL)
         }
     }
 
@@ -3241,109 +3181,26 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// Scene 壁纸设置：命中烘焙产物时直接播放；否则先立即显示 Scene，
-    /// 再在全局烘焙队列中生成 MP4，避免设置动作和详情页被长时间阻塞。
+    /// Scene 壁纸设置：离线播放优先采用与当前烘焙配置匹配的成片；没有成片时
+    /// 立即启动实时渲染，并将耗时烘焙交给全局队列，不阻塞详情页或壁纸设置。
     private func applySceneWallpaperPreferringBake(sceneContentRoot: URL) {
         let bakedVideoURL = SceneOfflineBakeService.usableBakedVideoURL(
             forSceneContentRoot: sceneContentRoot,
             matchingCurrentBakeSettings: true
         )
-        AppLogger.error(.wallpaper, "applySceneWallpaperPreferringBake", metadata: [
-            "contentRoot": sceneContentRoot.lastPathComponent,
-            "hasBakeArtifact": bakedVideoURL != nil
-        ])
 
-        // 1. 已有有效烘焙产物 → 直接走视频播放器；不能回退至 .web 实时渲染。
         if let bakedVideoURL {
             applySceneBakedVideoWallpaper(bakedVideoURL)
             return
         }
 
-        // 2. 无成片时不等待烘焙：先使用同一个 Scene 直接渲染，再排入后台。
         applyWorkshopRendererWallpaper(
             path: sceneContentRoot.path,
             posterURL: preferredWorkshopPosterForVideo,
             statusKey: "applyingWallpaper.realtime"
         )
 
-        Task {
-            do {
-                // 获取或分析烘焙资格
-                let snapshotRecord = await MainActor.run {
-                    mediaLibrary.downloadedItems.first { $0.item.id == itemID }
-                }
-                let eligibility: SceneBakeEligibilitySnapshot
-                if let existing = snapshotRecord?.sceneBakeEligibility,
-                   existing.contentRootPath == sceneContentRoot.path {
-                    eligibility = existing
-                } else {
-                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
-                        await MainActor.run {
-                            isBakingScene = false
-                            isSettingWallpaper = false
-                            errorMessage = t("sceneBake.error.insufficientMemory.analysis")
-                            showError = true
-                        }
-                        return
-                    }
-                    eligibility = try await Task.detached(priority: .userInitiated) {
-                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: sceneContentRoot)
-                    }.value
-                    await MainActor.run {
-                        MediaLibraryService.shared.attachSceneBakeEligibility(
-                            itemID: itemID,
-                            snapshot: eligibility,
-                            triggerAutoBake: false
-                        )
-                    }
-                }
-
-                guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
-                    await MainActor.run {
-                        isBakingScene = false
-                        isSettingWallpaper = false
-                        errorMessage = t("sceneBake.error.insufficientMemory.bake")
-                        showError = true
-                    }
-                    return
-                }
-
-                let persistID = await MainActor.run {
-                    mediaLibrary.downloadedItems.first { $0.item.id == itemID && $0.isActive }?.id
-                }
-                let cacheKey = persistID ?? SceneOfflineBakeService.stableOrphanCacheItemID(contentRootPath: sceneContentRoot.path)
-
-                // 使用 wallpaper-wgpu bake 子命令烘焙
-                let artifact = try await SceneOfflineBakeService.bake(
-                    eligibility: eligibility,
-                    contentRoot: sceneContentRoot,
-                    cacheItemID: cacheKey,
-                    renderer: .wallpaperWgpu,
-                    persistArtifactToItemID: persistID,
-                    progressItemID: itemID,
-                    progress: { progress in
-                        // 全局 tracker 会广播通知；本地回调兜底当前页即时刷新
-                        updateSceneBakeProgress(progress)
-                    }
-                )
-                return
-            }
-            self.scheduleSceneBakeSuccessFlash()
-            self.applySceneBakedVideoWallpaper(bakedVideoURL)
-        }
-        if let record = currentDownloadRecord {
-            SceneBakeQueueService.shared.enqueue(record: record, completion: completion)
-        } else {
-            SceneBakeQueueService.shared.enqueue(
-                sceneContentRoot: sceneContentRoot,
-                cacheItemID: SceneOfflineBakeService.stableOrphanCacheItemID(
-                    contentRootPath: sceneContentRoot.path
-                ),
-                itemID: resolvedItem.id,
-                title: resolvedItem.title,
-                completion: completion
-            )
-        }
+        SceneOfflineBakeService.enqueueBakeForAppliedScene(path: sceneContentRoot.path)
     }
 
     private func isSceneStillActive(_ sceneContentRoot: URL) -> Bool {

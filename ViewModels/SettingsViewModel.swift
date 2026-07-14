@@ -271,6 +271,7 @@ class SettingsViewModel: ObservableObject {
         frameInterpolationAutoEnqueue = effectiveAutoOnDownload
         UserDefaults.standard.set(effectiveAutoOnDownload, forKey: "frame_interpolation_auto_on_download")
         UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
+        let effectiveAutoAnalyzeLoopPoint = loopPointAnalysisEnabled && autoAnalyzeLoopPoint
         UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
         UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
         UserDefaults.standard.set(proxyHost, forKey: "proxy_host")

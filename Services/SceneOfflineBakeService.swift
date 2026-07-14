@@ -36,6 +36,10 @@ enum SceneBakeRenderer: String, CaseIterable, Codable, Hashable, Sendable {
 extension Notification.Name {
     /// 烘焙视频抽帧封面已生成。`object` 为 `String`（itemID），`userInfo["thumbnailURL"]` 为 `URL`。
     static let sceneOfflineBakeThumbnailDidUpdate = Notification.Name("sceneOfflineBakeThumbnailDidUpdate")
+    /// 烘焙队列进度已更新。`object` 为壁纸 item ID，`userInfo["progress"]` 为 0...1。
+    static let sceneOfflineBakeProgressDidUpdate = Notification.Name("sceneOfflineBakeProgressDidUpdate")
+    /// 单次离线烘焙结束。`object` 为成功时的 `SceneBakeArtifact`。
+    static let sceneOfflineBakeDidComplete = Notification.Name("sceneOfflineBakeDidComplete")
 }
 
 @discardableResult
@@ -376,7 +380,6 @@ enum SceneOfflineBakeService {
                 print("[SceneOfflineBake] realtime companion bake failed (\(reason)): \(error.localizedDescription)")
             }
         }
-        enqueueBakeForAppliedScene(path: contentRoot.path, completion: completion)
     }
 
     @available(macOS 26.0, *)
@@ -569,13 +572,7 @@ enum SceneOfflineBakeService {
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
-        let effectiveDuration: Double
-        if let durationSeconds {
-            effectiveDuration = durationSeconds
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
-            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
-        }
+        let effectiveDuration = resolvedBakeDuration(durationSeconds)
         let trackedItemID = progressItemID ?? persistArtifactToItemID
         // 并发门控：防止多个烘焙同时运行
         let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
@@ -1079,11 +1076,7 @@ enum SceneOfflineBakeService {
 
     /// 解析本次烘焙应使用的帧率。未指定时读取当前全局设置。
     static func resolvedBakeFPS(_ requestedFPS: Int32? = nil) -> Int32 {
-        if let requestedFPS {
-            return Int32(min(max(requestedFPS, 15), 60))
-        }
-        let saved = UserDefaults.standard.double(forKey: "scene_bake_fps")
-        return saved >= 15 ? Int32(min(max(saved, 15), 60)) : 30
+        resolvedBakeFPS(requestedFPS: requestedFPS)
     }
 
     /// 解析本次烘焙应使用的时长。未指定时读取当前全局设置。
@@ -1128,13 +1121,7 @@ enum SceneOfflineBakeService {
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
-        let effectiveDuration: Double
-        if let durationSeconds {
-            effectiveDuration = durationSeconds
-        } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
-            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
-        }
+        let effectiveDuration = resolvedBakeDuration(durationSeconds)
         guard let eligibility = record.sceneBakeEligibility else {
             throw SceneOfflineBakeError.ineligible
         }
@@ -1160,7 +1147,7 @@ enum SceneOfflineBakeService {
                 MediaLibraryService.shared.downloadedItems.first { $0.item.id == itemID }
             }
             guard let record,
-                  let eligibility = record.sceneBakeEligibility else { return }
+                  record.sceneBakeEligibility != nil else { return }
             guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
                 print("[SceneOfflineBake] auto-bake skipped: insufficient reclaimable memory")
                 return

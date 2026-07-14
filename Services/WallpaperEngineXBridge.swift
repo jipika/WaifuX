@@ -1020,6 +1020,11 @@ final class WallpaperEngineXBridge: ObservableObject {
         wasAudioRelayActiveBeforePause = false
     }
 
+    /// 指定屏幕是否处于暂停状态。全局暂停对全部屏幕生效。
+    func isPaused(on screen: NSScreen) -> Bool {
+        isExternalPaused || perScreenPausedScreenIDs.contains(screen.wallpaperScreenIdentifier)
+    }
+
     /// 检查指定 screenID 是否被外部引擎管理（有 scene 进程，或在 target / renderStates 中）
     func isManaging(screenID: String) -> Bool {
         if screenProcesses[screenID] != nil { return true }
