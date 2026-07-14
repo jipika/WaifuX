@@ -99,7 +99,10 @@ class WorkshopService: ObservableObject {
         var components = URLComponents(string: "https://steamcommunity.com\(profilePath)/myworkshopfiles/")
         components?.queryItems = [
             URLQueryItem(name: "appid", value: wallpaperEngineAppID),
-            URLQueryItem(name: "p", value: String(page)),
+            // 显式 myfiles + mostrecent，避免默认视图/排序导致翻页异常
+            URLQueryItem(name: "browsefilter", value: "myfiles"),
+            URLQueryItem(name: "sort", value: "mostrecent"),
+            URLQueryItem(name: "p", value: String(max(page, 1))),
             // Steam 作者页使用 numperpage，不是 Workshop 搜索页的 num_per_page。
             URLQueryItem(name: "numperpage", value: String(authorPageSize))
         ]
@@ -2976,17 +2979,47 @@ extension WorkshopService {
         for entry in entries {
             var d: ObjCBool = false
             guard fm.fileExists(atPath: entry.path, isDirectory: &d), d.boolValue else { continue }
+            // SteamCMD 下载壳目录：downloads / temp 不含 project.json，跳过可加速定位 content/<appid>/<id>
+            let name = entry.lastPathComponent.lowercased()
+            if name == "downloads" || name == "temp" { continue }
             childDirs.append(entry)
+        }
+        if childDirs.isEmpty {
+            return url
         }
         if childDirs.count == 1 {
             return resolveWEProjectRootRecursive(childDirs[0], depthLeft: depthLeft - 1, fm: fm)
         }
-        if childDirs.count > 1 {
-            let withProject = childDirs
-                .filter { fm.fileExists(atPath: $0.appendingPathComponent("project.json").path) }
-                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            if let first = withProject.first {
-                return resolveWEProjectRootRecursive(first, depthLeft: depthLeft - 1, fm: fm)
+
+        // 多子目录：先看直接子目录是否带 project.json
+        let withProject = childDirs
+            .filter { fm.fileExists(atPath: $0.appendingPathComponent("project.json").path) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        if let first = withProject.first {
+            return first
+        }
+
+        // Steam 路径常为 steamapps/workshop/content/431960/<id>/project.json：
+        // 当前层（如 workshop）有 content/downloads/temp 等多个目录，直接子层也没有 project.json。
+        // 继续向下搜索，优先 content 目录。
+        let orderedChildren = childDirs.sorted { a, b in
+            let aContent = a.lastPathComponent.lowercased() == "content"
+            let bContent = b.lastPathComponent.lowercased() == "content"
+            if aContent != bContent { return aContent && !bContent }
+            return a.path.localizedStandardCompare(b.path) == .orderedAscending
+        }
+        for child in orderedChildren {
+            let resolved = resolveWEProjectRootRecursive(child, depthLeft: depthLeft - 1, fm: fm)
+            if fm.fileExists(atPath: resolved.appendingPathComponent("project.json").path) {
+                return resolved
+            }
+            // 子树里若已落在含 pkg/视频 的工程根，也接受
+            if let childEntries = try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]),
+               childEntries.contains(where: {
+                   $0.pathExtension.lowercased() == "pkg" ||
+                   ["mp4", "mov", "webm"].contains($0.pathExtension.lowercased())
+               }) {
+                return resolved
             }
         }
         return url

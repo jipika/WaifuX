@@ -77,11 +77,14 @@ class SettingsViewModel: ObservableObject {
             VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
         }
     }
+    /// 下载完成时自动补帧（调度/设壁纸路径禁止触发补帧）。
     @Published var frameInterpolationAutoEnqueue = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(frameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_enqueue")
-            FrameInterpolationQueueService.shared.autoEnqueueEnabled = frameInterpolationAutoEnqueue
+            UserDefaults.standard.set(frameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_on_download")
+            // 旧 key 清理，防止被当成「切换时自动补帧」读回。
+            UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
+            FrameInterpolationQueueService.shared.applySettings(autoOnDownload: frameInterpolationAutoEnqueue)
         }
     }
     @Published var loopPointAnalysisEnabled = true {
@@ -136,7 +139,7 @@ class SettingsViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
     }
 
-    /// 壁纸引擎离线烘焙帧率 (15 ~ 60)
+    /// 壁纸引擎离线烘焙帧率 (15 ~ 显示器最高刷新率)
     @Published var sceneBakeFPS: Double = 30 {
         didSet { UserDefaults.standard.set(sceneBakeFPS, forKey: "scene_bake_fps") }
     }
@@ -264,10 +267,10 @@ class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
         UserDefaults.standard.set(frameInterpolationEnabled, forKey: "frame_interpolation_enabled")
         UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
-        let effectiveFrameInterpolationAutoEnqueue = frameInterpolationEnabled && frameInterpolationAutoEnqueue
-        frameInterpolationAutoEnqueue = effectiveFrameInterpolationAutoEnqueue
-        UserDefaults.standard.set(effectiveFrameInterpolationAutoEnqueue, forKey: "frame_interpolation_auto_enqueue")
-        let effectiveAutoAnalyzeLoopPoint = loopPointAnalysisEnabled && autoAnalyzeLoopPoint
+        let effectiveAutoOnDownload = frameInterpolationEnabled && frameInterpolationAutoEnqueue
+        frameInterpolationAutoEnqueue = effectiveAutoOnDownload
+        UserDefaults.standard.set(effectiveAutoOnDownload, forKey: "frame_interpolation_auto_on_download")
+        UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
         UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
         UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
         UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
@@ -280,7 +283,7 @@ class SettingsViewModel: ObservableObject {
         VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
         StaticImageWallpaperOverlayManager.shared.refreshAutoRemoveImageLetterbox()
         VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
-        FrameInterpolationQueueService.shared.autoEnqueueEnabled = effectiveFrameInterpolationAutoEnqueue
+        FrameInterpolationQueueService.shared.applySettings(autoOnDownload: effectiveAutoOnDownload)
         NotchOverlayManager.shared.setEnabled(hideNotch)
         if sceneRealtimeRenderingEnabled {
             LiquidGlassClockSettings.shared.update { $0.enabled = false }
@@ -365,9 +368,10 @@ class SettingsViewModel: ObservableObject {
             autoRemoveVideoLetterbox = defaults.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
             frameInterpolationEnabled = defaults.object(forKey: "frame_interpolation_enabled") as? Bool ?? false
             frameInterpolationTargetFPS = Double(FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(Int((defaults.object(forKey: "frame_interpolation_target_fps") as? Double ?? 60.0).rounded())))
-            frameInterpolationAutoEnqueue = frameInterpolationEnabled && (defaults.object(forKey: "frame_interpolation_auto_enqueue") as? Bool ?? false)
-            loopPointAnalysisEnabled = defaults.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true
-            autoAnalyzeLoopPoint = defaults.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
+            // 新语义：下载时自动补帧。旧 key「切换时自动」不再迁移为开启。
+            frameInterpolationAutoEnqueue = frameInterpolationEnabled
+                && (defaults.object(forKey: "frame_interpolation_auto_on_download") as? Bool ?? false)
+            defaults.set(false, forKey: "frame_interpolation_auto_enqueue")
             showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
             sceneRealtimeRenderingEnabled = defaults.bool(forKey: "scene_realtime_rendering_enabled")
             upscalingEnabled = defaults.object(forKey: "upscaling_enabled") as? Bool ?? true

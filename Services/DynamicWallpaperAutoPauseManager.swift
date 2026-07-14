@@ -237,10 +237,13 @@ final class DynamicWallpaperAutoPauseManager {
                 if !hasActiveGlobalPauseReason {
                     let stillPausedByOther = foregroundPausedScreenIDs.union(windowCoveragePausedScreenIDs)
                     let canResume = screenIDs.subtracting(stillPausedByOther)
-                    if !canResume.isEmpty { resumeScreens(byIDs: canResume) }
+                    if !canResume.isEmpty {
+                        resumeScreens(byIDs: canResume)
+                    }
                 }
             }
 
+            // 旧版全局 WE 全屏暂停标志：关闭开关时兜底恢复
             if fullscreenAutoPausedExternalEngine {
                 fullscreenAutoPausedExternalEngine = false
                 if !hasActiveGlobalPauseReason,
@@ -344,21 +347,24 @@ final class DynamicWallpaperAutoPauseManager {
         // Timer 驱动的全屏覆盖检测
         guard pauseWhenFullscreenCovers else { return }
 
-        // CGWindowListCopyWindowInfo 是重量级系统调用，移到后台线程避免阻塞主线程
-        fullscreenDetectionQueue.async { [weak self] in
+        // 主线程先快照各屏 frame/ID，再把重量级 CGWindowList 放到后台。
+        // NSScreen 必须在主线程读；后台读 NSScreen.screens 在多显示器下常会漏掉外接屏。
+        let screenFrames = currentScreenFrames()
+        guard !screenFrames.isEmpty else { return }
+
+        fullscreenDetectionQueue.async { [weak self, screenFrames] in
             guard let self else { return }
-            let fullscreenCoveredScreens = self.getFullscreenCoveredScreens()
-            let newFullscreenIDs = Set(fullscreenCoveredScreens.map { $0.wallpaperScreenIdentifier })
+            let newFullscreenIDs = Self.fullscreenCoveredScreenIDs(in: screenFrames)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.applyFullscreenDetectionResult(newFullscreenIDs: newFullscreenIDs, fullscreenCoveredScreens: fullscreenCoveredScreens)
+                self.applyFullscreenDetectionResult(newFullscreenIDs: newFullscreenIDs)
             }
         }
     }
 
-    /// 在主线程处理全屏检测结果
-    private func applyFullscreenDetectionResult(newFullscreenIDs: Set<String>, fullscreenCoveredScreens: [NSScreen]) {
+    /// 在主线程处理全屏检测结果（原生视频 + WE 均按屏 pause/resume）
+    private func applyFullscreenDetectionResult(newFullscreenIDs: Set<String>) {
         guard newFullscreenIDs != fullscreenCoveredScreenIDs else {
             pendingFullscreenCoveredScreenIDs = nil
             pendingFullscreenSampleCount = 0
@@ -369,6 +375,7 @@ final class DynamicWallpaperAutoPauseManager {
         let previouslyCoveredIDs = fullscreenCoveredScreenIDs
         fullscreenCoveredScreenIDs = newFullscreenIDs
 
+        // 恢复：离开全屏覆盖的屏幕
         let screenIDsToResume = fullscreenAutoPausedScreenIDs.subtracting(newFullscreenIDs)
         if !screenIDsToResume.isEmpty {
             fullscreenAutoPausedScreenIDs.subtract(screenIDsToResume)
@@ -381,27 +388,30 @@ final class DynamicWallpaperAutoPauseManager {
             }
         }
 
-        let screensToPause = fullscreenCoveredScreens.filter { screen in
-            !previouslyCoveredIDs.contains(screen.wallpaperScreenIdentifier)
-        }
-        if !screensToPause.isEmpty {
-            let pausedIDs = pauseScreens(screensToPause)
+        // 暂停：新进入全屏覆盖的屏幕（原生视频 + WE 都按屏）
+        let screenIDsToPause = newFullscreenIDs.subtracting(previouslyCoveredIDs)
+        if !screenIDsToPause.isEmpty {
+            let pausedIDs = pauseScreens(byIDs: screenIDsToPause)
             fullscreenAutoPausedScreenIDs.formUnion(pausedIDs)
         }
 
-        let weBridge = WallpaperEngineXBridge.shared
-        let shouldPauseExternal = weBridge.isControllingExternalEngine &&
-            weBridge.shouldPauseForFullscreenCoveredScreenIDs(newFullscreenIDs)
-        if shouldPauseExternal {
-            if !hasActiveGlobalPauseReason && !weBridge.isExternalPaused {
-                weBridge.pauseWallpaper()
-                fullscreenAutoPausedExternalEngine = true
+        // 兼容旧路径：若此前走了全局 WE pause，而当前已无 WE 管理屏处于全屏覆盖，则清掉全局标志。
+        // 新逻辑不再主动调用全局 pauseWallpaper()。
+        if fullscreenAutoPausedExternalEngine {
+            let weBridge = WallpaperEngineXBridge.shared
+            let stillCoveringWE = newFullscreenIDs.contains { weBridge.isManaging(screenID: $0) }
+            if !stillCoveringWE {
+                if !hasActiveGlobalPauseReason, weBridge.isExternalPaused {
+                    // 仅在全局暂停完全由旧逻辑引起、且没有其它 per-screen 暂停时才 resume 全局
+                    let anyPerScreenWEPaused = fullscreenAutoPausedScreenIDs.contains { weBridge.isManaging(screenID: $0) }
+                        || foregroundPausedScreenIDs.contains { weBridge.isManaging(screenID: $0) }
+                        || windowCoveragePausedScreenIDs.contains { weBridge.isManaging(screenID: $0) }
+                    if !anyPerScreenWEPaused {
+                        weBridge.resumeWallpaper()
+                    }
+                }
+                fullscreenAutoPausedExternalEngine = false
             }
-        } else if fullscreenAutoPausedExternalEngine {
-            if !hasActiveGlobalPauseReason, weBridge.isExternalPaused {
-                weBridge.resumeWallpaper()
-            }
-            fullscreenAutoPausedExternalEngine = false
         }
     }
 
@@ -698,67 +708,74 @@ final class DynamicWallpaperAutoPauseManager {
         return false
     }
 
-    /// 检查当前是否有全屏窗口覆盖桌面
-    private func isFullscreenCovering() -> Bool {
-        return !getFullscreenCoveredScreens().isEmpty
-    }
-
-    /// 获取被全屏窗口覆盖的屏幕列表（可在后台线程调用）
-    /// 通过 CGWindowList 检测 layer 0 且覆盖屏幕绝大部分区域的窗口
-    /// 排除本应用自身的渲染窗口（如 wallpaper-wgpu 的 Metal 窗口）
-    nonisolated private func getFullscreenCoveredScreens() -> [NSScreen] {
+    /// 检测被全屏窗口覆盖的屏幕 ID（可在后台线程调用）。
+    /// 通过 CGWindowList 检测 layer 0 且覆盖屏幕绝大部分区域的窗口。
+    /// 排除本应用自身的渲染窗口（如 wallpaper-wgpu 的 Metal 窗口）。
+    ///
+    /// - Parameter screenFrames: 主线程快照的 `screenID → frame` 映射；
+    ///   后台禁止再读 `NSScreen.screens`（多显示器下会漏外接屏）。
+    nonisolated private static func fullscreenCoveredScreenIDs(in screenFrames: [String: CGRect]) -> Set<String> {
+        guard !screenFrames.isEmpty else { return [] }
         guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
 
-        let screens = NSScreen.screens
-        let desktopFrame = screens.reduce(CGRect.null) { $0.union($1.frame) }
-        let ourBundleID = Bundle.main.bundleIdentifier
-        var coveredScreens: [NSScreen] = []
+        let desktopFrame = screenFrames.values.reduce(CGRect.null) { $0.union($1) }
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        var coveredIDs = Set<String>()
 
         for window in windowList {
             guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
             guard let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0 else { continue }
-            guard let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
 
-            // 跳过本应用的窗口（wallpaper-wgpu 的 Metal 渲染窗口属于本应用）
-            if let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
-               let app = NSRunningApplication(processIdentifier: pid_t(ownerPID)),
-               app.bundleIdentifier == ourBundleID {
+            // 跳过本应用窗口（wallpaper-wgpu / WKWebView 桌面渲染层）
+            let ownerPID: pid_t?
+            if let pid = window[kCGWindowOwnerPID as String] as? pid_t {
+                ownerPID = pid
+            } else if let pid = window[kCGWindowOwnerPID as String] as? Int {
+                ownerPID = pid_t(pid)
+            } else {
+                ownerPID = nil
+            }
+            if let ownerPID, ownerPID == myPID { continue }
+
+            let rawBounds: CGRect
+            if let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+               let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
+                rawBounds = rect
+            } else if let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] {
+                rawBounds = CGRect(
+                    x: boundsDict["X"] ?? 0,
+                    y: boundsDict["Y"] ?? 0,
+                    width: boundsDict["Width"] ?? 0,
+                    height: boundsDict["Height"] ?? 0
+                )
+            } else {
                 continue
             }
 
-            let rawBounds = CGRect(
-                x: boundsDict["X"] ?? 0,
-                y: boundsDict["Y"] ?? 0,
-                width: boundsDict["Width"] ?? 0,
-                height: boundsDict["Height"] ?? 0
-            )
-            let bounds = Self.normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
+            let bounds = normalizedWindowBounds(rawBounds, screenFrames: screenFrames, desktopFrame: desktopFrame)
 
-            // 检查窗口实际覆盖了哪块屏幕。不能只比较宽高：两块同尺寸或外接屏
-            // 大于内置屏时，会把未相交的屏幕也误判为被全屏覆盖。
-            for screen in screens {
-                let screenFrame = screen.frame
+            // 按实际相交面积判断；不能只比宽高，否则同尺寸多屏会误伤未覆盖的那块。
+            for (screenID, screenFrame) in screenFrames {
+                if coveredIDs.contains(screenID) { continue }
                 let intersection = bounds.intersection(screenFrame)
                 guard !intersection.isNull, !intersection.isEmpty else { continue }
 
                 let coveredArea = intersection.width * intersection.height
                 let screenArea = screenFrame.width * screenFrame.height
+                guard screenArea > 0 else { continue }
                 if coveredArea >= screenArea * 0.95 &&
                    intersection.width >= screenFrame.width * 0.95 &&
                    intersection.height >= screenFrame.height * 0.95 {
-                    if !coveredScreens.contains(where: { $0.wallpaperScreenIdentifier == screen.wallpaperScreenIdentifier }) {
-                        coveredScreens.append(screen)
-                    }
+                    coveredIDs.insert(screenID)
                 }
             }
         }
-        return coveredScreens
+        return coveredIDs
     }
 
     nonisolated private static func captureWindowSnapshot(screenFrames: [String: CGRect]) -> WindowSnapshot? {
-        let screens = NSScreen.screens.filter { screenFrames[$0.wallpaperScreenIdentifier] != nil }
         let screenRects = Array(screenFrames.values)
         let desktopFrame = screenRects.reduce(CGRect.null) { $0.union($1) }
 
@@ -787,7 +804,7 @@ final class DynamicWallpaperAutoPauseManager {
                 pid: pid,
                 layer: layer,
                 alpha: alpha,
-                bounds: normalizedWindowBounds(bounds, screens: screens, desktopFrame: desktopFrame)
+                bounds: normalizedWindowBounds(bounds, screenFrames: screenFrames, desktopFrame: desktopFrame)
             )
         }
 
@@ -884,7 +901,13 @@ final class DynamicWallpaperAutoPauseManager {
 
 
 
-    nonisolated private static func normalizedWindowBounds(_ bounds: CGRect, screens: [NSScreen], desktopFrame: CGRect) -> CGRect {
+    /// 将 CGWindow bounds（左上原点）与 AppKit screen frames（左下原点）对齐。
+    /// 以各屏相交总面积较大者为准，兼容内建/外接混排与主屏不在左下角的布局。
+    nonisolated private static func normalizedWindowBounds(
+        _ bounds: CGRect,
+        screenFrames: [String: CGRect],
+        desktopFrame: CGRect
+    ) -> CGRect {
         guard !desktopFrame.isNull else { return bounds }
         let flippedBounds = CGRect(
             x: bounds.origin.x,
@@ -894,14 +917,26 @@ final class DynamicWallpaperAutoPauseManager {
         )
 
         func totalIntersectionArea(for candidate: CGRect) -> CGFloat {
-            screens.reduce(CGFloat.zero) { total, screen in
-                let intersection = candidate.intersection(screen.frame)
+            screenFrames.values.reduce(CGFloat.zero) { total, frame in
+                let intersection = candidate.intersection(frame)
                 guard !intersection.isNull, !intersection.isEmpty else { return total }
                 return total + intersection.width * intersection.height
             }
         }
 
         return totalIntersectionArea(for: flippedBounds) > totalIntersectionArea(for: bounds) ? flippedBounds : bounds
+    }
+
+    /// 兼容仍传入 `[NSScreen]` 的前台覆盖检测路径。
+    nonisolated private static func normalizedWindowBounds(
+        _ bounds: CGRect,
+        screens: [NSScreen],
+        desktopFrame: CGRect
+    ) -> CGRect {
+        let frames = screens.reduce(into: [String: CGRect]()) { result, screen in
+            result[screen.wallpaperScreenIdentifier] = screen.frame
+        }
+        return normalizedWindowBounds(bounds, screenFrames: frames, desktopFrame: desktopFrame)
     }
 
     private func isStableFullscreenTransition(to screenIDs: Set<String>) -> Bool {
@@ -921,18 +956,31 @@ final class DynamicWallpaperAutoPauseManager {
         return true
     }
 
-    /// 暂停指定屏幕的原生视频壁纸，仅返回这次真正由自动暂停器触发的屏幕。
-    private func pauseScreens(_ screens: [NSScreen]) -> Set<String> {
+    /// 按屏幕 ID 暂停原生视频 + WE，返回本次真正触发了暂停动作的屏幕集合。
+    private func pauseScreens(byIDs screenIDs: Set<String>) -> Set<String> {
+        guard !screenIDs.isEmpty else { return [] }
         let videoManager = VideoWallpaperManager.shared
+        let weBridge = WallpaperEngineXBridge.shared
         var pausedScreenIDs = Set<String>()
 
-        for screen in screens {
-            let screenID = screen.wallpaperScreenIdentifier
+        for screenID in screenIDs {
+            var didPause = false
 
-            // 暂停原生视频壁纸
+            // 原生视频：按屏 pause
             if videoManager.isVideoWallpaperActive,
+               let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
                !videoManager.isPaused(on: screen) {
                 videoManager.pauseWallpaper(for: screen)
+                didPause = true
+            }
+
+            // WE scene/web：按屏 SIGSTOP / IPC pause（与前台覆盖、窗口覆盖路径一致）
+            if weBridge.isControllingExternalEngine, weBridge.isManaging(screenID: screenID) {
+                weBridge.pauseWallpaper(for: screenID)
+                didPause = true
+            }
+
+            if didPause {
                 pausedScreenIDs.insert(screenID)
             }
         }
@@ -940,14 +988,22 @@ final class DynamicWallpaperAutoPauseManager {
         return pausedScreenIDs
     }
 
-    /// 恢复指定屏幕 ID 列表的动态壁纸
+    /// 恢复指定屏幕 ID 列表的动态壁纸（原生视频 + WE）
     private func resumeScreens(byIDs screenIDs: Set<String>) {
         guard !screenIDs.isEmpty else { return }
         let videoManager = VideoWallpaperManager.shared
-        guard videoManager.isVideoWallpaperActive else { return }
+        let weBridge = WallpaperEngineXBridge.shared
 
-        for screen in NSScreen.screens where screenIDs.contains(screen.wallpaperScreenIdentifier) {
-            videoManager.resumeWallpaper(for: screen)
+        if videoManager.isVideoWallpaperActive {
+            for screen in NSScreen.screens where screenIDs.contains(screen.wallpaperScreenIdentifier) {
+                videoManager.resumeWallpaper(for: screen)
+            }
+        }
+
+        if weBridge.isControllingExternalEngine {
+            for screenID in screenIDs where weBridge.isManaging(screenID: screenID) {
+                weBridge.resumeWallpaper(for: screenID)
+            }
         }
     }
 
@@ -1037,34 +1093,23 @@ final class DynamicWallpaperAutoPauseManager {
 
         // ---- 外部引擎恢复 ----
         if globalAutoPausedExternalEngine {
-            if weBridge.isControllingExternalEngine {
-                if weBridge.shouldPauseForFullscreenCoveredScreenIDs(fullscreenCoveredScreenIDs) {
-                    fullscreenAutoPausedExternalEngine = true
-                } else if weBridge.isExternalPaused {
-                    weBridge.resumeWallpaper()
-                    fullscreenAutoPausedExternalEngine = false
-                } else {
-                    fullscreenAutoPausedExternalEngine = false
-                }
-            } else {
-                fullscreenAutoPausedExternalEngine = false
+            if weBridge.isControllingExternalEngine, weBridge.isExternalPaused {
+                weBridge.resumeWallpaper()
             }
+            fullscreenAutoPausedExternalEngine = false
             globalAutoPausedExternalEngine = false
 
-            // 恢复外部引擎后，重新施加前台暂停（如果前台仍有应用覆盖）
-            if !foregroundPausedScreenIDs.isEmpty,
-               weBridge.isControllingExternalEngine {
-                for screenID in foregroundPausedScreenIDs where weBridge.isManaging(screenID: screenID) {
+            // 恢复外部引擎后，按屏重新施加仍有效的暂停原因（全屏/前台/窗口覆盖）
+            if weBridge.isControllingExternalEngine {
+                let weStillNeedPause = fullscreenCoveredScreenIDs
+                    .union(foregroundPausedScreenIDs)
+                    .union(windowCoveragePausedScreenIDs)
+                for screenID in weStillNeedPause where weBridge.isManaging(screenID: screenID) {
                     weBridge.pauseWallpaper(for: screenID)
                 }
-            }
-
-            // 恢复外部引擎后，重新施加窗口覆盖比例暂停（如果当前仍有屏幕被覆盖）
-            if !windowCoveragePausedScreenIDs.isEmpty,
-               weBridge.isControllingExternalEngine {
-                for screenID in windowCoveragePausedScreenIDs where weBridge.isManaging(screenID: screenID) {
-                    weBridge.pauseWallpaper(for: screenID)
-                }
+                // 全屏覆盖的 WE 屏记入 fullscreenAutoPausedScreenIDs，便于后续差量恢复
+                let weFullscreen = fullscreenCoveredScreenIDs.filter { weBridge.isManaging(screenID: $0) }
+                fullscreenAutoPausedScreenIDs.formUnion(weFullscreen)
             }
         }
 

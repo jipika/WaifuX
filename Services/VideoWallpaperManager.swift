@@ -459,6 +459,27 @@ final class VideoWallpaperManager: ObservableObject {
         posterURLByScreen[screen.wallpaperScreenIdentifier] ?? posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint]
     }
 
+    /// 仅更新指定屏幕的静态 poster（不重建播放器）。
+    /// 用于调度器先切换视频、后台补齐封面后写回系统桌面底图。
+    func updatePosterURL(
+        _ posterURL: URL,
+        for screen: NSScreen,
+        expectedVideoURL: URL? = nil
+    ) {
+        if let expectedVideoURL {
+            guard videoURL(for: screen)?.standardizedFileURL == expectedVideoURL.standardizedFileURL else {
+                return
+            }
+        }
+        let screenID = screen.wallpaperScreenIdentifier
+        posterURLByScreen[screenID] = posterURL
+        posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint] = posterURL
+        currentPosterURL = posterURL
+        setPosterAsDesktopWallpaper(posterURL, targetScreen: screen)
+        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+        persistState()
+    }
+
     /// 获取指定屏幕应播放的视频 URL。
     func videoURL(for screen: NSScreen) -> URL? {
         videoURLByScreen[screen.wallpaperScreenIdentifier] ??
@@ -1605,163 +1626,11 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        guard !FrameInterpolationQueueService.shared.isBlacklisted(videoURL: videoURL) else {
-            frameInterpolationDebugPrint("视频需要补帧：该视频已加入补帧黑名单，跳过自动入队。视频=\(videoURL.lastPathComponent)")
-            return
-        }
-
-        guard FrameInterpolationQueueService.shared.autoEnqueueEnabled else {
-            frameInterpolationDebugPrint("视频需要补帧：自动加入队列未开启，继续播放原视频。")
-            if triggeredByWallpaperSetup { scheduleAutomaticLoopPointAnalysis(videoURL: videoURL) }
-            return
-        }
-
-        frameInterpolationDebugPrint("视频需要补帧：自动加入补帧队列，补完后会原地替换源视频。")
-        FrameInterpolationQueueService.shared.enqueue(
-            videoURL: videoURL,
-            title: videoURL.deletingPathExtension().lastPathComponent,
-            targetFPS: decision.targetFPS,
-            source: .automatic,
-            onCompleted: { [weak self] sourceURL, outputURL in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.frameInterpolationDecisionsByScreen[screenID]?.shouldInterpolate == true,
-                   self.isVideoSourceStillActive(sourceURL, onScreenID: screenID) {
-                    self.replacePlayerWithInterpolatedVideoIfNeeded(screenID: screenID, sourceURL: sourceURL, outputURL: outputURL)
-                } else {
-                    frameInterpolationDebugPrint("补帧完成时壁纸已切换，保留已优化文件但不刷新当前播放器。源视频：\(sourceURL.lastPathComponent)")
-                }
-                frameInterpolationDebugPrint("补帧队列完成：已将补帧结果写回源视频。视频：\(outputURL.path)")
-            }
-        })
-    }
-
-    private var autoAnalyzeLoopPointEnabled: Bool {
-        (UserDefaults.standard.object(forKey: "loop_point_analysis_enabled") as? Bool ?? true)
-            && (UserDefaults.standard.object(forKey: "auto_analyze_loop_point") as? Bool ?? false)
-    }
-
-    /// Runs the same automatic optimization policy for a freshly baked Scene MP4
-    /// without requiring that MP4 to become the active desktop player first.
-    ///
-    /// A realtime Scene keeps its renderer after baking, but its companion video
-    /// still needs the normal "loop analysis -> interpolation" pipeline. Playback
-    /// refreshes remain guarded by the active-source check inside the queue service.
-    func enqueueAutomaticOptimizationForBakedScene(
-        videoURL: URL,
-        title: String? = nil,
-        pipelineItemID: String? = nil
-    ) {
-        guard FileManager.default.fileExists(atPath: videoURL.path) else { return }
-
-        let effectiveTitle = title?.isEmpty == false
-            ? title!
-            : videoURL.deletingPathExtension().lastPathComponent
-
-        let enqueueFrameInterpolation: @MainActor (URL) -> Void = { [weak self] processedURL in
-            guard let self else { return }
-
-            guard self.frameInterpolationEnabled,
-                  FrameInterpolationQueueService.shared.autoEnqueueEnabled else {
-                if let pipelineItemID {
-                    VideoOptimizationPipelineStateService.shared.set(.idle, for: pipelineItemID)
-                }
-                return
-            }
-
-            let targetFPS = self.frameInterpolationTargetFPS(for: NSScreen.main ?? NSScreen.screens.first)
-            guard targetFPS > 0,
-                  !FrameInterpolationQueueService.shared.isBlacklisted(videoURL: processedURL) else {
-                if let pipelineItemID {
-                    VideoOptimizationPipelineStateService.shared.set(.idle, for: pipelineItemID)
-                }
-                return
-            }
-
-            if FrameInterpolationQueueService.shared.completedRecord(
-                videoURL: processedURL,
-                satisfying: targetFPS
-            ) != nil {
-                if let pipelineItemID {
-                    VideoOptimizationPipelineStateService.shared.set(.idle, for: pipelineItemID)
-                }
-                return
-            }
-
-            // A duplicate bake completion can attach to the same loop callback.
-            // Preserve the first task's visible state instead of clearing it.
-            guard !FrameInterpolationQueueService.shared.hasActiveInterpolation(
-                videoURL: processedURL,
-                satisfying: targetFPS
-            ) else {
-                return
-            }
-
-            if let pipelineItemID {
-                VideoOptimizationPipelineStateService.shared.set(.checkingInterpolation, for: pipelineItemID)
-            }
-
-            Task { @MainActor [weak self] in
-                let needsInterpolation = await FrameInterpolationQueueService.shared.needsInterpolation(
-                    videoURL: processedURL,
-                    targetFPS: targetFPS
-                )
-                guard let self,
-                      FileManager.default.fileExists(atPath: processedURL.path),
-                      self.frameInterpolationEnabled,
-                      FrameInterpolationQueueService.shared.autoEnqueueEnabled else {
-                    return
-                }
-
-                guard needsInterpolation else {
-                    VideoOptimizationRecordService.shared.append(
-                        .frameNotNeeded,
-                        for: processedURL,
-                        detail: "Source FPS already satisfies the automatic target",
-                        metadata: ["targetFPS": String(targetFPS)]
-                    )
-                    if let pipelineItemID {
-                        VideoOptimizationPipelineStateService.shared.set(.idle, for: pipelineItemID)
-                    }
-                    return
-                }
-
-                let taskID = FrameInterpolationQueueService.shared.enqueue(
-                    videoURL: processedURL,
-                    title: effectiveTitle,
-                    targetFPS: targetFPS,
-                    source: .automatic,
-                    onFinished: { succeeded in
-                        guard let pipelineItemID else { return }
-                        VideoOptimizationPipelineStateService.shared.set(
-                            succeeded ? .idle : .failed("视频补帧失败"),
-                            for: pipelineItemID
-                        )
-                    }
-                )
-                if taskID != nil, let pipelineItemID {
-                    VideoOptimizationPipelineStateService.shared.set(.frameQueued, for: pipelineItemID)
-                } else if let pipelineItemID {
-                    VideoOptimizationPipelineStateService.shared.set(.idle, for: pipelineItemID)
-                }
-            }
-        }
-
-        guard autoAnalyzeLoopPointEnabled,
-              !VideoLoopPreprocessingService.shared.hasCompletedAnalysis(videoURL) else {
-            enqueueFrameInterpolation(videoURL)
-            return
-        }
-
-        if let pipelineItemID {
-            VideoOptimizationPipelineStateService.shared.set(.loopQueued, for: pipelineItemID)
-        }
-        LoopPointAnalysisQueueService.shared.enqueue(videoURL: videoURL, title: effectiveTitle) { completedURL, succeeded in
-            if !succeeded {
-                frameInterpolationDebugPrint("Scene 烘焙视频循环点分析失败，继续按补帧开关处理：\(completedURL.lastPathComponent)")
-            }
-            enqueueFrameInterpolation(completedURL)
-        }
+        // 禁止任何自动补帧：调度/设壁纸只读现成资源。
+        // 补帧只能由用户在队列里手动添加；完成后由队列原地替换源文件，
+        // 若当前仍在播该路径，再统一走 reloadPlaybackAfterInPlaceInterpolation。
+        frameInterpolationDebugPrint("视频需要补帧：已禁用自动入队，继续播放原资源。视频=\(videoURL.lastPathComponent)")
+        resetFrameInterpolation(for: screenID, player: player, item: item)
     }
 
     @discardableResult
@@ -1804,6 +1673,8 @@ final class VideoWallpaperManager: ObservableObject {
         guard frameInterpolationEnabled,
               frameInterpolatedPlaybackURLByScreen[screenID]?.standardizedFileURL != outputURL.standardizedFileURL,
               let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
+              windows[screenID] != nil,
+              videoURLByScreen[screenID]?.standardizedFileURL == sourceURL.standardizedFileURL,
               let window = windows[screenID],
               let containerView = window.contentView as? WallpaperVideoContainerView else {
             return
@@ -2260,50 +2131,54 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        // 单屏停止：只拆掉该屏幕的视频层，不回退到旧静态壁纸
+        // 单屏停止：只拆掉该屏幕的视频层，不回退到旧静态壁纸。
+        // 注意：即使锁屏镜像扩展活跃，桌面 AVPlayer 窗口仍可能存在，
+        // 切到 web/scene 时必须一并拆除，否则会出现「web 已切上、视频层还在渲染」。
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
 
-        // 锁屏镜像实例活跃时，也只需要清理 per-screen 帧源追踪。
-        if isLockScreenExtensionActive {
-            videoTargetScreenIDs.remove(screenID)
-            videoTargetScreenFingerprints.remove(screenFingerprint)
-            videoURLByScreen.removeValue(forKey: screenID)
-            videoURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
-            posterURLByScreen.removeValue(forKey: screenID)
-            posterURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
+        // 取消该屏尚未应用的切换队列、poster 任务与补帧任务，避免 stop 后异步回调把视频窗重建回来。
+        pendingDisplaySwitches.removeValue(forKey: screenID)
+        if activeDisplaySwitchScreenID == screenID {
+            releaseDisplaySwitchGate(screenID: screenID, reason: "stopNativeOnly")
+        }
+        posterTasks[screenID]?.cancel()
+        posterTasks.removeValue(forKey: screenID)
+        resetFrameInterpolationState(for: screenID)
 
-            if videoURLByScreen.isEmpty {
-                if #available(macOS 26.0, *) {
-                    if !isLockScreenEnabled {
-                        LockScreenWallpaperService.shared.clearMirroringSourceCache()
-                    }
-                }
-                currentVideoURL = nil
-                currentPosterURL = nil
-                isPaused = false
-                videoTargetScreenIDs = []
-                videoTargetScreenFingerprints = []
-                defaults.removeObject(forKey: stateKey)
-                // 最后一块屏停止 → 停用音频会话，释放音频设备，防止 macOS 因本 App 残留音频会话而自动连接蓝牙设备
-                deactivateAudioSession()
-            }
-            syncCurrentVideoURL()
-            return
+        // 兼容 screenID 变化：按 fingerprint 找回旧 key 上的窗口/播放器。
+        let windowKey = windows[screenID] != nil
+            ? screenID
+            : windows.keys.first(where: { key in
+                NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == key })?
+                    .wallpaperScreenFingerprint == screenFingerprint
+            })
+        let playerKey = players[screenID] != nil
+            ? screenID
+            : players.keys.first(where: { key in
+                NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == key })?
+                    .wallpaperScreenFingerprint == screenFingerprint
+            })
+        let teardownKey = windowKey ?? playerKey
+
+        if let teardownKey {
+            teardownWindow(for: teardownKey)
+        } else if windows[screenID] != nil || players[screenID] != nil {
+            teardownWindow(for: screenID)
         }
 
-        guard windows[screenID] != nil || players[screenID] != nil else {
-            // 该屏幕没有视频壁纸在播放，无需操作（避免自动切换时误恢复旧壁纸导致闪烁）
-            return
-        }
-
-        teardownWindow(for: screenID)
         videoTargetScreenIDs.remove(screenID)
         videoTargetScreenFingerprints.remove(screenFingerprint)
         posterURLByScreen.removeValue(forKey: screenID)
         posterURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
         videoURLByScreen.removeValue(forKey: screenID)
         videoURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
+        // 清理可能残留的旧 screenID 映射
+        if let windowKey, windowKey != screenID {
+            videoTargetScreenIDs.remove(windowKey)
+            videoURLByScreen.removeValue(forKey: windowKey)
+            posterURLByScreen.removeValue(forKey: windowKey)
+        }
         discardOriginalWallpaperSnapshot()
 
         if players.isEmpty {
@@ -2317,14 +2192,27 @@ final class VideoWallpaperManager: ObservableObject {
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             defaults.removeObject(forKey: stateKey)
+            deactivateAudioSession()
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
+            persistState()
         }
         if #available(macOS 26.0, *),
            let screenNumber = targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
             WallpaperExtensionSocketServer.shared.unregisterDisplayVideo(displayID: screenNumber.uint32Value)
+            if !isLockScreenEnabled {
+                // 动态锁屏关闭时，切走视频也清掉该屏镜像源，避免扩展继续推旧帧
+                // （动态锁屏开启时保留实例映射，由 LockScreenWallpaperService 自己管理）
+            }
         }
+        wallpaperChangeCount &+= 1
         syncCurrentVideoURL()
+        AppLogger.error(.wallpaper, "stopNativeVideoWallpaperOnly done", metadata: [
+            "screenID": screenID,
+            "teardownKey": teardownKey ?? "none",
+            "remainingWindows": windows.count,
+            "remainingPlayers": players.count
+        ])
     }
 
     private func retainPlayersTemporarily(_ retainedPlayers: [AVQueuePlayer]) {
@@ -2482,6 +2370,19 @@ final class VideoWallpaperManager: ObservableObject {
         )
 
         if let activeDisplaySwitchScreenID {
+            // 同屏连续切换（自动下一张 / 菜单栏手动）：直接覆盖门控并立即应用最新请求，
+            // 否则会把请求塞进 pending，界面看起来像“点了没反应”。
+            if activeDisplaySwitchScreenID == screenID {
+                pendingDisplaySwitches.removeValue(forKey: screenID)
+                scheduleDisplaySwitchRelease(screenID: screenID, delay: displaySwitchTimeout, reason: "sameScreenSupersede")
+                AppLogger.debug(.wallpaper, "Video switch supersedes active gate on same display", metadata: [
+                    "screenID": screenID,
+                    "screen": targetScreen.localizedName,
+                    "video": videoURL.lastPathComponent
+                ])
+                return false
+            }
+
             pendingDisplaySwitches[screenID] = pending
             AppLogger.debug(.wallpaper, "Video switch cached while another display is stabilizing", metadata: [
                 "activeScreenID": activeDisplaySwitchScreenID,
@@ -4709,9 +4610,21 @@ final class FrameInterpolationQueueService: ObservableObject {
     static let shared = FrameInterpolationQueueService()
 
     @Published private(set) var items: [FrameInterpolationQueueItem] = []
+    @Published private(set) var completedInterpolationItems: [FrameInterpolationRecordItem] = []
+    @Published private(set) var blacklistedInterpolationItems: [FrameInterpolationRecordItem] = []
+    /// 下载完成时是否自动入队补帧（调度/设壁纸路径禁止使用）。
+    @Published var autoInterpolateOnDownload: Bool {
+        didSet {
+            UserDefaults.standard.set(autoInterpolateOnDownload, forKey: Self.autoOnDownloadKey)
+        }
+    }
+
+    /// 兼容旧设置页绑定名；映射到「下载时自动补帧」。
     @Published var autoEnqueueEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(autoEnqueueEnabled, forKey: "frame_interpolation_auto_enqueue")
+            if autoEnqueueEnabled != autoInterpolateOnDownload {
+                autoInterpolateOnDownload = autoEnqueueEnabled
+            }
         }
     }
 
@@ -4726,11 +4639,55 @@ final class FrameInterpolationQueueService: ObservableObject {
 
     private static let completedInterpolationRecordsKey = "frame_interpolation_completed_records_v1"
     private static let blacklistedInterpolationRecordsKey = "frame_interpolation_blacklist_records_v1"
+    private static let autoOnDownloadKey = "frame_interpolation_auto_on_download"
+    private static let legacyAutoEnqueueKey = "frame_interpolation_auto_enqueue"
 
     private init() {
         // 不在单例初始化阶段读取 UserDefaults。macOS 26+ 上启动早期读偏好设置
         // 可能触发 _CFXPreferences 递归；真实设置由 SettingsViewModel 延迟恢复后同步过来。
+        self.autoInterpolateOnDownload = false
         self.autoEnqueueEnabled = false
+    }
+
+    /// 由设置页恢复偏好后调用。
+    func applySettings(autoOnDownload: Bool) {
+        autoInterpolateOnDownload = autoOnDownload
+        autoEnqueueEnabled = autoOnDownload
+        // 清理旧的「切换壁纸时自动补帧」开关，避免再被读回。
+        UserDefaults.standard.set(false, forKey: Self.legacyAutoEnqueueKey)
+    }
+
+    /// 下载完成后按设置决定是否入队补帧。调度/设壁纸路径不得调用。
+    @discardableResult
+    func enqueueAfterDownloadIfNeeded(
+        videoURL: URL,
+        title: String? = nil
+    ) -> UUID? {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: "frame_interpolation_enabled") as? Bool ?? false
+        let onDownload = autoInterpolateOnDownload
+            || (defaults.object(forKey: Self.autoOnDownloadKey) as? Bool ?? false)
+        guard enabled, onDownload else { return nil }
+        guard videoURL.isFileURL,
+              FileManager.default.fileExists(atPath: videoURL.path) else {
+            return nil
+        }
+        let ext = videoURL.pathExtension.lowercased()
+        guard ["mp4", "mov", "m4v", "mkv"].contains(ext) else { return nil }
+
+        let targetFPS = FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
+        guard targetFPS > 0 else { return nil }
+        guard !isBlacklisted(videoURL: videoURL) else { return nil }
+        if completedRecord(videoURL: videoURL, satisfying: targetFPS) != nil { return nil }
+
+        frameInterpolationDebugPrint("下载完成：按设置自动入队补帧。视频=\(videoURL.lastPathComponent)，目标 FPS=\(targetFPS)")
+        return enqueue(
+            videoURL: videoURL,
+            title: title,
+            targetFPS: targetFPS,
+            source: .automatic,
+            onCompleted: nil
+        )
     }
 
     func hasPendingInterpolation(videoURL: URL, targetFPS: Int) -> Bool {
@@ -5209,10 +5166,8 @@ final class FrameInterpolationQueueService: ObservableObject {
             items[index].outputURL = outputURL
             items.remove(at: index)
             markCompleted(videoURL: outputURL, title: title, targetFPS: targetFPS)
-            frameInterpolationDebugPrint("补帧队列：任务完成，已替换源视频。路径=\(outputURL.path)")
-            // 先让所有正在播放该视频的屏幕切换到补帧结果，完成后再通知串行优化任务。
-            VideoWallpaperManager.shared.reloadPlaybackAfterInPlaceInterpolation(videoURL: outputURL)
-            completionHandlers[id]?.forEach { $0(sourceURL, outputURL) }
+            frameInterpolationDebugPrint("补帧队列：任务完成，已原地替换源视频。路径=\(outputURL.path)")
+            // 不走 per-screen 完成回调重建播放器；文件已替换，仅当当前仍在播该路径时刷新。
             completionHandlers[id] = nil
             terminalHandlers[id]?.forEach { $0(true) }
             terminalHandlers[id] = nil

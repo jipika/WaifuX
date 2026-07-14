@@ -517,6 +517,16 @@ struct PixivUserIllustMeta: Decodable {
     let id: String
 }
 
+/// 用户作品详情响应（/ajax/user/{id}/profile/illusts）
+struct PixivUserIllustsResponse: Decodable {
+    let error: Bool
+    let body: PixivUserIllustsBody
+}
+
+struct PixivUserIllustsBody: Decodable {
+    let works: [String: PixivSearchItem]
+}
+
 // MARK: - Pixiv → Wallpaper 转换扩展
 
 extension PixivRankingItem {
@@ -555,7 +565,8 @@ extension PixivRankingItem {
                 small: url
             ),
             tags: tags.map { Wallpaper.Tag(id: 0, name: $0, alias: nil) },
-            uploader: nil
+            uploader: pixivUploader(userName: userName, profileImageURL: profileImg),
+            pixivAuthorID: String(userId)
         )
     }
 
@@ -609,7 +620,8 @@ extension PixivSearchItem {
                 small: url
             ),
             tags: tags.map { Wallpaper.Tag(id: 0, name: $0, alias: nil) },
-            uploader: nil
+            uploader: pixivUploader(userName: userName, profileImageURL: profileImageUrl),
+            pixivAuthorID: userId
         )
     }
 
@@ -663,7 +675,8 @@ extension PixivIllustDetailBody {
                 small: urls.thumb
             ),
             tags: tags.tags.map { Wallpaper.Tag(id: 0, name: $0.tag, alias: nil) },
-            uploader: nil
+            uploader: pixivUploader(userName: userName, profileImageURL: ""),
+            pixivAuthorID: userId
         )
     }
 
@@ -676,6 +689,19 @@ extension PixivIllustDetailBody {
     private static func gcd(_ a: Int, _ b: Int) -> Int {
         return b == 0 ? a : gcd(b, a % b)
     }
+}
+
+private func pixivUploader(userName: String, profileImageURL: String) -> Wallpaper.Uploader {
+    Wallpaper.Uploader(
+        username: userName,
+        group: "pixiv",
+        avatar: Wallpaper.Avatar(
+            px200: profileImageURL,
+            px128: profileImageURL,
+            px32: profileImageURL,
+            px20: profileImageURL
+        )
+    )
 }
 
 // MARK: - Pixiv 排行模式

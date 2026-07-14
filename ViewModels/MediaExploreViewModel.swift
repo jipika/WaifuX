@@ -2319,12 +2319,18 @@ final class MediaExploreViewModel: ObservableObject {
 
     // MARK: - 按作者获取 Workshop 物品
 
+    /// 作者媒体分页结果。hasMore 不依赖固定 30 条假设（Steam 可能忽略 numperpage）。
+    struct AuthorMediaPageResult {
+        let items: [MediaItem]
+        let hasMore: Bool
+    }
+
     /// 获取指定作者的所有 Workshop 壁纸
     /// - Parameters:
     ///   - steamID: Steam 64位数字 ID
     ///   - page: 页码
-    /// - Returns: 壁纸列表（已转为 MediaItem）
-    func fetchMediaByAuthor(steamID: String, page: Int = 1) async throws -> [MediaItem] {
+    /// - Returns: 本页媒体 + 是否还有下一页
+    func fetchMediaByAuthor(steamID: String, page: Int = 1) async throws -> AuthorMediaPageResult {
         let wallpapers = try await workshopService.fetchByAuthor(steamID: steamID, page: page)
         let mediaItems = workshopService.convertToMediaItems(wallpapers)
 
@@ -2333,7 +2339,10 @@ final class MediaExploreViewModel: ObservableObject {
             mediaLibrary.upsert(item)
         }
 
-        return mediaItems
+        // 作者页实测可按 numperpage=30 翻页；满页继续，未满/空页结束。
+        // 不用「非空即 hasMore」，否则最后一页仍会多请求一次空页。
+        let hasMore = mediaItems.count >= 30
+        return AuthorMediaPageResult(items: mediaItems, hasMore: hasMore)
     }
 
     // MARK: - Workshop 下载

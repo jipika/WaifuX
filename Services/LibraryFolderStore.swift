@@ -27,6 +27,41 @@ final class LibraryFolderStore: ObservableObject {
            let decoded = try? decoder.decode([LibraryFolder].self, from: data) {
             mediaFolders = decoded
         }
+        // 注意：不要在这里 sanitize。
+        // 启动时 MediaLibrary 比 FolderStore 更晚 restore；sanitize 由 App 在库数据都恢复后统一调用。
+    }
+
+    /// 启动时/同步后：把空字符串、孤儿、跨集合 folderID 清回根目录。
+    func sanitizeLibraryFolderMemberships() {
+        let wallpaperFavIDs = Set(
+            wallpaperFolders
+                .filter { $0.collection == .favorites }
+                .map(\.id)
+        )
+        let wallpaperDlIDs = Set(
+            wallpaperFolders
+                .filter { $0.collection == .downloads }
+                .map(\.id)
+        )
+        let mediaFavIDs = Set(
+            mediaFolders
+                .filter { $0.collection == .favorites }
+                .map(\.id)
+        )
+        let mediaDlIDs = Set(
+            mediaFolders
+                .filter { $0.collection == .downloads }
+                .map(\.id)
+        )
+
+        WallpaperLibraryService.shared.sanitizeFolderMembership(
+            validFavoriteFolderIDs: wallpaperFavIDs,
+            validDownloadFolderIDs: wallpaperDlIDs
+        )
+        MediaLibraryService.shared.sanitizeFolderMembership(
+            validFavoriteFolderIDs: mediaFavIDs,
+            validDownloadFolderIDs: mediaDlIDs
+        )
     }
 
     // MARK: - 查询
@@ -65,6 +100,215 @@ final class LibraryFolderStore: ObservableObject {
             persistMediaFolders()
         }
         return folder
+    }
+
+    /// 查找或创建作者批量下载文件夹，保证同作者多次下载复用同一文件夹。
+    ///
+    /// 复用优先级：
+    /// 1. 已下载作品上挂载的作者文件夹（按出现次数）
+    /// 2. 下载集合中同名文件夹（忽略大小写/首尾空白，优先根目录）
+    /// 3. 新建根目录文件夹
+    @discardableResult
+    func findOrCreateAuthorDownloadFolder(
+        name: String,
+        contentType: LibraryFolder.FolderContentType,
+        identityKeys: Set<String> = []
+    ) -> LibraryFolder {
+        let preferredName = Self.normalizedFolderDisplayName(name)
+        let normalizedPreferred = Self.normalizedFolderKey(preferredName)
+
+        if let existing = resolveExistingAuthorDownloadFolder(
+            preferredNameKey: normalizedPreferred,
+            contentType: contentType,
+            identityKeys: identityKeys
+        ) {
+            // 若历史上已拆成多个同名/同作者文件夹，把内容并回主文件夹
+            consolidateAuthorDownloadFolders(
+                into: existing,
+                preferredNameKey: normalizedPreferred,
+                contentType: contentType,
+                identityKeys: identityKeys
+            )
+            return existing
+        }
+
+        return createFolder(
+            name: preferredName,
+            contentType: contentType,
+            parentID: nil,
+            collection: .downloads
+        )
+    }
+
+    private func resolveExistingAuthorDownloadFolder(
+        preferredNameKey: String,
+        contentType: LibraryFolder.FolderContentType,
+        identityKeys: Set<String>
+    ) -> LibraryFolder? {
+        let candidates = authorDownloadFolderCandidates(
+            preferredNameKey: preferredNameKey,
+            contentType: contentType,
+            identityKeys: identityKeys
+        )
+        return candidates.first
+    }
+
+    /// 候选主文件夹：先按同作者占用次数，再按同名（根目录优先、更早创建优先）
+    private func authorDownloadFolderCandidates(
+        preferredNameKey: String,
+        contentType: LibraryFolder.FolderContentType,
+        identityKeys: Set<String>
+    ) -> [LibraryFolder] {
+        let allFolders = contentType == .wallpaper ? wallpaperFolders : mediaFolders
+        let downloadFolders = allFolders.filter { $0.collection == .downloads }
+        guard !downloadFolders.isEmpty else { return [] }
+
+        let folderByID = Dictionary(uniqueKeysWithValues: downloadFolders.map { ($0.id, $0) })
+        var usageCount: [String: Int] = [:]
+
+        if !identityKeys.isEmpty {
+            switch contentType {
+            case .wallpaper:
+                for record in WallpaperLibraryService.shared.downloadedWallpapers {
+                    guard let folderID = record.folderID, folderByID[folderID] != nil else { continue }
+                    let keys = Self.wallpaperAuthorIdentityKeys(record.wallpaper)
+                    guard !keys.isDisjoint(with: identityKeys) else { continue }
+                    usageCount[folderID, default: 0] += 1
+                }
+            case .media:
+                for record in MediaLibraryService.shared.downloadedItems {
+                    guard let folderID = record.folderID, folderByID[folderID] != nil else { continue }
+                    let keys = Self.mediaAuthorIdentityKeys(record.item)
+                    guard !keys.isDisjoint(with: identityKeys) else { continue }
+                    usageCount[folderID, default: 0] += 1
+                }
+            }
+        }
+
+        let nameMatches = downloadFolders.filter {
+            Self.normalizedFolderKey($0.name) == preferredNameKey
+        }
+
+        var ordered: [LibraryFolder] = []
+        var seen = Set<String>()
+
+        let identityOrdered = usageCount.keys
+            .compactMap { folderByID[$0] }
+            .sorted { lhs, rhs in
+                let lhsCount = usageCount[lhs.id, default: 0]
+                let rhsCount = usageCount[rhs.id, default: 0]
+                if lhsCount != rhsCount { return lhsCount > rhsCount }
+                return lhs.createdAt < rhs.createdAt
+            }
+        for folder in identityOrdered where seen.insert(folder.id).inserted {
+            ordered.append(folder)
+        }
+
+        let nameOrdered = nameMatches.sorted { lhs, rhs in
+            let lhsRoot = lhs.parentFolderID == nil
+            let rhsRoot = rhs.parentFolderID == nil
+            if lhsRoot != rhsRoot { return lhsRoot && !rhsRoot }
+            return lhs.createdAt < rhs.createdAt
+        }
+        for folder in nameOrdered where seen.insert(folder.id).inserted {
+            ordered.append(folder)
+        }
+
+        return ordered
+    }
+
+    /// 把同名/同作者的多余文件夹内容合并进主文件夹，并删除空的重复文件夹
+    private func consolidateAuthorDownloadFolders(
+        into primary: LibraryFolder,
+        preferredNameKey: String,
+        contentType: LibraryFolder.FolderContentType,
+        identityKeys: Set<String>
+    ) {
+        let duplicates = authorDownloadFolderCandidates(
+            preferredNameKey: preferredNameKey,
+            contentType: contentType,
+            identityKeys: identityKeys
+        ).filter { $0.id != primary.id }
+
+        guard !duplicates.isEmpty else { return }
+
+        for duplicate in duplicates {
+            switch contentType {
+            case .wallpaper:
+                let records = WallpaperLibraryService.shared.downloadedWallpapers(inFolder: duplicate.id)
+                for record in records {
+                    moveWallpaperToFolder(
+                        wallpaperID: record.wallpaper.id,
+                        folderID: primary.id,
+                        scope: .downloads
+                    )
+                }
+            case .media:
+                let records = MediaLibraryService.shared.downloadedItems(inFolder: duplicate.id)
+                for record in records {
+                    moveMediaToFolder(
+                        mediaID: record.item.id,
+                        folderID: primary.id,
+                        scope: .downloads
+                    )
+                }
+            }
+
+            // 仅删除已无内容的重复作者文件夹，避免误删用户手建且仍有内容的目录
+            let remaining: Int
+            switch contentType {
+            case .wallpaper:
+                remaining = WallpaperLibraryService.shared.downloadedWallpapers(inFolder: duplicate.id).count
+                    + WallpaperLibraryService.shared.favoriteWallpapers(inFolder: duplicate.id).count
+                    + subfolders(of: duplicate.id, contentType: .wallpaper).count
+            case .media:
+                remaining = MediaLibraryService.shared.downloadedItems(inFolder: duplicate.id).count
+                    + MediaLibraryService.shared.favoriteItems(inFolder: duplicate.id).count
+                    + subfolders(of: duplicate.id, contentType: .media).count
+            }
+            if remaining == 0 {
+                deleteFolder(id: duplicate.id, contentType: contentType)
+            }
+        }
+    }
+
+    static func wallpaperAuthorIdentityKeys(_ wallpaper: Wallpaper) -> Set<String> {
+        var keys = Set<String>()
+        if let pixivID = wallpaper.pixivAuthorID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !pixivID.isEmpty {
+            keys.insert("pixiv:\(pixivID)")
+        }
+        if let username = wallpaper.uploader?.username
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !username.isEmpty {
+            keys.insert("name:\(username.lowercased())")
+        }
+        return keys
+    }
+
+    static func mediaAuthorIdentityKeys(_ item: MediaItem) -> Set<String> {
+        var keys = Set<String>()
+        if let steamID = item.authorSteamID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !steamID.isEmpty {
+            keys.insert("steam:\(steamID)")
+        }
+        if let name = item.authorName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty {
+            keys.insert("name:\(name.lowercased())")
+        }
+        return keys
+    }
+
+    static func normalizedFolderDisplayName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Unknown" : trimmed
+    }
+
+    static func normalizedFolderKey(_ name: String) -> String {
+        normalizedFolderDisplayName(name).lowercased()
     }
 
     func renameFolder(id: String, contentType: LibraryFolder.FolderContentType, newName: String) {
@@ -146,11 +390,13 @@ final class LibraryFolderStore: ObservableObject {
     func moveWallpaperToFolder(
         wallpaperID: String,
         folderID: String?,
+        scope: WallpaperLibraryService.FolderMembershipScope,
         fallback: (wallpaper: Wallpaper, fileURL: URL)? = nil
     ) {
         WallpaperLibraryService.shared.moveWallpaperToFolder(
             wallpaperID: wallpaperID,
             folderID: folderID,
+            scope: scope,
             fallback: fallback
         )
     }
@@ -158,27 +404,50 @@ final class LibraryFolderStore: ObservableObject {
     func moveMediaToFolder(
         mediaID: String,
         folderID: String?,
+        scope: MediaLibraryService.FolderMembershipScope,
         fallback: (item: MediaItem, fileURL: URL)? = nil
     ) {
         MediaLibraryService.shared.moveMediaToFolder(
             mediaID: mediaID,
             folderID: folderID,
+            scope: scope,
             fallback: fallback
         )
     }
 
     // MARK: - 云同步
 
-    /// 同步导入壁纸文件夹（云同步使用）
+    /// 同步导入壁纸文件夹（云同步使用）。
+    /// 按 folder.id 合并，而不是整表替换，避免云端旧快照抹掉本地新建文件夹。
     func syncImportWallpaperFolders(_ folders: [LibraryFolder]) {
-        wallpaperFolders = folders
+        wallpaperFolders = Self.mergeFolders(local: wallpaperFolders, remote: folders)
         persistWallpaperFolders()
+        sanitizeLibraryFolderMemberships()
     }
 
-    /// 同步导入媒体文件夹（云同步使用）
+    /// 同步导入媒体文件夹（云同步使用）。按 folder.id 合并。
     func syncImportMediaFolders(_ folders: [LibraryFolder]) {
-        mediaFolders = folders
+        mediaFolders = Self.mergeFolders(local: mediaFolders, remote: folders)
         persistMediaFolders()
+        sanitizeLibraryFolderMemberships()
+    }
+
+    /// 以 id 为键合并文件夹：同 id 取 updatedAt 更新者；云端有而本地没有的补入；本地独有的保留。
+    private static func mergeFolders(local: [LibraryFolder], remote: [LibraryFolder]) -> [LibraryFolder] {
+        var byID: [String: LibraryFolder] = Dictionary(
+            local.map { ($0.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        for remoteFolder in remote {
+            if let existing = byID[remoteFolder.id] {
+                if remoteFolder.updatedAt >= existing.updatedAt {
+                    byID[remoteFolder.id] = remoteFolder
+                }
+            } else {
+                byID[remoteFolder.id] = remoteFolder
+            }
+        }
+        return byID.values.sorted { $0.createdAt < $1.createdAt }
     }
 
     // MARK: - 持久化

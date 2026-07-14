@@ -9,6 +9,7 @@ import AppKit
 /// 全屏沉浸式，风格对齐 AnimeDetailSheet。
 struct MangaDetailSheet: View {
     let route: MangaRoutePayload
+    let onNavigateToManga: (MangaRoutePayload) -> Void
     @StateObject private var viewModel: MangaDetailViewModel
 
     @State private var isVisible = false
@@ -19,8 +20,21 @@ struct MangaDetailSheet: View {
     // 键盘监听（全局热键）
     @State private var keyboardMonitor: Any?
 
-    init(route: MangaRoutePayload) {
+    // MARK: - 作者漫画面板
+    @State private var showAuthorMangaSheet = false
+    @State private var authorMangaItems: [Wallpaper] = []
+    @State private var isLoadingAuthorManga = false
+    @State private var authorMangaPage = 1
+    @State private var hasMoreAuthorManga = true
+    @State private var cachedAuthorMangaUploader: Wallpaper.Uploader?
+    @State private var isDownloadingAuthorManga = false
+
+    init(
+        route: MangaRoutePayload,
+        onNavigateToManga: @escaping (MangaRoutePayload) -> Void = { _ in }
+    ) {
         self.route = route
+        self.onNavigateToManga = onNavigateToManga
         self._viewModel = StateObject(wrappedValue: MangaDetailViewModel(route: route))
     }
 
@@ -73,6 +87,9 @@ struct MangaDetailSheet: View {
                 keyboardMonitor = nil
             }
         }
+        .overlay {
+            authorMangaSheetOverlay
+        }
     }
 
     // MARK: - Main split
@@ -83,7 +100,10 @@ struct MangaDetailSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // 右：信息 + 章节列表
-            MangaSidePanel(viewModel: viewModel)
+            MangaSidePanel(
+                viewModel: viewModel,
+                onShowAuthorManga: openAuthorMangaSheet
+            )
                 .frame(width: 320)
         }
     }
@@ -238,6 +258,110 @@ struct MangaDetailSheet: View {
                 return event
             }
         }
+    }
+
+    // MARK: - Author manga
+
+    @ViewBuilder
+    private var authorMangaSheetOverlay: some View {
+        if showAuthorMangaSheet, let uploader = cachedAuthorMangaUploader {
+            AuthorWallpaperSheet(
+                uploader: uploader,
+                sourceName: "Pixiv",
+                contentTitle: "作者漫画",
+                wallpapers: authorMangaItems,
+                isLoading: isLoadingAuthorManga,
+                hasMore: hasMoreAuthorManga,
+                activeWallpaperID: "pixiv_\(route.illustId)",
+                onSelectWallpaper: navigateToAuthorManga,
+                onDismiss: dismissAuthorMangaSheet,
+                onLoadMore: loadMoreAuthorManga,
+                onDownloadAll: nil,
+                isDownloadingAll: $isDownloadingAuthorManga
+            )
+            .transition(.identity)
+            .zIndex(100)
+        }
+    }
+
+    private func openAuthorMangaSheet() {
+        guard let authorID = viewModel.authorID else { return }
+
+        showAuthorMangaSheet = true
+        authorMangaItems = []
+        authorMangaPage = 1
+        hasMoreAuthorManga = true
+        isLoadingAuthorManga = true
+        cachedAuthorMangaUploader = Wallpaper.Uploader(
+            username: viewModel.authorName,
+            group: "pixiv",
+            avatar: Wallpaper.Avatar(px200: "", px128: "", px32: "", px20: "")
+        )
+
+        Task {
+            do {
+                let page = try await viewModel.fetchAuthorManga(page: 1, limit: 24)
+                guard viewModel.authorID == authorID else { return }
+                authorMangaItems = page.items
+                hasMoreAuthorManga = page.hasMore
+                isLoadingAuthorManga = false
+                if let uploader = page.items.first?.uploader {
+                    cachedAuthorMangaUploader = uploader
+                }
+            } catch {
+                AppLogger.error(.wallpaper, "加载作者漫画失败", metadata: [
+                    "author": authorID,
+                    "error": error.localizedDescription
+                ])
+                isLoadingAuthorManga = false
+            }
+        }
+    }
+
+    private func loadMoreAuthorManga() {
+        guard !isLoadingAuthorManga, hasMoreAuthorManga else { return }
+        isLoadingAuthorManga = true
+        let nextPage = authorMangaPage + 1
+
+        Task {
+            do {
+                let page = try await viewModel.fetchAuthorManga(page: nextPage, limit: 24)
+                let existingIDs = Set(authorMangaItems.map(\.id))
+                let fresh = page.items.filter { !existingIDs.contains($0.id) }
+                authorMangaItems.append(contentsOf: fresh)
+                authorMangaPage = nextPage
+                // 无新增时停止，避免重复页 + sentinel 重建形成死循环
+                hasMoreAuthorManga = page.hasMore && !fresh.isEmpty
+                isLoadingAuthorManga = false
+            } catch {
+                AppLogger.error(.wallpaper, "加载更多作者漫画失败", metadata: [
+                    "author": viewModel.authorID ?? "unknown",
+                    "page": nextPage,
+                    "error": error.localizedDescription
+                ])
+                isLoadingAuthorManga = false
+            }
+        }
+    }
+
+    private func dismissAuthorMangaSheet() {
+        showAuthorMangaSheet = false
+        authorMangaItems = []
+        authorMangaPage = 1
+        hasMoreAuthorManga = true
+        isLoadingAuthorManga = false
+        cachedAuthorMangaUploader = nil
+    }
+
+    private func navigateToAuthorManga(_ wallpaper: Wallpaper) {
+        guard wallpaper.isPixivManga else { return }
+        dismissAuthorMangaSheet()
+        onNavigateToManga(MangaRoutePayload(
+            source: .pixiv,
+            illustId: String(wallpaper.id.dropFirst("pixiv_".count)),
+            seedTitle: wallpaper.title,
+            seedCoverURL: wallpaper.path
+        ))
     }
 }
 
@@ -552,6 +676,7 @@ private struct ZoomableAsyncImage: View {
 
 private struct MangaSidePanel: View {
     @ObservedObject var viewModel: MangaDetailViewModel
+    let onShowAuthorManga: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -588,10 +713,28 @@ private struct MangaSidePanel: View {
                 .foregroundStyle(.white)
                 .lineLimit(2)
 
-            Text("by \(viewModel.authorName)")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.65))
-                .lineLimit(1)
+            if viewModel.authorID != nil {
+                Button(action: onShowAuthorManga) {
+                    HStack(spacing: 5) {
+                        Text("by \(viewModel.authorName)")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .help("查看该作者的漫画")
+                .onHover { hovering in
+                    if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+            } else {
+                Text("by \(viewModel.authorName)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.65))
+                    .lineLimit(1)
+            }
 
             if !viewModel.seriesTags.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -699,4 +842,3 @@ private struct MangaScrollOffsetKey: PreferenceKey {
         value = nextValue()
     }
 }
-

@@ -297,9 +297,11 @@ struct HelpPopoverView: View {
                             t("tutorial.network.l1"),
                             t("tutorial.network.l2"),
                             t("tutorial.network.l3"),
-                            t("tutorial.network.l4"),
                             t("tutorial.network.l5"),
-                            t("tutorial.network.l6")
+                            t("tutorial.network.l6"),
+                            t("tutorial.network.l7"),
+                            t("tutorial.network.l8"),
+                            t("tutorial.network.l9")
                         ]
                     )
 

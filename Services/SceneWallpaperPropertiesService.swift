@@ -70,10 +70,76 @@ enum WallpaperEnginePropertyLocalizer {
         "ui_workshop_tags_music": "音乐",
     ]
 
+    // Web Workshop authors commonly use literal English instead of Wallpaper
+    // Engine locale tokens. Keep this concise and domain-specific so custom
+    // names remain intact while common controls are readable in Chinese.
+    private static let commonWebLabels: [String: String] = [
+        "x": "X 坐标",
+        "y": "Y 坐标",
+        "color": "颜色",
+        "size": "大小",
+        "position": "位置",
+        "x position": "X 坐标",
+        "y position": "Y 坐标",
+        "scale": "缩放",
+        "rotation": "旋转",
+        "opacity": "透明度",
+        "speed": "速度",
+        "animation speed": "动画速度",
+        "brightness": "亮度",
+        "contrast": "对比度",
+        "saturation": "饱和度",
+        "hue": "色相",
+        "background": "背景",
+        "foreground": "前景",
+        "font": "字体",
+        "font size": "字体大小",
+        "image": "图片",
+        "video": "视频",
+        "music": "音乐",
+        "audio": "音频",
+        "volume": "音量",
+        "bgm volume": "背景音乐音量",
+        "music volume": "音乐音量",
+        "voice": "语音",
+        "voice volume": "语音音量",
+        "voice language": "语音语言",
+        "idle voice": "待机语音",
+        "enable": "启用",
+        "enable voice": "启用语音",
+        "enable idle voice": "启用待机语音",
+        "disable": "禁用",
+        "on": "开启",
+        "off": "关闭",
+        "show": "显示",
+        "hide": "隐藏",
+        "language": "语言",
+        "japanese": "日语",
+        "english": "英语",
+        "quality": "质量",
+        "effect": "效果",
+        "blur": "模糊",
+    ]
+
     static func label(for rawLabel: String, fallback: String? = nil) -> String {
         let trimmed = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return fallback ?? "" }
-        return bundledChineseLabels[trimmed] ?? fallbackChineseLabels[trimmed] ?? fallback ?? trimmed
+        if let localized = bundledChineseLabels[trimmed] ?? fallbackChineseLabels[trimmed] {
+            return localized
+        }
+        return localizedWebLabel(trimmed) ?? fallback ?? trimmed
+    }
+
+    private static func localizedWebLabel(_ rawLabel: String) -> String? {
+        let lowercased = rawLabel.lowercased()
+        if let localized = commonWebLabels[lowercased] {
+            return localized
+        }
+
+        guard let bracketIndex = rawLabel.firstIndex(of: "[") else { return nil }
+        let name = rawLabel[..<bracketIndex].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let localized = commonWebLabels[name] else { return nil }
+        return "\(localized) \(rawLabel[bracketIndex...])"
     }
 
     private static func loadBundledChineseLabels() -> [String: String] {

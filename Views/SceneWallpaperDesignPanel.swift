@@ -541,6 +541,7 @@ struct SceneWallpaperDesignPanel: View {
         }
         .buttonStyle(.plain)
     }
+
 }
 
 // MARK: - 多语言组编辑器

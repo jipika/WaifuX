@@ -533,6 +533,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                 // 第3帧：媒体库
                 DispatchQueue.main.async {
                     MediaLibraryService.shared.restoreSavedData()
+                    // 壁纸库 + 文件夹 + 媒体库都已就位，清理空字符串 / 孤儿 / 跨集合 folderID
+                    LibraryFolderStore.shared.sanitizeLibraryFolderMemberships()
 
                     // 第4帧：动漫数据
                     DispatchQueue.main.async {

@@ -529,9 +529,36 @@ struct MediaDetailSheet: View {
             AppLogger.info(.media, "媒体详情页 onAppear",
                 metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
+            restoreSceneBakeProgressIfNeeded()
             setupNextItemDataSource()
             setupKeyboardMonitor()
             await loadDetailIfNeeded()
+        }
+        .onChange(of: resolvedItem.id) { _, _ in
+            restoreSceneBakeProgressIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeProgressDidUpdate)) { notification in
+            guard let notifItemID = notification.object as? String,
+                  notifItemID == resolvedItem.id else { return }
+            if let progress = notification.userInfo?["progress"] as? Double {
+                if progress >= 1.0 {
+                    isBakingScene = false
+                    bakeProgress = 0
+                    return
+                }
+                if !isBakingScene {
+                    isBakingScene = true
+                }
+                updateSceneBakeProgress(progress)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeDidComplete)) { _ in
+            // 失败时不会推 progress=1.0，用完成通知兜底清掉本页烘焙态
+            if isBakingScene,
+               SceneOfflineBakeProgressTracker.shared.progress(for: resolvedItem.id) == nil {
+                isBakingScene = false
+                bakeProgress = 0
+            }
         }
         .onDisappear {
             isVisible = false
@@ -1492,61 +1519,72 @@ struct MediaDetailSheet: View {
         }
     }
 
-    private func runSceneOfflineBake(
-        renderer: SceneBakeRenderer,
-        clearCachedArtifact: Bool,
-        durationSeconds: Double? = nil
-    ) {
+    private func updateSceneBakeProgress(_ progress: Double) {
+        guard progress.isFinite else { return }
+        let clamped = min(max(progress, 0.0), 0.99)
+        bakeProgress = max(bakeProgress, clamped)
+    }
+
+    /// 详情页重建后从全局 tracker 恢复进行中的烘焙 UI（关闭再进入不会丢进度条）
+    private func restoreSceneBakeProgressIfNeeded() {
+        if let progress = SceneOfflineBakeProgressTracker.shared.progress(for: resolvedItem.id) {
+            isBakingScene = true
+            bakeProgress = progress
+        } else if isBakingScene {
+            // 切换到别的 item 或烘焙已结束：清掉陈旧本地态
+            isBakingScene = false
+            bakeProgress = 0
+        }
+    }
+
+    private func runSceneOfflineBake(renderer: SceneBakeRenderer, clearCachedArtifact: Bool) {
         guard let record = currentDownloadRecord else { return }
         if isBakingScene { return }
         errorMessage = ""
-        let shouldAutoApplyAfterBake = NSScreen.screens.count <= 1
-        if clearCachedArtifact {
-            mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
-        }
-        guard let refreshedRecord = mediaLibrary.downloadRecord(for: record.item.id) else { return }
-        SceneBakeQueueService.shared.enqueue(
-            record: refreshedRecord,
-            renderer: renderer,
-            durationSeconds: durationSeconds,
-            forceRebake: clearCachedArtifact
-        ) { result in
-            switch result {
-            case .success(let artifact):
-                self.handleCompletedSceneBake(
-                    artifact,
-                    shouldAutoApplyAfterBake: shouldAutoApplyAfterBake
-                )
-            case .failure(let error):
-                self.errorMessage = Self.truncateErrorMessage(error.localizedDescription)
-                self.showError = true
+        // 仅首次烘焙 + 单显示器时自动设壁纸；「重新烘焙」只更新缓存，不改当前壁纸
+        let shouldAutoApplyAfterBake = !clearCachedArtifact && NSScreen.screens.count <= 1
+        Task {
+            if clearCachedArtifact {
+                await MainActor.run {
+                    mediaLibrary.clearSceneBakeArtifact(itemID: record.item.id)
+                }
             }
         }
     }
 
-    private func handleCompletedSceneBake(
-        _ artifact: SceneBakeArtifact,
-        shouldAutoApplyAfterBake: Bool
-    ) {
-        guard shouldAutoApplyAfterBake else {
-            sceneBakeStatusFlash = t("sceneBake.cached")
-            return
-        }
-        let videoURL = URL(fileURLWithPath: artifact.videoPath)
-        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
-            if #available(macOS 26.0, *), !VideoWallpaperManager.shared.isLockScreenEnabled {
-                Task {
-                    guard let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
-                        forLocalVideo: videoURL,
-                        fallbackPosterURL: nil
-                    ) else { return }
-                    let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                        .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                        .allowClipping: true
-                    ]
-                    for screen in NSScreen.screens {
-                        try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
+                await MainActor.run {
+                    isBakingScene = false
+                    bakeProgress = 0
+                    if shouldAutoApplyAfterBake {
+                        // 实时渲染模式下，烘焙产物不自动设置到桌面（已由 wallpaper-wgpu 实时渲染）
+                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+                            if #available(macOS 26.0, *), !VideoWallpaperManager.shared.isLockScreenEnabled {
+                                // 动态锁屏关闭：用烘焙产物的静态帧设置桌面 poster（不启动视频播放器）
+                                Task {
+                                    if let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: videoURL, fallbackPosterURL: nil) {
+                                        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                                            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                                            .allowClipping: true
+                                        ]
+                                        for screen in NSScreen.screens {
+                                            try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
+                                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
+                                        }
+                                        print("[MediaDetailSheet] 实时渲染模式：烘焙完成，已设置桌面 poster")
+                                    }
+                                }
+                                scheduleSceneBakeSuccessFlash()
+                            } else {
+                                sceneBakeStatusFlash = t("sceneBake.cached")
+                                print("[MediaDetailSheet] 实时渲染模式：烘焙完成，产物已缓存用于锁屏推送")
+                            }
+                        } else {
+                            scheduleSceneBakeSuccessFlash()
+                            applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+                        }
+                    } else {
+                        // 重新烘焙 / 多显示器：只缓存，不自动改壁纸
+                        scheduleSceneBakeSuccessFlash()
                     }
                 }
                 scheduleSceneBakeSuccessFlash()
@@ -3228,18 +3266,65 @@ struct MediaDetailSheet: View {
             statusKey: "applyingWallpaper.realtime"
         )
 
-        let completion: SceneBakeQueueService.Completion = { result in
-            guard case .success(let artifact) = result else { return }
-            let bakedVideoURL = URL(fileURLWithPath: artifact.videoPath)
-            guard !UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled"),
-                  self.isSceneStillActive(sceneContentRoot) else {
-                // The user may have enabled realtime rendering or already switched
-                // away while baking. Keep optimizing the newly created MP4, but do
-                // not replace whatever wallpaper is now active.
-                VideoWallpaperManager.shared.enqueueAutomaticOptimizationForBakedScene(
-                    videoURL: bakedVideoURL,
-                    title: self.resolvedItem.title,
-                    pipelineItemID: self.resolvedItem.id
+        Task {
+            do {
+                // 获取或分析烘焙资格
+                let snapshotRecord = await MainActor.run {
+                    mediaLibrary.downloadedItems.first { $0.item.id == itemID }
+                }
+                let eligibility: SceneBakeEligibilitySnapshot
+                if let existing = snapshotRecord?.sceneBakeEligibility,
+                   existing.contentRootPath == sceneContentRoot.path {
+                    eligibility = existing
+                } else {
+                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
+                        await MainActor.run {
+                            isBakingScene = false
+                            isSettingWallpaper = false
+                            errorMessage = t("sceneBake.error.insufficientMemory.analysis")
+                            showError = true
+                        }
+                        return
+                    }
+                    eligibility = try await Task.detached(priority: .userInitiated) {
+                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: sceneContentRoot)
+                    }.value
+                    await MainActor.run {
+                        MediaLibraryService.shared.attachSceneBakeEligibility(
+                            itemID: itemID,
+                            snapshot: eligibility,
+                            triggerAutoBake: false
+                        )
+                    }
+                }
+
+                guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
+                    await MainActor.run {
+                        isBakingScene = false
+                        isSettingWallpaper = false
+                        errorMessage = t("sceneBake.error.insufficientMemory.bake")
+                        showError = true
+                    }
+                    return
+                }
+
+                let persistID = await MainActor.run {
+                    mediaLibrary.downloadedItems.first { $0.item.id == itemID && $0.isActive }?.id
+                }
+                let cacheKey = persistID ?? SceneOfflineBakeService.stableOrphanCacheItemID(contentRootPath: sceneContentRoot.path)
+
+                // 使用 wallpaper-wgpu bake 子命令烘焙
+                let artifact = try await SceneOfflineBakeService.bake(
+                    eligibility: eligibility,
+                    contentRoot: sceneContentRoot,
+                    cacheItemID: cacheKey,
+                    renderer: .wallpaperWgpu,
+                    persistArtifactToItemID: persistID,
+                    progressItemID: itemID,
+                    progress: { progress in
+                        // 全局 tracker 会广播通知；本地回调兜底当前页即时刷新
+                        updateSceneBakeProgress(progress)
+                    }
                 )
                 return
             }
@@ -3288,6 +3373,10 @@ struct MediaDetailSheet: View {
     private func copyStaticImageToPasteboard() {
         Task { @MainActor in
             var imageURL: URL?
+            let imageExtensions: Set<String> = [
+                "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tiff", "tif"
+            ]
+            let videoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
 
             // 1. 优先从烘焙产物抽帧
             if let record = currentDownloadRecord,
@@ -3319,6 +3408,97 @@ struct MediaDetailSheet: View {
                 }
             }
 
+            // 4. 本机视频壁纸：从视频抽一帧
+            if imageURL == nil {
+                let candidateVideoURLs: [URL] = {
+                    var urls: [URL] = []
+                    if let localURL = currentDownloadRecord?.localFileURL {
+                        if let videoURL = MediaItem.resolveLocalVideoFile(from: localURL) {
+                            urls.append(videoURL)
+                        } else if videoExtensions.contains(localURL.pathExtension.lowercased()) {
+                            urls.append(localURL)
+                        }
+                    }
+                    if let workshop = findLocalWorkshopFile() {
+                        if let videoURL = MediaItem.resolveLocalVideoFile(from: workshop) {
+                            urls.append(videoURL)
+                        } else if videoExtensions.contains(workshop.pathExtension.lowercased()) {
+                            urls.append(workshop)
+                        }
+                    }
+                    if let preview = previewVideoURL,
+                       preview.isFileURL,
+                       videoExtensions.contains(preview.pathExtension.lowercased()) {
+                        urls.append(preview)
+                    }
+                    // 去重
+                    var seen = Set<String>()
+                    return urls.filter { seen.insert($0.standardizedFileURL.path).inserted }
+                }()
+
+                for videoURL in candidateVideoURLs {
+                    if let cached = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(forLocalFile: videoURL) {
+                        imageURL = cached
+                        break
+                    }
+                    if let poster = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL) {
+                        imageURL = poster
+                        break
+                    }
+                }
+            }
+
+            // 5. Workshop 预览图 / 本地静态图文件
+            if imageURL == nil {
+                let localCandidates: [URL] = {
+                    var urls: [URL] = []
+                    if let recordURL = currentDownloadRecord?.localFileURL {
+                        urls.append(recordURL)
+                    }
+                    if let workshop = findLocalWorkshopFile() {
+                        urls.append(workshop)
+                    }
+                    if isLocalFile,
+                       resolvedItem.coverImageURL.isFileURL {
+                        urls.append(resolvedItem.coverImageURL)
+                    }
+                    var seen = Set<String>()
+                    return urls.filter { seen.insert($0.standardizedFileURL.path).inserted }
+                }()
+
+                for local in localCandidates {
+                    if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: local),
+                       FileManager.default.fileExists(atPath: preview.path) {
+                        imageURL = preview
+                        break
+                    }
+                    let ext = local.pathExtension.lowercased()
+                    if imageExtensions.contains(ext),
+                       FileManager.default.fileExists(atPath: local.path) {
+                        imageURL = local
+                        break
+                    }
+                }
+            }
+
+            // 6. 封面图（本地文件优先；远程封面尽量下载后写入剪贴板）
+            if imageURL == nil {
+                let cover = resolvedItem.coverImageURL
+                if cover.isFileURL, FileManager.default.fileExists(atPath: cover.path) {
+                    imageURL = cover
+                } else if let image = await loadNSImageForPasteboard(from: cover) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.writeObjects([image])
+                    showCopyLinkToast = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        showCopyLinkToast = false
+                    }
+                    print("[MediaDetailSheet] ✅ 已复制静态图片到剪贴板（远程封面）")
+                    return
+                }
+            }
+
             guard let imageURL, FileManager.default.fileExists(atPath: imageURL.path) else {
                 print("[MediaDetailSheet] ⚠️ 未找到可复制的静态图片")
                 return
@@ -3332,14 +3512,28 @@ struct MediaDetailSheet: View {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     showCopyLinkToast = false
                 }
-                print("[MediaDetailSheet] ✅ 已复制静态图片到剪贴板")
+                print("[MediaDetailSheet] ✅ 已复制静态图片到剪贴板: \(imageURL.lastPathComponent)")
+            } else {
+                print("[MediaDetailSheet] ⚠️ 无法读取图片文件: \(imageURL.path)")
             }
         }
     }
 
-    private func revealCurrentMediaInFinder() {
-        guard let targetURL = finderRevealURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([targetURL])
+    /// 为剪贴板加载图片：本地直接读，远程则下载
+    private func loadNSImageForPasteboard(from url: URL) async -> NSImage? {
+        if url.isFileURL {
+            return NSImage(contentsOf: url)
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return nil
+            }
+            return NSImage(data: data)
+        } catch {
+            print("[MediaDetailSheet] ⚠️ 下载封面失败: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     private func resolvedShareableFileFromRecordOrCover() -> URL? {
@@ -4339,6 +4533,7 @@ struct MediaDetailSheet: View {
                 authorAvatarURL: resolvedItem.authorAvatarURL,
                 items: authorMediaItems,
                 isLoading: isLoadingAuthorItems,
+                hasMore: hasMoreAuthorItems,
                 activeItemID: resolvedItem.id,
                 onSelectItem: { selectedItem in
                     navigateToAuthorMedia(selectedItem)
@@ -4373,19 +4568,19 @@ struct MediaDetailSheet: View {
 
         Task {
             do {
-                let results = try await viewModel.fetchMediaByAuthor(
+                let page = try await viewModel.fetchMediaByAuthor(
                     steamID: steamID,
                     page: 1
                 )
                 await MainActor.run {
-                    if let authorItem = results.first(where: {
+                    if let authorItem = page.items.first(where: {
                         $0.authorName != nil || $0.authorSteamID != nil || $0.authorAvatarURL != nil
                     }) {
                         resolvedItem = mediaItemByMergingAuthorMetadata(resolvedItem, fallback: authorItem)
                     }
-                    // 过滤掉当前正在查看的项
-                    authorMediaItems = results.filter { $0.id != resolvedItem.id }
-                    hasMoreAuthorItems = results.count >= 30
+                    // 作者列表保留当前项，不排除自己；当前项用 activeItemID 高亮
+                    authorMediaItems = page.items
+                    hasMoreAuthorItems = page.hasMore
                     isLoadingAuthorItems = false
                 }
             } catch {
@@ -4407,39 +4602,59 @@ struct MediaDetailSheet: View {
         authorLoadedSteamID = nil
     }
 
-    /// 批量下载作者所有已加载媒体，并自动归入以作者名命名的虚拟文件夹
+    /// 批量下载作者所有已加载媒体，并自动归入以作者名命名的虚拟文件夹。
+    /// 同作者多次批量下载会复用同一文件夹，避免拆成多个同名目录。
     private func downloadAllByAuthor(authorName: String, items: [MediaItem]) {
         let folderStore = LibraryFolderStore.shared
         let libraryService = MediaLibraryService.shared
+        var identityKeys = Set(items.flatMap { LibraryFolderStore.mediaAuthorIdentityKeys($0) })
+        if let steamID = resolvedItem.authorSteamID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !steamID.isEmpty {
+            identityKeys.insert("steam:\(steamID)")
+        }
+        let trimmedAuthorName = authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedAuthorName.isEmpty {
+            identityKeys.insert("name:\(trimmedAuthorName.lowercased())")
+        }
+
+        // 作者列表项可能缺 authorName/steamID；下载前补齐，便于后续按作者身份复用文件夹
+        let stampedItems = items.map {
+            mediaItemByMergingAuthorMetadata($0, fallback: resolvedItem)
+        }
 
         Task { @MainActor in
-            // 查找或创建以作者名为名的虚拟文件夹
-            let existingFolders = folderStore.folders(for: .media, parentID: nil, collection: .downloads)
-            let folder: LibraryFolder
-            if let existing = existingFolders.first(where: { $0.name == authorName }) {
-                folder = existing
-            } else {
-                folder = folderStore.createFolder(
-                    name: authorName,
-                    contentType: .media,
-                    parentID: nil,
-                    collection: .downloads
-                )
-            }
+            defer { isDownloadingAllAuthor = false }
+
+            let folder = folderStore.findOrCreateAuthorDownloadFolder(
+                name: authorName,
+                contentType: .media,
+                identityKeys: identityKeys
+            )
 
             // 已下载的项直接归入文件夹，过滤出需要下载的
             var pendingItems: [MediaItem] = []
-            for item in items {
+            for item in stampedItems {
                 if libraryService.isDownloaded(item) {
-                    folderStore.moveMediaToFolder(mediaID: item.id, folderID: folder.id)
+                    folderStore.moveMediaToFolder(
+                        mediaID: item.id,
+                        folderID: folder.id,
+                        scope: .downloads
+                    )
                 } else {
                     pendingItems.append(item)
                 }
             }
 
-            // 并发提交所有下载任务
+            // 全部已下载时只归夹；defer 会复位按钮，不弹错误框
+            guard !pendingItems.isEmpty else { return }
+
+            // 并发提交所有下载任务，统计成败，保证按钮状态一定复位
             let vm = viewModel
-            await withTaskGroup(of: Void.self) { group in
+            let folderID = folder.id
+            var successCount = 0
+            var failureCount = 0
+            await withTaskGroup(of: Bool.self) { group in
                 for item in pendingItems {
                     group.addTask {
                         do {
@@ -4448,22 +4663,40 @@ struct MediaDetailSheet: View {
                             } else {
                                 guard let bestOption = item.downloadOptions.max(by: {
                                     $0.qualityRank < $1.qualityRank
-                                }) else { return }
+                                }) else {
+                                    return false
+                                }
                                 _ = try await vm.downloadMedia(item, option: bestOption)
                             }
                             await MainActor.run {
-                                folderStore.moveMediaToFolder(mediaID: item.id, folderID: folder.id)
+                                folderStore.moveMediaToFolder(
+                                    mediaID: item.id,
+                                    folderID: folderID,
+                                    scope: .downloads
+                                )
                             }
+                            return true
                         } catch {
                             AppLogger.error(.download, "作者媒体批量下载失败",
                                 metadata: ["itemID": item.id, "author": authorName,
                                            "error": error.localizedDescription])
+                            return false
                         }
                     }
                 }
+                for await ok in group {
+                    if ok { successCount += 1 } else { failureCount += 1 }
+                }
             }
 
-            isDownloadingAllAuthor = false
+            if failureCount > 0 {
+                if successCount == 0 {
+                    errorMessage = String(format: t("downloadAllByAuthor.allFailed"), failureCount)
+                } else {
+                    errorMessage = String(format: t("downloadAllByAuthor.partialFailed"), successCount, failureCount)
+                }
+                showError = true
+            }
         }
     }
 
@@ -4477,15 +4710,17 @@ struct MediaDetailSheet: View {
 
         Task {
             do {
-                let results = try await viewModel.fetchMediaByAuthor(
+                let page = try await viewModel.fetchMediaByAuthor(
                     steamID: steamID,
                     page: nextPage
                 )
                 await MainActor.run {
-                    let newItems = results.filter { $0.id != resolvedItem.id }
+                    let existingIDs = Set(authorMediaItems.map(\.id))
+                    let newItems = page.items.filter { !existingIDs.contains($0.id) }
                     authorMediaItems.append(contentsOf: newItems)
                     authorItemsPage = nextPage
-                    hasMoreAuthorItems = results.count >= 30
+                    // 服务端 hasMore + 本页确实有新增；重复页/空增量时停
+                    hasMoreAuthorItems = page.hasMore && !newItems.isEmpty
                     isLoadingAuthorItems = false
                 }
             } catch {

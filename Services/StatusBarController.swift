@@ -872,67 +872,14 @@ final class StatusBarController: NSObject {
 
     @objc private func nextWallpaperForScreen(_ sender: NSMenuItem) {
         guard let screen = sender.representedObject as? NSScreen else { return }
-        let screenID = WallpaperSchedulerService.shared.displayConfigScreenID(for: screen)
+        let screenID = screen.wallpaperScreenIdentifier
+        let hasItems = WallpaperSchedulerService.shared.hasSchedulableItems(for: screenID)
+        print("[StatusBar] nextWallpaperForScreen screen=\(screen.localizedName) id=\(screenID) hasItems=\(hasItems)")
+        guard hasItems else {
+            print("[StatusBar] nextWallpaper ignored: no schedulable items for \(screenID)")
+            return
+        }
         WallpaperSchedulerService.shared.triggerNextWallpaperNow(for: screenID)
-    }
-
-    @objc private func openCurrentWallpaper(_ sender: NSMenuItem) {
-        guard let screen = sender.representedObject as? NSScreen,
-              let request = currentWallpaperDetailRequest(for: screen) else { return }
-        MainNavigationRequestStore.requestWallpaperDetail(request)
-        showWindowHandler?()
-    }
-
-    private func currentWallpaperDetailRequest(for screen: NSScreen) -> MainWallpaperDetailRequest? {
-        guard let url = currentWallpaperURL(for: screen) else { return nil }
-
-        if let record = matchingMediaDownloadRecord(for: url) {
-            return .media(record.item)
-        }
-        if let record = matchingWallpaperDownloadRecord(for: url) {
-            return .wallpaper(record.wallpaper)
-        }
-        return nil
-    }
-
-    private func matchingMediaDownloadRecord(for currentURL: URL) -> MediaDownloadRecord? {
-        MediaLibraryService.shared.downloadedItems.first { record in
-            let candidatePaths = [
-                record.localFilePath,
-                record.resolvedVideoFileURL?.path,
-                record.sceneBakeArtifact?.videoPath
-            ].compactMap { $0 }
-            return candidatePaths.contains { matchesWallpaperPath(currentURL, recordPath: $0) }
-        }
-    }
-
-    private func matchingWallpaperDownloadRecord(for currentURL: URL) -> WallpaperDownloadRecord? {
-        WallpaperLibraryService.shared.downloadedWallpapers.first { record in
-            matchesWallpaperPath(currentURL, recordPath: record.localFilePath)
-        }
-    }
-
-    private func matchesWallpaperPath(_ currentURL: URL, recordPath: String) -> Bool {
-        guard currentURL.isFileURL else { return false }
-
-        let currentPath = currentURL.standardizedFileURL.path
-        let storedPath = URL(fileURLWithPath: recordPath).standardizedFileURL.path
-        return currentPath == storedPath
-            || currentPath.hasPrefix(storedPath + "/")
-            || storedPath.hasPrefix(currentPath + "/")
-    }
-
-    private func currentWallpaperURL(for screen: NSScreen) -> URL? {
-        if let videoURL = videoWallpaperManager.videoURL(for: screen) {
-            return videoURL
-        }
-        if let rendererPath = weBridge.currentWallpaperPath(for: screen) {
-            return URL(fileURLWithPath: rendererPath)
-        }
-        if let imageURL = StaticImageWallpaperOverlayManager.shared.imageURL(for: screen) {
-            return imageURL
-        }
-        return DesktopWallpaperSyncManager.shared.imageURL(for: screen)
     }
 
     @objc private func perScreenTogglePlayback(_ sender: NSMenuItem) {

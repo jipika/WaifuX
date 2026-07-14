@@ -361,6 +361,44 @@ actor PixivService {
         return response.body
     }
 
+    /// 批量获取用户作品元数据。`profile/all` 只返回作品 ID；本接口补齐封面、标题与作者信息。
+    func userIllusts(
+        userId: String,
+        illustIDs: [String],
+        workCategory: String = "illustManga"
+    ) async throws -> [PixivSearchItem] {
+        let requestedIDs = Array(illustIDs.prefix(24))
+        guard !requestedIDs.isEmpty,
+              var components = URLComponents(string: baseURL) else {
+            return []
+        }
+
+        components.path = "/ajax/user/\(userId)/profile/illusts"
+        // Pixiv 将缺少这两个参数的请求判为 400（"不正なリクエスト"）。
+        components.queryItems = [
+            URLQueryItem(name: "work_category", value: workCategory),
+            URLQueryItem(name: "is_first_page", value: "1")
+        ] + requestedIDs.map { URLQueryItem(name: "ids[]", value: $0) }
+
+        guard let url = components.url else {
+            throw NetworkError.invalidResponse
+        }
+
+        await enforceRateLimit()
+
+        let response = try await networkService.fetch(
+            PixivUserIllustsResponse.self,
+            from: url,
+            headers: defaultHeaders
+        )
+
+        guard !response.error else {
+            throw NetworkError.invalidResponse
+        }
+
+        return Array(response.body.works.values)
+    }
+
     /// 下载图片（i.pximg.net 必须携带 Referer）
     /// - Parameter url: 图片 URL
     /// - Returns: 图片数据

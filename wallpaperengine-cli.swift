@@ -739,7 +739,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     private enum FirstFramePolicy {
         /// 至少经历此时长后才允许「稳定」判真，避免白屏/首帧未绘制误判
-        static let minElapsed: TimeInterval = 1.05
+        static let minElapsed: TimeInterval = 3.0
         /// 含加载动画时最长等到此时长，取最后一帧作为首帧
         static let maxElapsed: TimeInterval = 24
         static let pollInterval: TimeInterval = 0.5

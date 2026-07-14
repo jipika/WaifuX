@@ -238,6 +238,7 @@ struct WallpaperExploreContentView: View {
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var pendingSearchText: String?
+    @State private var isSourceMenuHovered = false
     /// 氛围图仅在实际首张 id 变化时更新
     @State private var lastSyncedFirstWallpaperID: String?
     @State private var loadMoreTask: Task<Void, Never>?
@@ -771,16 +772,28 @@ struct WallpaperExploreContentView: View {
                         }
                     }
                 } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Image(systemName: "globe")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(arcSettings.primaryText.opacity(0.55))
-                        Text(WallpaperSourceManager.shared.activeSource.displayName)
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(arcSettings.primaryText.opacity(0.75))
-                    }
+                    Text(WallpaperSourceManager.shared.activeSource.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(arcSettings.primaryText.opacity(isSourceMenuHovered ? 0.92 : 0.78))
                 }
                 .menuStyle(.borderlessButton)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .liquidGlassSurface(.subtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous), lightweight: true)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(isSourceMenuHovered ? 0.055 : 0))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(isSourceMenuHovered ? 0.26 : 0.14), lineWidth: 0.5)
+                        }
+                        .allowsHitTesting(false)
+                }
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isSourceMenuHovered = hovering
+                    }
+                }
                 .offset(y: 1.5)
                 .background {
                     SourceHintIcon()

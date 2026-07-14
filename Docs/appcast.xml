@@ -6,18 +6,19 @@
     <description>WaifuX Updates</description>
     <language>zh</language>
     <item>
-      <title>Version 38.0.131</title>
-      <sparkle:version>38.0.131</sparkle:version>
-      <sparkle:shortVersionString>38.0.131</sparkle:shortVersionString>
-      <pubDate>Sun, 12 Jul 2026 18:45:52 +0800</pubDate>
+      <title>Version 38.0.132</title>
+      <sparkle:version>38.0.132</sparkle:version>
+      <sparkle:shortVersionString>38.0.132</sparkle:shortVersionString>
+      <pubDate>Tue, 14 Jul 2026 19:06:00 +0800</pubDate>
       <description><![CDATA[
-        <h3>WaifuX 38.0.131</h3>
+        <h3>WaifuX 38.0.132</h3>
         <ul>
-          <li>feat: 完善壁纸设计与媒体体验 (4be8686)</li>
+          <li>fix: 修复三处作者列表分页，支持连续滚动加载 (fe03342)</li>
+          <li>feat: 媒体库作者归夹与动态壁纸按屏控制稳定性 - 收藏/下载 folder 归属隔离，作者批量下载复用同文件夹并合并重复夹 - 全屏/前台覆盖暂停改为原生视频 + WE 按屏 pause/resume，修复多显示器误判 - WE 静态 fallback 后台抽帧、web 首帧稳定最短等待 3s，并更新 wallpaperengine-cli / wallpaper-wgpu - 详情页作者批量下载优化文件夹创建逻辑、封面复制、scene 烘焙进度恢复； - 烘焙放开帧率上下优化烘焙速度 - 优化壁纸引擎资源导入逻辑和删除逻辑 feat: pixiv源数据增加作者列表 (76c4616)</li>
         </ul>
       ]]></description>
       <enclosure
-        url="https://github.com/jipika/WaifuX/releases/download/v38.0.131/WaifuX.dmg"
+        url="https://github.com/jipika/WaifuX/releases/download/v38.0.132/WaifuX.dmg"
         type="application/octet-stream"
         length="0"
       />

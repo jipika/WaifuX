@@ -297,9 +297,11 @@
     padding: 10px 12px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
+    display: flex;
+    gap: 8px;
   }
-  .reset-btn {
-    width: 100%;
+  .footer-btn {
+    flex: 1;
     height: 36px;
     display: flex;
     align-items: center;
@@ -314,7 +316,36 @@
     cursor: pointer;
     transition: background 0.15s;
   }
-  .reset-btn:hover { background: var(--accent-dim); }
+  .footer-btn:hover { background: var(--accent-dim); }
+  .reward-popover {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 58px;
+    z-index: 10;
+    padding: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 14px 36px rgba(0,0,0,0.35);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(6px);
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .reward-popover.is-visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+  .reward-popover img {
+    display: block;
+    width: 100%;
+    max-height: min(360px, calc(100vh - 110px));
+    object-fit: contain;
+    border-radius: 8px;
+    background: white;
+  }
 
   .hidden-prop { display: none !important; }
 
@@ -616,8 +647,16 @@
 
 <div class="property-list" id="propertyList"></div>
 
+<div class="reward-popover" id="rewardPopover" aria-hidden="true">
+  <img id="rewardQRCode" alt="赞赏码">
+</div>
+
 <div class="footer">
-  <button class="reset-btn" onclick="handleReset()">
+  <button class="footer-btn" id="rewardButton" type="button" aria-label="赞赏支持" aria-expanded="false">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/></svg>
+    赞赏支持
+  </button>
+  <button class="footer-btn" type="button" onclick="handleReset()">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
     重置为默认值
   </button>
@@ -627,6 +666,7 @@
 let properties = [];
 let currentValues = {};
 let wallpaperTitle = '';
+const rewardSupportState = { isPinned: false, isConfigured: false };
 
 const i18nMap = {
   // ===== 通用属性标签 =====
@@ -1191,6 +1231,54 @@ function handleReset() {
   renderProperties();
 }
 
+function configureRewardSupport() {
+  const button = document.getElementById('rewardButton');
+  const popover = document.getElementById('rewardPopover');
+  const image = document.getElementById('rewardQRCode');
+  const dataURL = window.rewardQRCodeDataURL || '';
+  if (!button || !popover || !image) return;
+
+  if (!dataURL) {
+    button.hidden = true;
+    return;
+  }
+
+  image.src = dataURL;
+  button.hidden = false;
+
+  if (rewardSupportState.isConfigured) return;
+  rewardSupportState.isConfigured = true;
+
+  const setVisible = function(isVisible) {
+    popover.classList.toggle('is-visible', isVisible);
+    popover.setAttribute('aria-hidden', String(!isVisible));
+    button.setAttribute('aria-expanded', String(isVisible));
+  };
+
+  button.addEventListener('mouseenter', function() {
+    setVisible(true);
+  });
+  button.addEventListener('mouseleave', function() {
+    if (!rewardSupportState.isPinned) setVisible(false);
+  });
+  button.addEventListener('click', function() {
+    rewardSupportState.isPinned = !rewardSupportState.isPinned;
+    setVisible(rewardSupportState.isPinned);
+  });
+  document.addEventListener('mousedown', function(event) {
+    if (!popover.contains(event.target) && !button.contains(event.target)) {
+      rewardSupportState.isPinned = false;
+      setVisible(false);
+    }
+  });
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+      rewardSupportState.isPinned = false;
+      setVisible(false);
+    }
+  });
+}
+
 function hexToRgb(hex) {
   const r = parseInt(hex.slice(1,3), 16);
   const g = parseInt(hex.slice(3,5), 16);
@@ -1221,6 +1309,7 @@ function initFromData() {
   if (typeof window.accentColor !== 'undefined') {
     applyAccentColor(window.accentColor);
   }
+  configureRewardSupport();
   renderProperties();
 }
 
@@ -1236,6 +1325,7 @@ function initSceneDesign() {
   if (typeof window.accentColor !== 'undefined') {
     applyAccentColor(window.accentColor);
   }
+  configureRewardSupport();
   renderSceneDesign();
 }
 

@@ -34,8 +34,64 @@ final class MangaDetailViewModel: ObservableObject {
 
     var seriesTitle: String { series?.title ?? "漫画" }
     var authorName: String { series?.author ?? "" }
+    var authorID: String? {
+        guard let authorID = series?.authorId.trimmingCharacters(in: .whitespacesAndNewlines),
+              !authorID.isEmpty else { return nil }
+        return authorID
+    }
     var seriesDescription: String { series?.description ?? "" }
     var seriesTags: [String] { series?.tags ?? [] }
+
+    /// 作者漫画分页结果。hasMore 按 ID 切片判断，避免转换过滤后误停。
+    struct AuthorMangaPageResult {
+        let items: [Wallpaper]
+        let hasMore: Bool
+    }
+
+    /// 当前作者的漫画 ID 列表缓存，避免每页重复请求 profile/all。
+    private var authorMangaIDCache: [String: [String]] = [:]
+
+    /// 获取当前作者的 Pixiv 漫画。漫画使用独立阅读器，不能混入壁纸作者列表。
+    func fetchAuthorManga(page: Int = 1, limit: Int = 24) async throws -> AuthorMangaPageResult {
+        guard route.source == .pixiv,
+              let authorID,
+              page > 0,
+              limit > 0 else {
+            return AuthorMangaPageResult(items: [], hasMore: false)
+        }
+
+        // Pixiv /profile/illusts 单次最多 24 个 ids[]
+        let pageLimit = min(limit, 24)
+
+        let orderedIDs: [String]
+        if let cached = authorMangaIDCache[authorID] {
+            orderedIDs = cached
+        } else {
+            let profile = try await pixiv.userAllIllusts(userId: authorID)
+            orderedIDs = Array((profile.manga ?? [:]).keys).sorted {
+                (Int64($0) ?? 0) > (Int64($1) ?? 0)
+            }
+            authorMangaIDCache[authorID] = orderedIDs
+        }
+
+        let startIndex = (page - 1) * pageLimit
+        guard startIndex < orderedIDs.count else {
+            return AuthorMangaPageResult(items: [], hasMore: false)
+        }
+
+        let endIndex = min(startIndex + pageLimit, orderedIDs.count)
+        let pageIDs = Array(orderedIDs[startIndex..<endIndex])
+        let hasMore = endIndex < orderedIDs.count
+
+        let works = try await pixiv.userIllusts(
+            userId: authorID,
+            illustIDs: pageIDs,
+            workCategory: "manga"
+        )
+        let worksByID = Dictionary(uniqueKeysWithValues: works.map { ($0.id, $0) })
+        let items = pageIDs.compactMap { worksByID[$0]?.toWallpaper() }.filter(\.isPixivManga)
+        return AuthorMangaPageResult(items: items, hasMore: hasMore)
+    }
 
     // MARK: - Load
     func load() async {

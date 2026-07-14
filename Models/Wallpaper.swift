@@ -26,6 +26,8 @@ struct Wallpaper: Identifiable, Codable, Hashable {
     var thumbs: Thumbs
     let tags: [Tag]?
     let uploader: Uploader?
+    /// Pixiv 作者 ID。Wallhaven 使用 `uploader.username`，而 Pixiv 的作者作品接口必须使用数字用户 ID。
+    var pixivAuthorID: String? = nil
 
     var fullURL: URL? { URL(string: url) }
     var thumbURL: URL? { Self.normalizedImageURL(from: thumbs.large) }
@@ -236,6 +238,40 @@ struct Wallpaper: Identifiable, Codable, Hashable {
             .first(where: { !$0.isEmpty && $0.lowercased() != "wallpaper" })
     }
 
+    /// 补齐作者信息（搜索列表常缺 uploader / pixivAuthorID），用于作者批量下载记录与文件夹复用。
+    func stampingAuthor(uploader: Uploader?, pixivAuthorID: String?) -> Wallpaper {
+        let resolvedUploader = self.uploader ?? uploader
+        let resolvedPixivAuthorID = self.pixivAuthorID ?? pixivAuthorID
+        guard resolvedUploader != self.uploader || resolvedPixivAuthorID != self.pixivAuthorID else {
+            return self
+        }
+        return Wallpaper(
+            id: id,
+            title: title,
+            url: url,
+            shortUrl: shortUrl,
+            views: views,
+            favorites: favorites,
+            downloads: downloads,
+            source: source,
+            purity: purity,
+            category: category,
+            dimensionX: dimensionX,
+            dimensionY: dimensionY,
+            resolution: resolution,
+            ratio: ratio,
+            fileSize: fileSize,
+            fileType: fileType,
+            createdAt: createdAt,
+            colors: colors,
+            path: path,
+            thumbs: thumbs,
+            tags: tags,
+            uploader: resolvedUploader,
+            pixivAuthorID: resolvedPixivAuthorID
+        )
+    }
+
     func matchesAspectRatio(_ identifier: String, tolerance: Double = 0.03) -> Bool {
         guard
             let currentRatio = aspectRatioValue,
@@ -258,6 +294,7 @@ struct Wallpaper: Identifiable, Codable, Hashable {
         case fileType = "file_type"
         case createdAt = "created_at"
         case colors, path, thumbs, tags, uploader
+        case pixivAuthorID = "pixiv_author_id"
     }
 
     struct Thumbs: Codable, Hashable {

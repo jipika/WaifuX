@@ -218,6 +218,54 @@ struct MacLinkRow: View {
     }
 }
 
+/// Displays the bundled WeChat reward code on hover and keeps it open after a click.
+struct MacRewardRow: View {
+    let title: String
+    let imageName: String
+
+    @State private var isShowingCode = false
+    @State private var isPinned = false
+
+    var body: some View {
+        Button {
+            isPinned.toggle()
+            isShowingCode = isPinned
+        } label: {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer()
+
+                Image(systemName: "qrcode")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.45))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            if isHovering {
+                isShowingCode = true
+            } else if !isPinned {
+                isShowingCode = false
+            }
+        }
+        .popover(isPresented: $isShowingCode, arrowEdge: .trailing) {
+            Image(imageName)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 340, height: 340)
+                .padding(12)
+        }
+        .accessibilityLabel(title)
+    }
+}
+
 // MARK: - 以下保留供其他页面复用的旧组件
 
 struct SettingsSection<Content: View>: View {

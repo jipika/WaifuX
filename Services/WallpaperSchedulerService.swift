@@ -93,7 +93,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// 手动为指定屏幕切换下一张壁纸。即使该屏幕暂时关闭自动切换，也允许使用
     /// 已保存的轮换范围、顺序和文件夹过滤来选取下一张。
     func triggerNextWallpaperNow(for screenID: String) {
-        applyNextWallpaper(for: canonicalDisplayConfigScreenID(for: screenID), requiredMode: nil)
+        print("\(logTag) Manual next wallpaper requested for screen \(screenID)")
+        applyNextWallpaper(for: screenID, requiredMode: nil)
     }
 
     func triggerRandomWallpaperNow(for screenID: String) {
@@ -188,11 +189,19 @@ class WallpaperSchedulerService: ObservableObject {
         requiredMode: RequiredSwitchMode?,
         overrideOrder: ScheduleOrder? = nil
     ) {
-        guard !isScreenLocked, !isRebuildingDisplaySync else { return }
-        if config.syncAllDisplays,
-           let primaryScreenID = NSScreen.screens.first?.wallpaperScreenIdentifier,
-           screenID != primaryScreenID {
-            applyNextWallpaper(for: primaryScreenID, requiredMode: requiredMode, overrideOrder: overrideOrder)
+        // 手动“下一张”允许在锁屏标志异常时继续；自动 on-end 仍尊重锁屏状态。
+        // screenIsUnlocked DistributedNotification 偶发丢失时，isScreenLocked 会永久卡死。
+        if isScreenLocked {
+            if requiredMode == nil {
+                print("\(logTag) Manual next requested while isScreenLocked=true; force-clearing stuck lock flag")
+                isScreenLocked = false
+            } else {
+                print("\(logTag) Skip next wallpaper for \(screenID): screen is locked")
+                return
+            }
+        }
+        guard NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+            print("\(logTag) Skip next wallpaper: screen \(screenID) not found")
             return
         }
         guard let screen = NSScreen.screens.first(where: {
@@ -203,14 +212,17 @@ class WallpaperSchedulerService: ObservableObject {
         let displayConfig = resolvedDisplayConfig(for: screen)
         switch requiredMode {
         case .onEnd:
-            guard displayConfig.isEnabled && displayConfig.isOnEndMode else { return }
+            guard displayConfig.isEnabled && displayConfig.isOnEndMode else {
+                print("\(logTag) Skip on-end next for \(screenID): enabled=\(displayConfig.isEnabled) onEnd=\(displayConfig.isOnEndMode)")
+                return
+            }
         case nil:
             break
         }
 
         let items = getSchedulableItems(for: displayConfig, screenID: screenID)
         guard !items.isEmpty else {
-            print("\(logTag) Screen \(screenID): no schedulable items for next-wallpaper request")
+            print("\(logTag) Screen \(screenID): no schedulable items for next-wallpaper request (includeMedia=\(displayConfig.includeMedia) includeWallpapers=\(displayConfig.includeWallpapers) onEnd=\(displayConfig.isOnEndMode))")
             recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             return
         }
@@ -233,6 +245,7 @@ class WallpaperSchedulerService: ObservableObject {
         }
 
         Task { @MainActor in
+            print("\(logTag) Applying next wallpaper '\(item.title)' (\(item.fileURL.lastPathComponent)) to screen \(screenID)")
             let success = await applyItem(item, toScreenID: screenID)
             if success {
                 self.lastChangeTimes[screenID] = now
@@ -297,6 +310,14 @@ class WallpaperSchedulerService: ObservableObject {
                 print("\(self.logTag) Screen unlocked, resuming scheduler")
             }
         }
+    }
+
+    /// 自愈：若 unlock 通知丢失导致 isScreenLocked 卡死，调度定时器路径可主动恢复。
+    private func clearStuckScreenLockIfNeeded(source: String) {
+        guard isScreenLocked else { return }
+        // 用户能点到状态栏菜单 / 定时器在跑，说明会话通常已解锁。
+        isScreenLocked = false
+        print("\(logTag) Self-healed stuck isScreenLocked via \(source)")
     }
 
     @objc private func handleScreenParametersChanged() {
@@ -1302,7 +1323,10 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     private func changeWallpaperIfNeeded() {
-        guard isRunning, !isScreenLocked, !isRebuildingDisplaySync else { return }
+        if isScreenLocked {
+            clearStuckScreenLockIfNeeded(source: "timer")
+        }
+        guard !isScreenLocked else { return }
         guard !WallpaperEngineXBridge.shared.isSettingWallpaper else {
             print("\(logTag) Skipping: manual wallpaper setting in progress")
             return
@@ -1561,18 +1585,12 @@ class WallpaperSchedulerService: ObservableObject {
                SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)) {
                 print("\(logTag) Using baked video: \(bakedPath)")
                 let bakedURL = URL(fileURLWithPath: bakedPath)
-                let posterURL: URL?
-                if let itemID = item.sceneBakeItemID {
-                    posterURL = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
-                        forLocalVideo: bakedURL,
-                        itemID: itemID
-                    )
-                } else {
-                    posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
-                        forLocalVideo: bakedURL,
-                        fallbackPosterURL: nil
-                    )
-                }
+                // 只读下载/烘焙阶段已写好的抽帧，不在切换路径重新生成。
+                let posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
+                    forLocalVideo: bakedURL,
+                    sceneBakeItemID: item.sceneBakeItemID,
+                    projectRoot: item.fileURL
+                )
                 try VideoWallpaperManager.shared.applyVideoWallpaper(
                     from: bakedURL,
                     posterURL: posterURL,
@@ -1653,9 +1671,10 @@ class WallpaperSchedulerService: ObservableObject {
                         // Video 类型：提取实际视频文件路径，用 VideoWallpaperManager 播放
                         if let videoURL = findVideoFileInProject(projectJSON: projectJSON, root: resolvedRoot) {
                             print("\(logTag) Using video from WE project: \(videoURL.lastPathComponent)")
-                            let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
+                            let posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
                                 forLocalVideo: videoURL,
-                                fallbackPosterURL: nil
+                                sceneBakeItemID: item.sceneBakeItemID,
+                                projectRoot: resolvedRoot
                             )
                             try VideoWallpaperManager.shared.applyVideoWallpaper(
                                 from: videoURL,
@@ -1731,10 +1750,33 @@ class WallpaperSchedulerService: ObservableObject {
                         // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                     }
                 } else {
-                    // 所有目录候选在入队前必须通过 project.json 校验；这里保留兜底，
-                    // 绝不能把目录交给系统静态壁纸 API，否则会先停掉旧渲染再得到空桌面。
-                    print("\(logTag) Skipping project without readable project.json: \(fileURL.path)")
-                    return false
+                    // resolve 失败或 project.json 不可读：先在目录树里找可播视频，避免把 WE 壳目录当静态图。
+                    if let nestedVideo = findFirstVideoFile(in: fileURL) {
+                        print("\(logTag) No project.json at resolved root, using nested video: \(nestedVideo.path)")
+                        let posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
+                            forLocalVideo: nestedVideo,
+                            sceneBakeItemID: item.sceneBakeItemID,
+                            projectRoot: nestedVideo.deletingLastPathComponent()
+                        )
+                        try VideoWallpaperManager.shared.applyVideoWallpaper(
+                            from: nestedVideo,
+                            posterURL: posterURL,
+                            muted: true,
+                            targetScreen: screen,
+                            animatedTransition: true
+                        )
+                        if let posterURL = posterURL {
+                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                        }
+                    } else {
+                        if isOnEndMode && !webSceneSwitchEnabled {
+                            print("\(logTag) Skipping static image directory '\(item.title)' in on-end mode")
+                            return false
+                        }
+                        print("\(logTag) Using static image from directory: \(fileURL.path)")
+                        let vm = WallpaperViewModel()
+                        try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
+                    }
                 }
             } else if videoExtensions.contains(ext) {
                 // 3. 视频文件 → VideoWallpaperManager
@@ -1743,9 +1785,10 @@ class WallpaperSchedulerService: ObservableObject {
                     return false
                 }
                 print("\(logTag) Using video wallpaper: \(fileURL.lastPathComponent)")
-                let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
+                // 只读下载/列表阶段已写好的抽帧，不在切换路径重新生成。
+                let posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
                     forLocalVideo: fileURL,
-                    fallbackPosterURL: nil
+                    sceneBakeItemID: item.sceneBakeItemID
                 )
                 try VideoWallpaperManager.shared.applyVideoWallpaper(
                     from: fileURL,
@@ -1800,11 +1843,22 @@ class WallpaperSchedulerService: ObservableObject {
         }
 
         // 2. 递归查找目录中的视频文件
-        if let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) {
-            for case let fileURL as URL in enumerator {
-                if videoExts.contains(fileURL.pathExtension.lowercased()) {
-                    return fileURL
-                }
+        return findFirstVideoFile(in: root, extensions: videoExts)
+    }
+
+    /// 在目录树中找第一个可播视频（用于 project.json 解析失败时的兜底）。
+    private func findFirstVideoFile(
+        in root: URL,
+        extensions: Set<String> = ["mp4", "mov", "webm", "m4v"]
+    ) -> URL? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        for case let fileURL as URL in enumerator {
+            if extensions.contains(fileURL.pathExtension.lowercased()),
+               fm.fileExists(atPath: fileURL.path) {
+                return fileURL
             }
         }
         return nil

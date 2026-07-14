@@ -8,6 +8,60 @@ private final class LibraryScrollRuntimeState: ObservableObject {
     var currentOffset: CGFloat = 0
 }
 
+// MARK: - Folder Back Swipe Recognition
+/// Requires a deliberate, horizontal trackpad gesture before navigating away from a folder.
+private final class FolderBackSwipeRecognizer {
+    private static let minimumHorizontalDistance: CGFloat = 220
+    private static let minimumHorizontalDominance: CGFloat = 3
+
+    private var horizontalDistance: CGFloat = 0
+    private var verticalDistance: CGFloat = 0
+
+    func shouldNavigateBack(for event: NSEvent) -> Bool {
+        guard event.hasPreciseScrollingDeltas,
+              event.momentumPhase.isEmpty else {
+            reset()
+            return false
+        }
+
+        guard event.phase == .began || event.phase == .changed || event.phase == .ended else {
+            reset()
+            return false
+        }
+
+        if event.phase == .began {
+            reset()
+        }
+
+        guard event.phase != .ended else {
+            reset()
+            return false
+        }
+
+        let horizontalDelta = event.scrollingDeltaX
+        guard horizontalDelta > 0 else {
+            reset()
+            return false
+        }
+
+        horizontalDistance += horizontalDelta
+        verticalDistance += abs(event.scrollingDeltaY)
+
+        guard horizontalDistance >= Self.minimumHorizontalDistance,
+              horizontalDistance >= verticalDistance * Self.minimumHorizontalDominance else {
+            return false
+        }
+
+        reset()
+        return true
+    }
+
+    func reset() {
+        horizontalDistance = 0
+        verticalDistance = 0
+    }
+}
+
 // MARK: - Scroll 观察与恢复辅助组件
 /// 直接观察底层 NSScrollView，避免滚动时通过 PreferenceKey 持续触发整棵 SwiftUI 内容重算。
 private struct LibraryScrollObserver: NSViewRepresentable {
@@ -195,6 +249,7 @@ struct MyLibraryContentView: View {
 
     // 触摸板双指右滑返回（文件夹内）
     @State private var folderBackSwipeMonitor: Any?
+    @State private var folderBackSwipeRecognizer = FolderBackSwipeRecognizer()
 
     // 新建文件夹
     @State private var showNewFolderSheet = false
@@ -875,18 +930,18 @@ struct MyLibraryContentView: View {
         guard folderBackSwipeMonitor == nil else { return }
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [self] event in
             // 仅在文件夹内生效
-            guard self.isInAnyFolder else { return event }
+            guard self.isInAnyFolder else {
+                self.folderBackSwipeRecognizer.reset()
+                return event
+            }
             // 检查鼠标是否在主窗口内
             let mouseLocation = NSEvent.mouseLocation
             guard let window = NSApp.keyWindow,
                   window.frame.contains(mouseLocation) else {
+                self.folderBackSwipeRecognizer.reset()
                 return event
             }
-            // 检测右滑：scrollingDeltaX > 0 表示向右滑动
-            let deltaX = event.scrollingDeltaX
-            let deltaY = event.scrollingDeltaY
-            // 水平分量明显大于垂直分量，且方向向右
-            if deltaX > 0, abs(deltaX) > abs(deltaY) * 1.5 {
+            if self.folderBackSwipeRecognizer.shouldNavigateBack(for: event) {
                 DispatchQueue.main.async {
                     if self.selectedContentType == .wallpaper {
                         self.popWallpaperFolder()
@@ -907,10 +962,22 @@ struct MyLibraryContentView: View {
             NSEvent.removeMonitor(monitor)
             folderBackSwipeMonitor = nil
         }
+        folderBackSwipeRecognizer.reset()
+    }
+
+    private var currentWallpaperFolderScope: WallpaperLibraryService.FolderMembershipScope {
+        selectedSubTab == .favorites ? .favorites : .downloads
+    }
+
+    private var currentMediaFolderScope: MediaLibraryService.FolderMembershipScope {
+        selectedSubTab == .favorites ? .favorites : .downloads
     }
 
     private func moveWallpapersToFolder(ids: [String], folderID: String) {
+        // 空字符串不是合法文件夹 ID，统一视为根目录 nil，避免写入 "" 后变成“幽灵归属”
+        let normalizedFolderID = WallpaperLibraryService.normalizedFolderID(folderID)
         gridOrderStore.removeIDs(Set(ids), from: currentGridOrderScope)
+        let scope = currentWallpaperFolderScope
         let unifiedByID: [String: UnifiedLocalWallpaper] = Dictionary(
             uniqueKeysWithValues: viewModel.allLocalWallpapers.map { ($0.id, $0) }
         )
@@ -918,14 +985,15 @@ struct MyLibraryContentView: View {
             // 对「扫描进来但还没有 DownloadRecord」的项传 fallback，
             // 让 Service 层自动补登记，确保 folderID 写得进去。
             let fallback: (wallpaper: Wallpaper, fileURL: URL)?
-            if let unified = unifiedByID[id], unified.downloadRecord == nil {
+            if scope == .downloads, let unified = unifiedByID[id], unified.downloadRecord == nil {
                 fallback = (unified.wallpaper, unified.fileURL)
             } else {
                 fallback = nil
             }
             folderStore.moveWallpaperToFolder(
                 wallpaperID: id,
-                folderID: folderID,
+                folderID: normalizedFolderID,
+                scope: scope,
                 fallback: fallback
             )
         }
@@ -956,10 +1024,10 @@ struct MyLibraryContentView: View {
         switch selectedSubTab {
         case .favorites:
             let allFavorites = viewModel.favorites
-            let folderID = currentWallpaperFolderID
+            let folderID = WallpaperLibraryService.normalizedFolderID(currentWallpaperFolderID)
             let filtered = allFavorites.filter { wallpaper in
                 guard let record = WallpaperLibraryService.shared.favoriteRecord(for: wallpaper.id) else { return false }
-                return record.folderID == folderID
+                return WallpaperLibraryService.normalizedFolderID(record.folderID) == folderID
             }
             baseItems = filtered.map {
                 AnyWallpaperItem(
@@ -969,10 +1037,10 @@ struct MyLibraryContentView: View {
             }
         case .downloads:
             let allLocal = viewModel.allLocalWallpapers
-            let folderID = currentWallpaperFolderID
+            let folderID = WallpaperLibraryService.normalizedFolderID(currentWallpaperFolderID)
             let filtered = allLocal.filter { unified in
                 if let record = unified.downloadRecord {
-                    return record.folderID == folderID
+                    return WallpaperLibraryService.normalizedFolderID(record.folderID) == folderID
                 }
                 // 扫描到的本地文件只在根目录显示
                 return folderID == nil
@@ -1082,10 +1150,10 @@ struct MyLibraryContentView: View {
         switch selectedSubTab {
         case .favorites:
             let allFavorites = mediaViewModel.favoriteItems
-            let folderID = currentMediaFolderID
+            let folderID = MediaLibraryService.normalizedFolderID(currentMediaFolderID)
             let filtered = allFavorites.filter { item in
                 guard let record = MediaLibraryService.shared.favoriteRecord(for: item.id) else { return false }
-                return record.folderID == folderID
+                return MediaLibraryService.normalizedFolderID(record.folderID) == folderID
             }
             baseItems = filtered.map {
                 AnyMediaItem(
@@ -1095,10 +1163,10 @@ struct MyLibraryContentView: View {
             }
         case .downloads:
             let allLocal = mediaViewModel.allLocalMedia
-            let folderID = currentMediaFolderID
+            let folderID = MediaLibraryService.normalizedFolderID(currentMediaFolderID)
             let filtered = allLocal.filter { unified in
                 if let record = unified.downloadRecord {
-                    return record.folderID == folderID
+                    return MediaLibraryService.normalizedFolderID(record.folderID) == folderID
                 }
                 // 扫描到的本地文件只在根目录显示
                 return folderID == nil
@@ -1165,7 +1233,11 @@ struct MyLibraryContentView: View {
             if currentWallpaperFolderID != nil {
                 Button {
                     gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
-                    folderStore.moveWallpaperToFolder(wallpaperID: item.id, folderID: nil)
+                    folderStore.moveWallpaperToFolder(
+                        wallpaperID: item.id,
+                        folderID: nil,
+                        scope: currentWallpaperFolderScope
+                    )
                     updateWallpaperItems()
                 } label: {
                     Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
@@ -1275,20 +1347,23 @@ struct MyLibraryContentView: View {
     }
 
     private func moveMediasToFolder(ids: [String], folderID: String) {
+        let normalizedFolderID = MediaLibraryService.normalizedFolderID(folderID)
         gridOrderStore.removeIDs(Set(ids), from: currentGridOrderScope)
+        let scope = currentMediaFolderScope
         let unifiedByID: [String: UnifiedLocalMedia] = Dictionary(
             uniqueKeysWithValues: mediaViewModel.allLocalMedia.map { ($0.id, $0) }
         )
         for id in ids {
             let fallback: (item: MediaItem, fileURL: URL)?
-            if let unified = unifiedByID[id], unified.downloadRecord == nil {
+            if scope == .downloads, let unified = unifiedByID[id], unified.downloadRecord == nil {
                 fallback = (unified.mediaItem, unified.fileURL)
             } else {
                 fallback = nil
             }
             folderStore.moveMediaToFolder(
                 mediaID: id,
-                folderID: folderID,
+                folderID: normalizedFolderID,
+                scope: scope,
                 fallback: fallback
             )
         }
@@ -1326,7 +1401,11 @@ struct MyLibraryContentView: View {
             if currentMediaFolderID != nil {
                 Button {
                     gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
-                    folderStore.moveMediaToFolder(mediaID: item.id, folderID: nil)
+                    folderStore.moveMediaToFolder(
+                        mediaID: item.id,
+                        folderID: nil,
+                        scope: currentMediaFolderScope
+                    )
                     updateMediaItems()
                 } label: {
                     Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
@@ -1502,32 +1581,35 @@ struct MyLibraryContentView: View {
             return
         }
 
-        // ⚡ O(N) 预分组：按 folderID 建索引，避免对每个文件夹线性扫描全部记录
-        var downloadedByFolder: [String: [WallpaperDownloadRecord]] = [:]
-        for r in WallpaperLibraryService.shared.downloadRecords where r.isActive {
-            let fid = r.folderID ?? ""
-            downloadedByFolder[fid, default: []].append(r)
-        }
-        var favoriteByFolder: [String: [WallpaperFavoriteRecord]] = [:]
-        for r in WallpaperLibraryService.shared.favoriteRecords where r.isActive {
-            let fid = r.folderID ?? ""
-            favoriteByFolder[fid, default: []].append(r)
-        }
-
+        // ⚡ O(N) 预分组：按 folderID 建索引，避免对每个文件夹线性扫描全部记录。
+        // 收藏/下载集合各自只读对应记录，避免跨集合污染封面与计数。
         var next: [String: FolderDisplayInfo] = [:]
-        for folder in folders {
-            let downloadedWallpapers = downloadedByFolder[folder.id, default: []].map(\.wallpaper)
-            let favoriteWallpapers = favoriteByFolder[folder.id, default: []].map(\.wallpaper)
-            // 有序去重：下载记录优先（有本地抽帧），favorite 补充去重
-            var seen = Set<String>()
-            var wallpapers: [Wallpaper] = []
-            for w in downloadedWallpapers + favoriteWallpapers {
-                if seen.insert(w.id).inserted { wallpapers.append(w) }
+        if selectedSubTab == .favorites {
+            var favoriteByFolder: [String: [WallpaperFavoriteRecord]] = [:]
+            for r in WallpaperLibraryService.shared.favoriteRecords where r.isActive {
+                guard let fid = WallpaperLibraryService.normalizedFolderID(r.folderID) else { continue }
+                favoriteByFolder[fid, default: []].append(r)
             }
-            next[folder.id] = FolderDisplayInfo(
-                previewURLs: Array(wallpapers.prefix(3).compactMap(\.thumbURL)),
-                itemCount: wallpapers.count
-            )
+            for folder in folders {
+                let wallpapers = favoriteByFolder[folder.id, default: []].map(\.wallpaper)
+                next[folder.id] = FolderDisplayInfo(
+                    previewURLs: Array(wallpapers.prefix(3).compactMap(\.thumbURL)),
+                    itemCount: wallpapers.count
+                )
+            }
+        } else {
+            var downloadedByFolder: [String: [WallpaperDownloadRecord]] = [:]
+            for r in WallpaperLibraryService.shared.downloadRecords where r.isActive {
+                guard let fid = WallpaperLibraryService.normalizedFolderID(r.folderID) else { continue }
+                downloadedByFolder[fid, default: []].append(r)
+            }
+            for folder in folders {
+                let wallpapers = downloadedByFolder[folder.id, default: []].map(\.wallpaper)
+                next[folder.id] = FolderDisplayInfo(
+                    previewURLs: Array(wallpapers.prefix(3).compactMap(\.thumbURL)),
+                    itemCount: wallpapers.count
+                )
+            }
         }
         wallpaperFolderDisplay = next
     }
@@ -1539,46 +1621,48 @@ struct MyLibraryContentView: View {
             return
         }
 
-        // ⚡ O(N) 预分组：按 folderID 建索引，避免对每个文件夹线性扫描全部记录
-        var downloadedByFolder: [String: [MediaDownloadRecord]] = [:]
-        for r in MediaLibraryService.shared.downloadRecords where r.isActive {
-            let fid = r.folderID ?? ""
-            downloadedByFolder[fid, default: []].append(r)
-        }
-        var favoriteByFolder: [String: [MediaFavoriteRecord]] = [:]
-        for r in MediaLibraryService.shared.favoriteRecords where r.isActive {
-            let fid = r.folderID ?? ""
-            favoriteByFolder[fid, default: []].append(r)
-        }
+        // ⚡ O(N) 预分组；收藏/下载各自只读对应记录
         var next: [String: FolderDisplayInfo] = [:]
-
-        for folder in folders {
-            let records = downloadedByFolder[folder.id, default: []]
-            let favoriteItems = favoriteByFolder[folder.id, default: []].map(\.item)
-
-            // 下载记录优先；使用与卡片封面一致的 libraryGridThumbnailURL 解析
-            var seen = Set<String>()
-            var items: [MediaItem] = []
-            var localPaths: [String: URL] = [:]  // id → local file URL
-
-            for r in records {
-                guard seen.insert(r.item.id).inserted else { continue }
-                items.append(r.item)
-                let url = URL(fileURLWithPath: r.localFilePath)
-                localPaths[r.item.id] = url
+        if selectedSubTab == .favorites {
+            var favoriteByFolder: [String: [MediaFavoriteRecord]] = [:]
+            for r in MediaLibraryService.shared.favoriteRecords where r.isActive {
+                guard let fid = MediaLibraryService.normalizedFolderID(r.folderID) else { continue }
+                favoriteByFolder[fid, default: []].append(r)
             }
-            // favorite 补充不重复的项
-            for item in favoriteItems where seen.insert(item.id).inserted {
-                items.append(item)
+            for folder in folders {
+                let items = favoriteByFolder[folder.id, default: []].map(\.item)
+                let previewURLs = items.prefix(3).map { item in
+                    item.libraryFolderThumbnailURL(localFileURL: nil)
+                }
+                next[folder.id] = FolderDisplayInfo(
+                    previewURLs: previewURLs,
+                    itemCount: items.count
+                )
             }
-            // 文件夹只读取已有封面；不得在刷新时扫描所有媒体或批量抽帧。
-            let previewURLs = items.prefix(3).map { item in
-                item.libraryFolderThumbnailURL(localFileURL: localPaths[item.id])
+        } else {
+            var downloadedByFolder: [String: [MediaDownloadRecord]] = [:]
+            for r in MediaLibraryService.shared.downloadRecords where r.isActive {
+                guard let fid = MediaLibraryService.normalizedFolderID(r.folderID) else { continue }
+                downloadedByFolder[fid, default: []].append(r)
             }
-            next[folder.id] = FolderDisplayInfo(
-                previewURLs: previewURLs,
-                itemCount: items.count
-            )
+            for folder in folders {
+                let records = downloadedByFolder[folder.id, default: []]
+                var items: [MediaItem] = []
+                var localPaths: [String: URL] = [:]
+                var seen = Set<String>()
+                for r in records {
+                    guard seen.insert(r.item.id).inserted else { continue }
+                    items.append(r.item)
+                    localPaths[r.item.id] = URL(fileURLWithPath: r.localFilePath)
+                }
+                let previewURLs = items.prefix(3).map { item in
+                    item.libraryFolderThumbnailURL(localFileURL: localPaths[item.id])
+                }
+                next[folder.id] = FolderDisplayInfo(
+                    previewURLs: previewURLs,
+                    itemCount: items.count
+                )
+            }
         }
         mediaFolderDisplay = next
     }
@@ -1950,9 +2034,14 @@ struct MyLibraryContentView: View {
     private func addSelectedItemsToFolder(ids: [String]) {
         switch selectedContentType {
         case .wallpaper:
-            moveWallpapersToFolder(ids: ids, folderID: currentWallpaperFolderID ?? "")
+            // 只允许在已进入某个文件夹时添加；根目录没有目标 folderID
+            if let folderID = currentWallpaperFolderID {
+                moveWallpapersToFolder(ids: ids, folderID: folderID)
+            }
         case .video:
-            moveMediasToFolder(ids: ids, folderID: currentMediaFolderID ?? "")
+            if let folderID = currentMediaFolderID {
+                moveMediasToFolder(ids: ids, folderID: folderID)
+            }
         case .anime:
             break
         }

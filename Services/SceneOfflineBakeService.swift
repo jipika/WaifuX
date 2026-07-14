@@ -89,6 +89,63 @@ private actor SceneOfflineBakeConcurrencyGate {
     }
 }
 
+/// 跨详情页生命周期保留的烘焙进度。
+/// 详情页关闭后 `@State` 会丢，重进时需要从这里恢复 UI。
+@MainActor
+final class SceneOfflineBakeProgressTracker {
+    static let shared = SceneOfflineBakeProgressTracker()
+
+    private(set) var activeItemID: String?
+    private(set) var progress: Double = 0
+
+    var isBaking: Bool { activeItemID != nil }
+
+    func begin(itemID: String?) {
+        activeItemID = itemID
+        progress = 0
+        guard let itemID else { return }
+        NotificationCenter.default.post(
+            name: .sceneOfflineBakeProgressDidUpdate,
+            object: itemID,
+            userInfo: ["progress": 0.0]
+        )
+    }
+
+    func update(itemID: String?, progress value: Double) {
+        let clamped = min(max(value, 0.0), 0.99)
+        if let itemID {
+            activeItemID = itemID
+        }
+        progress = max(progress, clamped)
+        guard let itemID = itemID ?? activeItemID else { return }
+        NotificationCenter.default.post(
+            name: .sceneOfflineBakeProgressDidUpdate,
+            object: itemID,
+            userInfo: ["progress": progress]
+        )
+    }
+
+    func finish(itemID: String?, success: Bool) {
+        let targetID = itemID ?? activeItemID
+        if success, let targetID {
+            NotificationCenter.default.post(
+                name: .sceneOfflineBakeProgressDidUpdate,
+                object: targetID,
+                userInfo: ["progress": 1.0]
+            )
+        }
+        if activeItemID == nil || activeItemID == targetID {
+            activeItemID = nil
+            progress = 0
+        }
+    }
+
+    func progress(for itemID: String) -> Double? {
+        guard activeItemID == itemID else { return nil }
+        return progress
+    }
+}
+
 @MainActor
 private final class ScenePreviewProcessController {
     static let shared = ScenePreviewProcessController()
@@ -139,6 +196,25 @@ enum SceneOfflineBakeService {
         let height: Int
     }
 
+    /// 已连接显示器中的最高刷新率，用作离线烘焙输出的帧率上限。
+    private static var maximumBakeFPS: Double {
+        Double(NSScreen.screens.map(\.maxRefreshRate).max() ?? 60)
+    }
+
+    /// 将显式请求或用户偏好规范为烘焙器可用的帧率。
+    ///
+    /// 统一在服务层限制，确保自动烘焙和旧版保存的偏好也不会超过显示器最高刷新率。
+    private static func resolvedBakeFPS(requestedFPS: Int32?) -> Int32 {
+        let selectedFPS: Double
+        if let requestedFPS {
+            selectedFPS = Double(requestedFPS)
+        } else {
+            let savedFPS = UserDefaults.standard.double(forKey: "scene_bake_fps")
+            selectedFPS = savedFPS >= 15 ? savedFPS : 30
+        }
+        return Int32(min(max(selectedFPS, 15), maximumBakeFPS))
+    }
+
     private static func displayIDs(for screens: [NSScreen]?) -> [UInt32] {
         let targetScreens = (screens?.isEmpty == false) ? screens! : NSScreen.screens
         return targetScreens.compactMap { screen in
@@ -158,12 +234,19 @@ enum SceneOfflineBakeService {
 
     @MainActor
     private static func downloadedRecord(forResolvedContentRoot contentRoot: URL) -> MediaDownloadRecord? {
-        let resolvedPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: contentRoot).path
+        let resolvedContentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: contentRoot)
+        let resolvedPath = resolvedContentRoot.path
         if let exact = MediaLibraryService.shared.downloadRecord(forLocalFilePath: resolvedPath) {
             return exact
         }
         return MediaLibraryService.shared.downloadedItems.first { record in
-            WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: record.localFilePath)).path == resolvedPath
+            // SteamCMD stores a Workshop download at its outer `workshop_<id>` directory,
+            // whose sibling content/downloads/temp folders prevent a generic root walk from
+            // reaching the actual project. Use the record's canonical path comparison first.
+            record.hasSameLocalContent(as: resolvedContentRoot)
+                || WorkshopService.resolveWallpaperEngineProjectRoot(
+                    startingAt: URL(fileURLWithPath: record.localFilePath)
+                ).path == resolvedPath
         }
     }
 
@@ -225,6 +308,8 @@ enum SceneOfflineBakeService {
     /// 该 MP4 不会反向替换桌面实时渲染；如果动态锁屏开启，则烘焙完成后推送给对应显示器实例。
     @MainActor
     static func scheduleRealtimeCompanionBake(path: String, targetScreens: [NSScreen]? = nil, reason: String) {
+        guard #available(macOS 26.0, *) else { return }
+        let autoBakeEnabled = UserDefaults.standard.bool(forKey: "auto_bake_scene")
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
         guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
             print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): not a scene project \(contentRoot.path)")
@@ -233,24 +318,62 @@ enum SceneOfflineBakeService {
 
         let displayIDs = displayIDs(for: targetScreens)
 
-        let record = downloadedRecord(forResolvedContentRoot: contentRoot)
-        let completion: SceneBakeQueueService.Completion = { result in
-            guard case .success(let artifact) = result else { return }
-            let videoURL = URL(fileURLWithPath: artifact.videoPath)
-            VideoWallpaperManager.shared.enqueueAutomaticOptimizationForBakedScene(
-                videoURL: videoURL,
-                title: record?.item.title ?? contentRoot.lastPathComponent,
-                pipelineItemID: record?.item.id
-            )
-            if #available(macOS 26.0, *) {
-                Task {
-                    await syncRealtimeBakeToLockScreen(
-                        artifact: artifact,
-                        itemID: record?.item.id,
-                        displayIDs: displayIDs,
-                        reason: reason
-                    )
+        Task(priority: .utility) {
+            do {
+                let record = await MainActor.run {
+                    downloadedRecord(forResolvedContentRoot: contentRoot)
                 }
+
+                if let artifact = usableArtifact(from: record) {
+                    await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: record?.item.id, displayIDs: displayIDs, reason: reason)
+                    print("[SceneOfflineBake] realtime companion bake cache hit (\(reason)): \(artifact.videoPath)")
+                    return
+                }
+
+                guard autoBakeEnabled else {
+                    print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): cache miss and auto_bake_scene is disabled")
+                    return
+                }
+
+                let eligibility: SceneBakeEligibilitySnapshot
+                if let existing = record?.sceneBakeEligibility,
+                   existing.contentRootPath == contentRoot.path {
+                    eligibility = existing
+                } else {
+                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
+                        print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): insufficient memory for analysis")
+                        return
+                    }
+                    eligibility = try await Task.detached(priority: .utility) {
+                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: contentRoot, intent: .desktopLoop, strict: false)
+                    }.value
+                    if let itemID = record?.item.id {
+                        await MainActor.run {
+                            MediaLibraryService.shared.attachSceneBakeEligibility(
+                                itemID: itemID,
+                                snapshot: eligibility,
+                                triggerAutoBake: false
+                            )
+                        }
+                    }
+                }
+
+                let itemID = record?.item.id
+                let cacheItemID = itemID ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
+                let artifact = try await bake(
+                    eligibility: eligibility,
+                    contentRoot: contentRoot,
+                    cacheItemID: cacheItemID,
+                    renderer: .wallpaperWgpu,
+                    persistArtifactToItemID: itemID,
+                    progressItemID: itemID
+                )
+                print("[SceneOfflineBake] realtime companion bake finished (\(reason)): \(artifact.videoPath)")
+                await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: itemID, displayIDs: displayIDs, reason: reason)
+            } catch SceneOfflineBakeError.concurrentBakeInProgress {
+                print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): another bake is running")
+            } catch {
+                print("[SceneOfflineBake] realtime companion bake failed (\(reason)): \(error.localizedDescription)")
             }
         }
         enqueueBakeForAppliedScene(path: contentRoot.path, completion: completion)
@@ -279,34 +402,50 @@ enum SceneOfflineBakeService {
             print("[SceneOfflineBake] realtime companion bake synced lock screen (\(reason)): display=\(displayIDs) video=\(videoID)")
         } else {
             // 动态锁屏关闭：用烘焙产物的静态帧设置桌面 poster（不启动视频播放器）
-            if let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(forLocalVideo: videoURL, fallbackPosterURL: nil) {
-                let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                    .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                    .allowClipping: true
-                ]
-                // 只把 poster 推给目标显示器，绝不能写回 NSScreen.screens 全集 ——
-                // 否则用户只在屏幕 N 上启用场景实时渲染时，烘焙完成会把静帧 poster
-                // 顺手贴到其它屏的桌面（其它屏没有 wallpaper-wgpu 叠层挡着，直接可见）。
-                // 入参 displayIDs 已由调用方按 targetScreens 精确指定，这里照单全收。
-                let targetScreens: [NSScreen]
-                if displayIDs.isEmpty {
-                    // 调用方未指定 → 退回历史行为（兼容无显示器信息的路径）
-                    targetScreens = NSScreen.screens
-                } else {
-                    let idSet = Set(displayIDs)
-                    targetScreens = NSScreen.screens.filter { screen in
-                        guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-                            return false
-                        }
-                        return idSet.contains(n.uint32Value)
-                    }
-                }
-                for screen in targetScreens {
-                    try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
-                }
-                print("[SceneOfflineBake] realtime companion bake set desktop poster (\(reason)) on \(targetScreens.count) screen(s) display=\(displayIDs): \(posterURL.path)")
+            guard let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
+                forLocalVideo: videoURL,
+                fallbackPosterURL: nil
+            ) else {
+                print("[SceneOfflineBake] realtime companion bake could not generate desktop poster (\(reason)): \(videoURL.path)")
+                return
             }
+            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                .allowClipping: true
+            ]
+            // 只把 poster 推给目标显示器，绝不能写回 NSScreen.screens 全集 ——
+            // 否则用户只在屏幕 N 上启用场景实时渲染时，烘焙完成会把静帧 poster
+            // 顺手贴到其它屏的桌面（其它屏没有 wallpaper-wgpu 叠层挡着，直接可见）。
+            // 入参 displayIDs 已由调用方按 targetScreens 精确指定，这里照单全收。
+            let targetScreens: [NSScreen]
+            if displayIDs.isEmpty {
+                // 调用方未指定 → 退回历史行为（兼容无显示器信息的路径）
+                targetScreens = NSScreen.screens
+            } else {
+                let idSet = Set(displayIDs)
+                targetScreens = NSScreen.screens.filter { screen in
+                    guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                        return false
+                    }
+                    return idSet.contains(n.uint32Value)
+                }
+            }
+            guard !targetScreens.isEmpty else {
+                print("[SceneOfflineBake] realtime companion bake has no matching display for desktop poster (\(reason)): display=\(displayIDs)")
+                return
+            }
+
+            var appliedScreens = 0
+            for screen in targetScreens {
+                do {
+                    try NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
+                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
+                    appliedScreens += 1
+                } catch {
+                    print("[SceneOfflineBake] failed to set desktop poster (\(reason)) on \(screen.localizedName): \(error.localizedDescription)")
+                }
+            }
+            print("[SceneOfflineBake] realtime companion bake set desktop poster (\(reason)) on \(appliedScreens)/\(targetScreens.count) screen(s) display=\(displayIDs): \(posterURL.path)")
         }
     }
 
@@ -417,6 +556,7 @@ enum SceneOfflineBakeService {
 
     /// 与资格快照配套；`cacheItemID` 通常等于 `MediaItem.id`，无记录时用 `stableOrphanCacheItemID`。
     /// - Parameter persistArtifactToItemID: 非 nil 时将成品写回对应下载记录。
+    /// - Parameter progressItemID: 用于跨详情页恢复的进度追踪 item id；默认取 `persistArtifactToItemID`。
     static func bake(
         eligibility: SceneBakeEligibilitySnapshot,
         contentRoot: URL,
@@ -425,14 +565,29 @@ enum SceneOfflineBakeService {
         fps: Int32? = nil,
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         persistArtifactToItemID: String? = nil,
+        progressItemID: String? = nil,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
-        let effectiveFPS = resolvedBakeFPS(fps)
-        let effectiveDuration = resolvedBakeDuration(durationSeconds)
+        let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
+        let effectiveDuration: Double
+        if let durationSeconds {
+            effectiveDuration = durationSeconds
+        } else {
+            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
+        }
+        let trackedItemID = progressItemID ?? persistArtifactToItemID
         // 并发门控：防止多个烘焙同时运行
         let entered = await SceneOfflineBakeConcurrencyGate.shared.tryEnter()
         guard entered else {
             throw SceneOfflineBakeError.concurrentBakeInProgress
+        }
+        await MainActor.run {
+            SceneOfflineBakeProgressTracker.shared.begin(itemID: trackedItemID)
+        }
+        let trackedProgress: (@MainActor (Double) -> Void)? = { value in
+            SceneOfflineBakeProgressTracker.shared.update(itemID: trackedItemID, progress: value)
+            progress?(value)
         }
         do {
             let result = try await bakeCore(
@@ -443,12 +598,20 @@ enum SceneOfflineBakeService {
                 fps: effectiveFPS,
                 renderer: renderer,
                 persistArtifactToItemID: persistArtifactToItemID,
-                progress: progress
+                progress: trackedProgress
             )
             await SceneOfflineBakeConcurrencyGate.shared.leave()
+            await MainActor.run {
+                SceneOfflineBakeProgressTracker.shared.finish(itemID: trackedItemID, success: true)
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: result)
+            }
             return result
         } catch {
             await SceneOfflineBakeConcurrencyGate.shared.leave()
+            await MainActor.run {
+                SceneOfflineBakeProgressTracker.shared.finish(itemID: trackedItemID, success: false)
+                NotificationCenter.default.post(name: .sceneOfflineBakeDidComplete, object: nil)
+            }
             throw error
         }
     }
@@ -956,7 +1119,7 @@ enum SceneOfflineBakeService {
     }
 
     /// 与 `MediaDownloadRecord.sceneBakeEligibility` 配套；默认主屏逻辑分辨率 × scale。
-    /// FPS 默认值取自用户设置 `scene_bake_fps`（回退 30）。
+    /// FPS 默认值取自用户设置 `scene_bake_fps`（回退 30），且不超过显示器最高刷新率。
     static func bake(
         record: MediaDownloadRecord,
         durationSeconds: Double? = nil,
@@ -964,8 +1127,14 @@ enum SceneOfflineBakeService {
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
-        let effectiveFPS = resolvedBakeFPS(fps)
-        let effectiveDuration = resolvedBakeDuration(durationSeconds)
+        let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
+        let effectiveDuration: Double
+        if let durationSeconds {
+            effectiveDuration = durationSeconds
+        } else {
+            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+            effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
+        }
         guard let eligibility = record.sceneBakeEligibility else {
             throw SceneOfflineBakeError.ineligible
         }
@@ -978,6 +1147,7 @@ enum SceneOfflineBakeService {
             fps: effectiveFPS,
             renderer: renderer,
             persistArtifactToItemID: record.id,
+            progressItemID: record.item.id,
             progress: progress
         )
     }
@@ -1003,14 +1173,15 @@ enum SceneOfflineBakeService {
             ) {
                 return
             }
-            await MainActor.run {
-                SceneBakeQueueService.shared.enqueue(record: record) { result in
-                    switch result {
-                    case .success(let artifact):
-                        print("[SceneOfflineBake] auto-bake finished \(itemID): \(artifact.videoPath)")
-                    case .failure(let error):
-                        print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
-                    }
+            do {
+                // 进度由 SceneOfflineBakeProgressTracker 统一广播
+                _ = try await bake(record: record)
+                print("[SceneOfflineBake] auto-bake finished \(itemID)")
+            } catch {
+                if case SceneOfflineBakeError.concurrentBakeInProgress = error {
+                    print("[SceneOfflineBake] auto-bake skipped (busy) \(itemID)")
+                } else {
+                    print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
                 }
             }
         }

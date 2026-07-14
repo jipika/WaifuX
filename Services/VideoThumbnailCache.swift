@@ -99,13 +99,76 @@ final class VideoThumbnailCache {
     /// Scene 烘焙封面使用稳定的 item 级缓存文件，避免每次重新烘焙因为 MP4 文件名变化而堆出多张抽帧图。
     func cachedSceneBakePosterFileURLIfExists(itemID: String) -> URL? {
         let poster = sceneBakePosterCacheURL(itemID: itemID)
-        guard fileManager.fileExists(atPath: poster.path),
-              let attrs = try? fileManager.attributesOfItem(atPath: poster.path),
+        guard isUsableCachedImage(at: poster) else { return nil }
+        return poster
+    }
+
+    /// 仅返回已缓存的动态壁纸 poster，不触发 AVFoundation 抽帧。
+    /// 调度器切换下一张时优先走这里，避免串行抽帧把切换卡住。
+    func cachedPosterJPEGFileURLIfExists(forLocalVideo videoURL: URL) -> URL? {
+        guard videoURL.isFileURL else { return nil }
+        let pathKey = videoURL.standardizedFileURL.path
+        guard fileManager.fileExists(atPath: pathKey) else { return nil }
+        let poster = posterCacheURL(forPathKey: pathKey)
+        guard isUsableCachedImage(at: poster) else { return nil }
+        return poster
+    }
+
+    /// 调度/桌面静态底图：只读磁盘上已经写好的帧，绝不触发抽帧。
+    /// 优先级：
+    /// 1. scene 烘焙稳定封面 `scene_bake_<itemID>.jpg`（烘焙完成时写入）
+    /// 2. 下载完成后的高清 poster `poster_wallpaper_<path>.jpg`
+    /// 3. 列表缩略图缓存（同路径 hash 的 `.jpg`，来自视频抽帧）
+    /// 4. 调用方显式 fallback（必须是 file URL 且可用）
+    ///
+    /// **不用** Workshop 工程自带的 `preview.*`（商店缩略图，不适合桌面静态 fallback）。
+    func existingWallpaperPosterURL(
+        forLocalVideo videoURL: URL?,
+        sceneBakeItemID: String? = nil,
+        projectRoot: URL? = nil,
+        fallbackPosterURL: URL? = nil
+    ) -> URL? {
+        _ = projectRoot // 兼容旧调用；不再从工程目录取 preview.*
+
+        if let sceneBakeItemID,
+           let scenePoster = cachedSceneBakePosterFileURLIfExists(itemID: sceneBakeItemID) {
+            return scenePoster
+        }
+
+        if let videoURL {
+            if let poster = cachedPosterJPEGFileURLIfExists(forLocalVideo: videoURL) {
+                return poster
+            }
+            if let thumb = cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
+                return thumb
+            }
+        }
+
+        if let fallbackPosterURL,
+           fallbackPosterURL.isFileURL,
+           isUsableCachedImage(at: fallbackPosterURL) {
+            return fallbackPosterURL
+        }
+
+        return nil
+    }
+
+    /// 列表缩略图磁盘缓存（`generateThumbnail` 写入），不触发生成。
+    func cachedListThumbnailFileURLIfExists(forLocalVideo videoURL: URL) -> URL? {
+        guard videoURL.isFileURL else { return nil }
+        let thumb = cacheURL(for: videoURL)
+        guard isUsableCachedImage(at: thumb) else { return nil }
+        return thumb
+    }
+
+    private func isUsableCachedImage(at url: URL) -> Bool {
+        guard fileManager.fileExists(atPath: url.path),
+              let attrs = try? fileManager.attributesOfItem(atPath: url.path),
               let sz = attrs[.size] as? NSNumber,
               sz.intValue > 500 else {
-            return nil
+            return false
         }
-        return poster
+        return true
     }
 
     /// 获取视频缩略图 URL

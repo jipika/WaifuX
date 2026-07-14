@@ -192,11 +192,15 @@ final class ImportService: ObservableObject {
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
 
             if isDir.boolValue {
-                // 目录：先检查是否是 Workshop 项目（含 project.json）
-                if let workshopItem = findWorkshopItem(in: url) {
-                    items.append(workshopItem)
+                // 目录：先收集 Workshop 项目（含 project.json），支持父目录批量导入
+                let workshopItems = findWorkshopItems(in: url)
+                if !workshopItems.isEmpty {
+                    items.append(contentsOf: workshopItems)
+                    // 同级/树内的松散图片/视频仍可导入，但会跳过 workshop 工程树与 preview.*
+                    let looseItems = await scanDirectory(url)
+                    items.append(contentsOf: looseItems)
                 } else {
-                    // 普通目录：递归扫描子文件
+                    // 普通目录：递归扫描子文件（跳过 WE preview 与 workshop 工程树内文件）
                     let subItems = await scanDirectory(url)
                     items.append(contentsOf: subItems)
                 }
@@ -206,12 +210,14 @@ final class ImportService: ObservableObject {
                 if ext == "pkg" {
                     // .pkg 文件：取上级目录作为 Workshop 源
                     let parentDir = url.deletingLastPathComponent()
-                    if let workshopItem = findWorkshopItem(in: parentDir) {
+                    let workshopItems = findWorkshopItems(in: parentDir)
+                    if let workshopItem = workshopItems.first {
                         items.append(workshopItem)
                     } else {
                         print("[ImportService] .pkg file found but no project.json in parent dir: \(parentDir.path)")
                     }
                 } else if isImageFile(url) {
+                    // 用户显式选中 preview.* 时仍导入；目录扫描路径会过滤
                     items.append(ImportItem(type: .wallpaper(sourceURL: url)))
                 } else if isVideoFile(url) {
                     items.append(ImportItem(type: .media(sourceURL: url)))
@@ -238,6 +244,22 @@ final class ImportService: ObservableObject {
 
             var urls: [URL] = []
             for case let fileURL as URL in enumerator {
+                var isDir: AnyObject?
+                try? (fileURL as NSURL).getResourceValue(&isDir, forKey: URLResourceKey.isDirectoryKey)
+                let isDirectory = isDir as? Bool ?? false
+
+                // 跳过 Workshop 工程目录树：整体由 workshop 导入路径处理，
+                // 避免把 project 内的 preview.jpg / scene 贴图等当成独立壁纸。
+                if isDirectory,
+                   fileManager.fileExists(atPath: fileURL.appendingPathComponent("project.json").path) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                if isInsideWorkshopProject(fileURL, under: dir) {
+                    if isDirectory { enumerator.skipDescendants() }
+                    continue
+                }
+                if isDirectory { continue }
                 urls.append(fileURL)
             }
             return urls
@@ -246,11 +268,11 @@ final class ImportService: ObservableObject {
         for fileURL in collectedURLs {
             guard !Task.isCancelled else { break }
 
-            var isDir: AnyObject?
-            try? (fileURL as NSURL).getResourceValue(&isDir, forKey: URLResourceKey.isDirectoryKey)
-            let isDirectory = isDir as? Bool ?? false
-
-            if isDirectory { continue } // 不递归子目录（避免扫描 workshop 深层结构）
+            // WE 工程预览图命名固定为 preview.*，目录扫描时不得单独入库
+            if isWorkshopPreviewImage(fileURL) {
+                print("[ImportService] Skipping workshop preview image: \(fileURL.lastPathComponent)")
+                continue
+            }
 
             if isImageFile(fileURL) {
                 items.append(ImportItem(type: .wallpaper(sourceURL: fileURL)))
@@ -261,30 +283,98 @@ final class ImportService: ObservableObject {
         return items
     }
 
-    /// 在指定目录中查找 project.json → Workshop 项目
-    private func findWorkshopItem(in dir: URL) -> ImportItem? {
-        guard let enumerator = fileManager.enumerator(
-            at: dir,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
+    /// 在指定目录中收集所有 Workshop 项目（每个 project.json 一项）
+    /// - 单工程目录：返回该项
+    /// - 父目录下挂多个 workshop 子目录：全部返回，避免只导第一个
+    private func findWorkshopItems(in dir: URL) -> [ImportItem] {
+        // 当前目录本身就是工程根
+        let rootProject = dir.appendingPathComponent("project.json")
+        if fileManager.fileExists(atPath: rootProject.path),
+           let item = makeWorkshopImportItem(projectRoot: dir, projectJSONURL: rootProject) {
+            return [item]
+        }
 
-        for case let fileURL as URL in enumerator {
-            if fileURL.lastPathComponent == "project.json" {
-                guard let data = try? Data(contentsOf: fileURL),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    return nil
-                }
-                return ImportItem(
-                    type: .workshop(
-                        directoryURL: dir,
-                        projectJSONURL: fileURL,
-                        json: json
-                    )
-                )
+        // 批量优先：直接子目录各自是 workshop 工程
+        // （必须先于 resolve，否则父目录会被 resolve 到「第一个」子工程而漏导）
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var items: [ImportItem] = []
+        var seenRoots = Set<String>()
+        for child in children {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: child.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let projectRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: child)
+            let projectURL = projectRoot.appendingPathComponent("project.json")
+            guard fileManager.fileExists(atPath: projectURL.path) else { continue }
+            let key = projectRoot.standardizedFileURL.path
+            guard seenRoots.insert(key).inserted else { continue }
+            if let item = makeWorkshopImportItem(projectRoot: projectRoot, projectJSONURL: projectURL) {
+                items.append(item)
             }
         }
-        return nil
+        if !items.isEmpty {
+            return items
+        }
+
+        // 单工程壳目录（如 content/<id> 再往下一层才有 project.json）
+        let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: dir)
+        if resolved.standardizedFileURL != dir.standardizedFileURL {
+            let resolvedProject = resolved.appendingPathComponent("project.json")
+            if fileManager.fileExists(atPath: resolvedProject.path),
+               let item = makeWorkshopImportItem(projectRoot: resolved, projectJSONURL: resolvedProject) {
+                return [item]
+            }
+        }
+        return []
+    }
+
+    private func makeWorkshopImportItem(projectRoot: URL, projectJSONURL: URL) -> ImportItem? {
+        guard let data = try? Data(contentsOf: projectJSONURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return ImportItem(
+            type: .workshop(
+                directoryURL: projectRoot,
+                projectJSONURL: projectJSONURL,
+                json: json
+            )
+        )
+    }
+
+    /// 文件是否位于某个含 project.json 的 Workshop 工程目录下（含扫描根自身）
+    private func isInsideWorkshopProject(_ fileURL: URL, under scanRoot: URL) -> Bool {
+        let rootPath = scanRoot.standardizedFileURL.path
+        var current = fileURL.deletingLastPathComponent().standardizedFileURL
+
+        while true {
+            let currentPath = current.path
+            // 仅检查扫描根及其子路径
+            guard currentPath == rootPath || currentPath.hasPrefix(rootPath + "/") else {
+                return false
+            }
+            if fileManager.fileExists(atPath: current.appendingPathComponent("project.json").path) {
+                return true
+            }
+            if currentPath == rootPath { return false }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == currentPath { return false }
+            current = parent
+        }
+    }
+
+    /// Wallpaper Engine 工程固定预览图名（大小写不敏感）
+    private func isWorkshopPreviewImage(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return name == "preview.jpg"
+            || name == "preview.jpeg"
+            || name == "preview.png"
+            || name == "preview.webp"
+            || name == "preview.gif"
     }
 
     // MARK: - 处理单个导入项
@@ -327,9 +417,13 @@ final class ImportService: ObservableObject {
             let wallpaper = makeImportedWallpaper(from: destURL)
             wallpaperLibrary.recordDownload(wallpaper, fileURL: destURL)
 
-            // 如果指定了文件夹，归入该文件夹
+            // 如果指定了文件夹，归入该文件夹（导入只写入下载集合）
             if let folderID {
-                wallpaperLibrary.moveWallpaperToFolder(wallpaperID: wallpaper.id, folderID: folderID)
+                wallpaperLibrary.moveWallpaperToFolder(
+                    wallpaperID: wallpaper.id,
+                    folderID: folderID,
+                    scope: .downloads
+                )
             }
 
             return true
@@ -418,9 +512,13 @@ final class ImportService: ObservableObject {
             let mediaItem = await makeImportedMediaItem(from: destURL)
             mediaLibrary.recordDownload(item: mediaItem, localFileURL: destURL)
 
-            // 如果指定了文件夹，归入该文件夹
+            // 如果指定了文件夹，归入该文件夹（导入只写入下载集合）
             if let folderID {
-                mediaLibrary.moveMediaToFolder(mediaID: mediaItem.id, folderID: folderID)
+                mediaLibrary.moveMediaToFolder(
+                    mediaID: mediaItem.id,
+                    folderID: folderID,
+                    scope: .downloads
+                )
             }
 
             return true
@@ -571,7 +669,11 @@ final class ImportService: ObservableObject {
             mediaLibrary.recordDownload(item: item, localFileURL: destDir)
 
             if let folderID {
-                mediaLibrary.moveMediaToFolder(mediaID: item.id, folderID: folderID)
+                mediaLibrary.moveMediaToFolder(
+                    mediaID: item.id,
+                    folderID: folderID,
+                    scope: .downloads
+                )
             }
 
             return true
@@ -590,8 +692,7 @@ final class ImportService: ObservableObject {
         ) else { return nil }
 
         for case let fileURL as URL in enumerator {
-            let name = fileURL.lastPathComponent.lowercased()
-            if name == "preview.jpg" || name == "preview.jpeg" || name == "preview.png" || name == "preview.webp" || name == "preview.gif" {
+            if isWorkshopPreviewImage(fileURL) {
                 return fileURL
             }
         }

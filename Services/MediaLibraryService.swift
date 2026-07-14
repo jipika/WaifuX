@@ -100,16 +100,20 @@ final class MediaLibraryService: ObservableObject {
             .map(\.item)
     }
 
-    /// 获取指定文件夹内的收藏项目
+/// 获取指定文件夹内的收藏项目
     func favoriteItems(inFolder folderID: String?) -> [MediaItem] {
-        favoriteRecords
-            .filter { $0.isActive && $0.folderID == folderID }
+        let target = Self.normalizedFolderID(folderID)
+        return favoriteRecords
+            .filter { $0.isActive && Self.normalizedFolderID($0.folderID) == target }
             .map(\.item)
     }
 
     /// 获取指定文件夹内的下载项目
     func downloadedItems(inFolder folderID: String?) -> [MediaDownloadRecord] {
-        downloadRecords.filter { $0.isActive && $0.folderID == folderID }
+        let target = Self.normalizedFolderID(folderID)
+        return downloadRecords.filter {
+            $0.isActive && Self.normalizedFolderID($0.folderID) == target
+        }
     }
 
     var downloadedItems: [MediaDownloadRecord] {
@@ -117,8 +121,10 @@ final class MediaLibraryService: ObservableObject {
     }
 
     /// 根目录下载项目（无 folderID）
-    var rootDownloadedItems: [MediaDownloadRecord] {
-        downloadRecords.filter { $0.isActive && $0.folderID == nil }
+    func rootDownloadedItems() -> [MediaDownloadRecord] {
+        downloadRecords.filter {
+            $0.isActive && Self.normalizedFolderID($0.folderID) == nil
+        }
     }
 
     var pendingSyncFavorites: [MediaFavoriteRecord] {
@@ -248,7 +254,8 @@ final class MediaLibraryService: ObservableObject {
 
         SceneBakeEligibilityAnalyzer.scheduleAnalysisIfSceneProject(itemID: item.id, localFileURL: localFileURL)
 
-        // 视频文件下载完成后异步生成抽帧，供封面展示使用
+        // 视频文件下载完成后异步生成抽帧，供封面展示使用；
+        // 若开启「下载时自动补帧」，再入队离线补帧（不走调度/设壁纸路径）。
         let videoExts: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
         let videoFileURL: URL? = if videoExts.contains(localFileURL.pathExtension.lowercased()) {
             localFileURL
@@ -257,8 +264,13 @@ final class MediaLibraryService: ObservableObject {
             MediaItem.resolveLocalVideoFile(from: localFileURL)
         }
         if let videoFileURL {
+            let title = item.title
             Task { @MainActor in
                 _ = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoFileURL)
+                FrameInterpolationQueueService.shared.enqueueAfterDownloadIfNeeded(
+                    videoURL: videoFileURL,
+                    title: title
+                )
             }
         }
     }
@@ -902,48 +914,69 @@ final class MediaLibraryService: ObservableObject {
 
     // MARK: - 文件夹移动
 
+    /// 库文件夹归属作用域。
+    /// 收藏与下载各自维护独立的 folderID，绝不能互相污染，
+    /// 否则会出现“下载归夹后收藏里的项消失 / 反过来突然冒出来”的假象。
+    enum FolderMembershipScope {
+        case favorites
+        case downloads
+    }
+
+    /// 将空字符串 / 空白 folderID 规范为 nil（根目录）。
+    static func normalizedFolderID(_ folderID: String?) -> String? {
+        guard let folderID else { return nil }
+        let trimmed = folderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// 将媒体项移动到指定文件夹。
     /// - Parameters:
     ///   - mediaID: 媒体项 ID
     ///   - folderID: 目标文件夹 ID；传 nil 表示移回根目录
+    ///   - scope: 只改收藏或只改下载，禁止跨集合写 folderID
     ///   - fallback: 用于「扫描进来但还没有 DownloadRecord 的项」的回退信息。
-    ///     当传入且 favorite/download 都不命中时，先调 `recordDownload` 把该项补登成下载记录，
+    ///     当 scope=.downloads 且 favorite/download 都不命中时，先调 `recordDownload` 把该项补登成下载记录，
     ///     再写 folderID，避免拖入文件夹后看起来无效。
     func moveMediaToFolder(
         mediaID: String,
         folderID: String?,
+        scope: FolderMembershipScope,
         fallback: (item: MediaItem, fileURL: URL)? = nil
     ) {
-        var hit = false
-        // 更新收藏记录
-        if let index = favoriteRecords.firstIndex(where: { $0.item.id == mediaID }) {
-            favoriteRecords[index].folderID = folderID
-            saveFavToCache(favoriteRecords[index])
-            syncFavIndex()
-            favoriteRecords = Array(favoriteRecords)
-            hit = true
-        }
-        // 更新下载记录
-        if let index = downloadRecords.firstIndex(where: { $0.item.id == mediaID }) {
-            downloadRecords[index].folderID = folderID
-            saveDlToCache(downloadRecords[index])
-            syncDlIndex()
-            downloadRecords = Array(downloadRecords)
-            hit = true
-        }
-        // 都没命中：尝试从 fallback 补登记，再写 folderID
-        if !hit, let fallback {
-            recordDownload(item: fallback.item, localFileURL: fallback.fileURL)
+        let targetFolderID = Self.normalizedFolderID(folderID)
+
+        switch scope {
+        case .favorites:
+            if let index = favoriteRecords.firstIndex(where: { $0.item.id == mediaID }) {
+                favoriteRecords[index].folderID = targetFolderID
+                saveFavToCache(favoriteRecords[index])
+                syncFavIndex()
+                favoriteRecords = Array(favoriteRecords)
+            }
+        case .downloads:
+            var hit = false
             if let index = downloadRecords.firstIndex(where: { $0.item.id == mediaID }) {
-                downloadRecords[index].folderID = folderID
+                downloadRecords[index].folderID = targetFolderID
                 saveDlToCache(downloadRecords[index])
                 syncDlIndex()
                 downloadRecords = Array(downloadRecords)
+                hit = true
+            }
+            // 都没命中：尝试从 fallback 补登记，再写 folderID
+            if !hit, let fallback {
+                recordDownload(item: fallback.item, localFileURL: fallback.fileURL)
+                if let index = downloadRecords.firstIndex(where: { $0.item.id == mediaID }) {
+                    downloadRecords[index].folderID = targetFolderID
+                    saveDlToCache(downloadRecords[index])
+                    syncDlIndex()
+                    downloadRecords = Array(downloadRecords)
+                }
             }
         }
     }
 
     func moveItemsToRoot(fromFolder folderID: String) {
+        guard let folderID = Self.normalizedFolderID(folderID) else { return }
         var favoritesChanged = false
         for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
             favoriteRecords[index].folderID = nil
@@ -962,6 +995,63 @@ final class MediaLibraryService: ObservableObject {
             rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
+    }
+
+    /// 清理无效 folderID：空字符串、指向不存在文件夹、或跨集合引用。
+    /// 返回被修正的记录数。
+    @discardableResult
+    func sanitizeFolderMembership(
+        validFavoriteFolderIDs: Set<String>,
+        validDownloadFolderIDs: Set<String>
+    ) -> Int {
+        var fixed = 0
+        var favoritesChanged = false
+        var downloadsChanged = false
+
+        for index in favoriteRecords.indices {
+            let raw = favoriteRecords[index].folderID
+            let normalized = Self.normalizedFolderID(raw)
+            let next: String?
+            if let normalized, validFavoriteFolderIDs.contains(normalized) {
+                next = normalized
+            } else {
+                next = nil
+            }
+            if raw != next {
+                favoriteRecords[index].folderID = next
+                favoritesChanged = true
+                fixed += 1
+            }
+        }
+
+        for index in downloadRecords.indices {
+            let raw = downloadRecords[index].folderID
+            let normalized = Self.normalizedFolderID(raw)
+            let next: String?
+            if let normalized, validDownloadFolderIDs.contains(normalized) {
+                next = normalized
+            } else {
+                next = nil
+            }
+            if raw != next {
+                downloadRecords[index].folderID = next
+                downloadsChanged = true
+                fixed += 1
+            }
+        }
+
+        if favoritesChanged {
+            rebuildFavCache()
+            favoriteRecords = Array(favoriteRecords)
+        }
+        if downloadsChanged {
+            rebuildDlCache()
+            downloadRecords = Array(downloadRecords)
+        }
+        if fixed > 0 {
+            print("[MediaLibraryService] Sanitized \(fixed) folder membership field(s)")
+        }
+        return fixed
     }
 
     /// 清理无效下载记录（文件不存在的记录）
@@ -1353,14 +1443,18 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 获取指定文件夹内的收藏壁纸
     func favoriteWallpapers(inFolder folderID: String?) -> [Wallpaper] {
-        favoriteRecords
-            .filter { $0.isActive && $0.folderID == folderID }
+        let target = Self.normalizedFolderID(folderID)
+        return favoriteRecords
+            .filter { $0.isActive && Self.normalizedFolderID($0.folderID) == target }
             .map(\.wallpaper)
     }
 
     /// 获取指定文件夹内的下载壁纸
     func downloadedWallpapers(inFolder folderID: String?) -> [WallpaperDownloadRecord] {
-        downloadRecords.filter { $0.isActive && $0.folderID == folderID }
+        let target = Self.normalizedFolderID(folderID)
+        return downloadRecords.filter {
+            $0.isActive && Self.normalizedFolderID($0.folderID) == target
+        }
     }
 
     var downloadedWallpapers: [WallpaperDownloadRecord] {
@@ -1750,48 +1844,66 @@ final class WallpaperLibraryService: ObservableObject {
 
     // MARK: - 文件夹移动
 
+    /// 库文件夹归属作用域。
+    /// 收藏与下载各自维护独立的 folderID，绝不能互相污染。
+    enum FolderMembershipScope {
+        case favorites
+        case downloads
+    }
+
+    /// 将空字符串 / 空白 folderID 规范为 nil（根目录）。
+    static func normalizedFolderID(_ folderID: String?) -> String? {
+        guard let folderID else { return nil }
+        let trimmed = folderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// 将壁纸移动到指定文件夹。
     /// - Parameters:
     ///   - wallpaperID: 壁纸 ID
     ///   - folderID: 目标文件夹 ID；传 nil 表示移回根目录
+    ///   - scope: 只改收藏或只改下载，禁止跨集合写 folderID
     ///   - fallback: 用于「扫描进来但还没有 DownloadRecord 的项」的回退信息。
-    ///     当传入且 favorite/download 都不命中时，先调 `recordDownload` 把该项补登成下载记录，
-    ///     再写 folderID，避免拖入文件夹后看起来无效。
+    ///     当 scope=.downloads 且都不命中时，先调 `recordDownload` 补登记再写 folderID。
     func moveWallpaperToFolder(
         wallpaperID: String,
         folderID: String?,
+        scope: FolderMembershipScope,
         fallback: (wallpaper: Wallpaper, fileURL: URL)? = nil
     ) {
-        var hit = false
-        // 更新收藏记录
-        if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
-            favoriteRecords[index].folderID = folderID
-            saveFavToCache(favoriteRecords[index])
-            syncFavIndex()
-            favoriteRecords = Array(favoriteRecords)
-            hit = true
-        }
-        // 更新下载记录
-        if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
-            downloadRecords[index].folderID = folderID
-            saveDlToCache(downloadRecords[index])
-            syncDlIndex()
-            downloadRecords = Array(downloadRecords)
-            hit = true
-        }
-        // 都没命中：尝试从 fallback 补登记，再写 folderID
-        if !hit, let fallback {
-            recordDownload(fallback.wallpaper, fileURL: fallback.fileURL)
+        let targetFolderID = Self.normalizedFolderID(folderID)
+
+        switch scope {
+        case .favorites:
+            if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
+                favoriteRecords[index].folderID = targetFolderID
+                saveFavToCache(favoriteRecords[index])
+                syncFavIndex()
+                favoriteRecords = Array(favoriteRecords)
+            }
+        case .downloads:
+            var hit = false
             if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
-                downloadRecords[index].folderID = folderID
+                downloadRecords[index].folderID = targetFolderID
                 saveDlToCache(downloadRecords[index])
                 syncDlIndex()
                 downloadRecords = Array(downloadRecords)
+                hit = true
+            }
+            if !hit, let fallback {
+                recordDownload(fallback.wallpaper, fileURL: fallback.fileURL)
+                if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
+                    downloadRecords[index].folderID = targetFolderID
+                    saveDlToCache(downloadRecords[index])
+                    syncDlIndex()
+                    downloadRecords = Array(downloadRecords)
+                }
             }
         }
     }
 
     func moveItemsToRoot(fromFolder folderID: String) {
+        guard let folderID = Self.normalizedFolderID(folderID) else { return }
         var favoritesChanged = false
         for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
             favoriteRecords[index].folderID = nil
@@ -1810,6 +1922,63 @@ final class WallpaperLibraryService: ObservableObject {
             rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
+    }
+
+    /// 清理无效 folderID：空字符串、指向不存在文件夹、或跨集合引用。
+    /// 返回被修正的记录数。
+    @discardableResult
+    func sanitizeFolderMembership(
+        validFavoriteFolderIDs: Set<String>,
+        validDownloadFolderIDs: Set<String>
+    ) -> Int {
+        var fixed = 0
+        var favoritesChanged = false
+        var downloadsChanged = false
+
+        for index in favoriteRecords.indices {
+            let raw = favoriteRecords[index].folderID
+            let normalized = Self.normalizedFolderID(raw)
+            let next: String?
+            if let normalized, validFavoriteFolderIDs.contains(normalized) {
+                next = normalized
+            } else {
+                next = nil
+            }
+            if raw != next {
+                favoriteRecords[index].folderID = next
+                favoritesChanged = true
+                fixed += 1
+            }
+        }
+
+        for index in downloadRecords.indices {
+            let raw = downloadRecords[index].folderID
+            let normalized = Self.normalizedFolderID(raw)
+            let next: String?
+            if let normalized, validDownloadFolderIDs.contains(normalized) {
+                next = normalized
+            } else {
+                next = nil
+            }
+            if raw != next {
+                downloadRecords[index].folderID = next
+                downloadsChanged = true
+                fixed += 1
+            }
+        }
+
+        if favoritesChanged {
+            rebuildFavCache()
+            favoriteRecords = Array(favoriteRecords)
+        }
+        if downloadsChanged {
+            rebuildDlCache()
+            downloadRecords = Array(downloadRecords)
+        }
+        if fixed > 0 {
+            print("[WallpaperLibraryService] Sanitized \(fixed) folder membership field(s)")
+        }
+        return fixed
     }
 
     private func loadPersistedState() {

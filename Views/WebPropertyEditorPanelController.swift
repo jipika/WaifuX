@@ -149,6 +149,7 @@ final class WebPropertyEditorPanelController {
         pendingInject = nil
 
         let htmlContent = loadHTMLEditorContent()
+        let rewardQRCodeDataURL = rewardQRCodeDataURL().jsEscaped
 
         // Scene design uses a completely different data model (dynamic text entries)
         if currentType == .sceneDesign {
@@ -164,6 +165,7 @@ final class WebPropertyEditorPanelController {
             window.sceneDesignData = \(designJS);
             window.wallpaperTitle = "\(escapedWallpaperTitle)";
             window.accentColor = "\(accentHex)";
+            window.rewardQRCodeDataURL = "\(rewardQRCodeDataURL)";
             document.getElementById('panelTitle').textContent = "\(escapedTitle)";
             if (typeof initSceneDesign === 'function') initSceneDesign();
             """
@@ -212,6 +214,7 @@ final class WebPropertyEditorPanelController {
         window.currentValues = \(valuesJS);
         window.wallpaperTitle = "\(escapedWallpaperTitle)";
         window.accentColor = "\(accentHex)";
+        window.rewardQRCodeDataURL = "\(rewardQRCodeDataURL)";
         document.getElementById('panelTitle').textContent = "\(escapedTitle)";
         if (typeof initFromData === 'function') initFromData();
         """
@@ -264,6 +267,17 @@ final class WebPropertyEditorPanelController {
             }
         }
         return Self.fallbackHTML
+    }
+
+    private func rewardQRCodeDataURL() -> String {
+        guard let image = NSImage(named: "RewardQRCode"),
+              let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let jpegData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.92]) else {
+            return ""
+        }
+
+        return "data:image/jpeg;base64,\(jpegData.base64EncodedString())"
     }
 
     // MARK: - Message Handlers

@@ -598,7 +598,12 @@ struct ContentView: View {
             .toolbar(.hidden, for: .automatic)
 
         case .manga(let route):
-            MangaDetailSheet(route: route)
+            MangaDetailSheet(
+                route: route,
+                onNavigateToManga: { selectedRoute in
+                    detailPath.append(.manga(selectedRoute))
+                }
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
                 .navigationBarBackButtonHidden(true)
