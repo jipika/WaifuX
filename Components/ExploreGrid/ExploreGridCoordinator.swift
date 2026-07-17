@@ -1,6 +1,18 @@
 import AppKit
 import SwiftUI
 
+/// 占位 scroller：不绘制、不响应命中，避免系统 overlay 滚动条闪现。
+@MainActor
+private final class ExploreGridInvisibleScroller: NSScroller {
+    override func draw(_ dirtyRect: NSRect) {}
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var usableParts: NSScroller.UsableParts {
+        get { .noScrollerParts }
+        set {}
+    }
+}
+
 @MainActor
 private final class ExploreGridScrollView: NSScrollView {
     weak var gridCoordinator: ExploreGridCoordinator?
@@ -12,8 +24,28 @@ private final class ExploreGridScrollView: NSScrollView {
             nextResponder?.scrollWheel(with: event)
             return
         }
+
+        // 两阶段滚动：
+        // 1) header 未收完时，向下滚只收 header，网格锁在顶部（避免“一起滚”的错位感）
+        // 2) header 已收完才进入网格内部滚动；在顶部向上滚则先展开 header
+        if let coordinator = gridCoordinator,
+           coordinator.handleHeaderPhaseScrollWheel(event) {
+            return
+        }
+
         gridCoordinator?.scrollingWillBeginOrContinue()
         super.scrollWheel(with: event)
+    }
+
+    override func tile() {
+        super.tile()
+        // tile 后系统可能又挂回 scroller；强制关掉并清掉占用宽度。
+        hasVerticalScroller = false
+        hasHorizontalScroller = false
+        verticalScroller?.isHidden = true
+        horizontalScroller?.isHidden = true
+        verticalScroller?.alphaValue = 0
+        horizontalScroller?.alphaValue = 0
     }
 
     override func layout() {
@@ -73,6 +105,7 @@ final class ExploreGridCoordinator: NSObject {
     var lastReloadToken: Int = 0
     var lastLayoutRefreshToken: Int = 0
     var lastVisibilityRefreshToken: Int = 0
+    var lastExternalScrollDownToken: Int = 0
     private var scrollDebounceWorkItem: DispatchWorkItem?
     private var restoreHoverWorkItem: DispatchWorkItem?
     private var lastLaidOutWidth: CGFloat = 0
@@ -96,7 +129,14 @@ final class ExploreGridCoordinator: NSObject {
     private var lastReportedVisibleItemRange: (min: Int, max: Int)?
     /// 滚动偏移只在足够变化或跨越 UI 阈值时回调 SwiftUI，避免滚动中持续发布状态
     private var lastReportedScrollOffset: CGFloat?
+    /// 细粒度 offset（用于可折叠 header 1:1 跟滚），与粗粒度 UI 阈值分离。
+    private var lastFineReportedScrollOffset: CGFloat?
     private var lastReportedContentHeight: CGFloat = 0
+    private var pendingFineScrollOffsetReport: DispatchWorkItem?
+    /// 本地缓存的 header 剩余/已收高度。滚轮事件可能在 SwiftUI update 前连发，
+    /// 必须立刻本地扣减，否则会把后续本该进入网格的滚动吞掉。
+    private var localHeaderRemaining: CGFloat = 0
+    private var localHeaderConsumed: CGFloat = 0
 
     init(_ parent: ExploreGridContainer) {
         self.parent = parent
@@ -121,8 +161,17 @@ final class ExploreGridCoordinator: NSObject {
         self.scrollView = ExploreGridScrollView()
         scrollView.wantsLayer = true
         scrollView.documentView = collectionView
+        // 彻底隐藏滚动条：自定义 InvisibleScroller + 关闭 scroller 开关
+        let invisibleV = ExploreGridInvisibleScroller()
+        invisibleV.scrollerStyle = .overlay
+        let invisibleH = ExploreGridInvisibleScroller()
+        invisibleH.scrollerStyle = .overlay
+        scrollView.verticalScroller = invisibleV
+        scrollView.horizontalScroller = invisibleH
         scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         scrollView.scrollsDynamically = true
         scrollView.verticalScrollElasticity = .allowed
@@ -177,6 +226,7 @@ final class ExploreGridCoordinator: NSObject {
             pendingReload?.cancel()
             pendingBatchUpdate?.cancel()
             pendingViewUpdateLayout?.cancel()
+            pendingFineScrollOffsetReport?.cancel()
             pendingVisibilityRefreshWorkItems.forEach { $0.cancel() }
             pendingVisibilityRefreshWorkItems.removeAll()
         }
@@ -188,6 +238,96 @@ final class ExploreGridCoordinator: NSObject {
         scrollDebounceWorkItem?.cancel()
         restoreHoverWorkItem?.cancel()
         setHoverInteractionEnabledForVisibleItems(false)
+    }
+
+    /// 从 parent 同步 header 阶段状态（SwiftUI update 时调用）。
+    func syncHeaderCollapseStateFromParent() {
+        localHeaderRemaining = max(0, parent.headerCollapseRemaining)
+        localHeaderConsumed = max(0, parent.headerCollapseConsumed)
+    }
+
+    /// 处理 header 收起/展开阶段的滚轮。返回 true 表示已消费事件，网格不应再滚。
+    @discardableResult
+    func handleHeaderPhaseScrollWheel(_ event: NSEvent) -> Bool {
+        guard parent.allowsScrolling else { return false }
+        guard parent.onHeaderCollapseDelta != nil else { return false }
+
+        let rawDelta = event.hasPreciseScrollingDeltas
+            ? event.scrollingDeltaY
+            : event.deltaY * 16
+        // 浏览向下（看更下面的内容）：scrollDown > 0
+        // macOS 上手指上滑/滚轮下滚时 scrollingDeltaY 通常为负
+        let scrollDown = -rawDelta
+        // 本地缓存是两次 SwiftUI update 之间的权威状态（连发滚轮立刻扣减）
+        let rem = max(0, localHeaderRemaining)
+        let cons = max(0, localHeaderConsumed)
+        let atTop = scrollView.contentView.bounds.origin.y <= 1.0
+
+        if scrollDown > 0.5, rem > 0.5 {
+            // 阶段 1：先收 header，网格强制锁顶
+            let apply = min(rem, scrollDown)
+            localHeaderRemaining = max(0, rem - apply)
+            localHeaderConsumed = cons + apply
+            lockGridToTop()
+            parent.onHeaderCollapseDelta?(apply)
+            scrollingWillBeginOrContinue()
+            // 同一次事件把 header 收完后还有余量：手动推进网格 offset，
+            // 不能 super.scrollWheel(完整 event)，否则会按整段 delta 跳。
+            let leftover = scrollDown - apply
+            if leftover > 0.5, localHeaderRemaining <= 0.5 {
+                applyGridScrollDelta(leftover)
+            }
+            scheduleHoverRestoreAfterScrollWheel()
+            return true
+        }
+
+        if scrollDown < -0.5, atTop, cons > 0.5 {
+            // 阶段 0 反向：网格已在顶部，向上滚先展开 header
+            let expand = min(cons, -scrollDown)
+            localHeaderConsumed = max(0, cons - expand)
+            localHeaderRemaining = rem + expand
+            lockGridToTop()
+            parent.onHeaderCollapseDelta?(-expand)
+            scrollingWillBeginOrContinue()
+            scheduleHoverRestoreAfterScrollWheel()
+            return true
+        }
+
+        // header 未收完时禁止网格被其他输入带离顶部（保险）
+        if rem > 0.5, !atTop {
+            lockGridToTop()
+        }
+        return false
+    }
+
+    private func lockGridToTop() {
+        let origin = NSPoint(x: 0, y: 0)
+        guard abs(scrollView.contentView.bounds.origin.y) > 0.5 else { return }
+        scrollView.contentView.scroll(to: origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        lastReportedScrollOffset = 0
+        lastFineReportedScrollOffset = 0
+    }
+
+    /// header 阶段结束后把同一次滚轮的余量应用到网格（单位：pt，向下为正）。
+    private func applyGridScrollDelta(_ deltaDown: CGFloat) {
+        guard deltaDown > 0.5 else { return }
+        let visibleH = scrollView.contentView.bounds.height
+        let contentH = max(collectionView.frame.height, layout.collectionViewContentSize.height)
+        let maxY = max(0, contentH - visibleH)
+        let current = scrollView.contentView.bounds.origin.y
+        let newY = min(maxY, max(0, current + deltaDown))
+        guard abs(newY - current) > 0.5 else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: newY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        scheduleFineScrollOffsetReport(newY)
+    }
+
+    /// header 区域滚轮在 header 已收完后推送的外部滚动。
+    func applyExternalScrollDown(_ deltaDown: CGFloat) {
+        applyGridScrollDelta(deltaDown)
+        scrollingWillBeginOrContinue()
+        scheduleHoverRestoreAfterScrollWheel()
     }
 
     func scheduleHoverRestoreAfterScrollWheel() {
@@ -218,10 +358,23 @@ final class ExploreGridCoordinator: NSObject {
 
     @objc private func clipViewBoundsDidChange(_ notification: Notification) {
         guard !isUpdatingDocumentLayout else { return }
-        let width = scrollView.contentView.bounds.width
-        guard width > 0, abs(width - lastLaidOutWidth) > 0.5 else { return }
-        // 延迟布局，避免在窗口 display cycle 内触发布局循环
-        scheduleDeferredLayout()
+        let bounds = scrollView.contentView.bounds
+        let width = bounds.width
+        if width > 0, abs(width - lastLaidOutWidth) > 0.5 {
+            // 延迟布局，避免在窗口 display cycle 内触发布局循环
+            scheduleDeferredLayout()
+        }
+        // header 收起阶段禁止网格离开顶部（键盘/惯性等非 scrollWheel 路径兜底）
+        if parent.allowsScrolling,
+           parent.headerCollapseRemaining > 0.5,
+           bounds.origin.y > 1 {
+            lockGridToTop()
+            return
+        }
+        // live scroll 时 bounds.origin.y 连续变化：细粒度上报 offset。
+        if parent.allowsScrolling {
+            scheduleFineScrollOffsetReport(bounds.origin.y)
+        }
     }
 
     private func handleScrollUpdate() {
@@ -240,9 +393,15 @@ final class ExploreGridCoordinator: NSObject {
         if visibleRangeChanged {
             lastReportedVisibleItemRange = (minVisible, maxVisible)
         }
-        let shouldReportScrollOffset = shouldReportScrollOffset(offset)
-        if shouldReportScrollOffset {
+        // 粗粒度：回顶按钮等 UI 阈值
+        let shouldReportCoarseScrollOffset = shouldReportCoarseScrollOffset(offset)
+        if shouldReportCoarseScrollOffset {
             lastReportedScrollOffset = offset
+        }
+        // 细粒度：header 折叠跟滚（与 coarse 分离，避免被 96pt 阈值拖成瞬变）
+        let shouldReportFineScrollOffset = shouldReportFineScrollOffset(offset)
+        if shouldReportFineScrollOffset {
+            lastFineReportedScrollOffset = offset
         }
 
         // 避免在 AppKit 布局/滚动通知同步栈内触发 SwiftUI 状态发布。
@@ -251,7 +410,7 @@ final class ExploreGridCoordinator: NSObject {
             if visibleRangeChanged {
                 parent.onVisibleItemsChange?(visibleIndexPaths)
             }
-            if shouldReportScrollOffset {
+            if shouldReportFineScrollOffset || shouldReportCoarseScrollOffset {
                 parent.onScrollOffsetChange?(offset)
             }
             if parent.allowsScrolling && shouldReachBottom {
@@ -260,7 +419,34 @@ final class ExploreGridCoordinator: NSObject {
         }
     }
 
-    private func shouldReportScrollOffset(_ offset: CGFloat) -> Bool {
+    /// 细粒度 offset 上报：约每 2pt 一次，合并到下一 runloop，避免同步栈里狂刷 SwiftUI。
+    private func scheduleFineScrollOffsetReport(_ offset: CGFloat) {
+        guard shouldReportFineScrollOffset(offset) else { return }
+        pendingFineScrollOffsetReport?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingFineScrollOffsetReport = nil
+            let current = self.scrollView.contentView.bounds.origin.y
+            guard self.shouldReportFineScrollOffset(current) else { return }
+            self.lastFineReportedScrollOffset = current
+            // 同步粗粒度缓存，避免随后 coarse 路径重复跳变
+            if self.shouldReportCoarseScrollOffset(current) {
+                self.lastReportedScrollOffset = current
+            }
+            let parent = self.parent
+            parent.onScrollOffsetChange?(current)
+        }
+        pendingFineScrollOffsetReport = workItem
+        DispatchQueue.main.async(execute: workItem)
+    }
+
+    private func shouldReportFineScrollOffset(_ offset: CGFloat) -> Bool {
+        guard let last = lastFineReportedScrollOffset else { return true }
+        if offset <= 0.5, last > 0.5 { return true }
+        return abs(offset - last) >= 2
+    }
+
+    private func shouldReportCoarseScrollOffset(_ offset: CGFloat) -> Bool {
         guard let lastOffset = lastReportedScrollOffset else { return true }
         let threshold: CGFloat = 300
         if (lastOffset > threshold) != (offset > threshold) {
@@ -380,6 +566,9 @@ final class ExploreGridCoordinator: NSObject {
     func scrollToTop() {
         lastReportedVisibleItemRange = nil
         lastReportedScrollOffset = 0
+        lastFineReportedScrollOffset = 0
+        pendingFineScrollOffsetReport?.cancel()
+        pendingFineScrollOffsetReport = nil
         let origin = NSPoint(x: 0, y: 0)
         scrollView.contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -486,6 +675,11 @@ final class ExploreGridCoordinator: NSObject {
         guard let scrollView = scrollView as? ExploreGridScrollView else { return }
         scrollView.allowsGridScrolling = allowsScrolling
         self.scrollView.verticalScrollElasticity = allowsScrolling ? .allowed : .none
+        // 无论是否允许滚动，都隐藏滚动条（探索页不需要可见 scroller）。
+        self.scrollView.hasVerticalScroller = false
+        self.scrollView.hasHorizontalScroller = false
+        self.scrollView.verticalScroller = nil
+        self.scrollView.horizontalScroller = nil
 
         // `allowsScrolling=false` 时本 NSScrollView 不内部滚动（外层 SwiftUI ScrollView 总滚动），
         // 默认 NSClipView.masksToBounds=true 会把 cell hover 1.02 缩放在网格四角溢出的部分裁掉。

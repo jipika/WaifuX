@@ -1915,13 +1915,13 @@ class WorkshopService: ObservableObject {
                         // 移动确认场景但确认未成功
                         let confirmationMissing = needsMobileConfirmation && !mobileConfirmationSucceeded
 
-                        // 需要移动确认但用户未确认 → 不要清除凭据，提示用户去 App 中确认
+                        // 需要移动确认但用户未确认 → 账号本身没问题，保留凭据，提示去 App 确认
                         if confirmationMissing {
                             resumeBox.resume(throwing: WorkshopError.confirmationRequired("请在 Steam App 中确认登录请求后重试下载"))
                             return
                         }
 
-                        // 需要邮箱验证码但没有提供 → 说明缓存已失效，清除凭据
+                        // 需要邮箱验证码但没有提供 → 登录会话无效，清理本地账号
                         let guardCodeMissing = needsGuardCode
                         if guardCodeMissing {
                             Task { @MainActor in
@@ -1933,6 +1933,7 @@ class WorkshopService: ObservableObject {
                     }
 
                     // 检查 SteamCMD 自身的登录超时（网络问题导致连接 Steam 服务器超时）
+                    // 纯网络问题不清账号
                     let loginTimeoutIndicators = [
                         "ERROR (Timeout)",
                         "Connection timed out",
@@ -1942,7 +1943,8 @@ class WorkshopService: ObservableObject {
                         "No route to host",
                         "Connection refused",
                         "Unable to connect to Steam",
-                        "Failed to connect to Steam"
+                        "Failed to connect to Steam",
+                        "login failed: No Connection"
                     ]
                     if loginTimeoutIndicators.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
                         let cleaned = Self.cleanSteamCMDError(outputBox.errorString().isEmpty ? outputBox.outputString() : outputBox.errorString())
@@ -1951,20 +1953,27 @@ class WorkshopService: ObservableObject {
                         return
                     }
 
-                    // session token 过期或网络导致的登录失败
+                    // 真实登录/会话错误：清理本地账号，要求重新登录
                     let sessionExpiredKeywords = [
                         "ERROR! Not logged on",
                         "Not logged on",
-                        "No login session, exiting",
-                        "login failed: No Connection",
-                        "Login Failure"
+                        "No login session, exiting"
                     ]
                     if sessionExpiredKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
-                        // 会话已失效，自动清除过期凭据并提示用户重新登录
                         Task { @MainActor in
                             WorkshopSourceManager.shared.clearSteamCredentials()
                         }
                         resumeBox.resume(throwing: WorkshopError.sessionExpired)
+                        return
+                    }
+
+                    // 限流 / 无订阅：不是账号密码错误，保留凭据
+                    if combinedOutput.localizedCaseInsensitiveContains("RateLimitExceeded") {
+                        resumeBox.resume(throwing: WorkshopError.downloadFailed("Steam 请求过于频繁，请稍后再试"))
+                        return
+                    }
+                    if combinedOutput.localizedCaseInsensitiveContains("No subscriptions") {
+                        resumeBox.resume(throwing: WorkshopError.downloadFailed("当前 Steam 账号没有可用的 Workshop 订阅权限"))
                         return
                     }
 
@@ -1975,11 +1984,12 @@ class WorkshopService: ObservableObject {
                         "Account Logon Denied",
                         "Account disabled",
                         "Account locked",
-                        "RateLimitExceeded",
-                        "Two-factor code mismatch",
-                        "No subscriptions"
+                        "Two-factor code mismatch"
                     ]
                     if authFailureKeywords.contains(where: { combinedOutput.localizedCaseInsensitiveContains($0) }) {
+                        Task { @MainActor in
+                            WorkshopSourceManager.shared.clearSteamCredentials()
+                        }
                         resumeBox.resume(throwing: WorkshopError.invalidCredentials)
                         return
                     }
@@ -2683,32 +2693,40 @@ extension WorkshopService {
 extension WorkshopService {
     /// Canonicalize both SteamCMD's outer download directory and the nested content directory.
     /// This keeps media-library registration stable when callers resolve the playable project root.
+    ///
+    /// 实现注意：不要在循环里反复碰 `URL.path` / `lastPathComponent` / `deletingLastPathComponent`。
+    /// Foundation 每次都会 percent-decode / 重新 parse，下载后立刻「设为壁纸」时会把主线程卡死
+    ///（sample 里整段采样窗口都耗在这里），桌面层已停旧壁纸时就表现为黑屏 + RSS 顶高。
     nonisolated static func canonicalWorkshopContentURL(for workshopID: String, startingAt url: URL) -> URL {
         let fileManager = FileManager.default
-        let standardizedURL = url.standardizedFileURL
+        let standardizedPath = (url.path as NSString).standardizingPath
+        var components = (standardizedPath as NSString).pathComponents
 
-        if standardizedURL.pathComponents.suffix(2) == ["431960", workshopID] {
-            return standardizedURL
+        // 已是 .../431960/<id>
+        if components.count >= 2,
+           components[components.count - 2] == "431960",
+           components[components.count - 1] == workshopID {
+            return URL(fileURLWithPath: standardizedPath, isDirectory: true)
         }
 
         let workshopRootName = "workshop_\(workshopID)"
-        var candidate = standardizedURL
-        while true {
-            if candidate.lastPathComponent == workshopRootName {
-                let contentURL = candidate
+        // 纯字符串向上走，避免每层重建 BridgedURL
+        while !components.isEmpty {
+            if components.last == workshopRootName {
+                let rootPath = NSString.path(withComponents: components)
+                let contentPath = (rootPath as NSString)
                     .appendingPathComponent("steamapps/workshop/content/431960/\(workshopID)")
-                    .standardizedFileURL
-                if fileManager.fileExists(atPath: contentURL.path) {
-                    return contentURL
+                if fileManager.fileExists(atPath: contentPath) {
+                    return URL(fileURLWithPath: contentPath, isDirectory: true)
                 }
             }
-
-            let parent = candidate.deletingLastPathComponent()
-            guard parent.path != candidate.path else { break }
-            candidate = parent
+            // 到文件系统根就停（["/"] 或 ["C:"]）
+            if components.count <= 1 { break }
+            components.removeLast()
         }
 
-        return resolveWallpaperEngineProjectRoot(startingAt: standardizedURL).standardizedFileURL
+        let fallbackURL = URL(fileURLWithPath: standardizedPath, isDirectory: true)
+        return resolveWallpaperEngineProjectRoot(startingAt: fallbackURL)
     }
 
     /// SteamCMD 解压路径常为 `.../steamapps/workshop/content/431960/<id>/`，但 `project.json` 往往在**唯一子目录**或**多子目录之一**内。
@@ -2811,7 +2829,7 @@ enum WorkshopError: LocalizedError {
         case .credentialsRequired: return "需要登录 Steam 账号，请在设置中登录 SteamCMD"
         case .invalidCredentials: return "Steam 账号或密码错误，或需要 Steam Guard 验证码"
         case .steamLoginFailed(let msg): return msg
-        case .sessionExpired: return "Steam 登录已过期，请在设置中重新验证登录"
+        case .sessionExpired: return "Steam 登录已过期，请在设置中重新登录"
         case .loginTimeout: return "Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试"
         case .guardCodeRequired(let msg): return msg
         case .confirmationRequired(let msg): return msg

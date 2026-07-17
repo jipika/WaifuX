@@ -1128,7 +1128,7 @@ private struct SchedulerSettingsTab: View {
                             // 文件夹选择
                             FolderPickerRow(
                                 folderIDs: displayConfig.folderIDs,
-                                includeWallpapers: displayConfig.includeWallpapers && !(displayConfig.isOnEndMode && displayConfig.webSceneSwitchSeconds == nil),
+                                includeWallpapers: displayConfig.includeWallpapers,
                                 includeMedia: displayConfig.includeMedia,
                                 screenID: screenID,
                                 viewModel: viewModel
@@ -1153,9 +1153,7 @@ private struct SchedulerSettingsTab: View {
         let includeMedia: Bool
         let screenID: String
         @ObservedObject var viewModel: SettingsViewModel
-
-        @State private var wallpaperFolders: [LibraryFolder] = []
-        @State private var mediaFolders: [LibraryFolder] = []
+        @ObservedObject private var folderStore = LibraryFolderStore.shared
 
         var body: some View {
             HStack(spacing: 12) {
@@ -1184,7 +1182,7 @@ private struct SchedulerSettingsTab: View {
                                 toggleFolder(folder.id)
                             }) {
                                 HStack {
-                                    Text(folder.name)
+                                    Text(folderOptionLabel(for: folder))
                                     if isSelected(folder.id) {
                                         Image(systemName: "checkmark")
                                     }
@@ -1202,20 +1200,20 @@ private struct SchedulerSettingsTab: View {
                 .menuStyle(.borderlessButton)
                 .help(folderIDsLabel)
             }
-            .onAppear {
-                refreshFolders()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                refreshFolders()
-            }
         }
 
         private var allFolders: [LibraryFolder] {
             var combined: [LibraryFolder] = []
-            if includeWallpapers { combined.append(contentsOf: wallpaperFolders) }
-            if includeMedia { combined.append(contentsOf: mediaFolders) }
-            // 同名文件夹（壁纸库/媒体库各一份）按 id 去重保留，显示时带类型前缀区分
-            return combined.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            if includeWallpapers { combined.append(contentsOf: folderStore.folders(for: .wallpaper)) }
+            if includeMedia { combined.append(contentsOf: folderStore.folders(for: .media)) }
+            return combined.sorted { lhs, rhs in
+                let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+                if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+                if lhs.contentType != rhs.contentType {
+                    return lhs.contentType.rawValue < rhs.contentType.rawValue
+                }
+                return lhs.id < rhs.id
+            }
         }
 
         private var selectedFolderIDSet: Set<String> {
@@ -1267,7 +1265,7 @@ private struct SchedulerSettingsTab: View {
             guard let folderIDs else { return "全部" }
             if folderIDs.isEmpty { return "全部" }
             let names = folderIDs.compactMap { id in
-                allFolders.first(where: { $0.id == id })?.name
+                allFolders.first(where: { $0.id == id }).map(folderOptionLabel)
             }
             if names.isEmpty { return "全部" }
             if names.count == 1 { return names[0] }
@@ -1277,9 +1275,9 @@ private struct SchedulerSettingsTab: View {
             return "\(names.prefix(2).joined(separator: ", ")) +\(names.count - 2)"
         }
 
-        private func refreshFolders() {
-            wallpaperFolders = LibraryFolderStore.shared.folders(for: .wallpaper)
-            mediaFolders = LibraryFolderStore.shared.folders(for: .media)
+        private func folderOptionLabel(for folder: LibraryFolder) -> String {
+            let contentType = folder.contentType == .wallpaper ? t("wallpapers") : t("media")
+            return "\(contentType) · \(folder.name)"
         }
     }
 
@@ -1793,7 +1791,7 @@ private struct WorkshopSettingsTab: View {
                                         case .loginTimeout:
                                             steamLoginStatusText = "Steam 登录超时，请检查网络或代理设置后重试。"
                                         case .sessionExpired:
-                                            steamLoginStatusText = "Steam 登录已过期，请重新验证。"
+                                            steamLoginStatusText = "Steam 登录已过期，请重新登录。"
                                         case .invalidCredentials:
                                             steamLoginStatusText = "账号、密码或验证码不正确，请检查后重试。"
                                         case .steamLoginFailed(let msg):

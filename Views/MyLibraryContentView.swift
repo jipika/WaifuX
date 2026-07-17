@@ -8,60 +8,6 @@ private final class LibraryScrollRuntimeState: ObservableObject {
     var currentOffset: CGFloat = 0
 }
 
-// MARK: - Folder Back Swipe Recognition
-/// Requires a deliberate, horizontal trackpad gesture before navigating away from a folder.
-private final class FolderBackSwipeRecognizer {
-    private static let minimumHorizontalDistance: CGFloat = 220
-    private static let minimumHorizontalDominance: CGFloat = 3
-
-    private var horizontalDistance: CGFloat = 0
-    private var verticalDistance: CGFloat = 0
-
-    func shouldNavigateBack(for event: NSEvent) -> Bool {
-        guard event.hasPreciseScrollingDeltas,
-              event.momentumPhase.isEmpty else {
-            reset()
-            return false
-        }
-
-        guard event.phase == .began || event.phase == .changed || event.phase == .ended else {
-            reset()
-            return false
-        }
-
-        if event.phase == .began {
-            reset()
-        }
-
-        guard event.phase != .ended else {
-            reset()
-            return false
-        }
-
-        let horizontalDelta = event.scrollingDeltaX
-        guard horizontalDelta > 0 else {
-            reset()
-            return false
-        }
-
-        horizontalDistance += horizontalDelta
-        verticalDistance += abs(event.scrollingDeltaY)
-
-        guard horizontalDistance >= Self.minimumHorizontalDistance,
-              horizontalDistance >= verticalDistance * Self.minimumHorizontalDominance else {
-            return false
-        }
-
-        reset()
-        return true
-    }
-
-    func reset() {
-        horizontalDistance = 0
-        verticalDistance = 0
-    }
-}
-
 // MARK: - Scroll 观察与恢复辅助组件
 /// 直接观察底层 NSScrollView，避免滚动时通过 PreferenceKey 持续触发整棵 SwiftUI 内容重算。
 private struct LibraryScrollObserver: NSViewRepresentable {
@@ -249,8 +195,7 @@ struct MyLibraryContentView: View {
     @State private var mediaFolderStack: [String] = []  // 面包屑栈
 
     // 触摸板双指右滑返回（文件夹内）
-    @State private var folderBackSwipeMonitor: Any?
-    @State private var folderBackSwipeRecognizer = FolderBackSwipeRecognizer()
+    @State private var folderBackSwipeRegistration: UUID?
 
     // 新建文件夹
     @State private var showNewFolderSheet = false
@@ -442,11 +387,11 @@ struct MyLibraryContentView: View {
             if savedLibraryScrollOffset > 0 {
                 libraryScrollRestoreToken += 1
             }
-            // 安装触摸板双指右滑返回手势监视器
-            setupFolderBackSwipeMonitor()
+            // 注册触摸板双指右滑返回手势（文件夹内）。
+            registerFolderBackSwipeHandler()
         }
         .onDisappear {
-            removeFolderBackSwipeMonitor()
+            unregisterFolderBackSwipeHandler()
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
@@ -923,47 +868,29 @@ struct MyLibraryContentView: View {
 
     /// 当前是否处于某个文件夹内（壁纸或媒体）
     private var isInAnyFolder: Bool {
-        currentWallpaperFolderID != nil || currentMediaFolderID != nil
+        isVisible && (currentWallpaperFolderID != nil || currentMediaFolderID != nil)
     }
 
-    /// 安装滚动事件监视器：检测触摸板双指右滑（在文件夹内时触发返回）
-    private func setupFolderBackSwipeMonitor() {
-        guard folderBackSwipeMonitor == nil else { return }
-        let monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [self] event in
-            // 仅在文件夹内生效
-            guard self.isInAnyFolder else {
-                self.folderBackSwipeRecognizer.reset()
-                return event
-            }
-            // 检查鼠标是否在主窗口内
-            let mouseLocation = NSEvent.mouseLocation
-            guard let window = NSApp.keyWindow,
-                  window.frame.contains(mouseLocation) else {
-                self.folderBackSwipeRecognizer.reset()
-                return event
-            }
-            if self.folderBackSwipeRecognizer.shouldNavigateBack(for: event) {
-                DispatchQueue.main.async {
-                    if self.selectedContentType == .wallpaper {
-                        self.popWallpaperFolder()
-                    } else if self.selectedContentType == .video {
-                        self.popMediaFolder()
-                    }
+    /// 注册共享滚动事件路由：详情页的优先级更高，避免返回详情时同时退出后台文件夹。
+    private func registerFolderBackSwipeHandler() {
+        guard folderBackSwipeRegistration == nil else { return }
+        folderBackSwipeRegistration = TrackpadBackSwipeRouter.shared.register(
+            priority: 10,
+            isEnabled: { self.isInAnyFolder },
+            action: {
+                if self.selectedContentType == .wallpaper {
+                    self.popWallpaperFolder()
+                } else if self.selectedContentType == .video {
+                    self.popMediaFolder()
                 }
-                return nil  // 消费此事件，防止 ScrollView 处理
             }
-            return event
-        }
-        folderBackSwipeMonitor = monitor
+        )
     }
 
-    /// 移除滚动事件监视器
-    private func removeFolderBackSwipeMonitor() {
-        if let monitor = folderBackSwipeMonitor {
-            NSEvent.removeMonitor(monitor)
-            folderBackSwipeMonitor = nil
-        }
-        folderBackSwipeRecognizer.reset()
+    private func unregisterFolderBackSwipeHandler() {
+        guard let folderBackSwipeRegistration else { return }
+        TrackpadBackSwipeRouter.shared.unregister(folderBackSwipeRegistration)
+        self.folderBackSwipeRegistration = nil
     }
 
     private var currentWallpaperFolderScope: WallpaperLibraryService.FolderMembershipScope {
@@ -1394,6 +1321,7 @@ struct MyLibraryContentView: View {
             resolvedVideoFileURL: item.resolvedVideoFileURL,
             isVisible: isVisible,
             isCurrentWallpaper: currentWallpaperService.isCurrentWallpaper(localFileURL: item.localFileURL)
+                || currentWallpaperService.isCurrentWallpaper(localFileURL: item.resolvedVideoFileURL)
         ) {
             handleMediaTap(item.mediaItem)
         }

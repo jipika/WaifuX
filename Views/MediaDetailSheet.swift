@@ -72,6 +72,7 @@ struct MediaDetailSheet: View {
     @State private var applyingWallpaperStatusKey = "applyingWallpaper"
     @State private var sharePickerAnchorView: NSView?
     @State private var showCopyLinkToast = false
+    @State private var copyToastMessage = "链接已复制"
     @State private var showMoreOptionsPopover = false
     @State private var showDeleteBakeConfirm = false
     @State private var showDeleteFrameInterpolationConfirm = false
@@ -298,7 +299,7 @@ struct MediaDetailSheet: View {
             }
             .overlay(alignment: .bottom) {
                 if showCopyLinkToast {
-                    Text("链接已复制")
+                    Text(copyToastMessage)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
@@ -405,7 +406,7 @@ struct MediaDetailSheet: View {
         .alert("Steam 登录已过期", isPresented: $showSessionExpiredAlert) {
             Button("确定", role: .cancel) {}
         } message: {
-            Text("Steam 会话已失效，凭据已自动清除。请前往设置页面重新登录后再试。")
+            Text("Steam 会话已失效，本地登录信息已清除。请前往设置页面重新登录后再试。")
         }
         .navigationBarBackButtonHidden(true)
         .task {
@@ -1709,6 +1710,23 @@ struct MediaDetailSheet: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            // 仅在存在可用的 Scene 烘焙 MP4 时展示。
+            if let bakedVideoURL = cachedSceneBakeVideoURL {
+                Button {
+                    showMoreOptionsPopover = false
+                    copyBakedSceneVideoToPasteboard(bakedVideoURL)
+                } label: {
+                    HStack {
+                        Image(systemName: "doc.on.doc")
+                        Text("复制烘焙资源")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .frame(width: 192)
     }
@@ -2364,7 +2382,7 @@ struct MediaDetailSheet: View {
                     showError = true
                 case .sessionExpired:
                     showSessionExpiredAlert = true
-                    AppLogger.error(.download, "Workshop 会话过期，已清除凭据", metadata:
+                    AppLogger.error(.download, "Workshop 会话过期，已清除本地登录信息", metadata:
                         ["id": itemID])
                 default:
                     presentWorkshopDownloadError(error.localizedDescription)
@@ -2440,7 +2458,14 @@ struct MediaDetailSheet: View {
     private func setAsDesktopWallpaper() {
         // Wallpaper Engine 类内容：Workshop 与本地入库（同一套路径解析）
         if let localURL = findLocalWorkshopFile(for: resolvedItem) {
-            viewModel.ensureMediaIsInLibrary(resolvedItem, localFileURL: localURL)
+            // 入库校验不得阻塞设壁纸热路径。
+            // sample 显示主线程会卡在 ensureDownloadRecord → hasSameLocalContent →
+            // canonicalWorkshopContentURL；旧壁纸若已停，桌面就会黑屏，RSS 同步顶高。
+            // 先把 apply 排进当前调用栈，再用 async 补入库，保证设壁纸先走。
+            let itemForLibrary = resolvedItem
+            DispatchQueue.main.async { [viewModel] in
+                viewModel.ensureMediaIsInLibrary(itemForLibrary, localFileURL: localURL)
+            }
             let contentRoot = sceneEngineContentRoot(for: localURL)
 
             // 检查并自动下载 Workshop 依赖项（预设壁纸的母壁纸）
@@ -2826,6 +2851,27 @@ struct MediaDetailSheet: View {
         guard let url else { return }
         let items = SystemShareSupport.itemsForLocalFile(at: url)
         SystemShareSupport.presentPicker(items: items, anchorView: sharePickerAnchorView)
+    }
+
+    /// 将离线烘焙 MP4 作为文件引用写入剪贴板，供 Finder 等应用直接粘贴。
+    @MainActor
+    private func copyBakedSceneVideoToPasteboard(_ videoURL: URL) {
+        guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else { return }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([videoURL as NSURL]) else {
+            print("[MediaDetailSheet] ⚠️ 无法复制烘焙视频到剪贴板: \(videoURL.path)")
+            return
+        }
+
+        copyToastMessage = "烘焙视频已复制"
+        showCopyLinkToast = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            showCopyLinkToast = false
+        }
+        print("[MediaDetailSheet] 已复制烘焙视频到剪贴板: \(videoURL.lastPathComponent)")
     }
 
     /// 复制当前壁纸的静态图片到剪贴板

@@ -48,6 +48,17 @@ struct ExploreGridContainer: NSViewRepresentable {
     /// 网格内边距。`nil` 表示沿用 `ExploreGridCollectionViewLayout` 默认值
     /// `(top: 0, left: 2, bottom: 48, right: 2)`。壁纸探索页等需要紧贴上下边的场景显式传 `.zero`。
     var contentInsets: NSEdgeInsets? = nil
+    /// 顶部 header 还剩多少高度未收起。>0 时向下滚优先收 header，网格锁在 y=0。
+    var headerCollapseRemaining: CGFloat = 0
+    /// 顶部 header 已收起高度。网格在顶部且此值>0 时，向上滚优先展开 header。
+    var headerCollapseConsumed: CGFloat = 0
+    /// 滚轮驱动的 header 收起增量：`>0` 收起，`<0` 展开。
+    var onHeaderCollapseDelta: ((CGFloat) -> Void)? = nil
+    /// 外部递增时，把 `pendingScrollDown` 应用到网格（header 区域滚轮余量）。
+    var externalScrollDownToken: Int = 0
+    var pendingScrollDown: CGFloat = 0
+    /// 已消费 pending 后回调，供 SwiftUI 清零，避免重复应用。
+    var onPendingScrollDownConsumed: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         context.coordinator.scrollView
@@ -64,6 +75,7 @@ struct ExploreGridContainer: NSViewRepresentable {
         let cellClassChanged = previousParent.cellClass != cellClass
         let scrollingModeChanged = allowsScrolling != previousParent.allowsScrolling
         coordinator.parent = self
+        coordinator.syncHeaderCollapseStateFromParent()
         let layoutRefreshChanged = layoutRefreshToken != coordinator.lastLayoutRefreshToken
         let visibilityRefreshChanged = visibilityRefreshToken != coordinator.lastVisibilityRefreshToken
 
@@ -133,6 +145,16 @@ struct ExploreGridContainer: NSViewRepresentable {
         if restoreScrollToken != coordinator.lastRestoreScrollToken {
             coordinator.lastRestoreScrollToken = restoreScrollToken
             coordinator.restoreScrollOffset(restoreScrollOffset)
+        }
+
+        if externalScrollDownToken != coordinator.lastExternalScrollDownToken {
+            coordinator.lastExternalScrollDownToken = externalScrollDownToken
+            let delta = pendingScrollDown
+            if delta > 0.5 {
+                coordinator.applyExternalScrollDown(delta)
+            }
+            // 无论 delta 大小都清零，防止 token 重复触发时叠加旧值
+            onPendingScrollDownConsumed?()
         }
     }
 

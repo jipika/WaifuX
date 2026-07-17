@@ -270,13 +270,19 @@ enum LocalWallpaperApplyService {
     }
 
     private static func mediaRecord(for contentRoot: URL) -> MediaDownloadRecord? {
-        MediaLibraryService.shared.downloadRecord(forLocalFilePath: contentRoot.path)
-            ?? MediaLibraryService.shared.downloadedItems.first { record in
-                record.hasSameLocalContent(as: contentRoot)
-                    || WorkshopService.resolveWallpaperEngineProjectRoot(
-                        startingAt: URL(fileURLWithPath: record.localFilePath)
-                    ).path == contentRoot.path
-            }
+        let library = MediaLibraryService.shared
+        if let exact = library.downloadRecord(forLocalFilePath: contentRoot.path) {
+            return exact
+        }
+
+        // 只做轻量 hasSameLocalContent；避免对整表逐条 resolveWallpaperEngineProjectRoot
+        //（目录扫描 + 反复 URL.path）把设壁纸主线程再次拖慢。
+        let contentPath = (contentRoot.path as NSString).standardizingPath
+        return library.downloadedItems.first { record in
+            let recordedPath = (record.localFilePath as NSString).standardizingPath
+            if recordedPath == contentPath { return true }
+            return record.hasSameLocalContent(as: contentRoot)
+        }
     }
 
     // MARK: - Type detection（原 MediaDetailSheet.determineWorkshopContentType）

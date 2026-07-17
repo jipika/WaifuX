@@ -282,14 +282,27 @@ final class MediaLibraryService: ObservableObject {
     /// Applying a wallpaper is an explicit user action, so it must not remain cache-only.
     /// - Parameter folderID: 可选目标文件夹；已有同内容记录时也会补写归属。
     func ensureDownloadRecord(item: MediaItem, localFileURL: URL, folderID: String? = nil) {
-        if let existing = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }),
-           existing.hasSameLocalContent(as: localFileURL) {
-            // 记录已在且路径一致：仍允许补写作者批量下载 folderID
-            if let targetFolderID = Self.normalizedFolderID(folderID),
-               Self.normalizedFolderID(existing.folderID) != targetFolderID {
-                moveMediaToFolder(mediaID: item.id, folderID: targetFolderID, scope: .downloads)
+        // 优先走 O(1) 索引：下载刚完成再点「设为壁纸」时几乎总能命中，
+        // 避免对整表线性扫描 + 昂贵路径规范化把主线程卡住。
+        let existing: MediaDownloadRecord? = {
+            if let indexed = downloadRecordIndex[item.id], indexed.isActive {
+                return indexed
             }
-            return
+            return downloadRecords.first(where: { $0.item.id == item.id && $0.isActive })
+        }()
+
+        if let existing {
+            // 路径字符串直接相等时跳过 hasSameLocalContent（最常见：下载后立即设置）
+            let existingPath = (existing.localFilePath as NSString).standardizingPath
+            let candidatePath = (localFileURL.path as NSString).standardizingPath
+            let sameContent = existingPath == candidatePath || existing.hasSameLocalContent(as: localFileURL)
+            if sameContent {
+                if let targetFolderID = Self.normalizedFolderID(folderID),
+                   Self.normalizedFolderID(existing.folderID) != targetFolderID {
+                    moveMediaToFolder(mediaID: item.id, folderID: targetFolderID, scope: .downloads)
+                }
+                return
+            }
         }
         recordDownload(item: item, localFileURL: localFileURL, folderID: folderID)
     }

@@ -49,27 +49,6 @@ private struct TerminationEvent: @unchecked Sendable {
     let reason: Process.TerminationReason
 }
 
-/// 检查是否有屏幕录制权限（同步，禁止调用时直接崩溃）
-private func checkScreenCapturePermission() -> Bool {
-    if #available(macOS 10.15, *) {
-        return CGPreflightScreenCaptureAccess()
-    }
-    return true
-}
-
-/// 请求屏幕录制权限。真实截取外部 renderer 窗口必须走系统授权，不能用预览图替代。
-private func requestScreenCapturePermission() async -> Bool {
-    if #available(macOS 10.15, *) {
-        if CGPreflightScreenCaptureAccess() { return true }
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                continuation.resume(returning: CGRequestScreenCaptureAccess())
-            }
-        }
-    }
-    return true
-}
-
 // MARK: - CGS 私有 API 桥接（桌面层级/标签设置）
 // macOS 26 已移除 CGSWindowByID，且 `--wallpaper`/`--background` 参数已自带后台壁纸渲染能力，
 // 因此不再使用 CGS API。窗口标签（Stationary/CanJoinAllSpaces）由二进制处理。
@@ -152,6 +131,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 当前是否由 wallpaper-wgpu 接管桌面壁纸
     @Published private(set) var isControllingExternalEngine = false
     @Published private(set) var isExternalPaused = false
+    /// 每次每屏渲染状态变化时递增，供依赖具体壁纸路径的 UI 刷新。
+    @Published private(set) var renderStateChangeCount: UInt64 = 0
 
     // MARK: - 进程管理
 
@@ -170,17 +151,21 @@ final class WallpaperEngineXBridge: ObservableObject {
         let userProperties: String?
     }
     private var activeRenderKind: RenderKind?
-    private var screenRenderStates: [String: ScreenRenderState] = [:]
+    private var screenRenderStates: [String: ScreenRenderState] = [:] {
+        didSet {
+            renderStateChangeCount &+= 1
+        }
+    }
     /// 每个进程的终止 watchdog（key = pid）
     private var screenWatchdogs: [pid_t: DispatchWorkItem] = [:]
     /// 非隔离存储所有活跃 PID，供 deinit 中安全清理
     private nonisolated(unsafe) var _deinitPIDs: Set<pid_t> = []
     /// 启动批次号，防止旧进程的 terminationHandler 污染新进程状态
     private var launchGeneration: UInt64 = 0
-    /// 静态 fallback 帧捕获代次：新的 setWallpaper 会递增，旧后台捕获任务自动作废
-    private var staticFrameCaptureGeneration: UInt64 = 0
-    /// 交替写静态帧文件，避免 macOS 因路径不变缓存旧图
-    private var staticFrameDesktopSlot = 0
+    /// 烘焙静态资源同步代次：新的 setWallpaper 会递增，旧后台任务自动作废
+    private var bakedStaticUpdateGeneration: UInt64 = 0
+    /// 交替写烘焙静态图，避免 macOS 因路径不变缓存旧图
+    private var bakedStaticDesktopSlot = 0
 
     // MARK: - 线程安全的进程终止事件管道
 
@@ -796,13 +781,14 @@ final class WallpaperEngineXBridge: ObservableObject {
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
         // 真实渲染已经启动，UI 可立即结束“设置中”状态。
-        // 静态桌面/锁屏 fallback 首帧捕获较慢，放后台继续做；自动切换与热切换都必须走这里，
-        // 否则 Mission Control / 锁屏 / 渲染器暂停时仍会露出上一张壁纸的静态帧。
-        let captureTargets = effectiveScreens.compactMap { screen -> (screenID: String, pid: pid_t)? in
-            guard let pid = screenProcesses[screen.wallpaperScreenIdentifier]?.pid else { return nil }
-            return (screen.wallpaperScreenIdentifier, pid)
+        // 只允许已有烘焙资源更新静态桌面/锁屏；没有烘焙资源时不生成任何替代截图。
+        let bakedStaticScreens = effectiveScreens.filter { screen in
+            screenRenderStates[screen.wallpaperScreenIdentifier]?.path == resolvedPath
         }
-        scheduleStaticFallbackFrameCapture(path: resolvedPath, targets: captureTargets)
+        scheduleBakedCoverSync(
+            path: resolvedPath,
+            targetScreens: bakedStaticScreens
+        )
 
         // 强制恢复之前的焦点应用（wallpaper-wgpu 启动会抢占焦点）
         // 多次延迟尝试确保焦点恢复
@@ -2474,99 +2460,53 @@ final class WallpaperEngineXBridge: ObservableObject {
         )
     }
 
-    /// 使用 CoreGraphics 查找指定进程的窗口，返回 CGWindowID
-    /// ⚠️ 调用方需确保已有屏幕录制权限，否则 macOS 26 会 EXC_BREAKPOINT
-    private func findWindowForProcess(pid: pid_t) -> CGWindowID? {
-        guard let windowList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        for window in windowList {
-            guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int, ownerPID == pid else { continue }
-            guard let windowID = window[kCGWindowNumber as String] as? CGWindowID else { continue }
-            guard let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
-            let width = Int(bounds["Width"] ?? 0)
-            let height = Int(bounds["Height"] ?? 0)
-            guard width >= 100, height >= 100 else { continue }
-            return windowID
-        }
-        return nil
-    }
+    // MARK: - 烘焙静态资源同步
 
-    // MARK: - 首帧捕获（锁屏 / 静态 fallback）
-
-    /// 壁纸路径的缓存 key，用于 UserDefaults 记录最近一次捕获路径
-    private static func frameCacheKey(for path: String) -> String {
+    /// 壁纸路径的缓存 key，用于记录最近一次使用的烘焙静态资源路径。
+    private static func bakedStaticCacheKey(for path: String) -> String {
         let hash = abs(path.hashValue)
-        return "cached_frame_\(hash)"
+        return "baked_static_\(hash)"
     }
 
-    /// 后台调度静态 fallback。
-    /// 仅用烘焙产物封面 / 烘焙 MP4 的 poster；**不用** workshop 自带 preview.*（缩略图，不适合桌面 fallback）。
-    /// 没有烘焙资源时，再截运行中的 wgpu 窗口（需要屏幕录制权限）。
-    private func scheduleStaticFallbackFrameCapture(
+    /// 后台同步已有 scene 烘焙封面。
+    /// 封面读不到就不更新，不从其它资源生成或提取替代图片。
+    private func scheduleBakedCoverSync(
         path: String,
-        targets: [(screenID: String, pid: pid_t)]
+        targetScreens: [NSScreen]
     ) {
-        guard !targets.isEmpty else {
-            print("[WallpaperEngineXBridge] ⚠️ 无可用渲染进程，跳过静态帧捕获")
+        guard !targetScreens.isEmpty else {
+            print("[WallpaperEngineXBridge] ⚠️ 无可用目标屏幕，跳过烘焙静态资源同步")
             return
         }
 
-        staticFrameCaptureGeneration &+= 1
-        let generation = staticFrameCaptureGeneration
-        let captureTargets = targets
+        bakedStaticUpdateGeneration &+= 1
+        let generation = bakedStaticUpdateGeneration
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard self.staticFrameCaptureGeneration == generation else { return }
+            guard self.bakedStaticUpdateGeneration == generation else { return }
             guard self.lastWallpaperPath == path || self.screenRenderStates.values.contains(where: { $0.path == path }) else {
                 return
             }
 
-            let screens = captureTargets.compactMap { target in
-                NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == target.screenID })
+            guard let existing = self.existingBakedCoverURL(forScenePath: path) else {
+                print("[WallpaperEngineXBridge] Scene 烘焙封面读取不到，不更新系统桌面/锁屏")
+                return
             }
-            let applyScreens = screens.isEmpty ? nil : screens
-
-            // 1) 仅烘焙相关现成资源（不含 workshop preview.*）
-            if let existing = self.existingStaticFallbackImageURL(forScenePath: path) {
-                let applied = self.applyExistingStaticFallbackImage(
-                    existing,
-                    for: path,
-                    targetScreens: applyScreens,
-                    captureGeneration: generation
-                )
-                if applied {
-                    print("[WallpaperEngineXBridge] ✅ 使用烘焙资源作为静态 fallback: \(existing.lastPathComponent)")
-                    return
-                }
-            }
-
-            // 2) 无烘焙资源时，截运行中的 wgpu 窗口（需要屏幕录制权限）
-            var anyCaptured = false
-            for target in captureTargets {
-                guard self.staticFrameCaptureGeneration == generation else { return }
-                guard self.screenProcesses[target.screenID]?.pid == target.pid else { continue }
-                let targetScreens = NSScreen.screens.filter { $0.wallpaperScreenIdentifier == target.screenID }
-                let captured = await self.captureStaticFallbackFrame(
-                    path: path,
-                    expectedPID: target.pid,
-                    targetScreens: targetScreens.isEmpty ? nil : targetScreens,
-                    captureGeneration: generation
-                )
-                anyCaptured = anyCaptured || captured
-            }
-
-            guard self.staticFrameCaptureGeneration == generation else { return }
-            if !anyCaptured {
-                print("[WallpaperEngineXBridge] ⚠️ 无烘焙静态资源，且窗口截帧失败；实时渲染已启动，静态 fallback 未更新")
+            if self.applyBakedStaticImage(
+                existing,
+                for: path,
+                targetScreens: targetScreens,
+                updateGeneration: generation
+            ) {
+                print("[WallpaperEngineXBridge] ✅ 已使用烘焙静态资源: \(existing.lastPathComponent)")
             }
         }
     }
 
-    /// 解析 scene 路径对应的已有静态图：仅 scene 烘焙封面 / 烘焙 MP4 poster。
-    /// 明确不用 workshop 工程自带的 preview.*。
-    private func existingStaticFallbackImageURL(forScenePath path: String) -> URL? {
+    /// 读取 scene 已有的烘焙静态资源：优先稳定封面，其次读取可用烘焙 MP4 的已缓存 poster。
+    /// 两者都不存在时直接返回 nil，不从实时渲染窗口生成替代截图。
+    private func existingBakedCoverURL(forScenePath path: String) -> URL? {
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
         let record = MediaLibraryService.shared.downloadRecord(forLocalFilePath: contentRoot.path)
             ?? MediaLibraryService.shared.downloadedItems.first { record in
@@ -2576,47 +2516,45 @@ final class WallpaperEngineXBridge: ObservableObject {
                     ).path == contentRoot.path
             }
 
-        let itemID = record?.item.id
-        if let itemID,
+        if let itemID = record?.item.id,
            let scenePoster = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
             return scenePoster
         }
 
-        let bakedVideoURL = record?.sceneBakeArtifact.flatMap { art -> URL? in
-            let url = URL(fileURLWithPath: art.videoPath)
-            return SceneOfflineBakeService.isUsableBakedVideo(at: url) ? url : nil
-        }
-        if let bakedVideoURL,
-           let poster = VideoThumbnailCache.shared.cachedPosterJPEGFileURLIfExists(forLocalVideo: bakedVideoURL) {
-            return poster
+        if let artifact = record?.sceneBakeArtifact {
+            let bakedVideoURL = URL(fileURLWithPath: artifact.videoPath)
+            if SceneOfflineBakeService.isUsableBakedVideo(at: bakedVideoURL),
+               let poster = VideoThumbnailCache.shared.cachedPosterJPEGFileURLIfExists(forLocalVideo: bakedVideoURL) {
+                return poster
+            }
         }
 
         return nil
     }
 
-    /// 把已有图片文件设为静态桌面 fallback（不截屏）。
-    private func applyExistingStaticFallbackImage(
+    /// 把已有烘焙封面设为系统桌面壁纸。
+    private func applyBakedStaticImage(
         _ imageURL: URL,
         for path: String,
         targetScreens: [NSScreen]?,
-        captureGeneration: UInt64?
+        updateGeneration: UInt64?
     ) -> Bool {
-        if let captureGeneration, staticFrameCaptureGeneration != captureGeneration {
+        if let updateGeneration, bakedStaticUpdateGeneration != updateGeneration {
             return false
         }
         guard FileManager.default.fileExists(atPath: imageURL.path) else { return false }
 
-        let cacheKey = Self.frameCacheKey(for: path)
+        let cacheKey = Self.bakedStaticCacheKey(for: path)
         UserDefaults.standard.set(imageURL.path, forKey: cacheKey)
 
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
-            print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过静态 fallback 桌面写入（已记录已有资源路径）")
+            print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过烘焙封面的系统桌面写入")
             return true
         }
 
         // 系统壁纸同步关闭时：动态 scene 仍由 wgpu 渲染，但不得写系统桌面静态图。
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
-            print("[WallpaperEngineXBridge] 🧊 系统壁纸同步已关闭，跳过静态 fallback 桌面写入")
+            print("[WallpaperEngineXBridge] 🧊 系统壁纸同步已关闭，跳过烘焙封面写入")
             return true
         }
 
@@ -2625,17 +2563,17 @@ final class WallpaperEngineXBridge: ObservableObject {
             .fillColor: NSColor.black
         ]
         // 交替复制一份再 setDesktop，避免系统缓存固定路径旧图
-        staticFrameDesktopSlot = 1 - staticFrameDesktopSlot
+        bakedStaticDesktopSlot = 1 - bakedStaticDesktopSlot
         let cacheDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Caches/com.waifux.wallpaperengine/captured-frames")
+            .appendingPathComponent("Library/Caches/com.waifux.wallpaperengine/baked-static-wallpapers")
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let slotURL = cacheDir.appendingPathComponent("\(cacheKey)_s\(staticFrameDesktopSlot)\(imageURL.pathExtension.isEmpty ? ".jpg" : ".\(imageURL.pathExtension)")")
+        let slotURL = cacheDir.appendingPathComponent("\(cacheKey)_s\(bakedStaticDesktopSlot)\(imageURL.pathExtension.isEmpty ? ".jpg" : ".\(imageURL.pathExtension)")")
         try? FileManager.default.removeItem(at: slotURL)
         do {
             try FileManager.default.copyItem(at: imageURL, to: slotURL)
         } catch {
             // 复制失败则直接用原文件
-            print("[WallpaperEngineXBridge] ⚠️ 复制静态 fallback 到交替路径失败，改用原路径: \(error.localizedDescription)")
+            print("[WallpaperEngineXBridge] ⚠️ 复制烘焙封面到交替路径失败，改用原路径: \(error.localizedDescription)")
         }
         let applyURL = FileManager.default.fileExists(atPath: slotURL.path) ? slotURL : imageURL
 
@@ -2651,211 +2589,13 @@ final class WallpaperEngineXBridge: ObservableObject {
             do {
                 try NSWorkspace.shared.setDesktopImageURLForAllSpaces(applyURL, for: screen, options: fillOptions)
                 DesktopWallpaperSyncManager.shared.registerWallpaperSet(applyURL, for: screen, options: fillOptions)
-                print("[WallpaperEngineXBridge] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName)) source=\(applyURL.lastPathComponent)")
+                print("[WallpaperEngineXBridge] ✅ 烘焙封面壁纸已设置 (screen: \(screen.localizedName)) source=\(applyURL.lastPathComponent)")
                 didApply = true
             } catch {
                 print("[WallpaperEngineXBridge] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
             }
         }
         return didApply
-    }
-
-    /// 捕获首帧并设为静态桌面壁纸（锁屏显示 + wallpaper-wgpu 未运行时的 fallback）
-    private func captureStaticFallbackFrame(
-        path: String,
-        expectedPID: pid_t? = nil,
-        targetScreens: [NSScreen]? = nil,
-        captureGeneration: UInt64? = nil
-    ) async -> Bool {
-        // 仅在无烘焙/预览资源时走到这里。CGWindowListCreateImage 无权限时会 EXC_BREAKPOINT。
-        guard checkScreenCapturePermission() else {
-            print("[WallpaperEngineXBridge] ❌ 无已有静态资源且无屏幕录制权限，跳过窗口截帧 fallback")
-            return false
-        }
-
-        let cacheKey = Self.frameCacheKey(for: path)
-        print("[WallpaperEngineXBridge] 无已有烘焙/预览资源，回退窗口截帧: \(cacheKey)")
-
-        guard let pid = expectedPID ?? screenProcesses.values.first?.pid else { return false }
-        guard expectedPID == nil || screenProcesses.values.contains(where: { $0.pid == expectedPID }) else { return false }
-
-        // 查找渲染窗口
-        guard let windowID = findWindowForProcess(pid: pid) else {
-            print("[WallpaperEngineXBridge] ⚠️ 未找到渲染窗口，无法捕获真实首帧")
-            return false
-        }
-
-        // 轮询等待非黑帧
-        let minimumCaptureWarmup: TimeInterval = 8.0
-        let timeout: TimeInterval = 25
-        let pollInterval: TimeInterval = 0.5
-        let startTime = Date()
-        var lastFrame: CGImage?
-
-        while Date().timeIntervalSince(startTime) < timeout {
-            if let captureGeneration, staticFrameCaptureGeneration != captureGeneration {
-                return false
-            }
-            guard screenProcesses.values.contains(where: { $0.pid == pid }), kill(pid, 0) == 0 else { return false } // 进程已退出或已切换
-
-            if let image = captureWindowFrame(windowID: windowID) {
-                // 至少等待更久让场景完成暗到亮的加载，避免缓存黑屏/暗场帧
-                if Date().timeIntervalSince(startTime) >= minimumCaptureWarmup, isNonBlackFrame(image) {
-                    // 找到有效帧，保存并设静态壁纸
-                    return saveAndApplyStaticFrame(
-                        image,
-                        for: path,
-                        cacheKey: cacheKey,
-                        targetScreens: targetScreens,
-                        captureGeneration: captureGeneration
-                    )
-                }
-                lastFrame = image
-            }
-            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
-        }
-
-        if let captureGeneration, staticFrameCaptureGeneration != captureGeneration {
-            return false
-        }
-
-        // 超时：用最后一帧（即使可能偏黑）
-        if let frame = lastFrame {
-            print("[WallpaperEngineXBridge] ⚠️ 首帧捕获超时，使用最后一帧")
-            return saveAndApplyStaticFrame(
-                frame,
-                for: path,
-                cacheKey: cacheKey,
-                targetScreens: targetScreens,
-                captureGeneration: captureGeneration
-            )
-        } else {
-            print("[WallpaperEngineXBridge] ❌ 首帧捕获失败（无任何帧）")
-            return false
-        }
-    }
-
-    /// 保存帧到缓存并设为静态壁纸
-    private func saveAndApplyStaticFrame(
-        _ image: CGImage,
-        for path: String,
-        cacheKey: String,
-        targetScreens: [NSScreen]? = nil,
-        captureGeneration: UInt64? = nil
-    ) -> Bool {
-        if let captureGeneration, staticFrameCaptureGeneration != captureGeneration {
-            return false
-        }
-
-        // 保存到缓存目录；交替 slot 避免 macOS 因固定路径缓存旧图
-        let cacheDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Caches/com.waifux.wallpaperengine/captured-frames")
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-
-        staticFrameDesktopSlot = 1 - staticFrameDesktopSlot
-        let fileURL = cacheDir.appendingPathComponent("\(cacheKey)_s\(staticFrameDesktopSlot).jpg")
-
-        // 写入 JPEG
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let jpegData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
-            print("[WallpaperEngineXBridge] ⚠️ JPEG 编码失败")
-            return false
-        }
-        do {
-            try jpegData.write(to: fileURL, options: .atomic)
-            print("[WallpaperEngineXBridge] ✅ 首帧已保存: \(fileURL.path)")
-        } catch {
-            print("[WallpaperEngineXBridge] ⚠️ 首帧写入失败: \(error.localizedDescription)")
-            return false
-        }
-
-        // 标记已缓存
-        UserDefaults.standard.set(fileURL.path, forKey: cacheKey)
-
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
-            print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过静态 fallback 壁纸设置以保护用户锁屏选择")
-            return true
-        }
-
-        guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
-            print("[WallpaperEngineXBridge] 🧊 系统壁纸同步已关闭，跳过窗口截帧写系统桌面")
-            return true
-        }
-
-        // 设为静态桌面壁纸（锁屏会跟随使用此壁纸）
-        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSImageScaling.scaleAxesIndependently.rawValue,
-            .fillColor: NSColor.black
-        ]
-        var didApply = false
-        let screens: [NSScreen]
-        if let targetScreens, !targetScreens.isEmpty {
-            screens = targetScreens
-        } else {
-            let active = activeTargetScreens()
-            screens = active.isEmpty ? NSScreen.screens : active
-        }
-        for screen in screens {
-            do {
-                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(fileURL, for: screen, options: fillOptions)
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(fileURL, for: screen, options: fillOptions)
-                print("[WallpaperEngineXBridge] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName))")
-                didApply = true
-            } catch {
-                print("[WallpaperEngineXBridge] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
-            }
-        }
-        return didApply
-    }
-
-    /// 使用 CoreGraphics 捕获窗口帧
-    /// ⚠️ 调用方需确保已有屏幕录制权限，否则 macOS 26 会 EXC_BREAKPOINT
-    private func captureWindowFrame(windowID: CGWindowID) -> CGImage? {
-        CGWindowListCreateImage(
-            .infinite,
-            .optionIncludingWindow,
-            windowID,
-            [.boundsIgnoreFraming, .nominalResolution]
-        )
-    }
-
-    /// 判断帧是否为非黑的有效帧
-    private func isNonBlackFrame(_ image: CGImage) -> Bool {
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return false }
-
-        // 采样中心 1/4 区域
-        let sampleRect = CGRect(
-            x: width / 4,
-            y: height / 4,
-            width: width / 2,
-            height: height / 2
-        )
-        guard let cropped = image.cropping(to: sampleRect) else { return false }
-        guard let dataProvider = cropped.dataProvider else { return false }
-        guard let pixelData = dataProvider.data else { return false }
-        let data: UnsafePointer<UInt8> = CFDataGetBytePtr(pixelData)
-        let bytesPerRow = cropped.bytesPerRow
-
-        var totalBrightness: UInt64 = 0
-        var pixelCount: UInt64 = 0
-
-        for y in 0..<cropped.height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<cropped.width {
-                let offset = rowOffset + x * 4
-                let r = UInt64(data[offset + 1])
-                let g = UInt64(data[offset + 2])
-                let b = UInt64(data[offset + 3])
-                totalBrightness += (r + g + b) / 3
-                pixelCount += 1
-            }
-        }
-
-        guard pixelCount > 0 else { return false }
-        let avgBrightness = Double(totalBrightness) / Double(pixelCount)
-        return avgBrightness > 10.0
     }
 
     // MARK: - 辅助方法

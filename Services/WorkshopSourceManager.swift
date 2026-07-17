@@ -139,7 +139,7 @@ class WorkshopSourceManager: ObservableObject {
         }
     }
 
-    // MARK: - SteamCMD 凭证（Keychain 安全存储）
+    // MARK: - SteamCMD 凭证（本地明文存储）
 
     struct SteamCredentials: Codable {
         let username: String
@@ -269,17 +269,16 @@ class WorkshopSourceManager: ObservableObject {
         guard let openBrace = content[searchStart...].range(of: "{") else { return nil }
         let afterBrace = openBrace.upperBound
 
-        // 在 users 块内逐行扫描
         var currentSteamID: String?
-        let scanner = content[afterBrace...]
+        var mostRecentSteamID: String?
+        var lastSteamID: String?
         var depth = 1
-        let lines = scanner.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = content[afterBrace...].split(separator: "\n", omittingEmptySubsequences: false)
 
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
 
-            // 计算缩进深度（仅用于逻辑清晰，实际逐行处理）
             if trimmed.hasPrefix("{") {
                 depth += 1
                 continue
@@ -288,15 +287,35 @@ class WorkshopSourceManager: ObservableObject {
                 depth -= 1
                 if depth == 0 { break } // users 块结束
                 if depth == 1 {
-                    // 回到 users 顶层，重置状态
+                    // 回到 users 顶层，结束当前账号块
                     currentSteamID = nil
                 }
+                continue
+            }
+
+            // users 顶层下的 key 通常是 SteamID64
+            if depth == 1, let key = extractVDFKey(trimmed), isSteamID64(key) {
+                currentSteamID = key
+                lastSteamID = key
+                continue
+            }
+
+            // 账号块内：优先取 MostRecent = 1 的 SteamID64
+            if depth >= 2,
+               let key = extractVDFKey(trimmed),
+               key.caseInsensitiveCompare("MostRecent") == .orderedSame,
+               let value = extractVDFValue(trimmed),
+               value == "1",
+               let currentSteamID {
+                mostRecentSteamID = currentSteamID
             }
         }
 
-        // 如果找到 MostRecent 的 SteamID64 则优先返回，否则返回第一个
-        // 简化处理：直接取最后一个 SteamID64（通常是最近登录的）
-        return currentSteamID
+        return mostRecentSteamID ?? lastSteamID
+    }
+
+    private func isSteamID64(_ value: String) -> Bool {
+        value.count >= 15 && value.count <= 20 && value.allSatisfy(\.isNumber)
     }
 
     /// 提取 VDF 行中的 key（第一个引号内容）

@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CryptoKit
 import Foundation
 import Kingfisher
 
@@ -468,13 +469,33 @@ enum SceneOfflineBakeService {
         width: Int,
         height: Int,
         fps: Int,
-        durationSeconds: Double
+        durationSeconds: Double,
+        propertiesCacheKey: String?
     ) -> URL {
         let safeID = itemID.replacingOccurrences(of: "/", with: "_")
         let dir = baseDir.appendingPathComponent(safeID, isDirectory: true)
+        let propertiesSuffix = propertiesCacheKey.map { "_props-\($0)" } ?? ""
         let name =
-            "\(analysisId.uuidString)_\(renderer.rawValue)_\(width)x\(height)_\(fps)fps_\(Int(durationSeconds))s.mp4"
+            "\(analysisId.uuidString)_\(renderer.rawValue)_\(width)x\(height)_\(fps)fps_\(Int(durationSeconds))s\(propertiesSuffix).mp4"
         return dir.appendingPathComponent(name)
+    }
+
+    /// 设计面板属性会改变输出画面，必须参与缓存区分。
+    private static func propertiesCacheKey(for userProperties: String?) -> String? {
+        guard let userProperties,
+              !userProperties.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let data: Data
+        if let source = userProperties.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: source),
+           let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
+            data = canonical
+        } else {
+            data = Data(userProperties.utf8)
+        }
+        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
     static func rendererLaunchEnvironment(for executableURL: URL) -> [String: String] {
@@ -592,6 +613,12 @@ enum SceneOfflineBakeService {
         let h = max(64, mainDisplaySize.height)
         let evenW = (w / 2) * 2
         let evenH = (h / 2) * 2
+        let effectiveUserProperties = await MainActor.run {
+            SceneConfigOverrideService.mergedPropertiesJSON(
+                userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(for: contentRoot.path),
+                for: contentRoot.path
+            )
+        }
 
         let sceneBakesRoot = await MainActor.run {
             DownloadPathManager.shared.sceneBakesFolderURL
@@ -605,7 +632,8 @@ enum SceneOfflineBakeService {
             width: evenW,
             height: evenH,
             fps: Int(fps),
-            durationSeconds: cacheDurationSeconds
+            durationSeconds: cacheDurationSeconds,
+            propertiesCacheKey: propertiesCacheKey(for: effectiveUserProperties)
         )
 
         try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -659,6 +687,7 @@ enum SceneOfflineBakeService {
                 height: evenH,
                 fps: fps,
                 durationSeconds: durationSeconds,
+                userProperties: effectiveUserProperties,
                 progress: progress
             )
         }
@@ -687,6 +716,7 @@ enum SceneOfflineBakeService {
         height: Int,
         fps: Int32,
         durationSeconds: Double,
+        userProperties: String?,
         progress: (@MainActor (Double) -> Void)?
     ) async throws -> SceneBakeArtifact {
         // 使用 wallpaper-wgpu bake 子命令（GPU readback 直接编码，不需要屏幕录制）
@@ -711,6 +741,10 @@ enum SceneOfflineBakeService {
         // assets 路径（异步等待解压完成）
         if let assets = await WallpaperEngineEmbeddedAssets.awaitAssetsReady(), !assets.isEmpty {
             args += ["--assets", assets]
+        }
+
+        if let userProperties, !userProperties.isEmpty {
+            args += ["--user-properties", userProperties]
         }
 
         // 自动检测周期时不需要传 --duration，让 bake 自己检测

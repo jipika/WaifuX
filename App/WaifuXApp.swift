@@ -179,15 +179,13 @@ struct WaifuXApp {
 
     /// 配置 Kingfisher 高性能图片加载
     private static func configureKingfisher() {
-        // 内存缓存配置：256MB / 300 张 / 10 分钟过期 / 60 秒一次清理。
-        // 壁纸探索页瀑布流可能滚出几百张缩略图，仅靠 totalCostLimit 不够：
-        // 没有 expiration + cleanInterval 时，长期不访问的条目仍然驻留，
-        // RSS 会持续增长直至触发 macOS 内存压力 → 全量 clearMemoryCache()。
-        // 主动 expiration 让长尾图片自然落到磁盘缓存，缓解抖动。
-        ImageCache.default.memoryStorage.config.totalCostLimit = 256 * 1024 * 1024 // 256MB
-        ImageCache.default.memoryStorage.config.countLimit = 300
-        ImageCache.default.memoryStorage.config.expiration = .seconds(10 * 60) // 10 min
-        ImageCache.default.memoryStorage.config.cleanInterval = 60             // 60s
+        // 内存缓存配置：128MB / 180 张 / 5 分钟过期 / 30 秒一次清理。
+        // 探索页只显示缩略图；过高的 totalCostLimit 会让 RSS 长期顶在高位。
+        // 主动 expiration 让长尾图片落到磁盘缓存，滚动时再回填。
+        ImageCache.default.memoryStorage.config.totalCostLimit = 128 * 1024 * 1024 // 128MB
+        ImageCache.default.memoryStorage.config.countLimit = 180
+        ImageCache.default.memoryStorage.config.expiration = .seconds(5 * 60) // 5 min
+        ImageCache.default.memoryStorage.config.cleanInterval = 30             // 30s
 
         // 磁盘缓存配置
         ImageCache.default.diskStorage.config.sizeLimit = 500 * 1024 * 1024 // 500MB

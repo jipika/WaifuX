@@ -69,6 +69,7 @@ final class DesktopWallpaperSyncManager {
 
         // 恢复持久化的指纹 -> 壁纸 URL 映射，供外接屏重连后判断是否曾由 App 设过壁纸
         loadFingerprintState()
+        purgeLegacyRendererCaptureState()
     }
 
     /// 注册一次静态壁纸设置，后续 Space 切换时会自动同步
@@ -275,6 +276,43 @@ final class DesktopWallpaperSyncManager {
             lastSetImageURLByFingerprint[fingerprint] = URL(string: urlString)
         }
         migrateLegacyFingerprintStateIfNeeded()
+    }
+
+    /// 旧版会把 scene 实时渲染窗口截图注册为系统壁纸。该来源已经移除，必须同时
+    /// 清掉持久化注册，避免切换 Space 或唤醒时把历史截图重新写回桌面/锁屏。
+    private func purgeLegacyRendererCaptureState() {
+        let legacyDirectory = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Caches/com.waifux.wallpaperengine/captured-frames", isDirectory: true)
+            .standardizedFileURL
+        let legacyPrefix = legacyDirectory.path.hasSuffix("/")
+            ? legacyDirectory.path
+            : legacyDirectory.path + "/"
+
+        let legacyFingerprints = lastSetImageURLByFingerprint.compactMap { fingerprint, url in
+            url.standardizedFileURL.path.hasPrefix(legacyPrefix) ? fingerprint : nil
+        }
+        for fingerprint in legacyFingerprints {
+            lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
+            lastOptionsByFingerprint.removeValue(forKey: fingerprint)
+        }
+
+        let legacyScreenIDs = lastSetImageURLByScreen.compactMap { screenID, url in
+            url.standardizedFileURL.path.hasPrefix(legacyPrefix) ? screenID : nil
+        }
+        for screenID in legacyScreenIDs {
+            lastSetImageURLByScreen.removeValue(forKey: screenID)
+            lastOptionsByScreen.removeValue(forKey: screenID)
+        }
+
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("cached_frame_") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        try? FileManager.default.removeItem(at: legacyDirectory)
+
+        if !legacyFingerprints.isEmpty || !legacyScreenIDs.isEmpty {
+            persistFingerprintState()
+            print("[DesktopWallpaperSyncManager] 已清除旧 scene 窗口截图壁纸注册")
+        }
     }
 
     /// 旧版无序列号指纹无法可靠地区分同型号显示器。升级时从 macOS 当前每屏

@@ -149,20 +149,18 @@ private enum WallpaperExploreDiagnostics {
 
 // MARK: - 滚动位置保存已移除（怀疑返回时回到顶部是因数据被清空导致）
 
-// MARK: - macOS 14 兼容：滚动加载更多哨兵
+private final class WallpaperExploreScrollCoordinator: ObservableObject {
+    var pendingLoadMoreTask: DispatchWorkItem?
+    var wasNearBottom = false
 
-private struct WallpaperLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = .greatestFiniteMagnitude
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        // 只取最小值，且仅当显著变化时记录（避免同一帧多次更新警告）
-        if next < value {
-            value = next
-        }
+    func cancelPendingWork() {
+        pendingLoadMoreTask?.cancel()
+        pendingLoadMoreTask = nil
+        wasNearBottom = false
     }
 }
 
+/// 测量展开态 header 完整高度。
 private struct WallpaperExploreHeaderHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -174,33 +172,91 @@ private struct WallpaperExploreHeaderHeightPreferenceKey: PreferenceKey {
     }
 }
 
-private enum WallpaperLoadMoreScrollZone: Equatable {
-    case near
-    case armed
-    case far
-}
+/// Header 区域滚轮捕获：鼠标在筛选/搜索上也能驱动两阶段滚动。
+/// - 只接管 `scrollWheel`，`hitTest` 对点击返回 nil，不挡 chip / Menu / 输入框。
+private struct WallpaperHeaderScrollWheelCatcher: NSViewRepresentable {
+    /// 向下浏览为正（与 ExploreGridCoordinator 一致）。
+    var onScrollDown: (CGFloat) -> Void
 
-private final class WallpaperExploreScrollCoordinator: ObservableObject {
-    var sentinelDebounceTask: DispatchWorkItem?
-    var pendingLoadMoreTask: DispatchWorkItem?
-    var wasNearBottom = false
+    final class HostView: NSView {
+        var onScrollDown: ((CGFloat) -> Void)?
 
-    func cancelPendingWork() {
-        sentinelDebounceTask?.cancel()
-        pendingLoadMoreTask?.cancel()
-        sentinelDebounceTask = nil
-        pendingLoadMoreTask = nil
-        wasNearBottom = false
+        override var isFlipped: Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // 点击穿透到下层 SwiftUI 控件；滚轮事件仍会发到当前跟踪的 view。
+            // 对悬停在本 view bounds 内的 scrollWheel，AppKit 会找 acceptsFirstMouse/scroll 的 view。
+            // 这里返回 self 才能收到 scrollWheel；但会挡点击。
+            // 折中：hitTest 返回 nil 放行点击；用 local monitor 在 bounds 内抓滚轮。
+            return nil
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            installMonitorIfNeeded()
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil {
+                removeMonitor()
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        deinit {
+            // NSView 由 AppKit 主线程持有/释放；assumeIsolated 满足 Swift 6 对 nonisolated deinit 的要求。
+            MainActor.assumeIsolated {
+                removeMonitor()
+            }
+        }
+
+        private var scrollMonitor: Any?
+
+        private func installMonitorIfNeeded() {
+            guard scrollMonitor == nil, window != nil else { return }
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, self.window != nil else { return event }
+                // 只处理落在本 view 可见矩形内的滚轮
+                let locInWindow = event.locationInWindow
+                let locInSelf = self.convert(locInWindow, from: nil)
+                guard self.bounds.contains(locInSelf), !self.isHiddenOrHasHiddenAncestor else {
+                    return event
+                }
+                // 高度已收为 0 时不拦截
+                guard self.bounds.height > 0.5 else { return event }
+
+                let raw = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 16
+                let scrollDown = -raw
+                guard abs(scrollDown) > 0.2 else { return event }
+
+                self.onScrollDown?(scrollDown)
+                // 消费事件，避免再冒泡到别处
+                return nil
+            }
+        }
+
+        private func removeMonitor() {
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> HostView {
+        let view = HostView()
+        view.onScrollDown = onScrollDown
+        return view
+    }
+
+    func updateNSView(_ nsView: HostView, context: Context) {
+        nsView.onScrollDown = onScrollDown
     }
 }
 
 // MARK: - WallpaperExploreContentView - 壁纸探索页
 
 struct WallpaperExploreContentView: View {
-    private static let scrollCoordinateSpaceName = "wallpaper-explore-scroll"
-    private static let loadMoreTriggerThreshold: CGFloat = 120
-    private static let loadMoreResetThreshold: CGFloat = 520
-
     @ObservedObject var viewModel: WallpaperViewModel
     @Binding var selectedWallpaper: Wallpaper?
     var isVisible: Bool = true
@@ -233,7 +289,6 @@ struct WallpaperExploreContentView: View {
     @State private var isLoadingMore = false
     @State private var isInitialLoading = false
     @State private var showScrollToTop = false
-    @State private var outerScrollToTopToken: Int = 0
     @State private var showAPIKeyAlert = false
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
@@ -264,17 +319,22 @@ struct WallpaperExploreContentView: View {
     @State private var loadMoreCooldownUntil: Date? = nil
     /// syncAtmosphereIfNeeded 节流时间戳，避免 loadMore 高频触发时反复下载缩略图+CoreImage 采样。
     @State private var lastAtmosphereSyncTime: Date = .distantPast
-    @State private var measuredGridHeaderHeight: CGFloat = 0
-    @State private var isGridHeaderContentMounted = true
 
-    // MARK: - AppKit 瀑布流（NSCollectionView 通道）状态
-    /// AppKit `ExploreGridContainer` 汇报回的内容总高度。外层 SwiftUI ScrollView
-    /// 用 `.frame(height:)` 把这个值兑现给 grid，让网格在共享滚动模型下成为定高块。
-    @State private var gridContentHeight: CGFloat = 600
-    /// 触发可视 cell 重配的 token（数据数量未变但内容/收藏/标记发生变化时）。
+    // MARK: - AppKit 瀑布流（NSCollectionView 自滚动）
+    /// 数据内容变化但数量不变时，递增强制刷新可见 cell（收藏状态等）。
     @State private var gridReloadToken: Int = 0
-    /// 强制 AppKit 网格重做布局的 token（窗口宽度变化、tab 切回等场景）。
+    /// 窗口/tab 切回时强制 AppKit 重布局。
     @State private var gridLayoutRefreshToken: Int = 0
+    /// 外部递增时滚回网格顶部。
+    @State private var gridScrollToTopToken: Int = 0
+    /// header 区域滚轮收完 header 后，把余量推给网格的 token。
+    @State private var gridScrollBoostToken: Int = 0
+    /// 待推给网格的向下滚动量（pt）。
+    @State private var gridPendingScrollDown: CGFloat = 0
+    /// 展开态 header 的完整高度（由 GeometryReader 测得）。
+    @State private var measuredFullHeaderHeight: CGFloat = 0
+    /// 已随滚动消耗的 header 高度（像素）。0 = 完全展开，== fullHeight 时完全消失。
+    @State private var headerConsumedHeight: CGFloat = 0
 
     // shouldUseLightweightEffects 已下沉到 WallpaperExploreAtmosphereBackground 子视图，
     // 该子视图自行观察 VideoWallpaperManager / WallpaperEngineXBridge 的播放状态。
@@ -344,9 +404,15 @@ struct WallpaperExploreContentView: View {
                     }
                     syncAtmosphereIfNeeded()
                 }
-                // tab 切回时让 AppKit 网格主动补一次布局，覆盖 hide/unhide 期间的脏布局
+                // tab 切回时让 AppKit 网格主动补一次布局
                 gridLayoutRefreshToken &+= 1
             }
+        }
+        .onChange(of: viewModel.favoriteIDSet) { _, _ in
+            gridReloadToken &+= 1
+        }
+        .onChange(of: lastVisibleIDs) { _, _ in
+            gridReloadToken &+= 1
         }
         .onChange(of: searchText) { _, newValue in
             translationBridge.detectLanguage(for: newValue)
@@ -362,10 +428,6 @@ struct WallpaperExploreContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
-            invalidateGridHeaderMeasurement()
-        }
-        .onChange(of: gridHeaderLayoutSignature) { _, _ in
-            invalidateGridHeaderMeasurement()
         }
         .onChange(of: category) { _, _ in
             handleCategoryChange()
@@ -411,16 +473,6 @@ struct WallpaperExploreContentView: View {
                 recomputeVisibleWallpapers()
             }
         }
-        // ❌ 已移除 .onChange(of: libraryContentRevision)，收藏状态改为视图在 ForEach 中
-        // 直接读取 viewModel.favoriteIDSet，避免 @State 中间赋值引发不必要的 body 重算。
-        // ✅ AppKit 通道：收藏集合变化时只重配可视 cell（不整表 reload，不重启图片下载）
-        .onChange(of: viewModel.favoriteIDSet) { _, _ in
-            gridReloadToken &+= 1
-        }
-        // 数据顺序/身份变化（同长度筛选切换、排序变化等）也要让可视 cell 重读 wallpaper
-        .onChange(of: lastVisibleIDs) { _, _ in
-            gridReloadToken &+= 1
-        }
         .overlay(alertOverlay)
         .sheet(isPresented: $showWallpaperURLSheet) {
             WorkshopURLInputSheet(
@@ -434,156 +486,119 @@ struct WallpaperExploreContentView: View {
     }
 
     private func scrollContent(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
+        // ⚠️ 关键架构（2026-07 修订）：
+        // 1) LazyVStack + ZStack chunk 在 macOS 26 快速滚动会卡死主线程
+        //    （sample: LazyVStackLayout.measureEstimates → 100% CPU）。
+        // 2) 外层 SwiftUI ScrollView + 全高 NSCollectionView(allowsScrolling=false)
+        //    会让 clipView 等于全内容高度，所有 cell 被当可见 → 内存可到几十 GB。
+        //
+        // 正确路径：header 在上方可折叠；网格用 AppKit 自滚动 + 视口高度，
+        // NSCollectionView 才能真正复用 cell。数据列表不裁剪，滚回去仍可显示。
+        // 向下滚时 header 高度渐减、网格高度渐增；滚回顶部再展开。
         ZStack {
-            if visibleWallpapers.isEmpty {
-                legacyScrollContent(width: width) {
-                    Group {
-                        if isWallpaperLoadingState {
-                            loadingState
-                        } else {
-                            emptyState
+            VStack(alignment: .leading, spacing: 0) {
+                // mainTopBarContentPadding 必须放进可折叠高度内部：
+                // 以前它在 header 外层，header 收到 0 后仍占 80pt，网格永远钻不到顶部 tabs 下面。
+                collapsibleExploreHeader
+                    .padding(.horizontal, 28)
+                    .frame(width: width, alignment: .leading)
+                    .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                    .environment(\.arcIsLightMode, arcSettings.isLightMode)
+
+                Group {
+                    if visibleWallpapers.isEmpty {
+                        Group {
+                            if isWallpaperLoadingState {
+                                loadingState
+                            } else {
+                                emptyState
+                            }
                         }
+                        .padding(.horizontal, 28)
+                        .padding(.top, 16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.25)))
+                    } else {
+                        wallpaperGrid(config: gridConfig)
+                            .padding(.horizontal, 28)
+                            // 收起后网格顶到窗口最上沿，内容从 tabs 浮层下穿过
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
-                }
-            } else {
-                if #available(macOS 15.0, *) {
-                    scrollViewModern(width: width, gridConfig: gridConfig)
-                } else {
-                    scrollViewLegacy(width: width, viewportHeight: viewportHeight, gridConfig: gridConfig)
                 }
             }
+            .frame(width: width, height: viewportHeight, alignment: .top)
 
-            // 底部加载状态卡片
             bottomLoadingOverlay
-
             scrollToTopButton
         }
     }
 
-    private func legacyScrollContent<Content: View>(width: CGFloat, @ViewBuilder body: () -> Content) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 16) {
-                heroSection
-                categorySection
-                filterSection
-                activeFiltersSection
-                contentHeader
-                    .padding(.top, 12)
-                body()
-            }
-            .padding(.horizontal, 28)
-            .padding(.top, mainTopBarContentPadding)
-            .padding(.bottom, 48)
-            .frame(width: width, alignment: .leading)
-            .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-            .environment(\.arcIsLightMode, arcSettings.isLightMode)
+    /// header 完整内容（含顶部 tabs 避让区）。测量与收起都基于这一整块。
+    private var exploreHeaderContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            heroSection
+            hotTagsRow
+            categorySection
+            pixivRelatedTagsRow
+            filterSection
+            activeFiltersSection
+            contentHeader
+                .padding(.top, 8)
         }
-        .scrollDisabled(!isVisible)
+        // 顶部 80pt 与筛选区一起被挤压；滚够后整块到 0，列表可贴到窗口顶并穿过 tabs。
+        .padding(.top, mainTopBarContentPadding)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    // MARK: - macOS 15+：使用 onScrollGeometryChange
+    /// 随网格滚动 1:1 上移挤出的 header。
+    /// 用 `alignment: .bottom` 限高：高度变矮时保留下半段，顶部（标题）先离开，
+    /// 底部（分类/内容级别）最后离开，直到高度 0。这才是“跟着列表往上滚走”。
+    private var collapsibleExploreHeader: some View {
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        let consumed: CGFloat = {
+            guard fullHeight > 1, !visibleWallpapers.isEmpty else { return 0 }
+            return min(fullHeight, max(0, headerConsumedHeight))
+        }()
+        let currentHeight: CGFloat = {
+            guard fullHeight > 1 else { return 0 }
+            if visibleWallpapers.isEmpty { return fullHeight }
+            return max(0, fullHeight - consumed)
+        }()
 
-    @available(macOS 15.0, *)
-    private func scrollViewModern(width: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("wp-scroll-top")
-                    gridHeaderStack
-                    wallpaperGrid(config: gridConfig)
+        return exploreHeaderContent
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: WallpaperExploreHeaderHeightPreferenceKey.self,
+                        value: proxy.size.height
+                    )
                 }
-                .padding(.horizontal, 28)
-                .frame(width: width, alignment: .leading)
-                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                .environment(\.arcIsLightMode, arcSettings.isLightMode)
-            }
-            .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-            .onChange(of: viewModel.wallpapers.count) { _, count in
-                if count > 60 { showScrollToTop = true }
-            }
-            .onScrollGeometryChange(for: WallpaperLoadMoreScrollZone.self, of: { geometry in
-                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                let distanceFromBottom = geometry.contentSize.height - bottomOffset
-                guard distanceFromBottom.isFinite else {
-                    return .far
-                }
-                if distanceFromBottom <= Self.loadMoreTriggerThreshold { return .near }
-                if distanceFromBottom <= Self.loadMoreResetThreshold { return .armed }
-                return .far
-            }, action: { oldValue, newValue in
-                if newValue == .near && oldValue != .near {
-                    // ⛔ 冷却期内不触发 loadMore，防止 contentSize 增长后的无限级联
-                    if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
-                    guard !scrollCoordinator.wasNearBottom else { return }
-                    scrollCoordinator.wasNearBottom = true
-                    self.scheduleLoadMoreFromScroll()
-                } else if newValue == .far {
-                    // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-                        scrollCoordinator.wasNearBottom = false
-                    }
-                }
-            })
-            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
-                geometry.contentOffset.y
-            }, action: { _, offset in
-                handleScrollOffset(offset)
-            })
-            .scrollDisabled(!isVisible)
-            .onChange(of: outerScrollToTopToken) { _, _ in
-                withAnimation(nil) {
-                    proxy.scrollTo("wp-scroll-top", anchor: .top)
+            )
+            .onPreferenceChange(WallpaperExploreHeaderHeightPreferenceKey.self) { height in
+                // 展开时更新；收起中若内容变高（chips 增多）也允许抬上限
+                if consumed < 1 || measuredFullHeaderHeight < 1 || height > measuredFullHeaderHeight {
+                    updateMeasuredFullHeaderHeight(height)
                 }
             }
-        }
-    }
-
-    // MARK: - macOS 14：使用 PreferenceKey + 防抖
-
-    private func scrollViewLegacy(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("wp-scroll-top")
-                    gridHeaderStack
-                    wallpaperGrid(config: gridConfig)
-                    loadMoreSentinel
+            // alignment.bottom：裁掉顶部、保留底部 → 视觉上内容往上滚出
+            .frame(
+                maxWidth: .infinity,
+                minHeight: fullHeight > 1 ? currentHeight : nil,
+                maxHeight: fullHeight > 1 ? currentHeight : nil,
+                alignment: .bottom
+            )
+            .clipped()
+            // 鼠标在 header 上也能滚：捕获滚轮走同一套两阶段逻辑；点击仍穿透到控件
+            .overlay {
+                WallpaperHeaderScrollWheelCatcher { scrollDown in
+                    handleHeaderAreaScrollDown(scrollDown)
                 }
-                .padding(.horizontal, 28)
-                .frame(width: width, alignment: .leading)
-                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
-                .environment(\.arcIsLightMode, arcSettings.isLightMode)
-                .background(
-                    ScrollToTopHelper(trigger: 0, onOffsetChange: handleScrollOffset)
-                        .frame(width: 0, height: 0)
-                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
             }
-            .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-            .onChange(of: viewModel.wallpapers.count) { _, count in
-                if count > 60 { showScrollToTop = true }
-            }
-            .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
-                WallpaperExploreScrollActivity.markActive()
-                scrollCoordinator.sentinelDebounceTask?.cancel()
-                let task = DispatchWorkItem { [self] in
-                    guard !Task.isCancelled else { return }
-                    self.handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
-                }
-                scrollCoordinator.sentinelDebounceTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
-            }
-            .scrollDisabled(!isVisible)
-            .onChange(of: outerScrollToTopToken) { _, _ in
-                withAnimation(nil) {
-                    proxy.scrollTo("wp-scroll-top", anchor: .top)
-                }
-            }
-        }
+            .allowsHitTesting(currentHeight > 0.5)
     }
 
     private var scrollToTopButton: some View {
@@ -593,7 +608,9 @@ struct WallpaperExploreContentView: View {
                 Spacer()
                 if showScrollToTop {
                     ScrollToTopButton {
-                        outerScrollToTopToken += 1
+                        expandHeaderFully()
+                        gridScrollToTopToken &+= 1
+                        showScrollToTop = false
                     }
                     .padding(.trailing, 8)
                     .padding(.bottom, 112)
@@ -603,6 +620,26 @@ struct WallpaperExploreContentView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
         .zIndex(1)
+    }
+
+    private func updateMeasuredFullHeaderHeight(_ height: CGFloat) {
+        // 测量来自 hidden 副本的固有高度，始终可更新。
+        guard height > 1 else { return }
+        guard abs(height - measuredFullHeaderHeight) > 0.5 else { return }
+        measuredFullHeaderHeight = height
+        // fullHeight 变矮时，把已消耗量钳回合法范围
+        if headerConsumedHeight > height {
+            headerConsumedHeight = height
+        }
+    }
+
+    private func expandHeaderFully() {
+        guard headerConsumedHeight != 0 else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            headerConsumedHeight = 0
+        }
     }
 
     private var bottomLoadingOverlay: some View {
@@ -1114,117 +1151,22 @@ struct WallpaperExploreContentView: View {
         }
     }
 
-    private var gridHeaderStack: some View {
-        Group {
-            if isGridHeaderContentMounted {
-                gridHeaderContent
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: WallpaperExploreHeaderHeightPreferenceKey.self,
-                                value: proxy.size.height
-                            )
-                        }
-                    )
-            } else {
-                Color.clear
-                    .frame(height: max(measuredGridHeaderHeight, 1))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onPreferenceChange(WallpaperExploreHeaderHeightPreferenceKey.self) { height in
-            updateMeasuredGridHeaderHeight(height)
-        }
-    }
-
-    private var gridHeaderContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            heroSection
-            categorySection
-            pixivRelatedTagsRow
-            filterSection
-            activeFiltersSection
-            contentHeader
-                .padding(.top, 12)
-        }
-        .padding(.top, mainTopBarContentPadding)
-        .padding(.bottom, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var gridHeaderLayoutSignature: String {
-        [
-            WallpaperSourceManager.shared.activeSource.rawValue,
-            category.rawValue,
-            fourKCategory?.id ?? "none",
-            konachanCategory?.id ?? "none",
-            konachanHotTagName ?? "none",
-            hotTag?.id ?? "none",
-            viewModel.puritySFW ? "sfw1" : "sfw0",
-            viewModel.puritySketchy ? "sketchy1" : "sketchy0",
-            viewModel.purityNSFW ? "nsfw1" : "nsfw0",
-            viewModel.selectedColors.joined(separator: ",")
-        ].joined(separator: "|")
-    }
-
-    private func handleScrollOffset(_ offset: CGFloat) {
-        WallpaperExploreScrollActivity.markActive()
-        updateGridHeaderMountState(scrollOffset: offset)
-    }
-
-    private func updateGridHeaderMountState(scrollOffset: CGFloat) {
-        let headerHeight = measuredGridHeaderHeight > 1 ? measuredGridHeaderHeight : 260
-        let hideThreshold = headerHeight + 80
-        let showThreshold = max(0, headerHeight - 48)
-        let shouldMount = isGridHeaderContentMounted
-            ? scrollOffset < hideThreshold
-            : scrollOffset < showThreshold
-
-        guard shouldMount != isGridHeaderContentMounted else { return }
-
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            isGridHeaderContentMounted = shouldMount
-        }
-    }
-
-    private func updateMeasuredGridHeaderHeight(_ height: CGFloat) {
-        guard height > 1, abs(height - measuredGridHeaderHeight) > 1 else { return }
-
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            measuredGridHeaderHeight = height
-        }
-    }
-
-    private func invalidateGridHeaderMeasurement() {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            isGridHeaderContentMounted = true
-            measuredGridHeaderHeight = 0
-        }
-    }
-
     // MARK: - Grid & Cards
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
-        // 走 AppKit `NSCollectionView` 通道（`ExploreGridContainer` + `WallpaperGridCell`）。
-        // 关键参数：
-        //   - allowsScrolling: false → 外层 SwiftUI ScrollView 拥有总滚动权，
-        //     header / 网格 / loadMore sentinel 共享同一滚动模型。
-        //   - onContentHeightChange → 把 AppKit 算出来的内容高度写回 SwiftUI，
-        //     再用 .frame(height: gridContentHeight) 把高度兑现给外层 ScrollView。
-        //   - onReachBottom: 空实现 — loadMore 全权由 SwiftUI sentinel/scrollGeometry
-        //     驱动，避免双源竞态。allowsScrolling=false 时 AppKit 也不会发该回调。
-        //   - onScrollOffsetChange: 不消费 — AppKit 不滚动不会发；滚回顶部按钮
-        //     可见性继续由外层 SwiftUI offset 计算（handleScrollOffset）。
-        // 备胎：`WallpaperGridContainerView`（SwiftUI ZStack chunks）保留在本文件下方
-        // 与 `Components/WaterfallChunkLayout.swift`，未来如需切回再启用。
-        ExploreGridContainer(
+        // AppKit NSCollectionView 自滚动 + 视口高度。
+        // allowsScrolling=true → clipView 等于可见区域，cell 正常复用，不会撑满内存。
+        let fullHeader = max(measuredFullHeaderHeight, 0)
+        let remainingHeader: CGFloat = {
+            guard fullHeader > 1, !visibleWallpapers.isEmpty else { return 0 }
+            return max(0, fullHeader - headerConsumedHeight)
+        }()
+        let consumedHeader: CGFloat = {
+            guard fullHeader > 1, !visibleWallpapers.isEmpty else { return 0 }
+            return min(fullHeader, max(0, headerConsumedHeight))
+        }()
+
+        return ExploreGridContainer(
             itemCount: { visibleWallpapers.count },
             aspectRatio: { idx in
                 guard idx < visibleWallpapers.count else {
@@ -1244,41 +1186,51 @@ struct WallpaperExploreContentView: View {
                 guard idx < visibleWallpapers.count else { return }
                 selectedWallpaper = visibleWallpapers[idx]
             },
-            onVisibleItemsChange: nil, // 不再做近邻预取，依赖每个 cell 自己 lazy 加载
-            onScrollOffsetChange: nil, // allowsScrolling=false 时不会触发
-            onReachBottom: {},          // loadMore 由 SwiftUI sentinel 驱动
-            scrollToTopToken: 0,        // 滚回顶部由外层 SwiftUI ScrollView 处理
+            onVisibleItemsChange: nil,
+            onScrollOffsetChange: { offset in
+                handleGridScrollOffset(offset)
+            },
+            onReachBottom: {
+                // header 未收完时不触发 loadMore（网格本应锁顶）
+                guard remainingHeader <= 0.5 else { return }
+                // AppKit 在 near-bottom 时会反复回调；用 wasNearBottom + 冷却防级联。
+                if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
+                guard !scrollCoordinator.wasNearBottom else { return }
+                scrollCoordinator.wasNearBottom = true
+                scheduleLoadMoreFromScroll()
+            },
+            scrollToTopToken: gridScrollToTopToken,
             reloadToken: gridReloadToken,
             layoutRefreshToken: gridLayoutRefreshToken,
-            allowsScrolling: false,
-            onContentHeightChange: { height in
-                if abs(gridContentHeight - height) > 0.5 {
-                    gridContentHeight = height
-                }
-            },
+            allowsScrolling: true,
+            onContentHeightChange: nil,
             isVisible: isVisible,
             layoutWidth: config.contentWidth,
             gridColumnCount: config.columnCount,
-            // hover scale 仅 1.02 + zPosition=100 + masksToBounds=false，column/row spacing 16pt
-            // 已远大于缩放溢出，不需要预留扩张空间。设 0 让卡片完整占满列宽，对齐旧 SwiftUI 视觉。
             hoverExpansionAllowance: 0,
-            // 默认 contentInsets 包含 bottom: 48 给动漫/媒体页留触底缓冲，
-            // 但壁纸探索页外层 SwiftUI ScrollView 自己控边距，AppKit 不应再加。
-            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            // 底部留触底缓冲，配合 onReachBottom
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 48, right: 0),
+            // 两阶段：header 先完全收起，网格再内部滚动
+            headerCollapseRemaining: remainingHeader,
+            headerCollapseConsumed: consumedHeader,
+            onHeaderCollapseDelta: { delta in
+                applyHeaderCollapseDelta(delta)
+            },
+            externalScrollDownToken: gridScrollBoostToken,
+            pendingScrollDown: gridPendingScrollDown,
+            onPendingScrollDownConsumed: {
+                gridPendingScrollDown = 0
+            }
         )
-        .frame(height: max(gridContentHeight, 320))
     }
 
     /// 卡片整体（图像 + 46pt 底栏）的宽高比，供 ExploreGridCollectionViewLayout 计算 cell 高度。
-    /// 默认值（无具体壁纸时）：按 0.6 图像宽高比 + 46pt 底栏估算，保持视觉占位接近常见值。
     private func wallpaperCellAspectRatio(config: WallpaperGridConfig) -> CGFloat {
         let safeCardWidth = max(1, config.cardWidth)
         let height = safeCardWidth * 0.6 + 46
         return safeCardWidth / max(1, height)
     }
 
-    /// 单张壁纸的卡片宽高比。原始图像比例钳制在 0.35...3.6（与 WallpaperCardView 一致），
-    /// 防止超长竖图把列撑爆，或超宽横图破坏视觉。
     private func wallpaperCellAspectRatio(for wallpaper: Wallpaper, config: WallpaperGridConfig) -> CGFloat {
         let safeCardWidth = max(1, config.cardWidth)
         let imageAspectRatio = CGFloat(wallpaper.effectiveAspectRatioValue)
@@ -1288,6 +1240,88 @@ struct WallpaperExploreContentView: View {
         return safeCardWidth / max(1, height)
     }
 
+    private func handleGridScrollOffset(_ offset: CGFloat) {
+        WallpaperExploreScrollActivity.markActive()
+        // 回顶按钮：header 已收起或网格已下滚时显示
+        let headerCollapsed = measuredFullHeaderHeight > 1
+            && headerConsumedHeight >= measuredFullHeaderHeight - 1
+        let shouldShow = offset > 300 || headerCollapsed || visibleWallpapers.count > 60
+        if shouldShow != showScrollToTop {
+            showScrollToTop = shouldShow
+        }
+        // header 收起不再跟网格 offset 联动（避免“一起滚”）；
+        // 只由滚轮 onHeaderCollapseDelta 驱动。
+        // 若网格已离开顶部但 header 还没收完，强制补收完（异常恢复）。
+        if offset > 1, measuredFullHeaderHeight > 1,
+           headerConsumedHeight < measuredFullHeaderHeight - 0.5 {
+            applyHeaderCollapseDelta(measuredFullHeaderHeight - headerConsumedHeight)
+        }
+    }
+
+    /// 滚轮驱动 header 收起/展开。`delta > 0` 收起，`< 0` 展开。
+    private func applyHeaderCollapseDelta(_ delta: CGFloat) {
+        guard !visibleWallpapers.isEmpty else {
+            expandHeaderFully()
+            return
+        }
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        guard fullHeight > 1 else { return }
+
+        let target = min(fullHeight, max(0, (headerConsumedHeight + delta).rounded()))
+        guard abs(target - headerConsumedHeight) >= 0.5 else { return }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            headerConsumedHeight = target
+        }
+        WallpaperExploreScrollActivity.markActive()
+        if target >= fullHeight - 0.5 {
+            showScrollToTop = true
+        } else if target <= 0.5 {
+            showScrollToTop = false
+        }
+    }
+
+    /// 鼠标在 header 区域滚轮：与网格两阶段逻辑对齐。
+    /// 向下：先收 header；收完后的余量通过递增 scroll token 无法表达，改用
+    /// `gridScrollBoostToken` 不够直接——这里余量交给下一次落在网格上的滚动即可，
+    /// 同一次余量用 `requestGridScrollDown` 推网格。
+    private func handleHeaderAreaScrollDown(_ scrollDown: CGFloat) {
+        guard !visibleWallpapers.isEmpty else { return }
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        guard fullHeight > 1 else { return }
+
+        if scrollDown > 0.2 {
+            let remaining = max(0, fullHeight - headerConsumedHeight)
+            if remaining > 0.5 {
+                let apply = min(remaining, scrollDown)
+                applyHeaderCollapseDelta(apply)
+                let leftover = scrollDown - apply
+                if leftover > 0.5, headerConsumedHeight + apply >= fullHeight - 0.5 {
+                    // header 刚收完，余量推网格（通过 token 让 coordinator 执行）
+                    requestGridScrollDown(leftover)
+                }
+            } else {
+                requestGridScrollDown(scrollDown)
+            }
+        } else if scrollDown < -0.2 {
+            // 向上：先展开 header；header 已全开时无需处理（网格在顶）
+            let consumed = min(fullHeight, max(0, headerConsumedHeight))
+            if consumed > 0.5 {
+                applyHeaderCollapseDelta(max(-consumed, scrollDown))
+            }
+        }
+    }
+
+    /// 请求网格向下滚一段（header 区域滚轮余量）。
+    private func requestGridScrollDown(_ delta: CGFloat) {
+        guard delta > 0.5 else { return }
+        gridPendingScrollDown += delta
+        gridScrollBoostToken &+= 1
+    }
+
+    
     // MARK: - UI Components
 
     private var emptyState: some View {
@@ -1327,26 +1361,31 @@ struct WallpaperExploreContentView: View {
         )
     }
 
-    // MARK: - macOS 14 滚动哨兵
-
-    private var loadMoreSentinel: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: WallpaperLoadMoreSentinelMinYPreferenceKey.self,
-                value: proxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
-            )
-        }
-        .frame(height: 1)
-    }
-
     private var ratioMenu: some View {
         Menu {
-            Button(t("allRatios")) { viewModel.selectedRatios = []; reloadData() }
+            Button(t("allRatios")) {
+                viewModel.selectedRatios = []
+                // 手动清空比例时，同步取消依赖比例的热门标签
+                if hotTag?.apiRatios != nil {
+                    hotTag = nil
+                }
+                reloadData()
+            }
             Divider()
             ForEach(["16x9", "16x10", "21x9", "4x3", "3x2", "1x1", "9x16", "10x16"], id: \.self) { ratio in
                 let isSelected = viewModel.selectedRatios.contains(ratio)
                 Button {
-                    viewModel.selectedRatios = isSelected ? [] : [ratio]
+                    if isSelected {
+                        viewModel.selectedRatios = []
+                    } else {
+                        viewModel.selectedRatios = [ratio]
+                    }
+                    // 菜单选择与热门标签互斥：避免 chip 和菜单状态不同步
+                    if let tag = hotTag, let tagRatios = tag.apiRatios,
+                       Set(tagRatios) != Set(viewModel.selectedRatios) {
+                        hotTag = nil
+                        // 热门标签可能同时写过 atleast（如 4K），菜单改比例时保留 atleast
+                    }
                     reloadData()
                 } label: {
                     HStack {
@@ -1599,6 +1638,10 @@ struct WallpaperExploreContentView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
                 isLoadingMore = false
             }
+            // contentSize 稳定后再允许下一次触底加载
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [self] in
+                scrollCoordinator.wasNearBottom = false
+            }
         }
     }
 
@@ -1609,28 +1652,6 @@ struct WallpaperExploreContentView: View {
         }
         scrollCoordinator.pendingLoadMoreTask = task
         DispatchQueue.main.async(execute: task)
-    }
-
-    private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
-        guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
-            // ⛔ 冷却期内不触发 loadMore
-            if let cooldown = loadMoreCooldownUntil, Date() < cooldown {
-                WallpaperExploreDiagnostics.markLoadMoreSkipped(source: "legacySentinel", reason: "cooldown")
-                return
-            }
-            guard !scrollCoordinator.wasNearBottom else {
-                WallpaperExploreDiagnostics.markLoadMoreSkipped(source: "legacySentinel", reason: "alreadyNearBottom")
-                return
-            }
-            scrollCoordinator.wasNearBottom = true
-            scheduleLoadMoreFromScroll()
-        } else if sentinelMinY > viewportHeight + Self.loadMoreResetThreshold {
-            // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-                scrollCoordinator.wasNearBottom = false
-            }
-        }
     }
 
     private func submitSearch() {
@@ -1784,7 +1805,8 @@ struct WallpaperExploreContentView: View {
         isLoadingMore = false
         loadMoreFailed = false
         showScrollToTop = false
-        outerScrollToTopToken &+= 1
+        expandHeaderFully()
+        gridScrollToTopToken &+= 1
     }
 
     private func syncAtmosphereIfNeeded() {
@@ -1871,22 +1893,13 @@ private struct WallpaperExploreAtmosphereBackground: View {
 
 // MARK: - Grid Configuration
 
-/// 瀑布流网格容器（**备胎，当前未被引用**）。
+/// 瀑布流网格容器（当前壁纸探索页主路径）。
 ///
-/// 当前壁纸探索页瀑布流走 `Components/ExploreGrid/ExploreGridContainer`
-/// + `WallpaperGridCell`（AppKit `NSCollectionView` 通道）。本结构体保留作为
-/// 未来 SwiftUI 化的备胎，万一 AppKit 通道又出问题可以快速切回——只需把
-/// `wallpaperGrid(config:)` 的实现替换回调用本类型即可。配套的
-/// `WallpaperChunkView` / `Components/WaterfallChunkLayout.swift` 同样保留。
-///
-/// 设计：把 wallpapers 切成固定大小的 chunk（默认 30 张），外层用单 `LazyVStack`
-/// 提供 chunk 级别的 lazy 加载（仅可见 chunk 实例化）。每个 chunk 内部使用
-/// `WallpaperChunkView` —— 它**完全不使用 SwiftUI Layout protocol**，而是用
-/// 纯算法预计算所有卡片位置，然后用 `ZStack` + `.position` 绝对定位。
-///
-/// 这样 SwiftUI 在 chunk 内部不会进入 LayoutEngineBox/UnaryLayoutEngine 的
-/// 复杂 measure/place 路径——彻底绕过 macOS 26 上偶发的 SwiftUI 系统库
-/// 死循环（CPU 100% 主线程卡死 5+ 秒）。
+/// 外层 `LazyVStack` + 固定大小 chunk（默认 30 张），只有可见 chunk 实例化。
+/// chunk 内部用纯算法预计算位置 + `ZStack/.position`，不走 SwiftUI Layout protocol，
+/// 同时避免了：
+/// 1. AppKit 全高 `NSCollectionView` 虚拟化失效（历史 70GB 内存路径）
+/// 2. macOS 26 上 Layout protocol 的偶发主线程死循环
 private struct WallpaperGridContainerView: View, Equatable {
     let wallpapers: [Wallpaper]
     /// 用于 Equatable 比较的稳定标识；变化时整个 grid 重建。
@@ -2171,6 +2184,21 @@ private extension WallpaperExploreContentView {
            let preset = WallhavenAPI.colorPreset(for: hex) {
             chips.append(.init(kind: .color(hex), title: preset.displayHex, accentHex: hex))
         }
+        if viewModel.currentSourceSupportsRatioFilter {
+            for resolution in viewModel.selectedResolutions {
+                chips.append(.init(kind: .resolution(resolution), title: resolution, accentHex: "7A5CFF"))
+            }
+            if let atleast = viewModel.atleastResolution {
+                chips.append(.init(kind: .atleast(atleast), title: "≥\(atleast)", accentHex: "E85D04"))
+            }
+            for ratio in viewModel.selectedRatios {
+                chips.append(.init(
+                    kind: .ratio(ratio),
+                    title: ratio.replacingOccurrences(of: "x", with: ":"),
+                    accentHex: "5A7CFF"
+                ))
+            }
+        }
         return chips
     }
 
@@ -2209,6 +2237,10 @@ private extension WallpaperExploreContentView {
         viewModel.puritySketchy = false
         viewModel.purityNSFW = false
         viewModel.selectedColors = []
+        viewModel.selectedRatios = []
+        viewModel.selectedResolutions = []
+        viewModel.atleastResolution = nil
+        hotTag = nil
         reloadData()
     }
 
@@ -2220,7 +2252,21 @@ private extension WallpaperExploreContentView {
             case .sketchy: viewModel.puritySketchy = false
             case .nsfw: viewModel.purityNSFW = false
             }
-        case .color: viewModel.selectedColors = []
+        case .color:
+            viewModel.selectedColors = []
+        case .resolution(let resolution):
+            viewModel.selectedResolutions.removeAll { $0 == resolution }
+        case .ratio(let ratio):
+            viewModel.selectedRatios.removeAll { $0 == ratio }
+            // 热门标签如果绑定了该比例，一并取消选中
+            if let tag = hotTag, let tagRatios = tag.apiRatios, tagRatios.contains(ratio) {
+                hotTag = nil
+            }
+        case .atleast:
+            viewModel.atleastResolution = nil
+            if hotTag?.apiAtleast != nil {
+                hotTag = nil
+            }
         }
         reloadData()
     }
@@ -2230,11 +2276,17 @@ private struct FilterChipData: Identifiable {
     enum Kind: Hashable {
         case purity(PurityFilter)
         case color(String)
+        case resolution(String)
+        case ratio(String)
+        case atleast(String)
     }
     var id: String {
         switch kind {
         case .purity(let p): return "purity_\(p.rawValue)"
         case .color(let hex): return "color_\(hex)"
+        case .resolution(let resolution): return "resolution_\(resolution)"
+        case .ratio(let ratio): return "ratio_\(ratio)"
+        case .atleast(let value): return "atleast_\(value)"
         }
     }
     let kind: Kind

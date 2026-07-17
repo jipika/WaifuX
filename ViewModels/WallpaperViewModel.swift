@@ -829,6 +829,11 @@ class WallpaperViewModel: ObservableObject {
                     wallpapers.append(contentsOf: appended)
                 }
 
+                // 注意：正常 loadMore 不做顶部裁剪。
+                // 列表元数据本身不大；真正的 10GB+/70GB 来自全高 NSCollectionView
+                // 把所有 cell 当可见。顶部裁剪会在底部滚动时把 contentSize 从上方抽走，
+                // 造成滚动位置跳动。内存压力路径会主动裁列表。
+
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
@@ -879,14 +884,17 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 内存压力处理
 
-    /// 系统内存压力时自动触发：取消网络请求，但保留已加载的列表数据（列表仅存元数据，内存开销极小）。
+    /// 系统内存压力时：只取消网络/预取并清图片缓存面，**不裁剪 wallpapers 数据**。
+    /// 探索列表按虚拟滚动处理：数据保留，滚回去必须还能显示；
+    /// 真正占内存的是可见视图与图片缓存，不是元数据数组本身。
     private func handleMemoryPressure() {
-        print("[WallpaperViewModel] 内存压力，取消网络请求: wallpapers=\(wallpapers.count)")
+        print("[WallpaperViewModel] 内存压力，取消网络请求（保留列表数据）: wallpapers=\(wallpapers.count)")
         searchTask?.cancel()
         loadMoreTask?.cancel()
         debounceTask?.cancel()
         preloadTask?.cancel()
         preloadedResponse = nil
+        ForegroundPrefetchManager.shared.stop(namespace: "wallpaper-view-model")
     }
 
     // MARK: - 取消所有任务

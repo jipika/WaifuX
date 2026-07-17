@@ -384,20 +384,66 @@ struct MediaDownloadRecord: Identifiable, Codable, Hashable {
     /// A Workshop download may be registered at either its SteamCMD root or its nested content root.
     /// Treat those representations as the same source so applying it does not re-register the download.
     func hasSameLocalContent(as candidateURL: URL) -> Bool {
-        guard item.id.hasPrefix("workshop_") else {
-            return localFileURL.standardizedFileURL.path == candidateURL.standardizedFileURL.path
-        }
+        // 字符串标准化一次即可；避免两次 standardizedFileURL.path 的 Foundation 重解析
+        let recordedPath = (localFilePath as NSString).standardizingPath
+        let candidatePath = (candidateURL.path as NSString).standardizingPath
+        if recordedPath == candidatePath { return true }
+
+        guard item.id.hasPrefix("workshop_") else { return false }
 
         let workshopID = String(item.id.dropFirst("workshop_".count))
+        let workshopRootName = "workshop_\(workshopID)"
+        let recordedComponents = (recordedPath as NSString).pathComponents
+        let candidateComponents = (candidatePath as NSString).pathComponents
+
+        // 同一 workshop_xxx 下载树：根目录与 content 目录视为同一来源
+        if recordedComponents.contains(workshopRootName),
+           candidateComponents.contains(workshopRootName) {
+            // 一方是另一方的路径前缀（按组件边界，避免 workshop_12 vs workshop_123 误匹配）
+            if Self.isPathPrefix(recordedPath, of: candidatePath)
+                || Self.isPathPrefix(candidatePath, of: recordedPath) {
+                return true
+            }
+            // 都落到 .../431960/<id> 或其子路径
+            if let rRoot = Self.workshopContentRootPath(in: recordedComponents, workshopID: workshopID),
+               let cRoot = Self.workshopContentRootPath(in: candidateComponents, workshopID: workshopID),
+               rRoot == cRoot {
+                return true
+            }
+        }
+
         let recordedContentURL = WorkshopService.canonicalWorkshopContentURL(
             for: workshopID,
-            startingAt: localFileURL
+            startingAt: URL(fileURLWithPath: recordedPath)
         )
         let candidateContentURL = WorkshopService.canonicalWorkshopContentURL(
             for: workshopID,
-            startingAt: candidateURL
+            startingAt: URL(fileURLWithPath: candidatePath)
         )
-        return recordedContentURL.path == candidateContentURL.path
+        return (recordedContentURL.path as NSString).standardizingPath
+            == (candidateContentURL.path as NSString).standardizingPath
+    }
+
+    /// parent 是否为 child 的目录前缀（组件边界）。
+    private static func isPathPrefix(_ parent: String, of child: String) -> Bool {
+        if parent == child { return true }
+        let prefix = parent.hasSuffix("/") ? parent : parent + "/"
+        return child.hasPrefix(prefix)
+    }
+
+    /// 从 pathComponents 抽出 `.../steamapps/workshop/content/431960/<id>` 根路径。
+    private static func workshopContentRootPath(in components: [String], workshopID: String) -> String? {
+        guard components.count >= 5 else { return nil }
+        for i in 0..<(components.count - 4) {
+            if components[i] == "steamapps",
+               components[i + 1] == "workshop",
+               components[i + 2] == "content",
+               components[i + 3] == "431960",
+               components[i + 4] == workshopID {
+                return NSString.path(withComponents: Array(components.prefix(i + 5)))
+            }
+        }
+        return nil
     }
 
     /// 解析后的视频文件 URL：优先烘焙产物，其次目录内视频文件，最后原始路径

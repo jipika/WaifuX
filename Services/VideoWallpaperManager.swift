@@ -286,11 +286,18 @@ final class VideoWallpaperManager: ObservableObject {
         persistState()
     }
 
-    /// 获取指定屏幕应播放的视频 URL。
-    func videoURL(for screen: NSScreen) -> URL? {
+    /// 返回明确分配给指定屏幕的视频，不回退到旧的全局状态。
+    ///
+    /// 用于需要严格按屏聚合状态的调用方，避免某一屏的视频被误判到其它屏幕。
+    func assignedVideoURL(for screen: NSScreen) -> URL? {
         videoURLByScreen[screen.wallpaperScreenIdentifier] ??
-        videoURLByScreenFingerprint[screen.wallpaperScreenFingerprint] ??
-        currentVideoURL
+        videoURLByScreenFingerprint[screen.wallpaperScreenFingerprint]
+    }
+
+    /// 获取指定屏幕应播放的视频 URL。
+    /// 保留 `currentVideoURL` 回退以兼容尚未迁移到每屏状态的旧调用方。
+    func videoURL(for screen: NSScreen) -> URL? {
+        assignedVideoURL(for: screen) ?? currentVideoURL
     }
 
     /// 外接屏重连时按物理指纹恢复之前分配给这块屏的视频壁纸。
@@ -1520,11 +1527,18 @@ final class VideoWallpaperManager: ObservableObject {
             print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
             self.isScreenLocked = false
             // 解锁时恢复播放（如果不是手动暂停）
-            guard !self.isPaused else { return }
+            guard !self.isPaused else {
+                // 即便全局手动暂停，也要让 AutoPause 重新对齐追踪状态
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+                return
+            }
             for (screenID, player) in self.players {
                 player.play()
                 self.hidePosterImage(for: screenID)
             }
+            // 解锁后会先全量 play；立刻把仍有效的覆盖/前台/全屏暂停重新施加，
+            // 避免窗口列表尚未恢复时 AutoPause 误以为桌面已可见。
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
         }
     }
 

@@ -40,6 +40,14 @@ final class DynamicWallpaperAutoPauseManager {
     private var windowCoveragePausedScreenIDs: Set<String> = []
     /// 当前满足"窗口覆盖比例 ≥ 阈值"的屏幕 ID
     private var windowCoverageCoveredScreenIDs: Set<String> = []
+    /// 关屏/休眠/解锁后的过渡宽限期截止时间。
+    /// 此期间 CGWindowList 常短暂返回空列表，禁止据此把覆盖暂停误恢复。
+    private var displayTransitionGraceUntil: Date?
+    /// 过渡期结束后的延迟重检 work item（覆盖 AX 重绑 + 多轮 coverage 校准）
+    private var pendingDisplayTransitionReevalWorkItem: DispatchWorkItem?
+    /// 关屏/唤醒后尚未完成的强制重检次数；>0 时对“无外应用窗口”的低覆盖结果更保守。
+    private var remainingPostDisplayTransitionPasses = 0
+    private static let displayTransitionGraceDuration: TimeInterval = 1.0
 
     /// 前台应用变化观察者（用于替代 1s 轮询）
     private var appActivationObserver: Any?
@@ -162,6 +170,40 @@ final class DynamicWallpaperAutoPauseManager {
             name: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil
         )
+
+        // 关屏/休眠/唤醒：窗口列表与 AX 连接在过渡期不可靠，需宽限 + 重绑 + 重检。
+        // 原生视频路径会在唤醒时全量 play 再 reevaluate；WE 路径原先没有统一唤醒钩子，
+        // 这里由 AutoPause 统一兜底，避免覆盖暂停状态被空快照清掉后永久失效。
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidSleep),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleSystemWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleSystemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        DistributedNotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScreenUnlocked),
+            name: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
     }
 
     func restoreSettings() {
@@ -171,6 +213,148 @@ final class DynamicWallpaperAutoPauseManager {
     /// 当动态壁纸刚被重新应用或被用户手动恢复时，立刻重新计算自动暂停状态。
     func reevaluateCurrentState() {
         updateTimer()
+        // 唤醒/解锁路径常会先把播放器全部 play，再调 reevaluate。
+        // 先按已追踪的暂停原因重新施加，避免空窗口快照把覆盖暂停清掉后壁纸继续播。
+        reassertTrackedPauses()
+    }
+
+    // MARK: - 关屏 / 休眠 / 解锁过渡
+
+    @objc private func handleScreensDidSleep() {
+        DispatchQueue.main.async { [weak self] in
+            self?.enterDisplayTransitionGrace()
+        }
+    }
+
+    @objc private func handleScreensDidWake() {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleDisplayBecameAvailable(reason: "screensWake")
+        }
+    }
+
+    @objc private func handleSystemWillSleep() {
+        DispatchQueue.main.async { [weak self] in
+            self?.enterDisplayTransitionGrace()
+        }
+    }
+
+    @objc private func handleSystemDidWake() {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleDisplayBecameAvailable(reason: "systemWake")
+        }
+    }
+
+    @objc private func handleScreenUnlocked() {
+        // DistributedNotificationCenter 回调不保证主线程
+        DispatchQueue.main.async { [weak self] in
+            self?.handleDisplayBecameAvailable(reason: "screenUnlocked")
+        }
+    }
+
+    private func enterDisplayTransitionGrace() {
+        displayTransitionGraceUntil = Date().addingTimeInterval(Self.displayTransitionGraceDuration)
+    }
+
+    private var isInDisplayTransitionGrace: Bool {
+        guard let displayTransitionGraceUntil else { return false }
+        if Date() < displayTransitionGraceUntil {
+            return true
+        }
+        self.displayTransitionGraceUntil = nil
+        return false
+    }
+
+    /// 屏幕重新可用：进入宽限期、立刻按已有暂停原因重施压，并安排延迟重检。
+    private func handleDisplayBecameAvailable(reason: String) {
+        enterDisplayTransitionGrace()
+        reassertTrackedPauses()
+        schedulePostDisplayTransitionReevaluation()
+        #if DEBUG
+        print("[AutoPause] display available (\(reason)): grace=\(Self.displayTransitionGraceDuration)s trackedCoverage=\(windowCoveragePausedScreenIDs.count)")
+        #endif
+    }
+
+    /// 宽限期结束后强制：重绑 AX + 重跑覆盖/前台/全屏检测（再补一轮，覆盖窗口晚恢复）。
+    private func schedulePostDisplayTransitionReevaluation() {
+        pendingDisplayTransitionReevalWorkItem?.cancel()
+        // 两轮强制重检：第一轮结束后若窗口列表仍残缺，第二轮再校准。
+        remainingPostDisplayTransitionPasses = 2
+
+        let firstDelay = Self.displayTransitionGraceDuration + 0.15
+        let first = DispatchWorkItem { [weak self] in
+            self?.forceCoverageReevaluationAfterDisplayTransition()
+        }
+        pendingDisplayTransitionReevalWorkItem = first
+        DispatchQueue.main.asyncAfter(deadline: .now() + firstDelay, execute: first)
+
+        // 第二轮：外接屏/窗口服务有时会更晚才恢复完整 CGWindowList
+        DispatchQueue.main.asyncAfter(deadline: .now() + firstDelay + 0.85) { [weak self] in
+            self?.forceCoverageReevaluationAfterDisplayTransition()
+        }
+    }
+
+    private func forceCoverageReevaluationAfterDisplayTransition() {
+        let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
+        let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
+        guard hasNative || hasExternal else { return }
+        guard !VideoWallpaperManager.shared.isScreenLocked else { return }
+
+        // frontmost 通常不变，didActivate 不会触发；AX 连接在休眠后可能失效，必须主动重绑。
+        if pauseWhenWindowCoverage {
+            stopAXObserver()
+            windowCoverageCoalescer.reset()
+            if AXIsProcessTrusted() {
+                if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                   isOtherAppInForeground() {
+                    setupAXObserver(for: pid)
+                }
+                checkWindowCoverageAX()
+            } else {
+                checkWindowCoverage()
+            }
+        }
+
+        if pauseWhenOtherAppForeground {
+            reevaluateForegroundCoverage()
+        }
+
+        if pauseWhenFullscreenCovers {
+            checkAndApply()
+        }
+
+        // 检测完成后，对仍被追踪的暂停原因再施加一次，盖住 VWM 唤醒 play 的竞态。
+        // remainingPostDisplayTransitionPasses 由“可靠快照成功应用”路径递减，
+        // 不能在这里提前减——否则异步 CGWindowList 回来时计数已是 0，会误 resume。
+        reassertTrackedPauses()
+    }
+
+    /// 按当前追踪集合强制重新 pause（不改集合本身）。
+    /// 用于唤醒/解锁后播放器被全量恢复、但自动暂停原因仍有效的场景。
+    private func reassertTrackedPauses() {
+        guard !VideoWallpaperManager.shared.isScreenLocked else { return }
+        guard !hasActiveGlobalPauseReason else { return }
+
+        let ids = windowCoveragePausedScreenIDs
+            .union(foregroundPausedScreenIDs)
+            .union(fullscreenAutoPausedScreenIDs)
+        guard !ids.isEmpty else { return }
+
+        let videoManager = VideoWallpaperManager.shared
+        let weBridge = WallpaperEngineXBridge.shared
+
+        for screenID in ids {
+            if videoManager.isVideoWallpaperActive,
+               let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
+                // 即使 rate 已是 0 也再 pause 一次无害；唤醒后常见 rate 已被 play 拉起。
+                if !videoManager.isPaused(on: screen) {
+                    videoManager.pauseWallpaper(for: screen)
+                }
+            }
+
+            if weBridge.isControllingExternalEngine, weBridge.isManaging(screenID: screenID) {
+                weBridge.pauseWallpaper(for: screenID)
+            }
+        }
     }
 
     func suppressForegroundPauseForMainWindowHide(duration: TimeInterval = 1.0) {
@@ -365,6 +549,16 @@ final class DynamicWallpaperAutoPauseManager {
 
     /// 在主线程处理全屏检测结果（原生视频 + WE 均按屏 pause/resume）
     private func applyFullscreenDetectionResult(newFullscreenIDs: Set<String>) {
+        // 关屏/唤醒过渡期窗口列表常为空：若从“有全屏”跳到“无全屏”，丢弃本次结果，
+        // 等宽限期后的强制重检再决定是否真正离开全屏。
+        if isInDisplayTransitionGrace,
+           newFullscreenIDs.isEmpty,
+           !fullscreenCoveredScreenIDs.isEmpty {
+            pendingFullscreenCoveredScreenIDs = nil
+            pendingFullscreenSampleCount = 0
+            return
+        }
+
         guard newFullscreenIDs != fullscreenCoveredScreenIDs else {
             pendingFullscreenCoveredScreenIDs = nil
             pendingFullscreenSampleCount = 0
@@ -383,7 +577,7 @@ final class DynamicWallpaperAutoPauseManager {
             let filteredResumeIDs = screenIDsToResume
                 .subtracting(foregroundPausedScreenIDs)
                 .subtracting(windowCoveragePausedScreenIDs)
-            if !filteredResumeIDs.isEmpty, !hasActiveGlobalPauseReason {
+            if !filteredResumeIDs.isEmpty, !hasActiveGlobalPauseReason, !isInDisplayTransitionGrace {
                 resumeScreens(byIDs: filteredResumeIDs)
             }
         }
@@ -495,12 +689,18 @@ final class DynamicWallpaperAutoPauseManager {
                     }
                 } else if axTrusted {
                     // Finder 或本应用前台：停止 AXObserver，由最新快照决定是否恢复。
+                    // 覆盖检测仍会统计所有非本应用窗口，不依赖 frontmost。
                     self.stopAXObserver()
                     self.checkWindowCoverageAX()
                 } else {
-                    // 无 AX 路径回退：Finder/本应用前台直接清除窗口覆盖暂停。
+                    // 无 AX 路径：Finder/本应用前台时也应按窗口列表重算，不能直接清覆盖暂停。
+                    // 解锁瞬间 frontmost 常短暂落到 Finder/本应用，旧逻辑会误 resume。
                     self.stopAXObserver()
-                    self.clearWindowCoveragePause()
+                    if self.isInDisplayTransitionGrace {
+                        self.reassertTrackedPauses()
+                    } else {
+                        self.checkWindowCoverage()
+                    }
                 }
             }
         }
@@ -521,7 +721,22 @@ final class DynamicWallpaperAutoPauseManager {
         let newForegroundPausedIDs = Set(newlyCoveredScreens.map { $0.wallpaperScreenIdentifier })
         let previouslyPausedIDs = foregroundPausedScreenIDs
 
-        guard newForegroundPausedIDs != previouslyPausedIDs else { return }
+        // 关屏/唤醒过渡期：窗口列表常短暂为空。若此前已有前台暂停，
+        // 不能把空结果当成“前台已离开”而 resume。
+        if isInDisplayTransitionGrace,
+           newForegroundPausedIDs.isEmpty,
+           !previouslyPausedIDs.isEmpty {
+            reassertTrackedPauses()
+            return
+        }
+
+        guard newForegroundPausedIDs != previouslyPausedIDs else {
+            // 集合未变，但唤醒后播放器可能已被全量 play，强制再施压
+            if !newForegroundPausedIDs.isEmpty {
+                applyPerScreenForegroundPause(screenIDs: newForegroundPausedIDs)
+            }
+            return
+        }
         foregroundPausedScreenIDs = newForegroundPausedIDs
 
         // 电池暂停期间：只记录前台状态变化，不实际暂停/恢复壁纸
@@ -530,7 +745,7 @@ final class DynamicWallpaperAutoPauseManager {
 
         // 恢复不再被前台应用覆盖的屏幕
         let screenIDsToResume = previouslyPausedIDs.subtracting(newForegroundPausedIDs)
-        if !screenIDsToResume.isEmpty {
+        if !screenIDsToResume.isEmpty, !isInDisplayTransitionGrace {
             applyPerScreenForegroundResume(screenIDs: screenIDsToResume)
         }
 
@@ -783,6 +998,9 @@ final class DynamicWallpaperAutoPauseManager {
             return nil
         }
 
+        // 关屏/唤醒瞬间系统偶发返回空列表；当作无效快照丢弃，避免把覆盖率误算成 0。
+        guard !windowList.isEmpty else { return nil }
+
         let windows = windowList.compactMap { window -> WindowSnapshot.Window? in
             let pid: pid_t
             if let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t {
@@ -809,6 +1027,29 @@ final class DynamicWallpaperAutoPauseManager {
         }
 
         return WindowSnapshot(screenFrames: screenFrames, windows: windows)
+    }
+
+    /// 判断覆盖快照是否可信。
+    /// 关屏再亮瞬间，CGWindowList 有时只剩桌面层 / 本应用窗口，内容窗口会短暂消失；
+    /// 若此时仍有"覆盖暂停"在追踪，应视快照不可信，禁止据此 resume。
+    private func isCoverageSnapshotReliable(
+        _ snapshot: WindowSnapshot,
+        previouslyCoveredScreenIDs: Set<String>
+    ) -> Bool {
+        guard !previouslyCoveredScreenIDs.isEmpty else { return true }
+
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let hasForeignContentWindow = snapshot.windows.contains { window in
+            window.isVisibleContentWindow(excluding: myPID)
+        }
+        if hasForeignContentWindow { return true }
+
+        // 仍处于宽限或唤醒后重检轮次未耗尽：空外应用窗口更可能是瞬态假象。
+        if isInDisplayTransitionGrace || remainingPostDisplayTransitionPasses > 0 {
+            return false
+        }
+        // 重检全部完成后仍无外应用窗口 → 接受为真实桌面可见。
+        return true
     }
 
 
@@ -1250,6 +1491,7 @@ final class DynamicWallpaperAutoPauseManager {
         guard pauseWhenWindowCoverage && AXIsProcessTrusted() else { return }
         let screenFrames = currentScreenFrames()
         guard !screenFrames.isEmpty else { return }
+        let previouslyCovered = windowCoverageCoveredScreenIDs.union(windowCoveragePausedScreenIDs)
 
         fullscreenDetectionQueue.async { [weak self, screenFrames] in
             guard let self else { return }
@@ -1258,13 +1500,31 @@ final class DynamicWallpaperAutoPauseManager {
             let screenIDs = Set(snapshot.screenFrames.keys)
 
             DispatchQueue.main.async { [weak self] in
-                self?.applyWindowCoverageRatios(ratios: ratios, screenIDs: screenIDs)
+                guard let self else { return }
+                // 可靠性判断依赖 MainActor 上的宽限/重检状态，必须回主线程再判定。
+                if !self.isCoverageSnapshotReliable(snapshot, previouslyCoveredScreenIDs: previouslyCovered) {
+                    // 不可靠快照：保持已有暂停，并再施压一次（播放器可能刚被唤醒路径 play）。
+                    self.reassertTrackedPauses()
+                    return
+                }
+                self.applyWindowCoverageRatios(
+                    ratios: ratios,
+                    screenIDs: screenIDs,
+                    allowResume: true
+                )
+                self.consumePostDisplayTransitionPassIfNeeded()
             }
         }
     }
 
-    private func applyWindowCoverageRatios(ratios: [String: CGFloat], screenIDs: Set<String>) {
+    private func applyWindowCoverageRatios(
+        ratios: [String: CGFloat],
+        screenIDs: Set<String>,
+        allowResume: Bool = true
+    ) {
         guard pauseWhenWindowCoverage else { return }
+        // 宽限期内允许 pause，禁止 resume：防止空/残缺窗口列表把覆盖暂停清掉。
+        let canResume = allowResume && !isInDisplayTransitionGrace
 
         let pauseThreshold = normalizedWindowCoverageThreshold
         let resumeThreshold = max(0.20, pauseThreshold - Self.windowCoverageHysteresisGap)
@@ -1279,14 +1539,23 @@ final class DynamicWallpaperAutoPauseManager {
                 windowCoverageCoveredScreenIDs.insert(screenID)
                 if !windowCoveragePausedScreenIDs.contains(screenID), !hasActiveGlobalPauseReason {
                     applyWindowCoveragePause(screenID: screenID)
+                } else if windowCoveragePausedScreenIDs.contains(screenID), !hasActiveGlobalPauseReason {
+                    // 已在暂停集合但播放器可能被唤醒路径拉起，强制再 pause
+                    applyWindowCoveragePause(screenID: screenID)
                 }
-            } else if ratio < resumeThreshold {
+            } else if canResume, ratio < resumeThreshold {
                 windowCoverageCoveredScreenIDs.remove(screenID)
                 if windowCoveragePausedScreenIDs.contains(screenID) {
                     applyWindowCoverageResume(screenIDs: [screenID])
                 }
             }
         }
+    }
+
+    /// 可靠覆盖快照成功落地后，消耗一轮唤醒后强制重检配额。
+    private func consumePostDisplayTransitionPassIfNeeded() {
+        guard remainingPostDisplayTransitionPasses > 0 else { return }
+        remainingPostDisplayTransitionPasses -= 1
     }
 
     private func applyWindowCoveragePause(screenID: String) {
@@ -1329,6 +1598,7 @@ final class DynamicWallpaperAutoPauseManager {
         guard pauseWhenWindowCoverage else { return }
         let screenFrames = currentScreenFrames()
         guard !screenFrames.isEmpty else { return }
+        let previouslyCovered = windowCoverageCoveredScreenIDs.union(windowCoveragePausedScreenIDs)
 
         fullscreenDetectionQueue.async { [weak self, screenFrames] in
             guard let self else { return }
@@ -1337,7 +1607,17 @@ final class DynamicWallpaperAutoPauseManager {
             let screenIDs = Set(snapshot.screenFrames.keys)
 
             DispatchQueue.main.async { [weak self] in
-                self?.applyWindowCoverageRatios(ratios: ratios, screenIDs: screenIDs)
+                guard let self else { return }
+                if !self.isCoverageSnapshotReliable(snapshot, previouslyCoveredScreenIDs: previouslyCovered) {
+                    self.reassertTrackedPauses()
+                    return
+                }
+                self.applyWindowCoverageRatios(
+                    ratios: ratios,
+                    screenIDs: screenIDs,
+                    allowResume: true
+                )
+                self.consumePostDisplayTransitionPassIfNeeded()
             }
         }
     }
@@ -1348,8 +1628,13 @@ final class DynamicWallpaperAutoPauseManager {
         reevaluateForegroundCoverage()
     }
 
-    /// 当 Finder/本应用到前台时，清除窗口覆盖暂停状态（桌面可见 → 无需暂停）
+    /// 清除窗口覆盖暂停状态。
+    /// 注意：关屏/唤醒过渡期禁止走这条路径（frontmost 可能短暂落到 Finder/本应用）。
     private func clearWindowCoveragePause() {
+        guard !isInDisplayTransitionGrace else {
+            reassertTrackedPauses()
+            return
+        }
         guard !windowCoveragePausedScreenIDs.isEmpty else { return }
         let toResume = windowCoveragePausedScreenIDs
         windowCoveragePausedScreenIDs.removeAll()

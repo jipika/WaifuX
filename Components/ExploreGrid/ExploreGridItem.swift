@@ -1,7 +1,17 @@
 import AppKit
 import Kingfisher
 
-private final class ExploreGridAspectFillImageView: NSImageView {
+private final class ExploreGridCoverImageView: NSImageView {
+    /// 列表封面默认 `.resizeAspectFill` 铺满。
+    /// 注意：cell 高度按**原图**比例自动算，但列表加载的是 Wallhaven thumb（常为横裁中心图），
+    /// 预览图比例 ≠ cell 比例；若用 fit 会 letterbox 成“只显示半截”。
+    var preferredContentsGravity: CALayerContentsGravity = .resizeAspectFill {
+        didSet {
+            guard preferredContentsGravity != oldValue else { return }
+            updateLayerContents()
+        }
+    }
+
     override var image: NSImage? {
         didSet { updateLayerContents() }
     }
@@ -20,7 +30,9 @@ private final class ExploreGridAspectFillImageView: NSImageView {
     private func updateLayerContents() {
         guard let layer else { return }
 
-        layer.contentsGravity = .resizeAspectFill
+        // 走 layer.contents 时关掉 NSImageView 自己的缩放，避免与 contentsGravity 打架。
+        imageScaling = .scaleAxesIndependently
+        layer.contentsGravity = preferredContentsGravity
         layer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
 
         guard let image, image.size.width > 0, image.size.height > 0 else {
@@ -43,15 +55,16 @@ class ExploreGridItem: NSCollectionViewItem {
 
     /// 封面图片视图（避免与 NSCollectionViewItem.imageView 冲突）
     let coverImageView: NSImageView = {
-        let iv = ExploreGridAspectFillImageView()
-        iv.imageScaling = .scaleProportionallyUpOrDown
+        let iv = ExploreGridCoverImageView()
+        // 实际缩放由 layer.contentsGravity 控制（见 updateLayerContents）
+        iv.imageScaling = .scaleAxesIndependently
         iv.wantsLayer = true
         iv.layerContentsRedrawPolicy = .never
         iv.layer?.cornerRadius = 14
         iv.layer?.masksToBounds = true
         iv.layer?.contentsGravity = .resizeAspectFill
-        iv.layer?.minificationFilter = .linear
-        iv.layer?.magnificationFilter = .linear
+        iv.layer?.minificationFilter = .trilinear
+        iv.layer?.magnificationFilter = .trilinear
         return iv
     }()
 
@@ -99,6 +112,8 @@ class ExploreGridItem: NSCollectionViewItem {
     private var kfDownloadTask: Kingfisher.DownloadTask?
     /// 当前正在加载（或已加载）的图片 URL，用于 tab 切回时跳过重复的 Kingfisher 请求
     private var currentLoadingURL: URL?
+    /// 上次 loadImage 的目标点尺寸；bounds 变大后需要按新尺寸重解码
+    private var currentLoadingTargetSize: CGSize = .zero
     private(set) var isHovered = false
     private var isHoverInteractionEnabled = true
     private var trackingArea: NSTrackingArea?
@@ -178,6 +193,7 @@ class ExploreGridItem: NSCollectionViewItem {
         loadTask?.cancel()
         loadTask = nil
         currentLoadingURL = nil
+        currentLoadingTargetSize = .zero
         coverImageView.image = nil
         stopAnimating()
 
@@ -248,19 +264,44 @@ class ExploreGridItem: NSCollectionViewItem {
         loadImage(urls: [url], targetSize: targetSize)
     }
 
-    /// 加载图片。遍历候选 URL，取第一个成功加载且像素尺寸不低于目标 55% 的，用 Kingfisher 处理后显示。
+    /// 配置封面缩放模式。竖图用 fit 完整显示，横图用 fill 铺满。
+    func setCoverContentsGravity(_ gravity: CALayerContentsGravity) {
+        if let cover = coverImageView as? ExploreGridCoverImageView {
+            cover.preferredContentsGravity = gravity
+        } else {
+            coverImageView.layer?.contentsGravity = gravity
+        }
+    }
+
+    /// 加载图片。在候选 URL 中选**更清晰**的一档显示。
+    /// - Parameter targetSize: **点**尺寸（显示区域）。Downsampling 用 size×scaleFactor 得像素。
     func loadImage(urls: [URL], targetSize: CGSize) {
         guard !urls.isEmpty else { return }
 
-        // tab 切回时如果图片 URL 没变，跳过 Kingfisher 重新请求
-        if urls.first == currentLoadingURL { return }
+        let pointSize = CGSize(
+            width: max(targetSize.width, 64),
+            height: max(targetSize.height, 64)
+        )
+        // URL 相同且目标尺寸没有明显变大时跳过（tab 切回 / 重复 configure）
+        let sizeGrew =
+            pointSize.width > currentLoadingTargetSize.width + 24
+            || pointSize.height > currentLoadingTargetSize.height + 24
+        if urls.first == currentLoadingURL, !sizeGrew {
+            return
+        }
 
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let pixelSize = CGSize(width: max(targetSize.width, 64),
-                                height: max(targetSize.height, 64))
-        let minPixelEdge = max(pixelSize.width, pixelSize.height) * 0.55
+        let scale = view.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
+        // Kingfisher: maxPixelSize = max(size.w, size.h) * scaleFactor
+        // 点尺寸 + scaleFactor 才是正确像素预算；不要预先 * scale。
+        let neededPixelEdge = max(pointSize.width, pointSize.height) * scale
+        // 旧逻辑 0.55 太松：800px 源对 1440px 需求也会被当成“够了”直接停，竖卡必糊。
+        // 0.90 才算够清晰；达不到则继续试下一档（original）。
+        let goodEnoughPixelEdge = neededPixelEdge * 0.90
 
         currentLoadingURL = urls.first
+        currentLoadingTargetSize = pointSize
         // 取消上一轮的 Swift Task 与 Kingfisher 下载，避免重复下载堆积
         kfDownloadTask?.cancel()
         kfDownloadTask = nil
@@ -269,7 +310,7 @@ class ExploreGridItem: NSCollectionViewItem {
             guard let self else { return }
 
             let options: KingfisherOptionsInfo = [
-                .processor(DownsamplingImageProcessor(size: pixelSize)),
+                .processor(DownsamplingImageProcessor(size: pointSize)),
                 .scaleFactor(CGFloat(scale)),
                 .backgroundDecode,
                 .retryStrategy(DelayRetryStrategy(maxRetryCount: 1, retryInterval: .seconds(0.5))),
@@ -290,7 +331,8 @@ class ExploreGridItem: NSCollectionViewItem {
                 })
             ]
 
-            // 遍历候选 URL：取第一张分辨率不低于目标 55% 的（避免小缩略图硬撑大）
+            // 选最清晰的一档：达到 goodEnough 立即停；否则保留边缘最大的结果。
+            // image.size 在 macOS 上多为点，乘 scale 估像素边。
             var bestImage: NSImage?
             var bestEdge: CGFloat = 0
             for url in urls {
@@ -298,14 +340,13 @@ class ExploreGridItem: NSCollectionViewItem {
                 guard let image = await self.retrieveImageCancellable(url: url, options: options) else {
                     continue
                 }
-                let imageEdge = max(image.size.width, image.size.height)
-                if imageEdge >= minPixelEdge {
-                    bestImage = image
-                    break
-                }
+                let imageEdge = max(image.size.width, image.size.height) * scale
                 if imageEdge > bestEdge {
                     bestImage = image
                     bestEdge = imageEdge
+                }
+                if imageEdge >= goodEnoughPixelEdge {
+                    break
                 }
             }
 
@@ -323,9 +364,10 @@ class ExploreGridItem: NSCollectionViewItem {
                 guard let self, !Task.isCancelled else { return }
                 self.coverImageView.image = finalImage
             }
-            // GIF 探测：用 AnimatedImageProbeCache 缓存结果，避免重复探测。
-            // 快速滚动时 debounce 200ms，卡片滑过不触发探测。
-            guard !Task.isCancelled, let probeURL = urls.first else { return }
+            // 列表默认只显示静态封面，不再自动探测/解码 GIF。
+            // 历史路径会在每张图加载后 Range 探测 + gifRepresentation + 最多 20 帧解码，
+            // 快速滚动时瞬时峰值可到数 GB；hover 时再按需启动动画即可。
+            guard !Task.isCancelled, shouldAutoAnimateGIFOnLoad, let probeURL = urls.first else { return }
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled else { return }
             let isGIF = await AnimatedImageProbeCache.shared.isAnimatedGIF(
@@ -333,7 +375,6 @@ class ExploreGridItem: NSCollectionViewItem {
                 maxByteCount: 18 * 1024 * 1024
             )
             guard !Task.isCancelled, isGIF, let image = bestImage else { return }
-            // 是 GIF：从已下载的图片获取 GIF 数据播放动画
             if let gifData = image.kf.gifRepresentation() {
                 await MainActor.run { [weak self] in
                     self?.startAnimatingIfAnimated(data: gifData)
@@ -341,6 +382,9 @@ class ExploreGridItem: NSCollectionViewItem {
             }
         }
     }
+
+    /// 子类可覆写：列表默认 false，避免滚动时批量解码动图。
+    var shouldAutoAnimateGIFOnLoad: Bool { false }
 
     /// 用 Kingfisher 的 callback 版 retrieveImage 包装成 async，并把同步返回的
     /// `DownloadTask` 句柄写到 `kfDownloadTask`，以便外层 cancel 真正中断网络下载。

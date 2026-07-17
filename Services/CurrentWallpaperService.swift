@@ -37,6 +37,12 @@ final class CurrentWallpaperService: ObservableObject {
             .sink { [weak self] _ in self?.rebuildActivePaths() }
             .store(in: &cancellables)
 
+        // 外部引擎保持接管状态时，切换 scene/web 只会更新每屏路径，不会改变上面的 Bool。
+        WallpaperEngineXBridge.shared.$renderStateChangeCount
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rebuildActivePaths() }
+            .store(in: &cancellables)
+
         // 静态图片 overlay 变化
         StaticImageWallpaperOverlayManager.shared.$stateChangeSignal
             .receive(on: DispatchQueue.main)
@@ -113,7 +119,7 @@ final class CurrentWallpaperService: ObservableObject {
             var found = false
 
             // 1. 视频壁纸
-            if let videoURL = videoMgr.videoURL(for: screen) {
+            if let videoURL = videoMgr.assignedVideoURL(for: screen) {
                 let p = videoURL.standardizedFileURL.path
                 filePaths.insert(p)
                 urlStrings.insert(videoURL.absoluteString)

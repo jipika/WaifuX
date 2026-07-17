@@ -521,7 +521,7 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateConfig(_ newConfig: SchedulerConfig) {
-        // 根据各屏启用的内容类型校验 folderIDs：移除属于已关闭类型（或 on-end 模式下的壁纸类型）
+        // 根据各屏启用的内容类型校验 folderIDs：移除属于已关闭类型
         // 的文件夹 ID。若全部失效则回退为 nil（全部），避免文件夹过滤把候选清空导致自动更换失效。
         var validated = newConfig
         for screenID in validated.displayConfigs.keys {
@@ -543,12 +543,11 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     /// 校验 folderIDs 是否仍属于当前启用的内容类型。
-    /// - on-end 模式仅消费媒体，壁纸文件夹视为失效。
     /// - 已删除（在两类文件夹存储中均查不到）的 ID 一并剔除。
     /// - 全部失效时返回 nil（等价于"全部"），避免空过滤把候选清空。
     private func validatedFolderIDs(_ folderIDs: [String]?, displayConfig: DisplaySchedulerConfig) -> [String]? {
         guard let folderIDs, !folderIDs.isEmpty else { return folderIDs }
-        let includeWallpapers = displayConfig.includeWallpapers && !displayConfig.isOnEndMode
+        let includeWallpapers = displayConfig.includeWallpapers
         let includeMedia = displayConfig.includeMedia
         let store = LibraryFolderStore.shared
         let filtered = folderIDs.filter { id in

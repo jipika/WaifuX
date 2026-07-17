@@ -264,6 +264,7 @@ struct ContentView: View {
     // 顶层仅在 .task 中一次性轮询 isInitialSourceSelectionComplete，无需响应式；
     // 数据源切换提示由独立的 SourceSwitchToast / WorkshopSourceSwitchToast 子视图各自观察。
     @State private var detailPath: [MainDetailRoute] = []
+    @State private var detailBackSwipeRegistration: UUID?
 
     init(
         wallpaperViewModel: WallpaperViewModel,
@@ -295,6 +296,10 @@ struct ContentView: View {
             AppResponsivenessMonitor.noteTabChange(navigationState.selectedTab.title)
             AppResponsivenessMonitor.noteDetailDepth(detailPath.count)
             AppResponsivenessMonitor.noteScenePhase("contentViewVisible")
+            registerDetailBackSwipeHandler()
+        }
+        .onDisappear {
+            unregisterDetailBackSwipeHandler()
         }
         .onChange(of: navigationState.selectedTab) { _, tab in
             AppResponsivenessMonitor.noteTabChange(tab.title)
@@ -582,6 +587,22 @@ struct ContentView: View {
         if detailPath.isEmpty {
             clearSelectedDetailBindings()
         }
+    }
+
+    /// Wallpaper, media, anime, and manga detail pages share this NavigationStack.
+    private func registerDetailBackSwipeHandler() {
+        guard detailBackSwipeRegistration == nil else { return }
+        detailBackSwipeRegistration = TrackpadBackSwipeRouter.shared.register(
+            priority: 100,
+            isEnabled: { !self.detailPath.isEmpty },
+            action: { self.popDetail() }
+        )
+    }
+
+    private func unregisterDetailBackSwipeHandler() {
+        guard let detailBackSwipeRegistration else { return }
+        TrackpadBackSwipeRouter.shared.unregister(detailBackSwipeRegistration)
+        self.detailBackSwipeRegistration = nil
     }
 
     // MARK: - 猜你喜欢回调

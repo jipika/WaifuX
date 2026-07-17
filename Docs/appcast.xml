@@ -6,19 +6,18 @@
     <description>WaifuX Updates</description>
     <language>zh</language>
     <item>
-      <title>Version 38.0.132</title>
-      <sparkle:version>38.0.132</sparkle:version>
-      <sparkle:shortVersionString>38.0.132</sparkle:shortVersionString>
-      <pubDate>Tue, 14 Jul 2026 19:06:00 +0800</pubDate>
+      <title>Version 38.0.134</title>
+      <sparkle:version>38.0.134</sparkle:version>
+      <sparkle:shortVersionString>38.0.134</sparkle:shortVersionString>
+      <pubDate>Thu, 16 Jul 2026 19:27:30 +0800</pubDate>
       <description><![CDATA[
-        <h3>WaifuX 38.0.132</h3>
+        <h3>WaifuX 38.0.134</h3>
         <ul>
-          <li>fix: 修复三处作者列表分页，支持连续滚动加载 (fe03342)</li>
-          <li>feat: 媒体库作者归夹与动态壁纸按屏控制稳定性 - 收藏/下载 folder 归属隔离，作者批量下载复用同文件夹并合并重复夹 - 全屏/前台覆盖暂停改为原生视频 + WE 按屏 pause/resume，修复多显示器误判 - WE 静态 fallback 后台抽帧、web 首帧稳定最短等待 3s，并更新 wallpaperengine-cli / wallpaper-wgpu - 详情页作者批量下载优化文件夹创建逻辑、封面复制、scene 烘焙进度恢复； - 烘焙放开帧率上下优化烘焙速度 - 优化壁纸引擎资源导入逻辑和删除逻辑 feat: pixiv源数据增加作者列表 (76c4616)</li>
+          <li>feat: 优化探索页滚动体验，完善动态壁纸自动暂停与 Workshop 登录/路径稳定性 探索页滚动交互、动态壁纸在休眠/解锁后的自动暂停可靠性，以及 Workshop 下载登录与设壁纸链路稳定性。 探索页与网格 - 壁纸探索页改为“先收 header、再滚网格”的两阶段滚动，header 区域滚轮也可驱动，避免筛选栏与列表一起错位滚动 - 探索网格彻底隐藏滚动条，减少视觉干扰 - 细/粗粒度滚动上报分离，header 折叠更跟手，回顶等 UI 阈值仍保持稳定 - 恢复之前丢失的比例搜索 - 封面图缩放与缩略图重解码策略优化，降低半截图/模糊图问题 - Kingfisher 内存缓存下调，缓解探索页长期滚动后 RSS 偏高 动态壁纸自动暂停 - 补齐关屏/休眠/唤醒/解锁过渡处理：宽限期 + 延迟重检 + 已有暂停原因强制重施 - 避免 CGWindowList 空快照、Finder 短暂前台等误判导致覆盖暂停被清掉后继续播放 - 原生视频与 WE 外部引擎路径统一兜底，唤醒后暂停状态更一致 Workshop / 本地壁纸 - 收紧 SteamCMD 登录失败清理策略：真实登录/会话错误清本地账号；网络超时、等手机确认、限流、无订阅权限不清账号 - 修复 loginusers.vdf 解析，正确提取最近登录 SteamID64，改善 Profile 自动回填 - 优化 Workshop 路径标准化与同源判断，减少下载后立即设壁纸时主线程卡顿/黑屏 - 当前壁纸状态同步外部引擎路径切换；相关设壁纸/媒体库匹配逻辑更稳 手势与导航 - 抽出统一的触控板右滑返回识别与优先级路由，降低普通纵向滚动误触返回 (2147661)</li>
         </ul>
       ]]></description>
       <enclosure
-        url="https://github.com/jipika/WaifuX/releases/download/v38.0.132/WaifuX.dmg"
+        url="https://github.com/jipika/WaifuX/releases/download/v38.0.134/WaifuX.dmg"
         type="application/octet-stream"
         length="0"
       />

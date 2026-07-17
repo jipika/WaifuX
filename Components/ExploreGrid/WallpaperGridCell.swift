@@ -42,6 +42,8 @@ final class WallpaperGridCell: ExploreGridItem {
     private let viewsView = WallpaperStatView(symbolName: "eye.fill")
     private var wallpaperImageURLs: [URL] = []
     private var currentWallpaper: Wallpaper?
+    /// 上次 loadImage 使用的目标点尺寸，bounds 从 0→真实值时用于判断是否要重载。
+    private var lastImageTargetSize: CGSize = .zero
 
     /// layoutContentFrames 中 fittingSize 缓存；文本内容不变时结果不变，
     /// 在 configure() 中计算一次，避免每次 layout 重算。
@@ -96,6 +98,8 @@ final class WallpaperGridCell: ExploreGridItem {
         titleLabel.stringValue = ""
         wallpaperImageURLs = []
         currentWallpaper = nil
+        lastImageTargetSize = .zero
+        setCoverContentsGravity(.resizeAspectFill)
         categoryBadge.isHidden = true
         purityBadge.isHidden = true
         resolutionBadge.isHidden = true
@@ -117,6 +121,9 @@ final class WallpaperGridCell: ExploreGridItem {
 
         applyTheme()
         applyBorder(for: wallpaper)
+        // 列表封面始终 fill：Wallhaven 竖图的 large/original 预览经常是横裁中心图，
+        // 若用 fit 会在竖卡里上下大块留白（“只显示半截”）。完整原图留给详情页。
+        setCoverContentsGravity(.resizeAspectFill)
 
         titleLabel.stringValue = wallpaper.title ?? wallpaper.uploader?.username ?? wallpaper.categoryDisplayName
         categoryBadge.configure(text: wallpaper.categoryDisplayName)
@@ -141,6 +148,7 @@ final class WallpaperGridCell: ExploreGridItem {
 
         let targetSize = preferredImageTargetSize()
         wallpaperImageURLs = preferredImageURLs(for: wallpaper, targetSize: targetSize)
+        lastImageTargetSize = targetSize
         loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
 
         // 在文本确定后立即计算并缓存各子视图的 fittingSize；
@@ -196,51 +204,66 @@ final class WallpaperGridCell: ExploreGridItem {
         layoutTopBadges(in: bounds)
         layoutBottomBar(in: bottomBar.bounds)
         if let currentWallpaper {
+            setCoverContentsGravity(.resizeAspectFill)
             let targetSize = preferredImageTargetSize()
             let urls = preferredImageURLs(for: currentWallpaper, targetSize: targetSize)
-            if urls != wallpaperImageURLs {
+            // URL 变了，或 bounds 从占位尺寸变成真实尺寸（差 > 24pt）时重载，
+            // 避免竖图一直用 300pt 占位解码导致糊。
+            let sizeChanged =
+                abs(targetSize.width - lastImageTargetSize.width) > 24
+                || abs(targetSize.height - lastImageTargetSize.height) > 24
+            if urls != wallpaperImageURLs || sizeChanged {
                 wallpaperImageURLs = urls
+                lastImageTargetSize = targetSize
                 loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
             }
         }
     }
 
-    /// 根据 Cell 实际显示尺寸与图片比例动态计算降采样目标。
-    /// 竖图高度远大于宽度，固定 512 会导致高度方向像素不足而模糊。
+    /// 根据 Cell 实际显示尺寸计算降采样目标（**点**，非像素）。
+    /// `loadImage` 配合 `scaleFactor` 得到像素：max(w,h) * scale。
+    ///
+    /// 竖卡糊的根因之一：旧逻辑把长边硬封到 720pt，高竖卡（高 800~1000pt）在 2x
+    /// 屏上实际只解码 ~1440px，再 aspectFill 放大就糊。这里按真实 cover 区域给目标，
+    /// 仅在极端竖卡上做更高上限。
     private func preferredImageTargetSize() -> CGSize {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
         let baseWidth = coverImageView.bounds.width > 0
             ? coverImageView.bounds.width
             : 300
-
         let aspectRatio = CGFloat(currentWallpaper?.effectiveAspectRatioValue ?? 1.0)
         let clampedRatio = min(max(aspectRatio, 0.35), 3.6)
-        let imageHeight = baseWidth / clampedRatio
+        let baseHeight = coverImageView.bounds.height > 0
+            ? coverImageView.bounds.height
+            : (baseWidth / clampedRatio)
 
-        let targetWidth = baseWidth * scale
-        let targetHeight = imageHeight * scale
+        // aspectFill：解码目标至少覆盖显示区域
+        var targetWidth = max(baseWidth, 64)
+        var targetHeight = max(baseHeight, 64)
 
-        // 限制最大边不超过 1280，避免极端比例（如 0.35）导致单图内存爆炸
-        let maxEdge: CGFloat = 1280
+        // 竖卡更高，长边允许到 1200pt（2x ≈ 2400px），横卡 800pt 足够
+        let maxEdge: CGFloat = aspectRatio < 0.95 ? 1200 : 800
         let currentMaxEdge = max(targetWidth, targetHeight)
-        guard currentMaxEdge > maxEdge else {
-            return CGSize(width: targetWidth, height: targetHeight)
+        if currentMaxEdge > maxEdge {
+            let reduction = maxEdge / currentMaxEdge
+            targetWidth *= reduction
+            targetHeight *= reduction
         }
-        let reduction = maxEdge / currentMaxEdge
-        return CGSize(width: targetWidth * reduction, height: targetHeight * reduction)
+        return CGSize(width: targetWidth, height: targetHeight)
     }
 
     private func preferredImageURLs(for wallpaper: Wallpaper, targetSize: CGSize) -> [URL] {
+        // 列表严禁 fullImageURL：原图可达数 MB~数十 MB。
+        // Wallhaven thumbs:
+        // - large 常为中心裁切、短边约 300~800，竖卡 fill 时高度方向极易糊
+        // - original 预览更大，竖卡必须优先
+        // - small 仅兜底
         let aspectRatio = CGFloat(wallpaper.effectiveAspectRatioValue)
-        let targetMaxEdge = max(targetSize.width, targetSize.height)
-        let isLargeCard = targetMaxEdge >= 900
-        let isExtremeAspect = aspectRatio < 0.7 || aspectRatio > 2.1
+        let isPortraitCard = aspectRatio < 0.95 || targetSize.height > targetSize.width * 1.05
 
         let candidates: [URL?]
-        if isLargeCard || isExtremeAspect {
+        if isPortraitCard {
             candidates = [
                 wallpaper.originalThumbURL,
-                wallpaper.fullImageURL,
                 wallpaper.thumbURL,
                 wallpaper.smallThumbURL
             ]
@@ -248,7 +271,6 @@ final class WallpaperGridCell: ExploreGridItem {
             candidates = [
                 wallpaper.thumbURL,
                 wallpaper.originalThumbURL,
-                wallpaper.fullImageURL,
                 wallpaper.smallThumbURL
             ]
         }
