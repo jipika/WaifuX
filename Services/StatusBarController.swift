@@ -496,7 +496,7 @@ final class StatusBarController: NSObject {
 
         // 场景高级设置（仅在实时渲染场景壁纸时显示）
         let shouldShowSceneConfig = weBridge.isCurrentWallpaperScene
-            && UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+            && (UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true)
         sceneConfigItem.isHidden = !shouldShowSceneConfig
         sceneConfigItem.isEnabled = shouldShowSceneConfig
         if shouldShowSceneConfig, let path = weBridge.currentWallpaperPathForDesign {
@@ -865,10 +865,14 @@ final class StatusBarController: NSObject {
     }
 
     private func currentWallpaperURL(for screen: NSScreen) -> URL? {
-        if let videoURL = videoWallpaperManager.videoURL(for: screen) { return videoURL }
+        // “打开当前壁纸”必须严格按屏查询。`videoURL(for:)` 为兼容旧的
+        // 单屏调用会回退到全局 `currentVideoURL`；多屏下目标屏是 Scene/Web、
+        // 其它屏是视频时，这个回退会把其它屏的视频误认成目标屏当前壁纸。
+        if let videoURL = videoWallpaperManager.assignedVideoURL(for: screen) { return videoURL }
         if let rendererPath = weBridge.currentWallpaperPath(for: screen) {
             return URL(fileURLWithPath: rendererPath)
         }
+        if let imageURL = LockScreenWallpaperService.shared.staticImageSourceURL(for: screen) { return imageURL }
         if let imageURL = StaticImageWallpaperOverlayManager.shared.imageURL(for: screen) { return imageURL }
         return DesktopWallpaperSyncManager.shared.imageURL(for: screen)
     }
@@ -1030,7 +1034,7 @@ final class StatusBarController: NSObject {
         }
         if weBridge.isCurrentWallpaperScene {
             // 实时渲染模式下，显示属性编辑面板；否则显示文本设计面板
-            if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+            if UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true {
                 presentEditorPopover { anchorView in
                     WebPropertyEditorPanelController.shared.presentScene(for: wallpaperPath, from: anchorView)
                 }

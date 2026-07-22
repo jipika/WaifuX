@@ -1134,6 +1134,7 @@ final class MediaExploreViewModel: ObservableObject {
                 posterURL: posterURL,
                 muted: muted,
                 targetScreens: resolvedTargetScreens,
+                animatedTransition: true,
                 usesSharedVideoDecoder: usesSharedVideoDecoder
             )
             return
@@ -1151,6 +1152,7 @@ final class MediaExploreViewModel: ObservableObject {
                     posterURL: posterURL,
                     muted: muted,
                     targetScreens: resolvedTargetScreens,
+                    animatedTransition: true,
                     usesSharedVideoDecoder: usesSharedVideoDecoder
                 )
                 return
@@ -1171,6 +1173,7 @@ final class MediaExploreViewModel: ObservableObject {
             posterURL: posterURL,
             muted: muted,
             targetScreens: resolvedTargetScreens,
+            animatedTransition: true,
             usesSharedVideoDecoder: usesSharedVideoDecoder
         )
     }

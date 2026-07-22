@@ -1382,7 +1382,7 @@ struct MediaDetailSheet: View {
                     bakeProgress = 0
                     if shouldAutoApplyAfterBake {
                         // 实时渲染：桌面已由实时引擎渲染，不自动覆盖；仅缓存
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+                        if UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true {
                             sceneBakeStatusFlash = t("sceneBake.cached")
                             print("[MediaDetailSheet] 实时渲染模式：烘焙完成，产物已缓存（锁屏/companion 由统一 apply 路径处理）")
                         } else if SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) {
@@ -1457,7 +1457,7 @@ struct MediaDetailSheet: View {
                     bakeProgress = 0
                     if shouldAutoApplyAfterBake {
                         // 与 scene 一致：实时开着只缓存；非实时则应用烘焙循环视频
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+                        if UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true {
                             sceneBakeStatusFlash = t("sceneBake.cached")
                             print("[MediaDetailSheet] 实时渲染模式：Web 烘焙完成，产物已缓存（不覆盖当前实时壁纸）")
                         } else if SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) {
@@ -1503,7 +1503,7 @@ struct MediaDetailSheet: View {
                         ? NSScreen.screens
                         : selectedScreen.map { [$0] }
                     var options = LocalWallpaperApplyService.Options(
-                        animatedTransition: false,
+                        animatedTransition: true,
                         requirePlaybackEndSupport: false,
                         muted: isMuted,
                         fallbackPosterURL: preferredWorkshopPosterForVideo,
@@ -3170,7 +3170,7 @@ struct MediaDetailSheet: View {
     private func applyWorkshopWallpaperFromLocalURL(_ localURL: URL) {
         // 非实时 scene 且尚无烘焙产物：保留详情页「先烘再设」流程（会阻塞生成 MP4）
         let contentRoot = sceneEngineContentRoot(for: localURL)
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true
         let hasUsableBake = SceneOfflineBakeService.usableArtifact(from: currentDownloadRecord) != nil
         let projectType = Self.projectTypeString(at: contentRoot)
         if projectType == "scene", !isRealtime, !hasUsableBake {
@@ -3193,7 +3193,7 @@ struct MediaDetailSheet: View {
                         ? NSScreen.screens
                         : selectedScreen.map { [$0] }
                     var options = LocalWallpaperApplyService.Options(
-                        animatedTransition: false,
+                        animatedTransition: true,
                         requirePlaybackEndSupport: false,
                         muted: isMuted,
                         fallbackPosterURL: preferredWorkshopPosterForVideo,

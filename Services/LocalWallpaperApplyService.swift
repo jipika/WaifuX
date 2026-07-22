@@ -20,8 +20,8 @@ enum LocalWallpaperApplyService {
     }
 
     struct Options {
-        /// 调度切换淡入；手动默认 false
-        var animatedTransition: Bool = false
+        /// 所有用户可见的壁纸切换默认启用首帧预热过渡；恢复/回滚路径可显式关闭。
+        var animatedTransition: Bool = true
         /// 播完即换且未开 web/scene 定时：跳过无播放完成事件的类型
         var requirePlaybackEndSupport: Bool = false
         var muted: Bool = true
@@ -99,7 +99,7 @@ enum LocalWallpaperApplyService {
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
         ensurePresetHTMLGenerated(at: contentRoot)
 
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true
         let contentType = determineWorkshopContentType(at: contentRoot)
         let allowNonVideoInOnEnd = !options.requirePlaybackEndSupport || screens.contains { hasWebSceneTimer(for: $0) }
 
@@ -331,7 +331,7 @@ enum LocalWallpaperApplyService {
         if WallpaperEngineXBridge.resolvedCLIExecutableURL() == nil {
             throw ApplyError.failed("wallpaper-wgpu 渲染器未找到")
         }
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = UserDefaults.standard.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true
         // user properties 仅 scene 实时有意义；web 传 nil
         let userProps = (scheduleSceneCompanionBake && isRealtime)
             ? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: path)

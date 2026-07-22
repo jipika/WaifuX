@@ -229,6 +229,22 @@ final class StaticImageWallpaperOverlayManager {
         return imageByScreen[screenID] ?? imageByScreenFingerprint[fingerprint]
     }
 
+    func hasActiveWallpaper(on screens: [NSScreen]) -> Bool {
+        screens.contains { screen in
+            imageWindows[screen.wallpaperScreenIdentifier] != nil
+        }
+    }
+
+    /// 动态目标在后方加载时保持旧静态图可见，避免新 renderer 的未稳定首帧抢到前方。
+    func keepPresentationFront(on screens: [NSScreen]) {
+        for screen in screens {
+            guard let window = imageWindows[screen.wallpaperScreenIdentifier] else { continue }
+            window.orderFrontRegardless()
+            window.displayIfNeeded()
+        }
+        CATransaction.flush()
+    }
+
     /// 返回指定屏幕的静态图原始像素尺寸（供 CropAdjustOverlayController 预览使用）。
     func imageSize(for screen: NSScreen) -> CGSize? {
         imageSizes[screen.wallpaperScreenIdentifier]
