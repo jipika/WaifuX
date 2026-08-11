@@ -446,6 +446,11 @@ final class DynamicWallpaperAutoPauseManager {
             for screenID in pausedIDs where weBridge.isManaging(screenID: screenID) {
                 weBridge.resumeWallpaper(for: screenID)
             }
+            // FIX: 确保全局恢复。per-screen resume 可能无法清除 isExternalPaused 全局标志，
+            // 导致新壁纸仍被视为处于暂停状态。
+            if weBridge.isExternalPaused {
+                weBridge.resumeWallpaper()
+            }
         }
 
         let videoManager = VideoWallpaperManager.shared
