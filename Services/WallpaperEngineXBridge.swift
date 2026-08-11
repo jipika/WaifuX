@@ -652,7 +652,10 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
         }
         perScreenPausedScreenIDs.subtract(effectiveScreenIDs)
-        updateExternalPausedStateFromPerScreenPauses()
+        // FIX: 壁纸切换时强制恢复全局暂停状态。如果 isExternalPaused 仍为 true，
+        // 新启动的 wallpaper-wgpu 进程会收到 --paused 参数，导致启动即暂停。
+        isExternalPaused = false
+        updateRendererAudioControls(paused: false)
 
         let targetWebStates = screenRenderStates.values.filter { state in
             state.renderKind == .web && effectiveScreenIDs.contains(state.screenID)
@@ -1240,13 +1243,13 @@ final class WallpaperEngineXBridge: ObservableObject {
             wasMediaRelayActiveBeforePause = true
             stopMediaRelayIfActive()
         }
-        let generation = launchGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self, self.isExternalPaused, self.launchGeneration == generation else { return }
-            for (screenID, info) in self.screenProcesses {
-                kill(info.pid, SIGSTOP)
-                print("[WallpaperEngineXBridge] 暂停渲染 屏幕 \(screenID) (pid=\(info.pid))")
-            }
+        // FIX: 使用 PID 快照立即发送 SIGSTOP，避免与 setWallpaper 竞争导致新进程被误暂停。
+        // 原代码使用 asyncAfter(delay: 0.15) 延迟发送 SIGSTOP，如果在此期间 setWallpaper
+        // 启动了新进程，延迟闭包中的 self.screenProcesses 可能包含新进程，导致新进程被错误暂停。
+        let currentPIDs = screenProcesses.mapValues { $0.pid }
+        for (screenID, pid) in currentPIDs {
+            kill(pid, SIGSTOP)
+            print("[WallpaperEngineXBridge] 暂停渲染 屏幕 \(screenID) (pid=\(pid))")
         }
     }
 
