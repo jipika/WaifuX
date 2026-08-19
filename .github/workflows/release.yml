@@ -12,6 +12,8 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.APPLE_SIGNING_CERTIFICATE != '' }}
 
     steps:
       - name: Checkout
@@ -545,7 +547,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign DMG and generate appcast.xml
-        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
+        if: github.event_name != 'workflow_dispatch' && env.HAS_SIGNING_CERT == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
@@ -611,7 +613,7 @@ jobs:
 
       - name: Upload Release Asset
         # workflow_dispatch 仅用于测试构建/签名，不发布 release
-        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
+        if: github.event_name != 'workflow_dispatch' && env.HAS_SIGNING_CERT == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
@@ -657,7 +659,7 @@ jobs:
 
       # 提交更新后的 appcast.xml 到 GitHub Pages
       - name: Update appcast on GitHub Pages
-        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
+        if: github.event_name != 'workflow_dispatch' && env.HAS_SIGNING_CERT == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
