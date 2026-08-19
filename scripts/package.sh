@@ -343,11 +343,15 @@ sign_exported_app() {
       local ent_check
       ent_check=$(codesign -d --entitlements - "$code_path" 2>/dev/null || true)
       if ! echo "$ent_check" | grep -q "com.apple.security.application-groups"; then
-        echo "❌ App Extension 签名缺少 application-groups entitlement: $code_path" >&2
-        echo "请配置 APPLE_EXTENSION_PROVISIONING_PROFILE / WAIFUX_EXTENSION_PROVISIONING_PROFILE_UUID 后再打包 Developer ID 版本。" >&2
-        echo "Debug entitlements:" >&2
-        echo "$ent_check" | head -20 >&2
-        return 1
+        if [[ "$identity" == "-" ]]; then
+          echo "⚠️ ad-hoc 扩展签名没有 application-groups entitlement（Developer ID 发布需要 provisioning profile）" >&2
+        else
+          echo "❌ App Extension 签名缺少 application-groups entitlement: $code_path" >&2
+          echo "请配置 APPLE_EXTENSION_PROVISIONING_PROFILE / WAIFUX_EXTENSION_PROVISIONING_PROFILE_UUID 后再打包 Developer ID 版本。" >&2
+          echo "Debug entitlements:" >&2
+          echo "$ent_check" | head -20 >&2
+          return 1
+        fi
       fi
     else
 	      # 对 framework：清除旧封印后用 --deep 递归签名
@@ -441,10 +445,14 @@ sign_exported_app() {
   local app_ent_check
   app_ent_check=$(codesign -d --entitlements - "$app_path" 2>/dev/null || true)
   if ! echo "$app_ent_check" | grep -q "com.apple.security.application-groups"; then
-    echo "❌ App 签名缺少 application-groups entitlement: $app_path" >&2
-    echo "请配置 APPLE_APP_PROVISIONING_PROFILE / WAIFUX_APP_PROVISIONING_PROFILE_PATH 后再打包 Developer ID 版本。" >&2
-    echo "$app_ent_check" | head -20 >&2
-    return 1
+    if [[ "$identity" == "-" ]]; then
+      echo "⚠️ ad-hoc App 签名没有 application-groups entitlement（Developer ID 发布需要 provisioning profile）" >&2
+    else
+      echo "❌ App 签名缺少 application-groups entitlement: $app_path" >&2
+      echo "请配置 APPLE_APP_PROVISIONING_PROFILE / WAIFUX_APP_PROVISIONING_PROFILE_PATH 后再打包 Developer ID 版本。" >&2
+      echo "$app_ent_check" | head -20 >&2
+      return 1
+    fi
   fi
   echo "✅ App 签名验证通过"
 }

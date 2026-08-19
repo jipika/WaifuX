@@ -27,7 +27,10 @@ jobs:
           swift --version
 
       - name: Check XcodeGen
-        run: which xcodegen || brew install xcodegen
+        run: |
+          # GitHub macos runner 预装了未信任的 aws/tap，Homebrew 6 会刷警告
+          brew untap aws/tap || true
+          which xcodegen || brew install xcodegen
 
       - name: Install create-dmg
         run: brew install create-dmg || true
@@ -71,6 +74,42 @@ jobs:
           APPLE_APP_PROVISIONING_PROFILE: ${{ secrets.APPLE_APP_PROVISIONING_PROFILE }}
           APPLE_EXTENSION_PROVISIONING_PROFILE: ${{ secrets.APPLE_EXTENSION_PROVISIONING_PROFILE }}
         run: |
+          EXT_ENTITLEMENTS="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
+          sign_extension_adhoc() {
+            echo "⚠️ 使用 ad-hoc 签名扩展（测试构建可用，无法公证）"
+            local ext_build_log="$RUNNER_TEMP/extension-build.log"
+            if ! xcodebuild -project WaifuX.xcodeproj \
+              -target WaifuXWallpaperExtension \
+              -configuration Release \
+              CODE_SIGNING_ALLOWED=NO \
+              clean build > "$ext_build_log" 2>&1; then
+              tail -80 "$ext_build_log"
+              exit 1
+            fi
+            tail -30 "$ext_build_log"
+            local built_appex
+            built_appex=$(find build ~/Library/Developer/Xcode/DerivedData \
+              \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
+              -type d -print 2>/dev/null | head -1)
+            if [[ -z "$built_appex" || ! -d "$built_appex" ]]; then
+              echo "❌ xcodebuild 未产出 .appex"
+              exit 1
+            fi
+            codesign --force --options runtime --entitlements "$EXT_ENTITLEMENTS" -s - "$built_appex"
+            rm -rf ./WaifuXWallpaperExtension.appex
+            cp -R "$built_appex" ./WaifuXWallpaperExtension.appex
+            echo "✅ ad-hoc 扩展签名完成"
+          }
+
+          if [[ -z "$APPLE_SIGNING_CERTIFICATE" ]]; then
+            sign_extension_adhoc
+            exit 0
+          fi
+
+          if [[ -z "$KEYCHAIN_PASSWORD" ]]; then
+            KEYCHAIN_PASSWORD="waifux-ci-keychain"
+          fi
+
           KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
@@ -84,6 +123,12 @@ jobs:
 
           echo "=== 证书列表 ==="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          if [[ -z "$APPLE_SIGNING_IDENTITY" ]]; then
+            APPLE_SIGNING_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+          fi
 
           install_profile_from_base64() {
             local profile_b64="$1"
@@ -127,7 +172,9 @@ jobs:
           else
             APP_PROFILE_UUID=""
             echo "❌ 未配置 APPLE_APP_PROVISIONING_PROFILE，Developer ID 签名会丢失 App application-groups entitlement"
-            exit 1
+            echo "回退到 ad-hoc 扩展签名"
+            sign_extension_adhoc
+            exit 0
           fi
 
           PROFILE_UUID=""
@@ -136,7 +183,9 @@ jobs:
           else
             EXT_PROFILE_UUID=""
             echo "❌ 未配置 APPLE_EXTENSION_PROVISIONING_PROFILE，Developer ID 签名会丢失扩展 application-groups entitlement"
-            exit 1
+            echo "回退到 ad-hoc 扩展签名"
+            sign_extension_adhoc
+            exit 0
           fi
 
           echo "🔨 构建扩展..."
@@ -218,6 +267,35 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
+          pack_dmg() {
+            set +e
+            create-dmg \
+              --volname "WaifuX" \
+              --window-size 540 400 \
+              --app-drop-link 400 185 \
+              --hide-extension "WaifuX.app" \
+              --no-internet-enable \
+              build/WaifuX.dmg \
+              build/WaifuX.app
+            CREATE_DMG_STATUS=$?
+            set -e
+            if [ $CREATE_DMG_STATUS -ne 0 ]; then
+              echo "⚠️ create-dmg failed, falling back to hdiutil..."
+              rm -f build/WaifuX.dmg build/rw.*.WaifuX.dmg
+              hdiutil create -volname "WaifuX" \
+                -srcfolder build/WaifuX.app \
+                -ov -format UDZO \
+                -imagekey zlib-level=9 \
+                build/WaifuX.dmg
+            fi
+          }
+
+          if [[ -z "$APPLE_SIGNING_CERTIFICATE" ]]; then
+            echo "⚠️ APPLE_SIGNING_CERTIFICATE 未配置，跳过 Developer ID 重签与公证，仅打包测试 DMG"
+            pack_dmg
+            exit 0
+          fi
+
           # keychain 已在 Sign Extension 步骤中设置
           KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -397,25 +475,14 @@ jobs:
           # 但实际功能不受影响，因此不因验证失败而中断构建。
           codesign --verify --deep --strict --verbose=2 build/WaifuX.app 2>/dev/null || true
 
-          set +e
-          create-dmg \
-            --volname "WaifuX" \
-            --window-size 540 400 \
-            --app-drop-link 400 185 \
-            --hide-extension "WaifuX.app" \
-            --no-internet-enable \
-            build/WaifuX.dmg \
-            build/WaifuX.app
-          CREATE_DMG_STATUS=$?
-          set -e
-          if [ $CREATE_DMG_STATUS -ne 0 ]; then
-            echo "⚠️ create-dmg failed, falling back to hdiutil..."
-            rm -f build/WaifuX.dmg build/rw.*.WaifuX.dmg
-            hdiutil create -volname "WaifuX" \
-              -srcfolder build/WaifuX.app \
-              -ov -format UDZO \
-              -imagekey zlib-level=9 \
-              build/WaifuX.dmg
+          pack_dmg
+
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "⚠️ 公证凭证未配置，跳过 notarytool（DMG 已生成）"
+            echo "   APPLE_ID                    : ${APPLE_ID:+SET}${APPLE_ID:-EMPTY}"
+            echo "   APPLE_APP_SPECIFIC_PASSWORD : ${APPLE_APP_SPECIFIC_PASSWORD:+SET}${APPLE_APP_SPECIFIC_PASSWORD:-EMPTY}"
+            echo "   APPLE_TEAM_ID               : ${APPLE_TEAM_ID:+SET}${APPLE_TEAM_ID:-EMPTY}"
+            exit 0
           fi
 
           NOTARY_OUTPUT=$(xcrun notarytool submit build/WaifuX.dmg \
@@ -478,7 +545,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign DMG and generate appcast.xml
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
@@ -544,7 +611,7 @@ jobs:
 
       - name: Upload Release Asset
         # workflow_dispatch 仅用于测试构建/签名，不发布 release
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
@@ -590,7 +657,7 @@ jobs:
 
       # 提交更新后的 appcast.xml 到 GitHub Pages
       - name: Update appcast on GitHub Pages
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && secrets.APPLE_SIGNING_CERTIFICATE != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

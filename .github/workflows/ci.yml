@@ -41,7 +41,9 @@ jobs:
                   swift --version
 
             - name: Check XcodeGen
-              run: which xcodegen || brew install xcodegen
+              run: |
+                  brew untap aws/tap || true
+                  which xcodegen || brew install xcodegen
 
             - name: Install create-dmg
               run: brew install create-dmg || true
@@ -84,7 +86,7 @@ jobs:
             # 手动 codesign --entitlements 会静默丢弃 entitlements。
             # 因此在 Build & Package 之前先签好扩展，package.sh 会自动使用预签名的 .appex。
             - name: Setup Certificate & Sign Extension
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               env:
                   APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
                   APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
@@ -228,7 +230,7 @@ jobs:
                   fi
 
             - name: Build & Package
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               env:
                   WAIFUX_SKIP_DMG: "1"
               run: |
@@ -236,7 +238,7 @@ jobs:
                   ./scripts/package.sh
 
             - name: Sign & Notarize
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               env:
                   APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
                   APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
@@ -524,7 +526,7 @@ jobs:
                   done
 
             - name: Generate Changelog
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               id: changelog
               run: |
                   # 获取上一个 tag（用于生成变更日志）
@@ -551,7 +553,7 @@ jobs:
             # softprops/action-gh-release 会自动创建 tag（tag_name）+ Release，
             # 用 GITHUB_TOKEN 即可，无需 PAT，也不依赖 release.yml 被触发。
             - name: Create Release & Upload Asset
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               uses: softprops/action-gh-release@v2
               with:
                   tag_name: ${{ steps.version.outputs.tag }}
@@ -592,7 +594,7 @@ jobs:
             # 故使用 TAP_REPO_TOKEN。GITHUB_TOKEN 创建的 release 事件不会触发
             # update-homebrew-tap.yml，因此必须在此内联执行。
             - name: Update Homebrew Tap
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'false' && secrets.APPLE_SIGNING_CERTIFICATE != ''
               env:
                   TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
               run: |
@@ -652,7 +654,7 @@ jobs:
                     clean build
 
             - name: Build (verify push to main, tag exists)
-              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.exists == 'true'
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (steps.check_tag.outputs.exists == 'true' || secrets.APPLE_SIGNING_CERTIFICATE == '')
               run: |
                   mkdir -p build
                   xcodebuild -project WaifuX.xcodeproj \
