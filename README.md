@@ -198,7 +198,7 @@ WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristj
 ## 🌟 Star 历史
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://star-history.dera.page/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---

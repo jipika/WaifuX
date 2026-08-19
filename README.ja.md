@@ -207,7 +207,7 @@ WaifuX は **Wallpaper Engine の公式製品ではありません**。Valve Cor
 ## 🌟 Star 履歴
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://star-history.dera.page/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
