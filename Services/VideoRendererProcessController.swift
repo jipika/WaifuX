@@ -445,6 +445,7 @@ final class VideoRendererProcessController {
         case pruneInactiveScreens(screenIDs: [String])
         case prewarm(screen: Int, path: String, volume: Double, hdrMetadataEnabled: Bool)
         case ping
+        case refreshPlaybackState
         case shutdown
     }
 
@@ -975,6 +976,9 @@ final class VideoRendererProcessController {
 
         case .ping:
             msg.command = "ping"
+
+        case .refreshPlaybackState:
+            msg.command = "refreshPlaybackState"
 
         case .shutdown:
             msg.command = "shutdown"

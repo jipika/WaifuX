@@ -10,6 +10,7 @@ import AVFoundation
 import Combine
 import Foundation
 import AppKit
+import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 import notify
@@ -90,6 +91,7 @@ final class LockScreenWallpaperService: ObservableObject {
         transitionGeneration: 0,
         source: "initial"
     )
+    private var playbackStateReconciliationTask: Task<Void, Never>?
 
     private let appGroupID = "group.com.waifux.app"
     private let prefsFileName = "waifux-wallpaper-prefs.json"
@@ -110,6 +112,7 @@ final class LockScreenWallpaperService: ObservableObject {
     }
 
     deinit {
+        playbackStateReconciliationTask?.cancel()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default.removeObserver(self)
@@ -186,6 +189,7 @@ final class LockScreenWallpaperService: ObservableObject {
 
     @objc private func handleSystemScreenUnlocked() {
         updatePlaybackVisibility(isScreenLocked: false, source: "screenUnlocked")
+        schedulePlaybackStateReconciliation(source: "screenUnlocked")
     }
 
     @objc private func handleScreensDidSleep() {
@@ -194,6 +198,7 @@ final class LockScreenWallpaperService: ObservableObject {
 
     @objc private func handleScreensDidWake() {
         updatePlaybackVisibility(isDisplayAsleep: false, source: "screensDidWake")
+        schedulePlaybackStateReconciliation(source: "screensDidWake")
     }
 
     @objc private func handleSystemWillSleep() {
@@ -202,6 +207,47 @@ final class LockScreenWallpaperService: ObservableObject {
 
     @objc private func handleSystemDidWake() {
         updatePlaybackVisibility(isDisplayAsleep: false, source: "systemDidWake")
+        schedulePlaybackStateReconciliation(source: "systemDidWake")
+    }
+
+    /// Reconcile after wake/unlock instead of trusting one notification.
+    /// macOS can deliver the notification before the login session has
+    /// finished changing, or occasionally drop one of the wake notifications.
+    func reconcilePlaybackStateAfterWake(source: String) {
+        reconcilePlaybackStateWithCurrentSession(source: source)
+        schedulePlaybackStateReconciliation(source: source)
+    }
+
+    private func schedulePlaybackStateReconciliation(source: String) {
+        playbackStateReconciliationTask?.cancel()
+        playbackStateReconciliationTask = Task { @MainActor [weak self] in
+            let delays: [UInt64] = [
+                250_000_000,
+                750_000_000,
+                1_500_000_000
+            ]
+            for delay in delays {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, let self else { return }
+                self.reconcilePlaybackStateWithCurrentSession(
+                    source: "\(source)-reconcile"
+                )
+            }
+            self?.playbackStateReconciliationTask = nil
+        }
+    }
+
+    private func reconcilePlaybackStateWithCurrentSession(source: String) {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let isScreenLocked = session["CGSSessionScreenIsLocked"] as? Bool else {
+            return
+        }
+
+        updatePlaybackVisibility(
+            isScreenLocked: isScreenLocked,
+            isDisplayAsleep: false,
+            source: source
+        )
     }
 
     private func updatePlaybackVisibility(

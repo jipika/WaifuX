@@ -151,6 +151,7 @@ private enum IPCCommand: String, Codable {
     case pruneInactiveScreens
     case prewarm        // 预建下一张播完即换视频的解码管线（preroll 暖机，不挂窗口）
     case ping           // 存活探测
+    case refreshPlaybackState // 重新读取主进程共享的锁屏/唤醒状态
     case shutdown       // 优雅退出
 }
 
@@ -275,6 +276,8 @@ private final class VideoRendererDaemon {
     private var isPaused = false
     private var manualPausedScreens = Set<Int>()
     private var systemPlaybackPaused = false
+    private var systemPlaybackStateShowPoster = false
+    private var systemPlaybackStateGeneration: UInt64?
     private var audioOutputDeviceStrategy = "systemDefault"
     private var audioOutputDeviceUniqueID: String?
     private var playbackStateObserver: NSObjectProtocol?
@@ -383,6 +386,7 @@ private final class VideoRendererDaemon {
         let isDisplayAsleep: Bool
         let shouldPauseVideo: Bool
         let shouldShowPoster: Bool
+        let transitionGeneration: UInt64?
     }
 
     private func installPlaybackStateObservers() {
@@ -399,26 +403,40 @@ private final class VideoRendererDaemon {
         refreshPlaybackStateFromSharedSource()
     }
 
-    private func refreshPlaybackStateFromSharedSource() {
+    @discardableResult
+    private func refreshPlaybackStateFromSharedSource() -> Bool {
         guard let playbackStateFilePath else {
-            return
+            return false
         }
         let url = URL(fileURLWithPath: playbackStateFilePath)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
         guard let data = try? Data(contentsOf: url),
               let state = try? JSONDecoder().decode(ExternalPlaybackState.self, from: data) else {
             AppLogger.error(.wallpaper, "video-renderer 无法读取锁屏状态文件: \(url.path)")
-            return
+            return false
         }
         applySystemPlaybackState(
             paused: state.shouldPauseVideo,
-            showPoster: state.shouldShowPoster
+            showPoster: state.shouldShowPoster,
+            generation: state.transitionGeneration
         )
+        return true
     }
 
-    private func applySystemPlaybackState(paused: Bool, showPoster: Bool) {
-        guard systemPlaybackPaused != paused else { return }
+    private func applySystemPlaybackState(
+        paused: Bool,
+        showPoster: Bool,
+        generation: UInt64? = nil
+    ) {
+        let stateChanged = systemPlaybackPaused != paused
+            || systemPlaybackStateShowPoster != showPoster
+            || (generation != nil && systemPlaybackStateGeneration != generation)
+        guard stateChanged else { return }
         systemPlaybackPaused = paused
+        systemPlaybackStateShowPoster = showPoster
+        if let generation {
+            systemPlaybackStateGeneration = generation
+        }
 
         var seen = Set<ObjectIdentifier>()
         for (screen, player) in players {
@@ -435,6 +453,7 @@ private final class VideoRendererDaemon {
                 screenStates[screen]?.containerView?.resumeFromFreeze()
                 guard seen.insert(ObjectIdentifier(player)).inserted else { continue }
                 player.play()
+                kickStalledPlayback(screen: screen, player: player)
             }
         }
     }
@@ -669,6 +688,11 @@ private final class VideoRendererDaemon {
 
         case .ping:
             return "OK"
+
+        case .refreshPlaybackState:
+            return refreshPlaybackStateFromSharedSource()
+                ? "OK"
+                : "ERROR: playback state unavailable"
 
         case .set:
             guard let requestedScreen = msg.screen,

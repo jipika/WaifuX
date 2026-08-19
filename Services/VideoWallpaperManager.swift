@@ -736,6 +736,8 @@ final class VideoWallpaperManager: ObservableObject {
     private var pendingRebuildWorkItem: DispatchWorkItem?
     /// 独立于 screenParametersChanged 的唤醒重建 work item，防止唤醒时序竞争
     private var pendingWakeRebuildWorkItem: DispatchWorkItem?
+    private var externalWakeRecoveryTask: Task<Void, Never>?
+    private var externalWakeRecoveryGeneration: UInt64 = 0
     private var lastAppliedScreenConfigurations: [ScreenConfigurationSignature] = []
     /// Pause/resume commands used to be fire-and-forget. A rapid "pause, then
     /// next" could let the old pause arrive after the next renderer `set`,
@@ -1212,6 +1214,8 @@ final class VideoWallpaperManager: ObservableObject {
         pendingRebuildWorkItem = nil
         pendingWakeRebuildWorkItem?.cancel()
         pendingWakeRebuildWorkItem = nil
+        externalWakeRecoveryTask?.cancel()
+        externalWakeRecoveryTask = nil
     }
 
     // MARK: - Audio Session Management
@@ -4302,6 +4306,14 @@ final class VideoWallpaperManager: ObservableObject {
             guard let self = self else { return }
             print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
             self.isScreenLocked = false
+            if #available(macOS 26.0, *) {
+                LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
+                    source: "videoManagerScreenUnlocked"
+                )
+            }
+            if #available(macOS 26.0, *), self.externalRenderingActive {
+                self.scheduleExternalRendererWakeRecovery(reason: "screenUnlocked")
+            }
             // 解锁时恢复播放（如果不是手动暂停）
             guard !self.isPaused else {
                 // 即便全局手动暂停，也要让 AutoPause 重新对齐追踪状态
@@ -5889,6 +5901,12 @@ final class VideoWallpaperManager: ObservableObject {
             guard let self = self else { return }
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
+                LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
+                    source: "videoManagerScreensWake"
+                )
+            }
+            if #available(macOS 26.0, *), self.externalRenderingActive {
+                self.scheduleExternalRendererWakeRecovery(reason: "screensWake")
             }
 
             // 屏幕唤醒时防抖重建
@@ -5976,6 +5994,12 @@ final class VideoWallpaperManager: ObservableObject {
             guard let self = self else { return }
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
+                LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
+                    source: "videoManagerSystemWake"
+                )
+            }
+            if #available(macOS 26.0, *), self.externalRenderingActive {
+                self.scheduleExternalRendererWakeRecovery(reason: "systemWake")
             }
 
             self.pendingWakeRebuildWorkItem?.cancel()
@@ -6377,6 +6401,57 @@ final class VideoWallpaperManager: ObservableObject {
     /// 健康 daemon 毫秒级响应；楔死时必须快速失败让上层触发换代自愈，
     /// 不能让一次点击串行阻塞 15-30s（旧值 15s 曾让菜单暂停"点了没反应"）。
     private static let externalRendererPlaybackControlTimeout: TimeInterval = 2.5
+
+    private func refreshExternalRendererPlaybackState(reason: String) async {
+        guard externalRenderingActive, externalRenderer.isRunning else { return }
+        let response = await externalRenderer.sendCommand(
+            .refreshPlaybackState,
+            screen: nil,
+            timeout: Self.externalRendererPlaybackControlTimeout
+        )
+        guard response?.hasPrefix("OK") == true else {
+            AppLogger.error(.wallpaper, "外部视频唤醒状态刷新失败", metadata: [
+                "reason": reason,
+                "response": response ?? "nil"
+            ])
+            return
+        }
+        AppLogger.debug(.wallpaper, "外部视频唤醒状态已刷新", metadata: [
+            "reason": reason
+        ])
+    }
+
+    private func scheduleExternalRendererWakeRecovery(reason: String) {
+        guard externalRenderingActive else { return }
+        externalWakeRecoveryGeneration &+= 1
+        let generation = externalWakeRecoveryGeneration
+        externalWakeRecoveryTask?.cancel()
+        externalWakeRecoveryTask = Task { @MainActor [weak self] in
+            let delays: [UInt64] = [
+                0,
+                350_000_000,
+                900_000_000,
+                1_500_000_000
+            ]
+            for delay in delays {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled,
+                      let self,
+                      self.externalWakeRecoveryGeneration == generation,
+                      self.externalRenderingActive else {
+                    return
+                }
+                await self.refreshExternalRendererPlaybackState(
+                    reason: "\(reason)-pass"
+                )
+            }
+            if self?.externalWakeRecoveryGeneration == generation {
+                self?.externalWakeRecoveryTask = nil
+            }
+        }
+    }
 
     /// 外部视频事务门最长持有时间。允许多屏 set 串行初始化后再进入
     /// 首帧等待，避免 watchdog 在正常的高分辨率重建期间释放事务门。
