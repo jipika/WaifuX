@@ -62,6 +62,17 @@ class SettingsViewModel: ObservableObject {
     /// 默认关闭：桌面 AVPlayerLayer 开启逐帧 HDR 元数据时，在部分 15.x + XDR 上会偶发整层 tone-map 闪暗。
     /// 用户仍可在设置里手动打开；仅影响新创建的 AVPlayerItem。
     @Published var hdrEnabled = false { didSet { UserDefaults.standard.set(hdrEnabled, forKey: "hdr_enabled") } }
+    /// 使用独立视频渲染子进程；默认关闭，使用 App 内置播放器。
+    @Published var externalVideoRendererEnabled = false {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(
+                externalVideoRendererEnabled,
+                forKey: VideoWallpaperManager.externalVideoRendererDefaultsKey
+            )
+            VideoWallpaperManager.shared.setExternalVideoRendererEnabled(externalVideoRendererEnabled)
+        }
+    }
     @Published var autoRemoveVideoLetterbox = false {
         didSet {
             guard !isBatchUpdating else { return }
@@ -375,6 +386,10 @@ class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
         UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
         UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
+        UserDefaults.standard.set(
+            externalVideoRendererEnabled,
+            forKey: VideoWallpaperManager.externalVideoRendererDefaultsKey
+        )
         UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
         UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
         UserDefaults.standard.set(proxyPort, forKey: "proxy_port")
@@ -388,6 +403,7 @@ class SettingsViewModel: ObservableObject {
         VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
         VideoOptimizationQueueService.shared.applySettings(autoOnDownload: autoOptimizeVideosAfterDownload)
         NotchOverlayManager.shared.setEnabled(hideNotch)
+        VideoWallpaperManager.shared.setExternalVideoRendererEnabled(externalVideoRendererEnabled)
         if sceneRealtimeRenderingEnabled {
             LiquidGlassClockSettings.shared.update { $0.enabled = false }
         }
@@ -482,6 +498,9 @@ class SettingsViewModel: ObservableObject {
             let savedThreshold = defaults.double(forKey: "window_coverage_pause_threshold")
             windowCoveragePauseThreshold = savedThreshold > 0 ? savedThreshold : 50
             hdrEnabled = defaults.object(forKey: "hdr_enabled") as? Bool ?? false
+            externalVideoRendererEnabled = defaults.object(
+                forKey: VideoWallpaperManager.externalVideoRendererDefaultsKey
+            ) as? Bool ?? false
             autoRemoveVideoLetterbox = defaults.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
             portraitBlurFillEnabled = defaults.object(forKey: "portrait_blur_fill_enabled") as? Bool ?? false
             frameInterpolationTargetFPS = Double(FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(Int((defaults.object(forKey: "frame_interpolation_target_fps") as? Double ?? 60.0).rounded())))

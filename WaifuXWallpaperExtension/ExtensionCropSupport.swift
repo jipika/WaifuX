@@ -43,11 +43,15 @@ struct ExtCropSettings: Codable {
     var effectiveAspect: Double? {
         switch aspectPreset {
         case .autoFill: return nil
-        case .custom: return customAspect
+        case .custom:
+            guard let customAspect, customAspect.isFinite, customAspect > 0 else {
+                return nil
+            }
+            return customAspect
         default: return aspectPreset.aspectRatio
         }
     }
-    var shouldApplyCrop: Bool { isEnabled && effectiveAspect != nil }
+    var shouldApplyCrop: Bool { isEnabled }
 
     static let `default` = ExtCropSettings()
 }
@@ -68,8 +72,8 @@ enum ExtCropEngine {
         guard settings.shouldApplyCrop else {
             return ExtCropLayout(wallpaperCropRect: .full, viewportRect: .full, letterboxColor: letterboxColor)
         }
-        let targetAspect = settings.effectiveAspect ?? 1.0
         let screenAspect = screenSize.height > 0 ? screenSize.width / screenSize.height : 1.0
+        let targetAspect = settings.effectiveAspect ?? screenAspect
         let viewport: ExtUnitRect
         if targetAspect > screenAspect {
             let h = screenAspect / targetAspect

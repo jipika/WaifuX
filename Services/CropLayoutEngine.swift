@@ -21,7 +21,7 @@ enum CropLayoutEngine {
     ) -> CropLayout {
         let letterboxColor = Self.parseColorHex(settings.letterboxColorHex)
 
-        // 不应裁切：回退现状（全屏 + 全图）。
+        // 关闭时回退现状（全屏 + 全图）。
         guard settings.shouldApplyCrop else {
             return CropLayout(
                 wallpaperCropRect: .full,
@@ -30,10 +30,13 @@ enum CropLayoutEngine {
             )
         }
 
-        let targetAspect = settings.effectiveAspect ?? 1.0
         let screenAspect = (screenSize.height > 0)
             ? screenSize.width / screenSize.height
             : 1.0
+        // Auto Fill 没有独立目标比例，目标就是当前屏幕比例。
+        // 这样 viewport 仍然是全屏，但 cover 的真实壁纸裁切框
+        // 会保留下来，pan/zoom 才能作用于超出屏幕的内容。
+        let targetAspect = settings.effectiveAspect ?? screenAspect
 
         // 1. 算可视框 viewportRect（屏幕内居中放该比例的最大框）。
         let viewport: UnitRect

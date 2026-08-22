@@ -10,6 +10,11 @@ private func legacyCLICapturePath(for screen: Int) -> String {
     return "/tmp/wallpaperengine-cli-capture-s\(screen).png"
 }
 
+/// Web daemon 写出的全屏媒体内容尺寸。路径与 wallpaperengine-cli.swift 保持一致。
+private func legacyCLIWebContentSizePath(for screen: Int) -> String {
+    return "/tmp/wallpaperengine-cli-web-content-size-s\(screen).json"
+}
+
 /// Web 实时壁纸预热期间采集的海报候选。
 ///
 /// 分数只用于避开全黑、过曝开场和低信息量转场帧；它不影响实时渲染本身。
@@ -42,6 +47,11 @@ private struct WebCropParameters: Codable {
     let letterboxColorHex: String?
     /// 每屏单调递增；daemon 用它丢弃乱序的拖拽更新。
     let cropRevision: UInt64
+}
+
+private struct WebContentSizePayload: Codable {
+    let width: Double
+    let height: Double
 }
 
 /// Host → daemon：Web 壁纸可视区域。
@@ -792,7 +802,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         for screen in effectiveScreens {
             guard wallpaperSwitchGeneration == switchGeneration else { return }
             // 全屏覆盖（含菜单栏条带下方）。wgpu 窗口 setOpaque=false +
-            // alpha=0.99 常驻半透明（Rust 侧），壁纸层不被挂起，菜单栏
+            // alpha=0.99999 常驻近乎不透明（Rust 侧），壁纸层不被挂起，菜单栏
             // backdrop 懒采样能跟随 poster 更新。
             let f = screen.frame
             let scale = screen.backingScaleFactor
@@ -1659,8 +1669,11 @@ final class WallpaperEngineXBridge: ObservableObject {
         webCropRevisionByScreenIndex[screenIndex] = revision
 
         let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        let wallpaperSize = webContentSize(
+            forScreenIndex: screenIndex
+        ) ?? screen.frame.size
         let layout = CropLayoutEngine.compute(
-            wallpaperSize: screen.frame.size,
+            wallpaperSize: wallpaperSize,
             screenSize: screen.frame.size,
             settings: settings
         )
@@ -1679,6 +1692,48 @@ final class WallpaperEngineXBridge: ObservableObject {
             cropRevision: revision
         )
         return (screenIndex, parameters)
+    }
+
+    /// Web 壁纸的真实内容尺寸由 daemon 从当前可见的 video/canvas/img 推断。
+    /// 未识别到时回退屏幕尺寸，保持普通 Web 壁纸原有行为。
+    func webContentSize(for screen: NSScreen) -> CGSize? {
+        guard isWebWallpaperOn(screen: screen) else { return nil }
+        guard let screenIndex = Self.legacyCLIScreenIndex(for: screen) else { return nil }
+        return webContentSize(forScreenIndex: screenIndex)
+    }
+
+    private func webContentSize(forScreenIndex screenIndex: Int) -> CGSize? {
+        let url = URL(fileURLWithPath: legacyCLIWebContentSizePath(for: screenIndex))
+        guard let data = try? Data(contentsOf: url),
+              let payload = try? JSONDecoder().decode(WebContentSizePayload.self, from: data),
+              payload.width.isFinite, payload.height.isFinite,
+              payload.width > 0, payload.height > 0 else {
+            return nil
+        }
+        return CGSize(width: payload.width, height: payload.height)
+    }
+
+    private func invalidateWebContentSize(for screenIndex: Int) {
+        try? FileManager.default.removeItem(
+            atPath: legacyCLIWebContentSizePath(for: screenIndex)
+        )
+    }
+
+    private func waitForWebContentSize(
+        for screen: NSScreen,
+        timeout: TimeInterval = 1.5
+    ) async -> CGSize? {
+        guard let screenIndex = Self.legacyCLIScreenIndex(for: screen) else {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let size = webContentSize(forScreenIndex: screenIndex) {
+                return size
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return webContentSize(forScreenIndex: screenIndex)
     }
 
     /// 解析 WE project.json 判断是否需要实时音频频谱。
@@ -2210,6 +2265,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
 
         for screen in screens {
+            if let screenIndex = Self.legacyCLIScreenIndex(for: screen) {
+                invalidateWebContentSize(for: screenIndex)
+            }
             guard let initialCrop = nextWebCropParameters(for: screen) else {
                 throw WallpaperEngineError.executionFailed("Web 壁纸目标显示器已变化，请重试")
             }
@@ -2224,6 +2282,15 @@ final class WallpaperEngineXBridge: ObservableObject {
                 throw WallpaperEngineError.executionFailed(
                     "wallpaperengine-cli set 失败 (screen=\(initialCrop.screenIndex), exit=\(result.status))\(detail)"
                 )
+            }
+
+            // 首次 set 时 WebView 还未完成媒体元数据探测，initial crop 只能
+            // 使用屏幕尺寸。等 daemon 写出真实内容尺寸后补发一次最终 crop，
+            // 避免 16:9 媒体在 16:10 屏幕上永久丢失左右区域。
+            _ = await waitForWebContentSize(for: screen)
+            if webContentSize(forScreenIndex: initialCrop.screenIndex) != nil {
+                sendWebCropToWebDaemon(for: screen)
+                try? await Task.sleep(nanoseconds: 80_000_000)
             }
         }
 
@@ -4284,7 +4351,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         if didApply {
             // Scene/Web 的 poster 已写入系统壁纸：wgpu / engine-cli 窗口
-            // 常驻半透明（alpha=0.99，各自进程内设置），壁纸层不被挂起，
+            // 常驻近乎不透明（alpha=0.99999，各自进程内设置），壁纸层不被挂起，
             // 菜单栏 backdrop 懒采样（~10s）自动采到新 poster。
         }
         return didApply

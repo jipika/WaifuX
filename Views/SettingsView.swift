@@ -452,6 +452,14 @@ private struct GeneralSettingsTab: View {
                 }
 
                 MacSettingsRow(
+                    title: t("externalVideoRenderer"),
+                    subtitle: t("externalVideoRendererDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.externalVideoRendererEnabled)
+                }
+
+                MacSettingsRow(
                     title: t("pauseWhenOtherAppForeground"),
                     subtitle: t("pauseWhenOtherAppForegroundDesc"),
                     showDivider: true

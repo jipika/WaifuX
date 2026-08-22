@@ -13,6 +13,7 @@
 import Foundation
 import AppKit
 import CoreAudio
+import Darwin
 
 /// Renderer 侧音频输出策略。
 ///
@@ -211,6 +212,12 @@ final class VideoRendererProcessController {
     /// their desktop-level windows have actually exited so a following launch
     /// cannot briefly overlap the old renderer.
     private var stoppingPIDs = Set<pid_t>()
+    /// `startDaemon()` awaits socket/IPC readiness and therefore can be
+    /// re-entered by another wake/restart task. Serialize the whole launch
+    /// transaction so two callers cannot both observe "not running" and fork
+    /// two independent desktop renderers.
+    private var daemonStartInFlight = false
+    private var daemonStartWaiters: [CheckedContinuation<Bool, Never>] = []
     private var eventBuffer = Data()
     private var lastAudioMuted = true
     private var lastAudioVolume = 1.0
@@ -240,6 +247,23 @@ final class VideoRendererProcessController {
     /// - Returns: true 表示启动成功且子进程已就绪
     @discardableResult
     func startDaemon() async -> Bool {
+        if daemonStartInFlight {
+            return await withCheckedContinuation { continuation in
+                daemonStartWaiters.append(continuation)
+            }
+        }
+        daemonStartInFlight = true
+        let result = await startDaemonImplementation()
+        daemonStartInFlight = false
+        let waiters = daemonStartWaiters
+        daemonStartWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+        return result
+    }
+
+    private func startDaemonImplementation() async -> Bool {
         if isRunning {
             // 存活 ≠ 健康：socket 可连只代表内核 accept 队列在工作，daemon
             // 主线程卡死时连接照样成功但任何命令都无响应。必须 ping 通过才
@@ -247,6 +271,7 @@ final class VideoRendererProcessController {
             // 反馈的「只能手动杀进程」楔死点）。
             if await waitForSocket(timeout: 2.0),
                await sendCommand(.ping, screen: nil, timeout: 1.5) == "OK" {
+                await terminateOtherChildRenderers()
                 AppLogger.info(.wallpaper, "video-renderer 子进程已在运行，跳过启动")
                 return true
             }
@@ -254,6 +279,8 @@ final class VideoRendererProcessController {
             stopDaemon()
         }
 
+        await waitForStoppingRenderers()
+        await terminateOtherChildRenderers()
         await waitForStoppingRenderers()
         await terminateOrphanedRenderers()
 
@@ -371,6 +398,9 @@ final class VideoRendererProcessController {
         sendCommandFireAndForget(.shutdown)
         let pid = processPID
         stoppingPIDs.insert(pid)
+        // A renderer may be stopped while the display is asleep. Continue it
+        // before SIGTERM so the graceful shutdown handler can run.
+        kill(pid, SIGCONT)
         kill(pid, SIGTERM)
 
         // watchdog: 2s 后 SIGKILL
@@ -387,11 +417,86 @@ final class VideoRendererProcessController {
         try? FileManager.default.removeItem(atPath: pidPath)
     }
 
+    /// Synchronously terminate every renderer owned by this app.
+    ///
+    /// `stopDaemon()` is intentionally asynchronous for normal UI flows, but
+    /// its delayed SIGKILL is not reliable once the host app is already
+    /// terminating. Scan the process table so untracked children from an
+    /// older app state/version are included, then finish the shutdown before
+    /// returning to AppKit.
+    func terminateAllChildRenderersForAppTermination() {
+        pendingCropCommands.removeAll()
+        cropFlushScheduled = false
+
+        let parentPID = ProcessInfo.processInfo.processIdentifier
+        var rendererPIDs = Set(Self.rendererPIDs(parentPID: parentPID))
+        if processPID > 1,
+           process?.isRunning == true,
+           Self.isProcessAlive(processPID) {
+            rendererPIDs.insert(processPID)
+        }
+        guard !rendererPIDs.isEmpty else {
+            process = nil
+            processPID = 0
+            try? FileManager.default.removeItem(atPath: socketPath)
+            try? FileManager.default.removeItem(atPath: pidPath)
+            return
+        }
+
+        let sortedPIDs = rendererPIDs.sorted()
+        AppLogger.info(.wallpaper, "应用退出，同步清理 video-renderer 子进程", metadata: [
+            "pids": sortedPIDs.map(String.init).joined(separator: ","),
+            "parentPID": String(parentPID)
+        ])
+        expectedTerminationGeneration = generation
+        stoppingPIDs.formUnion(rendererPIDs)
+
+        for pid in sortedPIDs {
+            // SIGTERM is queued for a stopped process; SIGCONT makes the
+            // renderer's signal source and AppKit teardown runnable first.
+            kill(pid, SIGCONT)
+            kill(pid, SIGTERM)
+        }
+
+        waitForRendererExitSynchronously(sortedPIDs, timeout: 0.3)
+
+        let remainingPIDs = sortedPIDs.filter(Self.isProcessAlive)
+        if !remainingPIDs.isEmpty {
+            AppLogger.error(.wallpaper, "video-renderer 未响应 SIGTERM，退出前强制 SIGKILL", metadata: [
+                "pids": remainingPIDs.map(String.init).joined(separator: ",")
+            ])
+            for pid in remainingPIDs {
+                kill(pid, SIGKILL)
+            }
+            waitForRendererExitSynchronously(remainingPIDs, timeout: 0.15)
+        }
+
+        stoppingPIDs.subtract(rendererPIDs)
+        process = nil
+        processPID = 0
+        try? FileManager.default.removeItem(atPath: socketPath)
+        try? FileManager.default.removeItem(atPath: pidPath)
+    }
+
     /// daemon 是否仍在响应 IPC（短超时 ping 探测，用于区分「活而不答」）。
     /// 进程存活但主线程/IPC 卡死时 connect 依旧成功，只有 ping 能鉴别。
     func isDaemonResponsive(timeout: TimeInterval = 1.5) async -> Bool {
         guard isRunning else { return false }
         return await sendCommand(.ping, screen: nil, timeout: timeout) == "OK"
+    }
+
+    /// Removes any extra renderer still parented by this WaifuX instance.
+    /// Apply/reconfigure paths call this even when the tracked renderer is
+    /// healthy, because a stale child is otherwise invisible to `isRunning`.
+    func reconcileChildRenderers() async {
+        await terminateOtherChildRenderers()
+        await waitForStoppingRenderers()
+    }
+
+    /// Remove renderers left behind by a previous app version or an abrupt
+    /// host termination before persisted wallpaper state is restored.
+    func reapOrphanedRenderersFromPreviousVersions() async {
+        await terminateOrphanedRenderers()
     }
 
     /// 强制换代重启：处理进程存活但 IPC 无响应的卡死态
@@ -445,6 +550,7 @@ final class VideoRendererProcessController {
         case pruneInactiveScreens(screenIDs: [String])
         case prewarm(screen: Int, path: String, volume: Double, hdrMetadataEnabled: Bool)
         case ping
+        case refreshPlaybackState
         case shutdown
     }
 
@@ -629,6 +735,7 @@ final class VideoRendererProcessController {
             "pids": stalePIDs.map(String.init).joined(separator: ",")
         ])
         for pid in stalePIDs {
+            kill(pid, SIGCONT)
             kill(pid, SIGTERM)
         }
 
@@ -643,7 +750,56 @@ final class VideoRendererProcessController {
         }
     }
 
+    /// A stale renderer can still be parented by the current WaifuX process
+    /// when a previous async stop/restart lost its local PID bookkeeping.
+    /// Keep the controller's current child and terminate every other helper
+    /// before allowing a new launch. This is deliberately scoped to the
+    /// current parent PID, so another WaifuX session is never touched.
+    private func terminateOtherChildRenderers() async {
+        let parentPID = ProcessInfo.processInfo.processIdentifier
+        let currentPID = processPID
+        let stalePIDs = Self.rendererPIDs(parentPID: parentPID).filter {
+            $0 != currentPID
+        }
+        guard !stalePIDs.isEmpty else { return }
+
+        AppLogger.error(.wallpaper, "清理当前 WaifuX 下重复 video-renderer", metadata: [
+            "pids": stalePIDs.map(String.init).sorted().joined(separator: ","),
+            "currentPID": String(currentPID)
+        ])
+        for pid in stalePIDs {
+            stoppingPIDs.insert(pid)
+            kill(pid, SIGCONT)
+            kill(pid, SIGTERM)
+        }
+
+        let gracefulDeadline = Date().addingTimeInterval(0.6)
+        while Date() < gracefulDeadline,
+              stalePIDs.contains(where: Self.isProcessAlive) {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        for pid in stalePIDs where Self.isProcessAlive(pid) {
+            kill(pid, SIGKILL)
+        }
+        stoppingPIDs = stoppingPIDs.filter(Self.isProcessAlive)
+    }
+
+    private func waitForRendererExitSynchronously(
+        _ pids: [pid_t],
+        timeout: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline,
+              pids.contains(where: Self.isProcessAlive) {
+            usleep(25_000)
+        }
+    }
+
     private static func orphanedRendererPIDs() -> [pid_t] {
+        rendererPIDs(parentPID: 1)
+    }
+
+    private static func rendererPIDs(parentPID: pid_t?) -> [pid_t] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
         process.arguments = ["-axo", "pid=,ppid=,command="]
@@ -668,15 +824,17 @@ final class VideoRendererProcessController {
                     )
                     guard fields.count == 3,
                           let pid = pid_t(fields[0]),
-                          let parentPID = pid_t(fields[1]),
-                          parentPID == 1,
+                          let parsedParentPID = pid_t(fields[1]),
                           pid > 1 else {
+                        return nil
+                    }
+                    if let requestedParentPID = parentPID,
+                       parsedParentPID != requestedParentPID {
                         return nil
                     }
                     let command = String(fields[2])
                     guard command.contains("wallpaper-video-renderer"),
-                          command.contains("--socket"),
-                          command.contains("/tmp/waifux-video-renderer-") else {
+                          command.contains("--socket") else {
                         return nil
                     }
                     return pid
@@ -975,6 +1133,9 @@ final class VideoRendererProcessController {
 
         case .ping:
             msg.command = "ping"
+
+        case .refreshPlaybackState:
+            msg.command = "refreshPlaybackState"
 
         case .shutdown:
             msg.command = "shutdown"

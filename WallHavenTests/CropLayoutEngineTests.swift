@@ -103,7 +103,7 @@ final class CropLayoutEngineTests: XCTestCase {
         XCTAssertEqual(actual.h, h, accuracy: 1e-9, file: file, line: line)
     }
 
-    func testAutoFillReturnsFullScreenAndFullCrop() {
+    func testAutoFillReturnsFullScreenAndCenteredCoverCrop() {
         var s = DisplayCropSettings.defaultSettings
         s.aspectPreset = .autoFill
         let layout = CropLayoutEngine.compute(
@@ -111,7 +111,65 @@ final class CropLayoutEngineTests: XCTestCase {
             screenSize: CGSize(width: 3440, height: 1440),
             settings: s)
         assertRect(layout.viewportRect, 0, 0, 1, 1)
-        assertRect(layout.wallpaperCropRect, 0, 0, 1, 1)
+        XCTAssertEqual(layout.wallpaperCropRect.x, 0, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.w, 1, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.h, 0.7441860465, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.y, 0.1279069767, accuracy: 1e-9)
+    }
+
+    func testAutoFillUsesRealWallpaperOverflowOnDifferentScreenAspect() {
+        var s = DisplayCropSettings.defaultSettings
+        s.aspectPreset = .autoFill
+        s.pan = CGPoint(x: 0.5, y: 0.5)
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: CGSize(width: 1920, height: 1080),
+            screenSize: CGSize(width: 1440, height: 900),
+            settings: s
+        )
+
+        // 16:9 内容铺满 16:10 屏幕高度后，左右各有 5% 可平移余量。
+        assertRect(layout.viewportRect, 0, 0, 1, 1)
+        XCTAssertEqual(layout.wallpaperCropRect.x, 0.05, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.y, 0, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.w, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.h, 1, accuracy: 1e-9)
+    }
+
+    func testAutoFillPanReachesBothHorizontalEdges() {
+        var s = DisplayCropSettings.defaultSettings
+        s.aspectPreset = .autoFill
+
+        s.pan = CGPoint(x: 0, y: 0.5)
+        let left = CropLayoutEngine.compute(
+            wallpaperSize: CGSize(width: 1920, height: 1080),
+            screenSize: CGSize(width: 1440, height: 900),
+            settings: s
+        )
+        XCTAssertEqual(left.wallpaperCropRect.x, 0, accuracy: 1e-9)
+
+        s.pan = CGPoint(x: 1, y: 0.5)
+        let right = CropLayoutEngine.compute(
+            wallpaperSize: CGSize(width: 1920, height: 1080),
+            screenSize: CGSize(width: 1440, height: 900),
+            settings: s
+        )
+        XCTAssertEqual(right.wallpaperCropRect.x, 0.1, accuracy: 1e-9)
+    }
+
+    func testCustomWithoutAspectFallsBackToScreenAspect() {
+        var s = DisplayCropSettings.defaultSettings
+        s.aspectPreset = .custom
+        s.customAspect = nil
+        s.pan = CGPoint(x: 0.5, y: 0.5)
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: CGSize(width: 1920, height: 1080),
+            screenSize: CGSize(width: 1440, height: 900),
+            settings: s
+        )
+
+        assertRect(layout.viewportRect, 0, 0, 1, 1)
+        XCTAssertEqual(layout.wallpaperCropRect.w, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(layout.wallpaperCropRect.h, 1, accuracy: 1e-9)
     }
 
     func testDisabledReturnsFullScreenAndFullCrop() {

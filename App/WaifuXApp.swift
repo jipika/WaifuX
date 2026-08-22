@@ -652,6 +652,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                             // 先完成动态壁纸恢复，再恢复静态 overlay。视频 renderer 的启动
                             // 现在是异步的；若静态层先出现，会短暂抢占桌面并造成闪屏。
                             Task { @MainActor in
+                                // An older app version can leave a desktop-level
+                                // helper reparented to launchd. Reap it before
+                                // restoring persisted wallpaper state.
+                                await VideoRendererProcessController.shared
+                                    .reapOrphanedRenderersFromPreviousVersions()
                                 if WallpaperEngineXBridge.shared.hasPersistedRestoreState() {
                                     await WallpaperEngineXBridge.shared.restoreIfNeeded()
                                 } else {

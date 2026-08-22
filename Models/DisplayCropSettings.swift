@@ -64,18 +64,23 @@ struct DisplayCropSettings: Codable, Equatable {
     /// 总开关。false=回退现状 aspect-fill，零行为变化。
     var isEnabled: Bool = true
 
-    /// 实际生效的目标比例：custom 用 customAspect，autoFill 用 nil。
+    /// 实际生效的目标比例：custom 用 customAspect，autoFill 使用屏幕比例。
     var effectiveAspect: Double? {
         switch aspectPreset {
         case .autoFill: return nil
-        case .custom: return customAspect
+        case .custom:
+            guard let customAspect, customAspect.isFinite, customAspect > 0 else {
+                return nil
+            }
+            return customAspect
         default: return aspectPreset.aspectRatio
         }
     }
 
-    /// 是否应走 crop 通路（否则回现状）。
+    /// 是否应走 crop 通路。Auto Fill 也必须进入 crop 管线，
+    /// 否则 pan/zoom 只会保存而不会应用。
     var shouldApplyCrop: Bool {
-        isEnabled && effectiveAspect != nil
+        isEnabled
     }
 
     static let defaultSettings = DisplayCropSettings()

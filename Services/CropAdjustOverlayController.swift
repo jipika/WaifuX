@@ -77,6 +77,10 @@ final class CropAdjustOverlayController {
         if let size = WallpaperEngineXBridge.shared.canvasSize(for: screen) {
             return size
         }
+        // 4) Web 壁纸：优先使用 daemon 从全屏 video/canvas/img 识别出的内容尺寸。
+        if let size = WallpaperEngineXBridge.shared.webContentSize(for: screen) {
+            return size
+        }
         // 3) 静态图片：取 StaticImageWallpaperOverlayManager 缓存的图片像素尺寸
         if let size = StaticImageWallpaperOverlayManager.shared.imageSize(for: screen) {
             return size
@@ -212,6 +216,10 @@ private final class CropAdjustOverlayView: NSView {
         DisplayCropSettingsStore.shared.commitInteractive(for: screen)
     }
 
+    private func commitZoomInteraction() {
+        DisplayCropSettingsStore.shared.commitInteractive(for: screen)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         let delta = event.deltaY
         guard delta != 0 else { return }
@@ -223,9 +231,32 @@ private final class CropAdjustOverlayView: NSView {
         onSettingsChanged?()
         // 滚轮通常无明确"释放"事件，用 phase=.ended 判断；否则用 debounce
         if event.phase == .ended || event.momentumPhase == .ended {
-            DisplayCropSettingsStore.shared.commitInteractive(for: screen)
+            commitZoomInteraction()
         } else {
             scheduleScrollCommit()
+        }
+    }
+
+    /// 触摸板双指 pinch。NSEvent.magnification 在 macOS 上是相对变化量，
+    /// 连续手势期间只更新内存态，结束时一次性持久化并广播。
+    override func magnify(with event: NSEvent) {
+        let magnification = event.magnification
+        guard magnification != 0 else {
+            if event.phase == .ended || event.phase == .cancelled {
+                commitZoomInteraction()
+            }
+            return
+        }
+        DisplayCropSettingsStore.shared.update(for: screen, interactive: true) { s in
+            let multiplier = max(0.01, 1 + magnification)
+            s.zoom = max(1.0, min(4.0, s.zoom * multiplier))
+        }
+        renderPreview()
+        onSettingsChanged?()
+        if event.phase == .ended || event.phase == .cancelled {
+            commitZoomInteraction()
+        } else {
+            scheduleMagnifyCommit()
         }
     }
 
@@ -239,5 +270,9 @@ private final class CropAdjustOverlayView: NSView {
         scrollCommitWorkItem = item
         // 滚动停止 250ms 后落定
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
+    }
+
+    private func scheduleMagnifyCommit() {
+        scheduleScrollCommit()
     }
 }

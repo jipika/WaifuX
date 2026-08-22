@@ -59,6 +59,16 @@ private func primaryCapturePath(for screen: Int) -> String {
     return "/tmp/wallpaperengine-cli-capture-s\(screen).png"
 }
 
+/// Web 壁纸识别出的全屏媒体内容尺寸，供 Host 计算 crop 坐标。
+private func webContentSizePath(for screen: Int) -> String {
+    return "/tmp/wallpaperengine-cli-web-content-size-s\(screen).json"
+}
+
+private struct WebContentSizePayload: Codable {
+    let width: Double
+    let height: Double
+}
+
 private func isDynamicLockScreenEnabledForCurrentLaunch() -> Bool {
     let rawValue = ProcessInfo.processInfo.environment["WAIFUX_DYNAMIC_LOCK_SCREEN_ENABLED"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1929,6 +1939,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         var cropContainer: NSView?
         var webView: WKWebView?
         var cropLayout: WebCropLayout = .full
+        /// 可见的全屏 video/canvas/img 的原始内容尺寸。
+        var mediaContentSize: CGSize?
+        /// 识别到全屏媒体后，crop 只变换媒体元素，不变换整个 WebView。
+        var usesMediaCrop = false
+        var mediaDiscoveryGeneration: UInt64 = 0
         /// 乱序 socket 消息只允许前进，避免拖拽结束后被旧位置覆盖。
         var lastCropRevision: UInt64 = 0
         var pendingCompletion: ((Bool) -> Void)?
@@ -2120,7 +2135,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             w.setFrame(frame, display: false)
             w.alphaValue = 1
         } else {
-            // 全屏覆盖（含菜单栏条带下方）。alpha=0.99 常驻半透明
+            // 全屏覆盖（含菜单栏条带下方）。alpha=0.99999 常驻近乎不透明
             // （+ isOpaque=false 已有）：壁纸层不被挂起，菜单栏 backdrop
             // 懒采样能跟随 poster 更新。
             w.setFrame(targetScreen.frame, display: true)
@@ -2191,11 +2206,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             // `desktopWindow` 层本身低于普通 App 窗口；在该层内前置不会盖住应用，
             // 却能避免 WindowServer 将完整遮挡的 WKWebView/WebGL canvas 停止合成。
             w.orderFront(nil)
-            // 常驻半透明 alpha=0.99（+ isOpaque=false 已有）：窗口按半透明层
+            // 常驻近乎不透明 alpha=0.99999（+ isOpaque=false 已有）：窗口按半透明层
             // 合成，必须与壁纸层混合 → 壁纸层不被挂起 → 菜单栏 backdrop
             // 懒采样能跟随 poster 更新（alpha=1 时壁纸层被挂起，菜单栏永不
-            // 更新——实测验证）。0.99 与 1 视觉无差别。
-            w.alphaValue = 0.99
+            // 更新——实测验证）。0.99999 与 1 视觉无差别。
+            w.alphaValue = 0.99999
         }
 
         let destination = offscreen ? "offscreen bake surface" : "screen \(screenIdx) (\(targetScreen.localizedName))"
@@ -2262,6 +2277,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         screenStates[s]?.isLoaded = true
         runWebWallpaperBootstrap(screen: s) { [weak self] in
             guard let self = self else { return }
+            if self.screenStates[s]?.isOffscreen != true {
+                self.beginMediaContentDiscovery(screen: s)
+            }
             if self.screenStates[s]?.isOffscreen == true {
                 // Compositor recording does not need a stable WKWebView snapshot.
                 // Snapshot settling pauses/seeks video and is the source of judder.
@@ -2276,6 +2294,159 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             }
         }
         NSApp.setActivationPolicy(.prohibited)
+    }
+
+    /// 识别当前页面是否由全屏媒体主导。WebView 的 viewport 保持屏幕尺寸，
+    /// 只把媒体元素切换到原始内容坐标系，避免 WebGL/fixed 布局重排。
+    private func beginMediaContentDiscovery(screen: Int) {
+        guard var state = screenStates[screen], state.webView != nil else { return }
+        state.mediaDiscoveryGeneration &+= 1
+        let generation = state.mediaDiscoveryGeneration
+        screenStates[screen] = state
+
+        func probe(attempt: Int) {
+            guard let current = self.screenStates[screen],
+                  current.mediaDiscoveryGeneration == generation,
+                  let webView = current.webView else {
+                return
+            }
+            let script = """
+            (function() {
+              try {
+                var viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+                var candidates = Array.prototype.slice.call(
+                  document.querySelectorAll('video,canvas,img')
+                ).map(function(el) {
+                  var rect = el.getBoundingClientRect();
+                  var style = window.getComputedStyle(el);
+                  var width = el.videoWidth || el.naturalWidth || el.width || 0;
+                  var height = el.videoHeight || el.naturalHeight || el.height || 0;
+                  var area = Math.max(0, rect.width) * Math.max(0, rect.height);
+                  var visible = style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && parseFloat(style.opacity || '1') > 0
+                    && rect.width > 2 && rect.height > 2
+                    && area >= viewportArea * 0.55
+                    && width > 0 && height > 0;
+                  return { el: el, width: width, height: height, area: area, visible: visible };
+                }).filter(function(item) { return item.visible; })
+                  .sort(function(lhs, rhs) { return rhs.area - lhs.area; });
+
+                var best = candidates.length ? candidates[0] : null;
+                if (!best) return null;
+
+                var media = best.el;
+                if (window.__wxMediaCropElement !== media) {
+                  window.__wxMediaCropElement = media;
+                  media.style.setProperty('position', 'fixed', 'important');
+                  media.style.setProperty('left', '0px', 'important');
+                  media.style.setProperty('top', '0px', 'important');
+                  media.style.setProperty('margin', '0px', 'important');
+                  media.style.setProperty('object-fit', 'fill', 'important');
+                  media.style.setProperty('transform-origin', '0 0', 'important');
+                }
+
+                window.__wxApplyMediaCrop = function(config) {
+                  try {
+                    var element = window.__wxMediaCropElement;
+                    if (!element) return false;
+                    element.style.setProperty('width', config.sourceWidth + 'px', 'important');
+                    element.style.setProperty('height', config.sourceHeight + 'px', 'important');
+                    element.style.setProperty(
+                      'transform',
+                      'translate(' + config.translateX + 'px,' + config.translateY + 'px) '
+                        + 'scale(' + config.scaleX + ',' + config.scaleY + ')',
+                      'important'
+                    );
+                    return true;
+                  } catch (e) {
+                    return false;
+                  }
+                };
+                return { width: best.width, height: best.height };
+              } catch (e) {
+                return null;
+              }
+            })();
+            """
+            webView.evaluateJavaScript(script) { [weak self] result, _ in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    guard let current = self.screenStates[screen],
+                          current.mediaDiscoveryGeneration == generation else {
+                        return
+                    }
+                    if let dict = result as? [String: Any],
+                       let width = (dict["width"] as? NSNumber)?.doubleValue,
+                       let height = (dict["height"] as? NSNumber)?.doubleValue,
+                       width.isFinite, height.isFinite, width > 0, height > 0 {
+                        self.screenStates[screen]?.mediaContentSize = CGSize(width: width, height: height)
+                        self.screenStates[screen]?.usesMediaCrop = true
+                        self.writeWebContentSize(
+                            screen: screen,
+                            size: CGSize(width: width, height: height)
+                        )
+                        self.applyCenteredMediaFallbackIfNeeded(screen: screen)
+                        self.applyCropLayout(for: screen)
+                        return
+                    }
+                    guard attempt < 20 else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        probe(attempt: attempt + 1)
+                    }
+                }
+            }
+        }
+
+        probe(attempt: 0)
+    }
+
+    private func writeWebContentSize(screen: Int, size: CGSize) {
+        let payload = WebContentSizePayload(
+            width: size.width,
+            height: size.height
+        )
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        try? data.write(
+            to: URL(fileURLWithPath: webContentSizePath(for: screen)),
+            options: .atomic
+        )
+    }
+
+    private func applyCenteredMediaFallbackIfNeeded(screen: Int) {
+        guard let state = screenStates[screen],
+              let sourceSize = state.mediaContentSize,
+              let window = state.window,
+              let contentSize = window.contentView?.bounds.size,
+              contentSize.width > 0, contentSize.height > 0 else {
+            return
+        }
+        let layout = state.cropLayout
+        let isDefaultFullLayout = layout.crop.x == 0
+            && layout.crop.y == 0
+            && layout.crop.w == 1
+            && layout.crop.h == 1
+            && layout.viewport.x == 0
+            && layout.viewport.y == 0
+            && layout.viewport.w == 1
+            && layout.viewport.h == 1
+        guard isDefaultFullLayout else { return }
+
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let targetAspect = contentSize.width / contentSize.height
+        var crop = WebCropRect.full
+        if sourceAspect > targetAspect {
+            crop.w = targetAspect / sourceAspect
+            crop.x = (1 - crop.w) / 2
+        } else if sourceAspect < targetAspect {
+            crop.h = sourceAspect / targetAspect
+            crop.y = (1 - crop.h) / 2
+        }
+        screenStates[screen]?.cropLayout = WebCropLayout(
+            crop: crop,
+            viewport: .full,
+            letterboxColor: layout.letterboxColor
+        )
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -2546,7 +2717,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
 
         let targetSize = contentView.bounds.size
-        let sourceSize = webView.bounds.size
+        let sourceSize = state.mediaContentSize ?? webView.bounds.size
         guard targetSize.width > 0, targetSize.height > 0,
               sourceSize.width > 0, sourceSize.height > 0 else {
             return
@@ -2571,6 +2742,38 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             height: viewportHeight
         )
         cropContainer.layer?.masksToBounds = true
+
+        if state.usesMediaCrop, state.mediaContentSize != nil {
+            // 保持 WebView 的屏幕 viewport，只把它平移到 viewport 的完整页面坐标。
+            // media 元素本身再按原始内容尺寸做缩放/平移。
+            webView.frame = CGRect(
+                x: -viewportX,
+                y: viewportHeight - targetSize.height,
+                width: targetSize.width,
+                height: targetSize.height
+            )
+            webView.layer?.anchorPoint = CGPoint(x: 0, y: 0)
+            webView.layer?.setAffineTransform(.identity)
+
+            let sourceWidth = sourceSize.width
+            let sourceHeight = sourceSize.height
+            let scaleX = viewportWidth / max(0.0001, crop.w * sourceWidth)
+            let scaleY = viewportHeight / max(0.0001, crop.h * sourceHeight)
+            let config: [String: Any] = [
+                "sourceWidth": sourceWidth,
+                "sourceHeight": sourceHeight,
+                "scaleX": scaleX,
+                "scaleY": scaleY,
+                "translateX": viewportX - crop.x * sourceWidth * scaleX,
+                "translateY": viewport.y * targetSize.height - crop.y * sourceHeight * scaleY
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: config),
+               let json = String(data: data, encoding: .utf8) {
+                let script = "window.__wxApplyMediaCrop && window.__wxApplyMediaCrop(\(json));"
+                webView.evaluateJavaScript(script, completionHandler: nil)
+            }
+            return
+        }
 
         // 先恢复 WebView 的完整逻辑 bounds，再只对合成层缩放/平移。
         webView.frame = CGRect(origin: .zero, size: sourceSize)
@@ -2597,6 +2800,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         state.webView = nil
         state.cropContainer?.removeFromSuperview()
         state.cropContainer = nil
+        try? FileManager.default.removeItem(atPath: webContentSizePath(for: screen))
         state.window?.close()
         state.window = nil
         state.isLoaded = false

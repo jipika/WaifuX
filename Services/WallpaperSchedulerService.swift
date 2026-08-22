@@ -2183,9 +2183,9 @@ class WallpaperSchedulerService: ObservableObject {
     /// 抽取，命中率仅 1/(N-1)，预热形同虚设）。
     private var reservedNextOnEndItems: [String: SchedulableItem] = [:]
 
-    /// 预演「播完即换」的下一张：按与实际切换相同的候选池与顺序规则
-    /// 选出下一项并缓存为粘性预约（仅限直接视频文件，保证与 applyItem
-    /// 的视频路由严格一致），返回实际会被播放的文件 URL。
+    /// 预演「播完即换」的下一张：先按真实切换路径选择下一项，再决定
+    /// 是否可以预热。预热不能改变候选顺序，也不能绕过随机轮次去重；
+    /// 只有直接视频文件才交给独立 renderer 预热。
 
     func peekNextOnEndPlaybackURL(for screenID: String) -> URL? {
         guard let screen = NSScreen.screens.first(where: {
@@ -2202,37 +2202,32 @@ class WallpaperSchedulerService: ObservableObject {
             : screenID
         let lastID = lastChangedItemIDs[stateKey]
 
-        // 只预热「applyItem 确定会走外部视频管线」的项。
-        // Workshop 目录在 requirePlaybackEndSupport 模式下可能被
-        // LocalWallpaperApplyService 判为不可播（scene/web 实时渲染、
-        // bake 不可用等）而 apply 失败走重试——预热这种项必然 MISS，
-        // 还会把实际选择挤向别的项（曾致 8/8 全 MISS）。直接视频文件
-        // 的 apply 路径与 peek 返回的 URL 严格一致。
+        // 预热只接受直接视频文件。Workshop 目录可能最终走烘焙 MP4、
+        // wallpaper-wgpu 或其它 apply 路径，不能把目录路径直接交给 AVPlayer。
         let videoExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv", "avi"]
-        var prewarmable = items.filter {
-            videoExts.contains($0.fileURL.pathExtension.lowercased())
-        }
-        if prewarmable.isEmpty {
-            reservedNextOnEndItems.removeValue(forKey: stateKey)
-            return nil
-        }
 
         let candidate: SchedulableItem?
         switch displayConfig.order {
         case .sequential:
-            candidate = selectSequential(from: prewarmable, lastID: lastID)
+            // 顺序模式必须先在完整候选池中选下一项。若下一项是
+            // Workshop/烘焙项，就放弃预热，不能从 direct-video 子集里
+            // 偷换成另一项，否则实际顺序会被预约逻辑改写。
+            candidate = selectSequential(from: items, lastID: lastID)
         case .random:
             // 与 selectRandom 同口径但不写 usedItemIDs / 不持久化，
             // 避免预演污染实际轮换的随机去重池。
-            var pool = prewarmable
-            if let lastID,
-               pool.count > 1,
-               let index = pool.firstIndex(where: { $0.id == lastID }) {
-                pool.remove(at: index)
-            }
-            candidate = pool.randomElement()
+            candidate = chooseRandomCandidate(
+                from: items,
+                lastID: lastID,
+                used: usedItemIDs[stateKey] ?? Set()
+            )?.item
         }
         guard let item = candidate else {
+            reservedNextOnEndItems.removeValue(forKey: stateKey)
+            return nil
+        }
+        guard item.bakedVideoPath == nil,
+              videoExts.contains(item.fileURL.pathExtension.lowercased()) else {
             reservedNextOnEndItems.removeValue(forKey: stateKey)
             return nil
         }
@@ -2380,19 +2375,22 @@ class WallpaperSchedulerService: ObservableObject {
         return items.first
     }
 
-    private func selectRandom(from items: [SchedulableItem], lastID: String?, screenID: String) -> SchedulableItem? {
+    /// Selects the same random candidate that the real apply path would see,
+    /// without mutating the per-screen random-round state. The caller decides
+    /// whether consuming the result should advance `usedItemIDs`.
+    private func chooseRandomCandidate(
+        from items: [SchedulableItem],
+        lastID: String?,
+        used: Set<String>
+    ) -> (item: SchedulableItem, didResetRound: Bool)? {
         guard !items.isEmpty else { return nil }
 
-        var used = usedItemIDs[screenID] ?? Set()
         var candidates = items.filter { !used.contains($0.id) }
-
-        // 如果全部都用过了，重置本轮记录重新开始
-        if candidates.isEmpty {
-            used.removeAll()
+        let didResetRound = candidates.isEmpty
+        if didResetRound {
             candidates = items
         }
 
-        // 尽量避免连续重复（如果上一轮最后一个还在候选里，优先排除）
         if let lastID,
            candidates.count > 1,
            let lastIndex = candidates.firstIndex(where: { $0.id == lastID }) {
@@ -2400,10 +2398,30 @@ class WallpaperSchedulerService: ObservableObject {
         }
 
         guard let selected = candidates.randomElement() else { return nil }
-        used.insert(selected.id)
+        return (selected, didResetRound)
+    }
+
+    private func selectRandom(from items: [SchedulableItem], lastID: String?, screenID: String) -> SchedulableItem? {
+        guard !items.isEmpty else { return nil }
+
+        var used = usedItemIDs[screenID] ?? Set()
+        guard let selection = chooseRandomCandidate(
+            from: items,
+            lastID: lastID,
+            used: used
+        ) else {
+            return nil
+        }
+
+        // 如果全部都用过了，重置本轮记录重新开始。
+        if selection.didResetRound {
+            used.removeAll()
+        }
+
+        used.insert(selection.item.id)
         usedItemIDs[screenID] = used
         persistSchedulerState()
-        return selected
+        return selection.item
     }
 
     // MARK: - Persistence
