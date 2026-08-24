@@ -1007,6 +1007,7 @@ struct MyLibraryContentView: View {
                   event.window?.isKeyWindow == true,
                   event.keyCode == 53,
                   event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                  !CropAdjustOverlayController.shared.isAdjusting,
                   !self.isPresentingLibraryModal else {
                 return event
             }

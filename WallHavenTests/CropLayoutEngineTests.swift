@@ -117,6 +117,19 @@ final class CropLayoutEngineTests: XCTestCase {
         XCTAssertEqual(layout.wallpaperCropRect.y, 0.1279069767, accuracy: 1e-9)
     }
 
+    /// 默认铺满（不改 pan）在 16:10 屏上居中裁 16:9，左右各切 5%。
+    func testDefaultAutoFillIsCentered() {
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: CGSize(width: 3840, height: 2160),
+            screenSize: CGSize(width: 1440, height: 900),
+            settings: .defaultSettings)
+        assertRect(layout.viewportRect, 0, 0, 1, 1)
+        XCTAssertEqual(layout.wallpaperCropRect.x, 0.05, accuracy: 1e-6)
+        XCTAssertEqual(layout.wallpaperCropRect.y, 0.0, accuracy: 1e-6)
+        XCTAssertEqual(layout.wallpaperCropRect.w, 0.9, accuracy: 1e-6)
+        XCTAssertEqual(layout.wallpaperCropRect.h, 1.0, accuracy: 1e-6)
+    }
+
     func testAutoFillUsesRealWallpaperOverflowOnDifferentScreenAspect() {
         var s = DisplayCropSettings.defaultSettings
         s.aspectPreset = .autoFill

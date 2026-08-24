@@ -2940,6 +2940,7 @@ struct MediaDetailSheet: View {
                 self.navigateToNextMedia()
                 return nil
             case 53: // ESC：优先关闭当前弹窗，再关闭预览，最后返回详情栈
+                if CropAdjustOverlayController.shared.isAdjusting { return event }
                 if self.showSceneBakeRendererDialog {
                     self.dismissSceneBakeRendererDialog()
                 } else if self.showAuthorSheet {

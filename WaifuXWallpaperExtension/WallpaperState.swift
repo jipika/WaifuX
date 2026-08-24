@@ -52,6 +52,8 @@ final class WallpaperState: Sendable {
         var ioSurfaceRenderers: [UInt32: IOSurfaceFrameRenderer] = [:]
         /// 待处理的视频切换：当 switch_video 到达但无活跃上下文时缓存，上下文创建后自动应用
         var pendingVideoSwitches: [UInt32: URL] = [:]
+        /// 待处理的静态图切换。与视频切换同样需要跨越 context 重建窗口。
+        var pendingImageSwitches: [UInt32: URL] = [:]
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: State())
@@ -75,7 +77,7 @@ final class WallpaperState: Sendable {
     }
 
     /// 清除库级别的缓存 URL，使下次查找重新评估当前库。
-    /// 不清理 pendingVideoSwitches 和 per-display 热切换缓存（cachedVideoURLs/cachedImageURLs），
+    /// 不清理 pendingVideoSwitches/pendingImageSwitches 和 per-display 热切换缓存（cachedVideoURLs/cachedImageURLs），
     /// 这些是 socket 命令级别的状态，不应因 prefs 变化通知而丢失。
     func clearCaches() {
         lock.withLock { state in
@@ -293,7 +295,10 @@ final class WallpaperState: Sendable {
 
     /// 缓存待处理的视频切换请求（当 switch_video 到达但无活跃上下文时调用）
     func setPendingVideo(_ url: URL, for displayID: UInt32) {
-        lock.withLock { $0.pendingVideoSwitches[displayID] = url }
+        lock.withLock { state in
+            state.pendingVideoSwitches[displayID] = url
+            state.pendingImageSwitches.removeValue(forKey: displayID)
+        }
     }
 
     /// 取出并清除待处理的视频切换（上下文创建后调用）
@@ -307,6 +312,21 @@ final class WallpaperState: Sendable {
             guard let first = state.pendingVideoSwitches.first else { return nil }
             return state.pendingVideoSwitches.removeValue(forKey: first.key).map { (first.key, $0) }
         }
+    }
+
+    // MARK: - Pending Image Switches
+
+    /// 缓存待处理的静态图切换请求（当 switch_image 到达但无活跃上下文时调用）。
+    func setPendingImage(_ url: URL, for displayID: UInt32) {
+        lock.withLock { state in
+            state.pendingImageSwitches[displayID] = url
+            state.pendingVideoSwitches.removeValue(forKey: displayID)
+        }
+    }
+
+    /// 取出并清除待处理的静态图切换（上下文创建后调用）。
+    func takePendingImage(for displayID: UInt32) -> URL? {
+        lock.withLock { $0.pendingImageSwitches.removeValue(forKey: displayID) }
     }
 
     // MARK: - IOSurfaceFrameRenderer Registry
@@ -402,6 +422,8 @@ final class WallpaperState: Sendable {
                 state.cachedVideoURLs.removeValue(forKey: displayID)
             }
             state.cachedImageURLs.removeValue(forKey: displayID)
+            state.pendingVideoSwitches.removeValue(forKey: displayID)
+            state.pendingImageSwitches.removeValue(forKey: displayID)
         }
     }
 
@@ -419,6 +441,8 @@ final class WallpaperState: Sendable {
                 state.cachedImageURLs.removeValue(forKey: displayID)
             }
             state.cachedVideoURLs.removeValue(forKey: displayID)
+            state.pendingImageSwitches.removeValue(forKey: displayID)
+            state.pendingVideoSwitches.removeValue(forKey: displayID)
         }
     }
 

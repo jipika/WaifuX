@@ -14,6 +14,9 @@ final class DisplayCropSettingsStoreTests: XCTestCase {
         let s = store.settings(forScreenID: "nonexistent")
         XCTAssertEqual(s.aspectPreset, .autoFill)
         XCTAssertTrue(s.isEnabled)
+        XCTAssertEqual(s.pan.x, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(s.pan.y, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(s.zoom, 1.0, accuracy: 1e-9)
     }
 
     func testUpdatePersistsForScreenID() {
@@ -29,6 +32,8 @@ final class DisplayCropSettingsStoreTests: XCTestCase {
         let s = store.settings(forScreenID: "screen-B")
         XCTAssertEqual(s.aspectPreset, .autoFill)
         XCTAssertEqual(s.zoom, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(s.pan.x, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(s.pan.y, 0.5, accuracy: 1e-9)
     }
 
     func testClearRemovesEntry() {

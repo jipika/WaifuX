@@ -9,13 +9,30 @@ final class CropAdjustOverlayController {
 
     private var windowsByScreenID: [String: NSWindow] = [:]
     private weak var statusItem: NSStatusItem?
+    private var escapeMonitor: Any?
+    /// overlay 已关但同一次 ESC 还在其它 local monitor 里时，仍拦截页面返回。
+    private var eatingEscape = false
 
     private init() {}
 
     // MARK: - Public
 
+    var isAdjusting: Bool { !windowsByScreenID.isEmpty || eatingEscape }
+
     func isActive(for screen: NSScreen) -> Bool {
         windowsByScreenID[screen.wallpaperScreenIdentifier] != nil
+    }
+
+    /// ESC 只关裁切 overlay，不把事件交给详情页/文件夹返回。
+    func dismissIfActive() {
+        guard isAdjusting else { return }
+        eatingEscape = true
+        for screen in NSScreen.screens where windowsByScreenID[screen.wallpaperScreenIdentifier] != nil {
+            exit(for: screen)
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.eatingEscape = false
+        }
     }
 
     func toggle(for screen: NSScreen, statusBarItemRef: NSStatusItem?) {
@@ -55,6 +72,7 @@ final class CropAdjustOverlayController {
         window.contentView = view
         window.makeKeyAndOrderFront(nil)
         windowsByScreenID[screenID] = window
+        installEscapeMonitorIfNeeded()
     }
 
     private func exit(for screen: NSScreen) {
@@ -64,6 +82,24 @@ final class CropAdjustOverlayController {
         if let window = windowsByScreenID.removeValue(forKey: screenID) {
             window.orderOut(nil)
         }
+        removeEscapeMonitorIfNeeded()
+    }
+
+    private func installEscapeMonitorIfNeeded() {
+        guard escapeMonitor == nil else { return }
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53, CropAdjustOverlayController.shared.isAdjusting else {
+                return event
+            }
+            CropAdjustOverlayController.shared.dismissIfActive()
+            return nil
+        }
+    }
+
+    private func removeEscapeMonitorIfNeeded() {
+        guard windowsByScreenID.isEmpty, let escapeMonitor else { return }
+        NSEvent.removeMonitor(escapeMonitor)
+        self.escapeMonitor = nil
     }
 
     /// 按当前屏壁纸类型取真实尺寸，供 overlay 预览 crop 计算。
@@ -96,8 +132,7 @@ private final class CropAdjustOverlayWindow: NSWindow {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
-            CropAdjustOverlayController.shared.toggle(
-                for: self.screen ?? NSScreen.main!, statusBarItemRef: nil)
+            CropAdjustOverlayController.shared.dismissIfActive()
             return
         }
         super.keyDown(with: event)

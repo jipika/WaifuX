@@ -522,16 +522,14 @@ final class LockScreenWallpaperService: ObservableObject {
             try imageData.write(to: destURL, options: .atomic)
             writeThumbnail(imageData: imageData, thumbnailID: sourceID)
             WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: sourceID, videoURL: destURL)
-            WallpaperExtensionSocketServer.shared.enqueueCommand(
-                IPCCommand(action: "switch_image", videoID: sourceID, displayID: displayID)
-            )
             lastPath = destURL.path
             deployedImagePaths[displayID] = destURL.path
             print("[LockScreenWallpaper] 🖼️ 已部署静态图 display=\(displayID) source=\(destURL.lastPathComponent)")
         }
 
         if let lastPath {
-            // 合并写入 prefs：保留现有 video paths，更新本批 displayIDs 的 image paths
+            // 先持久化再发送热切换命令。若扩展此时刚好重启或 context 尚未创建，
+            // 后续 acquire 也会从 prefs 读取到这张静态图，而不会回退到旧视频。
             let prefsURL = container.appendingPathComponent(prefsFileName)
             var prefs = (try? JSONDecoder().decode(PrefsFile.self, from: Data(contentsOf: prefsURL))) ?? PrefsFile()
             prefs.userPaused = false
@@ -560,7 +558,15 @@ final class LockScreenWallpaperService: ObservableObject {
             staticImageSourceChangeSignal &+= 1
         }
 
-        syncInstanceCatalogToSocketServer()
+        // 实例目录刷新和命令消费之间不要提前广播 prefsChanged，确保扩展轮询命令时
+        // Socket 路径注册与 per-display prefs 都已经完整可见。
+        syncInstanceCatalogToSocketServer(notify: false)
+        for displayID in deployedImagePaths.keys.sorted() {
+            let sourceID = Self.displayInstanceID(displayID)
+            WallpaperExtensionSocketServer.shared.enqueueCommand(
+                IPCCommand(action: "switch_image", videoID: sourceID, displayID: displayID)
+            )
+        }
         notifyExtensionPrefsChanged()
     }
 

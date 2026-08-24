@@ -252,6 +252,7 @@ struct MangaDetailSheet: View {
                 viewModel.nextPage()
                 return nil
             case 53:  // esc
+                if CropAdjustOverlayController.shared.isAdjusting { return event }
                 dismiss()
                 return nil
             default:

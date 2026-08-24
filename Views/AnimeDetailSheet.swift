@@ -201,6 +201,7 @@ struct AnimeDetailSheet: View {
                 }
                 return nil
             case 53: // ESC：返回
+                if CropAdjustOverlayController.shared.isAdjusting { return event }
                 self.isPresented = false
                 return nil
             default:

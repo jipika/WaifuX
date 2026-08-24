@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// 场景配置覆盖键定义（对应 wallpaper-wgpu 的 __-prefixed 系统键）
 public enum SceneConfigOverrideKey: String, CaseIterable, Sendable {
@@ -262,6 +263,31 @@ enum SceneConfigOverrideService {
             }
         }
         return result
+    }
+
+    /// Scene 画布像素（`orthogonalprojection`，含用户覆盖的宽高）。
+    /// 给铺满裁切在 wgpu 写出 canvas-size 之前用，才能按真实比例居中 cover。
+    static func sceneOrthogonalSize(for wallpaperPath: String) -> CGSize? {
+        let overrides = loadOverrides(for: wallpaperPath)
+        var width: Double?
+        var height: Double?
+        if case .number(let value) = overrides[.orthoWidth] { width = value }
+        if case .number(let value) = overrides[.orthoHeight] { height = value }
+        if width == nil || height == nil, let general = loadSceneGeneralDict(for: wallpaperPath),
+           let ortho = general["orthogonalprojection"] as? [String: Any] {
+            if width == nil { width = numericValue(ortho["width"]) }
+            if height == nil { height = numericValue(ortho["height"]) }
+        }
+        guard let width, let height, width > 1, height > 1 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    private static func numericValue(_ value: Any?) -> Double? {
+        if let number = value as? Double { return number }
+        if let number = value as? Int { return Double(number) }
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let text = value as? String { return Double(text) }
+        return nil
     }
 
     /// 定位壁纸目录下的 scene.pkg 并解析其中 scene.json 的 `general` 段。

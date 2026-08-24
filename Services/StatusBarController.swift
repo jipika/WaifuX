@@ -787,6 +787,10 @@ final class StatusBarController: NSObject {
         guard let payload = sender.representedObject as? CropAspectPayload else { return }
         DisplayCropSettingsStore.shared.update(for: payload.screen) { s in
             s.aspectPreset = payload.preset
+            if payload.preset == .autoFill {
+                s.pan = CGPoint(x: 0.5, y: 0.5)
+                s.zoom = 1.0
+            }
         }
         refreshMenuState()
     }

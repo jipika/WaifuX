@@ -588,6 +588,23 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
     ) async {
+        // 静态图和视频热切换都可能恰好落在 WallpaperAgent 重建 context 的窗口。
+        // 静态图必须优先于待处理视频消费，避免旧视频命令在下一次 acquire 时反向覆盖新图片。
+        if let pendingImageURL = WallpaperState.shared.takePendingImage(for: displayID) {
+            extLog("  [Acquire] 📦 应用待处理静态图 display=\(displayID) image=\(pendingImageURL.lastPathComponent)")
+            renderStaticImage(
+                imageURL: pendingImageURL,
+                displayID: displayID,
+                instanceID: instanceID,
+                rootLayer: rootLayer,
+                caContext: caContext,
+                contextId: contextId,
+                wallpaperIDString: wallpaperIDString,
+                doReply: doReply
+            )
+            return
+        }
+
         // 优先使用待处理的视频切换（扩展重启期间 switch_video 到达但无上下文时缓存的）
         if let pendingURL = WallpaperState.shared.takePendingVideo(for: displayID) {
             extLog("  [Acquire] 📦 应用待处理视频 display=\(displayID) video=\(pendingURL.lastPathComponent)")
@@ -864,15 +881,16 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     }
 
     static func switchActiveContextToStaticImage(displayID: UInt32, sourceID: String, imageURL: URL) {
-        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID)")
+        let allContexts = WallpaperState.shared.allActiveContexts(for: displayID)
+        guard !allContexts.isEmpty else {
+            WallpaperState.shared.setPendingImage(imageURL, for: displayID)
+            extLog("[Commands] ⏳ 无活跃 context，已缓存待处理静态图 display=\(displayID) source=\(sourceID)")
             return
         }
 
-        let allContexts = WallpaperState.shared.allActiveContexts(for: displayID)
-        guard !allContexts.isEmpty else {
-            extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID): 无活跃 context")
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID)")
             return
         }
 
