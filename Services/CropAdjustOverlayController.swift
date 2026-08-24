@@ -50,12 +50,15 @@ final class CropAdjustOverlayController {
         let screenID = screen.wallpaperScreenIdentifier
         guard windowsByScreenID[screenID] == nil else { return }
 
+        // contentRect + screen: 会把 contentRect 当成相对该屏原点；传入全局 frame
+        // 会把外接屏（如 origin.x=-1920）叠成 -3840，overlay 跑到屏外。创建后再 setFrame 纠正。
         let window = CropAdjustOverlayWindow(
-            contentRect: screen.frame,
+            contentRect: NSRect(origin: .zero, size: screen.frame.size),
             styleMask: .borderless,
             backing: .buffered,
             defer: false,
             screen: screen)
+        window.setFrame(screen.frame, display: true)
         window.level = .init(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
         window.isOpaque = false
         window.backgroundColor = .clear
