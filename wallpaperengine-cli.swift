@@ -2903,25 +2903,38 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
     }
 
+    private func applyUserPropertiesJSBody(b64EncodedJSON: String) -> String {
+        "var props=JSON.parse(atob(\"\(b64EncodedJSON)\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}"
+    }
+
+    private func makeApplyUserPropertiesScript(json: String) -> String? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        let encoded = data.base64EncodedString()
+        return "(function(){try{\(applyUserPropertiesJSBody(b64EncodedJSON: encoded))}catch(e){}})();"
+    }
+
     private func runWebWallpaperBootstrap(screen: Int, completion: (() -> Void)? = nil) {
         guard let state = screenStates[screen], let webView = state.webView else { completion?(); return }
         var propsBlock = ""
-        var b64Props = ""
-        if let json = state.injectedPropertiesJSON, let data = json.data(using: .utf8) {
-            b64Props = data.base64EncodedString()
-            propsBlock = "try{var props=JSON.parse(atob(\"" + b64Props + "\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}}catch(e){}"
+        if let json = state.injectedPropertiesJSON,
+           let data = json.data(using: .utf8) {
+            let encoded = data.base64EncodedString()
+            propsBlock = "try{\(applyUserPropertiesJSBody(b64EncodedJSON: encoded))}catch(e){}"
         }
         // 先重置样式，再执行 propsBlock（applyUserProperties 可能会设置 background-image 等样式）
         // 如果顺序反过来，bootstrap 的 background-image:none 会清掉 applyUserProperties 设置的背景图
         let source = "(function(){try{document.documentElement.style.cssText='width:100%;height:100%;margin:0;padding:0;background:transparent;overflow:hidden;';document.body.style.setProperty('width','100%');document.body.style.setProperty('height','100%');window.dispatchEvent(new Event('resize'));}catch(e2){}" + propsBlock + "return true;})();"
         webView.evaluateJavaScript(source) { [weak self] _, _ in
             // 延迟重新应用属性：部分壁纸（如 Spine 动画壁纸）异步初始化可能覆盖首次 applyUserProperties 设置的样式
-            // 500ms 后再次调用 applyUserProperties 确保 background-image 等属性在异步初始化完成后仍然生效
-            if !b64Props.isEmpty, let webView = self?.screenStates[screen]?.webView {
-                let reapply = "(function(){try{var props=JSON.parse(atob(\"" + b64Props + "\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}}catch(e){}})();"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    webView.evaluateJavaScript(reapply) { _, _ in }
-                }
+            // 500ms 后再次调用 applyUserProperties 确保 background-image 等属性在异步初始化完成后仍然生效。
+            // 必须读取当前 injectedPropertiesJSON：set 完成后 apply-properties 可能已写入 design.json 覆盖，
+            // 若仍用 bootstrap 时捕获的 project.json 默认值会把 fit_mode 等用户设置冲掉。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self,
+                      let webView = self.screenStates[screen]?.webView,
+                      let json = self.screenStates[screen]?.injectedPropertiesJSON,
+                      let reapply = self.makeApplyUserPropertiesScript(json: json) else { return }
+                webView.evaluateJavaScript(reapply) { _, _ in }
             }
             DispatchQueue.main.async { completion?() }
         }
