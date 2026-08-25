@@ -71,6 +71,89 @@ private final class WallpaperVolumeSliderView: NSView {
     }
 }
 
+// MARK: - 菜单栏播放倍速滑块（0.5x…2.0x）
+private final class WallpaperPlaybackRateSliderView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let valueLabel = NSTextField(labelWithString: "1x")
+    private let slider = NSSlider()
+
+    var onRateChanged: ((Double) -> Void)?
+
+    private let minRate = VideoWallpaperManager.minPlaybackRate
+    private let maxRate = VideoWallpaperManager.maxPlaybackRate
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 40))
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        titleLabel.stringValue = t("statusbar.playbackSpeed")
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        slider.minValue = minRate
+        slider.maxValue = maxRate
+        slider.doubleValue = 1.0
+        slider.numberOfTickMarks = 7
+        slider.allowsTickMarkValuesOnly = false
+        slider.isContinuous = true
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(titleLabel)
+        addSubview(valueLabel)
+        addSubview(slider)
+
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 8),
+            valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 36),
+
+            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            slider.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let rate = sender.doubleValue
+        valueLabel.stringValue = Self.formatRate(rate)
+        onRateChanged?(rate)
+    }
+
+    func setRate(_ rate: Double) {
+        let clamped = min(maxRate, max(minRate, rate))
+        slider.doubleValue = clamped
+        valueLabel.stringValue = Self.formatRate(clamped)
+    }
+
+    func refreshLocalizedTitle() {
+        titleLabel.stringValue = t("statusbar.playbackSpeed")
+    }
+
+    private static func formatRate(_ rate: Double) -> String {
+        if abs(rate - rate.rounded()) < 0.05 {
+            return String(format: "%.0fx", rate.rounded())
+        }
+        return String(format: "%.2gx", rate)
+    }
+}
+
 // MARK: - 单屏幕音量控制（名称 + 滑块）
 private final class ScreenVolumeControlView: NSView {
     private let nameLabel = NSTextField()
@@ -169,6 +252,8 @@ final class StatusBarController: NSObject {
     private lazy var openSettingsItem = NSMenuItem(title: t("settings"), action: #selector(openAppSettingsPanel), keyEquivalent: "")
     private lazy var releaseMemoryItem = NSMenuItem(title: t("statusbar.releaseMemory"), action: #selector(releaseForegroundMemory), keyEquivalent: "")
     private lazy var muteItem = NSMenuItem(title: t("statusbar.muteWallpaper"), action: #selector(toggleMute), keyEquivalent: "")
+    private lazy var playbackSpeedItem = NSMenuItem()
+    private lazy var playbackRateSliderView = WallpaperPlaybackRateSliderView()
     private lazy var desktopIconsItem = NSMenuItem(title: t("statusbar.hideDesktopIcons"), action: #selector(toggleDesktopIcons), keyEquivalent: "")
     private lazy var designWallpaperItem = NSMenuItem(title: t("design.designWallpaper"), action: #selector(openWebWallpaperDesignPanel), keyEquivalent: "")
     private lazy var sceneConfigItem = NSMenuItem(title: t("statusbar.sceneAdvancedSettings"), action: #selector(openSceneConfigPanel), keyEquivalent: "")
@@ -280,6 +365,11 @@ final class StatusBarController: NSObject {
         menu.addItem(designWallpaperItem)
         menu.addItem(sceneConfigItem)
         menu.addItem(muteItem)
+        playbackSpeedItem.view = playbackRateSliderView
+        playbackRateSliderView.onRateChanged = { [weak self] rate in
+            self?.videoWallpaperManager.setPlaybackRate(rate)
+        }
+        menu.addItem(playbackSpeedItem)
         menu.addItem(.separator())
         menu.addItem(checkUpdateItem)
         menu.addItem(quitItem)
@@ -335,10 +425,15 @@ final class StatusBarController: NSObject {
 
     private func bindWallpaperState() {
         videoWallpaperManager.$currentVideoURL
-            .combineLatest(videoWallpaperManager.$isPaused, videoWallpaperManager.$isMuted, videoWallpaperManager.$volume)
+            .combineLatest(
+                videoWallpaperManager.$isPaused,
+                videoWallpaperManager.$isMuted,
+                videoWallpaperManager.$volume
+            )
+            .combineLatest(videoWallpaperManager.$playbackRate)
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _, _, _ in
+            .sink { [weak self] _, _ in
                 self?.refreshMenuState()
             }
             .store(in: &cancellables)
@@ -736,6 +831,15 @@ final class StatusBarController: NSObject {
         // 全局静音开关
         muteItem.isEnabled = hasNativeWallpaper || hasExternalWallpaper
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+
+        // 播放倍速滑块：仅视频壁纸显示；Scene / Web / 静态不出现
+        let hasVideoWallpaper = videoWallpaperManager.isVideoWallpaperActive
+        playbackSpeedItem.isHidden = !hasVideoWallpaper
+        playbackSpeedItem.isEnabled = hasVideoWallpaper
+        if hasVideoWallpaper {
+            playbackRateSliderView.setRate(videoWallpaperManager.playbackRate)
+            playbackRateSliderView.refreshLocalizedTitle()
+        }
     }
 
     private func refreshLocalizedTitles() {
@@ -745,6 +849,7 @@ final class StatusBarController: NSObject {
         releaseMemoryItem.title = t("statusbar.releaseMemory")
         desktopIconsItem.title = t("statusbar.hideDesktopIcons")
         muteItem.title = videoWallpaperManager.isMuted ? t("statusbar.unmuteWallpaper") : t("statusbar.muteWallpaper")
+        playbackRateSliderView.refreshLocalizedTitle()
         designWallpaperItem.title = t("design.designWallpaper")
         sceneConfigItem.title = t("statusbar.sceneAdvancedSettings")
         checkUpdateItem.title = t("checkForUpdates")
