@@ -529,7 +529,8 @@ final class VideoRendererProcessController {
             transitionDuration: Double,
             globalPaused: Bool,
             screenPaused: Bool,
-            globalDisplaySyncEnabled: Bool
+            globalDisplaySyncEnabled: Bool,
+            rate: Double
         )
         case pause(screen: Int?)
         case resume(screen: Int?)
@@ -537,6 +538,7 @@ final class VideoRendererProcessController {
         case seek(screen: Int, time: Double)
         case setVolume(screen: Int?, volume: Double)
         case setMuted(Bool)
+        case setRate(screen: Int?, rate: Double)
         case setCrop(screen: Int, crop: CGRect?, viewport: CGRect?, letterboxColor: String?, revision: UInt64?)
         case updatePoster(screen: Int, path: String?)
         case showPoster(screen: Int, path: String)
@@ -884,6 +886,7 @@ final class VideoRendererProcessController {
         var screenFrameH: Double?
         var muted: Bool?
         var volume: Double?
+        var rate: Double?
         var audioEffectiveVolume: Double?
         var audioOutputDeviceStrategy: String?
         var audioOutputDeviceUniqueID: String?
@@ -930,6 +933,7 @@ final class VideoRendererProcessController {
             screenFrameH: nil,
             muted: nil,
             volume: nil,
+            rate: nil,
             audioEffectiveVolume: nil,
             audioOutputDeviceStrategy: nil,
             audioOutputDeviceUniqueID: nil,
@@ -977,7 +981,8 @@ final class VideoRendererProcessController {
             let transitionDuration,
             let globalPaused,
             let screenPaused,
-            let globalDisplaySyncEnabled
+            let globalDisplaySyncEnabled,
+            let rate
         ):
             msg.command = "set"
             msg.screen = screen
@@ -991,6 +996,7 @@ final class VideoRendererProcessController {
             msg.screenFrameH = frame.size.height
             msg.muted = muted
             msg.volume = volume
+            msg.rate = rate
             msg.enableLooping = looping
             msg.usesSharedDecoder = shared
             msg.forceNewPipeline = forceNewPipeline
@@ -1054,6 +1060,12 @@ final class VideoRendererProcessController {
                 muted: muted,
                 volume: lastAudioVolume
             )
+
+        case .setRate(let screen, let rate):
+            msg.command = "setRate"
+            msg.screen = screen
+            msg.screenID = screen.flatMap(stableScreenID(for:))
+            msg.rate = rate
 
         case .setCrop(let screen, let crop, let viewport, let letterboxColor, let revision):
             msg.command = "setCrop"

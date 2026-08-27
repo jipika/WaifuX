@@ -2749,13 +2749,23 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
     }
 
+    private func applyUserPropertiesJSBody(b64EncodedJSON: String) -> String {
+        "var props=JSON.parse(atob(\"\(b64EncodedJSON)\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}"
+    }
+
+    private func makeApplyUserPropertiesScript(json: String) -> String? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        let encoded = data.base64EncodedString()
+        return "(function(){try{\(applyUserPropertiesJSBody(b64EncodedJSON: encoded))}catch(e){}})();"
+    }
+
     private func runWebWallpaperBootstrap(screen: Int, completion: (() -> Void)? = nil) {
         guard let state = screenStates[screen], let webView = state.webView else { completion?(); return }
         var propsBlock = ""
-        var b64Props = ""
-        if let json = state.injectedPropertiesJSON, let data = json.data(using: .utf8) {
-            b64Props = data.base64EncodedString()
-            propsBlock = "try{var props=JSON.parse(atob(\"" + b64Props + "\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}}catch(e){}"
+        if let json = state.injectedPropertiesJSON,
+           let data = json.data(using: .utf8) {
+            let encoded = data.base64EncodedString()
+            propsBlock = "try{\(applyUserPropertiesJSBody(b64EncodedJSON: encoded))}catch(e){}"
         }
         // 不重写 html/body 的尺寸、边距或 overflow，避免改变 WebGL 壁纸自身的布局基准。
         // crop 只通过 document.documentElement 的 transform 作用于整页。
@@ -2888,13 +2898,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         })();
         """
         webView.evaluateJavaScript(source) { [weak self] _, _ in
-            // 延迟重新应用属性：部分壁纸（如 Spine 动画壁纸）异步初始化可能覆盖首次 applyUserProperties 设置的样式
-            // 500ms 后再次调用 applyUserProperties 确保 background-image 等属性在异步初始化完成后仍然生效
-            if !b64Props.isEmpty, let webView = self?.screenStates[screen]?.webView {
-                let reapply = "(function(){try{var props=JSON.parse(atob(\"" + b64Props + "\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}}catch(e){}})();"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    webView.evaluateJavaScript(reapply) { _, _ in }
+            // Re-read current properties after async wallpaper initialization:
+            // a design.json update may have arrived after the initial bootstrap.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self,
+                      let webView = self.screenStates[screen]?.webView,
+                      let json = self.screenStates[screen]?.injectedPropertiesJSON,
+                      let reapply = self.makeApplyUserPropertiesScript(json: json) else {
+                    return
                 }
+                webView.evaluateJavaScript(reapply) { _, _ in }
             }
             DispatchQueue.main.async { completion?() }
         }

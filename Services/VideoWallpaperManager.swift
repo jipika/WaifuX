@@ -190,6 +190,9 @@ final class VideoWallpaperManager: ObservableObject {
     /// 否则长期遮挡后的 persist/restore 会把自动暂停当成用户暂停，再也无法自动恢复。
     private var userRequestedPause = false
     @Published private(set) var volume: Double = 1.0
+    /// 最近一次进入菜单的主视频速度。实际保存和应用均按视频路径进行。
+    @Published private(set) var playbackRate: Double = 1.0
+    private var playbackRateByPath: [String: Double] = [:]
     /// 壁纸变更计数器（每次 applyVideoWallpaper 成功切换后自增）。
     /// 外部订阅此属性可感知任意壁纸切换事件，不受 `currentVideoURL` 值是否变化影响。
     @Published private(set) var wallpaperChangeCount: UInt64 = 0
@@ -430,6 +433,9 @@ final class VideoWallpaperManager: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let stateKey = "video_wallpaper_state_v1"
+    private let playbackRateByPathKey = "video_wallpaper_playback_rate_by_path_v1"
+    static let minPlaybackRate: Double = 0.5
+    static let maxPlaybackRate: Double = 2.0
     private let originalWallpaperKey = "video_wallpaper_original_desktop_v2"  // 旧版原始壁纸快照 key，仅用于清理遗留数据
     private let delayedCleanupRetention: TimeInterval = 0.5
     private let localVideoForwardBufferDuration: TimeInterval = 5.0
@@ -538,7 +544,7 @@ final class VideoWallpaperManager: ObservableObject {
                         container.attachPlayer(player)
                     }
                     if !isPaused, player.rate == 0 {
-                        player.play()
+                        playWallpaperPlayer(player, screenID: entry.screenID)
                     }
                     container.playerLayer.setNeedsDisplay()
                     container.needsDisplay = true
@@ -571,7 +577,7 @@ final class VideoWallpaperManager: ObservableObject {
                 if let entry = self.existingVideoWindowEntry(for: screen) {
                     Self.revealDesktopWallpaperWindow(entry.window)
                     if let player = self.players[entry.screenID], !self.isPaused, player.rate == 0 {
-                        player.play()
+                        self.playWallpaperPlayer(player, screenID: entry.screenID)
                     }
                 }
             }
@@ -789,8 +795,12 @@ final class VideoWallpaperManager: ObservableObject {
     private func syncCurrentVideoURL() {
         if videoURLByScreen.isEmpty && videoURLByScreenFingerprint.isEmpty {
             currentVideoURL = nil
+            playbackRate = 1.0
         } else {
             currentVideoURL = videoURLByScreen.values.first ?? videoURLByScreenFingerprint.values.first
+            if let currentVideoURL {
+                playbackRate = storedPlaybackRate(for: currentVideoURL)
+            }
         }
     }
 
@@ -823,6 +833,7 @@ final class VideoWallpaperManager: ObservableObject {
         if UserDefaults.standard.object(forKey: "wallpaper_is_muted") != nil {
             isMuted = UserDefaults.standard.bool(forKey: "wallpaper_is_muted")
         }
+        loadPlaybackRates()
         externalRenderer.eventHandler = { [weak self] event in
             self?.handleExternalRendererEvent(event)
         }
@@ -997,7 +1008,8 @@ final class VideoWallpaperManager: ObservableObject {
             transitionDuration: 0,
             globalPaused: isPaused,
             screenPaused: externalPausedScreenIDs.contains(screenID),
-            globalDisplaySyncEnabled: WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled
+            globalDisplaySyncEnabled: WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled,
+            rate: playbackRate(for: videoURL)
         )
         let response = await externalRenderer.sendCommand(
             cmd,
@@ -1831,6 +1843,7 @@ final class VideoWallpaperManager: ObservableObject {
             purgeOrphanedVideoPlayers(reason: coalesced ? "reuseExistingCoalesced" : "reuseExisting")
             synchronizeExistingWindowFramesToCurrentScreens()
             currentVideoURL = localFileURL
+            playbackRate = storedPlaybackRate(for: localFileURL)
             setMuted(muted)
             if !isPaused {
                 var seenPlayers = Set<ObjectIdentifier>()
@@ -1838,7 +1851,7 @@ final class VideoWallpaperManager: ObservableObject {
                     let id = ObjectIdentifier(player)
                     guard seenPlayers.insert(id).inserted else { continue }
                     if player.rate == 0 {
-                        player.play()
+                        playWallpaperPlayer(player)
                     }
                 }
             }
@@ -1939,6 +1952,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         currentVideoURL = localFileURL
+        playbackRate = storedPlaybackRate(for: localFileURL)
         // 按屏幕记录 poster，防止多屏自动更换时互相覆盖
         if let targetScreen {
             let screenID = targetScreen.wallpaperScreenIdentifier
@@ -2052,6 +2066,7 @@ final class VideoWallpaperManager: ObservableObject {
     ) {
         self.usesSharedVideoDecoder = usesSharedVideoDecoder
         currentVideoURL = localFileURL
+        playbackRate = storedPlaybackRate(for: localFileURL)
         setMuted(muted)
 
         if !isPaused {
@@ -2377,7 +2392,8 @@ final class VideoWallpaperManager: ObservableObject {
                 transitionDuration: animatedTransition ? automaticSwitchTransitionDuration : 0,
                 globalPaused: keepPaused,
                 screenPaused: keepPaused || keepPausedScreenIDs.contains(screenID),
-                globalDisplaySyncEnabled: WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled
+                globalDisplaySyncEnabled: WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled,
+                rate: playbackRate(for: localFileURL)
             )
             var response = await externalRenderer.sendCommand(
                 cmd,
@@ -2521,6 +2537,7 @@ final class VideoWallpaperManager: ObservableObject {
             videoTargetScreenFingerprints.formUnion(captureScreens.map(\.wallpaperScreenFingerprint))
         }
         currentVideoURL = localFileURL
+        playbackRate = storedPlaybackRate(for: localFileURL)
         currentPosterURL = posterURL
         wallpaperChangeCount &+= 1
         discardOriginalWallpaperSnapshot()
@@ -3111,6 +3128,113 @@ final class VideoWallpaperManager: ObservableObject {
         return volumeByScreen[screenID] ?? volumeByScreenFingerprint[screen.wallpaperScreenFingerprint] ?? volume
     }
 
+    /// 获取指定视频路径已保存的播放速度；未设置时为 1x。
+    func playbackRate(for videoURL: URL) -> Double {
+        storedPlaybackRate(for: videoURL)
+    }
+
+    /// 获取某块显示器当前视频的播放速度。没有视频时保持 1x。
+    func playbackRate(for screen: NSScreen) -> Double {
+        guard let videoURL = assignedVideoURL(for: screen) else { return 1.0 }
+        return storedPlaybackRate(for: videoURL)
+    }
+
+    /// 按视频路径保存并应用播放速度。相同视频在多块屏幕上会一起更新。
+    func setPlaybackRate(_ newRate: Double, for screen: NSScreen) {
+        guard let videoURL = assignedVideoURL(for: screen) else { return }
+        setPlaybackRate(newRate, for: videoURL)
+    }
+
+    /// 兼容旧的单屏调用：按当前主视频路径设置播放速度。
+    func setPlaybackRate(_ newRate: Double) {
+        guard let currentVideoURL else { return }
+        setPlaybackRate(newRate, for: currentVideoURL)
+    }
+
+    private func setPlaybackRate(_ newRate: Double, for videoURL: URL) {
+        let rate = Self.clampPlaybackRate(newRate)
+        let path = Self.playbackRateStorageKey(for: videoURL)
+        playbackRateByPath[path] = rate
+        playbackRate = rate
+        persistPlaybackRates()
+
+        if externalRenderingActive {
+            for screen in externalTargetScreens() where
+                assignedVideoURL(for: screen).map(Self.playbackRateStorageKey(for:)) == path {
+                guard let screenIndex = externalScreenIndex(for: screen) else { continue }
+                externalRenderer.sendCommandFireAndForget(
+                    .setRate(screen: screenIndex, rate: rate)
+                )
+            }
+            return
+        }
+
+        guard !isPaused else { return }
+        var seenPlayers = Set<ObjectIdentifier>()
+        for (screenID, player) in players {
+            guard playbackRateStorageKey(forScreenID: screenID) == path,
+                  player.rate != 0,
+                  seenPlayers.insert(ObjectIdentifier(player)).inserted else {
+                continue
+            }
+            playWallpaperPlayer(player, screenID: screenID)
+        }
+    }
+
+    private static func clampPlaybackRate(_ rate: Double) -> Double {
+        min(maxPlaybackRate, max(minPlaybackRate, rate))
+    }
+
+    private static func playbackRateStorageKey(for videoURL: URL) -> String {
+        videoURL.standardizedFileURL.path
+    }
+
+    private func playbackRateStorageKey(forScreenID screenID: String) -> String? {
+        if let videoURL = videoURLByScreen[screenID] {
+            return Self.playbackRateStorageKey(for: videoURL)
+        }
+        guard let screen = NSScreen.screens.first(where: {
+            $0.wallpaperScreenIdentifier == screenID
+        }), let videoURL = videoURLByScreenFingerprint[screen.wallpaperScreenFingerprint] else {
+            return nil
+        }
+        return Self.playbackRateStorageKey(for: videoURL)
+    }
+
+    private func storedPlaybackRate(for videoURL: URL) -> Double {
+        let path = Self.playbackRateStorageKey(for: videoURL)
+        return Self.clampPlaybackRate(playbackRateByPath[path] ?? 1.0)
+    }
+
+    private func playbackRate(forScreenID screenID: String) -> Double {
+        guard let path = playbackRateStorageKey(forScreenID: screenID) else { return 1.0 }
+        return Self.clampPlaybackRate(playbackRateByPath[path] ?? 1.0)
+    }
+
+    /// `AVPlayer.play()` always resets the rate to 1x. All resume paths must
+    /// route through this helper so a remembered speed survives pause/rebuild.
+    private func playWallpaperPlayer(_ player: AVQueuePlayer, screenID: String? = nil) {
+        let resolvedScreenID = screenID
+            ?? screenIDsReferencingPlayer(player).sorted().first
+        let rate = resolvedScreenID.map(playbackRate(forScreenID:)) ?? 1.0
+        player.rate = Float(rate)
+    }
+
+    private func loadPlaybackRates() {
+        guard let data = defaults.data(forKey: playbackRateByPathKey),
+              let decoded = try? JSONDecoder().decode([String: Double].self, from: data) else {
+            playbackRateByPath = [:]
+            return
+        }
+        playbackRateByPath = decoded.mapValues(Self.clampPlaybackRate)
+    }
+
+    private func persistPlaybackRates() {
+        let clamped = playbackRateByPath.mapValues(Self.clampPlaybackRate)
+        guard let data = try? JSONEncoder().encode(clamped) else { return }
+        defaults.set(data, forKey: playbackRateByPathKey)
+    }
+
     func pauseWallpaper(
         for targetScreen: NSScreen? = nil,
         persistAsUserRequest: Bool = true
@@ -3242,13 +3366,15 @@ final class VideoWallpaperManager: ObservableObject {
         if let targetScreen = targetScreen {
             // 恢复特定屏幕的壁纸
             let screenID = targetScreen.wallpaperScreenIdentifier
-            players[screenID]?.play()
+            if let player = players[screenID] {
+                playWallpaperPlayer(player, screenID: screenID)
+            }
             hidePosterImage(for: screenID)
         } else {
             // 恢复所有屏幕的壁纸
             isPaused = false
             for (screenID, player) in players {
-                player.play()
+                playWallpaperPlayer(player, screenID: screenID)
                 hidePosterImage(for: screenID)
             }
         }
@@ -3564,7 +3690,7 @@ final class VideoWallpaperManager: ObservableObject {
                 guard let self, self.players[screenID] === player else { return }
                 guard !self.isPaused else { return }
 
-                player.play()
+                self.playWallpaperPlayer(player, screenID: screenID)
                 self.hidePosterImage(for: screenID)
             }
         }
@@ -3598,7 +3724,10 @@ final class VideoWallpaperManager: ObservableObject {
                 guard let player else { return }
                 DispatchQueue.main.async {
                     guard let self, !self.isPaused else { return }
-                    player.play()
+                    self.playWallpaperPlayer(
+                        player,
+                        screenID: group.screenIDs.sorted().first
+                    )
                     for screenID in group.screenIDs where self.players[screenID] === player {
                         self.hidePosterImage(for: screenID)
                     }
@@ -4140,7 +4269,7 @@ final class VideoWallpaperManager: ObservableObject {
         applyCropToScreen(screen)
         applyPlayerAudioPolicy(components.player, muted: isMuted, volume: volumeByScreen[screenID] ?? volume)
         if !isPaused {
-            components.player.play()
+            playWallpaperPlayer(components.player, screenID: screenID)
         }
 
         if isOnEndMode {
@@ -4411,7 +4540,7 @@ final class VideoWallpaperManager: ObservableObject {
                 return
             }
             for (screenID, player) in self.players {
-                player.play()
+                self.playWallpaperPlayer(player, screenID: screenID)
                 self.hidePosterImage(for: screenID)
             }
             // 解锁后会先全量 play；立刻把仍有效的覆盖/前台/全屏暂停重新施加，
@@ -6025,7 +6154,7 @@ final class VideoWallpaperManager: ObservableObject {
                 // 只有非手动暂停时才恢复播放
                 if !self.isPaused {
                     for (screenID, player) in self.players {
-                        player.play()
+                        self.playWallpaperPlayer(player, screenID: screenID)
                         self.hidePosterImage(for: screenID)
                     }
                 }
@@ -6122,7 +6251,7 @@ final class VideoWallpaperManager: ObservableObject {
                 }
                 if !self.isPaused {
                     for (screenID, player) in self.players {
-                        player.play()
+                        self.playWallpaperPlayer(player, screenID: screenID)
                         self.hidePosterImage(for: screenID)
                     }
                 }
@@ -6449,7 +6578,8 @@ final class VideoWallpaperManager: ObservableObject {
                     globalPaused: wasPaused,
                     screenPaused: pausedIDs.contains(screenID),
                     globalDisplaySyncEnabled: WallpaperSchedulerService.shared
-                        .isGlobalDisplaySyncEnabled
+                        .isGlobalDisplaySyncEnabled,
+                    rate: playbackRate(for: sourceURL)
                 )
                 let setCommandTimeout = recoverUnresponsiveRenderer
                     ? Self.externalRendererWakeSetCommandTimeout
@@ -7090,7 +7220,10 @@ final class VideoWallpaperManager: ObservableObject {
                         let screenVolume = self.volumeByScreen[targetScreenID] ?? self.volume
                         self.applyPlayerAudioPolicy(components.player, muted: self.isMuted, volume: screenVolume)
                         if !self.isPaused {
-                            components.player.play()
+                            self.playWallpaperPlayer(
+                                components.player,
+                                screenID: targetScreenID
+                            )
                         }
 
                         containerView.crossfadePreparedPlayer(
@@ -7125,7 +7258,9 @@ final class VideoWallpaperManager: ObservableObject {
                                 if currentItem.status == .failed { return }
                                 if currentItem.status == .readyToPlay {
                                     self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
-                                    player.preroll(atRate: 1.0) { success in
+                                    player.preroll(
+                                        atRate: Float(self.playbackRate(forScreenID: targetScreenID))
+                                    ) { success in
                                         guard success else { return }
                                         Task { @MainActor in
                                             beginAnimatedSwap("replacementPrerolled")
@@ -7181,7 +7316,10 @@ final class VideoWallpaperManager: ObservableObject {
                     let screenVolume = volumeByScreen[targetScreenID] ?? volume
                     applyPlayerAudioPolicy(components.player, muted: isMuted, volume: screenVolume)
                     if !isPaused {
-                        components.player.play()
+                        playWallpaperPlayer(
+                            components.player,
+                            screenID: targetScreenID
+                        )
                     }
                     finalizeReplacement()
                     Self.revealDesktopWallpaperWindow(existingWindow)
@@ -7303,7 +7441,10 @@ final class VideoWallpaperManager: ObservableObject {
             // 再挂剩余 layer，避免“同时创建”整组停在未解码状态。
             let initialSeconds = player.currentTime().seconds
             if !self.isPaused {
-                player.play()
+                self.playWallpaperPlayer(
+                    player,
+                    screenID: firstScreen.wallpaperScreenIdentifier
+                )
             }
 
             // 单屏全局切换：没有 follower，leader ready 即可 commit。
@@ -7389,7 +7530,9 @@ final class VideoWallpaperManager: ObservableObject {
                       self.pendingGlobalTransitionPlayer === player else { return }
                 if let currentItem = player.currentItem, currentItem.status == .readyToPlay {
                     self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: self.volume)
-                    player.preroll(atRate: 1.0) { success in
+                    player.preroll(
+                        atRate: Float(self.playbackRate(for: videoURL))
+                    ) { success in
                         guard success else { return }
                         Task { @MainActor in
                             guard self.globalTransitionGeneration == generation,
@@ -8392,7 +8535,7 @@ final class VideoWallpaperManager: ObservableObject {
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
             if !self.isPaused {
-                player.play()
+                self.playWallpaperPlayer(player, screenID: screenID)
             }
             if self.screenIDsReferencingPlayer(player).count > 1 {
                 self.scheduleSharedFollowerAttachments(for: player)
@@ -8466,9 +8609,11 @@ final class VideoWallpaperManager: ObservableObject {
                         if currentItem.status == .readyToPlay {
                             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: warmupVolume)
                             if !self.isPaused {
-                                player.play()
+                                self.playWallpaperPlayer(player, screenID: screenID)
                             }
-                            player.preroll(atRate: 1.0) { success in
+                            player.preroll(
+                                atRate: Float(self.playbackRate(forScreenID: screenID))
+                            ) { success in
                                 Task { @MainActor in
                                     // preroll 失败也强制 reveal：菜单栏路径上 success=false 很常见，
                                     // 继续等 isReadyForDisplay 会卡到用户点一下才动。
@@ -8537,7 +8682,7 @@ final class VideoWallpaperManager: ObservableObject {
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
             if !self.isPaused {
-                player.play()
+                self.playWallpaperPlayer(player, screenID: screenID)
             }
             // 超时路径一律瞬时显现，避免后台再卡在 animator 上。
             self.presentDesktopWallpaperWindow(window, animated: false)

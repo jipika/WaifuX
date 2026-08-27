@@ -138,6 +138,7 @@ private enum IPCCommand: String, Codable {
     case seek
     case setVolume
     case setMuted
+    case setRate
     case setCrop        // crop pan/zoom（高频，fire-and-forget + revision）
     case updatePoster   // 更新封面路径但不改变当前显示状态
     case showPoster     // 显示封面图
@@ -191,6 +192,7 @@ private struct IPCMessage: Codable {
     var screenFrameH: Double?
     var muted: Bool?
     var volume: Double?
+    var rate: Double?
     var audioEffectiveVolume: Double?
     var audioOutputDeviceStrategy: String?
     var audioOutputDeviceUniqueID: String?
@@ -273,6 +275,8 @@ private final class VideoRendererDaemon {
     private var isMuted = true
     private var volume: Float = 1.0
     private var volumeByScreen: [Int: Float] = [:]
+    private var playbackRate: Float = 1.0
+    private var playbackRateByScreen: [Int: Float] = [:]
     private var isPaused = false
     private var manualPausedScreens = Set<Int>()
     private var systemPlaybackPaused = false
@@ -461,7 +465,7 @@ private final class VideoRendererDaemon {
                 screenStates[screen]?.containerView?.hidePoster()
                 screenStates[screen]?.containerView?.resumeFromFreeze()
                 guard seen.insert(ObjectIdentifier(player)).inserted else { continue }
-                player.play()
+                playWallpaperPlayer(player, rate: playbackRate(forScreen: screen))
                 kickStalledPlayback(screen: screen, player: player)
             }
         }
@@ -800,6 +804,7 @@ private final class VideoRendererDaemon {
             let videoURL = URL(fileURLWithPath: path)
             let muted = msg.muted ?? self.isMuted
             let vol = msg.volume ?? Double(self.volume)
+            let rate = msg.rate.map(Self.clampPlaybackRate) ?? Double(self.playbackRate)
             let looping = msg.enableLooping ?? true
             let shared = msg.usesSharedDecoder ?? false
             let forceNewPipeline = msg.forceNewPipeline ?? false
@@ -821,7 +826,7 @@ private final class VideoRendererDaemon {
                 deviceUID: msg.audioOutputDeviceUniqueID
             )
             return await setWallpaper(screen: screen, videoURL: videoURL, screenFrame: frame,
-                                      muted: muted, volume: vol, enableLooping: looping,
+                                      muted: muted, volume: vol, rate: rate, enableLooping: looping,
                                       usesSharedDecoder: shared,
                                       forceNewPipeline: forceNewPipeline,
                                       hdrMetadataEnabled: hdrMetadataEnabled,
@@ -912,6 +917,37 @@ private final class VideoRendererDaemon {
                 strategy: msg.audioOutputDeviceStrategy,
                 deviceUID: msg.audioOutputDeviceUniqueID
             )
+            return "OK"
+
+        case .setRate:
+            let rate = Float(Self.clampPlaybackRate(msg.rate ?? Double(playbackRate)))
+            if let screen = resolvedScreenIndex(for: msg) {
+                guard let player = players[screen] else {
+                    return "ERROR: screen not found"
+                }
+                playbackRateByScreen[screen] = rate
+                playbackRate = rate
+                if !systemPlaybackPaused,
+                   !isPaused,
+                   !manualPausedScreens.contains(screen) {
+                    playWallpaperPlayer(player, rate: rate)
+                }
+            } else {
+                playbackRate = rate
+                playbackRateByScreen = Dictionary(
+                    uniqueKeysWithValues: players.keys.map { ($0, rate) }
+                )
+                if !systemPlaybackPaused && !isPaused {
+                    var seen = Set<ObjectIdentifier>()
+                    for (screen, player) in players {
+                        guard !manualPausedScreens.contains(screen),
+                              seen.insert(ObjectIdentifier(player)).inserted else {
+                            continue
+                        }
+                        playWallpaperPlayer(player, rate: rate)
+                    }
+                }
+            }
             return "OK"
 
         case .setCrop:
@@ -1010,7 +1046,7 @@ private final class VideoRendererDaemon {
     // MARK: setWallpaper（核心：创建窗口 + Player）
 
     private func setWallpaper(screen: Int, videoURL: URL, screenFrame: CGRect,
-                              muted: Bool, volume: Double, enableLooping: Bool,
+                              muted: Bool, volume: Double, rate: Double, enableLooping: Bool,
                               usesSharedDecoder: Bool, forceNewPipeline: Bool,
                               hdrMetadataEnabled: Bool,
                               deferredPresentation: Bool,
@@ -1023,6 +1059,9 @@ private final class VideoRendererDaemon {
         self.isMuted = muted
         self.volume = Float(volume)
         volumeByScreen[screen] = Float(max(0, min(1, volume)))
+        let clampedRate = Float(Self.clampPlaybackRate(rate))
+        playbackRate = clampedRate
+        playbackRateByScreen[screen] = clampedRate
         self.usesSharedVideoDecoder = usesSharedDecoder
         self.isGlobalDisplaySyncEnabled = globalDisplaySyncEnabled
         self.isPaused = globalPaused
@@ -1351,13 +1390,14 @@ private final class VideoRendererDaemon {
             && !isPaused
             && !manualPausedScreens.contains(screen)
         if canPlay {
-            player.play()
+            playWallpaperPlayer(player, rate: playbackRate(forScreen: screen))
             return
         }
 
         // Only call preroll after status becomes ready. Keep the player paused;
         // a later lock/unlock or auto-pause transition owns the actual play().
-        player.preroll(atRate: 1) { [weak self, weak player] _ in
+        let rate = playbackRate(forScreen: screen)
+        player.preroll(atRate: rate) { [weak self, weak player] _ in
             Task { @MainActor [weak self, weak player] in
                 guard let self, let player, self.players[screen] === player else {
                     return
@@ -1365,10 +1405,25 @@ private final class VideoRendererDaemon {
                 if !self.systemPlaybackPaused,
                    !self.isPaused,
                    !self.manualPausedScreens.contains(screen) {
-                    player.play()
+                    self.playWallpaperPlayer(
+                        player,
+                        rate: self.playbackRate(forScreen: screen)
+                    )
                 }
             }
         }
+    }
+
+    private static func clampPlaybackRate(_ rate: Double) -> Double {
+        min(2.0, max(0.5, rate))
+    }
+
+    private func playbackRate(forScreen screen: Int) -> Float {
+        playbackRateByScreen[screen] ?? playbackRate
+    }
+
+    private func playWallpaperPlayer(_ player: AVPlayer, rate: Float? = nil) {
+        player.rate = min(2.0, max(0.5, rate ?? playbackRate))
     }
 
     // MARK: Player 组件解析（含共享解码逻辑）
@@ -1526,7 +1581,7 @@ private final class VideoRendererDaemon {
                 guard let self else { return }
                 self.prewarmStatusObservers[screen]?.invalidate()
                 self.prewarmStatusObservers.removeValue(forKey: screen)
-                observedPlayer.preroll(atRate: 1) { _ in }
+                observedPlayer.preroll(atRate: self.playbackRate(forScreen: screen)) { _ in }
             }
         }
         return "OK"
@@ -1906,7 +1961,7 @@ private final class VideoRendererDaemon {
         guard !systemPlaybackPaused else { return true }
         screenStates[screen]?.containerView?.hidePoster()
         screenStates[screen]?.containerView?.resumeFromFreeze()
-        player.play()
+        playWallpaperPlayer(player, rate: playbackRate(forScreen: screen))
         kickStalledPlayback(screen: screen, player: player)
         return true
     }
@@ -1924,7 +1979,7 @@ private final class VideoRendererDaemon {
             let id = ObjectIdentifier(player)
             guard !seen.contains(id) else { continue }
             seen.insert(id)
-            player.play()
+            playWallpaperPlayer(player, rate: playbackRate(forScreen: screen))
             kickStalledPlayback(screen: screen, player: player)
         }
         return true
@@ -1940,7 +1995,10 @@ private final class VideoRendererDaemon {
                 guard !self.systemPlaybackPaused,
                       !self.isPaused,
                       !self.manualPausedScreens.contains(screen) else { return }
-                player.play()
+                self.playWallpaperPlayer(
+                    player,
+                    rate: self.playbackRate(forScreen: screen)
+                )
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak player] in
@@ -1950,7 +2008,10 @@ private final class VideoRendererDaemon {
                   !self.manualPausedScreens.contains(screen) else { return }
             let layer = self.screenStates[screen]?.containerView?.playerLayer
             if layer?.isReadyForDisplay != true || player.rate == 0 {
-                player.play()
+                self.playWallpaperPlayer(
+                    player,
+                    rate: self.playbackRate(forScreen: screen)
+                )
                 self.screenStates[screen]?.containerView?.resumeFromFreeze()
             }
         }
@@ -2137,7 +2198,10 @@ private final class VideoRendererDaemon {
         } else {
             pending.oldState.containerView?.hidePoster()
             pending.oldState.containerView?.resumeFromFreeze()
-            pending.oldPlayer.play()
+            playWallpaperPlayer(
+                pending.oldPlayer,
+                rate: playbackRate(forScreen: screen)
+            )
         }
         pending.oldState.window?.alphaValue = 0.99999
         pending.oldState.window?.orderFrontRegardless()
@@ -2474,7 +2538,7 @@ private final class VideoRendererDaemon {
                !isPaused,
                !manualPausedScreens.contains(screen),
                player.rate == 0 {
-                player.play()
+                playWallpaperPlayer(player, rate: playbackRate(forScreen: screen))
             }
             container.playerLayer.setNeedsDisplay()
             container.needsDisplay = true

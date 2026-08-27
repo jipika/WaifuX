@@ -50,12 +50,15 @@ final class CropAdjustOverlayController {
         let screenID = screen.wallpaperScreenIdentifier
         guard windowsByScreenID[screenID] == nil else { return }
 
+        // contentRect + screen treats contentRect as relative to that screen.
+        // Passing a global frame would double the external display origin.
         let window = CropAdjustOverlayWindow(
-            contentRect: screen.frame,
+            contentRect: NSRect(origin: .zero, size: screen.frame.size),
             styleMask: .borderless,
             backing: .buffered,
             defer: false,
             screen: screen)
+        window.setFrame(screen.frame, display: true)
         window.level = .init(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
         window.isOpaque = false
         window.backgroundColor = .clear

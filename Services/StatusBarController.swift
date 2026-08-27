@@ -71,6 +71,85 @@ private final class WallpaperVolumeSliderView: NSView {
     }
 }
 
+// MARK: - 菜单栏播放速度滑块
+private final class WallpaperPlaybackRateSliderView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let valueLabel = NSTextField(labelWithString: "1x")
+    private let slider = NSSlider()
+
+    var onRateChanged: ((Double) -> Void)?
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 40))
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        titleLabel.stringValue = t("statusbar.playbackSpeed")
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        slider.minValue = VideoWallpaperManager.minPlaybackRate
+        slider.maxValue = VideoWallpaperManager.maxPlaybackRate
+        slider.numberOfTickMarks = 7
+        slider.allowsTickMarkValuesOnly = false
+        slider.isContinuous = true
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(titleLabel)
+        addSubview(valueLabel)
+        addSubview(slider)
+
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            valueLabel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: titleLabel.trailingAnchor,
+                constant: 8
+            ),
+            valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 36),
+            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            slider.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let rate = sender.doubleValue
+        valueLabel.stringValue = Self.format(rate)
+        onRateChanged?(rate)
+    }
+
+    func setRate(_ rate: Double) {
+        let clamped = min(
+            VideoWallpaperManager.maxPlaybackRate,
+            max(VideoWallpaperManager.minPlaybackRate, rate)
+        )
+        slider.doubleValue = clamped
+        valueLabel.stringValue = Self.format(clamped)
+    }
+
+    private static func format(_ rate: Double) -> String {
+        if abs(rate - rate.rounded()) < 0.05 {
+            return String(format: "%.0fx", rate.rounded())
+        }
+        return String(format: "%.2gx", rate)
+    }
+}
+
 // MARK: - 单屏幕音量控制（名称 + 滑块）
 private final class ScreenVolumeControlView: NSView {
     private let nameLabel = NSTextField()
@@ -500,6 +579,20 @@ final class StatusBarController: NSObject {
         return item
     }
 
+    private func buildPlaybackRateMenuItem(for screen: NSScreen) -> NSMenuItem? {
+        guard videoWallpaperManager.assignedVideoURL(for: screen) != nil else {
+            return nil
+        }
+        let controlView = WallpaperPlaybackRateSliderView()
+        controlView.setRate(videoWallpaperManager.playbackRate(for: screen))
+        controlView.onRateChanged = { [weak self] rate in
+            self?.videoWallpaperManager.setPlaybackRate(rate, for: screen)
+        }
+        let item = NSMenuItem()
+        item.view = controlView
+        return item
+    }
+
     private func refreshMenuState() {
         refreshLocalizedTitles()
 
@@ -675,6 +768,9 @@ final class StatusBarController: NSObject {
                 } else {
                     screenSubMenu.addItem(buildVolumeMenuItem(for: screen))
                 }
+            }
+            if let playbackRateItem = buildPlaybackRateMenuItem(for: screen) {
+                screenSubMenu.addItem(playbackRateItem)
             }
 
             screenSubMenu.addItem(.separator())
