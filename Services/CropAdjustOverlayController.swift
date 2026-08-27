@@ -109,12 +109,12 @@ final class CropAdjustOverlayController {
         if let size = VideoWallpaperManager.shared.videoSize(for: screen) {
             return size
         }
+        // Web 调节的是整个 screen-sized HTML 页面，不读取内部 video/canvas 尺寸。
+        if WallpaperEngineXBridge.shared.isWebWallpaperOn(screen: screen) {
+            return screen.frame.size
+        }
         // 2) wgpu 动态壁纸：取 Bridge 的 canvas 尺寸文件
         if let size = WallpaperEngineXBridge.shared.canvasSize(for: screen) {
-            return size
-        }
-        // 4) Web 壁纸：优先使用 daemon 从全屏 video/canvas/img 识别出的内容尺寸。
-        if let size = WallpaperEngineXBridge.shared.webContentSize(for: screen) {
             return size
         }
         // 3) 静态图片：取 StaticImageWallpaperOverlayManager 缓存的图片像素尺寸

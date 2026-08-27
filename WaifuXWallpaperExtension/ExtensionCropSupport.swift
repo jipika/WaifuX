@@ -82,17 +82,24 @@ enum ExtCropEngine {
             let w = targetAspect / screenAspect
             viewport = ExtUnitRect(x: (1 - w) / 2, y: 0, w: w, h: 1)
         }
-        let vpAspect = viewport.h > 0 ? viewport.w / viewport.h : 1.0
-        let wpAspect = (wallpaperSize.height > 0) ? wallpaperSize.width / wallpaperSize.height : 1.0
+        // Use pixel geometry here, not the normalized viewport ratio.
+        // For an auto-fill viewport, viewport.w / viewport.h is always 1 even
+        // when the display is 16:10. Treating it as the target aspect stretches
+        // a 16:9 frame across the lock screen instead of cropping it.
+        let vpW = viewport.w * screenSize.width
+        let vpH = viewport.h * screenSize.height
+        let wpW = wallpaperSize.width
+        let wpH = wallpaperSize.height
+        let coverScale = max(
+            wpW > 0 ? vpW / wpW : 1.0,
+            wpH > 0 ? vpH / wpH : 1.0
+        )
         let zoom = max(1.0, min(4.0, settings.zoom))
-        let winW: Double, winH: Double
-        if wpAspect > vpAspect {
-            winH = 1.0 / zoom
-            winW = winH * vpAspect
-        } else {
-            winW = 1.0 / zoom
-            winH = winW / vpAspect
-        }
+        let scale = coverScale * zoom
+        let displayWidth = wpW * scale
+        let displayHeight = wpH * scale
+        let winW = displayWidth > 0 ? vpW / displayWidth : 1.0
+        let winH = displayHeight > 0 ? vpH / displayHeight : 1.0
         let panX = max(0, min(1, settings.pan.x))
         let panY = max(0, min(1, settings.pan.y))
         let originX = max(0, min(1 - winW, panX - winW / 2))

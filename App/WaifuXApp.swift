@@ -981,12 +981,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
     func applicationWillTerminate(_ notification: Notification) {
         AppExitDiagnostics.record("applicationWillTerminate")
+
+        // 通知系统托管的扩展解除“仅锁屏播放”限制。
+        // 先让底层自解码恢复出帧，再拆 App 的覆盖层，减少退出交接时露出静帧。
+        if #available(macOS 26.0, *) {
+            WallpaperExtensionSocketServer.shared.notifyAppWillTerminate()
+        }
+
         // 只清理动态壁纸窗口，不回退到旧静态壁纸
         VideoWallpaperManager.shared.prepareForAppTermination()
 
-        // 通知系统托管的锁屏扩展释放自解码上下文，避免旧扩展进程常驻。
         if #available(macOS 26.0, *) {
-            WallpaperExtensionSocketServer.shared.notifyAppWillTerminate()
             WallpaperExtensionSocketServer.shared.clearDisplayVideos()
             WallpaperExtensionSocketServer.shared.stop()
         }

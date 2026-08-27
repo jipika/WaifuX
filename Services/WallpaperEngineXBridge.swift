@@ -10,11 +10,6 @@ private func legacyCLICapturePath(for screen: Int) -> String {
     return "/tmp/wallpaperengine-cli-capture-s\(screen).png"
 }
 
-/// Web daemon 写出的全屏媒体内容尺寸。路径与 wallpaperengine-cli.swift 保持一致。
-private func legacyCLIWebContentSizePath(for screen: Int) -> String {
-    return "/tmp/wallpaperengine-cli-web-content-size-s\(screen).json"
-}
-
 /// Web 实时壁纸预热期间采集的海报候选。
 ///
 /// 分数只用于避开全黑、过曝开场和低信息量转场帧；它不影响实时渲染本身。
@@ -47,11 +42,6 @@ private struct WebCropParameters: Codable {
     let letterboxColorHex: String?
     /// 每屏单调递增；daemon 用它丢弃乱序的拖拽更新。
     let cropRevision: UInt64
-}
-
-private struct WebContentSizePayload: Codable {
-    let width: Double
-    let height: Double
 }
 
 /// Host → daemon：Web 壁纸可视区域。
@@ -285,6 +275,11 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var sceneCanvasSizeCache: [String: CGSize?] = [:]
     /// 每屏最近一次读到的 scene canvas 尺寸。热切换会删 canvas-size 文件，新文件没写出前用它重算 crop。
     private var lastCanvasSizeByScreenID: [String: CGSize] = [:]
+    /// Web crop 必须按 revision 顺序发送，避免并发 socket 让 daemon 丢掉最新位置。
+    private let webCropSendQueue = DispatchQueue(
+        label: "com.waifux.wallpaper.web-crop-ipc",
+        qos: .userInitiated
+    )
     /// 非隔离存储所有活跃 PID，供 deinit 中安全清理
     private nonisolated(unsafe) var _deinitPIDs: Set<pid_t> = []
     /// 启动批次号，防止旧进程的 terminationHandler 污染新进程状态
@@ -945,9 +940,10 @@ final class WallpaperEngineXBridge: ObservableObject {
                             }
                         }
                         print("[WallpaperEngineXBridge] ⚠️ 屏幕 \(screenIDCopy) 热切换等待 canvas_size 超时，用缓存尺寸恢复 crop")
-                        if let screen = NSScreen.screens.first(where: {
-                            $0.wallpaperScreenIdentifier == screenIDCopy
-                        }) {
+                        if let self,
+                           let screen = NSScreen.screens.first(where: {
+                               $0.wallpaperScreenIdentifier == screenIDCopy
+                           }) {
                             self.applyPersistedCrop(for: screen)
                         }
                     }
@@ -1710,9 +1706,9 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     /// 通用 fire-and-forget Unix socket 发送（audio / media 共用）。
-    private func sendFireAndForgetToWebDaemon(_ data: Data) {
+    private func sendFireAndForgetToWebDaemon(_ data: Data, on queue: DispatchQueue? = nil) {
         let socketPath = "/tmp/wallpaperengine-cli.sock"
-        DispatchQueue.global(qos: .userInitiated).async {
+        (queue ?? DispatchQueue.global(qos: .userInitiated)).async {
             var addr = sockaddr_un()
             addr.sun_family = sa_family_t(AF_UNIX)
             strncpy(&addr.sun_path, socketPath, MemoryLayout.size(ofValue: addr.sun_path) - 1)
@@ -1732,7 +1728,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             var length = UInt32(data.count)
             let payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
             _ = payload.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, payload.count, 0) }
-            // 不 recv：daemon 对 audio/media 不发响应；shutdown 让对端 EOF。
+            // 不 recv：daemon 对 audio/media 不发响应；shutdown 让对端 EOF，defer 会关闭本端 fd。
             shutdown(fd, SHUT_WR)
         }
     }
@@ -1740,7 +1736,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 拖拽期间的高频 Web crop 更新：daemon 不响应，避免 30fps 下 socket 读写堆积。
     private func sendWebCropToWebDaemon(for screen: NSScreen) {
         guard let data = webCropMessageData(for: screen, expectsResponse: false) else { return }
-        sendFireAndForgetToWebDaemon(data)
+        sendFireAndForgetToWebDaemon(data, on: webCropSendQueue)
     }
 
     private func webCropMessageData(for screen: NSScreen, expectsResponse: Bool) -> Data? {
@@ -1763,9 +1759,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         webCropRevisionByScreenIndex[screenIndex] = revision
 
         let settings = DisplayCropSettingsStore.shared.settings(for: screen)
-        let wallpaperSize = webContentSize(
-            forScreenIndex: screenIndex
-        ) ?? screen.frame.size
+        // Web crop transforms the entire HTML document, whose logical canvas is
+        // the screen-sized WebView. Media/canvas intrinsic sizes must not affect it.
+        let wallpaperSize = screen.frame.size
         let layout = CropLayoutEngine.compute(
             wallpaperSize: wallpaperSize,
             screenSize: screen.frame.size,
@@ -1785,49 +1781,20 @@ final class WallpaperEngineXBridge: ObservableObject {
             letterboxColorHex: settings.letterboxColorHex,
             cropRevision: revision
         )
+        if revision <= 3 || revision % 15 == 0 {
+            let cropDescription = parameters.crop?.map { String(format: "%.4f", $0) }.joined(separator: ",") ?? "nil"
+            AppLogger.debug(.wallpaper, "Web crop enqueue", metadata: [
+                "screenID": screen.wallpaperScreenIdentifier,
+                "screenIndex": screenIndex,
+                "revision": revision,
+                "pan": String(format: "%.4f,%.4f", settings.pan.x, settings.pan.y),
+                "zoom": String(format: "%.4f", settings.zoom),
+                "wallpaperSize": String(format: "%.0fx%.0f", wallpaperSize.width, wallpaperSize.height),
+                "screenSize": String(format: "%.0fx%.0f", screen.frame.width, screen.frame.height),
+                "crop": cropDescription
+            ])
+        }
         return (screenIndex, parameters)
-    }
-
-    /// Web 壁纸的真实内容尺寸由 daemon 从当前可见的 video/canvas/img 推断。
-    /// 未识别到时回退屏幕尺寸，保持普通 Web 壁纸原有行为。
-    func webContentSize(for screen: NSScreen) -> CGSize? {
-        guard isWebWallpaperOn(screen: screen) else { return nil }
-        guard let screenIndex = Self.legacyCLIScreenIndex(for: screen) else { return nil }
-        return webContentSize(forScreenIndex: screenIndex)
-    }
-
-    private func webContentSize(forScreenIndex screenIndex: Int) -> CGSize? {
-        let url = URL(fileURLWithPath: legacyCLIWebContentSizePath(for: screenIndex))
-        guard let data = try? Data(contentsOf: url),
-              let payload = try? JSONDecoder().decode(WebContentSizePayload.self, from: data),
-              payload.width.isFinite, payload.height.isFinite,
-              payload.width > 0, payload.height > 0 else {
-            return nil
-        }
-        return CGSize(width: payload.width, height: payload.height)
-    }
-
-    private func invalidateWebContentSize(for screenIndex: Int) {
-        try? FileManager.default.removeItem(
-            atPath: legacyCLIWebContentSizePath(for: screenIndex)
-        )
-    }
-
-    private func waitForWebContentSize(
-        for screen: NSScreen,
-        timeout: TimeInterval = 1.5
-    ) async -> CGSize? {
-        guard let screenIndex = Self.legacyCLIScreenIndex(for: screen) else {
-            return nil
-        }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let size = webContentSize(forScreenIndex: screenIndex) {
-                return size
-            }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        return webContentSize(forScreenIndex: screenIndex)
     }
 
     /// 解析 WE project.json 判断是否需要实时音频频谱。
@@ -2359,9 +2326,6 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
 
         for screen in screens {
-            if let screenIndex = Self.legacyCLIScreenIndex(for: screen) {
-                invalidateWebContentSize(for: screenIndex)
-            }
             guard let initialCrop = nextWebCropParameters(for: screen) else {
                 throw WallpaperEngineError.executionFailed("Web 壁纸目标显示器已变化，请重试")
             }
@@ -2378,14 +2342,6 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
             }
 
-            // 首次 set 时 WebView 还未完成媒体元数据探测，initial crop 只能
-            // 使用屏幕尺寸。等 daemon 写出真实内容尺寸后补发一次最终 crop，
-            // 避免 16:9 媒体在 16:10 屏幕上永久丢失左右区域。
-            _ = await waitForWebContentSize(for: screen)
-            if webContentSize(forScreenIndex: initialCrop.screenIndex) != nil {
-                sendWebCropToWebDaemon(for: screen)
-                try? await Task.sleep(nanoseconds: 80_000_000)
-            }
         }
 
         // 初始 crop 已随 `set` 在窗口显示前应用。海报、锁屏和系统静态帧仍保持原始 Web 截图。
@@ -3508,7 +3464,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         )
     }
 
-    /// 铺满裁切用的壁纸尺寸：真实画布 > scene ortho / Web 内容 > 缓存。
+    /// 铺满裁切用的场景尺寸：真实画布 > scene ortho > 缓存。
     private func cropWallpaperSize(
         screen: NSScreen,
         path: String?,
@@ -3519,9 +3475,6 @@ final class WallpaperEngineXBridge: ObservableObject {
             return size
         }
         if let path, let size = sceneCanvasSize(forPath: path) {
-            return size
-        }
-        if let size = webContentSize(for: screen) {
             return size
         }
         if allowCachedCanvas {

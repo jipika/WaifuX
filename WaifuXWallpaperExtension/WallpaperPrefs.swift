@@ -34,6 +34,9 @@ final class WallpaperPrefs: @unchecked Sendable {
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: PrefsFile())
+    /// App 退出后扩展继续存活时，临时解除“仅锁屏播放”限制。
+    /// 这是进程内状态，不写回共享 prefs；App 下次启动并刷新 prefs 后自动清除。
+    private let appHostTerminatedLock = OSAllocatedUnfairLock(initialState: false)
 
     private static var sharedContainerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")
@@ -53,6 +56,13 @@ final class WallpaperPrefs: @unchecked Sendable {
 
     var userPaused: Bool { lock.withLock { $0.userPaused } }
     var alwaysPauseDesktop: Bool { lock.withLock { $0.alwaysPauseDesktop } }
+    var effectiveAlwaysPauseDesktop: Bool {
+        guard !appHostTerminatedLock.withLock({ $0 }) else { return false }
+        return alwaysPauseDesktop
+    }
+    var isAppHostTerminated: Bool {
+        appHostTerminatedLock.withLock { $0 }
+    }
     var pauseWhenOccluded: Bool { lock.withLock { $0.pauseWhenOccluded } }
     var desktopOccluded: Bool { lock.withLock { $0.desktopOccluded } }
 
@@ -112,6 +122,22 @@ final class WallpaperPrefs: @unchecked Sendable {
         applyPauseState()
     }
 
+    /// 更新宿主 App 存活状态。返回值表示状态是否发生变化。
+    @discardableResult
+    func setAppHostRunning(_ isRunning: Bool) -> Bool {
+        let terminated = !isRunning
+        return appHostTerminatedLock.withLock { current in
+            guard current != terminated else { return false }
+            current = terminated
+            return true
+        }
+    }
+
+    /// 标记宿主 App 已退出。扩展保留当前上下文，并由调用方重新计算播放策略。
+    func markAppHostTerminated() {
+        setAppHostRunning(false)
+    }
+
     // MARK: - Darwin Observer
 
     private var isObservingChanges = false
@@ -146,13 +172,23 @@ final class WallpaperPrefs: @unchecked Sendable {
         let power = PowerMonitor.shared.currentState
         let displayIDs = state.uniqueDisplayIDs()
         let currentPausedDisplays = pausedDisplayIDs
+        let effectiveMode = isAppHostTerminated
+            && !state.isScreenLocked
+            && !state.isDisplayAsleep
+            ? "active"
+            : state.presentationMode
+        let effectiveActivity = isAppHostTerminated
+            && !state.isScreenLocked
+            && !state.isDisplayAsleep
+            ? "active"
+            : state.activityState
 
         if displayIDs.isEmpty {
             let policy = PlaybackPolicy.compute(
-                presentationMode: state.presentationMode,
-                activityState: state.activityState,
+                presentationMode: effectiveMode,
+                activityState: effectiveActivity,
                 userPaused: userPaused,
-                alwaysPauseDesktop: alwaysPauseDesktop,
+                alwaysPauseDesktop: effectiveAlwaysPauseDesktop,
                 pauseWhenOccluded: pauseWhenOccluded,
                 desktopOccluded: desktopOccluded,
                 powerState: power
@@ -164,10 +200,10 @@ final class WallpaperPrefs: @unchecked Sendable {
             for displayID in displayIDs {
                 let isDisplayPaused = currentPausedDisplays.contains(displayID)
                 let policy = PlaybackPolicy.compute(
-                    presentationMode: state.presentationMode,
-                    activityState: state.activityState,
+                    presentationMode: effectiveMode,
+                    activityState: effectiveActivity,
                     userPaused: userPaused || isDisplayPaused,
-                    alwaysPauseDesktop: alwaysPauseDesktop,
+                    alwaysPauseDesktop: effectiveAlwaysPauseDesktop,
                     pauseWhenOccluded: pauseWhenOccluded,
                     desktopOccluded: desktopOccluded,
                     powerState: power

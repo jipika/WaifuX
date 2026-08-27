@@ -962,9 +962,6 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             }
         }
 
-        WallpaperState.shared.presentationMode = presentationMode
-        WallpaperState.shared.activityState = activityState
-
         if presentationMode == "locked" {
             WallpaperState.shared.isScreenLocked = true
             lastLockedUpdate = Date()
@@ -982,19 +979,29 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         // WallpaperAgent 在锁屏过渡期间会发 update("active")，此时不应该立刻覆盖 isScreenLocked。
 
         let prefs = WallpaperPrefs.shared
+        let hostUnavailable = prefs.isAppHostTerminated
+            && !WallpaperState.shared.isScreenLocked
+            && !WallpaperState.shared.isDisplayAsleep
+        let effectivePresentationMode = hostUnavailable ? "active" : presentationMode
+        let effectiveActivityState = hostUnavailable ? "active" : activityState
+        WallpaperState.shared.presentationMode = effectivePresentationMode
+        WallpaperState.shared.activityState = effectiveActivityState
+
         let power = PowerMonitor.shared.currentState
         let basePolicy = PlaybackPolicy.compute(
-            presentationMode: presentationMode,
-            activityState: activityState,
+            presentationMode: effectivePresentationMode,
+            activityState: effectiveActivityState,
             userPaused: prefs.userPaused,
-            alwaysPauseDesktop: prefs.alwaysPauseDesktop,
+            alwaysPauseDesktop: prefs.effectiveAlwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
             powerState: power
         )
 
-        let modeChanged = presentationMode != previousPresentationMode
-        let animated = prefs.alwaysPauseDesktop && activityState == "active" && modeChanged
+        let modeChanged = effectivePresentationMode != previousPresentationMode
+        let animated = prefs.effectiveAlwaysPauseDesktop
+            && effectiveActivityState == "active"
+            && modeChanged
 
         // Per-display policy：检查每个显示器是否有独立的暂停设置
         WallpaperState.shared.forEachActiveContext { displayID, renderer in
@@ -1003,8 +1010,11 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             renderer.applyPolicy(effectivePolicy, animated: animated)
         }
 
-        previousPresentationMode = presentationMode
-        extLog("=== UPDATE === mode: \(presentationMode), activity: \(activityState)")
+        previousPresentationMode = effectivePresentationMode
+        extLog(
+            "=== UPDATE === mode: \(presentationMode) -> \(effectivePresentationMode), "
+                + "activity: \(activityState) -> \(effectiveActivityState)"
+        )
         reply(nil)
     }
 

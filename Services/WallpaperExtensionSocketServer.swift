@@ -207,7 +207,8 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         }
     }
 
-    /// 通知系统托管的 Wallpaper Extension：主 App 正在退出，请释放管线并结束旧进程。
+    /// 通知系统托管的 Wallpaper Extension：主 App 正在退出，
+    /// 保留现有 CAContext 并切换为扩展自托管桌面播放。
     func notifyAppWillTerminate() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(

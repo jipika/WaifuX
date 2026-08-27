@@ -59,16 +59,6 @@ private func primaryCapturePath(for screen: Int) -> String {
     return "/tmp/wallpaperengine-cli-capture-s\(screen).png"
 }
 
-/// Web 壁纸识别出的全屏媒体内容尺寸，供 Host 计算 crop 坐标。
-private func webContentSizePath(for screen: Int) -> String {
-    return "/tmp/wallpaperengine-cli-web-content-size-s\(screen).json"
-}
-
-private struct WebContentSizePayload: Codable {
-    let width: Double
-    let height: Double
-}
-
 private func isDynamicLockScreenEnabledForCurrentLaunch() -> Bool {
     let rawValue = ProcessInfo.processInfo.environment["WAIFUX_DYNAMIC_LOCK_SCREEN_ENABLED"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1939,11 +1929,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         var cropContainer: NSView?
         var webView: WKWebView?
         var cropLayout: WebCropLayout = .full
-        /// 可见的全屏 video/canvas/img 的原始内容尺寸。
-        var mediaContentSize: CGSize?
-        /// 识别到全屏媒体后，crop 只变换媒体元素，不变换整个 WebView。
-        var usesMediaCrop = false
-        var mediaDiscoveryGeneration: UInt64 = 0
         /// 乱序 socket 消息只允许前进，避免拖拽结束后被旧位置覆盖。
         var lastCropRevision: UInt64 = 0
         var pendingCompletion: ((Bool) -> Void)?
@@ -2277,9 +2262,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         screenStates[s]?.isLoaded = true
         runWebWallpaperBootstrap(screen: s) { [weak self] in
             guard let self = self else { return }
-            if self.screenStates[s]?.isOffscreen != true {
-                self.beginMediaContentDiscovery(screen: s)
-            }
+            self.applyCropLayout(for: s)
             if self.screenStates[s]?.isOffscreen == true {
                 // Compositor recording does not need a stable WKWebView snapshot.
                 // Snapshot settling pauses/seeks video and is the source of judder.
@@ -2294,159 +2277,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             }
         }
         NSApp.setActivationPolicy(.prohibited)
-    }
-
-    /// 识别当前页面是否由全屏媒体主导。WebView 的 viewport 保持屏幕尺寸，
-    /// 只把媒体元素切换到原始内容坐标系，避免 WebGL/fixed 布局重排。
-    private func beginMediaContentDiscovery(screen: Int) {
-        guard var state = screenStates[screen], state.webView != nil else { return }
-        state.mediaDiscoveryGeneration &+= 1
-        let generation = state.mediaDiscoveryGeneration
-        screenStates[screen] = state
-
-        func probe(attempt: Int) {
-            guard let current = self.screenStates[screen],
-                  current.mediaDiscoveryGeneration == generation,
-                  let webView = current.webView else {
-                return
-            }
-            let script = """
-            (function() {
-              try {
-                var viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
-                var candidates = Array.prototype.slice.call(
-                  document.querySelectorAll('video,canvas,img')
-                ).map(function(el) {
-                  var rect = el.getBoundingClientRect();
-                  var style = window.getComputedStyle(el);
-                  var width = el.videoWidth || el.naturalWidth || el.width || 0;
-                  var height = el.videoHeight || el.naturalHeight || el.height || 0;
-                  var area = Math.max(0, rect.width) * Math.max(0, rect.height);
-                  var visible = style.display !== 'none'
-                    && style.visibility !== 'hidden'
-                    && parseFloat(style.opacity || '1') > 0
-                    && rect.width > 2 && rect.height > 2
-                    && area >= viewportArea * 0.55
-                    && width > 0 && height > 0;
-                  return { el: el, width: width, height: height, area: area, visible: visible };
-                }).filter(function(item) { return item.visible; })
-                  .sort(function(lhs, rhs) { return rhs.area - lhs.area; });
-
-                var best = candidates.length ? candidates[0] : null;
-                if (!best) return null;
-
-                var media = best.el;
-                if (window.__wxMediaCropElement !== media) {
-                  window.__wxMediaCropElement = media;
-                  media.style.setProperty('position', 'fixed', 'important');
-                  media.style.setProperty('left', '0px', 'important');
-                  media.style.setProperty('top', '0px', 'important');
-                  media.style.setProperty('margin', '0px', 'important');
-                  media.style.setProperty('object-fit', 'fill', 'important');
-                  media.style.setProperty('transform-origin', '0 0', 'important');
-                }
-
-                window.__wxApplyMediaCrop = function(config) {
-                  try {
-                    var element = window.__wxMediaCropElement;
-                    if (!element) return false;
-                    element.style.setProperty('width', config.sourceWidth + 'px', 'important');
-                    element.style.setProperty('height', config.sourceHeight + 'px', 'important');
-                    element.style.setProperty(
-                      'transform',
-                      'translate(' + config.translateX + 'px,' + config.translateY + 'px) '
-                        + 'scale(' + config.scaleX + ',' + config.scaleY + ')',
-                      'important'
-                    );
-                    return true;
-                  } catch (e) {
-                    return false;
-                  }
-                };
-                return { width: best.width, height: best.height };
-              } catch (e) {
-                return null;
-              }
-            })();
-            """
-            webView.evaluateJavaScript(script) { [weak self] result, _ in
-                guard let self else { return }
-                DispatchQueue.main.async {
-                    guard let current = self.screenStates[screen],
-                          current.mediaDiscoveryGeneration == generation else {
-                        return
-                    }
-                    if let dict = result as? [String: Any],
-                       let width = (dict["width"] as? NSNumber)?.doubleValue,
-                       let height = (dict["height"] as? NSNumber)?.doubleValue,
-                       width.isFinite, height.isFinite, width > 0, height > 0 {
-                        self.screenStates[screen]?.mediaContentSize = CGSize(width: width, height: height)
-                        self.screenStates[screen]?.usesMediaCrop = true
-                        self.writeWebContentSize(
-                            screen: screen,
-                            size: CGSize(width: width, height: height)
-                        )
-                        self.applyCenteredMediaFallbackIfNeeded(screen: screen)
-                        self.applyCropLayout(for: screen)
-                        return
-                    }
-                    guard attempt < 20 else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        probe(attempt: attempt + 1)
-                    }
-                }
-            }
-        }
-
-        probe(attempt: 0)
-    }
-
-    private func writeWebContentSize(screen: Int, size: CGSize) {
-        let payload = WebContentSizePayload(
-            width: size.width,
-            height: size.height
-        )
-        guard let data = try? JSONEncoder().encode(payload) else { return }
-        try? data.write(
-            to: URL(fileURLWithPath: webContentSizePath(for: screen)),
-            options: .atomic
-        )
-    }
-
-    private func applyCenteredMediaFallbackIfNeeded(screen: Int) {
-        guard let state = screenStates[screen],
-              let sourceSize = state.mediaContentSize,
-              let window = state.window,
-              let contentSize = window.contentView?.bounds.size,
-              contentSize.width > 0, contentSize.height > 0 else {
-            return
-        }
-        let layout = state.cropLayout
-        let isDefaultFullLayout = layout.crop.x == 0
-            && layout.crop.y == 0
-            && layout.crop.w == 1
-            && layout.crop.h == 1
-            && layout.viewport.x == 0
-            && layout.viewport.y == 0
-            && layout.viewport.w == 1
-            && layout.viewport.h == 1
-        guard isDefaultFullLayout else { return }
-
-        let sourceAspect = sourceSize.width / sourceSize.height
-        let targetAspect = contentSize.width / contentSize.height
-        var crop = WebCropRect.full
-        if sourceAspect > targetAspect {
-            crop.w = targetAspect / sourceAspect
-            crop.x = (1 - crop.w) / 2
-        } else if sourceAspect < targetAspect {
-            crop.h = sourceAspect / targetAspect
-            crop.y = (1 - crop.h) / 2
-        }
-        screenStates[screen]?.cropLayout = WebCropLayout(
-            crop: crop,
-            viewport: .full,
-            letterboxColor: layout.letterboxColor
-        )
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -2674,8 +2504,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         return true
     }
 
-    /// 热更新 Web 壁纸的裁切与可视框。WebView 保持全尺寸，通过父容器裁切和 layer
-    /// 缩放实现，避免 WebGL / fixed 布局因改变 viewport 而重新排版。
+    /// 热更新 Web 壁纸的裁切与可视框。WebView 保持原始屏幕 viewport，
+    /// 父容器负责可视框裁切，HTML 根节点负责整个 Web 页面的缩放与平移。
     @discardableResult
     func applyCrop(
         crop: [Double]?,
@@ -2707,6 +2537,22 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         return true
     }
 
+    private func webRootTransform(
+        targetSize: CGSize,
+        crop: WebCropRect,
+        viewport: WebCropRect
+    ) -> (scaleX: CGFloat, scaleY: CGFloat, translateX: CGFloat, translateY: CGFloat) {
+        let viewportWidth = viewport.w * targetSize.width
+        let viewportHeight = viewport.h * targetSize.height
+        let viewportX = viewport.x * targetSize.width
+        let viewportY = viewport.y * targetSize.height
+        let scaleX = viewportWidth / max(0.0001, targetSize.width * crop.w)
+        let scaleY = viewportHeight / max(0.0001, targetSize.height * crop.h)
+        let translateX = viewportX - crop.x * targetSize.width * scaleX
+        let translateY = viewportY - crop.y * targetSize.height * scaleY
+        return (scaleX, scaleY, translateX, translateY)
+    }
+
     private func applyCropLayout(for screen: Int) {
         guard let state = screenStates[screen],
               let window = state.window,
@@ -2717,7 +2563,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
 
         let targetSize = contentView.bounds.size
-        let sourceSize = state.mediaContentSize ?? webView.bounds.size
+        let sourceSize = webView.bounds.size
         guard targetSize.width > 0, targetSize.height > 0,
               sourceSize.width > 0, sourceSize.height > 0 else {
             return
@@ -2726,13 +2572,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         let layout = state.cropLayout
         let viewport = layout.viewport
         let crop = layout.crop
+        let cropText = String(format: "%.4f,%.4f,%.4f,%.4f", crop.x, crop.y, crop.w, crop.h)
+        let viewportText = String(format: "%.4f,%.4f,%.4f,%.4f", viewport.x, viewport.y, viewport.w, viewport.h)
+        dlog("[WebRendererBridge] crop geometry screen=\(screen) revision=\(state.lastCropRevision) root=html source=\(Int(sourceSize.width))x\(Int(sourceSize.height)) target=\(Int(targetSize.width))x\(Int(targetSize.height)) crop=\(cropText) viewport=\(viewportText)")
         let viewportWidth = viewport.w * targetSize.width
         let viewportHeight = viewport.h * targetSize.height
         let viewportX = viewport.x * targetSize.width
         // AppKit view 坐标原点在左下；Crop 参数 y 原点在左上。
         let viewportY = (1 - viewport.y - viewport.h) * targetSize.height
-        let scaleX = viewportWidth / (crop.w * sourceSize.width)
-        let scaleY = viewportHeight / (crop.h * sourceSize.height)
 
         contentView.layer?.backgroundColor = layout.letterboxColor.cgColor
         cropContainer.frame = CGRect(
@@ -2743,48 +2590,42 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         )
         cropContainer.layer?.masksToBounds = true
 
-        if state.usesMediaCrop, state.mediaContentSize != nil {
-            // 保持 WebView 的屏幕 viewport，只把它平移到 viewport 的完整页面坐标。
-            // media 元素本身再按原始内容尺寸做缩放/平移。
-            webView.frame = CGRect(
-                x: -viewportX,
-                y: viewportHeight - targetSize.height,
-                width: targetSize.width,
-                height: targetSize.height
-            )
-            webView.layer?.anchorPoint = CGPoint(x: 0, y: 0)
-            webView.layer?.setAffineTransform(.identity)
-
-            let sourceWidth = sourceSize.width
-            let sourceHeight = sourceSize.height
-            let scaleX = viewportWidth / max(0.0001, crop.w * sourceWidth)
-            let scaleY = viewportHeight / max(0.0001, crop.h * sourceHeight)
-            let config: [String: Any] = [
-                "sourceWidth": sourceWidth,
-                "sourceHeight": sourceHeight,
-                "scaleX": scaleX,
-                "scaleY": scaleY,
-                "translateX": viewportX - crop.x * sourceWidth * scaleX,
-                "translateY": viewport.y * targetSize.height - crop.y * sourceHeight * scaleY
-            ]
-            if let data = try? JSONSerialization.data(withJSONObject: config),
-               let json = String(data: data, encoding: .utf8) {
-                let script = "window.__wxApplyMediaCrop && window.__wxApplyMediaCrop(\(json));"
-                webView.evaluateJavaScript(script, completionHandler: nil)
-            }
-            return
-        }
-
-        // 先恢复 WebView 的完整逻辑 bounds，再只对合成层缩放/平移。
-        webView.frame = CGRect(origin: .zero, size: sourceSize)
-        guard let layer = webView.layer else { return }
-        layer.anchorPoint = CGPoint(x: 0, y: 0)
-        layer.setAffineTransform(CGAffineTransform(scaleX: scaleX, y: scaleY))
-        // crop.y 是从顶部量起；layer/container 坐标则从底部量起。
-        layer.position = CGPoint(
-            x: -crop.x * sourceSize.width * scaleX,
-            y: -(1 - crop.y - crop.h) * sourceSize.height * scaleY
+        // Keep the WebView viewport at the screen size. The crop transform is
+        // applied to document.documentElement, so the entire Web page moves
+        // together and WebGL/fixed-position descendants keep their own layout.
+        webView.frame = CGRect(
+            x: -viewportX,
+            y: -viewportY,
+            width: targetSize.width,
+            height: targetSize.height
         )
+
+        let transform = webRootTransform(
+            targetSize: targetSize,
+            crop: crop,
+            viewport: viewport
+        )
+        let config: [String: Any] = [
+            "scaleX": transform.scaleX,
+            "scaleY": transform.scaleY,
+            "translateX": transform.translateX,
+            "translateY": transform.translateY
+        ]
+        guard state.isLoaded else { return }
+        if let data = try? JSONSerialization.data(withJSONObject: config),
+           let json = String(data: data, encoding: .utf8) {
+            let script = "window.__wxApplyWebCrop && window.__wxApplyWebCrop(\(json));"
+            webView.evaluateJavaScript(script) { result, error in
+                if let error {
+                    dlog("[WebRendererBridge] root crop JS error screen=\(screen): \(error)")
+                } else if (result as? Bool) != true {
+                    dlog(
+                        "[WebRendererBridge] root crop JS rejected screen=\(screen) " +
+                        "result=\(String(describing: result))"
+                    )
+                }
+            }
+        }
     }
 
     func stop(screen: Int = 0) {
@@ -2800,7 +2641,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         state.webView = nil
         state.cropContainer?.removeFromSuperview()
         state.cropContainer = nil
-        try? FileManager.default.removeItem(atPath: webContentSizePath(for: screen))
         state.window?.close()
         state.window = nil
         state.isLoaded = false
@@ -2879,10 +2719,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                   sourceY >= viewportY, sourceY <= viewportY + viewportHeight else {
                 continue
             }
-            let scaleX = viewportWidth / max(0.0001, crop.w * webView.bounds.width)
-            let scaleY = viewportHeight / max(0.0001, crop.h * webView.bounds.height)
-            let webViewX = crop.x * webView.bounds.width + (sourceX - viewportX) / scaleX
-            let webViewY = crop.y * webView.bounds.height + (sourceY - viewportY) / scaleY
+            let transform = webRootTransform(
+                targetSize: CGSize(width: targetWidth, height: targetHeight),
+                crop: crop,
+                viewport: viewport
+            )
+            guard transform.scaleX > 0, transform.scaleY > 0 else { continue }
+            // Mouse coordinates are sent back through the inverse transform of
+            // document.documentElement, in the WebView's normal CSS viewport.
+            let webViewX = (sourceX - transform.translateX) / transform.scaleX
+            let webViewY = (sourceY - transform.translateY) / transform.scaleY
             guard webViewX >= 0, webViewX <= webView.bounds.width,
                   webViewY >= 0, webViewY <= webView.bounds.height else { continue }
             let xStr = String(Double(webViewX))
@@ -2911,9 +2757,136 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             b64Props = data.base64EncodedString()
             propsBlock = "try{var props=JSON.parse(atob(\"" + b64Props + "\"));if(window.wallpaperPropertyListener&&typeof window.wallpaperPropertyListener.applyUserProperties==='function'){window.wallpaperPropertyListener.applyUserProperties(props);}}catch(e){}"
         }
-        // 先重置样式，再执行 propsBlock（applyUserProperties 可能会设置 background-image 等样式）
-        // 如果顺序反过来，bootstrap 的 background-image:none 会清掉 applyUserProperties 设置的背景图
-        let source = "(function(){try{document.documentElement.style.cssText='width:100%;height:100%;margin:0;padding:0;background:transparent;overflow:hidden;';document.body.style.setProperty('width','100%');document.body.style.setProperty('height','100%');window.dispatchEvent(new Event('resize'));}catch(e2){}" + propsBlock + "return true;})();"
+        // 不重写 html/body 的尺寸、边距或 overflow，避免改变 WebGL 壁纸自身的布局基准。
+        // crop 只通过 document.documentElement 的 transform 作用于整页。
+        let source = """
+        (function() {
+          try {
+            var root = document.documentElement;
+            if (root) {
+              var state = window.__wxWebCropState || {
+                active: false,
+                captured: false,
+                transform: '',
+                transformPriority: '',
+                transformOrigin: '',
+                transformOriginPriority: ''
+              };
+              window.__wxWebCropState = state;
+              window.__wxSyncWebCropBackground = function() {
+                try {
+                  var body = document.body;
+                  var rootStyle = window.getComputedStyle(root);
+                  var bodyStyle = body ? window.getComputedStyle(body) : null;
+                  var bodyHasImage = bodyStyle && bodyStyle.backgroundImage !== 'none';
+                  var bodyHasColor = bodyStyle
+                    && bodyStyle.backgroundColor !== 'transparent'
+                    && bodyStyle.backgroundColor !== 'rgba(0, 0, 0, 0)';
+                  var sourceStyle = bodyHasImage || bodyHasColor ? bodyStyle : rootStyle;
+                  if (!sourceStyle) return false;
+                  root.style.setProperty('--wx-crop-background-color', sourceStyle.backgroundColor);
+                  root.style.setProperty('--wx-crop-background-image', sourceStyle.backgroundImage);
+                  root.style.setProperty('--wx-crop-background-position', sourceStyle.backgroundPosition);
+                  root.style.setProperty('--wx-crop-background-size', sourceStyle.backgroundSize);
+                  root.style.setProperty('--wx-crop-background-repeat', sourceStyle.backgroundRepeat);
+                  root.style.setProperty('--wx-crop-background-origin', sourceStyle.backgroundOrigin);
+                  root.style.setProperty('--wx-crop-background-clip', sourceStyle.backgroundClip);
+                  root.style.setProperty('--wx-crop-background-blend-mode', sourceStyle.backgroundBlendMode);
+                  return true;
+                } catch (e) {
+                  return false;
+                }
+              };
+              if (!document.getElementById('__wx-web-crop-background-style')) {
+                var cropStyle = document.createElement('style');
+                cropStyle.id = '__wx-web-crop-background-style';
+                cropStyle.textContent =
+                  'html[data-wx-web-crop-active="true"] { isolation: isolate; }' +
+                  'html[data-wx-web-crop-active="true"]::before {' +
+                  'content:"";position:fixed;inset:0;width:100vw;height:100vh;' +
+                  'pointer-events:none;z-index:-2147483647;' +
+                  'background-color:var(--wx-crop-background-color,transparent);' +
+                  'background-image:var(--wx-crop-background-image,none);' +
+                  'background-position:var(--wx-crop-background-position,0% 0%);' +
+                  'background-size:var(--wx-crop-background-size,auto);' +
+                  'background-repeat:var(--wx-crop-background-repeat,repeat);' +
+                  'background-origin:var(--wx-crop-background-origin,padding-box);' +
+                  'background-clip:var(--wx-crop-background-clip,border-box);' +
+                  'background-blend-mode:var(--wx-crop-background-blend-mode,normal);' +
+                  'background-attachment:scroll;}';
+                (document.head || root).appendChild(cropStyle);
+              }
+              if (!window.__wxWebCropBackgroundObserver && typeof MutationObserver === 'function') {
+                window.__wxWebCropBackgroundObserver = new MutationObserver(function() {
+                  if (state.active && window.__wxSyncWebCropBackground) {
+                    window.__wxSyncWebCropBackground();
+                  }
+                });
+                if (document.body) {
+                  window.__wxWebCropBackgroundObserver.observe(
+                    document.body,
+                    { attributes: true, attributeFilter: ['style', 'class'] }
+                  );
+                }
+              }
+              window.__wxApplyWebCrop = function(config) {
+                try {
+                  if (!config || !isFinite(config.scaleX) || !isFinite(config.scaleY)
+                      || !isFinite(config.translateX) || !isFinite(config.translateY)) {
+                    return false;
+                  }
+                  var isIdentity = Math.abs(config.scaleX - 1) < 0.000001
+                    && Math.abs(config.scaleY - 1) < 0.000001
+                    && Math.abs(config.translateX) < 0.0001
+                    && Math.abs(config.translateY) < 0.0001;
+                  if (isIdentity) {
+                    if (state.active && state.captured) {
+                      if (state.transform) {
+                        root.style.setProperty('transform', state.transform, state.transformPriority);
+                      } else {
+                        root.style.removeProperty('transform');
+                      }
+                      if (state.transformOrigin) {
+                        root.style.setProperty('transform-origin', state.transformOrigin, state.transformOriginPriority);
+                      } else {
+                        root.style.removeProperty('transform-origin');
+                      }
+                    }
+                    root.removeAttribute('data-wx-web-crop-active');
+                    state.active = false;
+                    state.captured = false;
+                    return true;
+                  }
+                  if (!state.captured) {
+                    state.transform = root.style.getPropertyValue('transform');
+                    state.transformPriority = root.style.getPropertyPriority('transform');
+                    state.transformOrigin = root.style.getPropertyValue('transform-origin');
+                    state.transformOriginPriority = root.style.getPropertyPriority('transform-origin');
+                    state.captured = true;
+                  }
+                  if (window.__wxSyncWebCropBackground) {
+                    window.__wxSyncWebCropBackground();
+                  }
+                  root.setAttribute('data-wx-web-crop-active', 'true');
+                  root.style.setProperty('transform-origin', '0 0', 'important');
+                  root.style.setProperty(
+                    'transform',
+                    'translate3d(' + config.translateX + 'px,' + config.translateY + 'px,0) '
+                      + 'scale3d(' + config.scaleX + ',' + config.scaleY + ',1)',
+                    'important'
+                  );
+                  state.active = true;
+                  return true;
+                } catch (e) {
+                  return false;
+                }
+              };
+            }
+          } catch (e2) {}
+          \(propsBlock)
+          return true;
+        })();
+        """
         webView.evaluateJavaScript(source) { [weak self] _, _ in
             // 延迟重新应用属性：部分壁纸（如 Spine 动画壁纸）异步初始化可能覆盖首次 applyUserProperties 设置的样式
             // 500ms 后再次调用 applyUserProperties 确保 background-image 等属性在异步初始化完成后仍然生效

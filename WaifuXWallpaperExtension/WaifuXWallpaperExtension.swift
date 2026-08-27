@@ -155,6 +155,7 @@ let wallpaperCommandQueue = DispatchQueue(label: "com.waifux.wallpaperextension.
 final class WaifuXWallpaperExtension: NSObject, AppExtension {
     typealias Configuration = WallpaperExtensionConfiguration
     private static let wakeRecoveryGeneration = OSAllocatedUnfairLock(initialState: 0)
+    private static let hostAppBundleIdentifier = "com.waifux.app"
 
     var configuration: WallpaperExtensionConfiguration {
         WallpaperExtensionConfiguration()
@@ -184,6 +185,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             observeSocketCommands()
             observeSocketCommandNotifications()
             observeExtensionReload()
+            Self.reconcileHostApplicationPresence()
         } else {
             let err = String(cString: dlerror())
             extLog("INIT — dlopen failed: \(err)")
@@ -197,19 +199,49 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             center,
             observer,
             { _, _, _, _, _ in
-                extLog("[Extension] App will terminate — releasing frame pipeline")
-                FrameChannel.shared.stop()
-                let removed = WallpaperState.shared.removeAllContexts()
-                WallpaperPrefs.shared.setActive(false)
-                extLog("[Extension] Released \(removed.count) active context(s), exiting extension process")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    exit(0)
-                }
+                WaifuXWallpaperExtension.transitionToSelfHostedPlayback(
+                    reason: "appWillTerminate"
+                )
             },
             "com.waifux.app.wallpaper.appWillTerminate" as CFString,
             nil,
             .deliverImmediately
         )
+    }
+
+    private static func transitionToSelfHostedPlayback(reason: String) {
+        FrameChannel.shared.stop()
+        WallpaperPrefs.shared.markAppHostTerminated()
+
+        // WallpaperAgent can leave the covered desktop instance in `idle`.
+        // Once the App-owned overlay is gone, that stale mode must not keep the
+        // extension frozen. Future WallpaperAgent updates remain authoritative.
+        let state = WallpaperState.shared
+        if !state.isScreenLocked, !state.isDisplayAsleep {
+            state.presentationMode = "active"
+            state.activityState = "active"
+        }
+
+        recomputeAndApplyPolicy()
+        extLog(
+            "[Extension] Host unavailable (\(reason)); kept "
+                + "\(state.activeContextCount) context(s) and enabled self-hosted desktop playback"
+        )
+    }
+
+    private static func reconcileHostApplicationPresence() {
+        let isRunning = !NSRunningApplication.runningApplications(
+            withBundleIdentifier: hostAppBundleIdentifier
+        ).isEmpty
+        let prefs = WallpaperPrefs.shared
+        guard prefs.setAppHostRunning(isRunning) else { return }
+
+        if isRunning {
+            recomputeAndApplyPolicy()
+            extLog("[Extension] Host App detected; restored App-managed playback policy")
+        } else {
+            transitionToSelfHostedPlayback(reason: "hostProcessMissing")
+        }
     }
 
     /// 监听 App 重启时的扩展重载通知。
@@ -374,6 +406,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     /// 在主线程执行会阻塞 run loop，影响 XPC 回调响应和 CACommit 等关键事件的处理。
     private func observeSocketCommands() {
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            WaifuXWallpaperExtension.reconcileHostApplicationPresence()
             wallpaperCommandQueue.async {
                 Self.drainPendingSocketCommands(reason: "timer")
             }
@@ -622,15 +655,23 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         let prefs = WallpaperPrefs.shared
         let power = PowerMonitor.shared.currentState
 
-        let effectiveMode = state.isScreenLocked && state.presentationMode != "locked"
-            ? "locked"
-            : state.presentationMode
+        let effectiveMode: String
+        let effectiveActivity: String
+        if prefs.isAppHostTerminated && !state.isScreenLocked && !state.isDisplayAsleep {
+            effectiveMode = "active"
+            effectiveActivity = "active"
+        } else {
+            effectiveMode = state.isScreenLocked && state.presentationMode != "locked"
+                ? "locked"
+                : state.presentationMode
+            effectiveActivity = state.activityState
+        }
 
         let basePolicy = PlaybackPolicy.compute(
             presentationMode: effectiveMode,
-            activityState: state.activityState,
+            activityState: effectiveActivity,
             userPaused: prefs.userPaused,
-            alwaysPauseDesktop: prefs.alwaysPauseDesktop,
+            alwaysPauseDesktop: prefs.effectiveAlwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
             powerState: power
