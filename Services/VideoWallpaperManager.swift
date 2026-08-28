@@ -30,6 +30,16 @@ enum FrameInterpolationTargetFPSResolver {
     }
 }
 
+enum VideoWallpaperDisplayRecoveryPolicy {
+    static func shouldRebuildNativePipeline(
+        afterDisplayWake: Bool,
+        displayConfigurationChanged: Bool,
+        externalRenderingActive: Bool
+    ) -> Bool {
+        !externalRenderingActive && (afterDisplayWake || displayConfigurationChanged)
+    }
+}
+
 @MainActor
 final class VideoWallpaperManager: ObservableObject {
     static let shared = VideoWallpaperManager()
@@ -154,7 +164,7 @@ final class VideoWallpaperManager: ObservableObject {
     /// 记录最近一次成功挂载视频壁纸时的目标显示器配置。
     /// 某些窗口激活/隐藏路径会误触发 `didChangeScreenParametersNotification`，
     /// 但桌面显示器的实际 frame / scale 并没有变化；这类通知不应重建播放器。
-    private struct ScreenConfigurationSignature: Equatable {
+    private struct ScreenConfigurationSignature: Hashable {
         let screenID: String
         let originX: Int
         let originY: Int
@@ -814,6 +824,9 @@ final class VideoWallpaperManager: ObservableObject {
     // 防止重复重建（@MainActor 保证串行访问，无需 NSLock）
     private var isRebuilding = false
     private var pendingRebuildWorkItem: DispatchWorkItem?
+    /// 上一次收到屏幕参数通知时的完整屏幕布局。仅当布局真的发生变化时，
+    /// 才把热插拔视为原生视频解码管线边界，避免普通 AppKit 通知触发重建。
+    private var lastObservedScreenConfigurations: Set<ScreenConfigurationSignature> = []
     /// 独立于 screenParametersChanged 的唤醒重建 work item，防止唤醒时序竞争
     private var pendingWakeRebuildWorkItem: DispatchWorkItem?
     private var externalWakeRecoveryTask: Task<Void, Never>?
@@ -840,6 +853,9 @@ final class VideoWallpaperManager: ObservableObject {
         // 尽早建立锁屏/睡眠状态源，确保 helper 晚启动时能从共享文件读到
         // 当前状态，而不是在首次 set 时短暂误播。
         _ = LockScreenWallpaperService.shared
+        lastObservedScreenConfigurations = Set(
+            NSScreen.screens.map(ScreenConfigurationSignature.init(screen:))
+        )
         setupNotificationObservers()
         configureAudioSession()
     }
@@ -5998,11 +6014,18 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSNotification 回调可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            let currentScreenConfigurations = Set(
+                NSScreen.screens.map(ScreenConfigurationSignature.init(screen:))
+            )
+            let displayConfigurationChanged =
+                currentScreenConfigurations != self.lastObservedScreenConfigurations
+            self.lastObservedScreenConfigurations = currentScreenConfigurations
             AppLogger.error(.wallpaper, "Video wallpaper screen parameters changed", metadata: [
                 "active": self.hasActiveVideoWallpaper,
                 "windows": self.windows.keys.sorted().joined(separator: ","),
                 "targetIDs": self.videoTargetScreenIDs.sorted().joined(separator: ","),
-                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
+                "displayConfigurationChanged": displayConfigurationChanged
             ])
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
@@ -6037,6 +6060,17 @@ final class VideoWallpaperManager: ObservableObject {
 
                 self.relinkDisplayStateForCurrentScreens()
                 self.teardownOrphanedVideoWindowsPreservingRestoreState()
+
+                if VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                    afterDisplayWake: false,
+                    displayConfigurationChanged: displayConfigurationChanged,
+                    externalRenderingActive: self.externalRenderingActive
+                ) {
+                    self.rebuildNativeVideoPipelinesAfterDisplayTransition(
+                        reason: "screenParametersChanged"
+                    )
+                    return
+                }
 
                 guard self.hasEffectiveTargetDisplayChange() else {
                     if self.synchronizeExistingWindowFramesToCurrentScreens() {
@@ -6149,13 +6183,14 @@ final class VideoWallpaperManager: ObservableObject {
                         }
                         return
                     }
-                    self.repairWindowsForCurrentDisplayConfiguration(reason: "screensWake")
-                }
-                // 只有非手动暂停时才恢复播放
-                if !self.isPaused {
-                    for (screenID, player) in self.players {
-                        self.playWallpaperPlayer(player, screenID: screenID)
-                        self.hidePosterImage(for: screenID)
+                    if VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                        afterDisplayWake: true,
+                        displayConfigurationChanged: false,
+                        externalRenderingActive: self.externalRenderingActive
+                    ) {
+                        self.rebuildNativeVideoPipelinesAfterDisplayTransition(
+                            reason: "screensWake"
+                        )
                     }
                 }
                 // 重新评估自动暂停状态，避免 AutoPause 之前暂停的屏幕被错误恢复
@@ -6247,12 +6282,14 @@ final class VideoWallpaperManager: ObservableObject {
                         }
                         return
                     }
-                    self.repairWindowsForCurrentDisplayConfiguration(reason: "systemWake")
-                }
-                if !self.isPaused {
-                    for (screenID, player) in self.players {
-                        self.playWallpaperPlayer(player, screenID: screenID)
-                        self.hidePosterImage(for: screenID)
+                    if VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                        afterDisplayWake: true,
+                        displayConfigurationChanged: false,
+                        externalRenderingActive: self.externalRenderingActive
+                    ) {
+                        self.rebuildNativeVideoPipelinesAfterDisplayTransition(
+                            reason: "systemWake"
+                        )
                     }
                 }
                 // 唤醒后立即重新评估自动暂停状态，避免 AutoPause 之前暂停的屏幕被错误恢复导致闪烁
@@ -6453,6 +6490,50 @@ final class VideoWallpaperManager: ObservableObject {
                 try? rebuildWindows(targetScreen: screen)
             }
         }
+    }
+
+    /// 显示器重新连接/唤醒后，旧 AVPlayer 可能仍然存活，但其 VideoToolbox
+    /// drawable 已经绑定到失效的显示输出。单纯调用 `play()` 不会重新建立
+    /// 这条管线，表现就是窗口还在但画面停住/黑屏；重启 App 恰好会重新创建
+    /// AVQueuePlayer，因此能暂时恢复。
+    ///
+    /// 这里保留 per-screen 的视频、poster 和暂停状态，只重建原生视频窗口与
+    /// AVPlayer/AVPlayerLooper。poster 先作为底图，避免重建期间暴露黑帧。
+    private func rebuildNativeVideoPipelinesAfterDisplayTransition(reason: String) {
+        guard hasActiveVideoWallpaper, !externalRenderingActive else { return }
+
+        relinkDisplayStateForCurrentScreens()
+        teardownOrphanedVideoWindowsPreservingRestoreState()
+        let targetScreens = screensForVideoWallpaperTargets()
+        guard !targetScreens.isEmpty else {
+            NSLog("[VideoWallpaperManager] Native video pipeline rebuild skipped: no target screens (\(reason))")
+            return
+        }
+
+        let wasPaused = isPaused
+        for screen in targetScreens {
+            showPosterImage(for: screen.wallpaperScreenIdentifier)
+        }
+
+        do {
+            try rebuildWindows()
+        } catch {
+            NSLog("[VideoWallpaperManager] Failed to rebuild native video pipeline after \(reason): \(error.localizedDescription)")
+            return
+        }
+
+        if wasPaused {
+            for player in players.values {
+                player.pause()
+                player.rate = 0
+            }
+            for screen in targetScreens {
+                showPosterImage(for: screen.wallpaperScreenIdentifier)
+            }
+        }
+
+        DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+        NSLog("[VideoWallpaperManager] Rebuilt native video pipeline after \(reason) for \(targetScreens.count) screen(s)")
     }
 
     /// Rebinds the child renderer after a display reconnect or a resolution
@@ -8530,7 +8611,11 @@ final class VideoWallpaperManager: ObservableObject {
             self.fadeInTimeouts[screenID]?.cancel()
             self.fadeInTimeouts.removeValue(forKey: screenID)
             // 预卷或真实 layer 首帧已经完成，此时才移除封面并提交切换。
-            self.hidePosterImage(for: screenID)
+            // 全局手动暂停时必须继续保留 poster；新建的 AVPlayer 尚未有
+            // 可显示帧，提前隐藏会把暂停中的桌面变成纯黑。
+            if !self.isPaused {
+                self.hidePosterImage(for: screenID)
+            }
             // Looper 可能在预热期间插入新的循环 item，提交前再次同步音频策略。
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
@@ -8676,8 +8761,11 @@ final class VideoWallpaperManager: ObservableObject {
                 NSLog("[VideoWallpaperManager] Cross-type video first-frame timeout on \(screenID); old wallpaper kept visible")
                 return
             }
-            // 超时兜底，隐藏封面图
-            self.hidePosterImage(for: screenID)
+            // 超时兜底。全局手动暂停时仍保留封面，避免新播放器尚未
+            // 产出帧就把暂停中的桌面揭成黑色。
+            if !self.isPaused {
+                self.hidePosterImage(for: screenID)
+            }
             // ready 超时时也会直接播放，所以这里同样要先禁用静音状态下的音频轨。
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)

@@ -3,6 +3,36 @@ import CoreGraphics
 @testable import WaifuX
 
 final class WallpaperScreenIdentityTests: XCTestCase {
+    func testNativePipelineRecoveryIsForcedAfterDisplayWake() {
+        XCTAssertTrue(
+            VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                afterDisplayWake: true,
+                displayConfigurationChanged: false,
+                externalRenderingActive: false
+            )
+        )
+    }
+
+    func testNativePipelineRecoveryIsForcedWhenDisplayConfigurationChanges() {
+        XCTAssertTrue(
+            VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                afterDisplayWake: false,
+                displayConfigurationChanged: true,
+                externalRenderingActive: false
+            )
+        )
+    }
+
+    func testExternalRendererDoesNotUseNativeRecoveryPolicy() {
+        XCTAssertFalse(
+            VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
+                afterDisplayWake: true,
+                displayConfigurationChanged: true,
+                externalRenderingActive: true
+            )
+        )
+    }
+
     func testFingerprintWithHardwareSerialIgnoresPosition() {
         let fp = WallpaperScreenIdentity.fingerprint(
             legacyFingerprint: "cg:1:2:12345:external",
