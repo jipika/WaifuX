@@ -18,6 +18,27 @@ struct WallpaperDetailSheet: View {
     @State private var isSettingWallpaper = false
     @State private var isVisible = false
     @State private var isImageLoaded = false
+
+    private var usesDarkHeroForeground: Bool {
+        let luminances = wallpaper.colors.compactMap(Self.relativeLuminance(from:))
+        // Unknown/local images default to dark controls because the hero area is
+        // otherwise most likely to lose contrast against a light preview.
+        guard !luminances.isEmpty else { return true }
+        return luminances.reduce(0, +) / Double(luminances.count) > 0.58
+    }
+
+    private var heroForeground: Color {
+        usesDarkHeroForeground ? Color(hex: "17171B") : .white
+    }
+
+    private var heroSecondaryForeground: Color {
+        heroForeground.opacity(usesDarkHeroForeground ? 0.62 : 0.60)
+    }
+
+    private var heroGlassTint: Color? {
+        usesDarkHeroForeground ? Color.white.opacity(0.34) : nil
+    }
+
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
@@ -87,6 +108,16 @@ struct WallpaperDetailSheet: View {
 
     private var isDownloading: Bool {
         downloadActivity.isDownloading(itemID: wallpaper.id)
+    }
+
+    private static func relativeLuminance(from rawHex: String) -> Double? {
+        var hex = rawHex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        if hex.count == 8 { hex = String(hex.dropFirst(2)) }
+        guard hex.count == 6, let value = UInt64(hex, radix: 16) else { return nil }
+        let r = Double((value >> 16) & 0xFF) / 255
+        let g = Double((value >> 8) & 0xFF) / 255
+        let b = Double(value & 0xFF) / 255
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
     }
 
     var body: some View {
@@ -606,6 +637,7 @@ struct WallpaperDetailSheet: View {
                     .lineLimit(2)
                     .minimumScaleFactor(0.72)
                     .detailGlassTitleChrome()
+                    .foregroundStyle(heroForeground)
 
                 detailCategoryBadge
 
@@ -647,6 +679,23 @@ struct WallpaperDetailSheet: View {
         }
         .frame(maxWidth: 920)
         .frame(maxWidth: .infinity)
+        .background {
+            // Keep the wallpaper visible while giving glass controls a stable
+            // contrast field when the artwork is bright in the center.
+            RadialGradient(
+                colors: [
+                    Color.black.opacity(usesDarkHeroForeground ? 0.10 : 0.06),
+                    Color.black.opacity(usesDarkHeroForeground ? 0.03 : 0.01),
+                    .clear
+                ],
+                center: .center,
+                startRadius: 40,
+                endRadius: 560
+            )
+            .frame(height: 430)
+            .blur(radius: 18)
+            .allowsHitTesting(false)
+        }
     }
 
     // MARK: - 按钮行（带左右横线）
@@ -662,9 +711,9 @@ struct WallpaperDetailSheet: View {
                 } label: {
                     DetailSheetCircleIconLabel(
                         systemName: viewModel.isFavorite(wallpaper) ? "heart.fill" : "heart",
-                        foreground: viewModel.isFavorite(wallpaper) ? Color(hex: "FF5A7D") : .white
+                        foreground: viewModel.isFavorite(wallpaper) ? Color(hex: "FF5A7D") : heroForeground
                     )
-                    .detailGlassCircleChrome()
+                    .detailGlassCircleChrome(tint: heroGlassTint)
                 }
                 .buttonStyle(.plain)
 
@@ -672,8 +721,11 @@ struct WallpaperDetailSheet: View {
                     Button {
                         previewWallpaper()
                     } label: {
-                        DetailSheetCircleIconLabel(systemName: "arrow.up.backward.and.arrow.down.forward")
-                            .detailGlassCircleChrome()
+                        DetailSheetCircleIconLabel(
+                            systemName: "arrow.up.backward.and.arrow.down.forward",
+                            foreground: heroForeground
+                        )
+                            .detailGlassCircleChrome(tint: heroGlassTint)
                     }
                     .buttonStyle(.plain)
                     .help(t("preview"))
@@ -697,11 +749,11 @@ struct WallpaperDetailSheet: View {
                             .fixedSize(horizontal: true, vertical: false)
                     }
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(heroForeground)
                 .padding(.horizontal, 28)
                 .frame(height: 46)
                 .contentShape(Capsule())
-                .detailPrimaryGlassButtonChrome()
+                .detailPrimaryGlassButtonChrome(tint: heroGlassTint)
             }
             .buttonStyle(.plain)
             .disabled(isSettingWallpaper)
@@ -713,8 +765,11 @@ struct WallpaperDetailSheet: View {
                         downloadWallpaper()
                     }
                 } label: {
-                    DetailSheetCircleIconLabel(systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down")
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(
+                        systemName: isAlreadyDownloaded ? "checkmark" : "arrow.down",
+                        foreground: heroForeground
+                    )
+                        .detailGlassCircleChrome(tint: heroGlassTint)
                 }
                 .buttonStyle(.plain)
                 .disabled(isDownloading || isAlreadyDownloaded)
@@ -722,8 +777,8 @@ struct WallpaperDetailSheet: View {
                 Button {
                     showMoreOptionsPopover = true
                 } label: {
-                    DetailSheetCircleIconLabel(systemName: "ellipsis")
-                        .detailGlassCircleChrome()
+                    DetailSheetCircleIconLabel(systemName: "ellipsis", foreground: heroForeground)
+                        .detailGlassCircleChrome(tint: heroGlassTint)
                 }
                 .buttonStyle(.plain)
                 .help(t("wallpaperDetail.moreOptions"))
@@ -1181,11 +1236,11 @@ struct WallpaperDetailSheet: View {
     private var detailCategoryBadge: some View {
         Text("\(wallpaper.categoryDisplayName) · \(wallpaper.purityDisplayName)")
             .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(heroForeground.opacity(0.85))
             .tracking(2)
             .padding(.horizontal, 16)
             .frame(height: 34)
-            .detailGlassCapsuleChrome(level: .prominent)
+            .detailGlassCapsuleChrome(tint: heroGlassTint, level: .prominent)
     }
 
     // MARK: - 元数据胶囊（参考图风格：细长边框）
@@ -1193,17 +1248,17 @@ struct WallpaperDetailSheet: View {
         HStack(spacing: 4) {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(heroSecondaryForeground)
             Text(value)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(heroForeground.opacity(0.9))
             if isInteractive {
                 detailDisclosureIndicator
             }
         }
         .padding(.horizontal, 14)
         .frame(height: 32)
-        .detailGlassCapsuleChrome(level: .prominent)
+        .detailGlassCapsuleChrome(tint: heroGlassTint, level: .prominent)
         .padding(.trailing, isLast ? 0 : 8)
     }
 
@@ -1243,7 +1298,7 @@ struct WallpaperDetailSheet: View {
     private var detailDisclosureIndicator: some View {
         Image(systemName: "chevron.right")
             .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(.white.opacity(0.32))
+            .foregroundStyle(heroForeground.opacity(0.32))
     }
 
     // MARK: - 壁纸详情 API 获取（补充 uploader 数据）

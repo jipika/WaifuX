@@ -22,6 +22,7 @@ private struct EdgeToEdgeContainer<Content: View>: View {
 @MainActor
 private final class MainContentNavigationState: ObservableObject {
     @Published var selectedTab: MainTab = .home
+    @Published var isHomeChromeHidden = false
     @Published var selectedWallpaper: Wallpaper?
     @Published var selectedMedia: MediaItem?
     @Published var selectedAnime: AnimeSearchResult?
@@ -31,6 +32,9 @@ private final class MainContentNavigationState: ObservableObject {
     @Published var libraryWallpaperContext: [Wallpaper] = []
     @Published var libraryMediaContext: [MediaItem] = []
 
+    private var mouseMovementMonitor: Any?
+    private var mouseRevealOrigin: NSPoint?
+
     func binding<Value>(for keyPath: ReferenceWritableKeyPath<MainContentNavigationState, Value>) -> Binding<Value> {
         Binding(
             get: { self[keyPath: keyPath] },
@@ -39,6 +43,8 @@ private final class MainContentNavigationState: ObservableObject {
     }
 
     func resetForMemoryRelease() {
+        isHomeChromeHidden = false
+        mouseRevealOrigin = nil
         selectedWallpaper = nil
         selectedMedia = nil
         selectedAnime = nil
@@ -48,6 +54,36 @@ private final class MainContentNavigationState: ObservableObject {
         libraryWallpaperContext.removeAll()
         libraryMediaContext.removeAll()
         selectedTab = .home
+    }
+
+    func startMouseMovementMonitoring() {
+        guard mouseMovementMonitor == nil else { return }
+        mouseMovementMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            let location = event.locationInWindow
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isHomeChromeHidden else {
+                    self.mouseRevealOrigin = nil
+                    return
+                }
+                guard let origin = self.mouseRevealOrigin else {
+                    self.mouseRevealOrigin = location
+                    return
+                }
+                let dx = location.x - origin.x
+                let dy = location.y - origin.y
+                guard (dx * dx + dy * dy) >= 576 else { return }
+                self.isHomeChromeHidden = false
+                self.mouseRevealOrigin = nil
+            }
+            return event
+        }
+    }
+
+    func stopMouseMovementMonitoring() {
+        guard let mouseMovementMonitor else { return }
+        NSEvent.removeMonitor(mouseMovementMonitor)
+        self.mouseMovementMonitor = nil
     }
 }
 
@@ -177,6 +213,9 @@ private struct HomeTabPage: View {
             mediaViewModel: mediaViewModel,
             selectedWallpaper: navigationState.binding(for: \.selectedWallpaper),
             selectedMedia: navigationState.binding(for: \.selectedMedia),
+            isHomeChromeHidden: navigationState.binding(for: \.isHomeChromeHidden),
+            onOpenWallpapers: { navigationState.selectedTab = .wallpaperExplore },
+            onOpenMedia: { navigationState.selectedTab = .mediaExplore },
             isTabActive: navigationState.selectedTab == .home
         )
         .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .home)
@@ -303,13 +342,16 @@ struct ContentView: View {
             AppResponsivenessMonitor.noteDetailDepth(detailPath.count)
             AppResponsivenessMonitor.noteScenePhase("contentViewVisible")
             registerDetailBackSwipeHandler()
+            navigationState.startMouseMovementMonitoring()
             consumePendingWallpaperDetailRequest()
         }
         .onDisappear {
             unregisterDetailBackSwipeHandler()
+            navigationState.stopMouseMovementMonitoring()
         }
         .onChange(of: navigationState.selectedTab) { _, tab in
             AppResponsivenessMonitor.noteTabChange(tab.title)
+            navigationState.isHomeChromeHidden = false
         }
         .onChange(of: detailPath.count) { _, depth in
             AppResponsivenessMonitor.noteDetailDepth(depth)
@@ -462,6 +504,7 @@ struct ContentView: View {
             .environment(\.mainTopBarContentPadding, MainTopBarLayout.legacyContentTopPadding)
             .overlay(alignment: .top) {
                 topNavigationBar
+                    .animation(.easeOut(duration: 0.18), value: navigationState.isHomeChromeHidden)
             }
     }
 
@@ -497,6 +540,7 @@ struct ContentView: View {
     private var topNavigationBar: some View {
         TopNavigationBar(
             selectedTab: navigationState.binding(for: \.selectedTab),
+            isChromeHidden: navigationState.selectedTab == .home && navigationState.isHomeChromeHidden,
             onOpenSettings: { openSettingsWindow() },
             onGuessYouLike: { guessYouLikeVM.show() },
             onClose: { hideMainWindow() },

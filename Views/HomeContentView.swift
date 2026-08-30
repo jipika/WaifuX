@@ -120,6 +120,9 @@ struct HomeContentView: View {
     @ObservedObject var mediaViewModel: MediaExploreViewModel
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
+    @Binding var isHomeChromeHidden: Bool
+    let onOpenWallpapers: () -> Void
+    let onOpenMedia: () -> Void
     /// 为 false 时不挂载重 UI（非当前 Tab），避免五 Tab 同时跑 ScrollView/轮播
     var isTabActive: Bool = true
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
@@ -415,6 +418,9 @@ struct HomeContentView: View {
         .frame(width: width, height: height, alignment: .leading)
         .clipped()
         .contentShape(Rectangle())
+        .onTapGesture {
+            isHomeChromeHidden.toggle()
+        }
         .simultaneousGesture(
             heroCarouselDragGesture(width: width)
         )
@@ -433,7 +439,8 @@ struct HomeContentView: View {
                     atmosphereSecondary: atmosphereController.secondary,
                     onSelect: { wallpaper in
                         selectedWallpaper = wallpaper
-                    }
+                    },
+                    onSeeAll: onOpenWallpapers
                 )
             }
 
@@ -447,7 +454,8 @@ struct HomeContentView: View {
                     atmosphereSecondary: atmosphereController.secondary,
                     onSelect: { item in
                         selectedMedia = item
-                    }
+                    },
+                    onSeeAll: onOpenMedia
                 )
             }
         }
@@ -1198,6 +1206,8 @@ private struct HomeShelfSection: View {
     let atmospherePrimary: Color
     let atmosphereSecondary: Color
     let onSelect: (Wallpaper) -> Void
+    let onSeeAll: () -> Void
+    @State private var isSeeAllHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1206,14 +1216,10 @@ private struct HomeShelfSection: View {
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
 
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.54))
-                    .frame(width: 22, height: 22)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.06))
-                    )
+                HomeSectionSeeAllButton(
+                    isHovered: $isSeeAllHovered,
+                    action: onSeeAll
+                )
 
                 Spacer()
             }
@@ -1506,6 +1512,8 @@ private struct HomeMediaSection: View {
     let atmospherePrimary: Color
     let atmosphereSecondary: Color
     let onSelect: (MediaItem) -> Void
+    let onSeeAll: () -> Void
+    @State private var isSeeAllHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1514,14 +1522,10 @@ private struct HomeMediaSection: View {
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
 
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.54))
-                    .frame(width: 22, height: 22)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.06))
-                    )
+                HomeSectionSeeAllButton(
+                    isHovered: $isSeeAllHovered,
+                    action: onSeeAll
+                )
 
                 Spacer()
             }
@@ -1557,6 +1561,39 @@ private struct HomeMediaSection: View {
                 .frame(height: 158)
             }
         }
+    }
+}
+
+/// Stable hit target for the small trailing button used by home shelves.
+/// The hit shape lives inside the Button label so it remains reliable in a ScrollView.
+private struct HomeSectionSeeAllButton: View {
+    @Binding var isHovered: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .liquidGlassSurface(
+                        .regular,
+                        tint: Color.white.opacity(isHovered ? 0.12 : 0.04),
+                        in: Circle(),
+                        lightweight: true
+                    )
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(isHovered ? .white : .white.opacity(0.54))
+            }
+            .frame(width: 22, height: 22)
+            // Keep the larger hit target while keeping the visual control compact.
+            .frame(width: 36, height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(t("view.all"))
+        .accessibilityLabel(Text(t("view.all")))
     }
 }
 

@@ -19,6 +19,12 @@ final class ForegroundPrefetchManager {
     ) -> UUID? {
         guard !urls.isEmpty else { return nil }
 
+        // 同一前台场景只保留一组预取，避免连续刷新/分页时累积多个
+        // ImagePrefetcher，并与可见 cell 的请求争抢连接和内存。
+        if let namespace {
+            stop(namespace: namespace)
+        }
+
         let token = UUID()
         let prefetcher = ImagePrefetcher(
             urls: urls,

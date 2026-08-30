@@ -919,8 +919,8 @@ class WallpaperViewModel: ObservableObject {
                 if results.data.isEmpty {
                     errorMessage = t("explore.noResults")
                 } else {
-                    // 预加载前几张图片
-                    preloadImages(for: Array(results.data.prefix(4)))
+                    // 只预取极少量首屏图片；可见 cell 自身负责其余图片的懒加载。
+                    preloadImages(for: Array(results.data.prefix(2)))
                 }
             } catch is CancellationError {
                 isLoading = false
@@ -1065,6 +1065,11 @@ class WallpaperViewModel: ObservableObject {
                 let nextPage = currentPage + 1
                 let results: WallpaperSearchResponse
 
+                // 先等待正在进行的下一页预取。否则预取尚未完成时触底会再次请求同一页。
+                if let preloadTask {
+                    await preloadTask.value
+                }
+
                 // 检查是否有预加载的数据
                 if let cached = preloadedResponse,
                    cached.meta.currentPage == nextPage,
@@ -1107,8 +1112,8 @@ class WallpaperViewModel: ObservableObject {
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
-                // 预加载新加载的图片
-                preloadImages(for: Array(appended.prefix(2)))
+                // 只预取一张后续图片，其余由可见 cell 按需加载。
+                preloadImages(for: Array(appended.prefix(1)))
 
                 // 预加载下一页数据
                 if hasMorePages {
@@ -1206,7 +1211,8 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 图片预加载
     func preloadImages(for wallpapers: [Wallpaper]) {
-        let urls = wallpapers.compactMap(\.gridPreviewURL)
+        // 预取只服务于紧邻视口的少量项目；完整列表由 NSCollectionView 的可见 cell 懒加载。
+        let urls = Array(wallpapers.compactMap(\.gridPreviewURL).prefix(2))
         let targetSize = CGSize(width: 512, height: 512)
         ForegroundPrefetchManager.shared.start(
             urls: urls,

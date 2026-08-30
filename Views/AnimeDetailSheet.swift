@@ -32,6 +32,8 @@ struct AnimeDetailSheet: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
+    @State private var backdropAverageLuminance: Double?
+    @State private var coverAverageLuminance: Double?
 
     // MARK: - 键盘快捷键
     @State private var keyboardMonitor: Any?
@@ -51,6 +53,75 @@ struct AnimeDetailSheet: View {
     // 封面图 URL（备用）
     private var coverImageURL: URL? {
         anime.coverURL.flatMap { URL(string: $0) }
+    }
+
+    private var heroAverageLuminance: Double? {
+        if backdropURL != nil {
+            return backdropAverageLuminance ?? coverAverageLuminance
+        }
+        return coverAverageLuminance
+    }
+
+    private var usesDarkHeroForeground: Bool {
+        (heroAverageLuminance ?? 0) > 0.58
+    }
+
+    private var heroForeground: Color {
+        usesDarkHeroForeground ? Color(hex: "17171B") : .white
+    }
+
+    private var heroSecondaryForeground: Color {
+        heroForeground.opacity(usesDarkHeroForeground ? 0.62 : 0.60)
+    }
+
+    private var heroGlassTint: Color? {
+        usesDarkHeroForeground ? Color.white.opacity(0.34) : nil
+    }
+
+    private static func averageLuminance(from image: NSImage) -> Double? {
+        let sampleSize = 48
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: sampleSize,
+            pixelsHigh: sampleSize,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let data = bitmap.bitmapData else {
+            return nil
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: sampleSize, height: sampleSize),
+            from: .zero,
+            operation: .copy,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        let bytesPerPixel = max(bitmap.bitsPerPixel / 8, 4)
+        var total: Double = 0
+        var count: Double = 0
+
+        for y in 0..<sampleSize {
+            for x in 0..<sampleSize {
+                let offset = y * bitmap.bytesPerRow + x * bytesPerPixel
+                guard offset + 2 < bitmap.bytesPerRow * sampleSize else { continue }
+                let red = Double(data[offset]) / 255
+                let green = Double(data[offset + 1]) / 255
+                let blue = Double(data[offset + 2]) / 255
+                total += 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                count += 1
+            }
+        }
+
+        return count > 0 ? total / count : nil
     }
 
     var body: some View {
@@ -228,6 +299,7 @@ struct AnimeDetailSheet: View {
 
             await MainActor.run {
                 self.backdropURL = url
+                self.backdropAverageLuminance = nil
                 self.isLoadingBackdrop = false
 
                 // 图片加载状态会在 AsyncImage 的 onAppear 中设置
@@ -290,7 +362,8 @@ struct AnimeDetailSheet: View {
             KFImage(backdropURL.flatMap { URL(string: $0) })
                 .cacheMemoryOnly(false)
                 .fade(duration: 0.3)
-                .onSuccess { _ in
+                .onSuccess { result in
+                    backdropAverageLuminance = Self.averageLuminance(from: result.image)
                     withAnimation(.easeInOut(duration: 0.3)) {
                         isImageLoaded = true
                     }
@@ -389,6 +462,7 @@ struct AnimeDetailSheet: View {
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
                     sharedPortraitImage = result.image
+                    coverAverageLuminance = Self.averageLuminance(from: result.image)
                     isImageLoaded = true
                 }
             } catch {
@@ -425,6 +499,7 @@ struct AnimeDetailSheet: View {
                         .lineLimit(2)
                         .frame(maxWidth: 980)
                         .detailGlassTitleChrome()
+                        .foregroundStyle(heroForeground)
 
                     HStack(spacing: 0) {
                         metadataCapsules
@@ -438,6 +513,21 @@ struct AnimeDetailSheet: View {
             }
             .frame(maxWidth: 920)
             .frame(maxWidth: .infinity)
+            .background {
+                RadialGradient(
+                    colors: [
+                        Color.black.opacity(usesDarkHeroForeground ? 0.10 : 0.06),
+                        Color.black.opacity(usesDarkHeroForeground ? 0.03 : 0.01),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 40,
+                    endRadius: 560
+                )
+                .frame(height: 430)
+                .blur(radius: 18)
+                .allowsHitTesting(false)
+            }
         }
         .frame(width: viewportWidth)
         .scaleEffect(x: 1, y: scaleY, anchor: .center)
@@ -524,11 +614,11 @@ struct AnimeDetailSheet: View {
     private var detailCategoryBadge: some View {
         Text("Anime · \(anime.typeDisplayName)")
             .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(heroForeground.opacity(0.85))
             .tracking(2)
             .padding(.horizontal, 16)
             .frame(height: 34)
-            .detailGlassCapsuleChrome(level: .prominent)
+            .detailGlassCapsuleChrome(tint: heroGlassTint, level: .prominent)
     }
 
     // MARK: - 元数据胶囊
@@ -566,14 +656,14 @@ struct AnimeDetailSheet: View {
         HStack(spacing: 4) {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(heroSecondaryForeground)
             Text(value)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(heroForeground.opacity(0.9))
         }
         .padding(.horizontal, 14)
         .frame(height: 32)
-        .detailGlassCapsuleChrome(level: .prominent)
+        .detailGlassCapsuleChrome(tint: heroGlassTint, level: .prominent)
         .padding(.trailing, isLast ? 0 : 8)
     }
 
@@ -589,10 +679,10 @@ struct AnimeDetailSheet: View {
                 } label: {
                     Image(systemName: viewModel.isFavorite ? "heart.fill" : "heart")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(viewModel.isFavorite ? Color(hex: "FF5A7D") : .white)
+                        .foregroundStyle(viewModel.isFavorite ? Color(hex: "FF5A7D") : heroForeground)
                         .frame(width: 42, height: 42)
                         .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                        .detailGlassCircleChrome(tint: heroGlassTint)
                 }
                 .buttonStyle(.plain)
             }
@@ -608,11 +698,11 @@ struct AnimeDetailSheet: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(heroForeground)
                 .padding(.horizontal, 28)
                 .frame(height: 46)
                 .contentShape(Capsule())
-                .detailPrimaryGlassButtonChrome()
+                .detailPrimaryGlassButtonChrome(tint: heroGlassTint)
             }
             .buttonStyle(.plain)
 
@@ -622,10 +712,10 @@ struct AnimeDetailSheet: View {
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(heroForeground)
                         .frame(width: 42, height: 42)
                         .contentShape(Circle())
-                        .detailGlassCircleChrome()
+                        .detailGlassCircleChrome(tint: heroGlassTint)
                 }
                 .buttonStyle(.plain)
 

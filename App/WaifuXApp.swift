@@ -173,6 +173,12 @@ final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
         ])
     }
 
+    // Let the first click both activate an inactive window and reach SwiftUI
+    // controls. This matches standard macOS control behavior for the main UI.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
@@ -243,7 +249,9 @@ struct WaifuXApp {
         // 下载配置
         let downloader = KingfisherManager.shared.downloader
         let configuration = downloader.sessionConfiguration
-        configuration.httpMaximumConnectionsPerHost = 10
+        // 探索页的可见 cell、图片预取和分页请求共享该下载器；限制并发，
+        // 避免快速滚动时大量请求同时占用连接和解码内存。
+        configuration.httpMaximumConnectionsPerHost = 6
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 180
