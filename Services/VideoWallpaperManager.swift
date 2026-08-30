@@ -335,6 +335,29 @@ final class VideoWallpaperManager: ObservableObject {
     /// 延迟释放的工作项，用于取消上一次未执行的清理，避免快速切换时多组 AVPlayer 并发驻留
     private var pendingPlayerCleanups: [DispatchWorkItem] = []
     private var pendingWindowCleanups: [DispatchWorkItem] = []
+    /// 播放器泄漏审计：弱引用登记每条管线，定期对照活跃集合。
+    /// 线上实测：换壁纸时散落的强引用（transitionRetainedPlayers / KVO token /
+    /// fadeInTimeouts 工作项等）任一漏清理都会让旧管线永生——用户机 14.7 小时
+    /// 堆积 84 条打开的视频文件 ≈ 9.5GB。审计负责兜底：
+    /// 1) 转场保留超过 transitionRetentionMaxAge → 强制解除（正常只需几秒）；
+    /// 2) 不在任何活跃集合超过 playerLeakStaleGrace → 清 items 摘层，
+    ///    释放解码缓冲与文件句柄（对象即使仍被未知引用钉住，大头内存也会归零）。
+    /// 清 items 与摘层分两步，规避 MediaToolbox 后台异步清理窗口的 SIGSEGV
+    ///（同 teardownAll 注释的延迟释放策略）。
+    private struct LeakAuditEntry {
+        weak var player: AVQueuePlayer?
+        var looper: AVPlayerLooper?
+        var createdAt: Date
+        var hammerAttempted: Bool
+    }
+    private var playerLeakAuditEntries: [ObjectIdentifier: LeakAuditEntry] = [:]
+    private var leakedPipelineCount = 0
+    private var playerLeakAuditTimer: DispatchSourceTimer?
+    /// 转场保留的开始时间：正常几秒内解除，超龄即视为被交叠切换作废。
+    private var transitionRetentionStartedAt: [ObjectIdentifier: Date] = [:]
+    private let playerLeakAuditInterval: TimeInterval = 10.0
+    private let playerLeakStaleGrace: TimeInterval = 30.0
+    private let transitionRetentionMaxAge: TimeInterval = 20.0
     /// 启动时等待视频首帧就绪的 KVO 观察器（key: screenID）
     private var playerItemObservers: [String: NSKeyValueObservation] = [:]
     /// KVO 回调对应的稳定令牌，避免旧回调清理掉新的淡入流程。
@@ -5193,6 +5216,8 @@ final class VideoWallpaperManager: ObservableObject {
         player.replaceCurrentItem(with: nil)
         anchoredVideoPathByPlayerID.removeValue(forKey: playerID)
         sourceVideoItemByPlayerID.removeValue(forKey: playerID)
+        transitionRetentionStartedAt.removeValue(forKey: playerID)
+        playerLeakAuditEntries.removeValue(forKey: playerID)
         retainPlayersTemporarily([player])
     }
 
@@ -5221,6 +5246,100 @@ final class VideoWallpaperManager: ObservableObject {
         // 这里不 cancel 全部 cleanup（避免破坏 0.5s SIGSEGV 防护），仅打日志便于确认。
         if !pendingPlayerCleanups.isEmpty {
             NSLog("[VideoWallpaperManager] purgeOrphanedVideoPlayers(\(reason)): pendingCleanups=\(pendingPlayerCleanups.count) livePlayers=\(live.count)")
+        }
+    }
+
+    // MARK: - 播放器泄漏审计
+
+    private func registerPlayerForLeakAudit(_ player: AVQueuePlayer, looper: AVPlayerLooper?) {
+        playerLeakAuditEntries[ObjectIdentifier(player)] = LeakAuditEntry(
+            player: player, looper: looper, createdAt: Date(), hammerAttempted: false)
+        startPlayerLeakAuditTimerIfNeeded()
+    }
+
+    private func startPlayerLeakAuditTimerIfNeeded() {
+        guard playerLeakAuditTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + playerLeakAuditInterval, repeating: playerLeakAuditInterval)
+        timer.setEventHandler { [weak self] in
+            self?.runPlayerLeakAudit()
+        }
+        timer.resume()
+        playerLeakAuditTimer = timer
+    }
+
+    /// 仍被任何机制合法持有的管线：正牌引用、共享解码、待交接、转场保留。
+    private func liveLeakAuditPlayerIDs() -> Set<ObjectIdentifier> {
+        var live = Set<ObjectIdentifier>()
+        for player in players.values { live.insert(ObjectIdentifier(player)) }
+        if let sharedVideoPlayer { live.insert(ObjectIdentifier(sharedVideoPlayer)) }
+        if let pendingGlobalTransitionPlayer { live.insert(ObjectIdentifier(pendingGlobalTransitionPlayer)) }
+        for player in transitionRetainedPlayers.values { live.insert(ObjectIdentifier(player)) }
+        return live
+    }
+
+    private func runPlayerLeakAudit() {
+        let now = Date()
+
+        // 1. 转场保留超龄：正常几秒内解除；超龄说明 endPlayerTransitionRetention
+        //    被交叠切换作废了，这条保留会永久钉住旧管线，必须强制解除。
+        //    遍历用快照：循环内的 endPlayerTransitionRetention / dispose 会改原字典。
+        let retentionSnapshot = transitionRetentionStartedAt
+        for (playerID, startedAt) in retentionSnapshot {
+            guard now.timeIntervalSince(startedAt) > transitionRetentionMaxAge else { continue }
+            guard let player = transitionRetainedPlayers[playerID],
+                  ObjectIdentifier(player) == playerID else {
+                transitionRetentionStartedAt.removeValue(forKey: playerID)
+                continue
+            }
+            NSLog("[VideoWallpaperManager] 泄漏审计: 转场保留超龄 %.0fs 强制解除 %@ owners=%@",
+                  now.timeIntervalSince(startedAt), String(describing: playerID),
+                  transitionRetainedPlayerOwners[playerID]?.sorted().joined(separator: ",") ?? "")
+            for screenID in transitionRetainedPlayerOwners[playerID] ?? [] {
+                endPlayerTransitionRetention(player, for: screenID)
+            }
+            transitionRetentionStartedAt.removeValue(forKey: playerID)
+            releasePlayerIfUnreferenced(player, looper: playerLeakAuditEntries[playerID]?.looper)
+        }
+
+        // 2. 滞留管线：不在任何活跃集合且超过宽限期 → 清 items 释放解码缓冲与文件句柄，
+        //    再延迟摘层（摘层可能成为最后一个强引用触发 dealloc，避开 SIGSEGV 窗口）。
+        let live = liveLeakAuditPlayerIDs()
+        var staleEntries: [(ObjectIdentifier, LeakAuditEntry)] = []
+        // 快照遍历：循环内会回收已释放条目（修改原字典）。
+        for (playerID, entry) in playerLeakAuditEntries {
+            if entry.player == nil {
+                playerLeakAuditEntries.removeValue(forKey: playerID)  // 已正常释放，回收登记
+                continue
+            }
+            if live.contains(playerID) || entry.hammerAttempted { continue }
+            if now.timeIntervalSince(entry.createdAt) > playerLeakStaleGrace {
+                staleEntries.append((playerID, entry))
+            }
+        }
+        guard !staleEntries.isEmpty else { return }
+        for (playerID, entry) in staleEntries {
+            guard let player = entry.player else { continue }
+            leakedPipelineCount += 1
+            NSLog("[VideoWallpaperManager] 泄漏审计: 滞留管线强制清空 %@ path=%@ looper=%@ 累计滞留=\(leakedPipelineCount)",
+                  String(describing: playerID),
+                  anchoredVideoPathByPlayerID[playerID] ?? "?",
+                  entry.looper != nil ? "yes" : "no")
+            playerLeakAuditEntries[playerID]?.hammerAttempted = true
+            player.pause()
+            player.rate = 0
+            player.removeAllItems()
+            player.replaceCurrentItem(with: nil)
+            entry.looper?.disableLooping()
+            playerLeakAuditEntries[playerID]?.looper = nil
+            sharedFollowerAttachmentTasks.removeValue(forKey: playerID)?.cancel()
+            anchoredVideoPathByPlayerID.removeValue(forKey: playerID)
+            sourceVideoItemByPlayerID.removeValue(forKey: playerID)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self, weak player] in
+                guard let self, let player else { return }
+                self.detachPlayerFromAllLayers(player)
+                self.playerLeakAuditEntries.removeValue(forKey: ObjectIdentifier(player))
+            }
         }
     }
 
@@ -8263,6 +8382,7 @@ final class VideoWallpaperManager: ObservableObject {
         let id = ObjectIdentifier(player)
         transitionRetainedPlayers[id] = player
         transitionRetainedPlayerOwners[id, default: []].insert(screenID)
+        transitionRetentionStartedAt[id] = Date()
     }
 
     private func endPlayerTransitionRetention(_ player: AVQueuePlayer, for screenID: String) {
@@ -8271,6 +8391,7 @@ final class VideoWallpaperManager: ObservableObject {
         if transitionRetainedPlayerOwners[id]?.isEmpty != false {
             transitionRetainedPlayerOwners.removeValue(forKey: id)
             transitionRetainedPlayers.removeValue(forKey: id)
+            transitionRetentionStartedAt.removeValue(forKey: id)
         }
     }
 
@@ -8440,6 +8561,7 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             queuePlayer.insert(playerItem, after: nil)
         }
+        registerPlayerForLeakAudit(queuePlayer, looper: looper)
 
         let playerID = ObjectIdentifier(queuePlayer)
         anchoredVideoPathByPlayerID[playerID] = videoURL.standardizedFileURL.path

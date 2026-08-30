@@ -1764,8 +1764,10 @@ class WallpaperViewModel: ObservableObject {
             VideoWallpaperManager.shared.clearExtensionState()
         }
 
-        // macOS 26+：动态锁屏启用时，不走系统静态锁屏写入。
-        // 改为把静态图源直接部署给 WaifuX 显示器实例，避免覆盖用户已选择的容器。
+        // macOS 26+：动态锁屏启用时，不走系统静态壁纸写入（setDesktopImageURL 会
+        // 覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例）。锁屏侧把静态图源直接
+        // 部署给 WaifuX 显示器实例；桌面侧改走独立静态图 overlay 窗口显示，
+        // 保证静态壁纸在每块屏上都真实可见。
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
             for screen in screens {
                 guard let displayID = (screen.deviceDescription[
@@ -1784,10 +1786,21 @@ class WallpaperViewModel: ObservableObject {
                     return
                 }
             }
+            // 桌面：不写系统壁纸，用独立 overlay 显示（与系统壁纸同步关闭路径一致）
+            for screen in screens {
+                let resolvedImageURL = imageURLByScreen[screen.wallpaperScreenIdentifier] ?? imageURL
+                await StaticImageWallpaperOverlayManager.shared.showPrepared(
+                    imageURL: resolvedImageURL,
+                    for: screen
+                )
+                guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(
+                    transitionToken
+                ) else {
+                    return
+                }
+            }
             StaticWallpaperGrainManager.shared.updateOverlay()
-            // 互斥：清除可能残留的静态图 overlay
-            StaticImageWallpaperOverlayManager.shared.clearState()
-            print("[WallpaperViewModel] 🔒 动态锁屏已启用，已将静态图同步到 WaifuX 锁屏/桌面实例")
+            print("[WallpaperViewModel] 🔒 动态锁屏已启用，静态图已同步到 WaifuX 锁屏实例 + 桌面 overlay")
             await finishStaticWallpaperTransitionIfNeeded(
                 screens: screens,
                 preservesDynamicWallpaperUntilReady: preservesDynamicWallpaperUntilReady,
@@ -1905,8 +1918,9 @@ class WallpaperViewModel: ObservableObject {
                 LockScreenWallpaperService.shared.clearMirroringSourceCache()
             }
 
-            // macOS 26+：动态锁屏启用时，不走系统静态锁屏写入。
-            // 改为把静态图源直接部署给该显示器的 WaifuX 实例。
+            // macOS 26+：动态锁屏启用时，不走系统静态壁纸写入（会覆盖用户手动
+            // 选择的锁屏实例）。锁屏侧部署给该显示器的 WaifuX 实例；桌面侧走
+            // 独立静态图 overlay 显示，保证目标屏真实可见。
             if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
                 if let displayID = (targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value {
                     try await LockScreenWallpaperService.shared.cacheStaticImageSource(
@@ -1918,10 +1932,17 @@ class WallpaperViewModel: ObservableObject {
                     ) else {
                         return
                     }
+                    await StaticImageWallpaperOverlayManager.shared.showPrepared(
+                        imageURL: resolvedImageURL,
+                        for: targetScreen
+                    )
+                    guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(
+                        transitionToken
+                    ) else {
+                        return
+                    }
                     StaticWallpaperGrainManager.shared.updateOverlay()
-                    // 互斥：清除可能残留的静态图 overlay
-                    StaticImageWallpaperOverlayManager.shared.clearState()
-                    print("[WallpaperViewModel] 🔒 动态锁屏已启用，已将单屏静态图同步到 WaifuX 实例")
+                    print("[WallpaperViewModel] 🔒 动态锁屏已启用，单屏静态图已同步到 WaifuX 实例 + 桌面 overlay")
                 }
                 await finishStaticWallpaperTransitionIfNeeded(
                     screens: [targetScreen],

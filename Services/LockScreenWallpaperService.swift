@@ -465,8 +465,11 @@ final class LockScreenWallpaperService: ObservableObject {
 
         currentMirroringSourcePath = destURL.path
 
-        // 先生成缩略图，再同步实例目录，确保封面路径在新目录中立即生效
-        generateThumbnail(for: destURL, videoID: videoID)
+        // 先生成缩略图，再同步实例目录，确保封面路径在新目录中立即生效。
+        // 缩略图解码在后台线程执行，避免阻塞 MainActor。
+        await Task.detached(priority: .userInitiated) {
+            Self.generateThumbnail(in: container, videoURL: destURL, videoID: videoID)
+        }.value
         // 更新显示器实例目录（此时缩略图已就绪，posterThumbnailPath 能查到最新文件）
         syncInstanceCatalogToSocketServer(notify: notify)
         WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: videoID, videoURL: destURL)
@@ -510,17 +513,27 @@ final class LockScreenWallpaperService: ObservableObject {
         let imageDir = container.appendingPathComponent(imageDirName, isDirectory: true)
         try FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
 
-        let preparedImage = prepareStaticLockScreenImageData(originalImageData, sourceURL: imageURL)
+        // 全图解码 + 黑边像素扫描 + 可能的重编码非常重（5K PNG 可达数秒），
+        // 放到后台线程执行，避免阻塞 MainActor 卡住「设为壁纸」热路径。
+        let sourceURLForPrepare = imageURL
+        let preparedImage = await Task.detached(priority: .userInitiated) {
+            Self.prepareStaticLockScreenImageData(originalImageData, sourceURL: sourceURLForPrepare)
+        }.value
         let imageData = preparedImage.data
         let ext = preparedImage.fileExtension
         var lastPath: String?
         var deployedImagePaths: [UInt32: String] = [:]
+        let thumbDir = thumbnailDirectory()
         for displayID in displayIDs {
             let sourceID = Self.displayInstanceID(displayID)
             let destURL = imageDir.appendingPathComponent("\(sourceID).\(ext)")
             cleanupCachedImages(sourceID: sourceID, in: imageDir)
             try imageData.write(to: destURL, options: .atomic)
-            writeThumbnail(imageData: imageData, thumbnailID: sourceID)
+            if let thumbDir {
+                await Task.detached(priority: .userInitiated) {
+                    Self.writeThumbnail(imageData: imageData, thumbnailID: sourceID, thumbDir: thumbDir)
+                }.value
+            }
             WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: sourceID, videoURL: destURL)
             lastPath = destURL.path
             deployedImagePaths[displayID] = destURL.path
@@ -763,25 +776,27 @@ final class LockScreenWallpaperService: ObservableObject {
         }
     }
 
-    private func prepareStaticLockScreenImageData(_ data: Data, sourceURL: URL) -> (data: Data, fileExtension: String) {
-        let fallbackExtension = normalizedImageExtension(from: sourceURL)
+    // MARK: - 纯图像处理（nonisolated：可从后台线程调用，不触碰任何实例状态）
+
+    private nonisolated static func prepareStaticLockScreenImageData(_ data: Data, sourceURL: URL) -> (data: Data, fileExtension: String) {
+        let fallbackExtension = Self.normalizedImageExtension(from: sourceURL)
         guard UserDefaults.standard.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              let cropRect = detectBlackBorderCropRect(in: image) else {
+              let cropRect = Self.detectBlackBorderCropRect(in: image) else {
             return (data, fallbackExtension)
         }
 
         guard let croppedImage = image.cropping(to: cropRect),
-              let encodedData = encodeLockScreenImage(croppedImage, preferredExtension: fallbackExtension) else {
+              let encodedData = Self.encodeLockScreenImage(croppedImage, preferredExtension: fallbackExtension) else {
             return (data, fallbackExtension)
         }
 
         print("[LockScreenWallpaper] 🖼️ 静态锁屏图已自动去黑边 crop=\(Int(cropRect.width))x\(Int(cropRect.height))")
-        return (encodedData, normalizedOutputExtension(fallbackExtension))
+        return (encodedData, Self.normalizedOutputExtension(fallbackExtension))
     }
 
-    private func encodeLockScreenImage(_ image: CGImage, preferredExtension: String) -> Data? {
+    private nonisolated static func encodeLockScreenImage(_ image: CGImage, preferredExtension: String) -> Data? {
         let outputUTI: CFString
         switch preferredExtension.lowercased() {
         case "jpg", "jpeg":
@@ -805,7 +820,7 @@ final class LockScreenWallpaperService: ObservableObject {
         return data as Data
     }
 
-    private func normalizedOutputExtension(_ preferredExtension: String) -> String {
+    private nonisolated static func normalizedOutputExtension(_ preferredExtension: String) -> String {
         switch preferredExtension.lowercased() {
         case "jpg", "jpeg":
             return "jpg"
@@ -814,7 +829,7 @@ final class LockScreenWallpaperService: ObservableObject {
         }
     }
 
-    private func detectBlackBorderCropRect(in image: CGImage) -> CGRect? {
+    private nonisolated static func detectBlackBorderCropRect(in image: CGImage) -> CGRect? {
         let width = image.width
         let height = image.height
         guard width > 16, height > 16 else { return nil }
@@ -1044,9 +1059,9 @@ final class LockScreenWallpaperService: ObservableObject {
 
     // MARK: - 缩略图
 
-    /// 生成视频的 JPEG 缩略图并写入共享容器供扩展读取
-    private func generateThumbnail(for videoURL: URL, videoID: String) {
-        guard let container = sharedContainerURL else { return }
+    /// 生成视频的 JPEG 缩略图并写入共享容器供扩展读取。
+    /// nonisolated：AVAssetImageGenerator 同步解码整帧很重，由调用方放到后台线程执行。
+    private nonisolated static func generateThumbnail(in container: URL, videoURL: URL, videoID: String) {
         let thumbDir = container.appendingPathComponent("WallpaperCache/thumbnails")
         try? FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
         let thumbURL = thumbDir.appendingPathComponent("\(videoID).jpg")
@@ -1096,7 +1111,7 @@ final class LockScreenWallpaperService: ObservableObject {
         }
     }
 
-    private func normalizedImageExtension(from url: URL) -> String {
+    private nonisolated static func normalizedImageExtension(from url: URL) -> String {
         let ext = url.pathExtension.lowercased()
         if ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"].contains(ext) {
             return ext == "jpeg" ? "jpg" : ext
@@ -1117,12 +1132,11 @@ final class LockScreenWallpaperService: ObservableObject {
         return thumbDir
     }
 
-    private func writeThumbnail(imageData: Data, thumbnailID: String) {
-        guard let thumbDir = thumbnailDirectory(),
-              let image = NSImage(data: imageData),
+    private nonisolated static func writeThumbnail(imageData: Data, thumbnailID: String, thumbDir: URL) {
+        guard let image = NSImage(data: imageData),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let dest = CGImageDestinationCreateWithURL(
-                versionedThumbnailURL(prefix: thumbnailID, in: thumbDir) as CFURL,
+                Self.versionedThumbnailURL(prefix: thumbnailID, in: thumbDir) as CFURL,
                 "public.jpeg" as CFString,
                 1,
                 nil
@@ -1130,7 +1144,7 @@ final class LockScreenWallpaperService: ObservableObject {
             print("[LockScreenWallpaper] ⚠️ 静态图缩略图生成失败: \(thumbnailID)")
             return
         }
-        cleanupCachedThumbnails(prefix: thumbnailID, in: thumbDir)
+        Self.cleanupCachedThumbnails(prefix: thumbnailID, in: thumbDir)
         CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
         if CGImageDestinationFinalize(dest) {
             print("[LockScreenWallpaper] ✅ 静态图缩略图已写入: \(thumbnailID)")
@@ -1144,8 +1158,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
         for displayID in displayIDs {
             let prefix = Self.displayInstanceID(displayID)
-            cleanupCachedThumbnails(prefix: prefix, in: thumbDir)
-            let destURL = versionedThumbnailURL(prefix: prefix, in: thumbDir)
+            Self.cleanupCachedThumbnails(prefix: prefix, in: thumbDir)
+            let destURL = Self.versionedThumbnailURL(prefix: prefix, in: thumbDir)
             do {
                 try FileManager.default.copyItem(at: sourceURL, to: destURL)
                 print("[LockScreenWallpaper] ✅ 已刷新显示器实例缩略图: \(destURL.lastPathComponent)")
@@ -1155,13 +1169,13 @@ final class LockScreenWallpaperService: ObservableObject {
         }
     }
 
-    private func versionedThumbnailURL(prefix: String, in thumbDir: URL) -> URL {
+    private nonisolated static func versionedThumbnailURL(prefix: String, in thumbDir: URL) -> URL {
         let milliseconds = Int(Date().timeIntervalSince1970 * 1000)
         let suffix = UUID().uuidString.prefix(8)
         return thumbDir.appendingPathComponent("\(prefix)-\(milliseconds)-\(suffix).jpg")
     }
 
-    private func cleanupCachedThumbnails(prefix: String, in thumbDir: URL) {
+    private nonisolated static func cleanupCachedThumbnails(prefix: String, in thumbDir: URL) {
         guard let files = try? FileManager.default.contentsOfDirectory(at: thumbDir, includingPropertiesForKeys: nil) else {
             return
         }
@@ -1177,7 +1191,7 @@ final class LockScreenWallpaperService: ObservableObject {
         ) else {
             return nil
         }
-        let matches = files.filter { isThumbnail($0, matching: prefix) }
+        let matches = files.filter { Self.isThumbnail($0, matching: prefix) }
         let latest = matches.max { lhs, rhs in
             let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -1189,7 +1203,7 @@ final class LockScreenWallpaperService: ObservableObject {
         return latest?.path
     }
 
-    private func isThumbnail(_ url: URL, matching prefix: String) -> Bool {
+    private nonisolated static func isThumbnail(_ url: URL, matching prefix: String) -> Bool {
         guard url.pathExtension.lowercased() == "jpg" else { return false }
         let name = url.deletingPathExtension().lastPathComponent
         return name == prefix || name.hasPrefix("\(prefix)-")

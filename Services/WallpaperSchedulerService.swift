@@ -60,6 +60,10 @@ class WallpaperSchedulerService: ObservableObject {
     private let minimumTimerDelay: TimeInterval = 0.25
     private let scheduleLeeway: DispatchTimeInterval = .milliseconds(200)
     private var isScreenLocked = false
+    /// 锁屏期间到达的「播完即换」事件（观察者已把旧视频 pause+seek(0)）。
+    /// screenIsUnlocked 分布式通知偶发丢失时 isScreenLocked 会卡死，
+    /// 这些事件解锁后由 drainPendingOnEndSwitches 重放，避免该屏永远停在封面帧。
+    private var pendingOnEndSwitchScreenIDs: Set<String> = []
     private var lastUnlockSwitchTime: Date?
     private var globalRotationTask: Task<Void, Never>?
     /// A manual next request must not be lost when a timed/on-end global
@@ -129,6 +133,16 @@ class WallpaperSchedulerService: ObservableObject {
             self,
             selector: #selector(handleVideoPlaybackEnded(_:)),
             name: Self.videoPlaybackEndedNotification,
+            object: nil
+        )
+        // LockScreenWallpaperService 的播放状态（进程内通知，带唤醒/解锁后的
+        // session 校正）。com.apple.screenIsUnlocked 分布式通知偶发丢失会让
+        // 本地 isScreenLocked 永久卡死（定时器被取消、on-end 事件全被丢弃），
+        // 这里订阅校正后的状态作为自愈来源。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleLockScreenPlaybackStateDidChange(_:)),
+            name: LockScreenWallpaperService.playbackStateNotification,
             object: nil
         )
     }
@@ -235,13 +249,15 @@ class WallpaperSchedulerService: ObservableObject {
         preferImmediatePresentation: Bool = false
     ) {
         // 手动“下一张”允许在锁屏标志异常时继续；自动 on-end 仍尊重锁屏状态。
-        // screenIsUnlocked DistributedNotification 偶发丢失时，isScreenLocked 会永久卡死。
+        // screenIsUnlocked DistributedNotification 偶发丢失时，isScreenLocked 会永久卡死，
+        // 因此丢弃的 on-end 事件记入 pendingOnEndSwitchScreenIDs，解锁后重放。
         if isScreenLocked {
             if requiredMode == nil {
                 print("\(logTag) Manual next requested while isScreenLocked=true; force-clearing stuck lock flag")
                 isScreenLocked = false
             } else {
-                print("\(logTag) Skip next wallpaper for \(screenID): screen is locked")
+                print("\(logTag) Skip next wallpaper for \(screenID): screen is locked (queued for replay after unlock)")
+                pendingOnEndSwitchScreenIDs.insert(screenID)
                 return
             }
         }
@@ -404,7 +420,13 @@ class WallpaperSchedulerService: ObservableObject {
             }
             return
         }
-        guard !isScreenLocked || requiredMode == nil else { return }
+        // 锁屏时丢弃的 on-end 事件记入重放队列，解锁后由 drainPendingOnEndSwitches 恢复。
+        guard !isScreenLocked || requiredMode == nil else {
+            if case .onEnd? = requiredMode {
+                pendingOnEndSwitchScreenIDs.insert(globalSchedulerStateKey)
+            }
+            return
+        }
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return }
 
@@ -541,6 +563,60 @@ class WallpaperSchedulerService: ObservableObject {
                 self.scheduleNextChange()
                 print("\(self.logTag) Screen unlocked, resuming scheduler")
             }
+        }
+    }
+
+    /// LockScreenWallpaperService 校正后的锁屏/唤醒状态（进程内通知）。
+    /// 用于从「screenIsUnlocked 分布式通知丢失」的卡死中自愈：
+    /// 服务侧有 250ms/750ms/1.5s 的 session 校正，状态比裸系统通知可靠。
+    @objc private func handleLockScreenPlaybackStateDidChange(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let userInfo = notification.userInfo
+            let locked = (userInfo?[LockScreenWallpaperService.lockedUserInfoKey] as? Bool)
+                ?? LockScreenWallpaperService.shared.playbackState.isScreenLocked
+            guard locked != self.isScreenLocked else { return }
+            if locked {
+                self.isScreenLocked = true
+                self.cancelDispatchTimer()
+                self.endSchedulerActivity()
+                self.cancelTimedRotation()
+                print("\(self.logTag) Playback state: screen locked, pausing scheduler")
+            } else {
+                self.isScreenLocked = false
+                print("\(self.logTag) Playback state: screen unlocked (healing scheduler state)")
+                self.drainPendingOnEndSwitches()
+                self.changeUnlockWallpapersIfNeeded()
+                if self.isRunning {
+                    self.scheduleNextChange()
+                }
+            }
+        }
+    }
+
+    /// 重放锁屏期间被丢弃的「播完即换」事件。
+    /// 观察者在事件触发时已经 pause + seek(0)，如果只丢弃不重放，
+    /// 对应屏幕会永远停在封面帧上（动态锁屏用户频繁锁屏时极易命中）。
+    private func drainPendingOnEndSwitches() {
+        guard !pendingOnEndSwitchScreenIDs.isEmpty else { return }
+        let screenIDs = pendingOnEndSwitchScreenIDs
+        pendingOnEndSwitchScreenIDs = []
+        if let globalIndex = screenIDs.firstIndex(of: globalSchedulerStateKey) {
+            var perScreen = screenIDs
+            perScreen.remove(at: globalIndex)
+            if config.isGlobalDisplaySyncEnabled {
+                print("\(logTag) Replaying global on-end switch dropped while locked")
+                applyNextGlobalWallpaper(requiredMode: .onEnd)
+            }
+            for screenID in perScreen.sorted() {
+                print("\(logTag) Replaying on-end switch dropped while locked for \(screenID)")
+                applyNextWallpaper(for: screenID, requiredMode: .onEnd)
+            }
+            return
+        }
+        for screenID in screenIDs.sorted() {
+            print("\(logTag) Replaying on-end switch dropped while locked for \(screenID)")
+            applyNextWallpaper(for: screenID, requiredMode: .onEnd)
         }
     }
 

@@ -39,7 +39,7 @@
     <key>LSUIElement</key>
     <false/>
     <key>NSScreenCaptureDescription</key>
-    <string>WaifuX 需要屏幕录制权限来捕获动态壁纸的渲染窗口，用于实时桌面显示和视频烘焙导出。系统音频环回（音乐可视化柱状图）同样依赖此权限。</string>
+    <string>WaifuX 需要屏幕录制与系统音频捕获权限，用于动态壁纸显示、音频可视化和视频烘焙导出。</string>
     <key>NSAppleMusicUsageDescription</key>
     <string>WaifuX 需要读取「正在播放」信息，以便 Web 音频可视化壁纸显示歌名、艺人与封面。</string>
     <key>NSAppleEventsUsageDescription</key>
