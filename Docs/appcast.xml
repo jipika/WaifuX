@@ -6,15 +6,15 @@
     <description>WaifuX Updates</description>
     <language>zh</language>
     <item>
-      <title>Version 38.0.145</title>
-      <sparkle:version>38.0.145</sparkle:version>
-      <sparkle:shortVersionString>38.0.145</sparkle:shortVersionString>
-      <pubDate>Sat, 22 Aug 2026 13:59:45 +0800</pubDate>
+      <title>Version 38.0.146</title>
+      <sparkle:version>38.0.146</sparkle:version>
+      <sparkle:shortVersionString>38.0.146</sparkle:shortVersionString>
+      <pubDate>Sun, 30 Aug 2026 18:20:20 +0800</pubDate>
       <description><![CDATA[
-<h3>WaifuX 38.0.145</h3><ul><li><strong>fix: 将窗口 alpha 值从 0.999 调整为 0.99999 (f07d972)</strong><ul><li>统一所有代码处的窗口透明度配置，保持视觉无差别的同时确保壁纸层不会被挂起，让菜单栏 backdrop 可以正确跟随海报更新</li></ul></li><li><strong>fix: 将窗口alpha值从0.99改为0.999以修复菜单栏采样问题 (9fa0e75)</strong><ul><li>将所有代码中的窗口透明度0.99调整为0.999，保持视觉效果不变的同时，确保菜单栏backdrop懒采样能正确获取新壁纸海报，解决alpha=1时壁纸层被挂起导致菜单栏无法更新的问题。</li></ul></li><li><strong>feat: 新增独立视频渲染器设置与自动填充裁剪优化 (95a6e36)</strong><ul><li>新增设置项允许用户开启独立视频渲染进程以优化Screen Time统计</li><li>重构裁剪布局逻辑，autoFill模式现在使用屏幕比例作为默认目标</li><li>修复自定义裁剪比例无效的边界情况判断</li><li>为Web壁纸添加真实媒体内容尺寸识别，优化跨比例屏幕显示效果</li><li>新增触摸板捏合缩放裁剪交互</li><li>完善相关本地化字符串与单元测试</li></ul></li><li><strong>fix(lockscreen): 修复解锁后瞬间重新锁屏的问题 (23a48cf)</strong><ul><li>添加解锁状态缓冲期，避免系统会话状态更新滞后导致的视频意外暂停，区分解锁和唤醒事件的不同处理逻辑</li></ul></li><li><strong>fix: 修复唤醒恢复时的播放器崩溃和超时问题 (1187c29)</strong><ul><li>新增专用超时配置用于唤醒恢复场景，将超时从30秒缩短到3秒</li><li>延迟初始播放/预加载直到播放器状态就绪，避免调用preroll时抛出异常导致守护进程卡死</li><li>新增播放状态观察者管理，正确清理相关资源</li></ul></li><li><strong>fix: 修复多显示器场景下的壁纸渲染异常与进程泄漏问题 (4c508f0)</strong><ul><li>添加旧版本遗留孤儿渲染进程清理逻辑，解决进程泄漏问题</li><li>新增屏幕指纹标识，避免显示器重连后误判为新屏幕导致重复窗口</li><li>优化渲染进程启动的并发安全，防止同时启动多个子进程</li><li>修复图层裁剪逻辑，避免露出底层系统壁纸</li><li>增强屏幕唤醒与锁屏后的恢复逻辑，处理解码器卡死与显示拓扑变化</li><li>完善应用退出时的进程清理流程，确保所有子进程被正确终止</li></ul></li><li><strong>docs: 修复 README 中失效的 Star 历史图表 (#91) (33359a2)</strong><ul><li>GitHub Star API 限制导致当前 Star 历史图表无法正常展示，现将 README.md、README.en.md 与 README.ja.md 中的图表地址切换到可用的新服务 star-history.dera.page，确保图表恢复正常。</li></ul></li></ul>
+<h3>WaifuX 38.0.146</h3><ul><li><strong>merge: manually integrate PR #107 (37c612f)</strong><ul><li>Record the selected PR #107 UI and image prefetch changes on current main.\nPreserve the current WallpaperEngineXBridge implementation and add matching anime detail contrast handling.</li></ul></li><li><strong>refactor: 优化音频权限、锁屏壁纸与播放器泄漏修复 (ea68c09)</strong><ul><li>更新权限提示文案，合并屏幕与系统音频权限说明</li><li>修复锁屏期间播放结束事件丢失导致的壁纸卡死问题</li><li>新增播放器泄漏审计机制，自动清理滞留的视频播放管线</li><li>优化静态壁纸处理与缩略图生成的线程调度</li><li>修复系统音频捕获的设备切换与重试逻辑</li></ul></li><li><strong>refactor(video-wallpaper): add display recovery policy and fix pipeline rebuild logic (e52ebf5)</strong><ul><li>重构了屏幕参数变化和唤醒时的原生视频管线重建逻辑，提取出统一的恢复策略判断逻辑，修复了外部渲染模式下的错误重建问题，同时优化了屏幕配置变化的检测方式，避免误触发重建。</li></ul></li><li><strong>integrate: 手工整合 PR #102 #103 #104 (00ab824)</strong><ul><li>Manually extract the functional changes from PRs #102, #103, and #104 onto main. Keep the existing crop/web refactor, rebuild both helper binaries, and scope playback speed controls to each display&#x27;s assigned video path.</li></ul></li><li><strong>refactor: 重构壁纸扩展与桥接逻辑，优化退出与裁切行为 (95bf182)</strong><ul><li>重构Web壁纸裁切逻辑，移除媒体内容尺寸探测相关代码，统一使用屏幕尺寸作为裁切基准</li><li>调整应用退出时的通知逻辑，改为保留CAContext并切换为扩展自托管桌面播放</li><li>优化扩展端的宿主存活状态检测与播放策略切换</li><li>新增两个回归测试用例，验证裁切布局与播放策略正确性</li><li>修复Web壁纸鼠标坐标转换逻辑，调整crop参数计算方式</li><li>简化桥接层的代码冗余部分，统一Web壁纸渲染的裁切实现</li></ul></li><li><strong>fix: 修复静态图热切换问题并添加无黑场渲染过渡 (c4a360a)</strong><ul><li>重构静态图与视频热切换的缓存与执行逻辑，新增待处理静态图切换缓存</li><li>调整部署流程，先持久化配置再发送切换命令，避免扩展重启时回退</li><li>添加渲染保留逻辑，强制重启时保留旧渲染器直到新渲染器就绪，消除桌面黑场</li><li>优化上下文重建时的资源清理与命令执行顺序</li></ul></li><li><strong>fix: 调节可视区域时 ESC 只退出裁切 overlay (d4efb93)</strong><ul><li>详情页和文件夹的 ESC 监听会先于 overlay 把页面退掉；裁切进行中先吞掉这次 ESC。</li></ul></li><li><strong>fix: 默认铺满按画布尺寸居中裁切 (a2b467f)</strong><ul><li>自动（铺满）用 scene/web 真实尺寸写居中 cover，避免 Rust 默认 Cover 偏一侧。选回铺满时把平移和缩放置中。</li></ul></li><li><strong>fix: 换壁纸后恢复已保存的可视区域裁切 (f057077)</strong><ul><li>热切换会清掉 crop-control 和 canvas-size，新尺寸没写出时裁切会丢成默认 Cover。缓存上一张画布尺寸，切换结束和超时后再按已保存的比例/平移写回。</li></ul></li></ul>
       ]]></description>
       <enclosure
-        url="https://github.com/jipika/WaifuX/releases/download/v38.0.145/WaifuX.dmg"
+        url="https://github.com/jipika/WaifuX/releases/download/v38.0.146/WaifuX.dmg"
         type="application/octet-stream"
         length="0"
       />
