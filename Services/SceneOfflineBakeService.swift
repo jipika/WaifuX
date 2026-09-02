@@ -134,6 +134,9 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
     let renderer: SceneBakeRenderer
     let persistArtifactToItemID: String?
     let progressItemID: String?
+    /// Companion bakes are tied to the currently displayed realtime scene and can
+    /// be cancelled when the user applies another wallpaper.
+    let isCompanion: Bool?
     let addedAt: Date
 
     static func scene(
@@ -145,7 +148,8 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
         fps: Int32,
         renderer: SceneBakeRenderer,
         persistArtifactToItemID: String?,
-        progressItemID: String?
+        progressItemID: String?,
+        isCompanion: Bool = false
     ) -> PersistentOfflineBakeJob {
         let normalizedRoot = contentRoot.standardizedFileURL.path
         let key = [
@@ -171,6 +175,7 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
             renderer: renderer,
             persistArtifactToItemID: persistArtifactToItemID,
             progressItemID: progressItemID,
+            isCompanion: isCompanion,
             addedAt: .now
         )
     }
@@ -197,6 +202,7 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
             renderer: .wallpaperEngineWeb,
             persistArtifactToItemID: record.id,
             progressItemID: record.item.id,
+            isCompanion: nil,
             addedAt: .now
         )
     }
@@ -436,8 +442,11 @@ private final class ScenePreviewProcessController {
     static let shared = ScenePreviewProcessController()
     private var process: Process?
     private var renderer: SceneBakeRenderer?
+    private var memoryWatchdogTask: Task<Void, Never>?
 
     func stop() {
+        memoryWatchdogTask?.cancel()
+        memoryWatchdogTask = nil
         guard let process else { return }
         if process.isRunning {
             process.terminate()
@@ -464,12 +473,153 @@ private final class ScenePreviewProcessController {
                 if self.process?.processIdentifier == process.processIdentifier {
                     self.process = nil
                     self.renderer = nil
+                    self.memoryWatchdogTask?.cancel()
+                    self.memoryWatchdogTask = nil
                 }
             }
         }
         try process.run()
         self.process = process
         self.renderer = renderer
+        startMemoryWatchdog(pid: process.processIdentifier)
+    }
+
+    /// 预览子进程内存看门狗：phys_footprint 超过 1.5GB 视为 runaway，
+    /// 立即终止，避免用户打开异常项目时拖垮整个 App。
+    private func startMemoryWatchdog(pid: pid_t) {
+        memoryWatchdogTask?.cancel()
+        memoryWatchdogTask = Task(priority: .utility) { [weak self] in
+            let limitBytes: UInt64 = 1_500_000_000
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                guard let process = self.process,
+                      process.isRunning,
+                      process.processIdentifier == pid else { return }
+                var info = rusage_info_current()
+                let status = withUnsafeMutablePointer(to: &info) { pointer in
+                    pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                        proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+                    }
+                }
+                guard status == 0 else { continue }
+                if info.ri_phys_footprint > limitBytes {
+                    let footprintMB = info.ri_phys_footprint / 1_048_576
+                    print("[SceneOfflineBake] ⚠️ bake 进程内存超限 \(footprintMB)MB > 1500MB，强制终止（pid=\(pid)）")
+                    self.stop()
+                    return
+                }
+            }
+        }
+    }
+}
+
+/// 跟踪真正执行 `wallpaper-wgpu bake` 的子进程。
+/// 预览进程和 bake 进程是两条独立的 Process 生命周期，不能共用预览 controller。
+@MainActor
+private final class SceneBakeProcessController {
+    static let shared = SceneBakeProcessController()
+
+    private var process: Process?
+    private var processID: pid_t?
+    private var isCompanionProcess = false
+    private var memoryWatchdogTask: Task<Void, Never>?
+    private var terminationSerial: UInt64 = 0
+
+    func attach(process: Process, isCompanion: Bool) {
+        if self.process != nil {
+            terminateCurrentProcess()
+        }
+        terminationSerial &+= 1
+        self.process = process
+        processID = process.processIdentifier
+        isCompanionProcess = isCompanion
+        startMemoryWatchdog(process: process)
+    }
+
+    func finish(pid: pid_t) {
+        guard process?.processIdentifier == pid else { return }
+        memoryWatchdogTask?.cancel()
+        memoryWatchdogTask = nil
+        process = nil
+        processID = nil
+        isCompanionProcess = false
+        terminationSerial &+= 1
+    }
+
+    func stopCompanion() {
+        guard isCompanionProcess else { return }
+        terminateCurrentProcess()
+    }
+
+    func stop(pid: pid_t) {
+        guard processID == pid else { return }
+        terminateCurrentProcess()
+    }
+
+    private func terminateCurrentProcess() {
+        guard let process,
+              let pid = processID,
+              process.processIdentifier == pid else {
+            return
+        }
+
+        memoryWatchdogTask?.cancel()
+        memoryWatchdogTask = nil
+        self.process = nil
+        processID = nil
+        isCompanionProcess = false
+        terminationSerial &+= 1
+        let serial = terminationSerial
+
+        if process.isRunning {
+            process.terminate()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, process] in
+            guard let self else { return }
+            guard self.terminationSerial == serial else { return }
+            guard process.isRunning,
+                  process.processIdentifier == pid else {
+                return
+            }
+            kill(pid, SIGKILL)
+        }
+    }
+
+    private func startMemoryWatchdog(process: Process) {
+        let pid = process.processIdentifier
+        memoryWatchdogTask?.cancel()
+        memoryWatchdogTask = Task(priority: .utility) { [weak self] in
+            let limitBytes: UInt64 = 1_500_000_000
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+
+                guard let self,
+                      self.process === process,
+                      process.isRunning,
+                      self.processID == pid else {
+                    return
+                }
+
+                var info = rusage_info_current()
+                let status = withUnsafeMutablePointer(to: &info) { pointer in
+                    pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                        proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+                    }
+                }
+                guard status == 0 else { continue }
+                if info.ri_phys_footprint > limitBytes {
+                    let footprintMB = info.ri_phys_footprint / 1_048_576
+                    print("[SceneOfflineBake] bake 进程内存超限 \(footprintMB)MB > 1500MB，强制终止（pid=\(pid)）")
+                    self.stop(pid: pid)
+                    return
+                }
+            }
+        }
     }
 }
 
@@ -576,6 +726,28 @@ enum SceneOfflineBakeService {
     /// 实时渲染桌面后配套生成离线 MP4。
     /// 该 MP4 不会反向替换桌面实时渲染；如果动态锁屏开启，则烘焙完成后推送给对应显示器实例。
     /// 关闭自动烘焙时，缓存未命中会改为临时烘焙 1 秒，仅保留抽出的 poster。
+    /// 伴生烘焙代数：任何新的壁纸应用都会使上一轮伴生烘焙失效
+    /// （被替换的壁纸不再显示，继续烘焙只浪费资源，失控时还会拖垮系统）。
+    private static let companionBakeGenerationLock = NSLock()
+    private nonisolated(unsafe) static var _companionBakeGeneration: UInt = 0
+
+    /// 递增代数并终止 in-flight bake 进程。在每次壁纸应用入口调用。
+    @MainActor
+    static func cancelRealtimeCompanionBake(reason: String) {
+        companionBakeGenerationLock.lock()
+        _companionBakeGeneration &+= 1
+        companionBakeGenerationLock.unlock()
+        SceneBakeProcessController.shared.stopCompanion()
+        ScenePreviewProcessController.shared.stop()
+        print("[SceneOfflineBake] realtime companion bake cancelled (\(reason))")
+    }
+
+    private static var companionBakeGeneration: UInt {
+        companionBakeGenerationLock.lock()
+        defer { companionBakeGenerationLock.unlock() }
+        return _companionBakeGeneration
+    }
+
     @MainActor
     static func scheduleRealtimeCompanionBake(path: String, targetScreens: [NSScreen]? = nil, reason: String) {
         let autoBakeEnabled = UserDefaults.standard.bool(forKey: "auto_bake_scene")
@@ -587,6 +759,7 @@ enum SceneOfflineBakeService {
 
         let posterTargets = realtimePosterTargets(for: targetScreens)
         let displayIDs = posterTargets.map(\.displayID)
+        let generation = companionBakeGeneration
 
         Task(priority: .utility) {
             do {
@@ -594,8 +767,20 @@ enum SceneOfflineBakeService {
                     downloadedRecord(forResolvedContentRoot: contentRoot)
                 }
 
+                guard generation == companionBakeGeneration else {
+                    print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded before record lookup")
+                    return
+                }
+
                 if let artifact = usableArtifact(from: record) {
-                    await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: record?.item.id, displayIDs: displayIDs, reason: reason)
+                    guard generation == companionBakeGeneration else { return }
+                    await syncRealtimeBakeToLockScreen(
+                        artifact: artifact,
+                        itemID: record?.item.id,
+                        displayIDs: displayIDs,
+                        reason: reason,
+                        generation: generation
+                    )
                     print("[SceneOfflineBake] realtime companion bake cache hit (\(reason)): \(artifact.videoPath)")
                     return
                 }
@@ -605,8 +790,14 @@ enum SceneOfflineBakeService {
                         contentRoot: contentRoot,
                         record: record,
                         targets: posterTargets,
-                        reason: reason
+                        reason: reason,
+                        generation: generation
                     )
+                    return
+                }
+
+                guard generation == companionBakeGeneration else {
+                    print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded by newer apply")
                     return
                 }
 
@@ -622,6 +813,10 @@ enum SceneOfflineBakeService {
                     eligibility = try await Task.detached(priority: .utility) {
                         try SceneBakeEligibilityAnalyzer.analyze(contentRoot: contentRoot, intent: .desktopLoop, strict: false)
                     }.value
+                    guard generation == companionBakeGeneration else {
+                        print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded after analysis")
+                        return
+                    }
                     if let itemID = record?.item.id {
                         await MainActor.run {
                             MediaLibraryService.shared.attachSceneBakeEligibility(
@@ -633,6 +828,7 @@ enum SceneOfflineBakeService {
                     }
                 }
 
+                guard generation == companionBakeGeneration else { return }
                 let itemID = record?.item.id
                 let displayTitle = record?.item.title
                 let cacheItemID = itemID ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
@@ -643,10 +839,22 @@ enum SceneOfflineBakeService {
                     renderer: .wallpaperWgpu,
                     persistArtifactToItemID: itemID,
                     progressItemID: itemID,
-                    displayTitle: displayTitle
+                    displayTitle: displayTitle,
+                    isCompanion: true,
+                    companionGeneration: generation
                 )
+                guard generation == companionBakeGeneration else {
+                    print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded after bake")
+                    return
+                }
                 print("[SceneOfflineBake] realtime companion bake finished (\(reason)): \(artifact.videoPath)")
-                await syncRealtimeBakeToLockScreen(artifact: artifact, itemID: itemID, displayIDs: displayIDs, reason: reason)
+                await syncRealtimeBakeToLockScreen(
+                    artifact: artifact,
+                    itemID: itemID,
+                    displayIDs: displayIDs,
+                    reason: reason,
+                    generation: generation
+                )
             } catch {
                 print("[SceneOfflineBake] realtime companion bake failed (\(reason)): \(error.localizedDescription)")
             }
@@ -662,8 +870,10 @@ enum SceneOfflineBakeService {
         contentRoot: URL,
         record: MediaDownloadRecord?,
         targets: [RealtimePosterTarget],
-        reason: String
+        reason: String,
+        generation: UInt
     ) async {
+        guard generation == companionBakeGeneration else { return }
         let videoManager = VideoWallpaperManager.shared
         guard videoManager.isLockScreenEnabled || videoManager.isSystemWallpaperSyncEnabled else {
             print("[SceneOfflineBake] transient poster skipped (\(reason)): no static poster target is enabled")
@@ -699,6 +909,7 @@ enum SceneOfflineBakeService {
                 return
             }
 
+            guard generation == companionBakeGeneration else { return }
             if let itemID {
                 MediaLibraryService.shared.attachSceneBakeEligibility(
                     itemID: itemID,
@@ -718,6 +929,7 @@ enum SceneOfflineBakeService {
         var missingSizes: [WallpaperPosterPixelSize] = []
 
         for size in orderedSizes {
+            guard generation == companionBakeGeneration else { return }
             let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
             if let cachedPoster = VideoThumbnailCache.shared
                 .cachedSceneRealtimePosterFileURLIfExists(
@@ -728,7 +940,8 @@ enum SceneOfflineBakeService {
                 await syncRealtimeStaticPoster(
                     cachedPoster,
                     displayIDs: groupedTargets[size, default: []].map(\.displayID),
-                    reason: "\(reason), cached \(size.width)x\(size.height) transient poster"
+                    reason: "\(reason), cached \(size.width)x\(size.height) transient poster",
+                    generation: generation
                 )
             } else {
                 missingSizes.append(size)
@@ -745,7 +958,16 @@ enum SceneOfflineBakeService {
             let jobID = UUID()
             await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
 
+            guard generation == companionBakeGeneration else {
+                await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+                return
+            }
+
             for size in missingSizes {
+                guard generation == companionBakeGeneration else {
+                    await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+                    return
+                }
                 let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
                 let displayIDs = groupedTargets[size, default: []].map(\.displayID)
 
@@ -759,7 +981,8 @@ enum SceneOfflineBakeService {
                     await syncRealtimeStaticPoster(
                         cachedPoster,
                         displayIDs: displayIDs,
-                        reason: "\(reason), shared \(size.width)x\(size.height) transient poster"
+                        reason: "\(reason), shared \(size.width)x\(size.height) transient poster",
+                        generation: generation
                     )
                     continue
                 }
@@ -771,16 +994,22 @@ enum SceneOfflineBakeService {
                     variantKey: variantKey,
                     size: size,
                     userProperties: userProperties,
-                    reason: reason
+                    reason: reason,
+                    generation: generation
                 ) else {
                     continue
                 }
 
+                guard generation == companionBakeGeneration else {
+                    await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+                    return
+                }
                 postersBySize[size] = posterURL
                 await syncRealtimeStaticPoster(
                     posterURL,
                     displayIDs: displayIDs,
-                    reason: "\(reason), temporary 1s bake \(size.width)x\(size.height)"
+                    reason: "\(reason), temporary 1s bake \(size.width)x\(size.height)",
+                    generation: generation
                 )
                 print(
                     "[SceneOfflineBake] transient poster finished (\(reason)) "
@@ -791,6 +1020,7 @@ enum SceneOfflineBakeService {
             await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
         }
 
+        guard generation == companionBakeGeneration else { return }
         if let itemID,
            let primarySize,
            let primaryPoster = postersBySize[primarySize] {
@@ -817,8 +1047,10 @@ enum SceneOfflineBakeService {
         variantKey: String,
         size: WallpaperPosterPixelSize,
         userProperties: String?,
-        reason: String
+        reason: String,
+        generation: UInt
     ) async -> URL? {
+        guard generation == companionBakeGeneration else { return nil }
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WaifuX", isDirectory: true)
             .appendingPathComponent("TransientScenePosters", isDirectory: true)
@@ -852,7 +1084,9 @@ enum SceneOfflineBakeService {
                 fps: min(resolvedBakeFPS(requestedFPS: nil), 30),
                 durationSeconds: 1,
                 userProperties: userProperties,
-                progress: nil
+                progress: nil,
+                isCompanion: true,
+                companionGeneration: generation
             )
         } catch {
             print(
@@ -862,6 +1096,7 @@ enum SceneOfflineBakeService {
             return nil
         }
 
+        guard generation == companionBakeGeneration else { return nil }
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
         guard isUsableBakedVideo(at: videoURL),
               let posterURL = await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
@@ -885,8 +1120,10 @@ enum SceneOfflineBakeService {
         artifact: SceneBakeArtifact,
         itemID: String?,
         displayIDs: [UInt32],
-        reason: String
+        reason: String,
+        generation: UInt? = nil
     ) async {
+        guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
         guard isUsableBakedVideo(at: videoURL) else { return }
 
@@ -899,6 +1136,7 @@ enum SceneOfflineBakeService {
                 videoID: videoID,
                 displayIDs: displayIDs
             )
+            guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
             print("[SceneOfflineBake] realtime companion bake synced lock screen (\(reason)): display=\(displayIDs) video=\(videoID)")
         } else {
             guard let posterURL = await VideoThumbnailCache.shared.lockScreenPosterURL(
@@ -908,7 +1146,13 @@ enum SceneOfflineBakeService {
                 print("[SceneOfflineBake] realtime companion bake could not generate desktop poster (\(reason)): \(videoURL.path)")
                 return
             }
-            await syncRealtimeStaticPoster(posterURL, displayIDs: displayIDs, reason: reason)
+            guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
+            await syncRealtimeStaticPoster(
+                posterURL,
+                displayIDs: displayIDs,
+                reason: reason,
+                generation: generation
+            )
         }
     }
 
@@ -919,8 +1163,10 @@ enum SceneOfflineBakeService {
     private static func syncRealtimeStaticPoster(
         _ posterURL: URL,
         displayIDs: [UInt32],
-        reason: String
+        reason: String,
+        generation: UInt? = nil
     ) async {
+        guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
             guard !displayIDs.isEmpty else {
                 print("[SceneOfflineBake] static poster skipped (\(reason)): no lock-screen display IDs")
@@ -931,6 +1177,7 @@ enum SceneOfflineBakeService {
                     imageURL: posterURL,
                     displayIDs: displayIDs
                 )
+                guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
                 print("[SceneOfflineBake] set lock-screen static poster (\(reason)): display=\(displayIDs) poster=\(posterURL.path)")
             } catch {
                 print("[SceneOfflineBake] failed to set lock-screen static poster (\(reason)): \(error.localizedDescription)")
@@ -1337,6 +1584,8 @@ enum SceneOfflineBakeService {
         progressItemID: String? = nil,
         resumingJobID: UUID? = nil,
         displayTitle: String? = nil,
+        isCompanion: Bool = false,
+        companionGeneration: UInt? = nil,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
@@ -1363,7 +1612,8 @@ enum SceneOfflineBakeService {
             fps: effectiveFPS,
             renderer: renderer,
             persistArtifactToItemID: persistArtifactToItemID,
-            progressItemID: trackedItemID
+            progressItemID: trackedItemID,
+            isCompanion: isCompanion
         )
         let enqueueResult = await MainActor.run {
             SceneOfflineBakeProgressTracker.shared.enqueue(
@@ -1377,6 +1627,13 @@ enum SceneOfflineBakeService {
         let jobID = enqueueResult.jobID
 
         await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
+        guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+            await MainActor.run {
+                SceneOfflineBakeProgressTracker.shared.finish(jobID: jobID, success: false)
+            }
+            await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+            throw CancellationError()
+        }
         await MainActor.run {
             SceneOfflineBakeProgressTracker.shared.begin(jobID: jobID)
         }
@@ -1394,8 +1651,13 @@ enum SceneOfflineBakeService {
                 renderer: renderer,
                 persistArtifactToItemID: persistArtifactToItemID,
                 displayTitle: resolvedTitle,
+                isCompanion: isCompanion,
+                companionGeneration: companionGeneration,
                 progress: trackedProgress
             )
+            guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+                throw CancellationError()
+            }
             await MainActor.run {
                 SceneOfflineBakeProgressTracker.shared.finish(jobID: jobID, success: true)
                 let bakedURL = URL(fileURLWithPath: result.videoPath)
@@ -1444,6 +1706,7 @@ enum SceneOfflineBakeService {
                     continue
                 }
                 do {
+                    let isCompanion = job.isCompanion ?? false
                     _ = try await bake(
                         eligibility: eligibility,
                         contentRoot: URL(fileURLWithPath: job.contentRootPath),
@@ -1453,7 +1716,9 @@ enum SceneOfflineBakeService {
                         renderer: job.renderer,
                         persistArtifactToItemID: job.persistArtifactToItemID,
                         progressItemID: job.progressItemID,
-                        resumingJobID: job.id
+                        resumingJobID: job.id,
+                        isCompanion: isCompanion,
+                        companionGeneration: isCompanion ? companionBakeGeneration : nil
                     )
                 } catch {
                     SceneOfflineBakeProgressTracker.shared.discardPersistedJob(
@@ -1486,6 +1751,8 @@ enum SceneOfflineBakeService {
         renderer: SceneBakeRenderer,
         persistArtifactToItemID: String?,
         displayTitle: String?,
+        isCompanion: Bool,
+        companionGeneration: UInt?,
         progress: (@MainActor (Double) -> Void)?
     ) async throws -> SceneBakeArtifact {
         guard FileManager.default.fileExists(atPath: contentRoot.path) else {
@@ -1606,6 +1873,9 @@ enum SceneOfflineBakeService {
                 bakedAt: (attrs[.creationDate] as? Date) ?? .now,
                 renderer: renderer
             )
+            guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+                return artifact
+            }
             cleanupStaleBakeFiles(inDirectory: resolvedCacheURL.deletingLastPathComponent(), keeping: resolvedCacheURL)
             if let itemID = persistArtifactToItemID {
                 await MainActor.run {
@@ -1639,10 +1909,15 @@ enum SceneOfflineBakeService {
                 fps: fps,
                 durationSeconds: durationSeconds,
                 userProperties: effectiveUserProperties,
-                progress: progress
+                progress: progress,
+                isCompanion: isCompanion,
+                companionGeneration: companionGeneration
             )
         case .wallpaperEngineWeb:
             throw SceneOfflineBakeError.ineligible
+        }
+        guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+            return artifact
         }
         cleanupStaleBakeFiles(inDirectory: outURL.deletingLastPathComponent(), keeping: outURL)
         if let itemID = persistArtifactToItemID {
@@ -1671,7 +1946,9 @@ enum SceneOfflineBakeService {
         fps: Int32,
         durationSeconds: Double,
         userProperties: String?,
-        progress: (@MainActor (Double) -> Void)?
+        progress: (@MainActor (Double) -> Void)?,
+        isCompanion: Bool,
+        companionGeneration: UInt?
     ) async throws -> SceneBakeArtifact {
         // 使用 wallpaper-wgpu bake 子命令（GPU readback 直接编码，不需要屏幕录制）
         guard let wgpuBinary = WallpaperEngineXBridge.resolvedCLIExecutableURL() else {
@@ -1706,6 +1983,9 @@ enum SceneOfflineBakeService {
             args += ["--duration", String(Int(durationSeconds))]
         }
 
+        guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+            throw CancellationError()
+        }
         print("[SceneOfflineBake] 启动 wallpaper-wgpu bake: \(wgpuBinary.lastPathComponent) \(args.joined(separator: " "))")
 
         let process = Process()
@@ -1722,6 +2002,21 @@ enum SceneOfflineBakeService {
         process.standardOutput = stdoutPipe
 
         try process.run()
+        let processID = process.processIdentifier
+        await MainActor.run {
+            SceneBakeProcessController.shared.attach(process: process, isCompanion: isCompanion)
+        }
+        guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+            await MainActor.run {
+                SceneBakeProcessController.shared.stop(pid: processID)
+            }
+            throw CancellationError()
+        }
+        defer {
+            Task { @MainActor in
+                SceneBakeProcessController.shared.finish(pid: processID)
+            }
+        }
 
         final class StderrCapture: @unchecked Sendable {
             private let maxTailBytes = 256 * 1024
@@ -1953,12 +2248,29 @@ enum SceneOfflineBakeService {
 
         // 用轮询替代 waitUntilExit，避免阻塞 cooperative thread pool
         while process.isRunning {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            if Task.isCancelled {
+                await MainActor.run {
+                    SceneBakeProcessController.shared.stop(pid: processID)
+                }
+                break
+            }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                continue
+            }
         }
         await progressTask.value
         await stdoutTask.value
         stderrCapture.close()
+        await MainActor.run {
+            SceneBakeProcessController.shared.finish(pid: processID)
+        }
 
+        guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw CancellationError()
+        }
         guard process.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: tempURL)
             let stderrString = String(data: stderrCapture.tail, encoding: .utf8) ?? ""

@@ -1421,7 +1421,12 @@ struct WallpaperDetailSheet: View {
                 isSettingWallpaper = true
                 errorMessage = ""
                 Task { @MainActor in
+                    let targetScreenIDs = Set(
+                        (selectedScreen.map { [$0] } ?? NSScreen.screens)
+                            .map(\.wallpaperScreenIdentifier)
+                    )
                     do {
+                        await WallpaperSchedulerService.shared.beginManualWallpaperApply()
                         let imageURL = try await getWallpaperImageURLForSetting()
                         // selectedScreen == nil → 所有显示器；非 nil → 仅指定显示器
                         // viewModel 内部会按需停止对应屏幕的动态壁纸
@@ -1429,6 +1434,10 @@ struct WallpaperDetailSheet: View {
                         WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                         isSettingWallpaper = false
                     } catch {
+                        WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                            success: false,
+                            screenIDs: targetScreenIDs
+                        )
                         errorMessage = "\(t("error")): \(error.localizedDescription)"
                         showError = true
                         print("Set wallpaper error: \(error)")
@@ -1441,7 +1450,9 @@ struct WallpaperDetailSheet: View {
             isSettingWallpaper = true
             errorMessage = ""
             Task { @MainActor in
+                let targetScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
                 do {
+                    await WallpaperSchedulerService.shared.beginManualWallpaperApply()
                     let imageURL = try await getWallpaperImageURLForSetting()
                     // viewModel 内部会按需停止动态壁纸
                     try await viewModel.setWallpaper(from: imageURL, option: .desktop)
@@ -1449,6 +1460,10 @@ struct WallpaperDetailSheet: View {
                         screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
                     )
                 } catch {
+                    WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                        success: false,
+                        screenIDs: targetScreenIDs
+                    )
                     errorMessage = "\(t("error")): \(error.localizedDescription)"
                     showError = true
                     print("Set wallpaper error: \(error)")

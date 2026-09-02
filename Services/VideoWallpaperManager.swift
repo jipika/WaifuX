@@ -199,6 +199,11 @@ final class VideoWallpaperManager: ObservableObject {
     /// 仅状态栏「暂停动态壁纸」会置位。前台遮挡/全屏/电池等自动暂停不得写入此标记，
     /// 否则长期遮挡后的 persist/restore 会把自动暂停当成用户暂停，再也无法自动恢复。
     private var userRequestedPause = false
+    /// 主进程视频的按屏暂停状态。不能只依赖 AVPlayer.rate：合帧、重建和
+    /// AVPlayerLooper 的 ready 回调都会在 rate == 0 时尝试恢复播放，导致
+    /// 手动暂停或自动暂停很快失效。
+    private var nativePausedScreenIDs = Set<String>()
+    private var nativePausedScreenFingerprints = Set<String>()
     @Published private(set) var volume: Double = 1.0
     /// 最近一次进入菜单的主视频速度。实际保存和应用均按视频路径进行。
     @Published private(set) var playbackRate: Double = 1.0
@@ -576,9 +581,6 @@ final class VideoWallpaperManager: ObservableObject {
                     if container.playerLayer.player !== player {
                         container.attachPlayer(player)
                     }
-                    if !isPaused, player.rate == 0 {
-                        playWallpaperPlayer(player, screenID: entry.screenID)
-                    }
                     container.playerLayer.setNeedsDisplay()
                     container.needsDisplay = true
                     container.displayIfNeeded()
@@ -609,9 +611,6 @@ final class VideoWallpaperManager: ObservableObject {
             for screen in targets {
                 if let entry = self.existingVideoWindowEntry(for: screen) {
                     Self.revealDesktopWallpaperWindow(entry.window)
-                    if let player = self.players[entry.screenID], !self.isPaused, player.rate == 0 {
-                        self.playWallpaperPlayer(player, screenID: entry.screenID)
-                    }
                 }
             }
             CATransaction.flush()
@@ -1886,11 +1885,12 @@ final class VideoWallpaperManager: ObservableObject {
             setMuted(muted)
             if !isPaused {
                 var seenPlayers = Set<ObjectIdentifier>()
-                for player in players.values {
+                for (screenID, player) in players {
                     let id = ObjectIdentifier(player)
-                    guard seenPlayers.insert(id).inserted else { continue }
+                    guard shouldPlayNativePlayer(player),
+                          seenPlayers.insert(id).inserted else { continue }
                     if player.rate == 0 {
-                        playWallpaperPlayer(player)
+                        playWallpaperPlayer(player, screenID: screenID)
                     }
                 }
             }
@@ -3330,10 +3330,15 @@ final class VideoWallpaperManager: ObservableObject {
         }
         if let targetScreen = targetScreen {
             let screenID = targetScreen.wallpaperScreenIdentifier
+            nativePausedScreenIDs.insert(screenID)
+            nativePausedScreenFingerprints.insert(targetScreen.wallpaperScreenFingerprint)
             if let player = players[screenID] {
                 // 同文件多屏共用一条解码管线时，单屏暂停只能遮住该屏画面，
                 // 不能暂停共享 player，否则仍引用它的其它屏也会一起停止。
-                if screenIDsReferencingPlayer(player).count == 1 {
+                let hasPlayingOwner = screenIDsReferencingPlayer(player).contains {
+                    !isNativeScreenPaused($0)
+                }
+                if !hasPlayingOwner {
                     player.pause()
                     player.rate = 0
                 }
@@ -3342,6 +3347,10 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             // 暂停所有屏幕的壁纸
             isPaused = true
+            nativePausedScreenIDs.formUnion(players.keys)
+            for screen in NSScreen.screens where players.keys.contains(screen.wallpaperScreenIdentifier) {
+                nativePausedScreenFingerprints.insert(screen.wallpaperScreenFingerprint)
+            }
             for player in players.values {
                 player.pause()
                 // 将 rate 设为 0 确保完全停止渲染
@@ -3405,6 +3414,11 @@ final class VideoWallpaperManager: ObservableObject {
         if let targetScreen = targetScreen {
             // 恢复特定屏幕的壁纸
             let screenID = targetScreen.wallpaperScreenIdentifier
+            // 全局暂停后恢复单屏时，剩余屏幕由 nativePausedScreenIDs 继续保持暂停；
+            // 清掉全局闸门，否则刚恢复的屏幕仍会被 isPaused(on:) 判成暂停。
+            isPaused = false
+            nativePausedScreenIDs.remove(screenID)
+            nativePausedScreenFingerprints.remove(targetScreen.wallpaperScreenFingerprint)
             if let player = players[screenID] {
                 playWallpaperPlayer(player, screenID: screenID)
             }
@@ -3412,6 +3426,8 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             // 恢复所有屏幕的壁纸
             isPaused = false
+            nativePausedScreenIDs.removeAll()
+            nativePausedScreenFingerprints.removeAll()
             for (screenID, player) in players {
                 playWallpaperPlayer(player, screenID: screenID)
                 hidePosterImage(for: screenID)
@@ -3727,7 +3743,7 @@ final class VideoWallpaperManager: ObservableObject {
             guard let player else { return }
             DispatchQueue.main.async {
                 guard let self, self.players[screenID] === player else { return }
-                guard !self.isPaused else { return }
+                guard self.shouldPlayNativeVideo(for: screenID) else { return }
 
                 self.playWallpaperPlayer(player, screenID: screenID)
                 self.hidePosterImage(for: screenID)
@@ -3762,7 +3778,7 @@ final class VideoWallpaperManager: ObservableObject {
             group.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player = group.player] _ in
                 guard let player else { return }
                 DispatchQueue.main.async {
-                    guard let self, !self.isPaused else { return }
+                    guard let self, self.shouldPlayNativePlayer(player) else { return }
                     self.playWallpaperPlayer(
                         player,
                         screenID: group.screenIDs.sorted().first
@@ -4307,7 +4323,7 @@ final class VideoWallpaperManager: ObservableObject {
         containerView.attachPlayer(components.player)
         applyCropToScreen(screen)
         applyPlayerAudioPolicy(components.player, muted: isMuted, volume: volumeByScreen[screenID] ?? volume)
-        if !isPaused {
+        if shouldPlayNativeVideo(for: screenID) {
             playWallpaperPlayer(components.player, screenID: screenID)
         }
 
@@ -4517,7 +4533,24 @@ final class VideoWallpaperManager: ObservableObject {
             return !hasActiveWallpaper(on: screen) || externalIsPaused(screenID: screenID)
         }
         guard let player = players[screenID] else { return true }
-        return player.rate == 0
+        return isPaused
+            || nativePausedScreenIDs.contains(screenID)
+            || nativePausedScreenFingerprints.contains(screen.wallpaperScreenFingerprint)
+            || player.rate == 0
+    }
+
+    private func isNativeScreenPaused(_ screenID: String) -> Bool {
+        nativePausedScreenIDs.contains(screenID)
+    }
+
+    private func shouldPlayNativeVideo(for screenID: String) -> Bool {
+        !isPaused && !isNativeScreenPaused(screenID)
+    }
+
+    private func shouldPlayNativePlayer(_ player: AVQueuePlayer) -> Bool {
+        !isPaused && screenIDsReferencingPlayer(player).contains {
+            !isNativeScreenPaused($0)
+        }
     }
 
     // MARK: - 锁屏处理
@@ -4579,8 +4612,10 @@ final class VideoWallpaperManager: ObservableObject {
                 return
             }
             for (screenID, player) in self.players {
-                self.playWallpaperPlayer(player, screenID: screenID)
-                self.hidePosterImage(for: screenID)
+                if self.shouldPlayNativeVideo(for: screenID) {
+                    self.playWallpaperPlayer(player, screenID: screenID)
+                    self.hidePosterImage(for: screenID)
+                }
             }
             // 解锁后会先全量 play；立刻把仍有效的覆盖/前台/全屏暂停重新施加，
             // 避免窗口列表尚未恢复时 AutoPause 误以为桌面已可见。
@@ -4717,6 +4752,8 @@ final class VideoWallpaperManager: ObservableObject {
             videoURLByScreen.removeAll()
             videoURLByScreenFingerprint.removeAll()
             isPaused = false
+            nativePausedScreenIDs.removeAll()
+            nativePausedScreenFingerprints.removeAll()
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             discardOriginalWallpaperSnapshot()
@@ -4730,6 +4767,8 @@ final class VideoWallpaperManager: ObservableObject {
         // 单屏停止：只拆掉该屏幕的视频层，不回退到旧静态壁纸
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
+        nativePausedScreenIDs.remove(screenID)
+        nativePausedScreenFingerprints.remove(screenFingerprint)
         // 对称关闭该屏静态图 overlay（保持久化，便于再次开启时恢复）
         StaticImageWallpaperOverlayManager.shared.hide(for: targetScreen)
 
@@ -4759,6 +4798,8 @@ final class VideoWallpaperManager: ObservableObject {
                 currentVideoURL = nil
                 currentPosterURL = nil
                 isPaused = false
+                nativePausedScreenIDs.removeAll()
+                nativePausedScreenFingerprints.removeAll()
                 videoTargetScreenIDs = []
                 videoTargetScreenFingerprints = []
             }
@@ -5019,6 +5060,8 @@ final class VideoWallpaperManager: ObservableObject {
                 videoURLByScreenFingerprint.removeAll()
                 videoTargetScreenIDs.removeAll()
                 videoTargetScreenFingerprints.removeAll()
+                nativePausedScreenIDs.removeAll()
+                nativePausedScreenFingerprints.removeAll()
                 externalPausedScreenIDs.removeAll()
                 externalFirstFrameReadyScreenIDs.removeAll()
                 externalRequestIDByScreenID.removeAll()
@@ -5074,6 +5117,8 @@ final class VideoWallpaperManager: ObservableObject {
         // 切到 web/scene 时必须一并拆除，否则会出现「web 已切上、视频层还在渲染」。
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
+        nativePausedScreenIDs.remove(screenID)
+        nativePausedScreenFingerprints.remove(screenFingerprint)
 
         // 取消该屏尚未应用的切换队列、poster 任务与补帧任务，避免 stop 后异步回调把视频窗重建回来。
         pendingDisplaySwitches.removeValue(forKey: screenID)
@@ -5116,6 +5161,7 @@ final class VideoWallpaperManager: ObservableObject {
             videoTargetScreenIDs.remove(windowKey)
             videoURLByScreen.removeValue(forKey: windowKey)
             posterURLByScreen.removeValue(forKey: windowKey)
+            nativePausedScreenIDs.remove(windowKey)
         }
         discardOriginalWallpaperSnapshot()
 
@@ -5127,6 +5173,8 @@ final class VideoWallpaperManager: ObservableObject {
             videoURLByScreen.removeAll()
             videoURLByScreenFingerprint.removeAll()
             isPaused = false
+            nativePausedScreenIDs.removeAll()
+            nativePausedScreenFingerprints.removeAll()
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             defaults.removeObject(forKey: stateKey)
@@ -6462,6 +6510,19 @@ final class VideoWallpaperManager: ObservableObject {
             }
         }
 
+        // screenID 会在睡眠/热插拔后变化；把按屏暂停状态一起迁移，
+        // 否则新建播放器时会把原来暂停的屏重新启动。
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
+            if nativePausedScreenIDs.contains(screenID)
+                || nativePausedScreenIDs.contains(fingerprint)
+                || nativePausedScreenFingerprints.contains(fingerprint) {
+                nativePausedScreenIDs.insert(screenID)
+                nativePausedScreenFingerprints.insert(fingerprint)
+            }
+        }
+
         rematerializeExternalScreenIdentitySets()
         migrateSingleActiveVideoWallpaperToCurrentScreenIfNeeded()
         syncCurrentVideoURL()
@@ -7419,7 +7480,7 @@ final class VideoWallpaperManager: ObservableObject {
                         // AVPlayerLooper 可能在预热期间插入新的循环 item，交接前再应用一次音频策略。
                         let screenVolume = self.volumeByScreen[targetScreenID] ?? self.volume
                         self.applyPlayerAudioPolicy(components.player, muted: self.isMuted, volume: screenVolume)
-                        if !self.isPaused {
+                        if self.shouldPlayNativeVideo(for: targetScreenID) {
                             self.playWallpaperPlayer(
                                 components.player,
                                 screenID: targetScreenID
@@ -7515,7 +7576,7 @@ final class VideoWallpaperManager: ObservableObject {
                     // 非动画替换会立即播放，新播放器绑定到 layer 后先同步静音音频轨状态。
                     let screenVolume = volumeByScreen[targetScreenID] ?? volume
                     applyPlayerAudioPolicy(components.player, muted: isMuted, volume: screenVolume)
-                    if !isPaused {
+                    if shouldPlayNativeVideo(for: targetScreenID) {
                         playWallpaperPlayer(
                             components.player,
                             screenID: targetScreenID
@@ -7640,7 +7701,7 @@ final class VideoWallpaperManager: ObservableObject {
             // 首屏首帧完成后立即播放。先确认时间轴开始推进，
             // 再挂剩余 layer，避免“同时创建”整组停在未解码状态。
             let initialSeconds = player.currentTime().seconds
-            if !self.isPaused {
+            if self.shouldPlayNativeVideo(for: firstScreen.wallpaperScreenIdentifier) {
                 self.playWallpaperPlayer(
                     player,
                     screenID: firstScreen.wallpaperScreenIdentifier
@@ -8010,6 +8071,9 @@ final class VideoWallpaperManager: ObservableObject {
         }
         if onEndModeScreens.remove(oldScreenID) != nil {
             onEndModeScreens.insert(newScreenID)
+        }
+        if nativePausedScreenIDs.remove(oldScreenID) != nil {
+            nativePausedScreenIDs.insert(newScreenID)
         }
         if let volume = volumeByScreen.removeValue(forKey: oldScreenID) {
             volumeByScreen[newScreenID] = volume
@@ -8735,13 +8799,13 @@ final class VideoWallpaperManager: ObservableObject {
             // 预卷或真实 layer 首帧已经完成，此时才移除封面并提交切换。
             // 全局手动暂停时必须继续保留 poster；新建的 AVPlayer 尚未有
             // 可显示帧，提前隐藏会把暂停中的桌面变成纯黑。
-            if !self.isPaused {
+            if self.shouldPlayNativeVideo(for: screenID) {
                 self.hidePosterImage(for: screenID)
             }
             // Looper 可能在预热期间插入新的循环 item，提交前再次同步音频策略。
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
-            if !self.isPaused {
+            if self.shouldPlayNativeVideo(for: screenID) {
                 self.playWallpaperPlayer(player, screenID: screenID)
             }
             if self.screenIDsReferencingPlayer(player).count > 1 {
@@ -8815,7 +8879,7 @@ final class VideoWallpaperManager: ObservableObject {
                         }
                         if currentItem.status == .readyToPlay {
                             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: warmupVolume)
-                            if !self.isPaused {
+                            if self.shouldPlayNativeVideo(for: screenID) {
                                 self.playWallpaperPlayer(player, screenID: screenID)
                             }
                             player.preroll(
@@ -8885,13 +8949,13 @@ final class VideoWallpaperManager: ObservableObject {
             }
             // 超时兜底。全局手动暂停时仍保留封面，避免新播放器尚未
             // 产出帧就把暂停中的桌面揭成黑色。
-            if !self.isPaused {
+            if self.shouldPlayNativeVideo(for: screenID) {
                 self.hidePosterImage(for: screenID)
             }
             // ready 超时时也会直接播放，所以这里同样要先禁用静音状态下的音频轨。
             let screenVolume = self.volumeByScreen[screenID] ?? self.volume
             self.applyPlayerAudioPolicy(player, muted: self.isMuted, volume: screenVolume)
-            if !self.isPaused {
+            if self.shouldPlayNativeVideo(for: screenID) {
                 self.playWallpaperPlayer(player, screenID: screenID)
             }
             // 超时路径一律瞬时显现，避免后台再卡在 animator 上。

@@ -1100,7 +1100,10 @@ final class StatusBarController: NSObject {
             ) { [weak self] selectedScreen in
                 guard let self = self else { return }
 
-                if self.videoWallpaperManager.isPaused {
+                let isPaused = selectedScreen.map {
+                    self.videoWallpaperManager.isPaused(on: $0)
+                } ?? self.videoWallpaperManager.isPaused
+                if isPaused {
                     self.videoWallpaperManager.resumeWallpaper(for: selectedScreen)
                     DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
                 } else {

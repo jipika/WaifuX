@@ -22,6 +22,11 @@ class WorkshopViewModel: ObservableObject {
     private let workshopService = WorkshopService.shared
     private var cancellables = Set<AnyCancellable>()
 
+    /// 内存压力通知 observer token；deinit 时移除。
+    /// ⚠️ token 一旦丢弃，NotificationCenter 会永久持有 observer block。
+    /// nonisolated(unsafe)：deinit 需要访问；removeObserver 线程安全。
+    private nonisolated(unsafe) var memoryPressureObserver: NSObjectProtocol?
+
     // MARK: - Internal State
 
     private var currentPage = 1
@@ -32,12 +37,13 @@ class WorkshopViewModel: ObservableObject {
 
     init() {
         // 注册内存压力通知
-        NotificationCenter.default.addObserver(
+        // ⚠️ 外层闭包必须 [weak self]，否则 observer block 强捕获 self → 实例永不释放。
+        memoryPressureObserver = NotificationCenter.default.addObserver(
             forName: .appDidReceiveMemoryPressure,
             object: nil,
             queue: .main
-        ) { _ in
-            Task { @MainActor [weak self] in
+        ) { [weak self] _ in
+            Task { @MainActor in
                 self?.handleMemoryPressure()
             }
         }
@@ -51,6 +57,12 @@ class WorkshopViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    deinit {
+        if let observer = memoryPressureObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Public API

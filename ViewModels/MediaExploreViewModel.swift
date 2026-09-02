@@ -152,18 +152,24 @@ final class MediaExploreViewModel: ObservableObject {
     /// 缓存的本地媒体列表，避免每次 body 重绘时重复计算和文件 I/O
     @Published var cachedAllLocalMedia: [UnifiedLocalMedia] = []
 
+    /// 内存压力通知 observer token；deinit 时移除。
+    /// ⚠️ token 一旦丢弃，NotificationCenter 会永久持有 observer block。
+    /// nonisolated(unsafe)：deinit 需要访问；removeObserver 线程安全。
+    private nonisolated(unsafe) var memoryPressureObserver: NSObjectProtocol?
+
     init() {
         // 缓存 UserDefaults 值，避免后台线程访问触发 _CFXPreferences 递归崩溃
         // 注意：此读取本身也有风险，但为既有路径；探索排序改为 restoreExploreSortPreferences() 延迟恢复
         persistDownloadedMediaToAppLibrary = UserDefaults.standard.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
 
         // 注册内存压力通知（由 WaifuXApp.configureKingfisher 中的 DispatchSource 触发）
-        NotificationCenter.default.addObserver(
+        // ⚠️ 外层闭包必须 [weak self]，否则 observer block 强捕获 self → 实例永不释放。
+        memoryPressureObserver = NotificationCenter.default.addObserver(
             forName: .appDidReceiveMemoryPressure,
             object: nil,
             queue: .main
-        ) { _ in
-            Task { @MainActor [weak self] in
+        ) { [weak self] _ in
+            Task { @MainActor in
                 self?.handleMemoryPressure()
             }
         }
@@ -294,6 +300,12 @@ final class MediaExploreViewModel: ObservableObject {
         // 设置网络监测器到网络服务
         networkMonitorSetupTask = Task { [networkService, networkMonitor] in
             await networkService.setNetworkMonitor(networkMonitor)
+        }
+    }
+
+    deinit {
+        if let observer = memoryPressureObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -1174,6 +1186,7 @@ final class MediaExploreViewModel: ObservableObject {
         usesSharedVideoDecoder: Bool = false
     ) async throws {
         let resolvedTargetScreens = targetScreens ?? targetScreen.map { [$0] }
+        SceneOfflineBakeService.cancelRealtimeCompanionBake(reason: "applyDynamicWallpaper")
         // Workshop 项：优先查找本地已下载的视频文件
         if item.id.hasPrefix("workshop_"),
            let localVideoURL = findLocalWorkshopVideo(for: item) {

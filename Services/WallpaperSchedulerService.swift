@@ -17,6 +17,11 @@ class WallpaperSchedulerService: ObservableObject {
     private var usedItemIDs: [String: Set<String>] = [:]
     /// Per-screen in-flight set for "播完即换" — blocks concurrent applies.
     private var onEndSwitchInFlightScreens = Set<String>()
+    /// Cancellable tasks for independent-screen on-end applies. The task must
+    /// be drained before a manual apply starts, otherwise its awaited renderer
+    /// work can finish later and overwrite the user's selection.
+    private var onEndSwitchTasks: [String: Task<Void, Never>] = [:]
+    private var onEndSwitchGeneration: UInt64 = 0
     /// Earliest time another on-end apply is allowed for a screen (post-apply cooldown).
     private var onEndSwitchCooldownUntilByScreen: [String: Date] = [:]
     /// Ignore another on-end trigger for the same screen within this window after apply returns.
@@ -74,6 +79,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
     private var activeGlobalRotationIsManual = false
     private var pendingManualGlobalRotation: PendingManualGlobalRotation?
+    /// Blocks a timer callback while a user-initiated apply is committing.
+    private var manualWallpaperApplyInFlight = false
     /// Cached per-root health result. Candidate construction stays memory-only;
     /// each actual switch forces one root-level check before applying.
     private var managedLibraryRootAvailability: (path: String, isAvailable: Bool)?
@@ -248,6 +255,10 @@ class WallpaperSchedulerService: ObservableObject {
         overrideOrder: ScheduleOrder? = nil,
         preferImmediatePresentation: Bool = false
     ) {
+        if case .onEnd? = requiredMode, manualWallpaperApplyInFlight {
+            print("\(logTag) Skipping on-end next for \(screenID): manual wallpaper setting in progress")
+            return
+        }
         // 手动“下一张”允许在锁屏标志异常时继续；自动 on-end 仍尊重锁屏状态。
         // screenIsUnlocked DistributedNotification 偶发丢失时，isScreenLocked 会永久卡死，
         // 因此丢弃的 on-end 事件记入 pendingOnEndSwitchScreenIDs，解锁后重放。
@@ -342,15 +353,31 @@ class WallpaperSchedulerService: ObservableObject {
             return
         }
 
-        Task { @MainActor in
+        let generation = onEndSwitchGeneration
+        let task = Task { @MainActor in
             var didApply = false
-            defer { self.finishOnEndSwitch(for: screenID, requiredMode: requiredMode, applied: didApply) }
+            defer {
+                if self.onEndSwitchGeneration == generation {
+                    self.onEndSwitchTasks.removeValue(forKey: screenID)
+                    self.finishOnEndSwitch(for: screenID, requiredMode: requiredMode, applied: didApply)
+                }
+            }
+            guard !Task.isCancelled,
+                  self.onEndSwitchGeneration == generation,
+                  !self.manualWallpaperApplyInFlight else {
+                return
+            }
             print("\(logTag) Applying next wallpaper '\(item.title)' (\(item.fileURL.lastPathComponent)) to screen \(screenID)")
             let success = await applyItem(
                 item,
                 toScreenID: screenID,
                 preferImmediatePresentation: preferImmediatePresentation
             )
+            guard !Task.isCancelled,
+                  self.onEndSwitchGeneration == generation,
+                  !self.manualWallpaperApplyInFlight else {
+                return
+            }
             if success {
                 didApply = true
                 self.lastChangeTimes[screenID] = now
@@ -362,6 +389,11 @@ class WallpaperSchedulerService: ObservableObject {
                 // 尝试其他可用项，避免因选中不支持的壁纸类型导致黑屏
                 var remaining = items.filter { $0.id != item.id }
                 while !remaining.isEmpty {
+                    guard !Task.isCancelled,
+                          self.onEndSwitchGeneration == generation,
+                          !self.manualWallpaperApplyInFlight else {
+                        return
+                    }
                     guard let retryItem = selectNextItem(from: remaining, lastID: lastChangedItemID, screenID: screenID, order: order) else { break }
                     remaining.removeAll { $0.id == retryItem.id }
                     let retrySuccess = await applyItem(
@@ -369,6 +401,11 @@ class WallpaperSchedulerService: ObservableObject {
                         toScreenID: screenID,
                         preferImmediatePresentation: preferImmediatePresentation
                     )
+                    guard !Task.isCancelled,
+                          self.onEndSwitchGeneration == generation,
+                          !self.manualWallpaperApplyInFlight else {
+                        return
+                    }
                     if retrySuccess {
                         didApply = true
                         self.lastChangeTimes[screenID] = now
@@ -383,6 +420,7 @@ class WallpaperSchedulerService: ObservableObject {
                 self.recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             }
         }
+        onEndSwitchTasks[screenID] = task
     }
 
     private func finishOnEndSwitch(
@@ -408,6 +446,10 @@ class WallpaperSchedulerService: ObservableObject {
         overrideOrder: ScheduleOrder? = nil,
         preferImmediatePresentation: Bool = false
     ) {
+        if case .onEnd? = requiredMode, manualWallpaperApplyInFlight {
+            print("\(logTag) Skipping global on-end rotation: manual wallpaper setting in progress")
+            return
+        }
         guard globalRotationTask == nil else {
             if requiredMode == nil, !activeGlobalRotationIsManual {
                 pendingManualGlobalRotation = PendingManualGlobalRotation(
@@ -1041,6 +1083,82 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
+    /// 用户开始应用壁纸前调用：取消已经排队/在途的自动切换，避免它在用户操作
+    /// 期间覆盖手动选择。成功/失败后的时间状态由 completeManualWallpaperApply 处理。
+    @MainActor
+    func beginManualWallpaperApply() async {
+        var tasksToDrain: [Task<Void, Never>] = []
+        if let timedRotationTask {
+            tasksToDrain.append(timedRotationTask)
+        }
+        if let globalRotationTask {
+            tasksToDrain.append(globalRotationTask)
+        }
+        if let displayModeTransitionTask {
+            tasksToDrain.append(displayModeTransitionTask)
+        }
+        tasksToDrain.append(contentsOf: onEndSwitchTasks.values)
+
+        manualWallpaperApplyInFlight = true
+        cancelDispatchTimer()
+        cancelTimedRotation()
+        pendingOnEndSwitchScreenIDs.removeAll()
+
+        globalRotationGeneration &+= 1
+        globalRotationTask?.cancel()
+        globalRotationTask = nil
+        activeGlobalRotationIsManual = false
+        pendingManualGlobalRotation = nil
+        displayModeTransitionGeneration &+= 1
+        displayModeTransitionTask?.cancel()
+        displayModeTransitionTask = nil
+        onEndSwitchGeneration &+= 1
+        onEndSwitchTasks.removeAll()
+        onEndSwitchInFlightScreens.removeAll()
+        onEndSwitchCooldownUntilByScreen.removeAll()
+        globalOnEndSwitchCooldownUntil = nil
+        for task in tasksToDrain {
+            task.cancel()
+            await task.value
+        }
+
+        print("\(logTag) Manual wallpaper apply started; auto-switch work cancelled")
+    }
+
+    /// 用户壁纸应用完成后调用：成功时按当前调度模式重置对应状态，失败时仅恢复
+    /// 调度器，不把一次失败的手动操作误记成最近一次壁纸切换。
+    @MainActor
+    func completeManualWallpaperApply(success: Bool, screenIDs: Set<String>) {
+        manualWallpaperApplyInFlight = false
+        guard success else {
+            if isRunning {
+                scheduleNextChange()
+            }
+            print("\(logTag) Manual wallpaper apply failed; auto-switch timers restored")
+            return
+        }
+
+        let now = Date()
+        if config.isGlobalDisplaySyncEnabled {
+            lastChangeTimes[globalSchedulerStateKey] = now
+            failedApplyRetryAfter.removeValue(forKey: globalSchedulerStateKey)
+        } else {
+            let currentScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+            let targetIDs = screenIDs.isEmpty
+                ? currentScreenIDs
+                : screenIDs.intersection(currentScreenIDs)
+            for screenID in targetIDs {
+                lastChangeTimes[screenID] = now
+                failedApplyRetryAfter.removeValue(forKey: screenID)
+            }
+        }
+        persistSchedulerState()
+        if isRunning {
+            scheduleNextChange()
+        }
+        print("\(logTag) Manual wallpaper applied; auto-switch timers reset")
+    }
+
     // MARK: - Control
 
     func start() {
@@ -1100,6 +1218,7 @@ class WallpaperSchedulerService: ObservableObject {
     /// 手动设置壁纸后调用：重置该屏幕的调度计时器，避免刚设置完就被自动切换覆盖。
     /// - Parameter screenID: 被手动设置壁纸的屏幕标识符；nil 表示重置所有屏幕。
     func notifyManualWallpaperChange(screenID: String? = nil) {
+        manualWallpaperApplyInFlight = false
         cancelTimedRotation()
         let now = Date()
         if config.isGlobalDisplaySyncEnabled {
@@ -1798,6 +1917,10 @@ class WallpaperSchedulerService: ObservableObject {
             clearStuckScreenLockIfNeeded(source: "timer")
         }
         guard !isScreenLocked else { return false }
+        guard !manualWallpaperApplyInFlight else {
+            print("\(logTag) Skipping: manual wallpaper setting in progress")
+            return false
+        }
         guard !WallpaperEngineXBridge.shared.isSettingWallpaper else {
             print("\(logTag) Skipping: manual wallpaper setting in progress")
             return false
@@ -1905,6 +2028,10 @@ class WallpaperSchedulerService: ObservableObject {
 
     private func changeUnlockWallpapersIfNeeded() {
         guard !isScreenLocked else { return }
+        guard !manualWallpaperApplyInFlight else {
+            print("\(logTag) Skipping unlock switch: manual wallpaper setting in progress")
+            return
+        }
         guard !WallpaperEngineXBridge.shared.isSettingWallpaper else {
             print("\(logTag) Skipping unlock switch: manual wallpaper setting in progress")
             return

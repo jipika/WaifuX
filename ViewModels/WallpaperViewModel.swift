@@ -34,6 +34,11 @@ class WallpaperViewModel: ObservableObject {
     private var debounceTask: Task<Void, Never>?
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
 
+    /// 内存压力通知 observer token；deinit 时移除。
+    /// ⚠️ token 一旦丢弃，NotificationCenter 会永久持有 observer block。
+    /// nonisolated(unsafe)：deinit 需要访问；removeObserver 线程安全。
+    private nonisolated(unsafe) var memoryPressureObserver: NSObjectProtocol?
+
     /// 本地壁纸缓存重建任务（带防抖）
     private var rebuildLocalWallpaperCacheTask: Task<Void, Never>?
     private var localWallpaperCacheRebuildID: UUID?
@@ -268,13 +273,16 @@ class WallpaperViewModel: ObservableObject {
 
     init() {
         // ⚠️ 不在 init 读 UserDefaults；探索排序由 restoreExploreSortPreferences() 延迟恢复
-        // 注册内存压力通知
-        NotificationCenter.default.addObserver(
+        // 注册内存压力通知。
+        // ⚠️ 外层闭包必须 [weak self]：仅内层 Task 的 [weak self] 不起作用，
+        // 外层 block 会为构造 weak 引用而强捕获 self；而 observer block 被
+        // NotificationCenter 永久持有（token 若丢弃则无法移除）→ 实例永不释放。
+        memoryPressureObserver = NotificationCenter.default.addObserver(
             forName: .appDidReceiveMemoryPressure,
             object: nil,
             queue: .main
-        ) { _ in
-            Task { @MainActor [weak self] in
+        ) { [weak self] _ in
+            Task { @MainActor in
                 self?.handleMemoryPressure()
             }
         }
@@ -325,6 +333,12 @@ class WallpaperViewModel: ObservableObject {
         // 设置网络监测器到网络服务
         Task {
             await networkService.setNetworkMonitor(networkMonitor)
+        }
+    }
+
+    deinit {
+        if let observer = memoryPressureObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -1733,6 +1747,7 @@ class WallpaperViewModel: ObservableObject {
             reason: "WallpaperViewModel.setWallpaper"
         )
         let screens = NSScreen.screens
+        SceneOfflineBakeService.cancelRealtimeCompanionBake(reason: "WallpaperViewModel.setWallpaper")
         let transitionToken = WallpaperCrossTypeTransitionCoordinator.shared
             .beginRequest(on: screens)
         let imageURLByScreen = try await preparedStaticImageURLs(
@@ -1880,6 +1895,7 @@ class WallpaperViewModel: ObservableObject {
         VideoWallpaperManager.shared.cancelPendingExternalVideoTransition(
             reason: "WallpaperViewModel.setWallpaperForScreen"
         )
+        SceneOfflineBakeService.cancelRealtimeCompanionBake(reason: "WallpaperViewModel.setWallpaperForScreen")
         let workspace = NSWorkspace.shared
 
         // 如果指定了特定屏幕，只设置到该屏幕

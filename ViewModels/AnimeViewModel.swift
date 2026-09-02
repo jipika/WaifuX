@@ -36,6 +36,16 @@ class AnimeViewModel: ObservableObject {
     private var currentPage = 1
     private let pageSize = 20
     private var hasRegisteredMemoryPressure = false
+    /// 内存压力通知 observer token；deinit 时移除。
+    /// ⚠️ token 一旦丢弃，NotificationCenter 会永久持有 observer block。
+    /// nonisolated(unsafe)：deinit 需要访问；removeObserver 线程安全。
+    private nonisolated(unsafe) var memoryPressureObserver: NSObjectProtocol?
+
+    deinit {
+        if let observer = memoryPressureObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
 
     private var loadMoreTask: Task<Void, Never>?
 
@@ -81,14 +91,15 @@ class AnimeViewModel: ObservableObject {
         defer { isLoading = false }
 
         // 注册内存压力通知（只注册一次）
+        // ⚠️ 外层闭包必须 [weak self]，否则 observer block 强捕获 self → 实例永不释放。
         if !hasRegisteredMemoryPressure {
             hasRegisteredMemoryPressure = true
-            NotificationCenter.default.addObserver(
+            memoryPressureObserver = NotificationCenter.default.addObserver(
                 forName: .appDidReceiveMemoryPressure,
                 object: nil,
                 queue: .main
-            ) { _ in
-                Task { @MainActor [weak self] in
+            ) { [weak self] _ in
+                Task { @MainActor in
                     self?.handleMemoryPressure()
                 }
             }

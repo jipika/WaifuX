@@ -1662,11 +1662,14 @@ struct MediaDetailSheet: View {
                         reason: "baked-loop-apply"
                     )
                     options.bakedVideoPath = bakedVideoURL.path
-                    _ = try await LocalWallpaperApplyService.apply(
+                    let applied = try await LocalWallpaperApplyService.apply(
                         localURL: bakedVideoURL,
                         targetScreens: targetScreens,
                         options: options
                     )
+                    guard applied else {
+                        throw LocalWallpaperApplyService.ApplyError.failed("壁纸应用未完成")
+                    }
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                         screenID: isGlobalDisplaySyncEnabled ? nil : selectedScreen?.wallpaperScreenIdentifier
                     )
@@ -3308,19 +3311,26 @@ struct MediaDetailSheet: View {
         // 检测多显示器
         let screens = NSScreen.screens
         if WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled {
+            let targetScreens = screens
+            let targetScreenIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
             applyingWallpaperStatusKey = "applyingWallpaper.video"
             isSettingWallpaper = true
             errorMessage = ""
             Task { @MainActor in
                 do {
+                    await WallpaperSchedulerService.shared.beginManualWallpaperApply()
                     try await viewModel.applyDynamicWallpaper(
                         resolvedItem,
                         muted: isMuted,
-                        targetScreens: NSScreen.screens,
+                        targetScreens: targetScreens,
                         usesSharedVideoDecoder: true
                     )
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: nil)
                 } catch {
+                    WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                        success: false,
+                        screenIDs: targetScreenIDs
+                    )
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
                 }
@@ -3331,15 +3341,26 @@ struct MediaDetailSheet: View {
                 title: t("setWallpaper"),
                 message: t("multiDisplayDetected")
             ) { [self] selectedScreen in
+                let targetScreens = selectedScreen.map { [$0] } ?? NSScreen.screens
+                let targetScreenIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
                 applyingWallpaperStatusKey = "applyingWallpaper.video"
                 isSettingWallpaper = true
                 errorMessage = ""
                 Task { @MainActor in
                     do {
-                        try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted, targetScreen: selectedScreen)
+                        await WallpaperSchedulerService.shared.beginManualWallpaperApply()
+                        try await viewModel.applyDynamicWallpaper(
+                            resolvedItem,
+                            muted: isMuted,
+                            targetScreens: targetScreens
+                        )
                         WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                         isSettingWallpaper = false
                     } catch {
+                        WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                            success: false,
+                            screenIDs: targetScreenIDs
+                        )
                         errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                         showError = true
                         isSettingWallpaper = false
@@ -3347,16 +3368,27 @@ struct MediaDetailSheet: View {
                 }
             }
         } else {
+            let targetScreens = screens
+            let targetScreenIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
             applyingWallpaperStatusKey = "applyingWallpaper.video"
             isSettingWallpaper = true
             errorMessage = ""
             Task { @MainActor in
                 do {
-                    try await viewModel.applyDynamicWallpaper(resolvedItem, muted: isMuted)
+                    await WallpaperSchedulerService.shared.beginManualWallpaperApply()
+                    try await viewModel.applyDynamicWallpaper(
+                        resolvedItem,
+                        muted: isMuted,
+                        targetScreens: targetScreens
+                    )
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
-                        screenID: NSScreen.screens.first?.wallpaperScreenIdentifier
+                        screenID: targetScreens.first?.wallpaperScreenIdentifier
                     )
                 } catch {
+                    WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                        success: false,
+                        screenIDs: targetScreenIDs
+                    )
                     errorMessage = error.localizedDescription
                     showError = true
                 }
@@ -3456,11 +3488,14 @@ struct MediaDetailSheet: View {
                     if let art = SceneOfflineBakeService.usableArtifact(from: currentDownloadRecord) {
                         options.bakedVideoPath = art.videoPath
                     }
-                    _ = try await LocalWallpaperApplyService.apply(
+                    let applied = try await LocalWallpaperApplyService.apply(
                         localURL: localURL,
                         targetScreens: targetScreens,
                         options: options
                     )
+                    guard applied else {
+                        throw LocalWallpaperApplyService.ApplyError.failed("壁纸应用未完成")
+                    }
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                         screenID: isGlobalDisplaySyncEnabled ? nil : selectedScreen?.wallpaperScreenIdentifier
                     )
@@ -3518,13 +3553,15 @@ struct MediaDetailSheet: View {
 
         // 2. 无烘焙产物 → 自动用 wallpaper-wgpu 烘焙后应用
         guard !isBakingScene else { return }
+        let targetScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
         isBakingScene = true
         bakeProgress = 0
         applyingWallpaperStatusKey = "applyingWallpaper.video"
         isSettingWallpaper = true
 
-        Task {
+        Task { @MainActor in
             do {
+                await WallpaperSchedulerService.shared.beginManualWallpaperApply()
                 // 获取或分析烘焙资格
                 let snapshotRecord = await MainActor.run {
                     mediaLibrary.downloadedItems.first { $0.item.id == itemID }
@@ -3536,6 +3573,10 @@ struct MediaDetailSheet: View {
                 } else {
                     guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
                         await MainActor.run {
+                            WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                                success: false,
+                                screenIDs: targetScreenIDs
+                            )
                             isBakingScene = false
                             isSettingWallpaper = false
                             errorMessage = t("sceneBake.error.insufficientMemory.analysis")
@@ -3583,11 +3624,15 @@ struct MediaDetailSheet: View {
                     isBakingScene = false
                     isSettingWallpaper = false
                     scheduleSceneBakeSuccessFlash()
-                    // 烘焙完成后与手动设壁纸同一路径
-                    applyWorkshopWallpaperFromLocalURL(sceneContentRoot)
+                    // 直接使用刚生成的产物，避免媒体库记录异步刷新导致再次触发烘焙。
+                    applyBakedLoopVideoAsWallpaper(URL(fileURLWithPath: artifact.videoPath))
                 }
             } catch {
                 await MainActor.run {
+                    WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                        success: false,
+                        screenIDs: targetScreenIDs
+                    )
                     isBakingScene = false
                     isSettingWallpaper = false
                     let detail = Self.truncateErrorMessage(error.localizedDescription)

@@ -630,10 +630,16 @@ struct FullScreenWallpaperView: View {
 
     private func setAsWallpaper() {
         Task {
+            let targetScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+            await WallpaperSchedulerService.shared.beginManualWallpaperApply()
             do {
                 try await viewModel.setAsWallpaper(wallpaper)
                 WallpaperSchedulerService.shared.notifyManualWallpaperChange()
             } catch {
+                WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                    success: false,
+                    screenIDs: targetScreenIDs
+                )
                 print("Set wallpaper error: \(error)")
             }
         }
