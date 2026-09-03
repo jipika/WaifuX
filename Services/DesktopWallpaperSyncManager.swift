@@ -189,6 +189,10 @@ final class DesktopWallpaperSyncManager {
             }
         }
         persistFingerprintState()
+
+        // 静态壁纸写入会让 wallpaper agent 新增一份 24MB+ 的解码缓存，
+        // 触发一次系统壁纸缓存水位检查（内部 10 秒防抖 + 10 分钟节流 + 2GB 阈值，常态零开销）
+        WallpaperSystemCacheJanitor.shared.noteWallpaperChanged()
     }
 
     /// 返回指定屏幕最后通过 App 设置的静态壁纸 URL（无记录时返回 nil）

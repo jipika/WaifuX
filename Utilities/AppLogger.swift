@@ -257,4 +257,30 @@ final class AppLogger: @unchecked Sendable {
     static func logFileURL() -> URL? {
         return shared.logFileURL
     }
+
+    // MARK: - 导出日志到桌面
+
+    /// 把运行日志复制到桌面（带时间戳文件名），返回导出文件 URL；无日志文件时返回 nil，复制失败抛错。
+    /// 供设置页「导出日志」使用：用户把导出的文件发给开发者排查问题。
+    static func exportLogToDesktop() throws -> URL? {
+        guard let sourceURL = shared.logFileURL,
+              FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return nil
+        }
+        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = formatter.string(from: Date())
+        var destination = desktop.appendingPathComponent("WaifuX-Log-\(stamp).log")
+        // 同一秒内重复导出时追加序号，避免覆盖
+        var sequence = 1
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = desktop.appendingPathComponent("WaifuX-Log-\(stamp)-\(sequence).log")
+            sequence += 1
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        AppLogger.info(.general, "日志已导出到桌面", metadata: ["path": destination.path])
+        return destination
+    }
 }

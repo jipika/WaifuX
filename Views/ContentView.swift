@@ -904,9 +904,57 @@ struct ContentView: View {
 
 // MARK: - MyMediaContentView 已移除（死代码，未被任何视图引用）
 
+/// 跟踪用户是否正在滚动列表。弹窗在滚动期间跳过进度动画提交，
+/// 避免动画帧与列表滚动渲染争抢主线程（滚动停止 idleInterval 后自动恢复）。
+@MainActor
+private final class ScrollActivityTracker: ObservableObject {
+    @Published private(set) var isScrolling = false
+
+    private var monitor: Any?
+    private var idleWorkItem: DispatchWorkItem?
+    private let idleInterval: TimeInterval = 0.25
+
+    func start() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.noteScrollActivity()
+            }
+            return event
+        }
+    }
+
+    func stop() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        monitor = nil
+        idleWorkItem?.cancel()
+        idleWorkItem = nil
+        if isScrolling {
+            isScrolling = false
+        }
+    }
+
+    private func noteScrollActivity() {
+        // 只在状态翻转时发布，避免每个滚轮事件都触发 objectWillChange
+        if !isScrolling {
+            isScrolling = true
+        }
+        idleWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.isScrolling else { return }
+            self.isScrolling = false
+        }
+        idleWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleInterval, execute: item)
+    }
+}
+
 // MARK: - iOS 丝滑风格下载进度弹窗宿主
 private struct DownloadProgressToastHost: View {
     @StateObject private var viewModel = DownloadToastViewModel()
+    @StateObject private var scrollTracker = ScrollActivityTracker()
     let onDismiss: (DownloadToastSnapshot) -> Void
     let onCancel: (DownloadToastSnapshot) -> Void
     let onRetry: (DownloadToastSnapshot) -> Void
@@ -936,6 +984,7 @@ private struct DownloadProgressToastHost: View {
                     snapshot: snapshot,
                     activeTaskCount: viewModel.activeTaskCount,
                     steamCMDQueuedCount: viewModel.steamCMDQueuedCount,
+                    suppressProgressAnimation: scrollTracker.isScrolling,
                     onDismiss: {
                         dismiss(snapshot)
                     },
@@ -960,7 +1009,11 @@ private struct DownloadProgressToastHost: View {
             }
         }
         .onAppear {
+            scrollTracker.start()
             reconcileDisplayedSnapshot(viewModel.snapshot)
+        }
+        .onDisappear {
+            scrollTracker.stop()
         }
         .onChange(of: viewModel.snapshot) { _, snapshot in
             reconcileDisplayedSnapshot(snapshot)
@@ -1233,6 +1286,8 @@ private struct DownloadProgressToast: View {
     let snapshot: DownloadToastSnapshot
     let activeTaskCount: Int
     let steamCMDQueuedCount: Int
+    /// 列表滚动期间为 true：进度直接跳变，不启动新动画（避免与滚动渲染抢主线程）
+    var suppressProgressAnimation: Bool = false
     let onDismiss: () -> Void
     let onCancel: () -> Void
     let onRetry: () -> Void
@@ -1307,9 +1362,11 @@ private struct DownloadProgressToast: View {
             || snapshot.status == .waitingForSteamLogin
     }
 
-    /// 进度条动画：平滑跟随（优化：更长的响应时间减少重绘频率）
+    /// 进度条动画：临界阻尼 spring，约 0.3s 收敛。
+    /// 原 interpolatingSpring(stiffness: 120, damping: 20) 欠阻尼长尾在 ~6.7fps
+    /// 进度更新下几乎从不静止，弹窗会持续产生动画帧，滚动列表时叠加掉帧。
     private var progressAnimation: Animation {
-        .interpolatingSpring(stiffness: 120, damping: 20)
+        .spring(response: 0.3, dampingFraction: 1.0)
     }
 
     private enum ToastActionRole {
@@ -1327,10 +1384,10 @@ private struct DownloadProgressToast: View {
                     .foregroundStyle(tint)
                     .frame(width: 34, height: 34)
                     .background(
-                        DarkLiquidGlassBackground(
-                            cornerRadius: 17,
-                            isHovered: false
-                        )
+                        // 轻量半透明填充：玻璃卡片上的小元素不再叠加 material
+                        // 采样层（原来每层都是实时 backdrop blur，滚动时逐帧重采样）
+                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
                     )
                     .scaleEffect(isCompleted ? 1.08 : 1.0)
 
@@ -1355,12 +1412,22 @@ private struct DownloadProgressToast: View {
                     .padding(.horizontal, 10)
                     .frame(height: 24)
                     .background(
-                        DarkLiquidGlassBackground(
-                            cornerRadius: 12,
-                            isHovered: false
-                        )
-                        .opacity(0.7)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white.opacity(0.10))
                     )
+
+                // 右上角快捷操作：下载中=取消本次下载（含排队/等待 Steam 登录），
+                // 其余状态（完成/失败/暂停/已取消）=关闭弹窗
+                Button(action: snapshot.isRunning ? onCancel : onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help(snapshot.isRunning ? "取消下载" : "关闭")
             }
 
             // 进度区域
@@ -1383,7 +1450,8 @@ private struct DownloadProgressToast: View {
                     Text("\(Int((max(0, min(animatedProgress, 1)) * 100).rounded()))%")
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.86))
-                        .contentTransition(.numericText())
+                        // 去掉 contentTransition(.numericText())：每次进度更新都会
+                        // 创建文本 morph 动画层，monospacedDigit 直接跳变视觉等效且更省
                 }
             } else {
                 // 完成行：简洁显示
@@ -1428,8 +1496,17 @@ private struct DownloadProgressToast: View {
         // 精简动画：只用颜色过渡，避免复杂的 layout transition 导致卡顿
         .animation(.easeInOut(duration: 0.20), value: isCompleted)
         .onChange(of: snapshot.progress) { _, newProgress in
-            withAnimation(progressAnimation) {
-                animatedProgress = newProgress
+            if suppressProgressAnimation {
+                // 滚动期间：禁用动画直接跳变，弹窗层不产生新的动画帧
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    animatedProgress = newProgress
+                }
+            } else {
+                withAnimation(progressAnimation) {
+                    animatedProgress = newProgress
+                }
             }
         }
         .onAppear {

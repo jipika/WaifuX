@@ -1818,7 +1818,48 @@ class WorkshopService: ObservableObject {
         let contentPath = downloadDir
             .appendingPathComponent("steamapps/workshop/content/\(wallpaperEngineAppID)/\(workshopID)")
 
-        return try await withCheckedThrowingContinuation { continuation in
+        // 取消桥接：队列 cancelTask 会 cancel worker Task，但 withCheckedThrowingContinuation
+        // 不响应取消，steamcmd 子进程会继续跑到下载完成/600s 超时。这里通过 onCancel
+        // 显式 terminate 进程，再由 terminationHandler 以 CancellationError 结束等待。
+        // CancellationError 不是 WorkshopError，不会进入 recover/diagnose 重试链。
+        final class SteamCMDCancellationState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var isTriggered = false
+            private var terminateAction: (() -> Void)?
+
+            var triggered: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return isTriggered
+            }
+
+            /// 进程启动后注册终止动作；若取消已先发生则立即执行。
+            func arm(_ action: @escaping () -> Void) {
+                lock.lock()
+                let shouldRunNow = isTriggered
+                if !shouldRunNow {
+                    terminateAction = action
+                }
+                lock.unlock()
+                if shouldRunNow {
+                    action()
+                }
+            }
+
+            /// onCancel：置位并终止进程（进程尚未启动时仅置位，arm 时会补终止）。
+            func trigger() {
+                lock.lock()
+                isTriggered = true
+                let action = terminateAction
+                terminateAction = nil
+                lock.unlock()
+                action?()
+            }
+        }
+        let cancellationState = SteamCMDCancellationState()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
             let task = Process()
             // 直接执行 steamcmd 二进制，绕过 steamcmd.sh 脚本中路径空格导致的解析问题
             // 同时通过 stdin Pipe 发送命令，绕过 macOS 上 +runscript 卡死的问题
@@ -1992,6 +2033,12 @@ class WorkshopService: ObservableObject {
 
             task.terminationHandler = { _ in
                 progressMonitor.stop()
+                // 用户取消导致的进程终止：直接以 CancellationError 结束，不走输出解析
+                // （被 kill 的输出没有 "Download Complete"，走解析会被误判成下载失败并触发诊断）
+                if cancellationState.triggered {
+                    resumeBox.resume(throwing: CancellationError())
+                    return
+                }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
                     AppLogger.info(.download, "Workshop 网络进度采样汇总", metadata: progressMonitor.samplingDiagnostics())
                     // 超时导致的终止，直接返回明确的超时错误
@@ -2175,10 +2222,18 @@ class WorkshopService: ObservableObject {
 
             do {
                 try task.run()
+                cancellationState.arm {
+                    if task.isRunning {
+                        task.terminate()
+                    }
+                }
                 progressMonitor.start(processIdentifier: task.processIdentifier)
             } catch {
                 resumeBox.resume(throwing: WorkshopError.executionFailed(error.localizedDescription))
             }
+            }
+        } onCancel: {
+            cancellationState.trigger()
         }
     }
 

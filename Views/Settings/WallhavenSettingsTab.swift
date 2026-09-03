@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Wallhaven 设置标签：API Key 绑定，用于解锁 Sketchy / NSFW 内容级别。
+/// Wallhaven 设置标签：API Key 绑定和默认浏览筛选。
 struct WallhavenSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
 
@@ -49,6 +49,24 @@ struct WallhavenSettingsTab: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
+            }
+
+            MacSettingsSection(header: t("wallhavenDisplayPreferences")) {
+                MacSettingsRow(
+                    title: t("wallhavenHidePortraitByDefault"),
+                    subtitle: t("wallhavenHidePortraitByDefaultDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.hidePortraitWallpapersByDefault)
+                }
+
+                MacSettingsRow(
+                    title: t("wallhavenHidePeopleByDefault"),
+                    subtitle: t("wallhavenHidePeopleByDefaultDesc"),
+                    showDivider: false
+                ) {
+                    MacToggle(isOn: $viewModel.hidePeopleWallpapersByDefault)
+                }
             }
         }
     }

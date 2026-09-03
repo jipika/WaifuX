@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 enum MainTopBarLayout {
-    static let legacyContentTopPadding: CGFloat = 80
+    static let legacyContentTopPadding: CGFloat = 64
 }
 
 private struct MainTopBarContentPaddingKey: EnvironmentKey {
@@ -89,6 +89,7 @@ struct TopNavigationBar: View {
                         onOpenSettings()
                     }
                 }
+                .glassContainer(spacing: 8)
                 .opacity(isChromeHidden ? 0 : 1)
                 .allowsHitTesting(!isChromeHidden)
             }
@@ -249,20 +250,18 @@ private struct TopBarCircleButton: View {
                 .foregroundStyle(.white.opacity(isHovered ? 1.0 : 0.88))
                 .frame(width: size, height: size)
                 .contentShape(Circle())
-                .background { Circle().fill(topBarBaseColor(isHovered: isHovered)) }
                 .detailGlassCircleChrome(
-                    tint: Color.white.opacity(isHovered ? 0.16 : 0.09),
+                    tint: topBarGlassTint(isHovered: isHovered),
                     level: .max
                 )
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .scaleEffect(isHovered ? 1.04 : 1.0)
+        .scaleEffect(isHovered ? topBarHoverScale : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
         .preferredColorScheme(.dark)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isHovered = hovering
-            }
+            isHovered = hovering
         }
     }
 }
@@ -284,29 +283,25 @@ struct GuessYouLikeNavButton: View {
             .foregroundStyle(.white.opacity(isHovered ? 0.96 : 0.82))
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background { Capsule().fill(topBarBaseColor(isHovered: isHovered)) }
             .detailGlassCapsuleChrome(
-                tint: Color.white.opacity(isHovered ? 0.16 : 0.09),
+                tint: topBarGlassTint(isHovered: isHovered),
                 level: .max
             )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.025 : 1.0)
+        .scaleEffect(isHovered ? topBarHoverScale : 1.0)
+        .animation(AppFluidMotion.hoverEase, value: isHovered)
         .preferredColorScheme(.dark)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isHovered = hovering
-            }
+            isHovered = hovering
         }
     }
 }
 
-private func topBarBaseColor(isHovered: Bool) -> Color {
-    Color(
-        red: isHovered ? 0.34 : 0.25,
-        green: isHovered ? 0.34 : 0.25,
-        blue: isHovered ? 0.34 : 0.25
-    )
+private let topBarHoverScale: CGFloat = 1.03
+
+private func topBarGlassTint(isHovered: Bool) -> Color {
+    Color.black.opacity(isHovered ? 0.40 : 0.30)
 }
 
 // MARK: - 帮助/操作手册弹窗

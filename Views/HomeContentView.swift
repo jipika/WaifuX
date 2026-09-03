@@ -136,6 +136,7 @@ struct HomeContentView: View {
     @State private var carouselDragOffset: CGFloat = 0
     @State private var scrollOffset: CGFloat = 0
     @State private var initialLoadTask: Task<Void, Never>?
+    @State private var wallhavenDefaultFilterRevision = 0
 
     // 优化：缓存 heroPalette 避免每次访问都重新计算
     @State private var cachedHeroPalette: HeroDrivenPalette = HeroDrivenPalette(wallpaper: nil)
@@ -233,6 +234,7 @@ struct HomeContentView: View {
                             }
                         }
                         .padding(.horizontal, 26)
+                        .glassContainer(spacing: 12)
                         .frame(height: heroH - heroContentOverlap)
                         .zIndex(2)
                     }
@@ -264,6 +266,7 @@ struct HomeContentView: View {
                 }
             }
         )
+        .id(wallhavenDefaultFilterRevision)
         .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
             handleScroll(offset: offset)
         }
@@ -299,6 +302,9 @@ struct HomeContentView: View {
             Task { @MainActor in
                 await viewModel.refresh()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .wallhavenDefaultFiltersChanged)) { _ in
+            wallhavenDefaultFilterRevision &+= 1
         }
         .onChange(of: isTabActive) { _, active in
             if active {
@@ -479,7 +485,8 @@ struct HomeContentView: View {
     private var heroItems: [HeroItem] {
         // 关闭对应模块时，该模块不进 Hero 轮播（空数组自然不进合并循环，不出现空块）
         let wallpapers = ModuleAvailability.shared.wallpaperEnabled
-            ? viewModel.featuredWallpapers.filter { $0.dimensionX > $0.dimensionY }
+            ? viewModel.applyingWallhavenHomeDisplayFilters(to: viewModel.featuredWallpapers)
+                .filter { $0.dimensionX > $0.dimensionY }
             : []
         let mediaItems = ModuleAvailability.shared.mediaEnabled ? heroMediaItems : []
 
@@ -545,11 +552,17 @@ struct HomeContentView: View {
     }
 
     private var recentWallpapers: [Wallpaper] {
-        let latest = Array(viewModel.latestWallpapers.prefix(10))
+        let latest = Array(
+            viewModel.applyingWallhavenHomeDisplayFilters(to: viewModel.latestWallpapers)
+                .prefix(10)
+        )
         if !latest.isEmpty {
             return latest
         }
-        return Array(viewModel.wallpapers.suffix(10))
+        return Array(
+            viewModel.applyingWallhavenHomeDisplayFilters(to: viewModel.wallpapers)
+                .suffix(10)
+        )
     }
 
     /// 独立刷新轮播专用的 MotionBG 数据（固定源，与 explore 列表解耦）
@@ -1154,6 +1167,7 @@ private struct HeroActionButton: View {
     var iconColor: Color?
     let prominence: Prominence
     let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
@@ -1168,14 +1182,21 @@ private struct HeroActionButton: View {
             }
             .padding(.horizontal, 18)
             .frame(height: 44)
-            .liquidGlassSurface(
-                prominence == .primary ? .prominent : .regular,
-                tint: prominence == .primary ? LiquidGlassColors.primaryPink.opacity(0.16) : nil,
-                in: Capsule(style: .continuous)
+            .detailGlassCapsuleChrome(
+                tint: prominence == .primary
+                    ? LiquidGlassColors.primaryPink.opacity(isHovered ? 0.24 : 0.16)
+                    : homeHeroGlassTint(isHovered: isHovered),
+                level: prominence == .primary ? .max : .prominent
             )
         }
         .buttonStyle(.plain)
         .contentShape(Capsule(style: .continuous))
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 
@@ -1427,10 +1448,9 @@ private struct HeroEdgeButton: View {
                 .foregroundStyle(.white.opacity(isHovered ? 0.98 : 0.88))
                 .frame(width: 46, height: 46)
                 .contentShape(Circle())
-                .liquidGlassSurface(
-                    .max,
-                    tint: Color.white.opacity(isHovered ? 0.22 : 0.12),
-                    in: Circle()
+                .detailGlassCircleChrome(
+                    tint: homeHeroGlassTint(isHovered: isHovered),
+                    level: .max
                 )
         }
         .buttonStyle(HeroEdgePressButtonStyle())
@@ -1442,6 +1462,10 @@ private struct HeroEdgeButton: View {
             }
         }
     }
+}
+
+private func homeHeroGlassTint(isHovered: Bool) -> Color {
+    Color.black.opacity(isHovered ? 0.40 : 0.30)
 }
 
 private struct HeroEdgePressButtonStyle: ButtonStyle {

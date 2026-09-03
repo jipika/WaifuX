@@ -129,6 +129,8 @@ enum CloudSyncSettingsRegistry {
             .init(key: "rule_repository_url", category: .sources, valueType: .string),
             .init(key: "data_source_profiles_v1", category: .sources, valueType: .data),
             .init(key: "data_source_active_profile_id_v1", category: .sources, valueType: .string),
+            .init(key: WallhavenBrowsePreferences.hidePortraitByDefaultKey, category: .sources, valueType: .bool),
+            .init(key: WallhavenBrowsePreferences.hidePeopleByDefaultKey, category: .sources, valueType: .bool),
         ]
     }
 

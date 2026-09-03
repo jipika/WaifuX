@@ -145,6 +145,10 @@ struct Wallpaper: Identifiable, Codable, Hashable {
         return Double(dimensions.width) / Double(max(1, dimensions.height))
     }
 
+    var isPortrait: Bool {
+        effectiveAspectRatioValue < 1.0
+    }
+
     var effectiveResolutionLabel: String {
         let trimmed = resolution.trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.parseDimensions(from: trimmed) != nil {

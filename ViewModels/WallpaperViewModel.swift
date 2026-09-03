@@ -106,6 +106,7 @@ class WallpaperViewModel: ObservableObject {
     private static let fourKSortingDefaultsKey = "explore.wallpaper.fourKSorting"
     private static let konachanSortingDefaultsKey = "explore.wallpaper.konachanSorting"
     private static let pixivRankingModeDefaultsKey = "explore.wallpaper.pixivRankingMode"
+    private static let homeWallhavenRatios = ["16x9", "16x10", "21x9", "32x9", "48x9"]
     private var isRestoringExploreSort = false
     private var hasRestoredExploreSort = false
 
@@ -1544,7 +1545,13 @@ class WallpaperViewModel: ObservableObject {
     }
 
     private func normalizedCategoryMask() -> String {
-        let mask = "\(categoryGeneral ? 1 : 0)\(categoryAnime ? 1 : 0)\(categoryPeople ? 1 : 0)"
+        let hidePeopleForDefaultFeed = sourceManager.activeSource == .wallhaven
+            && categoryGeneral
+            && categoryAnime
+            && categoryPeople
+            && WallhavenBrowsePreferences.hidePeopleByDefault()
+        let includesPeople = categoryPeople && !hidePeopleForDefaultFeed
+        let mask = "\(categoryGeneral ? 1 : 0)\(categoryAnime ? 1 : 0)\(includesPeople ? 1 : 0)"
         return mask == "000" ? "111" : mask
     }
 
@@ -1582,6 +1589,24 @@ class WallpaperViewModel: ObservableObject {
             .map { $0.replacingOccurrences(of: "#", with: "") }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
+    }
+
+    /// 应用首页固定的横屏限制，以及 Wallhaven 的人物默认偏好。
+    func applyingWallhavenHomeDisplayFilters(to wallpapers: [Wallpaper]) -> [Wallpaper] {
+        guard sourceManager.activeSource == .wallhaven else { return wallpapers }
+
+        let hidePeople = WallhavenBrowsePreferences.hidePeopleByDefault()
+
+        return wallpapers.filter { wallpaper in
+            // 首页固定只显示横屏壁纸，与设置中的“默认隐藏竖图”无关。
+            if wallpaper.isPortrait {
+                return false
+            }
+            if hidePeople && wallpaper.category.lowercased() == "people" {
+                return false
+            }
+            return true
+        }
     }
 
     // MARK: - 下载壁纸
@@ -2148,15 +2173,15 @@ class WallpaperViewModel: ObservableObject {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,
-                categories: "111",
+                categories: defaultWallhavenCategoryMask(),
                 purity: "100",
                 sorting: SortingOption.toplist.rawValue,
                 order: "desc",
                 topRange: TopRange.oneDay.rawValue,
-                ratios: ["16x9", "16x10", "21x9", "32x9", "48x9"]
+                ratios: Self.homeWallhavenRatios
             )
         )
-        return response.data
+        return applyingWallhavenHomeDisplayFilters(to: response.data)
     }
 
     // MARK: - 获取 Top 列表
@@ -2178,14 +2203,15 @@ class WallpaperViewModel: ObservableObject {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,
-                categories: "111",
+                categories: defaultWallhavenCategoryMask(),
                 purity: "100",
                 sorting: SortingOption.toplist.rawValue,
                 order: "desc",
-                topRange: TopRange.oneMonth.rawValue
+                topRange: TopRange.oneMonth.rawValue,
+                ratios: Self.homeWallhavenRatios
             )
         )
-        return Array(response.data.prefix(8))
+        return Array(applyingWallhavenHomeDisplayFilters(to: response.data).prefix(8))
     }
 
     // MARK: - 获取 Latest 列表
@@ -2207,13 +2233,18 @@ class WallpaperViewModel: ObservableObject {
         let response = try await fetchWallpapers(
             parameters: WallhavenAPI.SearchParameters(
                 page: 1,
-                categories: "111",
+                categories: defaultWallhavenCategoryMask(),
                 purity: "100",
                 sorting: SortingOption.dateAdded.rawValue,
-                order: "desc"
+                order: "desc",
+                ratios: Self.homeWallhavenRatios
             )
         )
-        return Array(response.data.prefix(8))
+        return Array(applyingWallhavenHomeDisplayFilters(to: response.data).prefix(8))
+    }
+
+    private func defaultWallhavenCategoryMask() -> String {
+        WallhavenBrowsePreferences.hidePeopleByDefault() ? "110" : "111"
     }
 
     // MARK: - 初始化加载（支持取消和延迟加载）

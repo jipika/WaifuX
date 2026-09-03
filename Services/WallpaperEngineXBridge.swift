@@ -620,10 +620,21 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         let oldWallpaperPresentationHold: Task<Void, Never>? = preservesOldWallpaperUntilReady
             ? Task { @MainActor in
-                while !Task.isCancelled {
+                // 就绪信号丢失 / commit 卡死时，旧静态层/旧视频不能无限期占住前台：
+                // 持有最长 30s，超时后停止前置，让新 renderer 窗口自然浮上。
+                // 正常路径 commit 完成会 cancel 本任务，不会走到超时分支；超时日志
+                // 落盘用于定位“动态壁纸被旧静态层顶替”类用户端问题。
+                let holdDeadline = Date().addingTimeInterval(30)
+                while !Task.isCancelled, Date() < holdDeadline {
                     VideoWallpaperManager.shared.keepNativeVideoPresentationFront(on: effectiveScreens)
                     StaticImageWallpaperOverlayManager.shared.keepPresentationFront(on: effectiveScreens)
                     try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                if !Task.isCancelled {
+                    AppLogger.error(.wallpaper, "Cross-type presentation hold timed out, releasing old wallpaper front", metadata: [
+                        "holdSeconds": 30,
+                        "screens": effectiveScreens.map(\.wallpaperScreenIdentifier).joined(separator: ",")
+                    ])
                 }
             }
             : nil

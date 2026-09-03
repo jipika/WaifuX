@@ -345,6 +345,9 @@ struct WallpaperExploreContentView: View {
         let _ = Self._printChanges()
         #endif
         mainContent
+            .onReceive(NotificationCenter.default.publisher(for: .wallhavenDefaultFiltersChanged)) { _ in
+                handleDefaultFilterSettingsChange()
+            }
     }
 
     @ViewBuilder
@@ -482,17 +485,21 @@ struct WallpaperExploreContentView: View {
         }
         .overlay(alertOverlay)
         .sheet(isPresented: $showWallpaperURLSheet) {
-            WorkshopURLInputSheet(
-                urlInput: $wallpaperURLInput,
-                errorMessage: wallpaperURLError,
-                isLoading: isResolvingWallpaperURL,
-                onSubmit: { handleWallpaperURLSubmit() },
-                onDismiss: { showWallpaperURLSheet = false },
-                title: "通过链接打开壁纸",
-                placeholder: "粘贴壁纸链接...",
-                supportedFormatsHint: "支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.net/post/show/{id}、pixiv.net/artworks/{id}"
-            )
+            wallpaperURLSheet
         }
+    }
+
+    private var wallpaperURLSheet: some View {
+        WorkshopURLInputSheet(
+            urlInput: $wallpaperURLInput,
+            errorMessage: wallpaperURLError,
+            isLoading: isResolvingWallpaperURL,
+            onSubmit: { handleWallpaperURLSubmit() },
+            onDismiss: { showWallpaperURLSheet = false },
+            title: "通过链接打开壁纸",
+            placeholder: "粘贴壁纸链接...",
+            supportedFormatsHint: "支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.net/post/show/{id}、pixiv.net/artworks/{id}"
+        )
     }
 
     private func scrollContent(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
@@ -1520,6 +1527,11 @@ struct WallpaperExploreContentView: View {
         reloadData()
     }
 
+    private func handleDefaultFilterSettingsChange() {
+        guard WallpaperSourceManager.shared.activeSource == .wallhaven else { return }
+        reloadData()
+    }
+
     private func handleCategoryChange() {
         switch category {
         case .all:
@@ -1800,7 +1812,17 @@ struct WallpaperExploreContentView: View {
         let start = Date()
         let newVisible: [Wallpaper]
         if viewModel.currentSourceSupportsWallhavenCategories {
-            newVisible = viewModel.wallpapers.filter { matchesCategory($0, category: category) }
+            let hidePortrait = WallpaperSourceManager.shared.activeSource == .wallhaven
+                && WallhavenBrowsePreferences.hidePortraitByDefault()
+                && viewModel.selectedRatios.isEmpty
+            let hidePeople = WallpaperSourceManager.shared.activeSource == .wallhaven
+                && category == .all
+                && WallhavenBrowsePreferences.hidePeopleByDefault()
+            newVisible = viewModel.wallpapers.filter { wallpaper in
+                matchesCategory(wallpaper, category: category)
+                    && (!hidePortrait || !wallpaper.isPortrait)
+                    && (!hidePeople || wallpaper.category.lowercased() != "people")
+            }
         } else {
             newVisible = viewModel.wallpapers
         }

@@ -496,6 +496,8 @@ private struct NativeDarkLiquidGlass: View {
                     lineWidth: 1
                 )
         )
+        // 先合成成单层再做阴影，避免滚动时 material 重采样后逐层重投影
+        .compositingGroup()
         .shadow(
             color: Color.black.opacity(isHovered ? 0.4 : 0.25),
             radius: isHovered ? 24 : 16,
@@ -573,6 +575,8 @@ private struct FallbackDarkLiquidGlass: View {
                     lineWidth: 1
                 )
         )
+        // 先合成成单层再做阴影，避免滚动时 material 重采样后逐层重投影
+        .compositingGroup()
         .shadow(
             color: Color.black.opacity(isHovered ? 0.35 : 0.22),
             radius: isHovered ? 20 : 14,

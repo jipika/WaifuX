@@ -1626,6 +1626,11 @@ private struct SchedulerSettingsTab: View {
 private struct AboutSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showResetAlert = false
+    @State private var showExportLogConfirm = false
+    @State private var showExportResultAlert = false
+    @State private var exportedLogURL: URL?
+    @State private var exportResultTitle = ""
+    @State private var exportResultMessage = ""
 
     var body: some View {
         ZStack {
@@ -1669,6 +1674,13 @@ private struct AboutSettingsTab: View {
                     MacRewardRow(title: t("reward"), imageName: "RewardQRCode")
                 }
 
+                // 日志诊断组
+                MacSettingsSection(header: t("settings.diagnostics")) {
+                    MacLinkRow(title: t("settings.exportLog"), action: {
+                        showExportLogConfirm = true
+                    })
+                }
+
                 // 重置所有数据
                 MacSettingsSection(header: t("resetAllData")) {
                     HStack(spacing: 12) {
@@ -1696,7 +1708,46 @@ private struct AboutSettingsTab: View {
             } message: {
                 Text(t("resetAllDataConfirm"))
             }
+            .alert(t("settings.exportLog"), isPresented: $showExportLogConfirm) {
+                Button(t("cancel"), role: .cancel) {}
+                Button(t("confirm")) {
+                    exportLog()
+                }
+            } message: {
+                Text(t("settings.exportLog.confirm"))
+            }
+            .alert(exportResultTitle, isPresented: $showExportResultAlert) {
+                if let url = exportedLogURL {
+                    Button(t("settings.exportLog.reveal")) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+                Button(t("ok"), role: .cancel) {}
+            } message: {
+                Text(exportResultMessage)
+            }
         }
+    }
+
+    /// 确认导出后执行：复制运行日志到桌面，成功/失败都弹结果框。
+    private func exportLog() {
+        do {
+            if let url = try AppLogger.exportLogToDesktop() {
+                exportedLogURL = url
+                exportResultTitle = t("settings.exportLog.successTitle")
+                exportResultMessage = String(format: t("settings.exportLog.success"), url.lastPathComponent)
+            } else {
+                exportedLogURL = nil
+                exportResultTitle = t("settings.exportLog.failedTitle")
+                exportResultMessage = t("settings.exportLog.noLog")
+            }
+        } catch {
+            exportedLogURL = nil
+            exportResultTitle = t("settings.exportLog.failedTitle")
+            exportResultMessage = error.localizedDescription
+            AppLogger.error(.general, "日志导出失败", metadata: ["error": error.localizedDescription])
+        }
+        showExportResultAlert = true
     }
 
     @ViewBuilder

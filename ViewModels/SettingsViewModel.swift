@@ -88,6 +88,28 @@ class SettingsViewModel: ObservableObject {
             UserDefaults.standard.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
         }
     }
+    /// Wallhaven 探索页默认隐藏竖图。
+    @Published var hidePortraitWallpapersByDefault = true {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(
+                hidePortraitWallpapersByDefault,
+                forKey: WallhavenBrowsePreferences.hidePortraitByDefaultKey
+            )
+            NotificationCenter.default.post(name: .wallhavenDefaultFiltersChanged, object: nil)
+        }
+    }
+    /// Wallhaven 探索页默认隐藏人物分类。
+    @Published var hidePeopleWallpapersByDefault = true {
+        didSet {
+            guard !isBatchUpdating else { return }
+            UserDefaults.standard.set(
+                hidePeopleWallpapersByDefault,
+                forKey: WallhavenBrowsePreferences.hidePeopleByDefaultKey
+            )
+            NotificationCenter.default.post(name: .wallhavenDefaultFiltersChanged, object: nil)
+        }
+    }
     @Published var frameInterpolationTargetFPS: Double = 60 {
         didSet {
             guard !isBatchUpdating else { return }
@@ -377,6 +399,15 @@ class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(hideNotch, forKey: "hide_notch")
         UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
         UserDefaults.standard.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
+        UserDefaults.standard.set(
+            hidePortraitWallpapersByDefault,
+            forKey: WallhavenBrowsePreferences.hidePortraitByDefaultKey
+        )
+        UserDefaults.standard.set(
+            hidePeopleWallpapersByDefault,
+            forKey: WallhavenBrowsePreferences.hidePeopleByDefaultKey
+        )
+        NotificationCenter.default.post(name: .wallhavenDefaultFiltersChanged, object: nil)
         UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
         // 手动优化始终可用；总开关已废弃，写 true 以免旧代码路径误判为关闭。
         UserDefaults.standard.set(true, forKey: "frame_interpolation_enabled")
@@ -503,6 +534,8 @@ class SettingsViewModel: ObservableObject {
             ) as? Bool ?? false
             autoRemoveVideoLetterbox = defaults.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
             portraitBlurFillEnabled = defaults.object(forKey: "portrait_blur_fill_enabled") as? Bool ?? false
+            hidePortraitWallpapersByDefault = WallhavenBrowsePreferences.hidePortraitByDefault(from: defaults)
+            hidePeopleWallpapersByDefault = WallhavenBrowsePreferences.hidePeopleByDefault(from: defaults)
             frameInterpolationTargetFPS = Double(FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(Int((defaults.object(forKey: "frame_interpolation_target_fps") as? Double ?? 60.0).rounded())))
             // 统一为「下载后自动优化视频」。任一旧自动开关为 true 即迁移为开启。
             // 旧 key「切换时自动」不再迁移为开启。

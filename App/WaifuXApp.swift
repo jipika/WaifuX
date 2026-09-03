@@ -529,6 +529,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 预先在后台线程解压内嵌 assets（wallpaper-wgpu 渲染依赖），避免首次设置壁纸时阻塞主线程
         WallpaperEngineEmbeddedAssets.prepareAssetsInBackground()
 
+        // 启动后错峰检查一次系统壁纸缓存水位（>2GB 时 LRU 清到 100MB，见 WallpaperSystemCacheJanitor）
+        WallpaperSystemCacheJanitor.shared.noteAppLaunch()
+
         // Sparkle 自动按 SUScheduledCheckInterval (24h) 检查更新，无需手动触发
     }
 

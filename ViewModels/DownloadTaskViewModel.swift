@@ -245,7 +245,9 @@ final class DownloadToastViewModel: ObservableObject {
         let enoughTimePassed = lastToastProgressEmitDate.map {
             now.timeIntervalSince($0) >= runningProgressEmitInterval
         } ?? true
-        let enoughProgressChanged = abs(nextSnapshot.progress - previous.progress) >= 0.02
+        // 0.02 → 0.05：高速下载时 2% 阈值几乎每帧命中，实际发布频率会突破节流上限；
+        // 5% 变化对肉眼进度条几乎无差，但把最坏发布频率压回 ~6-7Hz
+        let enoughProgressChanged = abs(nextSnapshot.progress - previous.progress) >= 0.05
 
         guard enoughTimePassed || enoughProgressChanged else {
             return previous

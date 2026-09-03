@@ -1,5 +1,18 @@
 import Foundation
 
+enum WallhavenBrowsePreferences {
+    static let hidePortraitByDefaultKey = "wallhaven_hide_portrait_by_default"
+    static let hidePeopleByDefaultKey = "wallhaven_hide_people_by_default"
+
+    static func hidePortraitByDefault(from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: hidePortraitByDefaultKey) as? Bool ?? true
+    }
+
+    static func hidePeopleByDefault(from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: hidePeopleByDefaultKey) as? Bool ?? true
+    }
+}
+
 /// Wallhaven API 配置和端点构建器
 ///
 /// API Rate Limits: 45 requests per minute

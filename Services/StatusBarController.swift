@@ -201,9 +201,22 @@ private final class TaskQueueRowView: NSView {
     static let menuWidth: CGFloat = 300
     private let titleLabel = NSTextField(labelWithString: "")
     private let progressLabel = NSTextField(labelWithString: "")
+    private let cancelButton = NSButton(title: "", target: nil, action: nil)
+    /// 进度条文字直接贴行尾（无取消按钮时的布局）
+    private var progressTrailingToRowConstraint: NSLayoutConstraint?
+    /// 进度条文字贴取消按钮左侧（有取消按钮时的布局）
+    private var progressTrailingToButtonConstraint: NSLayoutConstraint?
+    var onCancel: (() -> Void)?
 
-    init(title: String, progress: Double, isSectionHeader: Bool = false) {
+    init(
+        title: String,
+        progress: Double,
+        isSectionHeader: Bool = false,
+        showsCancelButton: Bool = false,
+        onCancel: (() -> Void)? = nil
+    ) {
         super.init(frame: NSRect(x: 0, y: 0, width: Self.menuWidth, height: 24))
+        self.onCancel = onCancel
         titleLabel.font = NSFont.systemFont(ofSize: isSectionHeader ? 13 : 12, weight: isSectionHeader ? .semibold : .regular)
         titleLabel.textColor = isSectionHeader ? .secondaryLabelColor : .disabledControlTextColor
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -213,20 +226,52 @@ private final class TaskQueueRowView: NSView {
         progressLabel.textColor = .disabledControlTextColor
         progressLabel.alignment = .right
         progressLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        cancelButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "取消下载")?
+            .withSymbolConfiguration(symbolConfig)
+        cancelButton.isBordered = false
+        cancelButton.contentTintColor = .secondaryLabelColor
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelClicked)
+        cancelButton.toolTip = "取消下载"
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(titleLabel)
         addSubview(progressLabel)
+        addSubview(cancelButton)
+        progressTrailingToRowConstraint = progressLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14)
+        progressTrailingToButtonConstraint = progressLabel.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -6)
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(equalTo: progressLabel.leadingAnchor, constant: -8),
-            progressLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressLabel.leadingAnchor, constant: -8),
+            cancelButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            cancelButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            cancelButton.widthAnchor.constraint(equalToConstant: 18),
             progressLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            progressLabel.widthAnchor.constraint(equalToConstant: 44)
+            progressTrailingToRowConstraint!
         ])
+        setShowsCancelButton(showsCancelButton)
         update(title: title, progress: progress, isSectionHeader: isSectionHeader)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setShowsCancelButton(_ shows: Bool) {
+        cancelButton.isHidden = !shows
+        if shows {
+            progressTrailingToRowConstraint?.isActive = false
+            progressTrailingToButtonConstraint?.isActive = true
+        } else {
+            progressTrailingToButtonConstraint?.isActive = false
+            progressTrailingToRowConstraint?.isActive = true
+        }
+    }
+
+    @objc private func cancelClicked() {
+        onCancel?()
+    }
 
     func update(title: String, progress: Double, isSectionHeader: Bool = false) {
         titleLabel.stringValue = title
@@ -530,7 +575,17 @@ final class StatusBarController: NSObject {
             section.isEnabled = false
             taskQueueMenu.addItem(section)
             for entry in entries where entry.category == category {
-                let row = TaskQueueRowView(title: entry.title, progress: entry.progress)
+                // 仅下载类任务可取消（普通 URL 下载与 SteamCMD Workshop 下载同走
+                // DownloadTaskService.cancelTask，SteamCMD 队列会终止子进程）
+                let isDownload = entry.category == .download
+                let row = TaskQueueRowView(
+                    title: entry.title,
+                    progress: entry.progress,
+                    showsCancelButton: isDownload,
+                    onCancel: isDownload ? { [weak self] in
+                        self?.cancelDownloadQueueTask(id: entry.id)
+                    } : nil
+                )
                 let item = NSMenuItem()
                 item.view = row
                 item.isEnabled = false
@@ -541,6 +596,12 @@ final class StatusBarController: NSObject {
                 taskQueueMenu.addItem(.separator())
             }
         }
+    }
+
+    /// 取消一条下载任务。排队中 / 下载中 / 等待 Steam 登录的任务均可取消；
+    /// SteamCMD 下载会经 PersistentDownloadQueueService 终止 steamcmd 子进程。
+    private func cancelDownloadQueueTask(id: String) {
+        DownloadTaskService.shared.cancelTask(id: id)
     }
 
     /// 为指定屏幕构建音量滑块菜单项

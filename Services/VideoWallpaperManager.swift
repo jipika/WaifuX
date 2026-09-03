@@ -393,6 +393,13 @@ final class VideoWallpaperManager: ObservableObject {
             guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
                 return false
             }
+            // 最终闸门：桌面解锁时锁屏扩展必然未被系统托管运行。
+            // 扩展在解锁时被系统直接回收，来不及写 state=inactive；残留的
+            // isActive:true state 文件 / 已注册 surface 会让本属性永久为 true，
+            // 菜单栏「暂停动态壁纸」被误路由到扩展 prefs——内置 AVPlayer 和
+            // 独立进程渲染器都收不到暂停命令（实测点击后视频照常播放）。
+            // 因此必须以真实锁屏状态兜底，文件/管线信号只在锁定期间生效。
+            guard isScreenLocked else { return false }
             // 先检查内存标志（避免不必要的文件 I/O）
             guard isLockScreenExtensionActive || WallpaperExtensionSocketServer.shared.hasActivePipeline else {
                 // 内存标志为 false 时主动回退读 state 文件，
@@ -1627,6 +1634,38 @@ final class VideoWallpaperManager: ObservableObject {
     /// 清除锁屏镜像活跃状态（供外部调用方在清空镜像帧源后调用）
     func clearExtensionState() {
         isLockScreenExtensionActive = false
+    }
+
+    /// 解锁瞬间对账扩展 state 文件。
+    /// 锁屏扩展在解锁时被系统直接回收，来不及执行 `setActive(false)`，
+    /// `waifux-wallpaper-state.json` 会残留 `isActive:true`。此后：
+    /// 1. `checkExtensionState` 读到残留值会重新点亮内存标志；
+    /// 2. App 冷启动时还会把残留值当成「镜像刚激活」触发一轮多余的视频同步。
+    /// 在解锁事件里补写 inactive 并清掉内存标志，与 `isLockScreenMirroringActive`
+    /// 的 `isScreenLocked` 闸门形成双保险。
+    @available(macOS 26.0, *)
+    private func reconcileExtensionStateAfterUnlock() {
+        guard isLockScreenExtensionActive
+                || WallpaperExtensionSocketServer.shared.hasActivePipeline else {
+            return
+        }
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
+        ) else { return }
+        let stateURL = container.appendingPathComponent("waifux-wallpaper-state.json")
+        let json: [String: Any] = [
+            "isActive": false,
+            "currentVideoID": NSNull(),
+            "currentVideoName": NSNull(),
+            "contexts": NSNull()
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: json) {
+            try? data.write(to: stateURL, options: .atomic)
+        }
+        if isLockScreenExtensionActive {
+            isLockScreenExtensionActive = false
+            print("[VideoWallpaperManager] 解锁：补写扩展 state=inactive，清理残留镜像标志")
+        }
     }
 
 
@@ -4589,6 +4628,7 @@ final class VideoWallpaperManager: ObservableObject {
             print("[VideoWallpaperManager] Screen unlocked, resuming wallpaper")
             self.isScreenLocked = false
             if #available(macOS 26.0, *) {
+                self.reconcileExtensionStateAfterUnlock()
                 LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
                     source: "videoManagerScreenUnlocked"
                 )

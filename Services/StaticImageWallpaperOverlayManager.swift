@@ -436,6 +436,14 @@ final class StaticImageWallpaperOverlayManager {
 
     // MARK: - 刷新（屏幕插拔 / crop 变更）
 
+    /// 该屏当前是否有动态壁纸（本机视频 / 场景·web renderer）持有桌面。
+    /// 静态 overlay 的一切"重新前置/重建"动作都必须先过这道闸，防止
+    /// 过渡期遗漏清理的残留静态层盖住动态壁纸（切 Space 后表现为静态壁纸顶替动态）。
+    static func isDynamicWallpaperLive(on screen: NSScreen) -> Bool {
+        VideoWallpaperManager.shared.hasNativeVideoWallpaper(on: [screen])
+            || WallpaperEngineXBridge.shared.hasLivePresentation(on: screen)
+    }
+
     func refreshWindows() {
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
         AppLogger.error(.wallpaper, "Static overlay refresh windows", metadata: [
@@ -466,11 +474,29 @@ final class StaticImageWallpaperOverlayManager {
                 // 刷新时也重新应用 crop（屏幕分辨率可能变了）
                 applyCropToWindow(window, screenID: screenID, screen: screen)
             } else if let imageURL = imageByScreen[screenID] {
-                // 屏幕重连且本管理器记录过该屏图片 → 重建
+                // 屏幕重连且本管理器记录过该屏图片 → 重建。
+                // 但动态壁纸在播时禁止重建：hide()/hideAll() 只摘窗口保留记录，
+                // 唤醒/屏幕参数变化走到这里会把残留静态图重新顶到动态窗口上方。
+                guard !Self.isDynamicWallpaperLive(on: screen) else {
+                    AppLogger.error(.wallpaper, "Static overlay rebuild suppressed: dynamic wallpaper live", metadata: [
+                        "screenID": screenID,
+                        "source": "screenID-state",
+                        "image": imageURL.lastPathComponent
+                    ])
+                    continue
+                }
                 Task { @MainActor in
                     await showPrepared(imageURL: imageURL, for: screen)
                 }
             } else if let imageURL = imageByScreenFingerprint[screen.wallpaperScreenFingerprint] {
+                guard !Self.isDynamicWallpaperLive(on: screen) else {
+                    AppLogger.error(.wallpaper, "Static overlay rebuild suppressed: dynamic wallpaper live", metadata: [
+                        "screenID": screenID,
+                        "source": "fingerprint-state",
+                        "image": imageURL.lastPathComponent
+                    ])
+                    continue
+                }
                 Task { @MainActor in
                     await showPrepared(imageURL: imageURL, for: screen)
                 }
@@ -639,9 +665,32 @@ final class StaticImageWallpaperOverlayManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
             for (screenID, window) in self.imageWindows {
-                if self.imageByScreen[screenID] != nil {
-                    window.orderFront(nil)
+                guard self.imageByScreen[screenID] != nil,
+                      let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+                    continue
                 }
+                // 锁屏期间维持旧行为：动态锁屏镜像依赖静态 overlay 展示锁屏壁纸。
+                if VideoWallpaperManager.shared.isScreenLocked {
+                    window.orderFront(nil)
+                    continue
+                }
+                // 动态壁纸在播时静态 overlay 不得抢前台：跨类型切换遗漏清理的残留
+                // overlay 每次切 Space 都会被这里顶到动态窗口上方，表现为
+                // “动态壁纸（视频/场景）消失，显示静态壁纸”。此处置保持层级不动
+                // （残留窗口藏在动态窗口后方不可见）；跨类型过渡进行中，旧静态层
+                // 的可见性由 XBridge 的 keepPresentationFront 持有循环负责，不受影响。
+                let nativeVideoLive = VideoWallpaperManager.shared.hasNativeVideoWallpaper(on: [screen])
+                let externalLive = WallpaperEngineXBridge.shared.hasLivePresentation(on: screen)
+                if nativeVideoLive || externalLive {
+                    AppLogger.error(.wallpaper, "Static overlay re-front suppressed: dynamic wallpaper live", metadata: [
+                        "screenID": screenID,
+                        "nativeVideoLive": nativeVideoLive,
+                        "externalLive": externalLive,
+                        "image": self.imageByScreen[screenID]?.lastPathComponent ?? ""
+                    ])
+                    continue
+                }
+                window.orderFront(nil)
             }
         }
     }
