@@ -15,19 +15,18 @@ struct AuthorMediaSheet: View {
     let onSelectItem: (MediaItem) -> Void
     let onDismiss: () -> Void
     let onLoadMore: (() -> Void)?
+    let onDownloadLoaded: (([MediaItem]) -> Void)?
     let onDownloadAll: (([MediaItem]) -> Void)?
 
     @State private var isVisible = false
     @Binding var isDownloadingAll: Bool
-    /// 滚动几何分页：距底进入阈值后触发一次，离开后再允许下一次
-    @State private var wasNearBottom = false
+    /// 触底加载冷却（NSCollectionView onReachBottom 会随滚动反复回调，靠冷却 + isLoading 去重）
     @State private var loadMoreCooldownUntil: Date?
+    /// 当前项高亮切换（数量不变的内容变化）时递增，强制刷新可见 Cell
+    @State private var activeReloadToken = 0
 
     private let panelWidth: CGFloat = 360
-    private let cardSpacing: CGFloat = 12
     private let cornerRadius: CGFloat = 22
-    private static let scrollCoordinateSpaceName = "author-media-sheet-scroll"
-    private static let loadMoreTriggerThreshold: CGFloat = 80
 
     var body: some View {
         GeometryReader { geometry in
@@ -111,19 +110,8 @@ struct AuthorMediaSheet: View {
                     .foregroundStyle(LiquidGlassColors.textTertiary)
             }
 
-            // 下载全部按钮
-            if !items.isEmpty, let onDownloadAll {
-                Button {
-                    isDownloadingAll = true
-                    onDownloadAll(items)
-                } label: {
-                    Image(systemName: isDownloadingAll ? "arrow.down.circle.fill" : "arrow.down.circle")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(isDownloadingAll ? Color.accentColor : LiquidGlassColors.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .help(t("downloadAllByAuthor"))
-                .disabled(isDownloadingAll)
+            if !items.isEmpty {
+                downloadActions
             }
 
             Spacer()
@@ -142,6 +130,52 @@ struct AuthorMediaSheet: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    @ViewBuilder
+    private var downloadActions: some View {
+        VStack(spacing: 5) {
+            if let onDownloadLoaded {
+                authorDownloadButton(title: t("downloadLoadedByAuthor")) {
+                    isDownloadingAll = true
+                    onDownloadLoaded(items)
+                }
+                .help(t("downloadLoadedByAuthor"))
+            }
+
+            if let onDownloadAll {
+                authorDownloadButton(title: t("downloadAllByAuthor")) {
+                    isDownloadingAll = true
+                    onDownloadAll(items)
+                }
+                .help(t("downloadAllByAuthor"))
+            }
+        }
+    }
+
+    private func authorDownloadButton(
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .foregroundStyle(isDownloadingAll ? Color.accentColor : LiquidGlassColors.textSecondary)
+                .frame(width: 94, height: 24)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            isDownloadingAll
+                                ? Color.accentColor.opacity(0.55)
+                                : LiquidGlassColors.borderSubtle,
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloadingAll)
     }
 
     // MARK: - 作者头像
@@ -174,87 +208,55 @@ struct AuthorMediaSheet: View {
         }
     }
 
-    private let cardWidth: CGFloat = 158
-    private let cardImageHeight: CGFloat = 100
-
-    // MARK: - 壁纸网格（固定 2 列）
+    // MARK: - 壁纸网格（NSCollectionView 固定 2 列，复用 ExploreGrid cell 基建保证滚动流畅）
     private var itemGrid: some View {
-        GeometryReader { viewport in
-            ScrollView(.vertical, showsIndicators: false) {
-                if items.isEmpty && !isLoading {
+        Group {
+            if items.isEmpty && !isLoading {
+                ScrollView(.vertical, showsIndicators: false) {
                     emptyState
-                } else {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.fixed(cardWidth), spacing: cardSpacing),
-                            GridItem(.fixed(cardWidth), spacing: cardSpacing)
-                        ],
-                        spacing: cardSpacing
-                    ) {
-                        ForEach(items) { item in
-                            AuthorMediaCard(
-                                item: item,
-                                cardWidth: cardWidth,
-                                cardImageHeight: cardImageHeight,
-                                isActive: item.id == activeItemID,
-                                onTap: {
-                                    onSelectItem(item)
-                                }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 20)
-
-                    // 滚动几何哨兵：滚近底部时才加载更多（与探索页同思路）
-                    if onLoadMore != nil, !items.isEmpty, hasMore {
-                        ScrollBottomSentinel(coordinateSpaceName: Self.scrollCoordinateSpaceName)
-                            .padding(.bottom, 12)
-                    }
                 }
-
-                Color.clear
-                    .frame(height: 12)
-            }
-            .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-            .iosSmoothScroll()
-            .onScrollBottomSentinelChange { sentinelMinY in
-                handleLoadMoreSentinel(
-                    sentinelMinY: sentinelMinY,
-                    viewportHeight: viewport.size.height
+            } else {
+                AuthorSheetGridContainer(
+                    itemCount: { items.count },
+                    heightForItem: { _ in AuthorSheetCardMetrics.mediaCardHeight },
+                    configureCell: { cell, index in
+                        guard index >= 0, index < items.count else { return }
+                        (cell as? AuthorMediaGridCell)?.configure(
+                            with: items[index],
+                            isActive: items[index].id == activeItemID
+                        )
+                    },
+                    cellClass: AuthorMediaGridCell.self,
+                    onSelect: { index in
+                        guard index >= 0, index < items.count else { return }
+                        onSelectItem(items[index])
+                    },
+                    onReachBottom: {
+                        handleReachBottom()
+                    },
+                    reloadToken: activeReloadToken,
+                    layoutWidth: panelWidth
                 )
             }
-            // 加载结束且列表增长后，允许再次靠近底部触发（避免 wasNearBottom 卡死）
-            .onChange(of: isLoading) { _, loading in
-                if !loading {
-                    wasNearBottom = false
-                }
-            }
-            .onChange(of: items.count) { _, _ in
-                wasNearBottom = false
-            }
+        }
+        .onChange(of: activeItemID) { _, _ in
+            activeReloadToken += 1
         }
     }
 
-    private func handleLoadMoreSentinel(sentinelMinY: CGFloat, viewportHeight: CGFloat) {
+    // MARK: - 触底加载
+    /// onReachBottom 在近底区间会随滚动反复回调；
+    /// 与旧哨兵方案相同语义：isLoading / hasMore 拦截 + 0.8s 冷却。
+    private func handleReachBottom() {
         guard let onLoadMore,
               hasMore,
               !isLoading,
-              !items.isEmpty,
-              viewportHeight > 0,
-              sentinelMinY.isFinite else { return }
+              !items.isEmpty else { return }
 
         if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
 
-        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
-        if isNearBottom {
-            guard !wasNearBottom else { return }
-            wasNearBottom = true
-            loadMoreCooldownUntil = Date().addingTimeInterval(0.8)
-            onLoadMore()
-        } else {
-            wasNearBottom = false
-        }
+        loadMoreCooldownUntil = Date().addingTimeInterval(0.8)
+        onLoadMore()
     }
 
     // MARK: - 空状态
@@ -287,76 +289,5 @@ struct AuthorMediaSheet: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
             onDismiss()
         }
-    }
-}
-
-// MARK: - 作者媒体卡片
-private struct AuthorMediaCard: View {
-    let item: MediaItem
-    let cardWidth: CGFloat
-    let cardImageHeight: CGFloat
-    /// 是否为当前正在查看的壁纸
-    let isActive: Bool
-    let onTap: () -> Void
-
-    @State private var isHovered = false
-    private let cardCornerRadius: CGFloat = 14
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // 封面图
-            KFImage(coverImageURL)
-                .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                .backgroundDecode()
-                .cancelOnDisappear(true)
-                .placeholder { _ in
-                    Rectangle()
-                        .fill(.white.opacity(0.05))
-                }
-                .fade(duration: 0.15)
-                .resizable()
-                .scaledToFill()
-                .frame(width: cardWidth, height: cardImageHeight)
-                .clipped()
-
-            // 壁纸标题
-            Text(item.title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .lineLimit(1)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-        }
-        .frame(width: cardWidth)
-        .background(
-            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .fill(Color(hex: "1A1D24").opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(
-                    isActive
-                        ? Color.accentColor
-                        : (isHovered ? .white.opacity(0.2) : .white.opacity(0.06)),
-                    lineWidth: isActive ? 2 : 0.5
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
-        .scaleEffect(isHovered ? 1.01 : 1)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
-        .contentShape(Rectangle())
-        .onTapGesture { onTap() }
-        .throttledHover(interval: 0.08) { hovering in
-            isHovered = hovering
-        }
-    }
-
-    private var coverImageURL: URL? {
-        item.posterURL ?? item.thumbnailURL
-    }
-
-    private var targetImageSize: CGSize {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        return CGSize(width: cardWidth * scale, height: cardImageHeight * scale)
     }
 }

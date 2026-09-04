@@ -181,6 +181,17 @@ enum DynamicWallpaperSortOption: String, CaseIterable, Identifiable, SortOptionP
 // MARK: - 媒体项转换
 
 extension DynamicWallpaperRawItem {
+    /// 从文件名提取用于“最新”排序的时间序列。
+    /// Collection 文件名以分类号开头，不能直接按完整文件名比较。
+    var newestSortKey: String {
+        let stem = videoName.hasSuffix(".mp4")
+            ? String(videoName.dropLast(4))
+            : videoName
+        let parts = stem.split(separator: "_", omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { return stem }
+        return parts.dropFirst().map(String.init).joined(separator: "_")
+    }
+
     /// 基于 videoName 的稳定唯一标识（不依赖排序位置）
     var stableItemID: String {
         if videoName.contains("_") && !videoName.hasPrefix("168") {

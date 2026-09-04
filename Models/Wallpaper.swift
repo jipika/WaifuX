@@ -358,7 +358,9 @@ struct Wallpaper: Identifiable, Codable, Hashable {
         return nil
     }
 
-    private static func normalizedImageURL(from value: String) -> URL? {
+    /// 内部（含 ExploreGrid 网格 cell）共用的 URL 规范化：`//` 补 https、`/` 视为本地路径、
+    /// 仅接受 http/https/file。
+    static func normalizedImageURL(from value: String) -> URL? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 

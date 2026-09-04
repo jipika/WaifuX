@@ -1,130 +1,18 @@
 import SwiftUI
-import Kingfisher
-import AppKit
 
-// MARK: - 光标追踪视图（不参与点击命中）
-/// 替代 .onContinuousHover：通过 NSTrackingArea 追踪光标位置，
-/// 并让 SwiftUI 按钮和外层 ScrollView 保持正常的事件分发。
-private struct CursorTrackingView: NSViewRepresentable {
-    let onCursorMove: (CGPoint) -> Void
-    let onCursorEnter: () -> Void
-    let onCursorExit: () -> Void
+// MARK: - 猜你喜欢单张卡片的内容覆盖层（SwiftUI 共享组件）
+//
+// 旧 LazyVGrid 版卡片 `GuessYouLikeCardView` 的 contentOverlay 原样抽出。
+// 现由 `GuessYouLikeGridCell`（NSCollectionView 原生 cell）内的 NSHostingView
+// 承载：封面图 / 底色 / 边框 / 投影 / 3D 倾斜 / 发牌动画走 AppKit 原生实现，
+// 文本、来源标签与玻璃按钮继续用这份 SwiftUI 代码渲染，保证两版视觉逐像素一致。
 
-    func makeNSView(context: Context) -> CursorTrackingNSView {
-        let view = CursorTrackingNSView()
-        view.onCursorMove = onCursorMove
-        view.onCursorEnter = onCursorEnter
-        view.onCursorExit = onCursorExit
-        return view
-    }
-
-    func updateNSView(_ nsView: CursorTrackingNSView, context: Context) {
-        nsView.onCursorMove = onCursorMove
-        nsView.onCursorEnter = onCursorEnter
-        nsView.onCursorExit = onCursorExit
-    }
-}
-
-private class CursorTrackingNSView: NSView {
-    var onCursorMove: ((CGPoint) -> Void)?
-    var onCursorEnter: (() -> Void)?
-    var onCursorExit: (() -> Void)?
-    private var trackingArea: NSTrackingArea?
-
-    /// 追踪区域保持在卡片最上层，但不能成为鼠标事件的目标，
-    /// 否则会遮住 SwiftUI 的详情和下载按钮。
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = trackingArea { removeTrackingArea(existing) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        onCursorEnter?()
-        onCursorMove?(local)
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        onCursorMove?(local)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onCursorExit?()
-    }
-
-}
-
-// MARK: - 猜你喜欢单张卡片
-
-struct GuessYouLikeCardView: View {
+struct GuessYouLikeCardOverlayContent: View {
     let item: GuessYouLikeItem
     let onDetail: (GuessYouLikeItem) -> Void
     let onDownload: (GuessYouLikeItem) -> Void
 
-    @State private var hoverLocation: CGPoint = .zero
-    @State private var isHovering: Bool = false
-
-    private let maxTiltAngle: CGFloat = 6
-    // 固定卡片尺寸
-    private let cardW: CGFloat = 260
-    private let cardH: CGFloat = 360
-
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(Color.black.opacity(0.6))
-                .overlay(coverImage)
-                .overlay(contentOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-                )
-
-            // 光标追踪层只处理悬停；点击和滚动继续交给下层 SwiftUI 视图。
-            CursorTrackingView(
-                onCursorMove: { location in
-                    // NSView 坐标系左下角原点 → 转换为 SwiftUI 左上角原点
-                    let converted = CGPoint(x: location.x, y: cardH - location.y)
-                    hoverLocation = converted
-                },
-                onCursorEnter: {
-                    isHovering = true
-                },
-                onCursorExit: {
-                    isHovering = false
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        hoverLocation = .zero
-                    }
-                }
-            )
-        }
-        .frame(width: cardW, height: cardH)
-        .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .rotation3DEffect(rotationY, axis: (x: 0, y: 1, z: 0), perspective: 0.3)
-        .rotation3DEffect(rotationX, axis: (x: 1, y: 0, z: 0), perspective: 0.3)
-        .scaleEffect(isHovering ? 1.02 : 1.0)
-        .animation(.easeOut(duration: 0.15), value: isHovering)
-        .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
-    }
-
-    // MARK: - 内容层
-
-    @ViewBuilder
-    private var contentOverlay: some View {
         ZStack(alignment: .bottom) {
             // 底部渐变遮罩
             LinearGradient(
@@ -226,46 +114,16 @@ struct GuessYouLikeCardView: View {
         default: return Color(hex: "DDA0DD")
         }
     }
-
-    // MARK: - 封面图
-
-    @ViewBuilder
-    private var coverImage: some View {
-        if let url = URL(string: item.imageURL), !item.imageURL.isEmpty {
-            KFImage(url)
-                .memoryCacheExpiration(.seconds(300))
-                .placeholder { Color.black.opacity(0.3) }
-                .fade(duration: 0.2)
-                .resizable()
-                .downsampling(size: CGSize(width: cardW * 2, height: cardH * 2))
-                .aspectRatio(contentMode: .fill)
-        }
-    }
-
-    // MARK: - 悬停倾斜（使用固定尺寸，避免 GeometryReader 开销）
-
-    private var rotationY: Angle {
-        guard isHovering else { return .zero }
-        let nx = (hoverLocation.x / cardW - 0.5) * 2
-        return .degrees(Double(nx * maxTiltAngle))
-    }
-
-    private var rotationX: Angle {
-        guard isHovering else { return .zero }
-        let ny = -(hoverLocation.y / cardH - 0.5) * 2
-        return .degrees(Double(ny * maxTiltAngle))
-    }
 }
 
 // MARK: - 预览
 
 #Preview {
-    GuessYouLikeCardView(
+    GuessYouLikeCardOverlayContent(
         item: GuessYouLikeItem.mockItems()[0],
         onDetail: { _ in },
         onDownload: { _ in }
     )
-    .frame(width: 220, height: 310)
-    .padding(40)
+    .frame(width: 260, height: 360)
     .background(Color(hex: "0D0D0D"))
 }

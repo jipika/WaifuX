@@ -48,6 +48,8 @@ final class DynamicWallpaperAutoPauseManager {
     private var windowCoveragePausedScreenIDs: Set<String> = []
     /// 当前满足"窗口覆盖比例 ≥ 阈值"的屏幕 ID
     private var windowCoverageCoveredScreenIDs: Set<String> = []
+    /// 前台应用窗口检测代次，丢弃前台切换后迟到的旧快照。
+    private var foregroundDetectionGeneration: UInt64 = 0
     /// 关屏/休眠/解锁后的过渡宽限期截止时间。
     /// 此期间 CGWindowList 常短暂返回空列表，禁止据此把覆盖暂停误恢复。
     private var displayTransitionGraceUntil: Date?
@@ -429,6 +431,7 @@ final class DynamicWallpaperAutoPauseManager {
     /// 新启动的 wallpaper-wgpu 进程不应被旧的前台暂停状态误杀（SIGSTOP）。
     /// 当用户之后切走应用时，NSWorkspace app activation 通知会重新施加前台暂停。
     func clearForegroundPauseForWallpaperSwitch() {
+        foregroundDetectionGeneration &+= 1
         // The video manager resets its renderer pause state while replacing a
         // video. Allow a battery-triggered global pause to snapshot the new
         // player again; otherwise the old non-empty bookkeeping makes
@@ -491,6 +494,9 @@ final class DynamicWallpaperAutoPauseManager {
             startTimer(interval: 3.0)
         } else {
             stopTimer()
+        }
+        if !pauseWhenOtherAppForeground {
+            foregroundDetectionGeneration &+= 1
         }
         syncForegroundPauseRequest()
         syncInactiveDisplayPauseRequest()
@@ -587,6 +593,7 @@ final class DynamicWallpaperAutoPauseManager {
         let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
         guard hasNative || hasExternal else {
+            foregroundDetectionGeneration &+= 1
             foregroundPausedScreenIDs.removeAll()
             inactiveDisplayPausedScreenIDs.removeAll()
             inactiveDisplayManuallyPausedScreenIDs.removeAll()
@@ -814,13 +821,59 @@ final class DynamicWallpaperAutoPauseManager {
     private func reevaluateForegroundCoverage() {
         guard pauseWhenOtherAppForeground else { return }
         guard !isForegroundPauseSuppressed else { return }
+        foregroundDetectionGeneration &+= 1
+        let generation = foregroundDetectionGeneration
+
         let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
         guard hasNative || hasExternal else { return }
         guard !VideoWallpaperManager.shared.isScreenLocked else { return }
 
-        let newlyCoveredScreens = getForegroundAppCoveredScreens()
-        let newForegroundPausedIDs = Set(newlyCoveredScreens.map { $0.wallpaperScreenIdentifier })
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
+            applyForegroundCoverageResult(newForegroundPausedIDs: [])
+            return
+        }
+
+        let frontmostBundleID = frontmostApp.bundleIdentifier
+        let ourBundleID = Bundle.main.bundleIdentifier
+        let finderBundleID = "com.apple.finder"
+
+        // The app/Finder path cannot cover the desktop for this policy. Keep
+        // the fast path synchronous, but do not enumerate the window server.
+        guard frontmostBundleID != ourBundleID && frontmostBundleID != finderBundleID else {
+            applyForegroundCoverageResult(newForegroundPausedIDs: [])
+            return
+        }
+
+        let frontmostPID = frontmostApp.processIdentifier
+        let screenFrames = currentScreenFrames()
+        guard !screenFrames.isEmpty else {
+            applyForegroundCoverageResult(newForegroundPausedIDs: [])
+            return
+        }
+
+        // CGWindowListCopyWindowInfo can block while Spaces/display state is
+        // changing. Only the small AppKit snapshot stays on the main actor.
+        fullscreenDetectionQueue.async { [weak self, screenFrames, frontmostPID, generation] in
+            let newForegroundPausedIDs = Self.foregroundAppCoveredScreenIDs(
+                frontmostPID: frontmostPID,
+                screenFrames: screenFrames
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.foregroundDetectionGeneration == generation else {
+                    return
+                }
+                self.applyForegroundCoverageResult(
+                    newForegroundPausedIDs: newForegroundPausedIDs
+                )
+            }
+        }
+    }
+
+    /// Apply a foreground-window snapshot on the main actor.
+    private func applyForegroundCoverageResult(newForegroundPausedIDs: Set<String>) {
         let previouslyPausedIDs = foregroundPausedScreenIDs
 
         // 关屏/唤醒过渡期：窗口列表常短暂为空。若此前已有前台暂停，
@@ -911,35 +964,31 @@ final class DynamicWallpaperAutoPauseManager {
         }
     }
 
-    /// 获取前台应用的窗口覆盖了哪些屏幕
-    /// 通过 CGWindowListCopyWindowInfo 查找前台应用（非本应用、非 Finder）的窗口位置
-    private func getForegroundAppCoveredScreens() -> [NSScreen] {
-        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
-            return []
-        }
-        let frontmostPID = frontmostApp.processIdentifier
-
-        let ourBundleID = Bundle.main.bundleIdentifier
-        let finderBundleID = "com.apple.finder"
-        let frontBundleID = frontmostApp.bundleIdentifier
-
-        // 前台是本应用或 Finder → 没有"其他应用"覆盖
-        guard frontBundleID != ourBundleID && frontBundleID != finderBundleID else {
-            return []
-        }
-
+    /// 在后台队列查找前台应用覆盖了哪些屏幕。
+    /// 主线程只负责提供 frontmost PID 与屏幕 frame 快照。
+    nonisolated private static func foregroundAppCoveredScreenIDs(
+        frontmostPID: pid_t,
+        screenFrames: [String: CGRect]
+    ) -> Set<String> {
+        guard !screenFrames.isEmpty else { return [] }
         guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
 
-        let screens = NSScreen.screens
-        let desktopFrame = screens.reduce(CGRect.null) { $0.union($1.frame) }
-        var coveredScreens: [NSScreen] = []
+        let desktopFrame = screenFrames.values.reduce(CGRect.null) { $0.union($1) }
+        var coveredScreenIDs = Set<String>()
 
         // 找到前台应用的所有可见窗口
         let appWindows = windowList.filter { window in
-            guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
-                  ownerPID == frontmostPID else { return false }
+            let ownerPID: pid_t
+            if let value = window[kCGWindowOwnerPID as String] as? pid_t {
+                ownerPID = value
+            } else if let value = window[kCGWindowOwnerPID as String] as? Int {
+                ownerPID = pid_t(value)
+            } else {
+                return false
+            }
+            guard ownerPID == frontmostPID else { return false }
             guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { return false }
             guard let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0 else { return false }
             return true
@@ -948,20 +997,30 @@ final class DynamicWallpaperAutoPauseManager {
         guard !appWindows.isEmpty else { return [] }
 
         // 检查这些窗口覆盖了哪些屏幕
-        for screen in screens {
-            let screenFrame = screen.frame
+        for (screenID, screenFrame) in screenFrames {
             let screenArea = screenFrame.width * screenFrame.height
             var isCovered = false
 
             for window in appWindows {
-                guard let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
-                let rawBounds = CGRect(
-                    x: boundsDict["X"] ?? 0,
-                    y: boundsDict["Y"] ?? 0,
-                    width: boundsDict["Width"] ?? 0,
-                    height: boundsDict["Height"] ?? 0
+                let rawBounds: CGRect
+                if let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+                   let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
+                    rawBounds = rect
+                } else if let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] {
+                    rawBounds = CGRect(
+                        x: boundsDict["X"] ?? 0,
+                        y: boundsDict["Y"] ?? 0,
+                        width: boundsDict["Width"] ?? 0,
+                        height: boundsDict["Height"] ?? 0
+                    )
+                } else {
+                    continue
+                }
+                let bounds = Self.normalizedWindowBounds(
+                    rawBounds,
+                    screenFrames: screenFrames,
+                    desktopFrame: desktopFrame
                 )
-                let bounds = Self.normalizedWindowBounds(rawBounds, screens: screens, desktopFrame: desktopFrame)
 
                 // 检查窗口是否覆盖了该屏幕的大部分区域
                 let intersection = bounds.intersection(screenFrame)
@@ -976,11 +1035,11 @@ final class DynamicWallpaperAutoPauseManager {
             }
 
             if isCovered {
-                coveredScreens.append(screen)
+                coveredScreenIDs.insert(screenID)
             }
         }
 
-        return coveredScreens
+        return coveredScreenIDs
     }
 
     @objc private func handleActiveSpaceChange() {

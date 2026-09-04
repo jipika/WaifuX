@@ -1733,6 +1733,9 @@ struct WallpaperDetailSheet: View {
                 onLoadMore: {
                     self.loadMoreAuthorWallpapers()
                 },
+                onDownloadLoaded: { wallpapers in
+                    downloadLoadedByAuthor(authorName: uploader.username, wallpapers: wallpapers)
+                },
                 onDownloadAll: { wallpapers in
                     downloadAllByAuthor(authorName: uploader.username, wallpapers: wallpapers)
                 },
@@ -1801,9 +1804,22 @@ struct WallpaperDetailSheet: View {
         cachedAuthorUploader = nil
     }
 
-    /// 批量下载作者所有已加载壁纸，并自动归入以作者名命名的虚拟文件夹。
+    /// 仅下载作者列表当前已经加载的壁纸。
+    private func downloadLoadedByAuthor(authorName: String, wallpapers: [Wallpaper]) {
+        downloadAuthorWallpapers(authorName: authorName, wallpapers: wallpapers, downloadAllPages: false)
+    }
+
+    /// 批量下载作者全部壁纸，并自动翻页直到没有更多内容。
     /// 同作者多次批量下载会复用同一文件夹，避免拆成多个同名目录。
     private func downloadAllByAuthor(authorName: String, wallpapers: [Wallpaper]) {
+        downloadAuthorWallpapers(authorName: authorName, wallpapers: wallpapers, downloadAllPages: true)
+    }
+
+    private func downloadAuthorWallpapers(
+        authorName: String,
+        wallpapers: [Wallpaper],
+        downloadAllPages: Bool
+    ) {
         let folderStore = LibraryFolderStore.shared
         let libraryService = WallpaperLibraryService.shared
         var identityKeys = Set(wallpapers.flatMap { LibraryFolderStore.wallpaperAuthorIdentityKeys($0) })
@@ -1834,12 +1850,18 @@ struct WallpaperDetailSheet: View {
             }
             return wallpapers.first(where: { $0.pixivAuthorID != nil })?.pixivAuthorID
         }()
+        let isPixivAuthor = authorSource?.caseInsensitiveCompare("pixiv") == .orderedSame
+        let pixivUserID = authorLoadedIdentifier
+        let wallhavenUsername = authorUploader.username
         let stampedWallpapers = wallpapers.map {
             $0.stampingAuthor(uploader: authorUploader, pixivAuthorID: pixivAuthorID)
         }
 
         Task { @MainActor in
-            defer { isDownloadingAllAuthor = false }
+            defer {
+                isDownloadingAllAuthor = false
+                isLoadingAuthorWallpapers = false
+            }
 
             let folder = folderStore.findOrCreateAuthorDownloadFolder(
                 name: authorName,
@@ -1847,63 +1869,81 @@ struct WallpaperDetailSheet: View {
                 identityKeys: identityKeys
             )
 
-            // 已下载的项直接归入文件夹，过滤出需要下载的
-            // 作者批量下载只改下载集合，禁止污染收藏侧 folderID
-            var pendingWallpapers: [Wallpaper] = []
-            for wallpaper in stampedWallpapers {
-                if libraryService.isDownloaded(wallpaper) {
-                    folderStore.moveWallpaperToFolder(
-                        wallpaperID: wallpaper.id,
-                        folderID: folder.id,
-                        scope: .downloads
-                    )
-                } else {
-                    pendingWallpapers.append(wallpaper)
-                }
-            }
-
-            // 全部已下载时只归夹；defer 会复位按钮，不弹错误框
-            guard !pendingWallpapers.isEmpty else { return }
-
-            // 并发提交下载；folderID 在落盘登记时一并写入，避免“成功落盘却落在根目录”
-            let vm = viewModel
             let folderID = folder.id
             var successCount = 0
             var failureCount = 0
-            await withTaskGroup(of: (String, Bool).self) { group in
-                for wallpaper in pendingWallpapers {
-                    group.addTask {
-                        do {
-                            try await vm.downloadWallpaper(wallpaper, folderID: folderID)
-                            return (wallpaper.id, true)
-                        } catch {
-                            AppLogger.error(.download, "作者壁纸批量下载失败",
-                                metadata: ["wallpaperID": wallpaper.id, "author": authorName,
-                                           "error": error.localizedDescription])
-                            return (wallpaper.id, false)
-                        }
+            var processedIDs = Set<String>()
+            var batch = stampedWallpapers
+            var nextPage = authorWallpapersPage + 1
+            var shouldLoadNextPage = downloadAllPages && hasMoreAuthorWallpapers
+            var paginationError: Error?
+
+            // 每次只提交当前批次；当前批次结束后才继续请求下一页，避免把作者的
+            // 全量作品一次性堆进持久化下载队列。
+            while true {
+                let freshBatch = batch.filter { processedIDs.insert($0.id).inserted }
+                // 用户可能已经手动加载了多页；仍按 API 页大小切成小批次，
+                // 保持“当前批次完成后再继续”的节奏。
+                for start in stride(from: 0, to: freshBatch.count, by: 24) {
+                    let end = min(start + 24, freshBatch.count)
+                    let result = await downloadWallpaperBatch(
+                        Array(freshBatch[start..<end]),
+                        authorName: authorName,
+                        folderID: folderID,
+                        folderStore: folderStore,
+                        libraryService: libraryService
+                    )
+                    successCount += result.success
+                    failureCount += result.failure
+                }
+
+                guard shouldLoadNextPage else { break }
+
+                isLoadingAuthorWallpapers = true
+                do {
+                    let page: WallpaperViewModel.AuthorPageResult
+                    if isPixivAuthor {
+                        page = try await viewModel.fetchPixivWallpapersByAuthor(
+                            userID: pixivUserID ?? "",
+                            page: nextPage,
+                            limit: 24
+                        )
+                    } else {
+                        page = try await viewModel.fetchWallpapersByAuthor(
+                            username: wallhavenUsername,
+                            page: nextPage,
+                            limit: 24
+                        )
                     }
-                }
-                for await (_, ok) in group {
-                    if ok { successCount += 1 } else { failureCount += 1 }
+
+                    let existingIDs = Set(authorWallpapers.map(\.id))
+                    let fresh = page.items.filter {
+                        !existingIDs.contains($0.id) && !processedIDs.contains($0.id)
+                    }
+                    authorWallpapers.append(contentsOf: fresh)
+                    authorWallpapersPage = nextPage
+                    hasMoreAuthorWallpapers = page.hasMore && !fresh.isEmpty
+                    batch = fresh.map {
+                        $0.stampingAuthor(uploader: authorUploader, pixivAuthorID: pixivAuthorID)
+                    }
+                    shouldLoadNextPage = hasMoreAuthorWallpapers
+                    nextPage += 1
+                } catch {
+                    paginationError = error
+                    AppLogger.error(.wallpaper, "作者壁纸批量下载分页失败",
+                        metadata: [
+                            "author": authorName,
+                            "page": nextPage,
+                            "error": error.localizedDescription
+                        ])
+                    break
                 }
             }
 
-            // 兜底：本批成功项再归一次作者夹。
-            // 优先按 isDownloaded；若仅有下载记录（文件检测偶发缓存滞后）也尝试归夹。
-            for wallpaper in stampedWallpapers {
-                let hasRecord = libraryService.downloadRecords.contains {
-                    $0.wallpaper.id == wallpaper.id && $0.isActive
-                }
-                guard libraryService.isDownloaded(wallpaper) || hasRecord else { continue }
-                folderStore.moveWallpaperToFolder(
-                    wallpaperID: wallpaper.id,
-                    folderID: folderID,
-                    scope: .downloads
-                )
-            }
-
-            if failureCount > 0 {
+            if let paginationError {
+                errorMessage = paginationError.localizedDescription
+                showError = true
+            } else if failureCount > 0 {
                 if successCount == 0 {
                     errorMessage = String(format: t("downloadAllByAuthor.allFailed"), failureCount)
                 } else {
@@ -1912,6 +1952,73 @@ struct WallpaperDetailSheet: View {
                 showError = true
             }
         }
+    }
+
+    /// 下载一个作者列表批次。下载队列内部仍限制实际并发数，但这里只等待本批完成。
+    private func downloadWallpaperBatch(
+        _ wallpapers: [Wallpaper],
+        authorName: String,
+        folderID: String,
+        folderStore: LibraryFolderStore,
+        libraryService: WallpaperLibraryService
+    ) async -> (success: Int, failure: Int) {
+        var pendingWallpapers: [Wallpaper] = []
+        for wallpaper in wallpapers {
+            if libraryService.isDownloaded(wallpaper) {
+                folderStore.moveWallpaperToFolder(
+                    wallpaperID: wallpaper.id,
+                    folderID: folderID,
+                    scope: .downloads
+                )
+            } else {
+                pendingWallpapers.append(wallpaper)
+            }
+        }
+
+        guard !pendingWallpapers.isEmpty else { return (0, 0) }
+
+        let vm = viewModel
+        var successCount = 0
+        var failureCount = 0
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for wallpaper in pendingWallpapers {
+                group.addTask {
+                    do {
+                        try await vm.downloadWallpaper(wallpaper, folderID: folderID)
+                        return (wallpaper.id, true)
+                    } catch {
+                        AppLogger.error(.download, "作者壁纸批量下载失败",
+                            metadata: [
+                                "wallpaperID": wallpaper.id,
+                                "author": authorName,
+                                "error": error.localizedDescription
+                            ])
+                        return (wallpaper.id, false)
+                    }
+                }
+            }
+            for await (_, ok) in group {
+                if ok {
+                    successCount += 1
+                } else {
+                    failureCount += 1
+                }
+            }
+        }
+
+        // 文件检测可能比下载记录刷新稍晚，再做一次归夹兜底。
+        for wallpaper in pendingWallpapers {
+            let hasRecord = libraryService.downloadRecords.contains {
+                $0.wallpaper.id == wallpaper.id && $0.isActive
+            }
+            guard libraryService.isDownloaded(wallpaper) || hasRecord else { continue }
+            folderStore.moveWallpaperToFolder(
+                wallpaperID: wallpaper.id,
+                folderID: folderID,
+                scope: .downloads
+            )
+        }
+        return (successCount, failureCount)
     }
 
     /// 加载更多作者壁纸（分页），防止重复触发

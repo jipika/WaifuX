@@ -277,6 +277,7 @@ struct MangaDetailSheet: View {
                 onSelectWallpaper: navigateToAuthorManga,
                 onDismiss: dismissAuthorMangaSheet,
                 onLoadMore: loadMoreAuthorManga,
+                onDownloadLoaded: nil,
                 onDownloadAll: nil,
                 isDownloadingAll: $isDownloadingAuthorManga
             )

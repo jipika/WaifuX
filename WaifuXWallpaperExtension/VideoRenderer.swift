@@ -201,26 +201,28 @@ final class VideoRenderer: @unchecked Sendable {
         if settings.shouldApplyCrop {
             let layout = ExtCropEngine.compute(
                 wallpaperSize: videoSize, screenSize: bounds.size, settings: settings)
+            let geometry = ExtCropGeometry.layerGeometry(layout: layout, in: bounds)
             rootLayer.backgroundColor = layout.letterboxColor
-            let vp = CGRect(
-                x: layout.viewportRect.x * bounds.width,
-                y: layout.viewportRect.y * bounds.height,
-                width: layout.viewportRect.w * bounds.width,
-                height: layout.viewportRect.h * bounds.height)
-            displayLayer.frame = vp
-            displayLayer.videoGravity = .resize
-            displayLayer.contentsRect = CGRect(
-                x: layout.wallpaperCropRect.x, y: layout.wallpaperCropRect.y,
-                width: layout.wallpaperCropRect.w, height: layout.wallpaperCropRect.h)
+            // contentsRect 在远程 CAContext + AVSampleBufferDisplayLayer 路径中
+            // 不能可靠地表达“先裁切、再等比例铺满”。若配合 .resize，
+            // 竖屏会把整张横屏帧直接压进窄 viewport。改用超出 root bounds 的
+            // videoFrame，并由 rootLayer.masksToBounds 完成真实裁切。
+            displayLayer.frame = geometry.videoFrame
+            displayLayer.videoGravity = .resizeAspectFill
+            displayLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
             displayLayer.contentsScale = rootLayer.contentsScale
-            backgroundFrameLayer.frame = vp
-            backgroundFrameLayer.contentsGravity = .resize
-            backgroundFrameLayer.contentsRect = displayLayer.contentsRect
-            stillFrameLayer.frame = vp
-            stillFrameLayer.contentsGravity = .resize
-            stillFrameLayer.contentsRect = displayLayer.contentsRect
+            backgroundFrameLayer.frame = geometry.videoFrame
+            backgroundFrameLayer.contentsGravity = .resizeAspectFill
+            backgroundFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            stillFrameLayer.frame = geometry.videoFrame
+            stillFrameLayer.contentsGravity = .resizeAspectFill
+            stillFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
             stillFrameLayer.contentsScale = rootLayer.contentsScale
-            extLog("[VideoRenderer] layout crop video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height))")
+            extLog(
+                "[VideoRenderer] layout crop video=\(Int(videoSize.width))x\(Int(videoSize.height)) "
+                    + "display=\(Int(bounds.width))x\(Int(bounds.height)) "
+                    + "frame=\(Int(geometry.videoFrame.width))x\(Int(geometry.videoFrame.height))"
+            )
         } else {
             // 现状 aspect-fill
             rootLayer.backgroundColor = nil

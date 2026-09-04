@@ -34,8 +34,15 @@ enum AppResponsivenessMonitor {
                 state.heartbeat &+= 1
                 let token = state.heartbeat
 
-                DispatchQueue.main.async {
-                    acknowledgeHeartbeat(token)
+                // A hidden accessory app can be throttled or have its main run
+                // loop parked by the system. Do not turn that expected state
+                // into an ever-growing "main thread stall".
+                if state.windowVisible || state.appActive {
+                    DispatchQueue.main.async {
+                        acknowledgeHeartbeat(token)
+                    }
+                } else {
+                    resetHeartbeatBaseline(token: token)
                 }
 
                 evaluateStall()
@@ -64,6 +71,9 @@ enum AppResponsivenessMonitor {
     static func noteWindowVisible(_ visible: Bool) {
         queue.async {
             state.windowVisible = visible
+            if !visible, !state.appActive {
+                resetHeartbeatBaseline()
+            }
             flushSnapshotIfNeeded(trigger: "windowVisible", force: true)
         }
     }
@@ -71,6 +81,9 @@ enum AppResponsivenessMonitor {
     static func noteAppActive(_ active: Bool) {
         queue.async {
             state.appActive = active
+            if !active, !state.windowVisible {
+                resetHeartbeatBaseline()
+            }
             flushSnapshotIfNeeded(trigger: "appActive", force: true)
         }
     }
@@ -110,6 +123,16 @@ enum AppResponsivenessMonitor {
             state.lastAckedHeartbeat = token
             lastHeartbeatTime = Date()
         }
+    }
+
+    private static func resetHeartbeatBaseline(token: UInt64? = nil) {
+        if let token {
+            state.lastAckedHeartbeat = token
+        } else {
+            state.lastAckedHeartbeat = state.heartbeat
+        }
+        lastHeartbeatTime = Date()
+        lastStallLogTime = Date()
     }
 
     private static func evaluateStall() {

@@ -214,8 +214,11 @@ class DownloadTaskService: ObservableObject {
 
     /// 取消所有活动的下载
     func cancelAllActiveDownloads() {
-        Task {
-            await taskStorage.cancelAll()
+        let activeTaskIDs = tasks
+            .filter(\.isRunning)
+            .map(\.id)
+        for id in activeTaskIDs {
+            cancelTask(id: id)
         }
     }
 
@@ -939,13 +942,20 @@ final class PersistentDownloadQueueService {
         guard activeWorkers[jobID]?.token == workerToken else { return }
         activeWorkers.removeValue(forKey: jobID)
         DownloadTaskService.shared.unregisterDownloadTask(id: jobID)
-        DownloadTaskService.shared.markCompleted(id: jobID)
+
+        // 先从执行队列移除并补上下一个 Job，再发布当前 Job 的完成状态。
+        // 否则 Toast 会先收到“已完成”并启动自动隐藏计时，随后才收到下一个
+        // Job 开始，批量下载时就会出现弹窗逐项消失又重新弹出的闪烁。
         jobs.removeAll { $0.id == jobID }
         persistJobs()
         let terminalResult: Result<URL?, Error> = .success(result)
         storeTerminalResult(terminalResult, for: jobID)
         resumeWaiters(for: jobID, with: terminalResult)
         pump()
+
+        // 队列已补位后再标记完成；若没有下一个 Job，这里仍会正常进入
+        // 完成态并由 Toast 按原逻辑短暂展示后消失。
+        DownloadTaskService.shared.markCompleted(id: jobID)
     }
 
     private func fail(jobID: String, workerToken: UUID, error: Error) {

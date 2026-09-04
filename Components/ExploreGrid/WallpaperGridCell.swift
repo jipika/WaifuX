@@ -121,8 +121,9 @@ final class WallpaperGridCell: ExploreGridItem {
 
         applyTheme()
         applyBorder(for: wallpaper)
-        // 列表封面始终 fill：Wallhaven 竖图的 large/original 预览经常是横裁中心图，
-        // 若用 fit 会在竖卡里上下大块留白（“只显示半截”）。完整原图留给详情页。
+        // 列表封面始终 fill：Wallhaven 缩略图只有 orig 保原图比例（长边 300px），
+        // lg/small 恒为横裁图，比例与卡片不会完全一致，用 fit 会 letterbox 大块留白。
+        // 配合 loadImage(preferredAspectRatio:) 的比例优先选图，竖卡会选中 orig（完整显示）。
         setCoverContentsGravity(.resizeAspectFill)
 
         titleLabel.stringValue = wallpaper.title ?? wallpaper.uploader?.username ?? wallpaper.categoryDisplayName
@@ -149,7 +150,7 @@ final class WallpaperGridCell: ExploreGridItem {
         let targetSize = preferredImageTargetSize()
         wallpaperImageURLs = preferredImageURLs(for: wallpaper, targetSize: targetSize)
         lastImageTargetSize = targetSize
-        loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
+        loadImage(urls: wallpaperImageURLs, targetSize: targetSize, preferredAspectRatio: coverAspectRatio())
 
         // 在文本确定后立即计算并缓存各子视图的 fittingSize；
         // 后续 layoutContentFrames/layout 中直接读取缓存，避免重复测量。
@@ -215,7 +216,7 @@ final class WallpaperGridCell: ExploreGridItem {
             if urls != wallpaperImageURLs || sizeChanged {
                 wallpaperImageURLs = urls
                 lastImageTargetSize = targetSize
-                loadImage(urls: wallpaperImageURLs, targetSize: targetSize)
+                loadImage(urls: wallpaperImageURLs, targetSize: targetSize, preferredAspectRatio: coverAspectRatio())
             }
         }
     }
@@ -251,28 +252,49 @@ final class WallpaperGridCell: ExploreGridItem {
         return CGSize(width: targetWidth, height: targetHeight)
     }
 
+    /// 封面显示区的实际宽高比（w/h），供 loadImage 做比例优先选图。
+    /// bounds 未就绪（首次 configure）时退回 clamp 后的原图比例，
+    /// 与 wallpaperCellAspectRatio 的 clamp（0.35–3.6）保持一致。
+    private func coverAspectRatio() -> CGFloat {
+        let bounds = coverImageView.bounds
+        if bounds.width > 0, bounds.height > 0 {
+            return bounds.width / bounds.height
+        }
+        let ratio = CGFloat(currentWallpaper?.effectiveAspectRatioValue ?? 1.0)
+        return min(max(ratio, 0.35), 3.6)
+    }
+
     private func preferredImageURLs(for wallpaper: Wallpaper, targetSize: CGSize) -> [URL] {
-        // 列表严禁 fullImageURL：原图可达数 MB~数十 MB。
-        // Wallhaven thumbs:
-        // - large 常为中心裁切、短边约 300~800，竖卡 fill 时高度方向极易糊
-        // - original 预览更大，竖卡必须优先
-        // - small 仅兜底
+        // Wallhaven 缩略图实测（2026-09，th.wallhaven.cc）：
+        // - lg 恒定 432×243（16:9 中心横裁）、small 恒定 300×200（3:2 横裁），任意原图比例都裁
+        // - orig 保原图比例，但长边封顶 300px
+        // 竖卡清晰度策略（300px 上限在 2x 屏放大仍糊，用户要求真清晰）：
+        // 1) orig 排第一——比例匹配、几十 KB，先上屏保底；
+        // 2) path（full 原图）插第二——比例必匹配，loadImage 按「比例 > 像素边」评分，
+        //    下载完成即升级为最终显示，且达到 goodEnough 提前 break，lg/small 不再被请求。
+        //    full 只对竖卡启用：横卡 lg 比例匹配且像素需求 ≈1:1，足够清晰，
+        //    列表对横卡仍然严禁 fullImageURL（数 MB~数十 MB，滚动流量/缓存压力不可控）。
+        //    path 为 http(s) 才启用（本地 file:// 的缩略图已是清晰的本地图，不走 Kingfisher 网络源）。
         let aspectRatio = CGFloat(wallpaper.effectiveAspectRatioValue)
         let isPortraitCard = aspectRatio < 0.95 || targetSize.height > targetSize.width * 1.05
 
-        let candidates: [URL?]
-        if isPortraitCard {
-            candidates = [
+        var candidates: [URL?] = isPortraitCard
+            ? [
                 wallpaper.originalThumbURL,
                 wallpaper.thumbURL,
                 wallpaper.smallThumbURL
             ]
-        } else {
-            candidates = [
+            : [
                 wallpaper.thumbURL,
                 wallpaper.originalThumbURL,
                 wallpaper.smallThumbURL
             ]
+
+        if isPortraitCard,
+           let pathURL = Wallpaper.normalizedImageURL(from: wallpaper.path),
+           let scheme = pathURL.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            candidates.insert(pathURL, at: 1)
         }
 
         var seen: Set<String> = []

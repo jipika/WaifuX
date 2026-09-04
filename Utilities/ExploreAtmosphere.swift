@@ -38,7 +38,11 @@ actor AnimatedImageProbeCache {
     /// 最大并发探测数（避免快速滚动时大量并发 HTTP Range 请求）
     private let maxConcurrentProbes = 6
     private var activeProbes = 0
-    private var waitingProbes: [CheckedContinuation<Void, Never>] = []
+    private struct ProbeWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+    private var waitingProbes: [ProbeWaiter] = []
 
     private static let gifSignature = Data("GIF".utf8)
     private static let headerByteCount = 64 * 1024
@@ -91,10 +95,22 @@ actor AnimatedImageProbeCache {
             return cached
         }
 
-        // 并发限制：等待槽位
-        await acquireProbeSlot()
+        // 并发限制：等待槽位。hover 离开后要能移除排队中的探测，
+        // 否则快速掠过网格会把已取消的 Range 请求继续排到后台执行。
+        let waiterID = UUID()
+        let acquired = await withTaskCancellationHandler(operation: {
+            await acquireProbeSlot(id: waiterID)
+        }, onCancel: {
+            Task { await self.cancelProbeWaiter(id: waiterID) }
+        })
+        guard acquired else { return false }
+        guard !Task.isCancelled else {
+            releaseProbeSlot()
+            return false
+        }
 
         let result: Bool
+        defer { releaseProbeSlot() }
         if url.isFileURL {
             result = Self.probeLocalGIF(
                 url,
@@ -111,29 +127,39 @@ actor AnimatedImageProbeCache {
             )
         }
 
-        // 释放槽位
-        releaseProbeSlot()
-
+        // 取消不是“确认静态图”。快速移开鼠标时不能把取消结果写进负缓存，
+        // 否则下一次 hover 会直接跳过真正的 GIF 探测。
+        guard !Task.isCancelled else { return false }
         Self.memoryCache.setObject(NSNumber(value: result), forKey: key)
         return result
     }
 
     /// 等待一个并发槽位
-    private func acquireProbeSlot() async {
+    private func acquireProbeSlot(id: UUID) async -> Bool {
+        guard !Task.isCancelled else { return false }
         if activeProbes < maxConcurrentProbes {
             activeProbes += 1
+            return true
         } else {
-            await withCheckedContinuation { continuation in
-                waitingProbes.append(continuation)
+            return await withCheckedContinuation { continuation in
+                waitingProbes.append(
+                    ProbeWaiter(id: id, continuation: continuation)
+                )
             }
         }
     }
 
+    private func cancelProbeWaiter(id: UUID) {
+        guard let index = waitingProbes.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waitingProbes.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
     /// 释放并发槽位，唤醒等待者
     private func releaseProbeSlot() {
-        if let next = waitingProbes.first {
-            waitingProbes.removeFirst()
-            next.resume()
+        if !waitingProbes.isEmpty {
+            let next = waitingProbes.removeFirst()
+            next.continuation.resume(returning: true)
         } else {
             activeProbes -= 1
         }
@@ -201,12 +227,19 @@ actor AnimatedImageProbeCache {
         let looksLikeGIF = mimeType.contains("gif") || dataLooksLikeGIF(data)
         guard looksLikeGIF else { return false }
 
-        return imagePropertiesWithinBudget(
-            data,
-            maxPixelCount: maxPixelCount,
-            maxFrameCount: maxFrameCount,
-            requireAnimatedFrameCount: true
-        )
+        // Range 响应通常只包含 GIF 开头的几十 KB。此时 ImageIO 只能看到首帧，
+        // 不能据此判定它是单帧图；否则大 GIF 会被稳定误判为不可播放。
+        // 完整响应仍可做帧数检查，部分响应只验证 GIF 头和画布尺寸。
+        if let totalByteCount = estimatedByteCount(from: response),
+           totalByteCount == Int64(data.count) {
+            return imagePropertiesWithinBudget(
+                data,
+                maxPixelCount: maxPixelCount,
+                maxFrameCount: maxFrameCount,
+                requireAnimatedFrameCount: true
+            )
+        }
+        return gifHeaderDimensionsWithinBudget(data, maxPixelCount: maxPixelCount)
     }
 
     private static func dataLooksLikeGIF(_ data: Data) -> Bool {

@@ -14,19 +14,18 @@ struct AuthorWallpaperSheet: View {
     let onSelectWallpaper: (Wallpaper) -> Void
     let onDismiss: () -> Void
     let onLoadMore: (() -> Void)?
+    let onDownloadLoaded: (([Wallpaper]) -> Void)?
     let onDownloadAll: (([Wallpaper]) -> Void)?
 
     @State private var isVisible = false
     @Binding var isDownloadingAll: Bool
-    /// 滚动几何分页：距底进入阈值后触发一次，离开后再允许下一次
-    @State private var wasNearBottom = false
+    /// 触底加载冷却（NSCollectionView onReachBottom 会随滚动反复回调，靠冷却 + isLoading 去重）
     @State private var loadMoreCooldownUntil: Date?
+    /// 当前项高亮切换（数量不变的内容变化）时递增，强制刷新可见 Cell
+    @State private var activeReloadToken = 0
 
     private let panelWidth: CGFloat = 360
-    private let cardSpacing: CGFloat = 12
     private let cornerRadius: CGFloat = 22
-    private static let scrollCoordinateSpaceName = "author-wallpaper-sheet-scroll"
-    private static let loadMoreTriggerThreshold: CGFloat = 80
 
     var body: some View {
         GeometryReader { geometry in
@@ -110,19 +109,8 @@ struct AuthorWallpaperSheet: View {
                     .foregroundStyle(LiquidGlassColors.textTertiary)
             }
 
-            // 下载全部按钮
-            if !wallpapers.isEmpty, let onDownloadAll {
-                Button {
-                    isDownloadingAll = true
-                    onDownloadAll(wallpapers)
-                } label: {
-                    Image(systemName: isDownloadingAll ? "arrow.down.circle.fill" : "arrow.down.circle")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(isDownloadingAll ? Color.accentColor : LiquidGlassColors.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .help(t("downloadAllByAuthor"))
-                .disabled(isDownloadingAll)
+            if !wallpapers.isEmpty {
+                downloadActions
             }
 
             Spacer()
@@ -141,6 +129,52 @@ struct AuthorWallpaperSheet: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    @ViewBuilder
+    private var downloadActions: some View {
+        VStack(spacing: 5) {
+            if let onDownloadLoaded {
+                authorDownloadButton(title: t("downloadLoadedByAuthor")) {
+                    isDownloadingAll = true
+                    onDownloadLoaded(wallpapers)
+                }
+                .help(t("downloadLoadedByAuthor"))
+            }
+
+            if let onDownloadAll {
+                authorDownloadButton(title: t("downloadAllByAuthor")) {
+                    isDownloadingAll = true
+                    onDownloadAll(wallpapers)
+                }
+                .help(t("downloadAllByAuthor"))
+            }
+        }
+    }
+
+    private func authorDownloadButton(
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .foregroundStyle(isDownloadingAll ? Color.accentColor : LiquidGlassColors.textSecondary)
+                .frame(width: 94, height: 24)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            isDownloadingAll
+                                ? Color.accentColor.opacity(0.55)
+                                : LiquidGlassColors.borderSubtle,
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloadingAll)
     }
 
     // MARK: - 作者头像
@@ -175,87 +209,65 @@ struct AuthorWallpaperSheet: View {
         }
     }
 
-    private let cardWidth: CGFloat = 158
-    private let cardImageHeight: CGFloat = 100
-
-    // MARK: - 壁纸网格（固定 2 列）
+    // MARK: - 壁纸网格（NSCollectionView 固定 2 列，复用 ExploreGrid cell 基建保证滚动流畅）
     private var wallpaperGrid: some View {
-        GeometryReader { viewport in
-            ScrollView(.vertical, showsIndicators: false) {
-                if wallpapers.isEmpty && !isLoading {
+        Group {
+            if wallpapers.isEmpty && !isLoading {
+                ScrollView(.vertical, showsIndicators: false) {
                     emptyState
-                } else {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.fixed(cardWidth), spacing: cardSpacing),
-                            GridItem(.fixed(cardWidth), spacing: cardSpacing)
-                        ],
-                        spacing: cardSpacing
-                    ) {
-                        ForEach(wallpapers) { wallpaper in
-                            AuthorWallpaperCard(
-                                wallpaper: wallpaper,
-                                cardWidth: cardWidth,
-                                cardImageHeight: cardImageHeight,
-                                isActive: wallpaper.id == activeWallpaperID,
-                                onTap: {
-                                    onSelectWallpaper(wallpaper)
-                                }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 20)
-
-                    // 滚动几何哨兵：滚近底部时才加载更多（与探索页同思路）
-                    if onLoadMore != nil, !wallpapers.isEmpty, hasMore {
-                        ScrollBottomSentinel(coordinateSpaceName: Self.scrollCoordinateSpaceName)
-                            .padding(.bottom, 12)
-                    }
                 }
-
-                Color.clear
-                    .frame(height: 12)
-            }
-            .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-            .iosSmoothScroll()
-            .onScrollBottomSentinelChange { sentinelMinY in
-                handleLoadMoreSentinel(
-                    sentinelMinY: sentinelMinY,
-                    viewportHeight: viewport.size.height
+            } else {
+                AuthorSheetGridContainer(
+                    itemCount: { wallpapers.count },
+                    heightForItem: { index in
+                        guard index >= 0, index < wallpapers.count else {
+                            return AuthorSheetCardMetrics.mediaCardHeight
+                        }
+                        let wallpaper = wallpapers[index]
+                        return AuthorSheetCardMetrics.wallpaperCardHeight(
+                            hasTitle: wallpaper.title?.isEmpty == false,
+                            hasCategory: !wallpaper.category.isEmpty,
+                            hasResolution: !wallpaper.resolution.isEmpty
+                        )
+                    },
+                    configureCell: { cell, index in
+                        guard index >= 0, index < wallpapers.count else { return }
+                        (cell as? AuthorWallpaperGridCell)?.configure(
+                            with: wallpapers[index],
+                            isActive: wallpapers[index].id == activeWallpaperID
+                        )
+                    },
+                    cellClass: AuthorWallpaperGridCell.self,
+                    onSelect: { index in
+                        guard index >= 0, index < wallpapers.count else { return }
+                        onSelectWallpaper(wallpapers[index])
+                    },
+                    onReachBottom: {
+                        handleReachBottom()
+                    },
+                    reloadToken: activeReloadToken,
+                    layoutWidth: panelWidth
                 )
             }
-            // 加载结束且列表增长后，允许再次靠近底部触发（避免 wasNearBottom 卡死）
-            .onChange(of: isLoading) { _, loading in
-                if !loading {
-                    wasNearBottom = false
-                }
-            }
-            .onChange(of: wallpapers.count) { _, _ in
-                wasNearBottom = false
-            }
+        }
+        .onChange(of: activeWallpaperID) { _, _ in
+            activeReloadToken += 1
         }
     }
 
-    private func handleLoadMoreSentinel(sentinelMinY: CGFloat, viewportHeight: CGFloat) {
+    // MARK: - 触底加载
+    /// onReachBottom 在近底区间会随滚动反复回调；
+    /// 与旧哨兵方案相同语义：isLoading / hasMore 拦截 + 0.8s 冷却。
+    private func handleReachBottom() {
         guard let onLoadMore,
               hasMore,
               !isLoading,
-              !wallpapers.isEmpty,
-              viewportHeight > 0,
-              sentinelMinY.isFinite else { return }
+              !wallpapers.isEmpty else { return }
 
         if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
 
-        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
-        if isNearBottom {
-            guard !wasNearBottom else { return }
-            wasNearBottom = true
-            loadMoreCooldownUntil = Date().addingTimeInterval(0.8)
-            onLoadMore()
-        } else {
-            wasNearBottom = false
-        }
+        loadMoreCooldownUntil = Date().addingTimeInterval(0.8)
+        onLoadMore()
     }
 
     // MARK: - 空状态
@@ -302,104 +314,5 @@ struct AuthorWallpaperSheet: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
             onDismiss()
         }
-    }
-}
-
-// MARK: - 作者壁纸卡片
-private struct AuthorWallpaperCard: View {
-    let wallpaper: Wallpaper
-    let cardWidth: CGFloat
-    let cardImageHeight: CGFloat
-    let isActive: Bool
-    let onTap: () -> Void
-
-    @State private var isHovered = false
-    private let cardCornerRadius: CGFloat = 14
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // 壁纸封面
-            KFImage(coverImageURL)
-                .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
-                .backgroundDecode()
-                .cancelOnDisappear(true)
-                .placeholder { _ in
-                    Rectangle()
-                        .fill(.white.opacity(0.05))
-                }
-                .fade(duration: 0.15)
-                .resizable()
-                .scaledToFill()
-                .frame(width: cardWidth, height: cardImageHeight)
-                .clipped()
-
-            if let title = wallpaper.title, !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 7)
-            }
-
-            // 底部信息
-            HStack(spacing: 6) {
-                if !wallpaper.category.isEmpty {
-                    Text(wallpaper.categoryDisplayName)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(.white.opacity(0.08))
-                        )
-                }
-
-                Spacer(minLength: 0)
-
-                if !wallpaper.resolution.isEmpty {
-                    Text(wallpaper.resolution)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.35))
-                        .lineLimit(1)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, wallpaper.title?.isEmpty == false ? 4 : 7)
-            .padding(.bottom, 7)
-        }
-        .frame(width: cardWidth)
-        .background(
-            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .fill(Color(hex: "1A1D24").opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(
-                    isActive
-                        ? Color.accentColor
-                        : (isHovered ? .white.opacity(0.2) : .white.opacity(0.06)),
-                    lineWidth: isActive ? 2 : 0.5
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
-        .scaleEffect(isHovered ? 1.01 : 1)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
-        .contentShape(Rectangle())
-        .onTapGesture { onTap() }
-        .throttledHover(interval: 0.08) { hovering in
-            isHovered = hovering
-        }
-    }
-
-    private var coverImageURL: URL? {
-        wallpaper.thumbURL ?? wallpaper.smallThumbURL ?? wallpaper.fullImageURL
-    }
-
-    private var targetImageSize: CGSize {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        return CGSize(width: cardWidth * scale, height: cardImageHeight * scale)
     }
 }

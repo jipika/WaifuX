@@ -760,6 +760,14 @@ enum SceneOfflineBakeService {
         let posterTargets = realtimePosterTargets(for: targetScreens)
         let displayIDs = posterTargets.map(\.displayID)
         let generation = companionBakeGeneration
+        AppLogger.error(.wallpaper, "Scene companion poster scheduled", metadata: [
+            "reason": reason,
+            "autoBake": autoBakeEnabled,
+            "contentRoot": contentRoot.path,
+            "targetCount": posterTargets.count,
+            "displayIDs": displayIDs.map(String.init).joined(separator: ","),
+            "generation": generation
+        ])
 
         Task(priority: .utility) {
             do {
@@ -874,11 +882,8 @@ enum SceneOfflineBakeService {
         generation: UInt
     ) async {
         guard generation == companionBakeGeneration else { return }
-        let videoManager = VideoWallpaperManager.shared
-        guard videoManager.isLockScreenEnabled || videoManager.isSystemWallpaperSyncEnabled else {
-            print("[SceneOfflineBake] transient poster skipped (\(reason)): no static poster target is enabled")
-            return
-        }
+        // 抽帧缓存也供详情页/媒体库使用，与是否需要把静帧写回系统桌面无关。
+        // `syncRealtimeStaticPoster` 会在系统壁纸同步关闭时自行跳过桌面写入。
         guard !targets.isEmpty else {
             print("[SceneOfflineBake] transient poster skipped (\(reason)): no target display geometry")
             return

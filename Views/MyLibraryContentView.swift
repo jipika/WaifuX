@@ -159,6 +159,14 @@ struct MyLibraryContentView: View {
     @State private var isEditing = false
     @State private var selectedItems = Set<String>()
 
+    // MARK: - AppKit 网格状态（2026-09 迁移：NSCollectionView 自滚动 + cell 真复用）
+    /// 收藏/排序/选择/当前壁纸标记等「数量不变但内容变化」时递增，强制重配可见 cell。
+    @State private var gridReloadToken: Int = 0
+    /// 切子标签/内容类型/进出文件夹时递增，滚回网格顶部。
+    @State private var gridScrollToTopToken: Int = 0
+    /// tab 切回时强制 AppKit 网格重布局。
+    @State private var gridLayoutRefreshToken: Int = 0
+
     // 图片预加载由 onAppear 直接触发，无需追踪可见卡片 ID
 
     // MARK: - Scroll 恢复
@@ -261,7 +269,7 @@ struct MyLibraryContentView: View {
         }
     }
 
-    private struct FolderDisplayInfo {
+    private struct FolderDisplayInfo: Equatable {
         let previewURLs: [URL]
         let itemCount: Int
     }
@@ -321,6 +329,14 @@ struct MyLibraryContentView: View {
         #if PERF_TRACE
         let _ = Self._printChanges()
         #endif
+        // body 拆成三段（根内容 / 事件监听 / 弹窗警告），避免单表达式类型检查超时
+        librarySheetsAndAlerts(
+            libraryEventObservers(libraryRootContent)
+        )
+    }
+
+    /// 主体内容（背景 + 固定头部 + AppKit 网格）
+    private var libraryRootContent: some View {
         ZStack(alignment: .topLeading) {
             if isEditing {
                 Color.black.opacity(0.3)
@@ -358,30 +374,24 @@ struct MyLibraryContentView: View {
                     .padding(.top, mainTopBarContentPadding)
                     .padding(.bottom, 12)
 
-                    // 内部滚动区域
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            contentSections(config: gridConfig, animeConfig: animeGridConfig)
-                                .padding(.top, 10)
-                            Spacer(minLength: 0)
-                        }
+                    // 2026-09 网格迁移：SwiftUI ScrollView + LazyVGrid → ExploreGridContainer
+                    // （NSCollectionView 自滚动 + cell 真复用，与壁纸/媒体探索页同构）。
+                    // 面包屑固定在网格上方，不再随内容滚出；滚动位置恢复由容器
+                    // restoreScrollToken 接管（替代旧 LibraryScrollObserver）。
+                    contentSections(config: gridConfig, animeConfig: animeGridConfig)
                         .padding(.horizontal, 28)
-                        .padding(.bottom, 80)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .background(
-                            LibraryScrollObserver(
-                                restoreOffset: savedLibraryScrollOffset,
-                                restoreTrigger: libraryScrollRestoreToken,
-                                onScroll: handleLibraryScroll
-                            )
-                            .frame(width: 0, height: 0)
-                        )
-                    }
+                        .padding(.top, 10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environmentObject(CurrentWallpaperService.shared)
+    }
+
+    /// 生命周期 / 数据源 / 状态监听（从 body 拆出，降低类型检查开销）
+    private func libraryEventObservers(_ content: some View) -> some View {
+        content
         .task {
             async let wallpaperIndex: Void = viewModel.ensureLocalWallpaperIndex()
             async let mediaIndex: Void = mediaViewModel.ensureLocalMediaIndex()
@@ -431,7 +441,22 @@ struct MyLibraryContentView: View {
                 restoreLastLibraryPageIfNeeded()
                 // 回到库页时同步一次当前壁纸快照（可能在其他页被切换）
                 syncActiveWallpaperSnapshot()
+                // tab 切回时让 AppKit 网格主动补一次布局
+                gridLayoutRefreshToken &+= 1
             }
+        }
+        // AppKit 网格「数量不变但内容变化」的重配触发器
+        .onChange(of: isEditing) { _, _ in
+            gridReloadToken &+= 1
+        }
+        .onChange(of: selectedItems) { _, _ in
+            gridReloadToken &+= 1
+        }
+        .onChange(of: activeWallpaperRevision) { _, _ in
+            gridReloadToken &+= 1
+        }
+        .onChange(of: folderUnlockRevision) { _, _ in
+            gridReloadToken &+= 1
         }
         // ViewModel 不再 @ObservedObject：用 publisher 只听库内容 revision
         .onReceive(viewModel.$libraryContentRevision) { _ in
@@ -450,6 +475,7 @@ struct MyLibraryContentView: View {
             mediaFolderStack.removeAll()
             isEditing = false
             selectedItems.removeAll()
+            gridScrollToTopToken &+= 1
             updateWallpaperItems()
             updateMediaItems()
         }
@@ -499,9 +525,15 @@ struct MyLibraryContentView: View {
             currentMediaFolderID = nil
             wallpaperFolderStack.removeAll()
             mediaFolderStack.removeAll()
+            gridScrollToTopToken &+= 1
             debouncedUpdateWallpaperItems()
             debouncedUpdateMediaItems()
         }
+    }
+
+    /// 弹窗 / 警告框挂载（从 body 拆出，降低类型检查开销）
+    private func librarySheetsAndAlerts(_ content: some View) -> some View {
+        content
         .sheet(isPresented: $showNewFolderSheet) {
             NewFolderSheet(
                 folderName: $newFolderName,
@@ -679,6 +711,7 @@ struct MyLibraryContentView: View {
         idMap.reserveCapacity(animeFavorites.count)
         for (idx, anime) in animeFavorites.enumerated() { idMap[anime.id] = idx }
         animeIDIndexCache = idMap
+        gridReloadToken &+= 1
         syncSelectionWithVisibleItems()
     }
 
@@ -876,76 +909,249 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.primaryPink
                 )
             } else {
-                libraryWaterfallGrid(
-                    entries: orderedWallpaperGridItems,
-                    config: config,
-                    estimatedHeight: LibraryCardMetrics.thumbnailHeight + 60
-                ) { entry in
-                    wallpaperGridEntry(entry, config: config)
-                }
+                wallpaperGridContainer(config: config)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
     }
 
-    @ViewBuilder
-    private func wallpaperGridEntry(_ entry: LibraryGridEntry<AnyWallpaperItem>, config: LibraryGridConfig) -> some View {
-        switch entry {
-        case .folder(let folder):
-            wallpaperFolderCard(folder: folder, config: config)
-                .overlay(alignment: .leading) {
-                    // 排序插入条仅编辑态挂载，减少非编辑滚动时每卡 hit-test 层
-                    if isEditing {
-                        insertionDropZone(before: entry.id)
-                    }
+    /// 壁纸网格（文件夹 + 壁纸混排，NSCollectionView cell 复用）
+    private func wallpaperGridContainer(config: LibraryGridConfig) -> some View {
+        let entries = orderedWallpaperGridItems
+        let folderDisplay = wallpaperFolderDisplay
+        let editing = isEditing
+        let selection = selectedItems
+        let accent: NSColor = selectedSubTab == .favorites ? LibraryGridAccent.pink : LibraryGridAccent.cyan
+
+        return ExploreGridContainer(
+            itemCount: { entries.count },
+            aspectRatio: { _ in
+                LibraryGridCellMetrics.cardAspectRatio(columnWidth: config.cardWidth)
+            },
+            configureCell: { cell, idx in
+                guard idx < entries.count else { return }
+                switch entries[idx] {
+                case .folder(let folder):
+                    guard let folderCell = cell as? LibraryFolderGridCell else { return }
+                    folderCell.configure(
+                        with: makeWallpaperFolderCellModel(
+                            folder,
+                            display: folderDisplay[folder.id]
+                        ),
+                        isFavorite: false
+                    )
+                case .item(let item):
+                    guard let itemCell = cell as? LibraryWallpaperGridCell else { return }
+                    itemCell.configure(
+                        with: makeWallpaperCellModel(
+                            item,
+                            editing: editing,
+                            selection: selection,
+                            accent: accent
+                        ),
+                        isFavorite: false
+                    )
                 }
-        case .item(let item):
-            wallpaperGridItem(item: item, config: config)
-                .overlay(alignment: .leading) {
-                    if isEditing {
-                        insertionDropZone(before: entry.id)
-                    }
+            },
+            cellClass: LibraryWallpaperGridCell.self,
+            cellClassForItem: { idx in
+                guard idx < entries.count, entries[idx].isFolderEntry else {
+                    return LibraryWallpaperGridCell.self
                 }
-                .onAppear {
-                    libraryScrollRuntimeState.lastWallpaperItemID = item.id
-                    preloadNearbyWallpapers(around: item)
+                return LibraryFolderGridCell.self
+            },
+            additionalCellClasses: [LibraryFolderGridCell.self],
+            gridSpacing: 16,
+            onSelect: { idx in
+                guard idx < entries.count else { return }
+                switch entries[idx] {
+                case .folder(let folder):
+                    handleFolderTap(folder)
+                case .item(let item):
+                    handleWallpaperTap(item.wallpaper)
                 }
-        }
+            },
+            onVisibleItemsChange: { indexPaths in
+                handleWallpaperVisibleChange(indexPaths, entries: entries)
+            },
+            onScrollOffsetChange: { offset in
+                handleLibraryScroll(offset)
+            },
+            onReachBottom: {},
+            scrollToTopToken: gridScrollToTopToken,
+            restoreScrollToken: libraryScrollRestoreToken,
+            restoreScrollOffset: savedLibraryScrollOffset,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: true,
+            isVisible: isVisible,
+            layoutWidth: config.contentWidth,
+            gridColumnCount: config.columnCount,
+            hoverExpansionAllowance: 0,
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 80, right: 0),
+            pasteboardWriterForItem: { idx in
+                guard idx < entries.count else { return nil }
+                return NSString(string: dragPayload(for: entries[idx].id))
+            },
+            onValidateReorderDrop: { payloads, _ in
+                guard isEditing else { return false }
+                let movingIDs = LibraryDragPayload.ids(from: payloads)
+                    .filter { currentItemIDs.contains($0) }
+                return !movingIDs.isEmpty
+            },
+            onPerformReorderDrop: { payloads, targetIndex in
+                let targetID: String? = targetIndex < entries.count ? entries[targetIndex].id : nil
+                return handleGridReorderDrop(payloads, before: targetID)
+            }
+        )
     }
 
-    private func wallpaperFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
-        let display = wallpaperFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
-        // 依赖 folderUnlockRevision，解锁集合变化时刷新锁态，无需观察 FolderLockService 全对象
+    /// 可见区变化：维护「最后出现」的壁纸项并驱动预取（替代旧 LazyVGrid .onAppear）
+    private func handleWallpaperVisibleChange(
+        _ indexPaths: Set<IndexPath>,
+        entries: [LibraryGridEntry<AnyWallpaperItem>]
+    ) {
+        guard let maxIdx = indexPaths.map(\.item).max(), maxIdx < entries.count else { return }
+        guard case .item(let item) = entries[maxIdx] else { return }
+        libraryScrollRuntimeState.lastWallpaperItemID = item.id
+        preloadNearbyWallpapers(around: item)
+    }
+
+    @MainActor
+    private func makeWallpaperCellModel(
+        _ item: AnyWallpaperItem,
+        editing: Bool,
+        selection: Set<String>,
+        accent: NSColor
+    ) -> LibraryWallpaperCellModel {
+        // 菜单右键时才构建：optimizableVideoURL 会同步探测 workshop project.json
+        //（fileExists + 最多 8 层 Data 读取，不走 WorkshopLibraryPreviewCache）。
+        // configureCell 在滚动复用/批量重配（选中、token 递增）时高频执行，
+        // 同步打磁盘会卡主线程；旧 SwiftUI contextMenu 闭包同样只在右键时求值。
+        let menuProvider: () -> [LibraryGridMenuEntry] = { [self] in
+            var menuEntries: [LibraryGridMenuEntry] = []
+            if !wallpaperMoveTargetFolders.isEmpty {
+                menuEntries.append(
+                    .submenu(
+                        title: t("move.to.folder"),
+                        icon: "folder.badge.gearshape",
+                        entries: wallpaperMoveTargetFolders.map { folder in
+                            .item(title: folder.name, icon: "folder", destructive: false) {
+                                moveWallpapersToFolder(ids: [item.id], folderID: folder.id)
+                            }
+                        }
+                    )
+                )
+            }
+            if currentWallpaperFolderID != nil {
+                menuEntries.append(
+                    .item(title: t("remove.from.folder"), icon: "folder.badge.minus", destructive: false) {
+                        gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
+                        folderStore.moveWallpaperToFolder(
+                            wallpaperID: item.id,
+                            folderID: nil,
+                            scope: currentWallpaperFolderScope
+                        )
+                        updateWallpaperItems()
+                    }
+                )
+            }
+            if let videoURL = VideoOptimizationQueueService.shared.optimizableVideoURL(from: item.localFileURL) {
+                menuEntries.append(.divider)
+                menuEntries.append(
+                    .item(title: t("videoOptimizationOptimizeVideo"), icon: "sparkles", destructive: false) {
+                        _ = VideoOptimizationQueueService.shared.enqueueOptimizeVideo(
+                            videoURL: videoURL,
+                            title: item.wallpaper.title,
+                            targetFPS: FrameInterpolationTargetFPSResolver.targetFPSForManualAction(),
+                            source: .manual
+                        )
+                    }
+                )
+            }
+            menuEntries.append(.divider)
+            menuEntries.append(
+                .item(title: t("delete"), icon: "trash", destructive: true) {
+                    pendingWallpaperDeletion = item
+                }
+            )
+            return menuEntries
+        }
+
+        return LibraryWallpaperCellModel(
+            wallpaper: item.wallpaper,
+            localFileURL: item.localFileURL,
+            isEditing: editing,
+            isSelected: selection.contains(item.id),
+            isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
+                || isActiveWallpaperURL(item.wallpaper.fullImageURL),
+            accent: accent,
+            makeMenuEntries: menuProvider
+        )
+    }
+
+    @MainActor
+    private func makeWallpaperFolderCellModel(
+        _ folder: LibraryFolder,
+        display: FolderDisplayInfo?
+    ) -> LibraryFolderCellModel {
+        // 依赖 folderUnlockRevision，解锁集合变化时刷新锁态
         _ = folderUnlockRevision
         let isUnlocked = FolderLockService.shared.isFolderUnlocked(folder.id)
-        return LibraryFolderCard(
-            folder: folder,
-            previewURLs: display.previewURLs,
-            itemCount: display.itemCount,
-            cardWidth: config.cardWidth,
-            isEditing: isEditing,
-            isUnlocked: isUnlocked,
-            dragPayload: dragPayload(for: "folder_\(folder.id)"),
-            onTap: { handleFolderTap(folder) },
-            onDrop: { ids in moveWallpapersToFolder(ids: ids, folderID: folder.id) },
-            onDisband: {
+
+        var menuEntries: [LibraryGridMenuEntry] = []
+        menuEntries.append(
+            .item(title: t("folder.rename"), icon: "pencil", destructive: false) {
+                startRenamingFolder(folder)
+            }
+        )
+        if folder.isLocked, isUnlocked {
+            menuEntries.append(
+                .item(title: t("folder.relock"), icon: "lock.fill", destructive: false) {
+                    FolderLockService.shared.lockFolder(folder.id)
+                }
+            )
+        }
+        menuEntries.append(
+            .item(
+                title: folder.isLocked ? t("folder.unlock") : t("folder.lock"),
+                icon: folder.isLocked ? "lock.open" : "lock",
+                destructive: false
+            ) {
+                folderStore.toggleFolderLock(id: folder.id, contentType: .wallpaper)
+            }
+        )
+        menuEntries.append(.divider)
+        menuEntries.append(
+            .item(title: t("videoOptimizationBatchOptimizeVideos"), icon: "sparkles", destructive: false) {
+                _ = VideoOptimizationQueueService.shared.enqueueLibraryFolder(folder)
+            }
+        )
+        menuEntries.append(
+            .item(title: t("disband.folder"), icon: "folder.badge.minus", destructive: true) {
                 folderStore.deleteFolder(id: folder.id, contentType: .wallpaper)
                 gridOrderStore.removeIDs(["folder_\(folder.id)"], from: currentGridOrderScope)
                 updateWallpaperItems()
-            },
-            onDelete: {
+            }
+        )
+        menuEntries.append(
+            .item(title: t("delete.folder.with.contents"), icon: "trash", destructive: true) {
                 deleteFolderWithContents(folderID: folder.id, contentType: .wallpaper)
-            },
-            onRename: { startRenamingFolder(folder) },
-            onToggleLock: {
-                folderStore.toggleFolderLock(id: folder.id, contentType: .wallpaper)
+            }
+        )
+
+        return LibraryFolderCellModel(
+            folder: folder,
+            previewURLs: display?.previewURLs ?? [],
+            itemCount: display?.itemCount ?? 0,
+            isUnlocked: isUnlocked,
+            menuEntries: menuEntries,
+            onDrop: { ids in
+                moveWallpapersToFolder(ids: ids, folderID: folder.id)
             },
             onRelock: {
                 FolderLockService.shared.lockFolder(folder.id)
-            },
-            onOptimizeVideos: {
-                _ = VideoOptimizationQueueService.shared.enqueueLibraryFolder(folder)
-            },
-            onRedownloadAll: nil
+            }
         )
     }
 
@@ -954,16 +1160,19 @@ struct MyLibraryContentView: View {
             wallpaperFolderStack.append(current)
         }
         currentWallpaperFolderID = folderID
+        gridScrollToTopToken &+= 1
         updateWallpaperItems()
     }
 
     private func popWallpaperFolder() {
         guard !wallpaperFolderStack.isEmpty else {
             currentWallpaperFolderID = nil
+            gridScrollToTopToken &+= 1
             updateWallpaperItems()
             return
         }
         currentWallpaperFolderID = wallpaperFolderStack.popLast()
+        gridScrollToTopToken &+= 1
         updateWallpaperItems()
     }
 
@@ -1212,6 +1421,7 @@ struct MyLibraryContentView: View {
         idMap.reserveCapacity(wallpaperItems.count)
         for (idx, item) in wallpaperItems.enumerated() { idMap[item.id] = idx }
         wallpaperIDIndexCache = idMap
+        gridReloadToken &+= 1
         refreshWallpaperFolderDisplay()
         syncSelectionWithVisibleItems()
     }
@@ -1332,6 +1542,7 @@ struct MyLibraryContentView: View {
         idMap.reserveCapacity(mediaItems.count)
         for (idx, item) in mediaItems.enumerated() { idMap[item.id] = idx }
         mediaIDIndexCache = idMap
+        gridReloadToken &+= 1
         refreshMediaFolderDisplay()
         syncSelectionWithVisibleItems()
     }
@@ -1361,73 +1572,6 @@ struct MyLibraryContentView: View {
         renamingFolder = folder
     }
 
-    @ViewBuilder
-    private func wallpaperGridItem(item: AnyWallpaperItem, config: LibraryGridConfig) -> some View {
-        let card = WallpaperEditCard(
-            wallpaper: item.wallpaper,
-            localFileURL: item.localFileURL,
-            accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
-            isEditing: isEditing,
-            isSelected: selectedItems.contains(item.id),
-            downloadDate: item.downloadDate,
-            cardWidth: config.cardWidth,
-            isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
-                || isActiveWallpaperURL(item.wallpaper.fullImageURL)
-        ) {
-            handleWallpaperTap(item.wallpaper)
-        }
-        .equatable()
-        .contextMenu {
-            if !wallpaperMoveTargetFolders.isEmpty {
-                Menu {
-                    ForEach(wallpaperMoveTargetFolders) { folder in
-                        Button {
-                            moveWallpapersToFolder(ids: [item.id], folderID: folder.id)
-                        } label: {
-                            Label(folder.name, systemImage: "folder")
-                        }
-                    }
-                } label: {
-                    Label(t("move.to.folder"), systemImage: "folder.badge.gearshape")
-                }
-            }
-            if currentWallpaperFolderID != nil {
-                Button {
-                    gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
-                    folderStore.moveWallpaperToFolder(
-                        wallpaperID: item.id,
-                        folderID: nil,
-                        scope: currentWallpaperFolderScope
-                    )
-                    updateWallpaperItems()
-                } label: {
-                    Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
-                }
-            }
-            if let videoURL = VideoOptimizationQueueService.shared.optimizableVideoURL(from: item.localFileURL) {
-                Divider()
-                Button {
-                    _ = VideoOptimizationQueueService.shared.enqueueOptimizeVideo(
-                        videoURL: videoURL,
-                        title: item.wallpaper.title,
-                        targetFPS: FrameInterpolationTargetFPSResolver.targetFPSForManualAction(),
-                        source: .manual
-                    )
-                } label: {
-                    Label(t("videoOptimizationOptimizeVideo"), systemImage: "sparkles")
-                }
-            }
-            Divider()
-            Button(role: .destructive) {
-                pendingWallpaperDeletion = item
-            } label: {
-                Label(t("delete"), systemImage: "trash")
-            }
-        }
-        // 始终可拖入文件夹（浏览态也需要）；排序插入条仍仅编辑态挂载
-        card.draggable(dragPayload(for: item.id))
-    }
-
     // MARK: - Media Section
     private func mediaSection(config: LibraryGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1448,77 +1592,276 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.secondaryViolet
                 )
             } else {
-                libraryWaterfallGrid(
-                    entries: orderedMediaGridItems,
-                    config: config,
-                    estimatedHeight: LibraryCardMetrics.thumbnailHeight + 56
-                ) { entry in
-                    mediaGridEntry(entry, config: config)
-                }
+                mediaGridContainer(config: config)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
     }
 
-    @ViewBuilder
-    private func mediaGridEntry(_ entry: LibraryGridEntry<AnyMediaItem>, config: LibraryGridConfig) -> some View {
-        switch entry {
-        case .folder(let folder):
-            mediaFolderCard(folder: folder, config: config)
-                .overlay(alignment: .leading) {
-                    if isEditing {
-                        insertionDropZone(before: entry.id)
-                    }
+    /// 媒体网格（文件夹 + 媒体混排，NSCollectionView cell 复用）
+    private func mediaGridContainer(config: LibraryGridConfig) -> some View {
+        let entries = orderedMediaGridItems
+        let folderDisplay = mediaFolderDisplay
+        let editing = isEditing
+        let selection = selectedItems
+        let accent: NSColor = selectedSubTab == .favorites ? LibraryGridAccent.pink : LibraryGridAccent.cyan
+        let badgeText = selectedSubTab == .favorites ? t("badge.favorite") : nil
+
+        return ExploreGridContainer(
+            itemCount: { entries.count },
+            aspectRatio: { _ in
+                LibraryGridCellMetrics.cardAspectRatio(columnWidth: config.cardWidth)
+            },
+            configureCell: { cell, idx in
+                guard idx < entries.count else { return }
+                switch entries[idx] {
+                case .folder(let folder):
+                    guard let folderCell = cell as? LibraryFolderGridCell else { return }
+                    folderCell.configure(
+                        with: makeMediaFolderCellModel(
+                            folder,
+                            display: folderDisplay[folder.id]
+                        ),
+                        isFavorite: false
+                    )
+                case .item(let item):
+                    guard let itemCell = cell as? LibraryMediaGridCell else { return }
+                    itemCell.configure(
+                        with: makeMediaCellModel(
+                            item,
+                            badgeText: badgeText,
+                            editing: editing,
+                            selection: selection,
+                            accent: accent
+                        ),
+                        isFavorite: false
+                    )
                 }
-        case .item(let item):
-            mediaGridItem(item: item, config: config)
-                .overlay(alignment: .leading) {
-                    if isEditing {
-                        insertionDropZone(before: entry.id)
-                    }
+            },
+            cellClass: LibraryMediaGridCell.self,
+            cellClassForItem: { idx in
+                guard idx < entries.count, entries[idx].isFolderEntry else {
+                    return LibraryMediaGridCell.self
                 }
-                .onAppear {
-                    libraryScrollRuntimeState.lastMediaItemID = item.id
-                    preloadNearbyMedia(around: item)
+                return LibraryFolderGridCell.self
+            },
+            additionalCellClasses: [LibraryFolderGridCell.self],
+            gridSpacing: 16,
+            onSelect: { idx in
+                guard idx < entries.count else { return }
+                switch entries[idx] {
+                case .folder(let folder):
+                    handleFolderTap(folder)
+                case .item(let item):
+                    handleMediaTap(item.mediaItem)
                 }
-        }
+            },
+            onVisibleItemsChange: { indexPaths in
+                handleMediaVisibleChange(indexPaths, entries: entries)
+            },
+            onScrollOffsetChange: { offset in
+                handleLibraryScroll(offset)
+            },
+            onReachBottom: {},
+            scrollToTopToken: gridScrollToTopToken,
+            restoreScrollToken: libraryScrollRestoreToken,
+            restoreScrollOffset: savedLibraryScrollOffset,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: true,
+            isVisible: isVisible,
+            layoutWidth: config.contentWidth,
+            gridColumnCount: config.columnCount,
+            hoverExpansionAllowance: 0,
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 80, right: 0),
+            pasteboardWriterForItem: { idx in
+                guard idx < entries.count else { return nil }
+                return NSString(string: dragPayload(for: entries[idx].id))
+            },
+            onValidateReorderDrop: { payloads, _ in
+                guard isEditing else { return false }
+                let movingIDs = LibraryDragPayload.ids(from: payloads)
+                    .filter { currentItemIDs.contains($0) }
+                return !movingIDs.isEmpty
+            },
+            onPerformReorderDrop: { payloads, targetIndex in
+                let targetID: String? = targetIndex < entries.count ? entries[targetIndex].id : nil
+                return handleGridReorderDrop(payloads, before: targetID)
+            }
+        )
     }
 
-    private func mediaFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
-        let display = mediaFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
+    /// 可见区变化：维护「最后出现」的媒体项并驱动预取（替代旧 LazyVGrid .onAppear）
+    private func handleMediaVisibleChange(
+        _ indexPaths: Set<IndexPath>,
+        entries: [LibraryGridEntry<AnyMediaItem>]
+    ) {
+        guard let maxIdx = indexPaths.map(\.item).max(), maxIdx < entries.count else { return }
+        guard case .item(let item) = entries[maxIdx] else { return }
+        libraryScrollRuntimeState.lastMediaItemID = item.id
+        preloadNearbyMedia(around: item)
+    }
+
+    @MainActor
+    private func makeMediaCellModel(
+        _ item: AnyMediaItem,
+        badgeText: String?,
+        editing: Bool,
+        selection: Set<String>,
+        accent: NSColor
+    ) -> LibraryMediaCellModel {
+        // 菜单右键时才构建（同 makeWallpaperCellModel）：optimizableVideoURL
+        // 按下载记录最多试 3 个候选 URL，每个都同步 fileExists + 逐层读 project.json，
+        // 不能进 configureCell 滚动/重配热路径。
+        let menuProvider: () -> [LibraryGridMenuEntry] = { [self] in
+            var menuEntries: [LibraryGridMenuEntry] = []
+            if !mediaMoveTargetFolders.isEmpty {
+                menuEntries.append(
+                    .submenu(
+                        title: t("move.to.folder"),
+                        icon: "folder.badge.gearshape",
+                        entries: mediaMoveTargetFolders.map { folder in
+                            .item(title: folder.name, icon: "folder", destructive: false) {
+                                moveMediasToFolder(ids: [item.id], folderID: folder.id)
+                            }
+                        }
+                    )
+                )
+            }
+            if currentMediaFolderID != nil {
+                menuEntries.append(
+                    .item(title: t("remove.from.folder"), icon: "folder.badge.minus", destructive: false) {
+                        gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
+                        folderStore.moveMediaToFolder(
+                            mediaID: item.id,
+                            folderID: nil,
+                            scope: currentMediaFolderScope
+                        )
+                        updateMediaItems()
+                    }
+                )
+            }
+            if selectedSubTab == .downloads, canRedownloadMediaItem(item.mediaItem) {
+                menuEntries.append(
+                    .item(title: t("library.redownload.item"), icon: "arrow.clockwise.circle", destructive: false) {
+                        pendingRedownloadMediaItem = item.mediaItem
+                        showRedownloadMediaItemConfirm = true
+                    }
+                )
+            }
+            // Scene 烘焙 MP4 优先：纯 scene 工程目录本身没有视频，不能只看 localFileURL。
+            if let videoURL = VideoOptimizationQueueService.shared.optimizableVideoURL(
+                forMediaItem: item.mediaItem,
+                localURL: item.localFileURL
+            ) {
+                menuEntries.append(.divider)
+                menuEntries.append(
+                    .item(title: t("videoOptimizationOptimizeVideo"), icon: "sparkles", destructive: false) {
+                        _ = VideoOptimizationQueueService.shared.enqueueOptimizeVideo(
+                            videoURL: videoURL,
+                            title: item.mediaItem.title,
+                            targetFPS: FrameInterpolationTargetFPSResolver.targetFPSForManualAction(),
+                            source: .manual
+                        )
+                    }
+                )
+            }
+            menuEntries.append(.divider)
+            menuEntries.append(
+                .item(title: t("delete"), icon: "trash", destructive: true) {
+                    pendingMediaDeletion = item
+                }
+            )
+            return menuEntries
+        }
+
+        return LibraryMediaCellModel(
+            itemID: item.id,
+            mediaItem: item.mediaItem,
+            localFileURL: item.localFileURL,
+            initialThumbnailURL: item.thumbnailURL,
+            shouldProbeAnimatedThumbnail: item.shouldProbeAnimatedThumbnail,
+            resolvedVideoFileURL: item.resolvedVideoFileURL,
+            badgeText: badgeText ?? item.mediaItem.resolutionLabel,
+            isEditing: editing,
+            isSelected: selection.contains(item.id),
+            isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
+                || isActiveWallpaperURL(item.resolvedVideoFileURL),
+            accent: accent,
+            makeMenuEntries: menuProvider
+        )
+    }
+
+    @MainActor
+    private func makeMediaFolderCellModel(
+        _ folder: LibraryFolder,
+        display: FolderDisplayInfo?
+    ) -> LibraryFolderCellModel {
         _ = folderUnlockRevision
         let isUnlocked = FolderLockService.shared.isFolderUnlocked(folder.id)
-        return LibraryFolderCard(
-            folder: folder,
-            previewURLs: display.previewURLs,
-            itemCount: display.itemCount,
-            cardWidth: config.cardWidth,
-            isEditing: isEditing,
-            isUnlocked: isUnlocked,
-            dragPayload: dragPayload(for: "folder_\(folder.id)"),
-            onTap: { handleFolderTap(folder) },
-            onDrop: { ids in moveMediasToFolder(ids: ids, folderID: folder.id) },
-            onDisband: {
+        let itemCount = display?.itemCount ?? 0
+
+        var menuEntries: [LibraryGridMenuEntry] = []
+        menuEntries.append(
+            .item(title: t("folder.rename"), icon: "pencil", destructive: false) {
+                startRenamingFolder(folder)
+            }
+        )
+        if folder.isLocked, isUnlocked {
+            menuEntries.append(
+                .item(title: t("folder.relock"), icon: "lock.fill", destructive: false) {
+                    FolderLockService.shared.lockFolder(folder.id)
+                }
+            )
+        }
+        menuEntries.append(
+            .item(
+                title: folder.isLocked ? t("folder.unlock") : t("folder.lock"),
+                icon: folder.isLocked ? "lock.open" : "lock",
+                destructive: false
+            ) {
+                folderStore.toggleFolderLock(id: folder.id, contentType: .media)
+            }
+        )
+        menuEntries.append(.divider)
+        menuEntries.append(
+            .item(title: t("videoOptimizationBatchOptimizeVideos"), icon: "sparkles", destructive: false) {
+                _ = VideoOptimizationQueueService.shared.enqueueLibraryFolder(folder)
+            }
+        )
+        if selectedSubTab == .downloads, itemCount > 0 {
+            menuEntries.append(
+                .item(title: t("folder.redownload.all.media"), icon: "arrow.clockwise.circle", destructive: false) {
+                    pendingRedownloadMediaFolder = folder
+                    showRedownloadMediaFolderConfirm = true
+                }
+            )
+        }
+        menuEntries.append(
+            .item(title: t("disband.folder"), icon: "folder.badge.minus", destructive: true) {
                 folderStore.deleteFolder(id: folder.id, contentType: .media)
                 gridOrderStore.removeIDs(["folder_\(folder.id)"], from: currentGridOrderScope)
                 updateMediaItems()
-            },
-            onDelete: {
+            }
+        )
+        menuEntries.append(
+            .item(title: t("delete.folder.with.contents"), icon: "trash", destructive: true) {
                 deleteFolderWithContents(folderID: folder.id, contentType: .media)
-            },
-            onRename: { startRenamingFolder(folder) },
-            onToggleLock: {
-                folderStore.toggleFolderLock(id: folder.id, contentType: .media)
+            }
+        )
+
+        return LibraryFolderCellModel(
+            folder: folder,
+            previewURLs: display?.previewURLs ?? [],
+            itemCount: itemCount,
+            isUnlocked: isUnlocked,
+            menuEntries: menuEntries,
+            onDrop: { ids in
+                moveMediasToFolder(ids: ids, folderID: folder.id)
             },
             onRelock: {
                 FolderLockService.shared.lockFolder(folder.id)
-            },
-            onOptimizeVideos: {
-                _ = VideoOptimizationQueueService.shared.enqueueLibraryFolder(folder)
-            },
-            onRedownloadAll: selectedSubTab == .downloads && display.itemCount > 0 ? {
-                pendingRedownloadMediaFolder = folder
-                showRedownloadMediaFolderConfirm = true
-            } : nil
+            }
         )
     }
 
@@ -1527,16 +1870,19 @@ struct MyLibraryContentView: View {
             mediaFolderStack.append(current)
         }
         currentMediaFolderID = folderID
+        gridScrollToTopToken &+= 1
         updateMediaItems()
     }
 
     private func popMediaFolder() {
         guard !mediaFolderStack.isEmpty else {
             currentMediaFolderID = nil
+            gridScrollToTopToken &+= 1
             updateMediaItems()
             return
         }
         currentMediaFolderID = mediaFolderStack.popLast()
+        gridScrollToTopToken &+= 1
         updateMediaItems()
     }
 
@@ -1570,89 +1916,6 @@ struct MyLibraryContentView: View {
 
     private var activeRatioFilter: WallpaperRatioFilter {
         selectedContentType == .wallpaper ? wallpaperRatioFilter : mediaRatioFilter
-    }
-
-    @ViewBuilder
-    private func mediaGridItem(item: AnyMediaItem, config: LibraryGridConfig) -> some View {
-        let card = MediaVideoCard(
-            item: item.mediaItem,
-            localMediaFileURL: item.localFileURL,
-            badgeText: selectedSubTab == .favorites ? t("badge.favorite") : item.mediaItem.resolutionLabel,
-            accent: selectedSubTab == .favorites ? LiquidGlassColors.primaryPink : LiquidGlassColors.accentCyan,
-            isEditing: isEditing,
-            isSelected: selectedItems.contains(item.id),
-            cardWidth: config.cardWidth,
-            thumbnailURL: item.thumbnailURL,
-            shouldProbeAnimatedThumbnail: item.shouldProbeAnimatedThumbnail,
-            resolvedVideoFileURL: item.resolvedVideoFileURL,
-            isVisible: isVisible,
-            isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
-                || isActiveWallpaperURL(item.resolvedVideoFileURL)
-        ) {
-            handleMediaTap(item.mediaItem)
-        }
-        .equatable()
-        .contextMenu {
-            if !mediaMoveTargetFolders.isEmpty {
-                Menu {
-                    ForEach(mediaMoveTargetFolders) { folder in
-                        Button {
-                            moveMediasToFolder(ids: [item.id], folderID: folder.id)
-                        } label: {
-                            Label(folder.name, systemImage: "folder")
-                        }
-                    }
-                } label: {
-                    Label(t("move.to.folder"), systemImage: "folder.badge.gearshape")
-                }
-            }
-            if currentMediaFolderID != nil {
-                Button {
-                    gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
-                    folderStore.moveMediaToFolder(
-                        mediaID: item.id,
-                        folderID: nil,
-                        scope: currentMediaFolderScope
-                    )
-                    updateMediaItems()
-                } label: {
-                    Label(t("remove.from.folder"), systemImage: "folder.badge.minus")
-                }
-            }
-            if selectedSubTab == .downloads, canRedownloadMediaItem(item.mediaItem) {
-                Button {
-                    pendingRedownloadMediaItem = item.mediaItem
-                    showRedownloadMediaItemConfirm = true
-                } label: {
-                    Label(t("library.redownload.item"), systemImage: "arrow.clockwise.circle")
-                }
-            }
-            // Scene 烘焙 MP4 优先：纯 scene 工程目录本身没有视频，不能只看 localFileURL。
-            if let videoURL = VideoOptimizationQueueService.shared.optimizableVideoURL(
-                forMediaItem: item.mediaItem,
-                localURL: item.localFileURL
-            ) {
-                Divider()
-                Button {
-                    _ = VideoOptimizationQueueService.shared.enqueueOptimizeVideo(
-                        videoURL: videoURL,
-                        title: item.mediaItem.title,
-                        targetFPS: FrameInterpolationTargetFPSResolver.targetFPSForManualAction(),
-                        source: .manual
-                    )
-                } label: {
-                    Label(t("videoOptimizationOptimizeVideo"), systemImage: "sparkles")
-                }
-            }
-            Divider()
-            Button(role: .destructive) {
-                pendingMediaDeletion = item
-            } label: {
-                Label(t("delete"), systemImage: "trash")
-            }
-        }
-        // 始终可拖入文件夹（浏览态也需要）；排序插入条仍仅编辑态挂载
-        card.draggable(dragPayload(for: item.id))
     }
 
     private func dragPayload(for itemID: String) -> String {
@@ -1922,7 +2185,12 @@ struct MyLibraryContentView: View {
                 warmupTargets.append(contentsOf: preview.warmup)
             }
         }
-        wallpaperFolderDisplay = next
+        // 变化才写状态 + 递增 token：updateWallpaperItems 高频触发，
+        // 无差别赋值 + 重配会让文件夹叠图反复 setImage（闪动来源）
+        if next != wallpaperFolderDisplay {
+            wallpaperFolderDisplay = next
+            gridReloadToken &+= 1
+        }
         scheduleWallpaperFolderPreviewWarmup(targets: warmupTargets)
     }
 
@@ -2016,7 +2284,12 @@ struct MyLibraryContentView: View {
                 next[folder.id] = FolderDisplayInfo(previewURLs: preview.urls, itemCount: wallpapers.count)
             }
         }
-        wallpaperFolderDisplay = next
+        // 变化才写状态：updateWallpaperItems 高频触发，无差别赋值 + 递增 token
+        // 会让可见 cell 反复 reconfigure（文件夹叠图重复 setImage → 闪动）
+        if next != wallpaperFolderDisplay {
+            wallpaperFolderDisplay = next
+            gridReloadToken &+= 1
+        }
     }
 
     private func refreshMediaFolderDisplay() {
@@ -2076,7 +2349,11 @@ struct MyLibraryContentView: View {
                 )
             }
         }
-        mediaFolderDisplay = next
+        // 变化才写状态 + 递增 token（同 refreshWallpaperFolderDisplay，防无差别重配闪动）
+        if next != mediaFolderDisplay {
+            mediaFolderDisplay = next
+            gridReloadToken &+= 1
+        }
         scheduleMediaFolderPreviewWarmup(targets: warmupItems)
     }
 
@@ -2145,7 +2422,10 @@ struct MyLibraryContentView: View {
                 next[folder.id] = FolderDisplayInfo(previewURLs: previewURLs, itemCount: items.count)
             }
         }
-        mediaFolderDisplay = next
+        if next != mediaFolderDisplay {
+            mediaFolderDisplay = next
+            gridReloadToken &+= 1
+        }
     }
 
     // MARK: - Anime Section
@@ -2159,28 +2439,77 @@ struct MyLibraryContentView: View {
                     accent: LiquidGlassColors.tertiaryBlue
                 )
             } else {
-                let animeCardHeight = config.cardWidth * 1.4 + 52
-
-                // ⚡ 改用 LazyVGrid：动漫卡片高度统一，不需要瀑布流多列对齐。
-                LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    ForEach(currentAnimeItems) { anime in
-                        AnimeLibraryCard(
-                            anime: anime,
-                            isEditing: isEditing,
-                            isSelected: selectedItems.contains(anime.id),
-                            cardWidth: config.cardWidth
-                        ) {
-                            handleAnimeTap(anime)
-                        }
-                        .onAppear {
-                            libraryScrollRuntimeState.lastAnimeItemID = anime.id
-                            preloadNearbyAnime(around: anime)
-                        }
-                        .frame(height: animeCardHeight)
-                    }
-                }
+                animeGridContainer(config: config)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
+    }
+
+    /// 动漫网格（NSCollectionView cell 复用，编辑多选 + 观看进度）
+    private func animeGridContainer(config: AnimeGridConfig) -> some View {
+        let items = currentAnimeItems
+        let editing = isEditing
+        let selection = selectedItems
+        let accent = LibraryGridAccent.violet
+
+        return ExploreGridContainer(
+            itemCount: { items.count },
+            aspectRatio: { _ in
+                LibraryGridCellMetrics.animeAspectRatio(columnWidth: config.cardWidth)
+            },
+            configureCell: { cell, idx in
+                guard let animeCell = cell as? LibraryAnimeGridCell, idx < items.count else { return }
+                animeCell.configure(
+                    with: LibraryAnimeCellModel(
+                        anime: items[idx],
+                        isEditing: editing,
+                        isSelected: selection.contains(items[idx].id),
+                        accent: accent
+                    ),
+                    isFavorite: false
+                )
+            },
+            cellClass: LibraryAnimeGridCell.self,
+            gridSpacing: 12,
+            onSelect: { idx in
+                guard idx < items.count else { return }
+                handleAnimeTap(items[idx])
+            },
+            onVisibleItemsChange: { indexPaths in
+                guard let maxIdx = indexPaths.map(\.item).max(), maxIdx < items.count else { return }
+                libraryScrollRuntimeState.lastAnimeItemID = items[maxIdx].id
+                preloadNearbyAnime(around: items[maxIdx])
+            },
+            onScrollOffsetChange: { offset in
+                handleLibraryScroll(offset)
+            },
+            onReachBottom: {},
+            scrollToTopToken: gridScrollToTopToken,
+            restoreScrollToken: libraryScrollRestoreToken,
+            restoreScrollOffset: savedLibraryScrollOffset,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: true,
+            isVisible: isVisible,
+            layoutWidth: config.contentWidth,
+            gridColumnCount: config.columnCount,
+            hoverExpansionAllowance: 0,
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 80, right: 0),
+            pasteboardWriterForItem: { idx in
+                guard idx < items.count else { return nil }
+                return NSString(string: dragPayload(for: items[idx].id))
+            },
+            onValidateReorderDrop: { payloads, _ in
+                guard isEditing else { return false }
+                let movingIDs = LibraryDragPayload.ids(from: payloads)
+                    .filter { currentItemIDs.contains($0) }
+                return !movingIDs.isEmpty
+            },
+            onPerformReorderDrop: { payloads, targetIndex in
+                let targetID: String? = targetIndex < items.count ? items[targetIndex].id : nil
+                return handleGridReorderDrop(payloads, before: targetID)
+            }
+        )
     }
 
     private var currentAnimeItems: [AnimeSearchResult] {
@@ -3389,10 +3718,12 @@ struct MyLibraryContentView: View {
         let columnCount: Int
         let spacing: CGFloat
         let cardWidth: CGFloat
+        let contentWidth: CGFloat
         let gridItems: [GridItem]
 
         init(contentWidth: CGFloat) {
             self.spacing = 12
+            self.contentWidth = contentWidth
             self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
             let totalSpacing = spacing * CGFloat(columnCount - 1)
             self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
@@ -4013,6 +4344,13 @@ private enum LibraryGridEntry<Item: Identifiable>: Identifiable where Item.ID ==
         case .item(let item):
             return item.id
         }
+    }
+
+    var isFolderEntry: Bool {
+        if case .folder = self {
+            return true
+        }
+        return false
     }
 }
 

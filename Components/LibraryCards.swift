@@ -9,9 +9,20 @@ extension MediaItem {
     ]
 
     private static let videoFileExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
-    private static let workshopPreviewFallbackNames = [
-        "preview.gif", "preview.jpg", "preview.jpeg", "preview.png", "preview.webp"
+    private static let workshopStaticPreviewFallbackNames = [
+        "preview.jpg", "preview.jpeg", "preview.png", "preview.webp"
     ]
+    private static let workshopGIFPreviewFallbackNames = ["preview.gif"]
+
+    nonisolated static func urlLooksLikeGIF(_ url: URL) -> Bool {
+        let value = url.absoluteString.lowercased()
+        return value.hasSuffix(".gif")
+            || value.contains(".gif?")
+            || value.contains(".gif&")
+            || url.pathExtension.lowercased() == "gif"
+            || value.contains("format=gif")
+            || value.contains("output-format=gif")
+    }
 
     /// 读取 Wallpaper Engine `project.json` 的 type，用于区分 Web 壁纸和可抽帧的视频类内容。
     /// 结果经 `WorkshopLibraryPreviewCache` 缓存，避免列表重建时反复读外置卡。
@@ -32,9 +43,54 @@ extension MediaItem {
         }
     }
 
-    /// 若 `url` 是已下载的 Wallpaper Engine 项目录，优先寻找本地预览图（特别是 web 壁纸）。
+    /// 若 `url` 是已下载的 Wallpaper Engine 项目录，优先寻找静态本地预览图。
+    /// GIF 是 hover 动画源；只有没有其他静态候选时才作为列表封面保底。
     nonisolated static func resolveLocalWorkshopPreviewImage(from url: URL) -> URL? {
         WorkshopLibraryPreviewCache.shared.previewImage(for: url) {
+            let fm = FileManager.default
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+
+            let resolved = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: url)
+            let projectURL = resolved.appendingPathComponent("project.json")
+            var projectGIFPreview: URL?
+            if let data = try? Data(contentsOf: projectURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let previewName = json["preview"] as? String {
+                let trimmed = previewName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let candidate = resolved.appendingPathComponent(trimmed)
+                    if fm.fileExists(atPath: candidate.path) {
+                        if !Self.urlLooksLikeGIF(candidate) {
+                            return candidate
+                        }
+                        projectGIFPreview = candidate
+                    }
+                }
+            }
+
+            for name in workshopStaticPreviewFallbackNames {
+                let candidate = resolved.appendingPathComponent(name)
+                if fm.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+            if let projectGIFPreview {
+                return projectGIFPreview
+            }
+            for name in workshopGIFPreviewFallbackNames {
+                let candidate = resolved.appendingPathComponent(name)
+                if fm.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Wallpaper Engine 本地工程的真实 GIF 预览，只供 hover 播放使用。
+    nonisolated static func resolveLocalWorkshopPreviewGIF(from url: URL) -> URL? {
+        WorkshopLibraryPreviewCache.shared.previewGIF(for: url) {
             let fm = FileManager.default
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return nil }
@@ -44,16 +100,15 @@ extension MediaItem {
             if let data = try? Data(contentsOf: projectURL),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let previewName = json["preview"] as? String {
-                let trimmed = previewName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    let candidate = resolved.appendingPathComponent(trimmed)
-                    if fm.fileExists(atPath: candidate.path) {
-                        return candidate
-                    }
+                let candidate = resolved.appendingPathComponent(
+                    previewName.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                if fm.fileExists(atPath: candidate.path), Self.urlLooksLikeGIF(candidate) {
+                    return candidate
                 }
             }
 
-            for name in workshopPreviewFallbackNames {
+            for name in workshopGIFPreviewFallbackNames {
                 let candidate = resolved.appendingPathComponent(name)
                 if fm.fileExists(atPath: candidate.path) {
                     return candidate
@@ -112,6 +167,13 @@ extension MediaItem {
     @MainActor
     func libraryGridThumbnailURL(localFileURL: URL?) -> URL {
         let fileCache = FileExistenceCache.shared
+        let staticMetadataFallback = Self.firstExistingStaticMetadataURL(
+            posterURL: posterURL,
+            thumbnailURL: thumbnailURL,
+            fileCache: fileCache
+        )
+        var gifFallbackURL: URL?
+
         // Scene 烘焙：列表优先完整画幅列表帧；高清 poster 可能已 letterbox 裁切，作次选兜底。
         if let record = MediaLibraryService.shared.downloadRecord(for: id),
            let bakedPath = record.sceneBakeArtifact?.videoPath {
@@ -124,25 +186,32 @@ extension MediaItem {
             }
         }
 
+        // 自动烘焙关闭时，实时 Scene 只会留下按屏幕尺寸生成的静帧。
+        // 没有正式 bake artifact 时也要让「我的库」优先显示这张图。
+        if let extracted = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: id) {
+            return extracted
+        }
+
         if let local = localFileURL,
            local.isFileURL,
            fileCache.fileExists(atPath: local.path) {
             let ext = local.pathExtension.lowercased()
 
-            // GIF：必须返回原文件（或站点封面），禁止压成 LocalImageThumbnails JPEG，否则 hover 无法播放
+            // GIF 保留原文件给 hover 播放，但静态封面先找抽帧 / 普通静图。
             if ext == "gif" {
-                return local
+                gifFallbackURL = local
             }
 
             // 静图：优先 SSD 列表缩略图，缺失时异步生成，列表先用站点封面
-            if Self.libraryLocalRasterExtensions.contains(ext),
+            if ext != "gif",
+               Self.libraryLocalRasterExtensions.contains(ext),
                LocalImageThumbnailCache.isRasterImageFile(local) {
                 if let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: local) {
                     return cached
                 }
                 return LocalImageThumbnailCache.shared.listThumbnailURL(
                     forLocalFile: local,
-                    fallbackURL: coverImageURL
+                    fallbackURL: staticMetadataFallback
                 )
             }
 
@@ -162,28 +231,50 @@ extension MediaItem {
                     return extracted
                 }
                 if let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
-                    // preview.gif 必须原路径，供 hover 播放
-                    if LocalImageThumbnailCache.isGIFFile(localPreview) {
-                        return localPreview
-                    }
-                    if LocalImageThumbnailCache.isRasterImageFile(localPreview),
+                    if Self.urlLooksLikeGIF(localPreview) {
+                        gifFallbackURL = localPreview
+                    } else if LocalImageThumbnailCache.isRasterImageFile(localPreview),
                        let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: localPreview) {
                         return cached
-                    }
-                    if LocalImageThumbnailCache.isRasterImageFile(localPreview) {
+                    } else if LocalImageThumbnailCache.isRasterImageFile(localPreview) {
                         return LocalImageThumbnailCache.shared.listThumbnailURL(
                             forLocalFile: localPreview,
-                            fallbackURL: localPreview
+                            fallbackURL: staticMetadataFallback ?? localPreview
                         )
+                    } else {
+                        return localPreview
                     }
-                    return localPreview
                 }
             }
         }
-        if let poster = posterURL, poster.isFileURL, fileCache.fileExists(atPath: poster.path) {
-            return poster
+        if let staticMetadataFallback {
+            return staticMetadataFallback
+        }
+        if let gifFallbackURL {
+            return gifFallbackURL
+        }
+        for candidate in [posterURL, thumbnailURL] {
+            guard let candidate else { continue }
+            if !candidate.isFileURL || fileCache.fileExists(atPath: candidate.path) {
+                return candidate
+            }
         }
         return coverImageURL
+    }
+
+    @MainActor
+    private static func firstExistingStaticMetadataURL(
+        posterURL: URL?,
+        thumbnailURL: URL,
+        fileCache: FileExistenceCache
+    ) -> URL? {
+        for candidate in [posterURL, thumbnailURL] {
+            guard let candidate, !urlLooksLikeGIF(candidate) else { continue }
+            if !candidate.isFileURL || fileCache.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     /// 文件夹卡片封面：与夹内列表同一套「清晰源」优先级，但**只读已有 SSD 缓存**，
@@ -215,6 +306,10 @@ extension MediaItem {
             return extracted
         }
 
+        if let extracted = videoCache.latestSceneRealtimePosterFileURLIfExists(itemID: id) {
+            return extracted
+        }
+
         if let local = localFileURL, local.isFileURL {
             let ext = local.pathExtension.lowercased()
 
@@ -230,8 +325,15 @@ extension MediaItem {
                 return cached
             }
 
-            // GIF 原文件（动图本身通常已是封面尺寸）
+            // GIF 原文件只在没有静态封面时回退使用。
             if LocalImageThumbnailCache.isGIFFile(local) {
+                if let staticFallback = Self.firstExistingStaticMetadataURL(
+                    posterURL: posterURL,
+                    thumbnailURL: thumbnailURL,
+                    fileCache: fileCache
+                ) {
+                    return staticFallback
+                }
                 return local
             }
 
@@ -245,7 +347,15 @@ extension MediaItem {
                     return extracted
                 }
                 if let preview = Self.resolveLocalWorkshopPreviewImage(from: local) {
-                    if LocalImageThumbnailCache.isGIFFile(preview) {
+                    if Self.urlLooksLikeGIF(preview),
+                       let staticFallback = Self.firstExistingStaticMetadataURL(
+                           posterURL: posterURL,
+                           thumbnailURL: thumbnailURL,
+                           fileCache: fileCache
+                       ) {
+                        return staticFallback
+                    }
+                    if Self.urlLooksLikeGIF(preview) {
                         return preview
                     }
                     if LocalImageThumbnailCache.isRasterImageFile(preview),
@@ -258,6 +368,13 @@ extension MediaItem {
             }
         }
 
+        if let staticFallback = Self.firstExistingStaticMetadataURL(
+            posterURL: posterURL,
+            thumbnailURL: thumbnailURL,
+            fileCache: fileCache
+        ) {
+            return staticFallback
+        }
         if let poster = posterURL, poster.isFileURL, fileCache.fileExists(atPath: poster.path) {
             // 本地 poster 也可能是抽帧产物
             return poster
@@ -541,7 +658,7 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
         if let local = localMediaFileURL,
            local.isFileURL,
            FileExistenceCache.shared.isDirectory(atPath: local.path),
-           let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: local),
+           let preview = MediaItem.resolveLocalWorkshopPreviewGIF(from: local),
            LocalImageThumbnailCache.isGIFFile(preview) {
             return preview
         }

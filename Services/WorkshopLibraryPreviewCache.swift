@@ -14,6 +14,7 @@ final class WorkshopLibraryPreviewCache: @unchecked Sendable {
     private let lock = NSLock()
     private var projectTypeByPath: [String: String?] = [:]
     private var previewImageByPath: [String: URL?] = [:]
+    private var previewGIFByPath: [String: URL?] = [:]
     private var videoFileByPath: [String: URL?] = [:]
     private let maxEntries = 4000
 
@@ -24,6 +25,7 @@ final class WorkshopLibraryPreviewCache: @unchecked Sendable {
         defer { lock.unlock() }
         projectTypeByPath.removeAll(keepingCapacity: false)
         previewImageByPath.removeAll(keepingCapacity: false)
+        previewGIFByPath.removeAll(keepingCapacity: false)
         videoFileByPath.removeAll(keepingCapacity: false)
     }
 
@@ -33,6 +35,7 @@ final class WorkshopLibraryPreviewCache: @unchecked Sendable {
         defer { lock.unlock() }
         projectTypeByPath.removeValue(forKey: key)
         previewImageByPath.removeValue(forKey: key)
+        previewGIFByPath.removeValue(forKey: key)
         videoFileByPath.removeValue(forKey: videoCacheKey(for: key))
     }
 
@@ -70,6 +73,23 @@ final class WorkshopLibraryPreviewCache: @unchecked Sendable {
         return value
     }
 
+    func previewGIF(for url: URL, compute: () -> URL?) -> URL? {
+        let key = url.standardizedFileURL.path
+        lock.lock()
+        if let cached = previewGIFByPath[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let value = compute()
+        lock.lock()
+        trimIfNeededLocked()
+        previewGIFByPath[key] = value
+        lock.unlock()
+        return value
+    }
+
     func videoFile(for url: URL, compute: () -> URL?) -> URL? {
         let path = url.standardizedFileURL.path
         let key = videoCacheKey(for: path)
@@ -96,9 +116,11 @@ final class WorkshopLibraryPreviewCache: @unchecked Sendable {
         // 简单容量保护：超限时整表清空（比 LRU 实现成本低，库列表场景够用）
         if projectTypeByPath.count > maxEntries
             || previewImageByPath.count > maxEntries
+            || previewGIFByPath.count > maxEntries
             || videoFileByPath.count > maxEntries {
             projectTypeByPath.removeAll(keepingCapacity: true)
             previewImageByPath.removeAll(keepingCapacity: true)
+            previewGIFByPath.removeAll(keepingCapacity: true)
             videoFileByPath.removeAll(keepingCapacity: true)
         }
     }

@@ -185,19 +185,35 @@ final class DynamicWallpaperService: ObservableObject {
         case .popular:
             filtered.sort {
                 if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
-                return $0.videoName > $1.videoName // 同为热门时，较新的在前
+                if $0.newestSortKey != $1.newestSortKey {
+                    return $0.newestSortKey > $1.newestSortKey
+                }
+                return $0.videoName > $1.videoName
             }
         case .newest:
-            filtered.sort { $0.videoName > $1.videoName }
+            filtered.sort {
+                if $0.newestSortKey != $1.newestSortKey {
+                    return $0.newestSortKey > $1.newestSortKey
+                }
+                return $0.videoName > $1.videoName
+            }
         case .audio:
             filtered.sort {
                 if $0.hasAudio != $1.hasAudio { return $0.hasAudio > $1.hasAudio }
-                return $0.isPopular > $1.isPopular // 同为含音频时，热门在前
+                if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
+                if $0.newestSortKey != $1.newestSortKey {
+                    return $0.newestSortKey > $1.newestSortKey
+                }
+                return $0.videoName > $1.videoName
             }
         case .fourK:
             filtered.sort {
                 if $0.isFourK != $1.isFourK { return $0.isFourK > $1.isFourK }
-                return $0.isPopular > $1.isPopular // 同为 4K 时，热门在前
+                if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
+                if $0.newestSortKey != $1.newestSortKey {
+                    return $0.newestSortKey > $1.newestSortKey
+                }
+                return $0.videoName > $1.videoName
             }
         }
 

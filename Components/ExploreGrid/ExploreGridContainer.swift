@@ -12,6 +12,13 @@ struct ExploreGridContainer: NSViewRepresentable {
     var configureCell: (ExploreGridItem, Int) -> Void
     /// Cell 类型（各页面自定义子类）
     var cellClass: ExploreGridItem.Type
+    /// 混排网格：按 index 返回 cell 类（如我的库「文件夹 + 项目」混排），
+    /// `cellClass` 作为兜底。可能返回的所有类都要列在 `additionalCellClasses` 中。
+    var cellClassForItem: ((Int) -> ExploreGridItem.Type)? = nil
+    /// `cellClassForItem` 可能返回的其余 cell 类；集合变化时整表 reloadData。
+    var additionalCellClasses: [ExploreGridItem.Type] = []
+    /// 统一列/行间距；nil 用布局默认 16（我的库动漫网格传 12）。
+    var gridSpacing: CGFloat? = nil
     /// 点击回调
     var onSelect: ((Int) -> Void)?
     /// 可见区域变化回调
@@ -59,6 +66,20 @@ struct ExploreGridContainer: NSViewRepresentable {
     var pendingScrollDown: CGFloat = 0
     /// 已消费 pending 后回调，供 SwiftUI 清零，避免重复应用。
     var onPendingScrollDownConsumed: (() -> Void)? = nil
+    // MARK: 拖拽（可选，我的库网格使用；其余页面保持 nil 完全不受影响）
+    /// 拖拽源：返回该 item 的粘贴板负载；返回 nil 表示该 item 不作为拖拽源。
+    var pasteboardWriterForItem: ((Int) -> NSPasteboardWriting?)? = nil
+    /// 编辑态拖拽排序：drop 校验。`targetIndex` = 插入到该 index 之前，
+    /// `== itemCount` 表示追加到末尾。返回 false 表示当前不接受排序 drop。
+    var onValidateReorderDrop: (([String], Int) -> Bool)? = nil
+    /// 编辑态拖拽排序：drop 落地，返回是否消费。
+    var onPerformReorderDrop: (([String], Int) -> Bool)? = nil
+    /// 固定尺寸卡片（猜你喜欢 260×360 等）。非 nil 时布局忽略 aspectRatio，
+    /// 卡片保持固定宽高且列块居中。见 `ExploreGridCollectionViewLayout.fixedCardSize`。
+    var fixedCardSize: CGSize? = nil
+    /// Escape 键回调。NSCollectionView 抢占 first responder 后 SwiftUI 的
+    /// onKeyPress 不再收到事件，这里从 NSScrollView.keyDown 兜底转发。
+    var onEscape: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         context.coordinator.scrollView
@@ -73,9 +94,12 @@ struct ExploreGridContainer: NSViewRepresentable {
         let contentInsetsChanged = !insetsEqual(contentInsets, previousParent.contentInsets)
         let visibilityChanged = isVisible != previousParent.isVisible
         let cellClassChanged = previousParent.cellClass != cellClass
+            || previousParent.additionalCellClasses.map(ObjectIdentifier.init)
+                != additionalCellClasses.map(ObjectIdentifier.init)
         let scrollingModeChanged = allowsScrolling != previousParent.allowsScrolling
         coordinator.parent = self
         coordinator.syncHeaderCollapseStateFromParent()
+        coordinator.syncGridSpacingIfNeeded(gridSpacing)
         let layoutRefreshChanged = layoutRefreshToken != coordinator.lastLayoutRefreshToken
         let visibilityRefreshChanged = visibilityRefreshToken != coordinator.lastVisibilityRefreshToken
 
@@ -84,7 +108,7 @@ struct ExploreGridContainer: NSViewRepresentable {
         }
 
         if cellClassChanged {
-            coordinator.registerCellClassIfNeeded(cellClass)
+            coordinator.registerCellClassesIfNeeded(cellClass, additional: additionalCellClasses)
         }
 
         coordinator.configureScrollingMode(allowsScrolling)
@@ -126,7 +150,10 @@ struct ExploreGridContainer: NSViewRepresentable {
         } else if newCount != coordinator.lastItemCount {
             let oldCount = coordinator.lastItemCount
 
-            if newCount > oldCount && oldCount > 0 {
+            // 混排网格（cellClassForItem != nil，如我的库「文件夹+项目」）禁用增量插入：
+            // 内容整体替换时旧 index 上的 cell 类可能已失效（文件夹 cell ↔ 项目 cell 互换），
+            // 批量插入会保留错误类型的旧 cell，表现为「返回后列表没变 / 卡片丢图」。
+            if cellClassForItem == nil, newCount > oldCount && oldCount > 0 {
                 coordinator.performBatchUpdates(insertedCount: newCount - oldCount, oldCount: oldCount)
             } else {
                 coordinator.reloadData()

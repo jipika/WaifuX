@@ -62,6 +62,14 @@ struct ExtCropLayout {
     var letterboxColor: CGColor
 }
 
+/// CALayer 坐标系中的裁切结果。
+/// `videoFrame` 可以超出 rootLayer.bounds，rootLayer 负责裁掉溢出部分；
+/// 因此视频层始终按原始比例渲染，不依赖 contentsRect 做非等比拉伸。
+struct ExtLayerCropGeometry {
+    var viewportRect: CGRect
+    var videoFrame: CGRect
+}
+
 enum ExtCropEngine {
     static func compute(
         wallpaperSize: CGSize,
@@ -119,6 +127,36 @@ enum ExtCropEngine {
         return CGColor(red: CGFloat((v >> 16) & 0xFF) / 255.0,
                        green: CGFloat((v >> 8) & 0xFF) / 255.0,
                        blue: CGFloat(v & 0xFF) / 255.0, alpha: 1)
+    }
+}
+
+enum ExtCropGeometry {
+    /// 把归一化 crop/viewport 转为 CALayer 几何。
+    /// ExtUnitRect 使用左上原点，CALayer 使用左下原点，所以这里翻转 y。
+    static func layerGeometry(layout: ExtCropLayout, in bounds: CGRect) -> ExtLayerCropGeometry {
+        let viewport = layout.viewportRect
+        let crop = layout.wallpaperCropRect
+        let viewportRect = CGRect(
+            x: viewport.x * bounds.width,
+            y: (1 - viewport.y - viewport.h) * bounds.height,
+            width: viewport.w * bounds.width,
+            height: viewport.h * bounds.height
+        )
+
+        let cropWidth = max(crop.w, 0.0001)
+        let cropHeight = max(crop.h, 0.0001)
+        let videoWidth = viewportRect.width / cropWidth
+        let videoHeight = viewportRect.height / cropHeight
+        let videoFrame = CGRect(
+            x: viewportRect.minX - crop.x * videoWidth,
+            y: viewportRect.minY - (1 - crop.y - crop.h) * videoHeight,
+            width: videoWidth,
+            height: videoHeight
+        )
+        return ExtLayerCropGeometry(
+            viewportRect: viewportRect,
+            videoFrame: videoFrame
+        )
     }
 }
 

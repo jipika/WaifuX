@@ -47,12 +47,16 @@ final class MediaExploreViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - 预加载支持
+    private enum PreloadedPage {
+        case motionBG(pagePath: String, items: [MediaItem], nextPagePath: String?)
+        case workshop(page: Int, items: [MediaItem], hasMore: Bool)
+        case dongtai(page: Int, items: [MediaItem], hasMore: Bool)
+        case wallsflow(page: Int, items: [MediaItem], nextPagePath: String?)
+    }
+
     private var preloadTask: Task<Void, Never>?
-    private var preloadedItems: [MediaItem] = []
-    /// 预加载的页面路径（即被预加载的那个页面的 URL），用于和 nextPagePath 匹配。
-    private var preloadedPagePath: String?
-    /// 预加载页面的下一页路径（预加载页面返回的 nextPagePath）。
-    private var preloadedNextPath: String?
+    private var preloadedPage: PreloadedPage?
+    private var preloadGeneration: UInt = 0
 
     /// 详情页导航期间的探索列表快照。用于防止 SwiftUI 视图重建、前台释放或过期加载
     /// 把已滚动出来的分页列表清空/回退到第一页。
@@ -66,9 +70,7 @@ final class MediaExploreViewModel: ObservableObject {
         let currentSource: MediaRouteSource
         let nextPagePath: String?
         let hasMorePages: Bool
-        let preloadedItems: [MediaItem]
-        let preloadedPagePath: String?
-        let preloadedNextPath: String?
+        let preloadedPage: PreloadedPage?
         let workshopCurrentPage: Int
         let workshopHasMore: Bool
         let workshopSearchQuery: String
@@ -197,6 +199,16 @@ final class MediaExploreViewModel: ObservableObject {
         }
         .store(in: &cancellables)
 
+        // 临时 Scene 静帧不修改下载记录，但会改变「我的库」的封面来源。
+        // 推进同一个 revision，让 MyLibraryContentView 重建 AnyMediaItem 快照。
+        NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)
+            .compactMap { $0.object as? String }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.libraryContentRevision &+= 1
+            }
+            .store(in: &cancellables)
+
         // 初始重建一次缓存
         scheduleLocalMediaCacheRebuild(delayNanoseconds: 0)
 
@@ -235,8 +247,7 @@ final class MediaExploreViewModel: ObservableObject {
                 // 1. 取消所有进行中的异步任务，防止旧任务完成后写回 items
                 self.sourceSwitchTask?.cancel()
                 self.sourceSwitchTask = nil
-                self.preloadTask?.cancel()
-                self.preloadTask = nil
+                self.cancelPreload()
                 self.networkRecoveryTask?.cancel()
                 self.networkRecoveryTask = nil
                 self.detailTasks.values.forEach { $0.cancel() }
@@ -244,9 +255,6 @@ final class MediaExploreViewModel: ObservableObject {
                 self.cancelDetailPrefetchQueue()
                 self.invalidatePreservedExploreFeed()
                 // 2. 清空预加载缓存
-                self.preloadedItems = []
-                self.preloadedPagePath = nil
-                self.preloadedNextPath = nil
                 // 3. 重置 isLoading/isLoadingMore 防止旧任务的 isLoading 阻塞新源的加载
                 self.isLoading = false
                 self.isLoadingMore = false
@@ -450,9 +458,7 @@ final class MediaExploreViewModel: ObservableObject {
             currentSource: currentSource,
             nextPagePath: nextPagePath,
             hasMorePages: hasMorePages,
-            preloadedItems: preloadedItems,
-            preloadedPagePath: preloadedPagePath,
-            preloadedNextPath: preloadedNextPath,
+            preloadedPage: preloadedPage,
             workshopCurrentPage: workshopCurrentPage,
             workshopHasMore: workshopHasMore,
             workshopSearchQuery: workshopSearchQuery,
@@ -500,9 +506,7 @@ final class MediaExploreViewModel: ObservableObject {
         currentSource = snapshot.currentSource
         nextPagePath = snapshot.nextPagePath
         hasMorePages = snapshot.hasMorePages
-        preloadedItems = snapshot.preloadedItems
-        preloadedPagePath = snapshot.preloadedPagePath
-        preloadedNextPath = snapshot.preloadedNextPath
+        preloadedPage = snapshot.preloadedPage
         workshopCurrentPage = snapshot.workshopCurrentPage
         workshopHasMore = snapshot.workshopHasMore
         workshopSearchQuery = snapshot.workshopSearchQuery
@@ -572,10 +576,7 @@ final class MediaExploreViewModel: ObservableObject {
         hasMorePages = true
 
         // 重置预加载状态
-        preloadTask?.cancel()
-        preloadedItems = []
-        preloadedPagePath = nil
-        preloadedNextPath = nil
+        cancelPreload()
         cancelDetailPrefetchQueue()
 
         print("[MediaExploreViewModel] about to call fetchPage")
@@ -594,6 +595,9 @@ final class MediaExploreViewModel: ObservableObject {
             items = page.items
             nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
+            if hasMorePages {
+                triggerMotionBGPreload()
+            }
             print("[MediaExploreViewModel] load completed successfully")
         } catch {
             print("[MediaExploreViewModel] load failed with error: \(error)")
@@ -622,29 +626,32 @@ final class MediaExploreViewModel: ObservableObject {
     func loadMore() async {
         guard !isLoading, !isLoadingMore, let nextPagePath else { return }
         isLoadingMore = true
+        let requestedPagePath = nextPagePath
 
         defer {
             isLoadingMore = false
-            // 加载完成后触发预加载
-            if hasMorePages {
-                triggerPreloadNextPage()
-            }
         }
 
         do {
             let page: MediaListPage
 
-            // 检查是否有预加载的数据
-            if preloadedPagePath == nextPagePath && !preloadedItems.isEmpty {
+            // 先等待正在进行的下一页预取，避免触底时再次请求同一页。
+            if let preloadTask {
+                await preloadTask.value
+            }
+
+            if case let .motionBG(pagePath, cachedItems, cachedNextPath) = preloadedPage,
+               pagePath == requestedPagePath {
                 print("[MediaExploreViewModel] Using preloaded page")
-                page = MediaListPage(items: preloadedItems, nextPagePath: preloadedNextPath ?? preloadedPagePath, sectionTitle: currentTitle)
-                // 清空预加载数据
-                preloadedItems = []
-                preloadedPagePath = nil
-                preloadedNextPath = nil
+                page = MediaListPage(
+                    items: cachedItems,
+                    nextPagePath: cachedNextPath,
+                    sectionTitle: currentTitle
+                )
+                preloadedPage = nil
             } else {
                 // 正常加载
-                page = try await mediaService.fetchPage(source: currentSource, pagePath: nextPagePath)
+                page = try await mediaService.fetchPage(source: currentSource, pagePath: requestedPagePath)
             }
 
             // 源一致性检查：如果切换了源，丢弃这个过期结果
@@ -658,38 +665,55 @@ final class MediaExploreViewModel: ObservableObject {
 
             self.nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
+            if hasMorePages {
+                triggerMotionBGPreload()
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     // MARK: - 预加载下一页
-    private func triggerPreloadNextPage() {
+    private func cancelPreload() {
+        preloadGeneration &+= 1
         preloadTask?.cancel()
+        preloadTask = nil
+        preloadedPage = nil
+    }
 
-        guard let nextPath = nextPagePath else { return }
+    private func beginPreload() -> UInt {
+        preloadTask?.cancel()
+        preloadTask = nil
+        preloadedPage = nil
+        preloadGeneration &+= 1
+        return preloadGeneration
+    }
+
+    private func triggerMotionBGPreload() {
+        guard let nextPath = nextPagePath else {
+            cancelPreload()
+            return
+        }
+
+        let generation = beginPreload()
         let source = currentSource
-
-        preloadTask = Task(priority: .low) {
-            // 延迟一下再开始预加载
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-
-            guard !Task.isCancelled else { return }
+        preloadTask = Task(priority: .low) { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !Task.isCancelled else { return }
 
             do {
-                print("[MediaExploreViewModel] Preloading next page...")
-                let page = try await mediaService.fetchPage(source: source, pagePath: nextPath)
-
-                guard !Task.isCancelled else { return }
-
-                // 存储预加载的数据：preloadedPagePath 是当前预加载的页面路径，
-                // preloadedNextPath 是该页面返回的下一页路径。
-                preloadedItems = Array(page.items.prefix(40))
-                preloadedPagePath = nextPath
-                preloadedNextPath = page.nextPagePath
-                print("[MediaExploreViewModel] Preloaded \(page.items.count) items at path \(nextPath)")
+                let page = try await self.mediaService.fetchPage(source: source, pagePath: nextPath)
+                guard !Task.isCancelled,
+                      self.preloadGeneration == generation,
+                      self.workshopSourceManager.activeSource == .motionBG else { return }
+                self.preloadedPage = .motionBG(
+                    pagePath: nextPath,
+                    items: page.items,
+                    nextPagePath: page.nextPagePath
+                )
+                print("[MediaExploreViewModel] Preloaded MotionBG page at path \(nextPath)")
             } catch {
-                print("[MediaExploreViewModel] Preload failed: \(error)")
+                print("[MediaExploreViewModel] MotionBG preload failed: \(error)")
             }
         }
     }
@@ -818,11 +842,8 @@ final class MediaExploreViewModel: ObservableObject {
     @MainActor
     func resetAndLoadDefaultHomeFeed() async {
         invalidatePreservedExploreFeed()
-        preloadTask?.cancel()
+        cancelPreload()
         cancelDetailPrefetchQueue()
-        preloadedItems = []
-        preloadedPagePath = nil
-        preloadedNextPath = nil
         nextPagePath = nil
         currentQuery = ""
         currentSource = .home
@@ -904,6 +925,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
+        cancelPreload()
         // ⚠️ 不再清空 items，新数据到达前保持旧列表可见，
         // 防止 SwiftUI 全量销毁→重建视图树导致的 AttributeGraph 主线程卡死。
 
@@ -921,6 +943,9 @@ final class MediaExploreViewModel: ObservableObject {
             items = page.items
             nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
+            if hasMorePages {
+                triggerMotionBGPreload()
+            }
             print("[MediaExploreViewModel] loadTagFeed completed: \(items.count) items")
         } catch {
             print("[MediaExploreViewModel] loadTagFeed failed: \(error)")
@@ -951,6 +976,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
+        cancelPreload()
         // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
 
         defer { isLoading = false }
@@ -967,6 +993,9 @@ final class MediaExploreViewModel: ObservableObject {
             items = page.items
             nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
+            if hasMorePages {
+                triggerMotionBGPreload()
+            }
             print("[MediaExploreViewModel] search completed: \(items.count) items")
         } catch {
             print("[MediaExploreViewModel] search failed: \(error)")
@@ -1432,9 +1461,7 @@ final class MediaExploreViewModel: ObservableObject {
             currentSource: snapshot.currentSource,
             nextPagePath: snapshot.nextPagePath,
             hasMorePages: snapshot.hasMorePages,
-            preloadedItems: snapshot.preloadedItems,
-            preloadedPagePath: snapshot.preloadedPagePath,
-            preloadedNextPath: snapshot.preloadedNextPath,
+            preloadedPage: snapshot.preloadedPage,
             workshopCurrentPage: snapshot.workshopCurrentPage,
             workshopHasMore: snapshot.workshopHasMore,
             workshopSearchQuery: snapshot.workshopSearchQuery,
@@ -1460,9 +1487,13 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     private func mergedListItem(original: MediaItem, detail updatedItem: MediaItem) -> MediaItem {
-        MediaItem(
+        let resolvedTitle = updatedItem.title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? original.title : updatedItem.title
+
+        return MediaItem(
             slug: original.slug,
-            title: original.title,
+            title: resolvedTitle,
             pageURL: updatedItem.pageURL,
             thumbnailURL: original.thumbnailURL,
             resolutionLabel: original.resolutionLabel,
@@ -1771,10 +1802,7 @@ final class MediaExploreViewModel: ObservableObject {
     private func handleMemoryPressure() {
         print("[MediaExploreViewModel] 内存压力，释放缓存: items=\(items.count)")
         networkRecoveryTask?.cancel()
-        preloadTask?.cancel()
-        preloadedItems.removeAll()
-        preloadedPagePath = nil
-        preloadedNextPath = nil
+        cancelPreload()
         cancelDetailPrefetchQueue()
         detailTasks.values.forEach { $0.cancel() }
         detailTasks.removeAll()
@@ -1785,14 +1813,10 @@ final class MediaExploreViewModel: ObservableObject {
         networkRecoveryTask?.cancel()
         sourceSwitchTask?.cancel()
         networkMonitorSetupTask?.cancel()
-        preloadTask?.cancel()
         networkRecoveryTask = nil
         sourceSwitchTask = nil
         networkMonitorSetupTask = nil
-        preloadTask = nil
-        preloadedItems.removeAll()
-        preloadedPagePath = nil
-        preloadedNextPath = nil
+        cancelPreload()
         nextPagePath = nil
         cancelDetailPrefetchQueue()
         detailTasks.values.forEach { $0.cancel() }
@@ -2015,6 +2039,32 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 内部方法：加载 Workshop 数据
+    private func workshopWallpaperType(
+        for type: WorkshopSourceManager.WorkshopTypeFilter
+    ) -> WorkshopWallpaper.WallpaperType? {
+        guard type != .all else { return nil }
+        switch type {
+        case .scene: return .scene
+        case .video: return .video
+        case .web: return .web
+        case .all: return nil
+        }
+    }
+
+    private func workshopSearchParams(page: Int) -> WorkshopSearchParams {
+        WorkshopSearchParams(
+            query: workshopSearchQuery,
+            sortBy: workshopSortBy,
+            page: page,
+            pageSize: 20,
+            tags: workshopCurrentTags,
+            type: workshopWallpaperType(for: workshopCurrentType),
+            contentLevel: workshopCurrentContentLevel?.rawValue,
+            resolution: workshopCurrentResolution,
+            days: workshopDays
+        )
+    }
+
     private func loadWorkshopFeedInternal(
         query: String,
         tags: [String],
@@ -2024,6 +2074,7 @@ final class MediaExploreViewModel: ObservableObject {
     ) async {
         guard !isLoading else { return }
 
+        cancelPreload()
         isLoading = true
         errorMessage = nil
 
@@ -2068,6 +2119,9 @@ final class MediaExploreViewModel: ObservableObject {
             workshopHasMore = response.hasMore
             hasMorePages = response.hasMore
             currentTitle = query.isEmpty ? "Workshop" : "搜索: \(query)"
+            if workshopHasMore {
+                triggerWorkshopPreload()
+            }
             print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items, sort=\(workshopSortBy.rawValue), days=\(workshopDays.map(String.init) ?? "all")")
         } catch {
             errorMessage = error.localizedDescription
@@ -2084,32 +2138,29 @@ final class MediaExploreViewModel: ObservableObject {
 
         defer { isLoadingMore = false }
 
-        workshopCurrentPage += 1
-
-        let wallpaperType: WorkshopWallpaper.WallpaperType? = (workshopCurrentType == .all) ? nil : {
-            switch workshopCurrentType {
-            case .scene: return .scene
-            case .video: return .video
-            case .web: return .web
-            case .all: return nil
-            }
-        }()
-
-        let params = WorkshopSearchParams(
-            query: workshopSearchQuery,
-            sortBy: workshopSortBy,
-            page: workshopCurrentPage,
-            pageSize: 20,
-            tags: workshopCurrentTags,
-            type: wallpaperType,
-            contentLevel: workshopCurrentContentLevel?.rawValue,
-            resolution: workshopCurrentResolution,
-            days: workshopDays
-        )
+        let nextPage = workshopCurrentPage + 1
 
         do {
-            let response = try await workshopService.search(params: params)
-            let mediaItems = workshopService.convertToMediaItems(response.items)
+            // 先等待正在进行的下一页预取，避免触底时重复请求同一页。
+            if let preloadTask {
+                await preloadTask.value
+            }
+
+            let mediaItems: [MediaItem]
+            let pageHasMore: Bool
+            if case let .workshop(page, cachedItems, cachedHasMore) = preloadedPage,
+               page == nextPage {
+                mediaItems = cachedItems
+                pageHasMore = cachedHasMore
+                preloadedPage = nil
+                print("[MediaExploreViewModel] Using preloaded Workshop page \(nextPage)")
+            } else {
+                let response = try await workshopService.search(
+                    params: workshopSearchParams(page: nextPage)
+                )
+                mediaItems = workshopService.convertToMediaItems(response.items)
+                pageHasMore = response.hasMore
+            }
 
             // 源一致性检查：如果切换了源，丢弃这个过期结果
             guard workshopSourceManager.activeSource == .wallpaperEngine else { return }
@@ -2118,13 +2169,49 @@ final class MediaExploreViewModel: ObservableObject {
             let newItems = mediaItems.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
 
-            workshopHasMore = response.hasMore
-            hasMorePages = response.hasMore
+            workshopCurrentPage = nextPage
+            workshopHasMore = pageHasMore
+            hasMorePages = pageHasMore
+            if workshopHasMore {
+                triggerWorkshopPreload()
+            }
             print("[MediaExploreViewModel] loadMoreWorkshop completed: +\(newItems.count) items, total: \(items.count)")
         } catch {
             errorMessage = error.localizedDescription
-            workshopCurrentPage -= 1  // 恢复页码
             print("[MediaExploreViewModel] loadMoreWorkshop failed: \(error)")
+        }
+    }
+
+    private func triggerWorkshopPreload() {
+        guard workshopHasMore else {
+            cancelPreload()
+            return
+        }
+
+        let nextPage = workshopCurrentPage + 1
+        let params = workshopSearchParams(page: nextPage)
+        let generation = beginPreload()
+
+        preloadTask = Task(priority: .low) { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !Task.isCancelled else { return }
+
+            do {
+                let response = try await self.workshopService.search(params: params)
+                let mediaItems = self.workshopService.convertToMediaItems(response.items)
+                guard !Task.isCancelled,
+                      self.preloadGeneration == generation,
+                      self.workshopSourceManager.activeSource == .wallpaperEngine,
+                      self.workshopCurrentPage + 1 == nextPage else { return }
+                self.preloadedPage = .workshop(
+                    page: nextPage,
+                    items: mediaItems,
+                    hasMore: response.hasMore
+                )
+                print("[MediaExploreViewModel] Preloaded Workshop page \(nextPage)")
+            } catch {
+                print("[MediaExploreViewModel] Workshop preload failed: \(error)")
+            }
         }
     }
 
@@ -2291,6 +2378,19 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 内部方法：加载 DongTai 数据
+    private func dongtaiSearchParams(page: Int) -> DynamicWallpaperSearchParams {
+        DynamicWallpaperSearchParams(
+            query: dongtaiSearchQuery,
+            listType: dongtaiCurrentListType,
+            categories: dongtaiCurrentCategories,
+            sortBy: dongtaiSortBy,
+            page: page,
+            pageSize: 20,
+            hasAudio: dongtaiFilterAudio,
+            isFourK: dongtaiFilterFourK
+        )
+    }
+
     private func loadDongTaiFeedInternal(
         query: String,
         categories: Set<DynamicWallpaperCategory>,
@@ -2310,6 +2410,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
         }
 
+        cancelPreload()
         let generation = dongtaiLoadGeneration &+ 1
         dongtaiLoadGeneration = generation
 
@@ -2350,6 +2451,9 @@ final class MediaExploreViewModel: ObservableObject {
         dongtaiHasMore = result.hasMore
         hasMorePages = result.hasMore
         currentTitle = query.isEmpty ? t("dongtai") : "搜索: \(query)"
+        if dongtaiHasMore {
+            triggerDongTaiPreload()
+        }
         print("[MediaExploreViewModel] loadDongTaiFeedInternal completed: \(items.count) items, total=\(result.totalCount)")
     }
 
@@ -2362,31 +2466,68 @@ final class MediaExploreViewModel: ObservableObject {
 
         defer { isLoadingMore = false }
 
-        dongtaiCurrentPage += 1
+        let nextPage = dongtaiCurrentPage + 1
+        if let preloadTask {
+            await preloadTask.value
+        }
 
-        let params = DynamicWallpaperSearchParams(
-            query: dongtaiSearchQuery,
-            listType: dongtaiCurrentListType,
-            categories: dongtaiCurrentCategories,
-            sortBy: dongtaiSortBy,
-            page: dongtaiCurrentPage,
-            pageSize: 20,
-            hasAudio: dongtaiFilterAudio,
-            isFourK: dongtaiFilterFourK
-        )
-
-        let result = dynamicWallpaperService.queryItems(params: params)
+        let pageItems: [MediaItem]
+        let pageHasMore: Bool
+        if case let .dongtai(page, cachedItems, cachedHasMore) = preloadedPage,
+           page == nextPage {
+            pageItems = cachedItems
+            pageHasMore = cachedHasMore
+            preloadedPage = nil
+            print("[MediaExploreViewModel] Using preloaded DongTai page \(nextPage)")
+        } else {
+            let result = dynamicWallpaperService.queryItems(params: dongtaiSearchParams(page: nextPage))
+            pageItems = result.items
+            pageHasMore = result.hasMore
+        }
 
         // 源一致性检查：如果切换了源，丢弃这个过期结果
         guard workshopSourceManager.activeSource == .dongtai else { return }
 
         let existingIDs = Set(items.map(\.id))
-        let newItems = result.items.filter { !existingIDs.contains($0.id) }
+        let newItems = pageItems.filter { !existingIDs.contains($0.id) }
         items.append(contentsOf: newItems)
 
-        dongtaiHasMore = result.hasMore
-        hasMorePages = result.hasMore
+        dongtaiCurrentPage = nextPage
+        dongtaiHasMore = pageHasMore
+        hasMorePages = pageHasMore
+        if dongtaiHasMore {
+            triggerDongTaiPreload()
+        }
         print("[MediaExploreViewModel] loadMoreDongTai completed: +\(newItems.count) items, total: \(items.count)")
+    }
+
+    private func triggerDongTaiPreload() {
+        guard dongtaiHasMore else {
+            cancelPreload()
+            return
+        }
+
+        let nextPage = dongtaiCurrentPage + 1
+        let params = dongtaiSearchParams(page: nextPage)
+        let generation = beginPreload()
+
+        preloadTask = Task(priority: .low) { [weak self] in
+            // 给当前页的可见 Cell 一个 run loop，避免首屏刚出现就立刻做本地排序。
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self, !Task.isCancelled else { return }
+
+            let result = self.dynamicWallpaperService.queryItems(params: params)
+            guard !Task.isCancelled,
+                  self.preloadGeneration == generation,
+                  self.workshopSourceManager.activeSource == .dongtai,
+                  self.dongtaiCurrentPage + 1 == nextPage else { return }
+            self.preloadedPage = .dongtai(
+                page: nextPage,
+                items: result.items,
+                hasMore: result.hasMore
+            )
+            print("[MediaExploreViewModel] Preloaded DongTai page \(nextPage)")
+        }
     }
 
     // MARK: - Wallsflow 数据加载
@@ -2439,9 +2580,17 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 内部方法：加载 Wallsflow 数据
+    private func fetchWallsflowPage(_ page: Int) async throws -> WallsflowListPage {
+        if !wallsflowSearchQuery.isEmpty {
+            return try await wallsflowService.search(query: wallsflowSearchQuery, page: page)
+        }
+        return try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: page)
+    }
+
     private func loadWallsflowFeedInternal(query: String?, categorySlug: String?) async {
         guard !isLoading else { return }
 
+        cancelPreload()
         isLoading = true
         errorMessage = nil
         // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
@@ -2475,6 +2624,9 @@ final class MediaExploreViewModel: ObservableObject {
             items = page.items
             wallsflowHasMore = page.nextPagePath != nil
             hasMorePages = page.nextPagePath != nil
+            if wallsflowHasMore {
+                triggerWallsflowPreload()
+            }
             print("[MediaExploreViewModel] loadWallsflowFeedInternal completed: \(items.count) items")
         } catch {
             errorMessage = error.localizedDescription
@@ -2491,31 +2643,75 @@ final class MediaExploreViewModel: ObservableObject {
 
         defer { isLoadingMore = false }
 
-        wallsflowCurrentPage += 1
+        let nextPage = wallsflowCurrentPage + 1
 
         do {
-            let page: WallsflowListPage
+            if let preloadTask {
+                await preloadTask.value
+            }
 
-            if !wallsflowSearchQuery.isEmpty {
-                page = try await wallsflowService.search(query: wallsflowSearchQuery, page: wallsflowCurrentPage)
+            let pageItems: [MediaItem]
+            let pageNextPath: String?
+            if case let .wallsflow(page, cachedItems, cachedNextPath) = preloadedPage,
+               page == nextPage {
+                pageItems = cachedItems
+                pageNextPath = cachedNextPath
+                preloadedPage = nil
+                print("[MediaExploreViewModel] Using preloaded Wallsflow page \(nextPage)")
             } else {
-                page = try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: wallsflowCurrentPage)
+                let page = try await fetchWallsflowPage(nextPage)
+                pageItems = page.items
+                pageNextPath = page.nextPagePath
             }
 
             // 源一致性检查：如果切换了源，丢弃这个过期结果
             guard workshopSourceManager.activeSource == .wallsflow else { return }
 
             let existingIDs = Set(items.map(\.id))
-            let newItems = page.items.filter { !existingIDs.contains($0.id) }
+            let newItems = pageItems.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
 
-            wallsflowHasMore = page.nextPagePath != nil
-            hasMorePages = page.nextPagePath != nil
+            wallsflowCurrentPage = nextPage
+            wallsflowHasMore = pageNextPath != nil
+            hasMorePages = pageNextPath != nil
+            if wallsflowHasMore {
+                triggerWallsflowPreload()
+            }
             print("[MediaExploreViewModel] loadMoreWallsflow completed: +\(newItems.count) items, total: \(items.count)")
         } catch {
             errorMessage = error.localizedDescription
-            wallsflowCurrentPage -= 1
             print("[MediaExploreViewModel] loadMoreWallsflow failed: \(error)")
+        }
+    }
+
+    private func triggerWallsflowPreload() {
+        guard wallsflowHasMore else {
+            cancelPreload()
+            return
+        }
+
+        let nextPage = wallsflowCurrentPage + 1
+        let generation = beginPreload()
+
+        preloadTask = Task(priority: .low) { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !Task.isCancelled else { return }
+
+            do {
+                let page = try await self.fetchWallsflowPage(nextPage)
+                guard !Task.isCancelled,
+                      self.preloadGeneration == generation,
+                      self.workshopSourceManager.activeSource == .wallsflow,
+                      self.wallsflowCurrentPage + 1 == nextPage else { return }
+                self.preloadedPage = .wallsflow(
+                    page: nextPage,
+                    items: page.items,
+                    nextPagePath: page.nextPagePath
+                )
+                print("[MediaExploreViewModel] Preloaded Wallsflow page \(nextPage)")
+            } catch {
+                print("[MediaExploreViewModel] Wallsflow preload failed: \(error)")
+            }
         }
     }
 

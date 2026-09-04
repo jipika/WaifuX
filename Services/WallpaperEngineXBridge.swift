@@ -124,7 +124,7 @@ private struct ScreenProcessInfo {
     let pid: pid_t
     let process: Process
     let generation: UInt64
-    let screenID: String
+    var screenID: String
     let logFile: FileHandle?
     let audioControlURL: URL?
     /// `--crop-control` JSON 文件路径（wgpu 每 200ms 轮询，热更新 self.crop）。
@@ -592,6 +592,12 @@ final class WallpaperEngineXBridge: ObservableObject {
 
 		let resolvedPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path)).path
 		let renderKind: RenderKind = isWebWallpaper(path: resolvedPath) ? .web : .scene
+
+        // 启动恢复、显示器重连等路径会直接调用本桥，不能只依赖详情页/调度器入口
+        // 取消上一张 Scene 的伴生任务，避免旧壁纸继续生成并写回自己的静帧。
+        SceneOfflineBakeService.cancelRealtimeCompanionBake(
+            reason: "WallpaperEngineXBridge.setWallpaper"
+        )
 
         // 视频 -> Scene/Web 的交接期间，旧视频必须是唯一可见的桌面层。此时写系统
         // poster 会触发 WindowServer 重合成，打断交叉淡入并造成视频层轻微跳动；等交接
@@ -1285,7 +1291,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
         // 真实渲染已经启动，UI 可立即结束“设置中”状态。
-        // 只允许已有烘焙资源更新静态桌面/锁屏；没有烘焙资源时不生成任何替代截图。
+        // 已有烘焙资源立即同步；关闭自动烘焙时的临时静帧由 companion bake
+        // 异步生成，生成后再由其自身的静态承载条件决定是否回写桌面/锁屏。
         let bakedStaticScreens = effectiveScreens.filter { screen in
             screenRenderStates[screen.wallpaperScreenIdentifier]?.path == resolvedPath
         }
@@ -1293,6 +1300,15 @@ final class WallpaperEngineXBridge: ObservableObject {
             path: resolvedPath,
             targetScreens: bakedStaticScreens
         )
+        // 伴生抽帧必须挂在 renderer 的最终成功路径：启动恢复、显示器重连和直接调用
+        // `WallpaperEngineXBridge.setWallpaper` 都会绕开 LocalWallpaperApplyService。
+        if renderKind == .scene, !bakedStaticScreens.isEmpty {
+            SceneOfflineBakeService.scheduleRealtimeCompanionBake(
+                path: resolvedPath,
+                targetScreens: bakedStaticScreens,
+                reason: "renderer-set"
+            )
+        }
 
         // 强制恢复之前的焦点应用（wallpaper-wgpu 启动会抢占焦点）
         // 多次延迟尝试确保焦点恢复
@@ -1356,6 +1372,23 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     // MARK: - 暂停 / 恢复 / 停止
 
+    private func logRendererSignal(
+        _ action: String,
+        screenID: String,
+        pid: pid_t,
+        signalName: String,
+        result: Int32
+    ) {
+        AppLogger.error(.wallpaper, "WallpaperEngineX renderer \(action) signal", metadata: [
+            "screenID": screenID,
+            "pid": pid,
+            "signal": signalName,
+            "result": result,
+            "pidAlive": kill(pid, 0) == 0,
+            "perScreenPaused": perScreenPausedScreenIDs.sorted().joined(separator: ",")
+        ])
+    }
+
     /// 暂停渲染（发送 SIGSTOP）
     func pauseWallpaper() {
         if screenRenderStates.values.contains(where: { $0.renderKind == .web }) || activeRenderKind == .web {
@@ -1380,8 +1413,15 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 启动了新进程，延迟闭包中的 self.screenProcesses 可能包含新进程，导致新进程被错误暂停。
         let currentPIDs = screenProcesses.mapValues { $0.pid }
         for (screenID, pid) in currentPIDs {
-            kill(pid, SIGSTOP)
+            let result = kill(pid, SIGSTOP)
             print("[WallpaperEngineXBridge] 暂停渲染 屏幕 \(screenID) (pid=\(pid))")
+            logRendererSignal(
+                "pause",
+                screenID: screenID,
+                pid: pid,
+                signalName: "SIGSTOP",
+                result: result
+            )
         }
     }
 
@@ -1392,8 +1432,15 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         guard isControllingExternalEngine else { return }
         for (screenID, info) in screenProcesses {
-            kill(info.pid, SIGCONT)
+            let result = kill(info.pid, SIGCONT)
             print("[WallpaperEngineXBridge] 恢复渲染 屏幕 \(screenID) (pid=\(info.pid))")
+            logRendererSignal(
+                "resume",
+                screenID: screenID,
+                pid: info.pid,
+                signalName: "SIGCONT",
+                result: result
+            )
         }
         perScreenPausedScreenIDs.removeAll()
         isExternalPaused = false
@@ -1493,9 +1540,16 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // scene：有独立 wallpaper-wgpu 进程，按屏 SIGSTOP
         if let info = screenProcesses[screenID] {
-            kill(info.pid, SIGSTOP)
+            let result = kill(info.pid, SIGSTOP)
             perScreenPausedScreenIDs.insert(screenID)
             print("[WallpaperEngineXBridge] 暂停渲染 屏幕 \(screenID) (pid=\(info.pid))")
+            logRendererSignal(
+                "pause",
+                screenID: screenID,
+                pid: info.pid,
+                signalName: "SIGSTOP",
+                result: result
+            )
             updateExternalPausedStateFromPerScreenPauses()
             return
         }
@@ -1522,9 +1576,16 @@ final class WallpaperEngineXBridge: ObservableObject {
         guard isControllingExternalEngine else { return }
 
         if let info = screenProcesses[screenID] {
-            kill(info.pid, SIGCONT)
+            let result = kill(info.pid, SIGCONT)
             perScreenPausedScreenIDs.remove(screenID)
             print("[WallpaperEngineXBridge] 恢复渲染 屏幕 \(screenID) (pid=\(info.pid))")
+            logRendererSignal(
+                "resume",
+                screenID: screenID,
+                pid: info.pid,
+                signalName: "SIGCONT",
+                result: result
+            )
             updateExternalPausedStateFromPerScreenPauses()
             return
         }
@@ -4643,9 +4704,90 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func relinkTargetScreens() {
+        relinkRuntimeStateToCurrentScreens()
         for screen in NSScreen.screens where targetScreenFingerprints.contains(screen.wallpaperScreenFingerprint) {
             targetScreenIDs.insert(screen.wallpaperScreenIdentifier)
         }
+    }
+
+    /// NSScreenNumber 可能在显示器重连/重新枚举后变化。
+    /// fingerprint 能找回同一块物理屏，但只补 targetScreenIDs 不够：
+    /// 运行时字典仍以旧 ID 为 key 时，新的按屏 pause/resume 找不到旧 PID，
+    /// 而旧 PID 还可能停留在 SIGSTOP 状态。
+    private func relinkRuntimeStateToCurrentScreens() {
+        var migrated: [(oldID: String, newID: String, pid: pid_t?)] = []
+
+        for screen in NSScreen.screens {
+            let newID = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
+
+            let hasKnownFingerprint = targetScreenFingerprints.contains(fingerprint)
+                || screenRenderStates.values.contains { $0.screenFingerprint == fingerprint }
+            guard hasKnownFingerprint else { continue }
+
+            let oldProcessEntry = screenProcesses.first(where: { entry in
+                let key = entry.key
+                let info = entry.value
+                return key != newID
+                    && info.screenID == key
+                    && screenRenderStates[key]?.screenFingerprint == fingerprint
+            })
+            let oldStateEntry = screenRenderStates.first(where: { entry in
+                entry.key != newID && entry.value.screenFingerprint == fingerprint
+            })
+
+            let oldID = oldProcessEntry?.key ?? oldStateEntry?.key
+            guard let oldID, oldID != newID else { continue }
+
+            if screenProcesses[newID] == nil,
+               let oldProcess = screenProcesses.removeValue(forKey: oldID) {
+                var updatedProcess = oldProcess
+                updatedProcess.screenID = newID
+                screenProcesses[newID] = updatedProcess
+                migrated.append((oldID, newID, oldProcess.pid))
+            }
+
+            if let oldState = screenRenderStates.removeValue(forKey: oldID),
+               screenRenderStates[newID] == nil {
+                screenRenderStates[newID] = ScreenRenderState(
+                    screenID: newID,
+                    screenFingerprint: oldState.screenFingerprint,
+                    path: oldState.path,
+                    renderKind: oldState.renderKind,
+                    userProperties: oldState.userProperties,
+                    cliScreenIndex: oldState.cliScreenIndex
+                )
+            }
+
+            if targetScreenIDs.remove(oldID) != nil {
+                targetScreenIDs.insert(newID)
+            }
+            if perScreenPausedScreenIDs.remove(oldID) != nil {
+                perScreenPausedScreenIDs.insert(newID)
+            }
+            if let canvasSize = lastCanvasSizeByScreenID.removeValue(forKey: oldID) {
+                lastCanvasSizeByScreenID[newID] = canvasSize
+            }
+        }
+
+        guard !migrated.isEmpty else { return }
+
+        for migration in migrated {
+            guard let pid = migration.pid else { continue }
+            let wasTrackedPaused = perScreenPausedScreenIDs.contains(migration.newID)
+            if !wasTrackedPaused && !isExternalPaused {
+                _ = kill(pid, SIGCONT)
+            }
+        }
+
+        AppLogger.error(.wallpaper, "WallpaperEngineX relinked renderer screen identities", metadata: [
+            "migrations": migrated.map {
+                "\($0.oldID)->\($0.newID):pid=\($0.pid.map(String.init) ?? "none")"
+            }.joined(separator: ","),
+            "processScreens": screenProcesses.keys.sorted().joined(separator: ","),
+            "stateScreens": screenRenderStates.keys.sorted().joined(separator: ","),
+            "pausedScreens": perScreenPausedScreenIDs.sorted().joined(separator: ",")
+        ])
     }
 
     /// 可视区域 crop 变更：scene 写入 `--crop-control` JSON，web 走 daemon IPC；

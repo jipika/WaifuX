@@ -285,9 +285,9 @@ private extension WallsflowService {
         // 从 URL 提取 ID
         let id = extractID(from: href) ?? fullURL.lastPathComponent.replacingOccurrences(of: ".html", with: "")
 
-        // 标题
-        let title = try link.text().trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " Live Wallpaper$", with: "", options: .regularExpression)
+        // 标题：卡片的详情链接经常只包裹图片，名称实际放在 h2/h3、
+        // aria-label、title 或 data-title 中；最后从详情 URL slug 回退。
+        let title = extractListTitle(article: article, detailLink: link, pageURL: fullURL)
 
         // 海报/封面图
         let posterURL: URL? = {
@@ -501,7 +501,9 @@ private extension WallsflowService {
         // 找 Article 节点
         guard let article = graphArray.first(where: { ($0["@type"] as? String) == "Article" }) else { return nil }
 
-        let headline = article["headline"] as? String ?? article["name"] as? String ?? ""
+        let headline = normalizedTitle(
+            article["headline"] as? String ?? article["name"] as? String
+        ) ?? extractDetailTitle(document: document, pageURL: pageURL)
         let description = article["description"] as? String
         // JSON-LD 的 image 可能是 String / [String] / [{url: ...}]
         let imageURL = Self.parseJSONLDImageURL(article["image"])
@@ -568,7 +570,7 @@ private extension WallsflowService {
 
         let mediaItem = MediaItem(
             slug: "wf_\(id)",
-            title: headline.replacingOccurrences(of: " Live Wallpaper", with: ""),
+            title: headline,
             pageURL: pageURL,
             thumbnailURL: imageURL ?? pageURL,
             resolutionLabel: resolution ?? "动态壁纸",
@@ -599,8 +601,8 @@ private extension WallsflowService {
 
     /// DOM 详情页解析（JSON-LD 失败时的 fallback）
     func parseDetailPageDOM(document: Document, pageURL: URL) throws -> MediaItem? {
-        // 标题
-        let title = (try? document.select("h1").first()?.text()) ?? ""
+        // 标题：优先 h1，兼容站点改版后的 h2 / og:title，并从 URL 兜底。
+        let title = extractDetailTitle(document: document, pageURL: pageURL)
 
         // OG 图片
         let imageURL: URL? = {
@@ -643,7 +645,7 @@ private extension WallsflowService {
 
         return MediaItem(
             slug: "wf_\(id)",
-            title: title.replacingOccurrences(of: " Live Wallpaper", with: ""),
+            title: title,
             pageURL: pageURL,
             thumbnailURL: imageURL ?? pageURL,
             resolutionLabel: resolution ?? "动态壁纸",
@@ -776,6 +778,108 @@ private extension WallsflowService {
     }
 
     // MARK: - 辅助方法
+
+    /// 统一清理 Wallsflow 标题，避免列表和详情页出现不同的展示名称。
+    func normalizedTitle(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let collapsed = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return nil }
+
+        let cleaned = collapsed
+            .replacingOccurrences(
+                of: #"(?i)\s+live\s+wallpapers?$"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    /// 从详情 URL 的 slug 生成最后一级标题，确保卡片不会因为标题节点为空而留白。
+    func titleFromURL(_ url: URL) -> String? {
+        let filename = url.deletingPathExtension().lastPathComponent
+        let slug = filename
+            .replacingOccurrences(of: #"^\d+-"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)-wallsflow-com$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)-live-wallpapers?$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[-_]+"#, with: " ", options: .regularExpression)
+        return normalizedTitle(slug)
+    }
+
+    /// 从列表卡片兼容多种标题落点。`detailLink` 的属性优先级高于普通卡片文本，
+    /// 避免把分类 breadcrumb 或作者文本误当标题。
+    func extractListTitle(article: Element, detailLink: Element, pageURL: URL) -> String {
+        var candidates: [String] = []
+
+        func appendAttribute(_ name: String, from element: Element) {
+            if let value = try? element.attr(name), !value.isEmpty {
+                candidates.append(value)
+            }
+        }
+
+        // 设计文档中的主结构：h2 a；同时兼容 h3 和媒体 overlay。
+        for selector in ["h2 a", "h3 a", "a[aria-label]", "[data-title]", "[data-name]"] {
+            if let element = try? article.select(selector).first() {
+                appendAttribute("aria-label", from: element)
+                appendAttribute("data-title", from: element)
+                appendAttribute("data-name", from: element)
+                appendAttribute("title", from: element)
+                if let text = try? element.text(), !text.isEmpty {
+                    candidates.append(text)
+                }
+            }
+        }
+
+        appendAttribute("aria-label", from: detailLink)
+        appendAttribute("data-title", from: detailLink)
+        appendAttribute("data-name", from: detailLink)
+        appendAttribute("title", from: detailLink)
+        if let text = try? detailLink.text(), !text.isEmpty {
+            candidates.append(text)
+        }
+
+        // 图片链接没有文字时，alt 往往仍保留资源名称。
+        if let image = try? detailLink.select("img").first() {
+            appendAttribute("alt", from: image)
+            appendAttribute("title", from: image)
+        }
+
+        for candidate in candidates {
+            if let title = normalizedTitle(candidate) {
+                return title
+            }
+        }
+        return titleFromURL(pageURL) ?? "Live Wallpaper"
+    }
+
+    /// 详情页标题统一从 h1/h2、OG 元数据和 URL slug 取值。
+    func extractDetailTitle(document: Document, pageURL: URL) -> String {
+        var candidates: [String] = []
+        for selector in ["h1", "h2", "meta[property=\"og:title\"]", "meta[name=\"twitter:title\"]", "title"] {
+            if let element = try? document.select(selector).first() {
+                if selector.hasPrefix("meta[") {
+                    if let content = try? element.attr("content"), !content.isEmpty {
+                        candidates.append(content)
+                    }
+                } else if selector == "title" {
+                    if let text = try? element.text(), !text.isEmpty {
+                        candidates.append(text)
+                    }
+                } else if let text = try? element.text(), !text.isEmpty {
+                    candidates.append(text)
+                }
+            }
+        }
+
+        for candidate in candidates {
+            if let title = normalizedTitle(candidate) {
+                return title
+            }
+        }
+        return titleFromURL(pageURL) ?? "Live Wallpaper"
+    }
 
     /// JSON-LD `image` 兼容 String / [String] / [{url}] 三种形态。
     nonisolated static func parseJSONLDImageURL(_ value: Any?) -> URL? {

@@ -315,6 +315,11 @@ final class StatusBarController: NSObject {
     private var originalButtonImage: NSImage?
     private lazy var taskQueueItem = NSMenuItem(title: t("statusbar.taskQueue"), action: nil, keyEquivalent: "")
     private lazy var taskQueueMenu = NSMenu(title: t("statusbar.taskQueue"))
+    private lazy var cancelAllDownloadsItem = NSMenuItem(
+        title: t("statusbar.taskQueue.cancelAllDownloads"),
+        action: #selector(cancelAllDownloadQueueTasks),
+        keyEquivalent: ""
+    )
     /// 紧跟任务队列项的分隔线；队列隐藏时一并移除。
     private lazy var taskQueueSeparatorItem = NSMenuItem.separator()
     private var taskQueueRowsByID: [String: TaskQueueRowView] = [:]
@@ -393,6 +398,7 @@ final class StatusBarController: NSObject {
         sceneConfigItem.target = self
         checkUpdateItem.target = self
         quitItem.target = self
+        cancelAllDownloadsItem.target = self
 
         menu.addItem(openWindowItem)
         menu.addItem(openLibraryItem)
@@ -565,6 +571,11 @@ final class StatusBarController: NSObject {
         taskQueueMenu.removeAllItems()
         taskQueueRowsByID.removeAll()
 
+        if entries.contains(where: { $0.category == .download }) {
+            taskQueueMenu.addItem(cancelAllDownloadsItem)
+            taskQueueMenu.addItem(.separator())
+        }
+
         // 只展示当前有任务的分类；空分类不占菜单，避免“全是空”的常驻观感。
         let activeCategories = TaskQueueStatusService.Category.allCases.filter { category in
             entries.contains { $0.category == category }
@@ -602,6 +613,10 @@ final class StatusBarController: NSObject {
     /// SteamCMD 下载会经 PersistentDownloadQueueService 终止 steamcmd 子进程。
     private func cancelDownloadQueueTask(id: String) {
         DownloadTaskService.shared.cancelTask(id: id)
+    }
+
+    @objc private func cancelAllDownloadQueueTasks() {
+        DownloadTaskService.shared.cancelAllActiveDownloads()
     }
 
     /// 为指定屏幕构建音量滑块菜单项
@@ -906,6 +921,7 @@ final class StatusBarController: NSObject {
         sceneConfigItem.title = t("statusbar.sceneAdvancedSettings")
         checkUpdateItem.title = t("checkForUpdates")
         quitItem.title = t("statusbar.quit")
+        cancelAllDownloadsItem.title = t("statusbar.taskQueue.cancelAllDownloads")
     }
 
     @objc private func showMainWindow() {

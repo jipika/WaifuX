@@ -17,10 +17,13 @@ struct GuessYouLikeOverlay: View {
         self.onDownload = onDownload
     }
 
-    private let cardW: CGFloat = 260
-    private let cardH: CGFloat = 360
+    /// 发牌完成（dealingProgress → 1.0）等状态变化时递增，
+    /// 驱动 AppKit 网格重配可见 cell 触发发牌动画
+    @State private var gridReloadToken = 0
+
     private let columns = 4
     private let spacing: CGFloat = 18
+    private let horizontalPadding: CGFloat = 40
 
     var body: some View {
         ZStack {
@@ -58,28 +61,41 @@ struct GuessYouLikeOverlay: View {
                 .padding(.top, 60)
                 .padding(.bottom, 16)
 
-                // 卡片区域 — 每张卡独立延迟弹簧动画
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVGrid(
-                        columns: Array(repeating: GridItem(.fixed(cardW), spacing: spacing), count: columns),
-                        spacing: spacing
-                    ) {
-                        ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { (i, item) in
-                            GuessYouLikeCardCell(
-                                item: item,
-                                index: i,
-                                dealt: viewModel.dealingProgress >= 1.0,
-                                cardW: cardW,
-                                cardH: cardH,
-                                onDetail: { onDetail(item) },
-                                onDownload: { onDownload(item) }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 40)
-                    .padding(.top, 10)
-                    .padding(.bottom, 30)
-                }
+                // 卡片区域 — NSCollectionView（ExploreGrid 复用管线，60fps 滚动）；
+                // 发牌动画 / hover 倾斜由 GuessYouLikeGridCell 原生实现
+                ExploreGridContainer(
+                    itemCount: { viewModel.items.count },
+                    aspectRatio: { _ in
+                        GuessYouLikeGridCell.cardSize.width / GuessYouLikeGridCell.cardSize.height
+                    },
+                    configureCell: { cell, index in
+                        configureGridCell(cell, index)
+                    },
+                    cellClass: GuessYouLikeGridCell.self,
+                    // 每次 show() 都整表替换推荐内容：禁用增量插入，
+                    // 数量变化一律 reloadData，避免旧卡片内容残留
+                    cellClassForItem: { _ in GuessYouLikeGridCell.self },
+                    gridSpacing: spacing,
+                    onSelect: { index in
+                        guard index < viewModel.items.count else { return }
+                        onDetail(viewModel.items[index])
+                    },
+                    onReachBottom: {},
+                    reloadToken: gridReloadToken,
+                    gridColumnCount: columns,
+                    // 旧 LazyVGrid padding：horizontal 40 / top 10 / bottom 30
+                    contentInsets: NSEdgeInsets(
+                        top: 10,
+                        left: horizontalPadding,
+                        bottom: 30,
+                        right: horizontalPadding
+                    ),
+                    // 固定 260×360 卡片 + 列块居中（还原 GridItem(.fixed) + LazyVGrid .center）
+                    fixedCardSize: GuessYouLikeGridCell.cardSize,
+                    // NSCollectionView 抢占 first responder 后 onKeyPress 收不到 Escape，
+                    // 从 NSScrollView.keyDown 兜底转发
+                    onEscape: { viewModel.dismiss() }
+                )
             }
         }
         .transition(.opacity.animation(.easeOut(duration: 0.25)))
@@ -88,59 +104,26 @@ struct GuessYouLikeOverlay: View {
             viewModel.dismiss()
             return .handled
         }
-    }
-
-}
-
-// MARK: - 带独立动画状态的卡片 Cell
-// 动画完成后移除动画修饰符，避免滚动时持续触发依赖检查
-
-private struct GuessYouLikeCardCell: View {
-    let item: GuessYouLikeItem
-    let index: Int
-    let dealt: Bool
-    let cardW: CGFloat
-    let cardH: CGFloat
-    let onDetail: () -> Void
-    let onDownload: () -> Void
-
-    @State private var hasAnimated = false
-
-    var body: some View {
-        if hasAnimated {
-            // 动画已完成：纯静态渲染，无动画修饰符开销
-            GuessYouLikeCardView(
-                item: item,
-                onDetail: { _ in onDetail() },
-                onDownload: { _ in onDownload() }
-            )
-            .frame(width: cardW, height: cardH)
-        } else {
-            // 动画中：附加发牌动画修饰符
-            GuessYouLikeCardView(
-                item: item,
-                onDetail: { _ in onDetail() },
-                onDownload: { _ in onDownload() }
-            )
-            .frame(width: cardW, height: cardH)
-            .offset(y: dealt ? 0 : -320 - CGFloat(index) * 8)
-            .scaleEffect(dealt ? 1.0 : 0.3)
-            .opacity(dealt ? 1.0 : 0.0)
-            .rotationEffect(.degrees(dealt ? 0 : (index.isMultiple(of: 2) ? 20 : -20)))
-            .animation(
-                .spring(response: 0.5, dampingFraction: 0.7)
-                    .delay(Double(index) * 0.08),
-                value: dealt
-            )
-            .onChange(of: dealt) { _, newValue in
-                if newValue {
-                    // 动画触发后，在预计完成时标记 hasAnimated
-                    let delay = 0.5 + Double(index) * 0.08 + 0.1
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                        hasAnimated = true
-                    }
-                }
+        .onChange(of: viewModel.dealingProgress) { _, newValue in
+            // 发牌触发时机：数据就绪 0.2s 后 dealingProgress 翻为 1.0
+            if newValue >= 1.0 {
+                gridReloadToken += 1
             }
         }
+    }
+
+    /// 配置网格 cell：读闭包执行时的最新 dealingProgress，
+    /// cell 内部按 false→true 翻转决定是否播放发牌动画
+    private func configureGridCell(_ cell: ExploreGridItem, _ index: Int) {
+        guard let cell = cell as? GuessYouLikeGridCell,
+              index < viewModel.items.count else { return }
+        let item = viewModel.items[index]
+        cell.configure(
+            item: item,
+            index: index,
+            dealt: viewModel.dealingProgress >= 1.0,
+            onDetail: { _ in onDetail(item) },
+            onDownload: { _ in onDownload(item) }
+        )
     }
 }

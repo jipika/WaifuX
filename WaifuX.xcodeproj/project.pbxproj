@@ -101,6 +101,9 @@
 		5252C6B4707D39A35AD4EEEF /* AnimePlayerWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F6C0E316203FBD83F8C8F0A /* AnimePlayerWindow.swift */; };
 		5356C8209F81E9FDD4542A4B /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 7A69C756369D7A265C0E68EA /* Sparkle */; };
 		53B268F5E869D296961254E0 /* ExploreGridContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46516D807852C39C100910A6 /* ExploreGridContainer.swift */; };
+		7A1C4E92B3D5F608192AB3CD /* AuthorSheetGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E8D2F61A9B7C5031D82E6F4 /* AuthorSheetGrid.swift */; };
+		9B3E7A15C2D8F4170A69B2CE /* AuthorSheetGridCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F7C9E40D1B6A83547C0F9D2 /* AuthorSheetGridCells.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* GuessYouLikeGridCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293A4B5CA1B2C3D /* GuessYouLikeGridCell.swift */; };
 		556A1F6298A5E946375C8AB2 /* CaptchaVerificationWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 509F88E110E5EC7E70CE7841 /* CaptchaVerificationWebView.swift */; };
 		567CAB920D17CCAA38CAC210 /* FourKWallpapersParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7E5EA68B40F08C0C4032C1D /* FourKWallpapersParser.swift */; };
 		585AF892B06B0210C2067B6D /* AuthorWallpaperSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FB96E1C34C1865A12D061B /* AuthorWallpaperSheet.swift */; };
@@ -123,6 +126,7 @@
 		6422E68D0610118EA047E860 /* DownloadTaskService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E21497D08143F54A2DF436D /* DownloadTaskService.swift */; };
 		64B8046E4DA6E6D8BAF0171C /* MediaFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E863AB4B82C85983EF0D89 /* MediaFilters.swift */; };
 		64BAA00905C11265C8E95FA2 /* MediaGridCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 700E4A08C013237267380CD3 /* MediaGridCell.swift */; };
+		64BAA00905C11265C8E95FA3 /* LibraryGridCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = 700E4A08C013237267380CD4 /* LibraryGridCells.swift */; };
 		65F14844DB976B8ACA1C55C7 /* LiquidGlassClockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8A2EDD64DA363D5234CE77B /* LiquidGlassClockView.swift */; };
 		665C80997AFFE13CF895B7BA /* KonachanTagSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12FC41C865F45726FABC4946 /* KonachanTagSearchField.swift */; };
 		673D0EECCEEDD6DEB4097A89 /* IOSurfaceFrameRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F24F7D7BD1CC77E3D77B4F /* IOSurfaceFrameRenderer.swift */; };
@@ -400,6 +404,9 @@
 		45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoThumbnailCache.swift; sourceTree = "<group>"; };
 		461FAC93DBC7FF6EACC9547A /* SteamLoginWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamLoginWebView.swift; sourceTree = "<group>"; };
 		46516D807852C39C100910A6 /* ExploreGridContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreGridContainer.swift; sourceTree = "<group>"; };
+		4E8D2F61A9B7C5031D82E6F4 /* AuthorSheetGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorSheetGrid.swift; sourceTree = "<group>"; };
+		2F7C9E40D1B6A83547C0F9D2 /* AuthorSheetGridCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorSheetGridCells.swift; sourceTree = "<group>"; };
+		D4E5F60718293A4B5CA1B2C3D /* GuessYouLikeGridCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeGridCell.swift; sourceTree = "<group>"; };
 		49D037B6539B7CEDCE6C5136 /* WebPropertyEditorPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebPropertyEditorPanelController.swift; sourceTree = "<group>"; };
 		49D07F6F44CB59BB826B491E /* SceneWallpaperPropertiesPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneWallpaperPropertiesPanel.swift; sourceTree = "<group>"; };
 		4C13D08E6482C8C55D97DE9E /* WallpaperCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCardView.swift; sourceTree = "<group>"; };
@@ -441,6 +448,7 @@
 		6F9A4187FED2F381BE10E4B5 /* WorkshopSourceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopSourceManager.swift; sourceTree = "<group>"; };
 		6FCC0C608F584DA039E7092E /* BMPCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BMPCache.swift; sourceTree = "<group>"; };
 		700E4A08C013237267380CD3 /* MediaGridCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGridCell.swift; sourceTree = "<group>"; };
+		700E4A08C013237267380CD4 /* LibraryGridCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryGridCells.swift; sourceTree = "<group>"; };
 		7025EE0D111F36D9DC79675B /* ArcFrostedGlass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArcFrostedGlass.swift; sourceTree = "<group>"; };
 		70470FAE6A8C23C287154079 /* ExploreGridItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreGridItem.swift; sourceTree = "<group>"; };
 		71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVideoPlayer.swift; sourceTree = "<group>"; };
@@ -936,11 +944,15 @@
 			isa = PBXGroup;
 			children = (
 				E0FCDFCCB46ADEE405357090 /* AnimeGridCell.swift */,
+				4E8D2F61A9B7C5031D82E6F4 /* AuthorSheetGrid.swift */,
+				2F7C9E40D1B6A83547C0F9D2 /* AuthorSheetGridCells.swift */,
+				D4E5F60718293A4B5CA1B2C3D /* GuessYouLikeGridCell.swift */,
 				D30E1D462FB89FD612BE72B2 /* ExploreGridCollectionViewLayout.swift */,
 				46516D807852C39C100910A6 /* ExploreGridContainer.swift */,
 				5820276CDE6D037731572404 /* ExploreGridCoordinator.swift */,
 				70470FAE6A8C23C287154079 /* ExploreGridItem.swift */,
 				700E4A08C013237267380CD3 /* MediaGridCell.swift */,
+				700E4A08C013237267380CD4 /* LibraryGridCells.swift */,
 				D8B4DF44A83DE72A33A8BE3F /* WallpaperGridCell.swift */,
 			);
 			path = ExploreGrid;
@@ -1272,6 +1284,9 @@
 				FE7918F419971479AD53A5DD /* ExploreComponents.swift in Sources */,
 				9BAD1227153A6C0660E0D1A8 /* ExploreGridCollectionViewLayout.swift in Sources */,
 				53B268F5E869D296961254E0 /* ExploreGridContainer.swift in Sources */,
+				7A1C4E92B3D5F608192AB3CD /* AuthorSheetGrid.swift in Sources */,
+				9B3E7A15C2D8F4170A69B2CE /* AuthorSheetGridCells.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* GuessYouLikeGridCell.swift in Sources */,
 				CB8C76BCFA5B34389C576F5D /* ExploreGridCoordinator.swift in Sources */,
 				B1FFF544078DCA7FB88AA403 /* ExploreGridItem.swift in Sources */,
 				749738A0B446DAC24558DE5B /* ExploreGridLayout.swift in Sources */,
@@ -1339,6 +1354,7 @@
 				B6587E454CD823DE101CB3DF /* MediaExploreViewModel.swift in Sources */,
 				64B8046E4DA6E6D8BAF0171C /* MediaFilters.swift in Sources */,
 				64BAA00905C11265C8E95FA2 /* MediaGridCell.swift in Sources */,
+				64BAA00905C11265C8E95FA3 /* LibraryGridCells.swift in Sources */,
 				7A599DE765CF1CC79C17B9FA /* MediaItem.swift in Sources */,
 				D54F3D91342ED2263D52F8E7 /* MediaLibraryService.swift in Sources */,
 				35A192A50C85395F3510784E /* MediaService.swift in Sources */,

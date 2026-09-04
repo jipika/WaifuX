@@ -4565,6 +4565,9 @@ struct MediaDetailSheet: View {
                 onLoadMore: {
                     self.loadMoreAuthorMedia()
                 },
+                onDownloadLoaded: { items in
+                    downloadLoadedByAuthor(authorName: resolvedItem.authorName ?? t("unknown"), items: items)
+                },
                 onDownloadAll: { items in
                     downloadAllByAuthor(authorName: resolvedItem.authorName ?? t("unknown"), items: items)
                 },
@@ -4623,9 +4626,22 @@ struct MediaDetailSheet: View {
         authorLoadedSteamID = nil
     }
 
-    /// 批量下载作者所有已加载媒体，并自动归入以作者名命名的虚拟文件夹。
+    /// 仅下载作者列表当前已经加载的媒体。
+    private func downloadLoadedByAuthor(authorName: String, items: [MediaItem]) {
+        downloadAuthorMedia(authorName: authorName, items: items, downloadAllPages: false)
+    }
+
+    /// 批量下载作者全部媒体，并自动翻页直到没有更多内容。
     /// 同作者多次批量下载会复用同一文件夹，避免拆成多个同名目录。
     private func downloadAllByAuthor(authorName: String, items: [MediaItem]) {
+        downloadAuthorMedia(authorName: authorName, items: items, downloadAllPages: true)
+    }
+
+    private func downloadAuthorMedia(
+        authorName: String,
+        items: [MediaItem],
+        downloadAllPages: Bool
+    ) {
         let folderStore = LibraryFolderStore.shared
         let libraryService = MediaLibraryService.shared
         var identityKeys = Set(items.flatMap { LibraryFolderStore.mediaAuthorIdentityKeys($0) })
@@ -4643,9 +4659,13 @@ struct MediaDetailSheet: View {
         let stampedItems = items.map {
             mediaItemByMergingAuthorMetadata($0, fallback: resolvedItem)
         }
+        let authorSteamID = resolvedItem.authorSteamID
 
         Task { @MainActor in
-            defer { isDownloadingAllAuthor = false }
+            defer {
+                isDownloadingAllAuthor = false
+                isLoadingAuthorItems = false
+            }
 
             let folder = folderStore.findOrCreateAuthorDownloadFolder(
                 name: authorName,
@@ -4653,71 +4673,69 @@ struct MediaDetailSheet: View {
                 identityKeys: identityKeys
             )
 
-            // 已下载的项直接归入文件夹，过滤出需要下载的
-            var pendingItems: [MediaItem] = []
-            for item in stampedItems {
-                if libraryService.isDownloaded(item) {
-                    folderStore.moveMediaToFolder(
-                        mediaID: item.id,
-                        folderID: folder.id,
-                        scope: .downloads
-                    )
-                } else {
-                    pendingItems.append(item)
-                }
-            }
-
-            // 全部已下载时只归夹；defer 会复位按钮，不弹错误框
-            guard !pendingItems.isEmpty else { return }
-
-            // 并发提交下载；folderID 在落盘登记时一并写入，避免“成功落盘却落在根目录”
-            let vm = viewModel
             let folderID = folder.id
             var successCount = 0
             var failureCount = 0
-            await withTaskGroup(of: (String, Bool).self) { group in
-                for item in pendingItems {
-                    group.addTask {
-                        do {
-                            if item.id.hasPrefix("workshop_") {
-                                try await vm.downloadWorkshopWallpaper(item, folderID: folderID)
-                            } else {
-                                guard let bestOption = item.downloadOptions.max(by: {
-                                    $0.qualityRank < $1.qualityRank
-                                }) else {
-                                    return (item.id, false)
-                                }
-                                _ = try await vm.downloadMedia(item, option: bestOption, folderID: folderID)
-                            }
-                            return (item.id, true)
-                        } catch {
-                            AppLogger.error(.download, "作者媒体批量下载失败",
-                                metadata: ["itemID": item.id, "author": authorName,
-                                           "error": error.localizedDescription])
-                            return (item.id, false)
-                        }
+            var processedIDs = Set<String>()
+            var batch = stampedItems
+            var nextPage = authorItemsPage + 1
+            var shouldLoadNextPage = downloadAllPages && hasMoreAuthorItems
+            var paginationError: Error?
+
+            // 逐页串行：一页下载完成后才请求下一页，避免作者作品全部进入队列。
+            while true {
+                let freshBatch = batch.filter { processedIDs.insert($0.id).inserted }
+                // 用户可能已经手动加载了多页；仍按 API 页大小切成小批次，
+                // 保持“当前批次完成后再继续”的节奏。
+                for start in stride(from: 0, to: freshBatch.count, by: 24) {
+                    let end = min(start + 24, freshBatch.count)
+                    let result = await downloadMediaBatch(
+                        Array(freshBatch[start..<end]),
+                        authorName: authorName,
+                        folderID: folderID,
+                        folderStore: folderStore,
+                        libraryService: libraryService
+                    )
+                    successCount += result.success
+                    failureCount += result.failure
+                }
+
+                guard shouldLoadNextPage else { break }
+
+                isLoadingAuthorItems = true
+                do {
+                    let page = try await viewModel.fetchMediaByAuthor(
+                        steamID: authorSteamID ?? "",
+                        page: nextPage
+                    )
+                    let existingIDs = Set(authorMediaItems.map(\.id))
+                    let fresh = page.items.filter {
+                        !existingIDs.contains($0.id) && !processedIDs.contains($0.id)
                     }
-                }
-                for await (_, ok) in group {
-                    if ok { successCount += 1 } else { failureCount += 1 }
+                    authorMediaItems.append(contentsOf: fresh)
+                    authorItemsPage = nextPage
+                    hasMoreAuthorItems = page.hasMore && !fresh.isEmpty
+                    batch = fresh.map {
+                        mediaItemByMergingAuthorMetadata($0, fallback: resolvedItem)
+                    }
+                    shouldLoadNextPage = hasMoreAuthorItems
+                    nextPage += 1
+                } catch {
+                    paginationError = error
+                    AppLogger.error(.media, "作者媒体批量下载分页失败",
+                        metadata: [
+                            "author": authorName,
+                            "page": nextPage,
+                            "error": error.localizedDescription
+                        ])
+                    break
                 }
             }
 
-            // 兜底：本批成功项再归一次作者夹。
-            // 优先按 isDownloaded；若仅有下载记录（文件检测偶发缓存滞后）也尝试归夹。
-            for item in stampedItems {
-                let hasRecord = libraryService.downloadRecords.contains {
-                    $0.item.id == item.id && $0.isActive
-                }
-                guard libraryService.isDownloaded(item) || hasRecord else { continue }
-                folderStore.moveMediaToFolder(
-                    mediaID: item.id,
-                    folderID: folderID,
-                    scope: .downloads
-                )
-            }
-
-            if failureCount > 0 {
+            if let paginationError {
+                errorMessage = paginationError.localizedDescription
+                showError = true
+            } else if failureCount > 0 {
                 if successCount == 0 {
                     errorMessage = String(format: t("downloadAllByAuthor.allFailed"), failureCount)
                 } else {
@@ -4726,6 +4744,82 @@ struct MediaDetailSheet: View {
                 showError = true
             }
         }
+    }
+
+    /// 下载一个作者列表批次。Workshop 与普通媒体共用持久化下载队列。
+    private func downloadMediaBatch(
+        _ items: [MediaItem],
+        authorName: String,
+        folderID: String,
+        folderStore: LibraryFolderStore,
+        libraryService: MediaLibraryService
+    ) async -> (success: Int, failure: Int) {
+        var pendingItems: [MediaItem] = []
+        for item in items {
+            if libraryService.isDownloaded(item) {
+                folderStore.moveMediaToFolder(
+                    mediaID: item.id,
+                    folderID: folderID,
+                    scope: .downloads
+                )
+            } else {
+                pendingItems.append(item)
+            }
+        }
+
+        guard !pendingItems.isEmpty else { return (0, 0) }
+
+        let vm = viewModel
+        var successCount = 0
+        var failureCount = 0
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for item in pendingItems {
+                group.addTask {
+                    do {
+                        if item.id.hasPrefix("workshop_") {
+                            try await vm.downloadWorkshopWallpaper(item, folderID: folderID)
+                        } else {
+                            guard let bestOption = item.downloadOptions.max(by: {
+                                $0.qualityRank < $1.qualityRank
+                            }) else {
+                                return (item.id, false)
+                            }
+                            _ = try await vm.downloadMedia(item, option: bestOption, folderID: folderID)
+                        }
+                        return (item.id, true)
+                    } catch {
+                        AppLogger.error(.download, "作者媒体批量下载失败",
+                            metadata: [
+                                "itemID": item.id,
+                                "author": authorName,
+                                "error": error.localizedDescription
+                            ])
+                        return (item.id, false)
+                    }
+                }
+            }
+            for await (_, ok) in group {
+                if ok {
+                    successCount += 1
+                } else {
+                    failureCount += 1
+                }
+            }
+        }
+
+        // 文件检测可能比下载记录刷新稍晚，再做一次归夹兜底。
+        for item in pendingItems {
+            let hasRecord = libraryService.downloadRecords.contains {
+                $0.item.id == item.id && $0.isActive
+            }
+            guard libraryService.isDownloaded(item) || hasRecord else { continue }
+            folderStore.moveMediaToFolder(
+                mediaID: item.id,
+                folderID: folderID,
+                scope: .downloads
+            )
+        }
+        return (successCount, failureCount)
     }
 
     /// 加载更多作者壁纸（分页）

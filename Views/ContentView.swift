@@ -303,7 +303,7 @@ struct ContentView: View {
     // 注意：WallpaperSourceManager.shared 不在此顶层观察。
     // 它有 5 个 @Published 属性，若顶层 @ObservedObject 会在数据源切换时触发整个 ContentView body 重算。
     // 顶层仅在 .task 中一次性轮询 isInitialSourceSelectionComplete，无需响应式；
-    // 数据源切换提示由独立的 SourceSwitchToast / WorkshopSourceSwitchToast 子视图各自观察。
+    // 数据源切换提示由独立子视图各自观察，并复用同一个 SourceSwitchToast 外观。
     @State private var detailPath: [MainDetailRoute] = []
     /// 状态栏可在已有详情页上请求另一个详情；重建栈以避免 SwiftUI 复用旧 destination。
     @State private var detailNavigationStackID = UUID()
@@ -961,6 +961,7 @@ private struct DownloadProgressToastHost: View {
 
     @State private var displayedSnapshot: DownloadToastSnapshot?
     @State private var hideWorkItem: DispatchWorkItem?
+    @State private var hideGeneration = 0
 
     // iOS 丝滑动画状态
     @State private var toastOpacity: Double = 0
@@ -1037,6 +1038,7 @@ private struct DownloadProgressToastHost: View {
 
     /// 退场：向下缩小淡出（精简不卡顿）
     private func performHide(completion: @escaping () -> Void) {
+        let generation = hideGeneration
         withAnimation(iOSDismissAnimation) {
             toastOpacity = 0
             toastScale = 0.96
@@ -1044,12 +1046,15 @@ private struct DownloadProgressToastHost: View {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            guard generation == hideGeneration else { return }
             completion()
         }
     }
 
     private func reconcileDisplayedSnapshot(_ snapshot: DownloadToastSnapshot?) {
         hideWorkItem?.cancel()
+        hideWorkItem = nil
+        hideGeneration &+= 1
 
         guard let snapshot else {
             performHide {
@@ -1064,16 +1069,24 @@ private struct DownloadProgressToastHost: View {
         }
 
         if snapshot.isRunning {
-            // 如果是新任务或当前无显示任务，重新执行入场动画
-            if displayedSnapshot?.id != snapshot.id {
+            // 同一下载队列中的任务交接只替换内容，不重置透明度；
+            // 否则每完成一项都会先淡出再把下一项弹进来。
+            let isToastVisible = displayedSnapshot != nil && toastOpacity > 0.01
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 displayedSnapshot = snapshot
-                performShow()
-            } else {
-                var transaction = Transaction(animation: nil)
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    displayedSnapshot = snapshot
+            }
+            if isToastVisible {
+                // Interrupt a hide animation if the next task arrives while
+                // the old toast is still fading out.
+                withAnimation(iOSShowAnimation) {
+                    toastOpacity = 1
+                    toastScale = 1
+                    toastOffset = 0
                 }
+            } else {
+                performShow()
             }
             return
         }
@@ -1085,11 +1098,15 @@ private struct DownloadProgressToastHost: View {
                 performShow()
             }
 
+            let generation = hideGeneration
             let workItem = DispatchWorkItem { [self] in
+                guard generation == hideGeneration else { return }
                 performHide {
-                    if displayedSnapshot?.id == snapshot.id {
-                        displayedSnapshot = nil
+                    guard generation == hideGeneration,
+                          displayedSnapshot?.id == snapshot.id else {
+                        return
                     }
+                    displayedSnapshot = nil
                 }
             }
             hideWorkItem = workItem
@@ -1487,12 +1504,16 @@ private struct DownloadProgressToast: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
         .frame(maxWidth: 440)
-        .background(
-            DarkLiquidGlassBackground(
-                cornerRadius: 24,
-                isHovered: false
-            )
+        .liquidGlassSurface(
+            .prominent,
+            tint: Color.white.opacity(0.06),
+            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
         // 精简动画：只用颜色过渡，避免复杂的 layout transition 导致卡顿
         .animation(.easeInOut(duration: 0.20), value: isCompleted)
         .onChange(of: snapshot.progress) { _, newProgress in
@@ -1570,130 +1591,92 @@ private struct DownloadProgressToast: View {
 // MARK: - 壁纸数据源切换 Toast
 private struct WallpaperSourceSwitchToast: View {
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
-    @State private var isShowing: Bool = false
-    @State private var hideWorkItem: DispatchWorkItem?
 
     var body: some View {
-        VStack {
-            if let message = sourceManager.lastSwitchMessage, isShowing {
-                VStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color(hex: "FFD60A"))
-                    Text(message)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-                        )
-                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
-                )
-                .frame(maxWidth: 360)
-            }
-        }
+        SourceSwitchToast(
+            message: $sourceManager.lastSwitchMessage,
+            dismissAfter: 3.5
+        )
         .padding(.bottom, 40)
-        .opacity(isShowing ? 1 : 0)
-        .offset(y: isShowing ? 0 : 20)
-        .transition(.opacity.combined(with: .move(edge: .bottom)))
-        .onChange(of: sourceManager.lastSwitchMessage) { _, _ in
-            checkForNewMessage()
-        }
-    }
-
-    // MARK: - 监听消息变化
-
-    /// 当 lastSwitchMessage 变化时触发显示
-    private func checkForNewMessage() {
-        guard sourceManager.lastSwitchMessage != nil else { return }
-
-        hideWorkItem?.cancel()
-        isShowing = true
-
-        let workItem = DispatchWorkItem { [weak sourceManager] in
-            withAnimation(.easeOut(duration: 0.25)) {
-                isShowing = false
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                sourceManager?.lastSwitchMessage = nil
-            }
-        }
-        self.hideWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
 }
-
 
 // MARK: - Wallpaper Engine 数据源切换 Toast
 private struct WorkshopSourceSwitchToast: View {
     @ObservedObject private var sourceManager = WorkshopSourceManager.shared
+
+    var body: some View {
+        SourceSwitchToast(
+            message: $sourceManager.lastSwitchMessage,
+            dismissAfter: 3.0
+        )
+    }
+}
+
+/// 统一承载各数据源的切换提示；宿主仅传入各自的消息绑定和展示时长。
+private struct SourceSwitchToast: View {
+    @Binding var message: String?
+    let dismissAfter: TimeInterval
+
     @State private var isShowing: Bool = false
     @State private var hideWorkItem: DispatchWorkItem?
 
     var body: some View {
         VStack {
-            if let message = sourceManager.lastSwitchMessage, isShowing {
-                VStack(spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: sourceManager.activeSource.icon)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Color(hex: "0A84FF"))
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.5))
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Color(hex: "5E5CE6"))
-                    }
+            if let message, isShowing {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.85))
                     Text(message)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                        .multilineTextAlignment(.center)
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-                        )
-                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .liquidGlassSurface(
+                    .prominent,
+                    tint: Color.white.opacity(0.06),
+                    in: Capsule(style: .continuous)
                 )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.16), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
                 .frame(maxWidth: 360)
             }
         }
         .opacity(isShowing ? 1 : 0)
         .offset(y: isShowing ? 0 : 20)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
-        .onChange(of: sourceManager.lastSwitchMessage) { _, _ in
-            checkForNewMessage()
+        .onChange(of: message) { _, newMessage in
+            show(message: newMessage)
+        }
+        .onAppear {
+            show(message: message)
         }
     }
 
-    private func checkForNewMessage() {
-        guard sourceManager.lastSwitchMessage != nil else { return }
+    private func show(message: String?) {
+        guard let message else { return }
 
         hideWorkItem?.cancel()
         isShowing = true
 
-        let workItem = DispatchWorkItem { [weak sourceManager] in
+        let messageBinding = $message
+        let workItem = DispatchWorkItem {
             withAnimation(.easeOut(duration: 0.25)) {
                 isShowing = false
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                sourceManager?.lastSwitchMessage = nil
+                guard messageBinding.wrappedValue == message else { return }
+                messageBinding.wrappedValue = nil
             }
         }
         self.hideWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + dismissAfter, execute: workItem)
     }
 }

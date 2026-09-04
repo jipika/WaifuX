@@ -17,7 +17,18 @@ private final class ExploreGridInvisibleScroller: NSScroller {
 private final class ExploreGridScrollView: NSScrollView {
     weak var gridCoordinator: ExploreGridCoordinator?
     var allowsGridScrolling = true
+    /// Escape 兜底：NSCollectionView / 内嵌 NSHostingView 抢占 first responder 后，
+    /// SwiftUI 外层的 onKeyPress(.escape) 收不到事件，从这里转发。
+    var onEscapeKey: (() -> Void)?
     private var lastReportedSize: CGSize = .zero
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, let onEscapeKey {
+            onEscapeKey()
+            return
+        }
+        super.keyDown(with: event)
+    }
 
     override func scrollWheel(with event: NSEvent) {
         guard allowsGridScrolling else {
@@ -123,7 +134,7 @@ final class ExploreGridCoordinator: NSObject {
     private var pendingViewUpdateLayout: DispatchWorkItem?
     private var pendingVisibilityRefreshWorkItems: [DispatchWorkItem] = []
     private var pendingRestoreScrollOffset: CGFloat?
-    private var registeredCellClassIdentifier: ObjectIdentifier?
+    private var registeredCellClassIdentifiers: Set<NSUserInterfaceItemIdentifier> = []
     private var isHoverInteractionEnabled = true
     /// 仅当可见 item 索引范围变化时再回调，减轻 SwiftUI 侧与预取链路的无效触发
     private var lastReportedVisibleItemRange: (min: Int, max: Int)?
@@ -143,6 +154,7 @@ final class ExploreGridCoordinator: NSObject {
         self.layout = ExploreGridCollectionViewLayout()
         self.layout.hoverExpansionAllowance = parent.hoverExpansionAllowance
         self.layout.preferredColumnCount = parent.gridColumnCount
+        self.layout.fixedCardSize = parent.fixedCardSize
         if let insets = parent.contentInsets {
             self.layout.contentInsets = insets
         }
@@ -181,9 +193,13 @@ final class ExploreGridCoordinator: NSObject {
 
         super.init()
 
-        registerCellClassIfNeeded(parent.cellClass)
+        registerCellClassesIfNeeded(parent.cellClass, additional: parent.additionalCellClasses)
 
         (scrollView as? ExploreGridScrollView)?.gridCoordinator = self
+        // 读取最新 parent（updateNSView 持续刷新），避免 init 时的闭包快照过期
+        (scrollView as? ExploreGridScrollView)?.onEscapeKey = { [weak self] in
+            self?.parent.onEscape?()
+        }
         configureScrollingMode(parent.allowsScrolling)
 
         collectionView.dataSource = self
@@ -505,14 +521,28 @@ final class ExploreGridCoordinator: NSObject {
         DispatchQueue.main.async(execute: workItem)
     }
 
-    func registerCellClassIfNeeded(_ cellClass: ExploreGridItem.Type) {
-        let identifier = ObjectIdentifier(cellClass)
-        guard registeredCellClassIdentifier != identifier else { return }
-        registeredCellClassIdentifier = identifier
-        collectionView.register(
-            cellClass,
-            forItemWithIdentifier: ExploreGridItem.reuseIdentifier
-        )
+    func registerCellClassesIfNeeded(
+        _ cellClass: ExploreGridItem.Type,
+        additional: [ExploreGridItem.Type]
+    ) {
+        var seen = Set<ObjectIdentifier>()
+        for cls in [cellClass] + additional {
+            guard seen.insert(ObjectIdentifier(cls)).inserted else { continue }
+            let identifier = cls.gridReuseIdentifier
+            collectionView.register(cls, forItemWithIdentifier: identifier)
+            registeredCellClassIdentifiers.insert(identifier)
+        }
+    }
+
+    /// SwiftUI update 时同步网格间距；变化时失效布局重排。
+    func syncGridSpacingIfNeeded(_ spacing: CGFloat?) {
+        let resolved = max(4, spacing ?? 16)
+        guard abs(layout.columnSpacing - resolved) > 0.01
+            || abs(layout.rowSpacing - resolved) > 0.01 else { return }
+        layout.columnSpacing = resolved
+        layout.rowSpacing = resolved
+        layout.invalidateLayout()
+        scheduleViewUpdateLayout()
     }
 
     func performBatchUpdates(insertedCount: Int, oldCount: Int) {
@@ -652,6 +682,14 @@ final class ExploreGridCoordinator: NSObject {
         var missingIndexPaths = Set<IndexPath>()
         for indexPath in visibleIndexPaths {
             guard let item = collectionView.item(at: indexPath) as? ExploreGridItem else {
+                missingIndexPaths.insert(indexPath)
+                continue
+            }
+
+            // 混排网格：现挂 cell 类与该 index 期望类不符（同数量内容替换后文件夹↔项目互换），
+            // configure 的 as? 转型会静默失败留下旧内容；这里转 missing 走 reloadItems 重建。
+            let expectedType = parent.cellClassForItem?(indexPath.item) ?? parent.cellClass
+            if type(of: item) != expectedType {
                 missingIndexPaths.insert(indexPath)
                 continue
             }
@@ -983,8 +1021,9 @@ extension ExploreGridCoordinator: NSCollectionViewDataSource {
         _ collectionView: NSCollectionView,
         itemForRepresentedObjectAt indexPath: IndexPath
     ) -> NSCollectionViewItem {
+        let cellType = parent.cellClassForItem?(indexPath.item) ?? parent.cellClass
         let item = collectionView.makeItem(
-            withIdentifier: ExploreGridItem.reuseIdentifier,
+            withIdentifier: cellType.gridReuseIdentifier,
             for: indexPath
         ) as! ExploreGridItem
 
@@ -992,6 +1031,15 @@ extension ExploreGridCoordinator: NSCollectionViewDataSource {
         item.setHoverInteractionEnabled(isHoverInteractionEnabled)
         parent.configureCell(item, indexPath.item)
         return item
+    }
+
+    // MARK: 拖拽源（可选；pasteboardWriterForItem 为 nil 的页面不触发）
+
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        pasteboardWriterForItemAt indexPath: IndexPath
+    ) -> NSPasteboardWriting? {
+        parent.pasteboardWriterForItem?(indexPath.item)
     }
 }
 
@@ -1003,6 +1051,73 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
         guard let indexPath = indexPaths.first else { return }
         parent.onSelect?(indexPath.item)
         collectionView.deselectItems(at: indexPaths)
+    }
+
+    // MARK: 拖拽排序落点（可选；onValidateReorderDrop 为 nil 的页面完全不走这些分支）
+
+    /// 从粘贴板读出全部拖拽字符串负载（多选拖拽时有多条）。
+    nonisolated private static func dropPayloadStrings(from pasteboard: NSPasteboard) -> [String] {
+        if let objects = pasteboard.readObjects(forClasses: [NSString.self], options: nil) as? [String],
+           !objects.isEmpty {
+            return objects
+        }
+        if let single = pasteboard.string(forType: .string) {
+            return [single]
+        }
+        return []
+    }
+
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        validateDrop draggingInfo: NSDraggingInfo,
+        proposedIndexPath proposedDropIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
+        dropOperation proposedDropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>
+    ) -> NSDragOperation {
+        guard parent.onValidateReorderDrop != nil, parent.onPerformReorderDrop != nil else {
+            return []
+        }
+        let itemCount = collectionView.numberOfItems(inSection: 0)
+        guard itemCount > 0 else { return [] }
+
+        // 统一改写为 .before 插入语义：targetIndex = 插入到该 index 之前；
+        // 系统对网格在末尾空隙提出的 .on last → 追加到末尾（targetIndex == itemCount）。
+        let targetIndex: Int
+        switch proposedDropOperation.pointee {
+        case .before:
+            targetIndex = min(max(0, proposedDropIndexPath.pointee.item), itemCount)
+        case .on:
+            targetIndex = proposedDropIndexPath.pointee.item >= itemCount - 1 ? itemCount : proposedDropIndexPath.pointee.item
+        @unknown default:
+            targetIndex = min(max(0, proposedDropIndexPath.pointee.item), itemCount)
+        }
+
+        let payloads = Self.dropPayloadStrings(from: draggingInfo.draggingPasteboard)
+        let accepted = parent.onValidateReorderDrop?(payloads, targetIndex) ?? false
+        guard accepted else { return [] }
+
+        proposedDropIndexPath.pointee = NSIndexPath(forItem: min(targetIndex, itemCount), inSection: 0)
+        proposedDropOperation.pointee = .before
+        return .move
+    }
+
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        acceptDrop draggingInfo: NSDraggingInfo,
+        indexPath: IndexPath,
+        dropOperation: NSCollectionView.DropOperation
+    ) -> Bool {
+        guard let onPerform = parent.onPerformReorderDrop else { return false }
+        let itemCount = collectionView.numberOfItems(inSection: 0)
+        // validateDrop 已统一改写为 .before；这里再做一次防御性归一。
+        // .on last 视为追加到末尾（targetIndex == itemCount）。
+        var targetIndex: Int
+        if dropOperation == .on, indexPath.item >= itemCount - 1 {
+            targetIndex = itemCount
+        } else {
+            targetIndex = min(max(0, indexPath.item), itemCount)
+        }
+        let payloads = Self.dropPayloadStrings(from: draggingInfo.draggingPasteboard)
+        return onPerform(payloads, targetIndex)
     }
 }
 

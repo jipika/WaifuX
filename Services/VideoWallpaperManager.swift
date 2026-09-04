@@ -6256,8 +6256,6 @@ final class VideoWallpaperManager: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
                 return
             }
-            // 立刻拆掉已断屏窗口，避免 1.5s 防抖窗口内残留 AVPlayer/窗口
-            self.teardownOrphanedVideoWindowsPreservingRestoreState()
             guard self.hasActiveVideoWallpaper else { return }
 
             // 防抖：延迟执行，避免屏幕参数变化时的频繁重建
@@ -6266,6 +6264,9 @@ final class VideoWallpaperManager: ObservableObject {
                 guard let self = self, self.hasActiveVideoWallpaper else { return }
 
                 self.relinkDisplayStateForCurrentScreens()
+                // NSScreen.screens 在显示器重新枚举期间可能短暂缺屏。
+                // 必须等防抖窗口结束后再清理 orphan，否则一次瞬时抖动
+                // 就会销毁主屏 AVPlayer，且后续恢复不一定能及时重建。
                 self.teardownOrphanedVideoWindowsPreservingRestoreState()
 
                 if VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(

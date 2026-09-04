@@ -3,17 +3,6 @@ import AppKit
 import Kingfisher
 @preconcurrency import Translation
 
-private struct MediaLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = .greatestFiniteMagnitude
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if next < value {
-            value = next
-        }
-    }
-}
-
 private struct MediaExploreHeaderHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -25,15 +14,84 @@ private struct MediaExploreHeaderHeightPreferenceKey: PreferenceKey {
     }
 }
 
+/// Header 区域滚轮捕获：鼠标在筛选/搜索上也能驱动两阶段滚动（header 收起 → 网格滚动）。
+/// 只接管 `scrollWheel`，`hitTest` 返回 nil 不挡 chip / Menu / 输入框。
+/// 与壁纸探索页的 WallpaperHeaderScrollWheelCatcher 同构。
+private struct MediaHeaderScrollWheelCatcher: NSViewRepresentable {
+    /// 向下浏览为正（与 ExploreGridCoordinator 一致）。
+    var onScrollDown: (CGFloat) -> Void
+
+    final class HostView: NSView {
+        var onScrollDown: ((CGFloat) -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            installMonitorIfNeeded()
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil {
+                removeMonitor()
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        deinit {
+            MainActor.assumeIsolated {
+                removeMonitor()
+            }
+        }
+
+        private var scrollMonitor: Any?
+
+        private func installMonitorIfNeeded() {
+            guard scrollMonitor == nil, window != nil else { return }
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, self.window != nil else { return event }
+                let locInWindow = event.locationInWindow
+                let locInSelf = self.convert(locInWindow, from: nil)
+                guard self.bounds.contains(locInSelf), !self.isHiddenOrHasHiddenAncestor else {
+                    return event
+                }
+                // 高度已收为 0 时不拦截
+                guard self.bounds.height > 0.5 else { return event }
+
+                let raw = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 16
+                let scrollDown = -raw
+                guard abs(scrollDown) > 0.2 else { return event }
+
+                self.onScrollDown?(scrollDown)
+                return nil
+            }
+        }
+
+        private func removeMonitor() {
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> HostView {
+        let view = HostView()
+        view.onScrollDown = onScrollDown
+        return view
+    }
+
+    func updateNSView(_ nsView: HostView, context: Context) {
+        nsView.onScrollDown = onScrollDown
+    }
+}
+
 private final class MediaExploreScrollCoordinator: ObservableObject {
-    var sentinelDebounceTask: DispatchWorkItem?
     var pendingLoadMoreTask: DispatchWorkItem?
     var wasNearBottom = false
 
     func cancelPendingWork() {
-        sentinelDebounceTask?.cancel()
         pendingLoadMoreTask?.cancel()
-        sentinelDebounceTask = nil
         pendingLoadMoreTask = nil
         wasNearBottom = false
     }
@@ -42,9 +100,6 @@ private final class MediaExploreScrollCoordinator: ObservableObject {
 // MARK: - MediaExploreContentView - 媒体探索页
 
 struct MediaExploreContentView: View {
-    private static let scrollCoordinateSpaceName = "media-explore-scroll"
-    private static let loadMoreTriggerThreshold: CGFloat = 120
-
     @ObservedObject var viewModel: MediaExploreViewModel
     @Binding var selectedMedia: MediaItem?
     var isVisible: Bool = true
@@ -80,15 +135,30 @@ struct MediaExploreContentView: View {
     @State private var mediaSearchQuery: String = ""
     /// loadMore 冷却期，防止 contentSize 增长 → isNearBottom 翻转 → 立即重试的无限级联。
     @State private var loadMoreCooldownUntil: Date? = nil
-    @State private var measuredHeaderHeight: CGFloat = 0
-    @State private var isHeaderContentMounted = true
     @StateObject private var scrollCoordinator = MediaExploreScrollCoordinator()
     // shouldUseLightweightEffects 已下沉到 MediaExploreAtmosphereBackground 子视图，
     // 该子视图自行观察 VideoWallpaperManager / WallpaperEngineXBridge 的播放状态。
 
     // Grid 控制
     @State private var showScrollToTop: Bool = false
-    @State private var outerScrollToTopToken: Int = 0
+
+    // MARK: - AppKit 网格（NSCollectionView 自滚动，与壁纸探索页同构）
+    /// 收藏等"内容变化但数量不变"时递增，强制重配可见 cell。
+    @State private var gridReloadToken: Int = 0
+    /// 换源/搜索等整表替换 feed 时递增（数量可能恰好不变，仅靠 itemCount 差异检测不到）。
+    @State private var gridContentRefreshToken: Int = 0
+    /// 窗口/tab 切回时强制 AppKit 重布局。
+    @State private var gridLayoutRefreshToken: Int = 0
+    /// 外部递增时滚回网格顶部。
+    @State private var gridScrollToTopToken: Int = 0
+    /// header 区域滚轮收完 header 后，把余量推给网格的 token。
+    @State private var gridScrollBoostToken: Int = 0
+    /// 待推给网格的向下滚动量（pt）。
+    @State private var gridPendingScrollDown: CGFloat = 0
+    /// 展开态 header 的完整高度（由 GeometryReader 测得）。
+    @State private var measuredFullHeaderHeight: CGFloat = 0
+    /// 已随滚动消耗的 header 高度。0 = 完全展开，== fullHeight 时完全消失。
+    @State private var headerConsumedHeight: CGFloat = 0
 
     // Workshop 筛选
     @State private var selectedWorkshopTags: Set<WorkshopSourceManager.WorkshopTag> = []
@@ -186,6 +256,8 @@ struct MediaExploreContentView: View {
                 isLoadingMore = false
                 _ = viewModel.restoreExploreFeedIfNeededAfterDetailReturn()
                 syncAtmosphereIfNeeded()
+                // tab 切回时让 AppKit 网格主动补一次布局
+                gridLayoutRefreshToken &+= 1
             }
         }
         .onChange(of: arcSettings.isLightMode) { _, _ in }
@@ -215,12 +287,16 @@ struct MediaExploreContentView: View {
             }
             if newCount > 60 { showScrollToTop = true }
         }
+        // 收藏集合变化：数量不变，递增 reloadToken 让 AppKit 重配可见 cell
+        .onChange(of: viewModel.favoriteIDSet) { _, _ in
+            gridReloadToken &+= 1
+        }
+        // 整表替换 feed（换源/搜索/筛选）但数量恰好相同时，强制重配可见 cell
+        .onChange(of: gridContentRefreshToken) { _, _ in
+            gridReloadToken &+= 1
+        }
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
             handleSourceChange()
-            invalidateHeaderMeasurement()
-        }
-        .onChange(of: headerLayoutSignature) { _, _ in
-            invalidateHeaderMeasurement()
         }
     }
 
@@ -238,106 +314,250 @@ struct MediaExploreContentView: View {
                 .transition(.opacity.animation(.easeInOut(duration: 0.3)))
             }
         } else {
-            if #available(macOS 15.0, *) {
-                scrollViewModern(gridContentWidth: gridContentWidth, fullWidth: fullWidth)
+            // ⚠️ 关键架构（与壁纸探索页同构，2026-09 迁移）：
+            // 旧 SwiftUI ScrollView + LazyVGrid 在快速滚动时每帧 mount/unmount 大量
+            // SwiftUI 卡片视图（含 KFImage/NSView 桥接），是媒体页滚动比壁纸页卡的主因。
+            // 网格改用 AppKit NSCollectionView 自滚动 + cell 真复用（ExploreGridContainer），
+            // header 保持 SwiftUI 可折叠（滚轮两阶段：先收 header 再滚网格）。
+            exploreScrollContent(
+                gridContentWidth: gridContentWidth,
+                fullWidth: fullWidth,
+                viewportHeight: viewportHeight
+            )
+        }
+    }
+
+    // MARK: - AppKit 网格 + 可折叠 header
+
+    private func exploreScrollContent(gridContentWidth: CGFloat, fullWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+        // bottomLoadingOverlay / scrollToTopButton 由 body 的外层 ZStack 统一叠加
+        VStack(alignment: .leading, spacing: 0) {
+            collapsibleMediaHeader
+                .padding(.horizontal, 28)
+                .frame(width: fullWidth, alignment: .leading)
+                .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
+                .environment(\.arcIsLightMode, arcSettings.isLightMode)
+
+            mediaGridContainer(contentWidth: gridContentWidth)
+                .padding(.horizontal, 28)
+                // 收起后网格顶到窗口最上沿，内容从 tabs 浮层下穿过
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: fullWidth, height: viewportHeight, alignment: .top)
+    }
+
+    /// 随网格滚动 1:1 上移挤出的 header（alignment.bottom 裁顶保底，同壁纸探索页）。
+    private var collapsibleMediaHeader: some View {
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        let consumed: CGFloat = {
+            guard fullHeight > 1, !viewModel.items.isEmpty else { return 0 }
+            return min(fullHeight, max(0, headerConsumedHeight))
+        }()
+        let currentHeight: CGFloat = {
+            guard fullHeight > 1 else { return 0 }
+            if viewModel.items.isEmpty { return fullHeight }
+            return max(0, fullHeight - consumed)
+        }()
+
+        return headerContent
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: MediaExploreHeaderHeightPreferenceKey.self,
+                        value: proxy.size.height
+                    )
+                }
+            )
+            .onPreferenceChange(MediaExploreHeaderHeightPreferenceKey.self) { height in
+                // 展开时更新；收起中若内容变高（chips 增多）也允许抬上限
+                if consumed < 1 || measuredFullHeaderHeight < 1 || height > measuredFullHeaderHeight {
+                    updateMeasuredFullHeaderHeight(height)
+                }
+            }
+            // alignment.bottom：裁掉顶部、保留底部 → 视觉上内容往上滚出
+            .frame(
+                maxWidth: .infinity,
+                minHeight: fullHeight > 1 ? currentHeight : nil,
+                maxHeight: fullHeight > 1 ? currentHeight : nil,
+                alignment: .bottom
+            )
+            .clipped()
+            // 鼠标在 header 上也能滚：捕获滚轮走同一套两阶段逻辑；点击仍穿透到控件
+            .overlay {
+                MediaHeaderScrollWheelCatcher { scrollDown in
+                    handleHeaderAreaScrollDown(scrollDown)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+            }
+            .allowsHitTesting(currentHeight > 0.5)
+    }
+
+    private func mediaGridContainer(contentWidth: CGFloat) -> some View {
+        // AppKit NSCollectionView 自滚动 + 视口高度。
+        // allowsScrolling=true → clipView 等于可见区域，cell 正常复用，不会撑满内存。
+        let columnCount = ExploreGridLayout.columnCount(for: contentWidth)
+        let spacing = ExploreGridLayout.spacing
+        let cardWidth = max(1, floor((contentWidth - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount)))
+        // 统一卡片高度（16:10 封面 + 44pt 底栏），与旧 LazyVGrid 的 uniformMediaCardHeight 一致
+        let uniformAspectRatio = MediaItem.effectiveAspectRatio(columnWidth: cardWidth)
+        // 一页只生成一次 Set；不要让每个新 Cell 都重复构造同一份收藏索引。
+        let favoriteIDSet = viewModel.favoriteIDSet
+        let fullHeader = max(measuredFullHeaderHeight, 0)
+        let remainingHeader: CGFloat = {
+            guard fullHeader > 1, !viewModel.items.isEmpty else { return 0 }
+            return max(0, fullHeader - headerConsumedHeight)
+        }()
+        let consumedHeader: CGFloat = {
+            guard fullHeader > 1, !viewModel.items.isEmpty else { return 0 }
+            return min(fullHeader, max(0, headerConsumedHeight))
+        }()
+
+        return ExploreGridContainer(
+            itemCount: { viewModel.items.count },
+            aspectRatio: { _ in uniformAspectRatio },
+            configureCell: { cell, idx in
+                guard idx < viewModel.items.count else { return }
+                let media = viewModel.items[idx]
+                cell.configure(
+                    with: media,
+                    isFavorite: favoriteIDSet.contains(media.id)
+                )
+            },
+            cellClass: MediaGridCell.self,
+            onSelect: { idx in
+                guard idx < viewModel.items.count else { return }
+                viewModel.preserveExploreFeedForDetailNavigation()
+                selectedMedia = viewModel.items[idx]
+            },
+            onVisibleItemsChange: nil,
+            onScrollOffsetChange: { offset in
+                handleGridScrollOffset(offset)
+            },
+            onReachBottom: {
+                // header 未收完时不触发 loadMore（网格本应锁顶）
+                guard remainingHeader <= 0.5 else { return }
+                // AppKit 在 near-bottom 时会反复回调；用 wasNearBottom + 冷却防级联。
+                if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
+                guard !scrollCoordinator.wasNearBottom else { return }
+                scrollCoordinator.wasNearBottom = true
+                scheduleLoadMoreFromScroll()
+            },
+            scrollToTopToken: gridScrollToTopToken,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: true,
+            onContentHeightChange: nil,
+            isVisible: isVisible,
+            layoutWidth: contentWidth,
+            gridColumnCount: columnCount,
+            hoverExpansionAllowance: 0,
+            // 底部留触底缓冲，配合 onReachBottom
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 48, right: 0),
+            // 两阶段：header 先完全收起，网格再内部滚动
+            headerCollapseRemaining: remainingHeader,
+            headerCollapseConsumed: consumedHeader,
+            onHeaderCollapseDelta: { delta in
+                applyHeaderCollapseDelta(delta)
+            },
+            externalScrollDownToken: gridScrollBoostToken,
+            pendingScrollDown: gridPendingScrollDown,
+            onPendingScrollDownConsumed: {
+                gridPendingScrollDown = 0
+            }
+        )
+    }
+
+    private func handleGridScrollOffset(_ offset: CGFloat) {
+        // 回顶按钮：header 已收起或网格已下滚时显示
+        let headerCollapsed = measuredFullHeaderHeight > 1
+            && headerConsumedHeight >= measuredFullHeaderHeight - 1
+        let shouldShow = offset > 300 || headerCollapsed || viewModel.items.count > 60
+        if shouldShow != showScrollToTop {
+            showScrollToTop = shouldShow
+        }
+        // 若网格已离开顶部但 header 还没收完，强制补收完（异常恢复）
+        if offset > 1, measuredFullHeaderHeight > 1,
+           headerConsumedHeight < measuredFullHeaderHeight - 0.5 {
+            applyHeaderCollapseDelta(measuredFullHeaderHeight - headerConsumedHeight)
+        }
+    }
+
+    /// 滚轮驱动 header 收起/展开。`delta > 0` 收起，`< 0` 展开。
+    private func applyHeaderCollapseDelta(_ delta: CGFloat) {
+        guard !viewModel.items.isEmpty else {
+            expandHeaderFully()
+            return
+        }
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        guard fullHeight > 1 else { return }
+
+        let target = min(fullHeight, max(0, (headerConsumedHeight + delta).rounded()))
+        guard abs(target - headerConsumedHeight) >= 0.5 else { return }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            headerConsumedHeight = target
+        }
+        if target >= fullHeight - 0.5 {
+            showScrollToTop = true
+        } else if target <= 0.5 {
+            showScrollToTop = viewModel.items.count > 60
+        }
+    }
+
+    /// 鼠标在 header 区域滚轮：与网格两阶段逻辑对齐（同壁纸探索页）。
+    private func handleHeaderAreaScrollDown(_ scrollDown: CGFloat) {
+        guard !viewModel.items.isEmpty else { return }
+        let fullHeight = max(measuredFullHeaderHeight, 0)
+        guard fullHeight > 1 else { return }
+
+        if scrollDown > 0.2 {
+            let remaining = max(0, fullHeight - headerConsumedHeight)
+            if remaining > 0.5 {
+                let apply = min(remaining, scrollDown)
+                applyHeaderCollapseDelta(apply)
+                let leftover = scrollDown - apply
+                if leftover > 0.5, headerConsumedHeight + apply >= fullHeight - 0.5 {
+                    // header 刚收完，余量推网格（通过 token 让 coordinator 执行）
+                    requestGridScrollDown(leftover)
+                }
             } else {
-                scrollViewLegacy(gridContentWidth: gridContentWidth, fullWidth: fullWidth, viewportHeight: viewportHeight)
+                requestGridScrollDown(scrollDown)
+            }
+        } else if scrollDown < -0.2 {
+            // 向上：先展开 header；header 已全开时无需处理（网格在顶）
+            let consumed = min(fullHeight, max(0, headerConsumedHeight))
+            if consumed > 0.5 {
+                applyHeaderCollapseDelta(max(-consumed, scrollDown))
             }
         }
     }
 
-    // MARK: - macOS 15+：使用 onScrollGeometryChange
+    /// 请求网格向下滚一段（header 区域滚轮余量）。
+    private func requestGridScrollDown(_ delta: CGFloat) {
+        guard delta > 0.5 else { return }
+        gridPendingScrollDown += delta
+        gridScrollBoostToken &+= 1
+    }
 
-    @available(macOS 15.0, *)
-    private func scrollViewModern(gridContentWidth: CGFloat, fullWidth: CGFloat) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("media-scroll-top")
-                    headerStack
-                    mediaGrid(contentWidth: gridContentWidth)
-                }
-                .padding(.horizontal, 28)
-                .frame(width: fullWidth, alignment: .leading)
-                .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-                // ⚡ macOS 15+ 路径不再使用 ScrollToTopHelper（NSScrollView KVO）。
-                // header mount state / 滚动到顶都通过下方 onScrollGeometryChange + ScrollViewReader 实现，
-                // 避免每帧 KVO 与 onScrollGeometryChange 重复触发同一个 handleScrollOffset 回调。
-            }
-            .onScrollGeometryChange(for: ScrollNearBottomState.self, of: { geometry in
-                let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                let distanceFromBottom = geometry.contentSize.height - bottomOffset
-                guard distanceFromBottom.isFinite else {
-                    return ScrollNearBottomState(isNearBottom: false)
-                }
-                return ScrollNearBottomState(
-                    isNearBottom: distanceFromBottom <= Self.loadMoreTriggerThreshold
-                )
-            }, action: { oldValue, newValue in
-                if newValue.isNearBottom && !oldValue.isNearBottom {
-                    // ⛔ 冷却期内不触发 loadMore
-                    if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
-                    guard !scrollCoordinator.wasNearBottom else { return }
-                    scrollCoordinator.wasNearBottom = true
-                    scheduleLoadMoreFromScroll()
-                } else if !newValue.isNearBottom && oldValue.isNearBottom {
-                    // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-                        scrollCoordinator.wasNearBottom = false
-                    }
-                }
-            })
-            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
-                geometry.contentOffset.y
-            }, action: { _, newOffset in
-                handleScrollOffset(max(0, newOffset))
-            })
-            .scrollDisabled(!isVisible)
-            .onChange(of: outerScrollToTopToken) { _, _ in
-                withAnimation(nil) {
-                    proxy.scrollTo("media-scroll-top", anchor: .top)
-                }
-            }
+    private func updateMeasuredFullHeaderHeight(_ height: CGFloat) {
+        guard height > 1 else { return }
+        guard abs(height - measuredFullHeaderHeight) > 0.5 else { return }
+        measuredFullHeaderHeight = height
+        // fullHeight 变矮时，把已消耗量钳回合法范围
+        if headerConsumedHeight > height {
+            headerConsumedHeight = height
         }
     }
 
-    // MARK: - macOS 14：使用 PreferenceKey
-
-    private func scrollViewLegacy(gridContentWidth: CGFloat, fullWidth: CGFloat, viewportHeight: CGFloat) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("media-scroll-top")
-                    headerStack
-                    mediaGrid(contentWidth: gridContentWidth)
-                    loadMoreSentinel
-                }
-                .padding(.horizontal, 28)
-                .frame(width: fullWidth, alignment: .leading)
-                .coordinateSpace(name: Self.scrollCoordinateSpaceName)
-                .background(
-                    ScrollToTopHelper(trigger: 0, onOffsetChange: handleScrollOffset)
-                        .frame(width: 0, height: 0)
-                )
-            }
-            .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
-                scrollCoordinator.sentinelDebounceTask?.cancel()
-                let task = DispatchWorkItem {
-                    handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
-                }
-                scrollCoordinator.sentinelDebounceTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
-            }
-            .scrollDisabled(!isVisible)
-            .onChange(of: outerScrollToTopToken) { _, _ in
-                withAnimation(nil) {
-                    proxy.scrollTo("media-scroll-top", anchor: .top)
-                }
-            }
+    private func expandHeaderFully() {
+        guard headerConsumedHeight != 0 else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            headerConsumedHeight = 0
         }
     }
 
@@ -380,7 +600,9 @@ struct MediaExploreContentView: View {
                 Spacer()
                 if showScrollToTop {
                     ScrollToTopButton {
-                        outerScrollToTopToken &+= 1
+                        expandHeaderFully()
+                        gridScrollToTopToken &+= 1
+                        showScrollToTop = false
                     }
                     .padding(.trailing, 8)
                     .padding(.bottom, 112)
@@ -394,27 +616,20 @@ struct MediaExploreContentView: View {
 
     // MARK: - Header
 
+    /// 空态/加载态路径使用的 header（无折叠逻辑，仅测量高度供折叠状态机使用）。
     private var headerStack: some View {
-        Group {
-            if isHeaderContentMounted {
-                headerContent
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: MediaExploreHeaderHeightPreferenceKey.self,
-                                value: proxy.size.height
-                            )
-                        }
+        headerContent
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: MediaExploreHeaderHeightPreferenceKey.self,
+                        value: proxy.size.height
                     )
-            } else {
-                Color.clear
-                    .frame(height: max(measuredHeaderHeight, 1))
+                }
+            )
+            .onPreferenceChange(MediaExploreHeaderHeightPreferenceKey.self) { height in
+                updateMeasuredFullHeaderHeight(height)
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onPreferenceChange(MediaExploreHeaderHeightPreferenceKey.self) { height in
-            updateMeasuredHeaderHeight(height)
-        }
     }
 
     private var headerContent: some View {
@@ -440,62 +655,6 @@ struct MediaExploreContentView: View {
         .fixedSize(horizontal: false, vertical: true)
         .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
         .environment(\.arcIsLightMode, arcSettings.isLightMode)
-    }
-
-    private var headerLayoutSignature: String {
-        [
-            workshopSourceManager.activeSource.rawValue,
-            selectedCategory.rawValue,
-            selectedHotTag?.id ?? "none",
-            selectedWorkshopType.id,
-            selectedWorkshopContentLevel?.id ?? "none",
-            selectedWorkshopResolution?.id ?? "none",
-            selectedWorkshopTags.map(\.id).sorted().joined(separator: ","),
-            selectedWallsflowCategorySlug,
-            selectedDongTaiCategories.map(\.rawValue).sorted().joined(separator: ","),
-            dongtaiFilterAudio.map(String.init) ?? "nil",
-            dongtaiFilterFourK.map(String.init) ?? "nil"
-        ].joined(separator: "|")
-    }
-
-    private func handleScrollOffset(_ offset: CGFloat) {
-        updateHeaderMountState(scrollOffset: offset)
-    }
-
-    private func updateHeaderMountState(scrollOffset: CGFloat) {
-        let headerHeight = measuredHeaderHeight > 1 ? measuredHeaderHeight : 260
-        let hideThreshold = headerHeight + 80
-        let showThreshold = max(0, headerHeight - 48)
-        let shouldMount = isHeaderContentMounted
-            ? scrollOffset < hideThreshold
-            : scrollOffset < showThreshold
-
-        guard shouldMount != isHeaderContentMounted else { return }
-
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            isHeaderContentMounted = shouldMount
-        }
-    }
-
-    private func updateMeasuredHeaderHeight(_ height: CGFloat) {
-        guard height > 1, abs(height - measuredHeaderHeight) > 1 else { return }
-
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            measuredHeaderHeight = height
-        }
-    }
-
-    private func invalidateHeaderMeasurement() {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            isHeaderContentMounted = true
-            measuredHeaderHeight = 0
-        }
     }
 
     // MARK: - Sections
@@ -1256,48 +1415,9 @@ struct MediaExploreContentView: View {
 
     // MARK: - Grid
 
-    private func mediaGrid(contentWidth: CGFloat) -> some View {
-        let spacing: CGFloat = ExploreGridLayout.spacing
-        let columnCount = ExploreGridLayout.columnCount(for: contentWidth)
-        let totalSpacing = spacing * CGFloat(columnCount - 1)
-        let cardWidth = max(1, floor((contentWidth - totalSpacing) / CGFloat(columnCount)))
-        let cardHeight = Self.uniformMediaCardHeight(cardWidth: cardWidth)
-        let columns = Array(
-            repeating: GridItem(.fixed(cardWidth), spacing: spacing, alignment: .topLeading),
-            count: max(1, columnCount)
-        )
-
-        return LazyVGrid(columns: columns, alignment: .leading, spacing: spacing) {
-            ForEach(viewModel.items) { media in
-                MediaCardView(
-                    media: media,
-                    // ✅ 直接读取 viewModel.favoriteIDSet，O(1) 判断
-                    isFavorite: viewModel.favoriteIDSet.contains(media.id),
-                    cardWidth: cardWidth,
-                    forcedHeight: cardHeight
-                ) {
-                    viewModel.preserveExploreFeedForDetailNavigation()
-                    selectedMedia = media
-                }
-                .equatable()
-                .frame(width: cardWidth, height: cardHeight)
-            }
-        }
-    }
-
-    /// 媒体网格的统一卡片高度（LazyVGrid 模式：所有卡片同样高度，避免瀑布流的高度抖动与
-    /// 多列 LazyVStack 在 macOS 上的协调开销）。
-    private static func uniformMediaCardHeight(cardWidth: CGFloat) -> CGFloat {
-        let bottomBarHeight: CGFloat = 44
-        // 16:10 是动态壁纸/桌面壁纸常见的视觉比例，在大多数媒体源里都是合适的中位数。
-        let imageHeight = cardWidth / (16.0 / 10.0)
-        return imageHeight + bottomBarHeight
-    }
-
-    /// 旧 API：保留以兼容外部潜在调用，内部已不再使用。
-    private static func mediaCardHeight(cardWidth: CGFloat, media: MediaItem) -> CGFloat {
-        return uniformMediaCardHeight(cardWidth: cardWidth)
-    }
+    // 媒体网格卡片几何：列数/间距沿用 ExploreGridLayout；统一卡片高宽比
+    // （16:10 封面 + 44pt 底栏）由 `MediaItem.effectiveAspectRatio(columnWidth:)` 提供，
+    // 与旧 LazyVGrid 时代的 uniformMediaCardHeight 公式一致。
 
     // MARK: - UI Components
 
@@ -1347,16 +1467,6 @@ struct MediaExploreContentView: View {
             || viewModel.isLoadingMore
             || searchTask != nil
         )
-    }
-
-    private var loadMoreSentinel: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: MediaLoadMoreSentinelMinYPreferenceKey.self,
-                value: proxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
-            )
-        }
-        .frame(height: 1)
     }
 
     // MARK: - Actions
@@ -1691,6 +1801,10 @@ struct MediaExploreContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoadingMore = false
                 }
+                // contentSize 稳定后再允许下一次触底加载（AppKit near-bottom 会反复回调）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [self] in
+                    scrollCoordinator.wasNearBottom = false
+                }
             }
         }
     }
@@ -1702,23 +1816,6 @@ struct MediaExploreContentView: View {
         }
         scrollCoordinator.pendingLoadMoreTask = task
         DispatchQueue.main.async(execute: task)
-    }
-
-    private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
-        guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
-        if isNearBottom {
-            // ⛔ 冷却期内不触发 loadMore
-            if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
-            guard !scrollCoordinator.wasNearBottom else { return }
-            scrollCoordinator.wasNearBottom = true
-            scheduleLoadMoreFromScroll()
-        } else {
-            // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-                scrollCoordinator.wasNearBottom = false
-            }
-        }
     }
 
     private func resetAllFilters(reloadData: Bool = false) {
@@ -1784,7 +1881,10 @@ struct MediaExploreContentView: View {
         isLoadingMore = false
         loadMoreFailed = false
         showScrollToTop = false
-        outerScrollToTopToken &+= 1
+        // 整表替换：滚回顶部 + 展开.header + 通知 AppKit 网格重配（数量可能恰好不变）
+        expandHeaderFully()
+        gridScrollToTopToken &+= 1
+        gridContentRefreshToken &+= 1
     }
 
     private func cancelTasks() {

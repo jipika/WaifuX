@@ -1,7 +1,9 @@
 import AppKit
 import Kingfisher
 
-private final class ExploreGridCoverImageView: NSImageView {
+/// 封面图片视图：layer.contents + contentsGravity 绘制（GIF 覆盖播放也走这里的 aspect-fill）。
+/// 文件夹叠图等场景复用。
+final class ExploreGridCoverImageView: NSImageView {
     /// 列表封面默认 `.resizeAspectFill` 铺满。
     /// 注意：cell 高度按**原图**比例自动算，但列表加载的是 Wallhaven thumb（常为横裁中心图），
     /// 预览图比例 ≠ cell 比例；若用 fit 会 letterbox 成“只显示半截”。
@@ -45,11 +47,77 @@ private final class ExploreGridCoverImageView: NSImageView {
     }
 }
 
+/// cell 根视图：右键菜单（menu(for:) 只能在 NSView 上覆写），
+/// 转发给持有它的 ExploreGridItem 子类的 cellMenu(for:)。
+final class ExploreGridItemRootView: NSView {
+    weak var owningItem: ExploreGridItem?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        owningItem?.cellMenu(for: event)
+    }
+}
+
+/// GIF 静态封面处理器：数据确为多帧 GIF 时取**中间帧**做静态封面
+/// （大量动图前几帧是黑色淡入，直接显示首帧会常驻一块黑图），
+/// 其余格式回落到 DownsamplingImageProcessor 同款逻辑。
+/// 注意必须作为第一个（唯一）处理器使用：它只处理 `.data` 输入。
+struct GIFAwareMiddleFrameImageProcessor: ImageProcessor {
+    let identifier: String
+    private let downsampleSize: CGSize
+    private let pixelScale: CGFloat
+
+    init(targetSize: CGSize, scaleFactor: CGFloat) {
+        self.downsampleSize = targetSize
+        self.pixelScale = max(1, scaleFactor)
+        self.identifier = "com.waifux.gifmid|\(Int(targetSize.width))x\(Int(targetSize.height))@\(Int(pixelScale))"
+    }
+
+    func process(item: ImageProcessItem, options: KingfisherParsedOptionsInfo) -> NSImage? {
+        switch item {
+        case .data(let data):
+            if data.starts(with: Data("GIF".utf8)),
+               let image = Self.middleFrameImage(
+                   from: data,
+                   maxPixelSize: max(downsampleSize.width, downsampleSize.height) * pixelScale
+               ) {
+                return image
+            }
+            return DownsamplingImageProcessor(size: downsampleSize).process(item: item, options: options)
+        case .image(let image):
+            return image
+        }
+    }
+
+    /// 取第 count/2 帧的缩略图。GIF 帧间的 delta 合成由 ImageIO 内部完成
+    /// （与 startAnimatingIfAnimated 的逐帧采样同一路径，已在库页验证无残影）。
+    static func middleFrameImage(from data: Data, maxPixelSize: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(source)
+        guard count > 1 else { return nil }
+        let index = count / 2
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize),
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: .zero)
+    }
+}
+
 /// 通用网格 Cell 基类
 /// 支持 Cell 复用（prepareForReuse）、图片加载/取消、hover 缩放效果
 class ExploreGridItem: NSCollectionViewItem {
 
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("ExploreGridItem")
+
+    /// 该 cell 类在 NSCollectionView 里的注册标识。混排网格（如我的库
+    /// 「文件夹 + 项目」）按类注册/复用；子类可覆写提供独立标识。
+    class var gridReuseIdentifier: NSUserInterfaceItemIdentifier {
+        ExploreGridItem.reuseIdentifier
+    }
 
     // MARK: - 子视图
 
@@ -65,6 +133,22 @@ class ExploreGridItem: NSCollectionViewItem {
         iv.layer?.contentsGravity = .resizeAspectFill
         iv.layer?.minificationFilter = .trilinear
         iv.layer?.magnificationFilter = .trilinear
+        return iv
+    }()
+
+    /// 动画 GIF 覆盖层。默认隐藏，启用的 cell 在 hover 时叠在静态封面上，
+    /// 保持旧 SwiftUI ZStack 的底图常驻语义，避免切换播放层时短暂露出空白。
+    private let gifOverlayImageView: NSImageView = {
+        let iv = ExploreGridCoverImageView()
+        iv.imageScaling = .scaleAxesIndependently
+        iv.wantsLayer = true
+        iv.layerContentsRedrawPolicy = .never
+        iv.layer?.cornerRadius = 14
+        iv.layer?.masksToBounds = true
+        iv.layer?.contentsGravity = .resizeAspectFill
+        iv.layer?.minificationFilter = .trilinear
+        iv.layer?.magnificationFilter = .trilinear
+        iv.isHidden = true
         return iv
     }()
 
@@ -122,6 +206,17 @@ class ExploreGridItem: NSCollectionViewItem {
     private var animationTimer: Timer?
     private var animatedFrames: [(image: NSImage, duration: TimeInterval)] = []
     private var currentFrameIndex: Int = 0
+    private static let animatedGIFDataCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.countLimit = 4
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
+    private nonisolated static let maxAnimatedGIFDataBytes = 32 * 1024 * 1024
+    private struct PreparedGIFFrame: @unchecked Sendable {
+        let image: CGImage
+        let duration: TimeInterval
+    }
     var hoverExpansionAllowance: CGFloat = 0 {
         didSet {
             guard abs(hoverExpansionAllowance - oldValue) > 0.5 else { return }
@@ -132,6 +227,13 @@ class ExploreGridItem: NSCollectionViewItem {
 
     var shouldAnimateScaleOnHover: Bool { true }
     var shouldAnimateBorderOnHover: Bool { true }
+    /// 子类开启后，hover 时卡片获得投影（默认关：壁纸探索卡片常态无投影）。
+    /// 投影挂在未裁切的 cardSurfaceView layer 上，非 hover 态 opacity=0，零合成开销。
+    var shouldShowShadowOnHover: Bool { false }
+    /// 子类需要在静态封面上叠加 GIF 时开启，静态封面本身不会被动画帧替换。
+    var usesGIFOverlay: Bool { false }
+    /// 编辑态等场景可关闭 hover；已有 hover 在配置切换时由子类主动清理。
+    var allowsHoverInteraction: Bool { true }
     var hoverScaleFactor: CGFloat { 1.035 }
     var hoverOverlayMaxOpacity: Float { 0.02 }
 
@@ -160,7 +262,9 @@ class ExploreGridItem: NSCollectionViewItem {
     }
 
     override func loadView() {
-        view = NSView()
+        let rootView = ExploreGridItemRootView()
+        rootView.owningItem = self
+        view = rootView
         view.wantsLayer = true
         view.layer?.masksToBounds = false
         // 不关闭 translatesAutoresizingMaskIntoConstraints：NSCollectionView 在 tile() 中
@@ -174,6 +278,7 @@ class ExploreGridItem: NSCollectionViewItem {
         cardSurfaceView.layer?.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         cardSurfaceView.addSubview(containerView)
         containerView.addSubview(coverImageView)
+        containerView.addSubview(gifOverlayImageView)
         containerView.addSubview(contentView)
         cardSurfaceView.layer?.addSublayer(borderLayer)
         cardSurfaceView.layer?.allowsEdgeAntialiasing = false
@@ -194,6 +299,8 @@ class ExploreGridItem: NSCollectionViewItem {
         loadTask = nil
         currentLoadingURL = nil
         currentLoadingTargetSize = .zero
+        // 先恢复快照再清空封面，避免动画帧残留到下一个 item
+        stopGIFOverlayPlayback()
         coverImageView.image = nil
         stopAnimating()
 
@@ -206,6 +313,8 @@ class ExploreGridItem: NSCollectionViewItem {
         normalBorderColor = NSColor.white.withAlphaComponent(0.06)
         borderLayer.borderWidth = normalBorderWidth
         borderLayer.borderColor = normalBorderColor.cgColor
+        // 复用不走 setHovered 路径，这里显式清掉可能残留的 hover 投影
+        applyHoverShadow(false)
     }
 
     /// 子类调用此方法来设置常态边框（hover 效果会在此基础上叠加）
@@ -233,6 +342,7 @@ class ExploreGridItem: NSCollectionViewItem {
     private func setupLayout() {
         containerView.translatesAutoresizingMaskIntoConstraints = true
         coverImageView.translatesAutoresizingMaskIntoConstraints = true
+        gifOverlayImageView.translatesAutoresizingMaskIntoConstraints = true
         contentView.translatesAutoresizingMaskIntoConstraints = true
     }
 
@@ -247,6 +357,14 @@ class ExploreGridItem: NSCollectionViewItem {
         contentView.frame = containerView.bounds
     }
 
+    /// 让动画覆盖层始终与当前静态封面区域一致。库卡片的封面不占整张 card，
+    /// 因此不能只把覆盖层铺满 container。
+    func syncGIFOverlayFrame() {
+        gifOverlayImageView.frame = coverImageView.frame
+        gifOverlayImageView.layer?.cornerRadius = coverImageView.layer?.cornerRadius ?? 0
+        gifOverlayImageView.layer?.maskedCorners = coverImageView.layer?.maskedCorners ?? []
+    }
+
     // MARK: - 配置
 
     /// 子类重写此方法来配置 Cell 内容
@@ -256,6 +374,12 @@ class ExploreGridItem: NSCollectionViewItem {
 
     func hoverStateDidChange(_ hovering: Bool) {
         // 子类按需覆写
+    }
+
+    /// 子类覆写：返回右键菜单。由根视图 ExploreGridItemRootView.menu(for:) 触发
+    /// （menu(for:) 只能在 NSView 子类上覆写，controller 链不允许 override）。
+    func cellMenu(for event: NSEvent) -> NSMenu? {
+        nil
     }
 
     /// 加载图片。传入单个 URL，使用 Kingfisher 内置缓存。
@@ -273,9 +397,22 @@ class ExploreGridItem: NSCollectionViewItem {
         }
     }
 
-    /// 加载图片。在候选 URL 中选**更清晰**的一档显示。
+    /// 加载图片。在候选 URL 中选**比例匹配里更清晰**的一档显示。
     /// - Parameter targetSize: **点**尺寸（显示区域）。Downsampling 用 size×scaleFactor 得像素。
-    func loadImage(urls: [URL], targetSize: CGSize) {
+    /// - Parameter preferredAspectRatio: 封面显示区的宽高比（w/h，点单位即可）。
+    ///   提供后比例匹配优先于清晰度：Wallhaven 缩略图实测 lg 恒为 432×243（16:9 中心横裁）、
+    ///   small 恒为 300×200（3:2 横裁）、仅 orig 保原图比例但长边只有 300px。
+    ///   旧逻辑只比像素边，竖卡上 lg(432) 恒胜 orig(300)，结果显示横裁条再被 fill 放大——
+    ///   即“竖图显示不完整且模糊”的根因。
+    ///   提供该参数时启用渐进上屏：比例匹配的低清候选先显示，更高清候选下载完成后原地升级。
+    /// - Parameter preferGIFMiddleFrame: true 时静态封面用 GIFAwareMiddleFrameImageProcessor：
+    ///   候选确为多帧 GIF 就显示中间帧而非首帧（规避黑色开场帧常驻封面）。
+    func loadImage(
+        urls: [URL],
+        targetSize: CGSize,
+        preferredAspectRatio: CGFloat? = nil,
+        preferGIFMiddleFrame: Bool = false
+    ) {
         guard !urls.isEmpty else { return }
 
         let pointSize = CGSize(
@@ -310,7 +447,11 @@ class ExploreGridItem: NSCollectionViewItem {
             guard let self else { return }
 
             let options: KingfisherOptionsInfo = [
-                .processor(DownsamplingImageProcessor(size: pointSize)),
+                .processor(
+                    preferGIFMiddleFrame
+                        ? GIFAwareMiddleFrameImageProcessor(targetSize: pointSize, scaleFactor: CGFloat(scale))
+                        : DownsamplingImageProcessor(size: pointSize)
+                ),
                 .scaleFactor(CGFloat(scale)),
                 .backgroundDecode,
                 .retryStrategy(DelayRetryStrategy(maxRetryCount: 1, retryInterval: .seconds(0.5))),
@@ -338,19 +479,54 @@ if let host = req.url?.host?.lowercased() {
 
             // 选最清晰的一档：达到 goodEnough 立即停；否则保留边缘最大的结果。
             // image.size 在 macOS 上多为点，乘 scale 估像素边。
+            // preferredAspectRatio 提供时按「比例匹配 > 像素边」两级评分：
+            // 比例不匹配的候选（如竖卡上的 16:9 横裁 lg）再大也不选，
+            // 否则 fill 会把它裁成中间一条；比例接近的允许 fill 微裁换更高清晰度。
             var bestImage: NSImage?
             var bestEdge: CGFloat = 0
+            var bestAspectMatched = preferredAspectRatio == nil
             for url in urls {
                 guard !Task.isCancelled else { return }
                 guard let image = await self.retrieveImageCancellable(url: url, options: options) else {
                     continue
                 }
-                let imageEdge = max(image.size.width, image.size.height) * scale
-                if imageEdge > bestEdge {
+                let pixelWidth = image.size.width * scale
+                let pixelHeight = image.size.height * scale
+                let imageEdge = max(pixelWidth, pixelHeight)
+
+                var aspectMatched = true
+                if let preferredAspectRatio, pixelHeight > 0 {
+                    let imageAspect = pixelWidth / pixelHeight
+                    // 对称 20% 容差：接近就当作匹配（fill 微裁可接受）；
+                    // 横裁档与竖卡比例差远超 20%，会被稳定排除。
+                    let aspectDiff = abs(imageAspect - preferredAspectRatio)
+                    aspectMatched = aspectDiff <= max(preferredAspectRatio, imageAspect) * 0.2
+                }
+
+                let better: Bool
+                if bestImage == nil {
+                    better = true
+                } else if aspectMatched != bestAspectMatched {
+                    better = aspectMatched
+                } else {
+                    better = imageEdge > bestEdge
+                }
+                if better {
                     bestImage = image
                     bestEdge = imageEdge
+                    bestAspectMatched = aspectMatched
+                    // 渐进上屏（仅比例优先模式，即壁纸网格）：低清保底候选一到就先显示，
+                    // 高清 full 原图下载完成后由后续迭代原地升级，避免竖卡长时间停在骨架。
+                    // Media/Anime 未传 preferredAspectRatio，保持旧的「循环结束统一上屏」行为。
+                    if preferredAspectRatio != nil, aspectMatched, !Task.isCancelled {
+                        let candidate = image
+                        _ = await MainActor.run { [weak self] in
+                            guard let self, !Task.isCancelled else { return }
+                            self.coverImageView.image = candidate
+                        }
+                    }
                 }
-                if imageEdge >= goodEnoughPixelEdge {
+                if aspectMatched, imageEdge >= goodEnoughPixelEdge {
                     break
                 }
             }
@@ -423,16 +599,22 @@ if let host = req.url?.host?.lowercased() {
     /// 从已下载的图片数据检测并启动动画。data 是 Kingfisher 下载的原始数据。
     /// 内存保护：最多解码 50 帧，每帧用 ImageIO 缩略图接口下采样到封面视图尺寸，
     /// 避免大 GIF（如 4K 分辨率的 Steam 封面动图）单帧解码即可达 8MB，累积数十帧后撑爆内存。
-    func startAnimatingIfAnimated(data: Data) {
+    /// - Parameter startingAtMiddleFrame: true 时从中间帧起播并先显示中间帧。
+    ///   大量动图前几帧是黑色淡入；从中间帧开始可避免 hover 起始闪黑，
+    ///   且无需对每帧做「是否黑帧」的额外检测。
+    /// - Returns: 是否成功启动动画（数据非多帧 GIF / 解码失败时返回 false）。
+    @discardableResult
+    func startAnimatingIfAnimated(data: Data, startingAtMiddleFrame: Bool = false) -> Bool {
         stopAnimating()
-        guard let cgSource = CGImageSourceCreateWithData(data as CFData, nil) else { return }
+        guard let cgSource = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
         let count = CGImageSourceGetCount(cgSource)
-        guard count > 1 else { return }
+        guard count > 1 else { return false }
 
         // 限制最大帧数并计算采样步长（列表中 20 帧足够流畅，减少内存和解码压力）
         let maxFrames = 20
         let frameStep = max(1, count / maxFrames)
-        let maxPixel = Int(max(coverImageView.bounds.width, coverImageView.bounds.height) * 3)
+        let maxPixel = gifFrameMaxPixelSize
+        let targetImageView = usesGIFOverlay ? gifOverlayImageView : coverImageView
 
         var frames: [(image: NSImage, duration: TimeInterval)] = []
         let options: [CFString: Any] = [
@@ -448,12 +630,132 @@ if let host = req.url?.host?.lowercased() {
             }
             i += frameStep
         }
-        guard !frames.isEmpty else { return }
+        guard !frames.isEmpty else { return false }
 
         animatedFrames = frames
-        currentFrameIndex = 0
-        coverImageView.image = frames[0].image
+        currentFrameIndex = startingAtMiddleFrame ? frames.count / 2 : 0
+        targetImageView.image = frames[currentFrameIndex].image
         advanceFrameRepeating()
+        return true
+    }
+
+    /// 在后台准备 GIF 帧。hover 时不能在主线程一次性解码整组 GIF，
+    /// 否则卡片已经放大了，但首个动画帧还要等主线程解码完成。
+    @MainActor
+    func playGIFOverlayAsync(data: Data) async -> Bool {
+        guard isHoverInteractionEnabled, isHovered, !Task.isCancelled else {
+            return false
+        }
+        let maxPixel = gifFrameMaxPixelSize
+        let preparedFrames = await Self.prepareGIFFrames(
+            data: data,
+            maxPixelSize: maxPixel
+        )
+        guard isHoverInteractionEnabled, isHovered, !Task.isCancelled else {
+            return false
+        }
+        guard installPreparedGIFFrames(preparedFrames, startingAtMiddleFrame: true) else {
+            stopGIFOverlayPlayback()
+            return false
+        }
+        if usesGIFOverlay {
+            gifOverlayImageView.isHidden = false
+            isPlayingGIFOverlay = true
+        }
+        return true
+    }
+
+    private func installPreparedGIFFrames(
+        _ preparedFrames: [PreparedGIFFrame],
+        startingAtMiddleFrame: Bool
+    ) -> Bool {
+        stopAnimating()
+        guard !preparedFrames.isEmpty else { return false }
+
+        animatedFrames = preparedFrames.map {
+            (image: NSImage(cgImage: $0.image, size: .zero), duration: $0.duration)
+        }
+        currentFrameIndex = startingAtMiddleFrame ? animatedFrames.count / 2 : 0
+        let targetImageView = usesGIFOverlay ? gifOverlayImageView : coverImageView
+        targetImageView.image = animatedFrames[currentFrameIndex].image
+        advanceFrameRepeating()
+        return true
+    }
+
+    private static func prepareGIFFrames(
+        data: Data,
+        maxPixelSize: Int
+    ) async -> [PreparedGIFFrame] {
+        let decodeTask: Task<[PreparedGIFFrame], Never> = Task.detached(priority: .userInitiated) {
+            guard !Task.isCancelled,
+                  let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                return []
+            }
+
+            let count = CGImageSourceGetCount(source)
+            guard count > 1 else { return [] }
+
+            let maxFrames = 20
+            let frameStep = max(1, (count + maxFrames - 1) / maxFrames)
+            let options: [CFString: Any] = [
+                kCGImageSourceShouldCache: false,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(64, maxPixelSize),
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+
+            var frames: [PreparedGIFFrame] = []
+            frames.reserveCapacity(min(count, maxFrames))
+            var index = 0
+            while index < count, frames.count < maxFrames {
+                guard !Task.isCancelled else { return [] }
+
+                let endIndex = min(count, index + frameStep)
+                let duration = (index..<endIndex)
+                    .reduce(0) { $0 + frameDuration(at: $1, source: source) }
+
+                if let image = CGImageSourceCreateThumbnailAtIndex(
+                    source,
+                    index,
+                    options as CFDictionary
+                ) {
+                    frames.append(
+                        PreparedGIFFrame(
+                            image: image,
+                            duration: max(duration, 0.05)
+                        )
+                    )
+                }
+                index = endIndex
+            }
+            return frames
+        }
+        return await withTaskCancellationHandler(operation: {
+            await decodeTask.value
+        }, onCancel: {
+            decodeTask.cancel()
+        })
+    }
+
+    private nonisolated static func validateAnimatedGIFData(
+        _ data: Data,
+        maxByteCount: Int
+    ) async -> Data? {
+        let validationTask: Task<Data?, Never> = Task.detached(priority: .utility) {
+            guard !Task.isCancelled,
+                  data.count <= maxByteCount,
+                  data.starts(with: Data("GIF".utf8)),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetCount(source) > 1 else {
+                return nil
+            }
+            return data
+        }
+        return await withTaskCancellationHandler(operation: {
+            await validationTask.value
+        }, onCancel: {
+            validationTask.cancel()
+        })
     }
 
     func stopAnimating() {
@@ -463,7 +765,133 @@ if let host = req.url?.host?.lowercased() {
         currentFrameIndex = 0
     }
 
+    // MARK: - Hover GIF 覆盖播放
+    //
+    // 与 Kingfisher AnimatedImageView 叠层的旧方案相比：
+    // 1. 逐帧直接画进 ExploreGridCoverImageView（contentsGravity = .resizeAspectFill），
+    //    动画画面与静态封面**同比例铺满**卡片；AnimatedImageView.updateLayer 会按
+    //    imageScaling 强制 .resizeAspect（letterbox），NSImageScaling 无任何值能映射到
+    //    aspectFill —— 这就是旧方案 GIF 显示成“固定方块”的根因。
+    // 2. 从中间帧起播，避开黑色开场帧。
+    // 3. 动画帧最多 20 帧且按封面尺寸下采样（见 startAnimatingIfAnimated），内存有界。
+
+    /// 是否正在覆盖播放 hover GIF。
+    private(set) var isPlayingGIFOverlay = false
+
+    /// 在封面视图上播放 GIF（中间帧起播）。
+    /// 启用覆盖层的 cell 不会替换静态封面，停止时只隐藏动画层。
+    @discardableResult
+    func playGIFOverlay(data: Data) -> Bool {
+        guard isHoverInteractionEnabled, isHovered else {
+            return false
+        }
+        guard usesGIFOverlay else {
+            return startAnimatingIfAnimated(data: data, startingAtMiddleFrame: true)
+        }
+        guard startAnimatingIfAnimated(data: data, startingAtMiddleFrame: true) else {
+            stopGIFOverlayPlayback()
+            return false
+        }
+        gifOverlayImageView.isHidden = false
+        isPlayingGIFOverlay = true
+        return true
+    }
+
+    /// 停止覆盖播放并隐藏动画层。
+    func stopGIFOverlayPlayback() {
+        isPlayingGIFOverlay = false
+        stopAnimating()
+        gifOverlayImageView.image = nil
+        gifOverlayImageView.isHidden = true
+    }
+
+    /// 拉取 URL 的原始动画数据，不经过 Kingfisher 的静态处理器。
+    /// 处理器会把 GIF 压成单帧 NSImage，之后再调用 gifRepresentation 已无法保证
+    /// 仍保留全部帧；直接取原始字节才能与旧 KFAnimatedImage 的播放语义一致。
+    func retrieveAnimatedGIFData(from url: URL) async -> Data? {
+        let cacheKey = url.absoluteString as NSString
+        if let cached = Self.animatedGIFDataCache.object(forKey: cacheKey) {
+            return cached as Data
+        }
+
+        if url.isFileURL {
+            let readTask: Task<Data?, Never> = Task.detached(priority: .utility) {
+                guard !Task.isCancelled else { return nil }
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      let fileSize = attributes[.size] as? NSNumber,
+                      fileSize.intValue <= Self.maxAnimatedGIFDataBytes else {
+                    return nil
+                }
+                guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+                      let source = CGImageSourceCreateWithData(data as CFData, nil),
+                      CGImageSourceGetCount(source) > 1 else {
+                    return nil
+                }
+                return data
+            }
+            let data: Data? = await withTaskCancellationHandler(operation: {
+                await readTask.value
+            }, onCancel: {
+                readTask.cancel()
+            })
+            if let data {
+                Self.animatedGIFDataCache.setObject(
+                    data as NSData,
+                    forKey: cacheKey,
+                    cost: data.count
+                )
+            }
+            return data
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.cachePolicy = .returnCacheDataElseLoad
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        if let host = url.host?.lowercased() {
+            if host.contains("steam") || host.contains("akamaihd") {
+                request.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+            } else if host.contains("pximg.net") {
+                request.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+            } else if host.contains("wallsflow.com") {
+                request.setValue(WallsflowService.siteOrigin, forHTTPHeaderField: "Referer")
+            } else if host.contains("konachan.net") || host.contains("konachan.com") {
+                request.setValue(KonachanRequestConfiguration.browserUserAgent, forHTTPHeaderField: "User-Agent")
+                request.setValue(
+                    KonachanRequestConfiguration.referer(for: url),
+                    forHTTPHeaderField: "Referer"
+                )
+            }
+        }
+        request.setValue("image/gif,image/*;q=0.8,*/*;q=0.5", forHTTPHeaderField: "Accept")
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              !Task.isCancelled,
+              (response as? HTTPURLResponse).map({ 200..<300 ~= $0.statusCode }) ?? true,
+              let validatedData = await Self.validateAnimatedGIFData(
+                  data,
+                  maxByteCount: Self.maxAnimatedGIFDataBytes
+              ),
+              !Task.isCancelled else {
+            return nil
+        }
+        Self.animatedGIFDataCache.setObject(
+            validatedData as NSData,
+            forKey: cacheKey,
+            cost: validatedData.count
+        )
+        return validatedData
+    }
+
     private func advanceFrameRepeating() {
+        guard !animatedFrames.isEmpty else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            return
+        }
         guard currentFrameIndex < animatedFrames.count else {
             currentFrameIndex = 0
             advanceFrameRepeating()
@@ -472,16 +900,37 @@ if let host = req.url?.host?.lowercased() {
         let dur = max(animatedFrames[currentFrameIndex].duration, 0.05)
         animationTimer = Timer.scheduledTimer(withTimeInterval: dur, repeats: false) { [weak self] _ in
             guard let self else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                currentFrameIndex = (currentFrameIndex + 1) % animatedFrames.count
-                coverImageView.image = animatedFrames[currentFrameIndex].image
-                advanceFrameRepeating()
+            MainActor.assumeIsolated {
+                guard !self.animatedFrames.isEmpty else { return }
+                self.currentFrameIndex = (self.currentFrameIndex + 1) % self.animatedFrames.count
+                let targetImageView = self.usesGIFOverlay
+                    ? self.gifOverlayImageView
+                    : self.coverImageView
+                targetImageView.image = self.animatedFrames[self.currentFrameIndex].image
+                self.advanceFrameRepeating()
             }
         }
     }
 
-    private static func frameDuration(at index: Int, source: CGImageSource) -> TimeInterval {
+    /// GIF 帧只需要覆盖当前卡片的实际像素密度。
+    /// 3 倍卡片边长会在 Retina 屏上额外放大解码内存，却不会改善最终显示。
+    private var gifFrameMaxPixelSize: Int {
+        let scale = min(
+            max(
+                view.window?.backingScaleFactor
+                    ?? NSScreen.main?.backingScaleFactor
+                    ?? 2,
+                1
+            ),
+            2
+        )
+        return max(
+            64,
+            Int(max(coverImageView.bounds.width, coverImageView.bounds.height) * scale)
+        )
+    }
+
+    private nonisolated static func frameDuration(at index: Int, source: CGImageSource) -> TimeInterval {
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
               let gifProps = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] else { return 0.1 }
         if let dur = gifProps[kCGImagePropertyGIFDelayTime] as? NSNumber, dur.doubleValue > 0 { return dur.doubleValue }
@@ -519,10 +968,10 @@ if let host = req.url?.host?.lowercased() {
     }
 
     func setHoverInteractionEnabled(_ enabled: Bool) {
-        guard isHoverInteractionEnabled != enabled else { return }
         isHoverInteractionEnabled = enabled
 
         if !enabled {
+            // 即使开关本身已经是 false，也要清理复用或异步回调留下的状态。
             setHovered(false, animated: false)
         }
     }
@@ -563,7 +1012,8 @@ if let host = req.url?.host?.lowercased() {
     }
 
     private func setHovered(_ hovering: Bool, animated: Bool) {
-        guard isHovered != hovering || !animated else { return }
+        guard isHovered != hovering else { return }
+        guard !hovering || allowsHoverInteraction else { return }
 
         if hovering {
             clearSiblingHoverStates()
@@ -580,15 +1030,13 @@ if let host = req.url?.host?.lowercased() {
             layoutCardFrame()
             applyCardTransform(hovering: hovering)
             if shouldAnimateBorderOnHover {
-                borderLayer.borderWidth = hovering ? hoverBorderWidth() : normalBorderWidth
-                let borderAlpha = hovering
-                    ? hoverBorderAlpha(for: normalBorderColor)
-                    : normalBorderColor.alphaComponent
-                borderLayer.borderColor = normalBorderColor.withAlphaComponent(borderAlpha).cgColor
+                borderLayer.borderWidth = effectiveHoverBorderWidth(for: hovering)
+                borderLayer.borderColor = effectiveHoverBorderColor(for: hovering).cgColor
             } else {
-                borderLayer.borderWidth = normalBorderWidth
-                borderLayer.borderColor = normalBorderColor.cgColor
+                borderLayer.borderWidth = effectiveHoverBorderWidth(for: false)
+                borderLayer.borderColor = effectiveHoverBorderColor(for: false).cgColor
             }
+            applyHoverShadow(hovering)
         }
     }
 
@@ -603,17 +1051,38 @@ if let host = req.url?.host?.lowercased() {
         if shouldAnimateBorderOnHover {
             animateBorderHover(hovering)
         } else {
-            borderLayer.borderWidth = normalBorderWidth
-            borderLayer.borderColor = normalBorderColor.cgColor
+            borderLayer.borderWidth = effectiveHoverBorderWidth(for: false)
+            borderLayer.borderColor = effectiveHoverBorderColor(for: false).cgColor
         }
+        applyHoverShadow(hovering)
+    }
+
+    /// hover 投影（子类按需开启）。offset 高度为负：非翻转视图里 y 向上为正，
+    /// 负值才把影子投向"视觉下方"，与 SwiftUI 卡片 shadow(x:0, y:6) 对齐。
+    /// shadowPath 用圆角矩形，避免离屏按 alpha 求影子轮廓。
+    private func applyHoverShadow(_ hovering: Bool) {
+        guard shouldShowShadowOnHover, let layer = cardSurfaceView.layer else { return }
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = hovering ? 0.20 : 0
+        layer.shadowRadius = 10
+        layer.shadowOffset = CGSize(width: 0, height: -6)
+        refreshHoverShadowPath()
+    }
+
+    private func refreshHoverShadowPath() {
+        guard shouldShowShadowOnHover, let layer = cardSurfaceView.layer else { return }
+        let radius = min(cardCornerRadius, min(layer.bounds.width, layer.bounds.height) / 2)
+        layer.shadowPath = CGPath(
+            roundedRect: layer.bounds,
+            cornerWidth: radius,
+            cornerHeight: radius,
+            transform: nil
+        )
     }
 
     private func animateBorderHover(_ hovering: Bool) {
-        let targetWidth = hovering ? hoverBorderWidth() : normalBorderWidth
-        let targetAlpha = hovering
-            ? hoverBorderAlpha(for: normalBorderColor)
-            : normalBorderColor.alphaComponent
-        let targetColor = normalBorderColor.withAlphaComponent(targetAlpha)
+        let targetWidth = effectiveHoverBorderWidth(for: hovering)
+        let targetColor = effectiveHoverBorderColor(for: hovering)
 
         let oldWidth = borderLayer.presentation()?.borderWidth ?? borderLayer.borderWidth
         let oldColor = borderLayer.presentation()?.borderColor ?? borderLayer.borderColor
@@ -659,7 +1128,9 @@ if let host = req.url?.host?.lowercased() {
         }
         containerView.frame = cardSurfaceView.bounds
         layoutContentFrames()
+        syncGIFOverlayFrame()
         borderLayer.frame = cardSurfaceView.bounds
+        refreshHoverShadowPath()
     }
 
     private func cardTransform(hovering: Bool) -> CATransform3D {
@@ -705,7 +1176,20 @@ if let host = req.url?.host?.lowercased() {
         normalBorderWidth + 0.5
     }
 
-    private func hoverBorderAlpha(for color: NSColor) -> CGFloat {
+    /// 子类可覆盖，例如文件夹拖放目标需要压过普通 hover 边框。
+    func effectiveHoverBorderWidth(for hovering: Bool) -> CGFloat {
+        hovering ? hoverBorderWidth() : normalBorderWidth
+    }
+
+    /// 子类可覆盖，例如文件夹拖放目标需要保持强调色。
+    func effectiveHoverBorderColor(for hovering: Bool) -> NSColor {
+        if hovering {
+            return normalBorderColor.withAlphaComponent(hoverBorderAlpha(for: normalBorderColor))
+        }
+        return normalBorderColor
+    }
+
+    func hoverBorderAlpha(for color: NSColor) -> CGFloat {
         let alpha = color.alphaComponent
         return alpha < 0.5 ? 0.18 : alpha
     }

@@ -391,14 +391,8 @@ enum LocalWallpaperApplyService {
             userProperties: userProps,
             requireAllTargetScreens: options.isGlobalTransaction
         )
-        // companion bake：已有产物直接复用；关闭自动烘焙且无产物时临时烘 1 秒，只保留高清 poster。
-        if scheduleSceneCompanionBake {
-            SceneOfflineBakeService.scheduleRealtimeCompanionBake(
-                path: path,
-                targetScreens: screens,
-                reason: options.reason
-            )
-        }
+        // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，
+        // 覆盖启动恢复、显示器重连等绕过本服务的 Scene 设置入口。
     }
 
     private static func hasWebSceneTimer(for screen: NSScreen) -> Bool {
