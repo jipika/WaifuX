@@ -1296,6 +1296,12 @@ final class WallpaperEngineXBridge: ObservableObject {
         let bakedStaticScreens = effectiveScreens.filter { screen in
             screenRenderStates[screen.wallpaperScreenIdentifier]?.path == resolvedPath
         }
+        print(
+            "[ScenePosterDiag] setWallpaper 成功路径: renderKind=\(renderKind.rawValue) "
+                + "effectiveScreens=\(effectiveScreens.count) bakedStaticScreens=\(bakedStaticScreens.count) "
+                + "statePaths=[\(screenRenderStates.values.map { ($0.path as NSString).lastPathComponent }.joined(separator: ", "))] "
+                + "resolved=\((resolvedPath as NSString).lastPathComponent)"
+        )
         scheduleBakedCoverSync(
             path: resolvedPath,
             targetScreens: bakedStaticScreens
@@ -1307,6 +1313,11 @@ final class WallpaperEngineXBridge: ObservableObject {
                 path: resolvedPath,
                 targetScreens: bakedStaticScreens,
                 reason: "renderer-set"
+            )
+        } else {
+            print(
+                "[ScenePosterDiag] ⚠️ 跳过伴生抽帧调度: renderKind=\(renderKind.rawValue) "
+                    + "bakedStaticScreens=\(bakedStaticScreens.isEmpty ? "空(渲染状态path与resolvedPath不匹配?)" : "非空")"
             )
         }
 
@@ -1601,6 +1612,61 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
         }
         updateExternalPausedStateFromPerScreenPauses()
+    }
+
+    /// 用户主动单屏关闭（状态栏菜单）：scene 终止该屏 wallpaper-wgpu 进程；
+    /// web 按屏 IPC 拆除该屏 WKWebView 窗口（daemon 保持运行）。
+    /// 与断屏保留 orphan 恢复态不同：主动关闭会删除该屏 render state，
+    /// 重插显示器 / 重启 App 后不再自动恢复该屏，其余屏幕不受影响。
+    func stopWallpaper(forScreenID screenID: String) {
+        guard isControllingExternalEngine else { return }
+
+        let isManagedScreen = screenProcesses[screenID] != nil
+            || screenRenderStates[screenID] != nil
+            || targetScreenIDs.contains(screenID)
+        guard isManagedScreen else {
+            print("[WallpaperEngineXBridge] stopWallpaper(forScreenID): 屏幕 \(screenID) 无 WE 壁纸，跳过")
+            return
+        }
+
+        if screenProcesses[screenID] != nil {
+            // scene：独立进程。stopScreenProcess 会级联清理该屏 render state、
+            // 重算控制标志（isControllingExternalEngine/targetScreenIDs 等）并持久化。
+            Task { await stopScreenProcess(screenID) }
+        } else {
+            // web：daemon 保持运行，仅按屏停止；Host 侧对称清理状态。
+            if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
+               let screenIndex = Self.legacyCLIScreenIndex(for: screen) {
+                Task {
+                    if let status = try? await Self.runLegacyCLIClientCommand(["stop-screen", String(screenIndex)]),
+                       status != 0 {
+                        print("[WallpaperEngineXBridge] ⚠️ 单屏关闭 Web 壁纸失败 screen=\(screenIndex) exit=\(status)")
+                    }
+                }
+            }
+            screenRenderStates.removeValue(forKey: screenID)
+            removeScreenProcess(screenID)
+            updateControlStateFromScreenStates()
+            persistState()
+            processPendingTermination()
+        }
+
+        perScreenPausedScreenIDs.remove(screenID)
+        renderStateChangeCount &+= 1
+        updateExternalPausedStateFromPerScreenPauses()
+
+        // 全部屏关闭 → 对齐全局关闭收尾：停 web daemon 与音频/媒体 relay。
+        // （stop client 自身可能再 fork daemon，kill 兜底按 PID 清掉，顺序执行）
+        if !isControllingExternalEngine {
+            isExternalPaused = false
+            perScreenPausedScreenIDs.removeAll()
+            stopAudioRelayIfActive()
+            stopMediaRelayIfActive()
+            Task {
+                try? await Self.runLegacyCLIClientCommand(["stop"])
+                await Self.killLegacyDaemonIfRunning(waitForExit: false)
+            }
+        }
     }
 
     /// 指定屏幕当前是否已由全局或按屏策略暂停。
@@ -3004,12 +3070,67 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         do {
             try process.run()
+            startRendererMemoryWatchdog(process: process, screenID: screenID)
             print("[WallpaperEngineXBridge] ✅ launchRendererProcess: 渲染进程已启动 screen=\(screenID) pid=\(process.processIdentifier)")
             return RendererLaunch(process: process, logFile: logFile)
         } catch {
             print("[WallpaperEngineXBridge] ❌ launchRendererProcess: 渲染进程启动失败 screen=\(screenID) error=\(error.localizedDescription)")
             print("[WallpaperEngineXBridge] ❌ launchRendererProcess: executableURL=\(executableURL.path) cwd=\(executableURL.deletingLastPathComponent().path)")
             throw error
+        }
+    }
+
+    /// 实时渲染进程内存看门狗。
+    ///
+    /// wallpaper-wgpu `--wallpaper` 是长驻全屏 Metal 进程，此前没有任何内存监控
+    /// （烘焙/预览子进程各有 1.5GB 看门狗，这里没有），异常场景下会无限膨胀
+    /// 拖垮系统。phys_footprint 超限 → 记日志并终止该屏进程；进程退出后由
+    /// `processPendingTermination` 照常清理 screenProcesses/renderStates，
+    /// Scene 渲染进程没有自动重启逻辑，不会产生重启循环。
+    /// 阈值默认 2560MB，可用 UserDefaults `scene_renderer_memory_limit_mb` 覆盖；
+    /// 启动后 10s 内不采样，避免场景加载期的正常瞬时峰值误杀。
+    private func startRendererMemoryWatchdog(process: Process, screenID: String) {
+        let pid = process.processIdentifier
+        let limitMB = UInt64(max(512, UserDefaults.standard.object(forKey: "scene_renderer_memory_limit_mb") as? Int ?? 2560))
+        let limitBytes = limitMB * 1_048_576
+        let startedAt = Date()
+        let graceInterval: TimeInterval = 10
+        Task(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard process.isRunning, process.processIdentifier == pid else { return }
+                guard Date().timeIntervalSince(startedAt) >= graceInterval else { continue }
+                var info = rusage_info_current()
+                let status = withUnsafeMutablePointer(to: &info) { pointer in
+                    pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                        proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+                    }
+                }
+                guard status == 0 else { continue }
+                guard info.ri_phys_footprint > limitBytes else { continue }
+                let footprintMB = info.ri_phys_footprint / 1_048_576
+                print("[WallpaperEngineXBridge] ⚠️ 渲染进程内存超限 \(footprintMB)MB > \(limitMB)MB，强制终止 (screen=\(screenID) pid=\(pid))")
+                AppLogger.error(.wallpaper, "渲染进程内存超限，强制终止", metadata: [
+                    "screenID": screenID,
+                    "pid": Int(pid),
+                    "footprintMB": Int(footprintMB),
+                    "limitMB": Int(limitMB)
+                ])
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.killAllAudioChildren(pid: pid)
+                    self.terminateRenderer(pid: pid)
+                    let workItem = DispatchWorkItem {
+                        if kill(pid, 0) == 0 {
+                            print("[WallpaperEngineXBridge] 渲染进程未响应内存看门狗 terminate，发送 SIGKILL (pid=\(pid))")
+                            kill(pid, SIGKILL)
+                        }
+                    }
+                    self.screenWatchdogs[pid] = workItem
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+                }
+                return
+            }
         }
     }
 

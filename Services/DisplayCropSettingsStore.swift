@@ -2,6 +2,87 @@ import Foundation
 import AppKit
 import Combine
 
+/// crop 配置重链/去腐纯函数集（无 actor 隔离，可独立单测）。
+enum DisplayCropStateReconciler {
+
+    /// 当前屏身份快照（不依赖真实 NSScreen，便于单测）。
+    struct ScreenIdentitySnapshot: Equatable {
+        let screenID: String
+        let fingerprint: String
+    }
+
+    /// 去掉无序列号显示器指纹中的 `:position:` 后缀，得到位置无关的稳定部分。
+    /// 有硬件序列号的指纹不含该后缀，原样返回。
+    static func stableFingerprintPart(_ fp: String) -> String {
+        guard let range = fp.range(of: ":position:") else { return fp }
+        return String(fp[..<range.lowerBound])
+    }
+
+    /// 指纹匹配：精确相等，或仅桌面位置变化（稳定部分一致）。
+    static func isFingerprintMatch(_ recorded: String, _ actual: String) -> Bool {
+        recorded == actual || stableFingerprintPart(recorded) == stableFingerprintPart(actual)
+    }
+
+    /// 用当前在线屏对持久化条目做重链 + 去腐（纯函数，返回 nil 表示无需变化）。
+    ///
+    /// Pass 1（fingerprint 认领）：条目跟着它记录的物理显示器指纹走，而不是跟着
+    ///   screenID 走——修复重启后双屏 displayID 互换导致的 A/B 设置串台。
+    ///   第一轮精确匹配，第二轮忽略 position（显示器仅桌面位置变化的场景）。
+    /// Pass 2（同 ID 兜底）：同 screenID 条目若记录的指纹与当前屏不匹配
+    ///   （displayID 被新屏回收复用），丢弃旧条目回退默认；没记录过指纹的历史
+    ///   条目（旧版 update(forScreenID:) 路径）信任并补记指纹。
+    /// 未被认领的孤儿条目原样保留（显示器暂时断开不丢配置，重插后仍可按指纹重链）。
+    static func reconciledCropState(
+        settingsByScreen: [String: DisplayCropSettings],
+        fingerprints: [String: String],
+        currentScreens: [ScreenIdentitySnapshot]
+    ) -> (settings: [String: DisplayCropSettings], fingerprints: [String: String])? {
+        guard !currentScreens.isEmpty else { return nil }
+        let currentIDs = Set(currentScreens.map(\.screenID))
+
+        var newSettings: [String: DisplayCropSettings] = [:]
+        var newFingerprints: [String: String] = [:]
+        var consumed = Set<String>()
+
+        for pass in 0..<2 {
+            for screen in currentScreens {
+                guard newSettings[screen.screenID] == nil else { continue }
+                guard let entryID = fingerprints.first(where: { entryID, recordedFp in
+                    !consumed.contains(entryID)
+                        && (pass == 0
+                            ? recordedFp == screen.fingerprint
+                            : isFingerprintMatch(recordedFp, screen.fingerprint))
+                })?.key,
+                   let s = settingsByScreen[entryID] else { continue }
+                newSettings[screen.screenID] = s
+                newFingerprints[screen.screenID] = screen.fingerprint
+                consumed.insert(entryID)
+            }
+        }
+
+        for screen in currentScreens {
+            let id = screen.screenID
+            guard newSettings[id] == nil, let s = settingsByScreen[id] else { continue }
+            if let recorded = fingerprints[id] {
+                // 记录的指纹与当前同 ID 屏不匹配 → displayID 被回收/复用，丢弃旧条目。
+                guard isFingerprintMatch(recorded, screen.fingerprint) else { continue }
+            }
+            // 补记/更新指纹（含仅 position 变化的场景）。
+            newSettings[id] = s
+            newFingerprints[id] = screen.fingerprint
+            consumed.insert(id)
+        }
+
+        for (id, s) in settingsByScreen where !consumed.contains(id) && !currentIDs.contains(id) {
+            newSettings[id] = s
+            if let fp = fingerprints[id] { newFingerprints[id] = fp }
+        }
+
+        guard newSettings != settingsByScreen || newFingerprints != fingerprints else { return nil }
+        return (newSettings, newFingerprints)
+    }
+}
+
 /// 每屏可视区域配置存储。独立于现有 5+ manager，screenID 键 + fingerprint 重链。
 /// App 端持久化到 UserDefaults；扩展端通过 App Group JSON 共享。
 @MainActor
@@ -30,6 +111,8 @@ final class DisplayCropSettingsStore: ObservableObject {
     init(testDefaults: UserDefaults? = nil) {
         self.defaults = testDefaults ?? UserDefaults.standard
         load()
+        // 启动时做一次重链 + 去腐：修复重启后 displayID 互换导致的设置串台。
+        reconcileWithCurrentScreens()
         observeScreenChanges()
     }
 
@@ -40,7 +123,14 @@ final class DisplayCropSettingsStore: ObservableObject {
     // MARK: - Read
 
     func settings(forScreenID screenID: String) -> DisplayCropSettings {
-        settingsByScreen[screenID] ?? .defaultSettings
+        // displayID 回收/串台守卫：条目记录的指纹与当前同 ID 屏不匹配 → 视为陈旧，回退默认。
+        // （CGDirectDisplayID 在重启/重插后会被重新分配甚至复用，历史条目可能挂在新屏的 ID 上。）
+        if let recorded = fingerprints[screenID],
+           let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
+           !DisplayCropStateReconciler.isFingerprintMatch(recorded, screen.wallpaperScreenFingerprint) {
+            return .defaultSettings
+        }
+        return settingsByScreen[screenID] ?? .defaultSettings
     }
 
     func settings(for screen: NSScreen) -> DisplayCropSettings {
@@ -153,7 +243,32 @@ final class DisplayCropSettingsStore: ObservableObject {
         }
     }
 
-    // MARK: - Fingerprint 重链
+    // MARK: - Fingerprint 重链 + 去腐
+
+    /// 对当前在线屏执行一次重链 + 去腐，有变化时持久化并刷新共享 JSON。
+    /// App 启动与 didChangeScreenParametersNotification 时调用。
+    @discardableResult
+    private func reconcileWithCurrentScreens() -> Bool {
+        let snapshots = NSScreen.screens.map {
+            DisplayCropStateReconciler.ScreenIdentitySnapshot(
+                screenID: $0.wallpaperScreenIdentifier,
+                fingerprint: $0.wallpaperScreenFingerprint)
+        }
+        guard let next = DisplayCropStateReconciler.reconciledCropState(
+            settingsByScreen: settingsByScreen,
+            fingerprints: fingerprints,
+            currentScreens: snapshots) else { return false }
+        settingsByScreen = next.settings
+        fingerprints = next.fingerprints
+        settingsByFingerprint = [:]
+        for (id, fp) in fingerprints {
+            if let s = settingsByScreen[id] { settingsByFingerprint[fp] = s }
+        }
+        persist()
+        persistFingerprints()
+        writeSharedCropPrefs()
+        return true
+    }
 
     private func observeScreenChanges() {
         NotificationCenter.default.addObserver(
@@ -162,31 +277,11 @@ final class DisplayCropSettingsStore: ObservableObject {
     }
 
     @objc private func handleScreenParametersChanged() {
-        let currentScreens = NSScreen.screens
-        let currentScreenIDs = Set(currentScreens.map { $0.wallpaperScreenIdentifier })
-        var fpToScreenID: [String: String] = [:]
-        for screen in currentScreens {
-            fpToScreenID[screen.wallpaperScreenFingerprint] = screen.wallpaperScreenIdentifier
-        }
-        let orphanedIDs = Set(settingsByScreen.keys).subtracting(currentScreenIDs)
-        var migrated = 0
-        for orphanedID in orphanedIDs {
-            guard let fp = fingerprints[orphanedID],
-                  let newID = fpToScreenID[fp],
-                  !settingsByScreen.keys.contains(newID),
-                  let s = settingsByScreen[orphanedID] else { continue }
-            settingsByScreen[newID] = s
-            fingerprints[newID] = fp
-            settingsByFingerprint[fp] = s
-            settingsByScreen.removeValue(forKey: orphanedID)
-            fingerprints.removeValue(forKey: orphanedID)
-            migrated += 1
-        }
-        if migrated > 0 {
-            persist()
-            persistFingerprints()
-            writeSharedCropPrefs()
-            NotificationCenter.default.post(name: Self.cropDidChangeNotification, object: nil)
+        // 热插拔 / 重排 / 分辨率协商后重链：设置按物理显示器指纹跟随，displayID 复用条目去腐。
+        if reconcileWithCurrentScreens() {
+            NotificationCenter.default.post(
+                name: Self.cropDidChangeNotification, object: nil,
+                userInfo: ["screenID": "*", "interactive": false])
         }
     }
 

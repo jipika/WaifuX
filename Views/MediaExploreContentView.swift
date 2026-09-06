@@ -714,6 +714,8 @@ struct MediaExploreContentView: View {
                 // AppKit 会缓存 Menu 的原生项；源切换后强制用新状态重新构建菜单。
                 .id(activeSource)
                 .menuStyle(.borderlessButton)
+                // macOS 26 下 borderlessButton Menu 会接受提议宽度被拉满；固定为标签固有宽度。
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .liquidGlassSurface(.subtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous), lightweight: true)
@@ -961,6 +963,8 @@ struct MediaExploreContentView: View {
             )
         }
         .menuStyle(.borderlessButton)
+        // macOS 26 下 borderlessButton Menu 会被筛选行拉宽；同源选择器一样固定固有宽度。
+        .fixedSize(horizontal: true, vertical: false)
         .offset(y: 1)
         .frame(height: 34)
     }

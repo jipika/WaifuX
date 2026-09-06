@@ -794,6 +794,25 @@ final class StatusBarController: NSObject {
                     || DesktopWallpaperSyncManager.shared.imageURL(for: screen) != nil
             }
 
+            // 暂停/关闭/开启只针对「活跃动态壁纸运行时」判定。
+            // screenHasManagedWallpaper 含 DesktopWallpaperSyncManager 的系统桌面 poster
+            // 登记（视频壁纸设置时写入、App 运行期间不清），会把已关闭的屏误判为有壁纸。
+            let screenHasStaticOverlay: Bool
+            let screenHasLiveDynamicWallpaper: Bool
+            if isGlobalDisplaySyncEnabled {
+                screenHasStaticOverlay = NSScreen.screens.contains {
+                    StaticImageWallpaperOverlayManager.shared.imageURL(for: $0) != nil
+                }
+                screenHasLiveDynamicWallpaper = NSScreen.screens.contains { screen in
+                    videoWallpaperManager.hasActiveWallpaper(on: screen)
+                        || weBridge.hasLivePresentation(on: screen)
+                }
+            } else {
+                screenHasStaticOverlay = StaticImageWallpaperOverlayManager.shared.imageURL(for: screen) != nil
+                screenHasLiveDynamicWallpaper = videoWallpaperManager.hasActiveWallpaper(on: screen)
+                    || weBridge.hasLivePresentation(on: screen)
+            }
+
             // 自动切换开关
             let autoSwitchItem = NSMenuItem(
                 title: schedulerConfig.isEnabled ? t("statusbar.disableAutoSwitch") : t("statusbar.enableAutoSwitch"),
@@ -826,15 +845,36 @@ final class StatusBarController: NSObject {
 
             screenSubMenu.addItem(.separator())
 
-            if screenHasManagedWallpaper {
+            if screenHasLiveDynamicWallpaper {
                 let pauseItem = NSMenuItem(
                     title: isScreenPaused ? t("statusbar.resumeWallpaper") : t("statusbar.pauseWallpaper"),
                     action: #selector(perScreenTogglePlayback(_:)),
                     keyEquivalent: "")
                 pauseItem.target = self
                 pauseItem.representedObject = screen
-                pauseItem.isEnabled = screenHasWallpaper
+                pauseItem.isEnabled = screenHasLiveDynamicWallpaper
                 screenSubMenu.addItem(pauseItem)
+            }
+
+            if screenHasLiveDynamicWallpaper || screenHasStaticOverlay {
+                // 关闭该屏动态壁纸：彻底停止渲染并退回系统静态桌面（区别于暂停）
+                let stopItem = NSMenuItem(
+                    title: t("statusbar.stopWallpaper"),
+                    action: #selector(perScreenStopWallpaper(_:)),
+                    keyEquivalent: "")
+                stopItem.target = self
+                stopItem.representedObject = screen
+                stopItem.isEnabled = screenHasLiveDynamicWallpaper
+                screenSubMenu.addItem(stopItem)
+            } else if !screenHasStaticOverlay, Self.hasRestartableWallpaper(for: screen) {
+                // 该屏无壁纸但有关闭前的恢复记录 → 提供一键重新开启
+                let startItem = NSMenuItem(
+                    title: t("statusbar.startWallpaper"),
+                    action: #selector(perScreenStartWallpaper(_:)),
+                    keyEquivalent: "")
+                startItem.target = self
+                startItem.representedObject = screen
+                screenSubMenu.addItem(startItem)
             }
 
             // 音量（扩展模式跳过，与原逻辑一致）
@@ -1145,6 +1185,156 @@ final class StatusBarController: NSObject {
         } else {
             AppLogger.debug(.wallpaper, "每屏控制路由 → 单屏视频暂停")
             videoWallpaperManager.pauseWallpaper(for: screen)
+        }
+    }
+
+    /// 每屏「关闭动态壁纸」：彻底停止该屏渲染并退回系统静态桌面（区别于暂停）。
+    @objc private func perScreenStopWallpaper(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen else { return }
+
+        // 关闭会清掉持久化恢复状态，先捕获当前壁纸用于「开启动态壁纸」一键恢复
+        Self.recordRestartableWallpaper(for: screen, videoManager: videoWallpaperManager, bridge: weBridge)
+
+        AppLogger.debug(.wallpaper, "菜单每屏关闭壁纸点击", metadata: [
+            "screen": screen.localizedName,
+            "globalSync": String(WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled),
+            "weControl": String(weBridge.isControllingExternalEngine),
+            "weManaging": String(weBridge.isManaging(screen: screen)),
+            "lockMirror": String(videoWallpaperManager.isLockScreenMirroringActive)
+        ])
+
+        // 全局同步：单入口等价于全局关闭
+        if WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled {
+            WallpaperSchedulerService.shared.suppressAutoSwitchGlobally()
+            if weBridge.isControllingExternalEngine {
+                AppLogger.debug(.wallpaper, "每屏控制路由 → 全局WE关闭（保留恢复状态）")
+                weBridge.disableWallpaperKeepingRestoreState()
+            } else {
+                AppLogger.debug(.wallpaper, "每屏控制路由 → 全局视频关闭")
+                videoWallpaperManager.stopWallpaper()
+            }
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            return
+        }
+
+        if weBridge.isControllingExternalEngine {
+            // WE 壁纸（scene/web）：单屏关闭。scene 杀该屏 wgpu 进程，
+            // web 按屏 IPC 拆窗口；该屏 render state 同步移除，其余屏幕不受影响。
+            AppLogger.debug(.wallpaper, "每屏控制路由 → WE单屏关闭")
+            WallpaperSchedulerService.shared.suppressAutoSwitch(forScreen: screen)
+            weBridge.stopWallpaper(forScreenID: screen.wallpaperScreenIdentifier)
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            return
+        }
+
+        // native 视频 / 锁屏扩展：单屏停止（内部已处理该屏静态 overlay 与 poster 回退）
+        AppLogger.debug(.wallpaper, "每屏控制路由 → 单屏关闭")
+        WallpaperSchedulerService.shared.suppressAutoSwitch(forScreen: screen)
+        videoWallpaperManager.stopWallpaper(for: screen)
+        DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+    }
+
+    // MARK: - 每屏「开启动态壁纸」（关闭后一键恢复）
+
+    /// 关闭前捕获的壁纸恢复信息：path 为视频文件路径（isVideoWallpaper=true）
+    /// 或 WE 壁纸包根路径（scene/web）。按屏幕 fingerprint 隔离存储。
+    private struct RestartableWallpaper: Codable {
+        var path: String
+        var isVideoWallpaper: Bool
+        var muted: Bool?
+    }
+
+    private static let restartableWallpaperKey = "statusbar_restartable_wallpaper_v1"
+
+    private static func loadRestartableStore() -> [String: RestartableWallpaper] {
+        guard let data = UserDefaults.standard.data(forKey: restartableWallpaperKey),
+              let store = try? JSONDecoder().decode([String: RestartableWallpaper].self, from: data) else {
+            return [:]
+        }
+        return store
+    }
+
+    private static func saveRestartableStore(_ store: [String: RestartableWallpaper]) {
+        if let data = try? JSONEncoder().encode(store) {
+            UserDefaults.standard.set(data, forKey: restartableWallpaperKey)
+        }
+    }
+
+    static func recordRestartableWallpaper(for screen: NSScreen,
+                                           videoManager: VideoWallpaperManager,
+                                           bridge: WallpaperEngineXBridge) {
+        var entry: RestartableWallpaper?
+        if let videoURL = videoManager.assignedVideoURL(for: screen) {
+            entry = RestartableWallpaper(path: videoURL.path, isVideoWallpaper: true,
+                                         muted: videoManager.isMuted)
+        } else if bridge.isManaging(screen: screen),
+                  let path = bridge.currentWallpaperPathForDesign {
+            entry = RestartableWallpaper(path: path, isVideoWallpaper: false, muted: nil)
+        }
+        guard let entry else { return }
+
+        var store = loadRestartableStore()
+        store[screen.wallpaperScreenFingerprint] = entry
+        saveRestartableStore(store)
+    }
+
+    private static func restartableEntry(for screen: NSScreen) -> RestartableWallpaper? {
+        loadRestartableStore()[screen.wallpaperScreenFingerprint]
+    }
+
+    static func hasRestartableWallpaper(for screen: NSScreen) -> Bool {
+        guard let entry = restartableEntry(for: screen) else { return false }
+        return FileManager.default.fileExists(atPath: entry.path)
+    }
+
+    /// 每屏「开启动态壁纸」：用关闭前捕获的记录重新应用该屏壁纸。
+    /// 全局同步模式下恢复到全部屏（单入口语义与关闭对齐）。
+    @objc private func perScreenStartWallpaper(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen else { return }
+        guard let entry = Self.restartableEntry(for: screen) else { return }
+        guard FileManager.default.fileExists(atPath: entry.path) else {
+            // 壁纸文件已被删除/移动，记录失效，清理避免菜单残留
+            var store = Self.loadRestartableStore()
+            store.removeValue(forKey: screen.wallpaperScreenFingerprint)
+            Self.saveRestartableStore(store)
+            return
+        }
+
+        let globalSync = WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled
+        AppLogger.debug(.wallpaper, "菜单每屏开启壁纸点击", metadata: [
+            "screen": screen.localizedName,
+            "kind": entry.isVideoWallpaper ? "video" : "sceneOrWeb",
+            "globalSync": String(globalSync),
+            "path": entry.path
+        ])
+
+        let url = URL(fileURLWithPath: entry.path)
+        let targetScreens: [NSScreen]? = globalSync ? nil : [screen]
+        let muted = entry.muted ?? true
+        Task { @MainActor in
+            do {
+                if entry.isVideoWallpaper {
+                    try await videoWallpaperManager.applyVideoWallpaper(
+                        from: url,
+                        muted: muted,
+                        targetScreens: targetScreens
+                    )
+                } else {
+                    try await weBridge.setWallpaper(
+                        path: entry.path,
+                        targetScreens: targetScreens,
+                        forceRestart: true
+                    )
+                }
+                AppLogger.debug(.wallpaper, "菜单每屏开启壁纸完成", metadata: [
+                    "screen": screen.localizedName
+                ])
+            } catch {
+                AppLogger.error(.wallpaper, "菜单每屏开启壁纸失败", metadata: [
+                    "screen": screen.localizedName,
+                    "error": error.localizedDescription
+                ])
+            }
         }
     }
 

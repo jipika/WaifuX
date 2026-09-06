@@ -41,7 +41,8 @@ struct AuthorMediaSheet: View {
 
                 authorHeader
                     .padding(.horizontal, 20)
-                    .padding(.top, 8)
+                    // 顶部留出右上角关闭按钮的避让空间
+                    .padding(.top, 18)
                     .padding(.bottom, 14)
 
                 dividerLine
@@ -79,6 +80,12 @@ struct AuthorMediaSheet: View {
                 .prominent,
                 in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             )
+            .overlay(alignment: .topTrailing) {
+                // 关闭按钮固定在面板右上角
+                closeButton
+                    .padding(.top, 8)
+                    .padding(.trailing, 12)
+            }
             .shadow(color: .black.opacity(0.35), radius: 48, x: -8, y: 0)
             .offset(x: isVisible ? 0 : panelWidth + 20)
             .opacity(isVisible ? 1 : 0)
@@ -109,27 +116,30 @@ struct AuthorMediaSheet: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(LiquidGlassColors.textTertiary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if !items.isEmpty {
+                // 下载操作固定贴面板右缘，把中间空间让给作者名
                 downloadActions
             }
-
-            Spacer()
-
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(LiquidGlassColors.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        Circle()
-                            .fill(LiquidGlassColors.glassTint)
-                    )
-            }
-            .buttonStyle(.plain)
         }
+    }
+
+    // MARK: - 右上角关闭按钮
+    private var closeButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(LiquidGlassColors.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    Circle()
+                        .fill(LiquidGlassColors.glassTint)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

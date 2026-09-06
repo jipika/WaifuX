@@ -685,14 +685,9 @@ extension SceneBakeEligibilityAnalyzer {
         }
         if shouldSkip { return }
 
-        guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
-            print("[SceneBakeEligibility] skipped analyze for \(itemID): insufficient reclaimable memory")
-            return
-        }
-
         let snapshot: SceneBakeEligibilitySnapshot?
         do {
-            snapshot = try analyze(contentRoot: contentURL, intent: .desktopLoop, strict: false)
+            snapshot = try await analyzeWithinGate(contentRoot: contentURL, intent: .desktopLoop, strict: false)
         } catch {
             print("[SceneBakeEligibility] analyze failed for \(itemID): \(error)")
             snapshot = nil
@@ -705,6 +700,68 @@ extension SceneBakeEligibilityAnalyzer {
                     "[SceneBakeEligibility] \(itemID) tier=\(snapshot.tier.rawValue) score=\(snapshot.score) analysisId=\(snapshot.analysisId.uuidString)"
                 )
             }
+        }
+    }
+}
+
+// MARK: - 分析并发闸门
+
+/// Scene 资格分析并发闸门。
+///
+/// 批量导入时每个条目都会触发一次分析（此前是裸 `Task(priority: .utility)` 无上限），
+/// 而分析会把整个 scene.pkg 读进内存（库内实测最大 198MB/包）。原有的
+/// 「480MB 可回收内存」门槛是先检查后分配：N 个任务可以在任何一个开始分配前
+/// 全部过检、然后同时分配，内存瞬间叠加几十 GB——叠加烘焙/渲染/补帧通道时
+/// 足以把系统拖到重启（2026-09-05 用户实测：批量导入 + 未烘焙完设置壁纸）。
+/// 这里把并发收口到 2，且要求**持有槽位期间**才做内存检查与分配，
+/// 使「检查→分配」最多只有 2 个任务同时在飞。
+private actor SceneAnalysisGate {
+    static let shared = SceneAnalysisGate()
+    static let maxConcurrent = 2
+
+    private var activeCount = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if activeCount < Self.maxConcurrent {
+            activeCount += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard activeCount > 0 else { return }
+        activeCount -= 1
+        guard activeCount < Self.maxConcurrent, !waiters.isEmpty else { return }
+        activeCount += 1
+        waiters.removeFirst().resume()
+    }
+}
+
+extension SceneBakeEligibilityAnalyzer {
+    /// 在并发闸门内执行分析：拿到槽位后才做内存检查并整包读入 scene.pkg，
+    /// 检查失败立即归还槽位。返回 nil 表示可回收内存不足，调用方应跳过本次分析。
+    static func analyzeWithinGate(
+        contentRoot: URL,
+        intent: SceneBakeEligibilityIntent = .desktopLoop,
+        strict: Bool = false
+    ) async throws -> SceneBakeEligibilitySnapshot? {
+        await SceneAnalysisGate.shared.acquire()
+        do {
+            guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
+                await SceneAnalysisGate.shared.release()
+                print("[SceneBakeEligibility] skipped analyze: insufficient reclaimable memory (inside gate)")
+                return nil
+            }
+            let snapshot = try analyze(contentRoot: contentRoot, intent: intent, strict: strict)
+            await SceneAnalysisGate.shared.release()
+            return snapshot
+        } catch {
+            await SceneAnalysisGate.shared.release()
+            throw error
         }
     }
 }

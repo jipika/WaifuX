@@ -2691,11 +2691,14 @@ struct MediaDetailSheet: View {
             if Self.projectTypeString(at: contentRoot) == "scene" {
                 Task(priority: .utility) {
                     do {
-                        let snapshot = try SceneBakeEligibilityAnalyzer.analyze(
+                        guard let snapshot = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(
                             contentRoot: contentRoot,
                             intent: .desktopLoop,
                             strict: false
-                        )
+                        ) else {
+                            print("[MediaDetailSheet] ⚠️ 烘焙资格分析跳过：可回收内存不足")
+                            return
+                        }
                         await MainActor.run {
                             MediaLibraryService.shared.attachSceneBakeEligibility(
                                 itemID: resolvedItem.id,
@@ -3571,7 +3574,7 @@ struct MediaDetailSheet: View {
                    SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, sceneContentRoot.path) {
                     eligibility = existing
                 } else {
-                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
+                    guard let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: sceneContentRoot) else {
                         await MainActor.run {
                             WallpaperSchedulerService.shared.completeManualWallpaperApply(
                                 success: false,
@@ -3584,9 +3587,7 @@ struct MediaDetailSheet: View {
                         }
                         return
                     }
-                    eligibility = try await Task.detached(priority: .userInitiated) {
-                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: sceneContentRoot)
-                    }.value
+                    eligibility = analyzed
                     await MainActor.run {
                         MediaLibraryService.shared.attachSceneBakeEligibility(
                             itemID: itemID,

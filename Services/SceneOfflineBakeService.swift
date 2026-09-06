@@ -277,12 +277,18 @@ actor OfflineBakeSerialQueue {
     func waitForTurn(jobID: UUID) async {
         if activeJobID == nil, waiters.isEmpty {
             activeJobID = jobID
+            print("[ScenePosterDiag] 烘焙串行队列直接放行 job=\(jobID.uuidString.prefix(8))")
             return
         }
 
+        print(
+            "[ScenePosterDiag] 烘焙串行队列排队 job=\(jobID.uuidString.prefix(8)) "
+                + "active=\(activeJobID?.uuidString.prefix(8) ?? "nil") waiters=\(waiters.count)"
+        )
         await withCheckedContinuation { continuation in
             waiters.append(Waiter(jobID: jobID, continuation: continuation))
         }
+        print("[ScenePosterDiag] 烘焙串行队列排队结束→放行 job=\(jobID.uuidString.prefix(8))")
     }
 
     func leave(jobID: UUID) {
@@ -520,20 +526,39 @@ private final class ScenePreviewProcessController {
 private final class SceneBakeProcessController {
     static let shared = SceneBakeProcessController()
 
+    /// 烘焙进程内存看门狗阈值：按画布分辨率自适应。
+    ///
+    /// phys_footprint 会把 Metal/IOKit 显存分配（画布 + GPU readback + VideoToolbox
+    /// 编码器缓冲）计入，RSS 看似很小 footprint 却很大——固定 1500MB 阈值会把
+    /// 3200x1800 这类高分辨率但完全合法的烘焙在录制阶段误杀（实测 1531MB 时被杀）。
+    /// 基准 1500MB @ 1080p，每像素 ~1KB，封顶 6GB；失控保护语义保留。
+    nonisolated static func footprintLimitBytes(width: Int, height: Int) -> UInt64 {
+        let base: UInt64 = 1_500_000_000
+        let ceiling: UInt64 = 6_000_000_000
+        let pixels = UInt64(max(1, width)) * UInt64(max(1, height))
+        return max(base, min(ceiling, pixels * 1024))
+    }
+
     private var process: Process?
     private var processID: pid_t?
     private var isCompanionProcess = false
     private var memoryWatchdogTask: Task<Void, Never>?
     private var terminationSerial: UInt64 = 0
+    private var footprintLimitBytes: UInt64 = 1_500_000_000
+    private var didWarnNearLimit = false
 
-    func attach(process: Process, isCompanion: Bool) {
+    func attach(process: Process, isCompanion: Bool, footprintLimitBytes: UInt64 = 1_500_000_000) {
         if self.process != nil {
+            print("[ScenePosterDiag] ⚠️ attach: 旧 bake 进程(pid=\(processID ?? -1))仍在运行，被新 attach 强制终止（双重烘焙并发!）")
             terminateCurrentProcess()
         }
         terminationSerial &+= 1
         self.process = process
         processID = process.processIdentifier
         isCompanionProcess = isCompanion
+        self.footprintLimitBytes = max(footprintLimitBytes, 1_500_000_000)
+        didWarnNearLimit = false
+        print("[ScenePosterDiag] attach: bake 进程已挂接 pid=\(processID ?? -1) isCompanion=\(isCompanion) 内存阈值=\(self.footprintLimitBytes / 1_048_576)MB")
         startMemoryWatchdog(process: process)
     }
 
@@ -544,6 +569,7 @@ private final class SceneBakeProcessController {
         process = nil
         processID = nil
         isCompanionProcess = false
+        didWarnNearLimit = false
         terminationSerial &+= 1
     }
 
@@ -563,6 +589,7 @@ private final class SceneBakeProcessController {
               process.processIdentifier == pid else {
             return
         }
+        print("[ScenePosterDiag] 终止 bake 进程 pid=\(pid)（SIGTERM，2s 后 SIGKILL 兜底）")
 
         memoryWatchdogTask?.cancel()
         memoryWatchdogTask = nil
@@ -590,7 +617,6 @@ private final class SceneBakeProcessController {
         let pid = process.processIdentifier
         memoryWatchdogTask?.cancel()
         memoryWatchdogTask = Task(priority: .utility) { [weak self] in
-            let limitBytes: UInt64 = 1_500_000_000
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 2_000_000_000)
@@ -612,9 +638,14 @@ private final class SceneBakeProcessController {
                     }
                 }
                 guard status == 0 else { continue }
-                if info.ri_phys_footprint > limitBytes {
-                    let footprintMB = info.ri_phys_footprint / 1_048_576
-                    print("[SceneOfflineBake] bake 进程内存超限 \(footprintMB)MB > 1500MB，强制终止（pid=\(pid)）")
+                let footprintMB = info.ri_phys_footprint / 1_048_576
+                let limitMB = self.footprintLimitBytes / 1_048_576
+                if !self.didWarnNearLimit, footprintMB > limitMB * 4 / 5 {
+                    self.didWarnNearLimit = true
+                    print("[ScenePosterDiag] bake 进程内存接近上限 \(footprintMB)MB / \(limitMB)MB（pid=\(pid)）")
+                }
+                if info.ri_phys_footprint > self.footprintLimitBytes {
+                    print("[SceneOfflineBake] bake 进程内存超限 \(footprintMB)MB > \(limitMB)MB，强制终止（pid=\(pid)）")
                     self.stop(pid: pid)
                     return
                 }
@@ -774,9 +805,13 @@ enum SceneOfflineBakeService {
                 let record = await MainActor.run {
                     downloadedRecord(forResolvedContentRoot: contentRoot)
                 }
+                print(
+                    "[ScenePosterDiag] record 查找: \(record?.item.id ?? "nil(将使用孤儿缓存ID, UI不会收到封面通知)") "
+                        + "recordPath=\(record?.localFilePath ?? "nil") contentRoot=\(contentRoot.path)"
+                )
 
                 guard generation == companionBakeGeneration else {
-                    print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded before record lookup")
+                    print("[ScenePosterDiag] 中止(stale): record 查找后已被新应用取代 reason=\(reason)")
                     return
                 }
 
@@ -794,6 +829,10 @@ enum SceneOfflineBakeService {
                 }
 
                 guard autoBakeEnabled else {
+                    print(
+                        "[ScenePosterDiag] 自动烘焙=off → 进入临时抽帧路径 reason=\(reason) "
+                            + "targets=\(posterTargets.count) generation=\(generation)"
+                    )
                     await generateTransientRealtimePosters(
                         contentRoot: contentRoot,
                         record: record,
@@ -814,13 +853,11 @@ enum SceneOfflineBakeService {
                    SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, contentRoot.path) {
                     eligibility = existing
                 } else {
-                    guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
+                    guard let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) else {
                         print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): insufficient memory for analysis")
                         return
                     }
-                    eligibility = try await Task.detached(priority: .utility) {
-                        try SceneBakeEligibilityAnalyzer.analyze(contentRoot: contentRoot, intent: .desktopLoop, strict: false)
-                    }.value
+                    eligibility = analyzed
                     guard generation == companionBakeGeneration else {
                         print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded after analysis")
                         return
@@ -881,7 +918,10 @@ enum SceneOfflineBakeService {
         reason: String,
         generation: UInt
     ) async {
-        guard generation == companionBakeGeneration else { return }
+        guard generation == companionBakeGeneration else {
+            print("[ScenePosterDiag] 中止(stale): 进入临时抽帧前已被新应用取代 reason=\(reason)")
+            return
+        }
         // 抽帧缓存也供详情页/媒体库使用，与是否需要把静帧写回系统桌面无关。
         // `syncRealtimeStaticPoster` 会在系统壁纸同步关闭时自行跳过桌面写入。
         guard !targets.isEmpty else {
@@ -891,30 +931,33 @@ enum SceneOfflineBakeService {
 
         let itemID = record?.item.id
         let posterCacheID = itemID ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
+        print(
+            "[ScenePosterDiag] 临时抽帧开始: itemID=\(itemID ?? "nil") posterCacheID=\(posterCacheID) "
+                + "targets=\(targets.map { "d\(String($0.displayID)):\($0.size.width)x\($0.size.height)" }.joined(separator: ","))"
+        )
 
         let eligibility: SceneBakeEligibilitySnapshot
         if let existing = record?.sceneBakeEligibility,
            SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, contentRoot.path) {
             eligibility = existing
+            print("[ScenePosterDiag] 复用已有 eligibility analysisId=\(existing.analysisId.uuidString)")
         } else {
-            guard SystemMemoryPressure.hasRoomForSceneEligibilityAnalysis() else {
-                print("[SceneOfflineBake] transient poster skipped (\(reason)): insufficient memory for analysis")
-                return
-            }
             do {
-                eligibility = try await Task.detached(priority: .utility) {
-                    try SceneBakeEligibilityAnalyzer.analyze(
-                        contentRoot: contentRoot,
-                        intent: .desktopLoop,
-                        strict: false
-                    )
-                }.value
+                guard let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) else {
+                    print("[SceneOfflineBake] transient poster skipped (\(reason)): insufficient memory for analysis")
+                    return
+                }
+                eligibility = analyzed
+                print("[ScenePosterDiag] 新分析 eligibility analysisId=\(analyzed.analysisId.uuidString)")
             } catch {
                 print("[SceneOfflineBake] transient poster analysis failed (\(reason)): \(error.localizedDescription)")
                 return
             }
 
-            guard generation == companionBakeGeneration else { return }
+            guard generation == companionBakeGeneration else {
+                print("[ScenePosterDiag] 中止(stale): eligibility 分析后已被新应用取代 reason=\(reason)")
+                return
+            }
             if let itemID {
                 MediaLibraryService.shared.attachSceneBakeEligibility(
                     itemID: itemID,
@@ -934,13 +977,17 @@ enum SceneOfflineBakeService {
         var missingSizes: [WallpaperPosterPixelSize] = []
 
         for size in orderedSizes {
-            guard generation == companionBakeGeneration else { return }
+            guard generation == companionBakeGeneration else {
+                print("[ScenePosterDiag] 中止(stale): 缓存检查循环中被新应用取代 reason=\(reason)")
+                return
+            }
             let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
             if let cachedPoster = VideoThumbnailCache.shared
                 .cachedSceneRealtimePosterFileURLIfExists(
                     itemID: posterCacheID,
                     variantKey: variantKey
                 ) {
+                print("[ScenePosterDiag] 抽帧缓存命中 size=\(size.width)x\(size.height): \(cachedPoster.lastPathComponent)")
                 postersBySize[size] = cachedPoster
                 await syncRealtimeStaticPoster(
                     cachedPoster,
@@ -954,6 +1001,7 @@ enum SceneOfflineBakeService {
         }
 
         if !missingSizes.isEmpty {
+            print("[ScenePosterDiag] 待生成 poster 尺寸: \(missingSizes.map { "\($0.width)x\($0.height)" }.joined(separator: ","))")
             let userProperties = SceneConfigOverrideService.mergedPropertiesJSON(
                 userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(
                     for: contentRoot.path
@@ -961,15 +1009,19 @@ enum SceneOfflineBakeService {
                 for: contentRoot.path
             )
             let jobID = UUID()
+            print("[ScenePosterDiag] 等待离线烘焙串行队列 job=\(jobID.uuidString.prefix(8))")
             await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
+            print("[ScenePosterDiag] 串行队列已放行 job=\(jobID.uuidString.prefix(8))")
 
             guard generation == companionBakeGeneration else {
+                print("[ScenePosterDiag] 中止(stale): 串行队列等待期间被新应用取代 reason=\(reason)")
                 await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
                 return
             }
 
             for size in missingSizes {
                 guard generation == companionBakeGeneration else {
+                    print("[ScenePosterDiag] 中止(stale): 逐尺寸生成循环中被新应用取代 reason=\(reason)")
                     await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
                     return
                 }
@@ -982,6 +1034,7 @@ enum SceneOfflineBakeService {
                         itemID: posterCacheID,
                         variantKey: variantKey
                     ) {
+                    print("[ScenePosterDiag] 排队期间他请求已写好同尺寸 poster size=\(size.width)x\(size.height)")
                     postersBySize[size] = cachedPoster
                     await syncRealtimeStaticPoster(
                         cachedPoster,
@@ -992,7 +1045,7 @@ enum SceneOfflineBakeService {
                     continue
                 }
 
-                guard let posterURL = await bakeTransientRealtimePoster(
+        guard let posterURL = await bakeTransientRealtimePoster(
                     contentRoot: contentRoot,
                     eligibility: eligibility,
                     posterCacheID: posterCacheID,
@@ -1002,10 +1055,12 @@ enum SceneOfflineBakeService {
                     reason: reason,
                     generation: generation
                 ) else {
+                    print("[ScenePosterDiag] ⚠️ 单尺寸 poster 生成失败 size=\(size.width)x\(size.height)（上方应有具体失败日志）")
                     continue
                 }
 
                 guard generation == companionBakeGeneration else {
+                    print("[ScenePosterDiag] 中止(stale): poster 已生成但随后被新应用取代，丢弃 size=\(size.width)x\(size.height)")
                     await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
                     return
                 }
@@ -1025,7 +1080,10 @@ enum SceneOfflineBakeService {
             await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
         }
 
-        guard generation == companionBakeGeneration else { return }
+        guard generation == companionBakeGeneration else {
+            print("[ScenePosterDiag] 中止(stale): poster 全部就绪但被新应用取代，跳过 UI 封面通知 reason=\(reason)")
+            return
+        }
         if let itemID,
            let primarySize,
            let primaryPoster = postersBySize[primarySize] {
@@ -1041,6 +1099,14 @@ enum SceneOfflineBakeService {
                 object: itemID,
                 userInfo: ["thumbnailURL": primaryPoster]
             )
+            print("[ScenePosterDiag] ✅ 已发送封面更新通知 item=\(itemID) poster=\(primaryPoster.lastPathComponent)")
+        } else {
+            print(
+                "[ScenePosterDiag] ⚠️ poster 生成完成但未发送 UI 通知: itemID=\(itemID ?? "nil") "
+                    + "primarySize=\(primarySize.map { "\($0.width)x\($0.height)" } ?? "nil") "
+                    + "postersBySize=\(postersBySize.map { "\($0.key.width)x\($0.key.height)" }.sorted().joined(separator: ",")) "
+                    + "(itemID=nil 时封面文件写入孤儿缓存, 网格/详情页按 itemID 查不到)"
+            )
         }
     }
 
@@ -1055,7 +1121,14 @@ enum SceneOfflineBakeService {
         reason: String,
         generation: UInt
     ) async -> URL? {
-        guard generation == companionBakeGeneration else { return nil }
+        guard generation == companionBakeGeneration else {
+            print("[ScenePosterDiag] 中止(stale): 临时烘焙启动前被新应用取代 size=\(size.width)x\(size.height)")
+            return nil
+        }
+        print(
+            "[ScenePosterDiag] 开始临时烘焙 1s: posterCacheID=\(posterCacheID) size=\(size.width)x\(size.height) "
+                + "contentRoot=\(contentRoot.lastPathComponent) generation=\(generation)"
+        )
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WaifuX", isDirectory: true)
             .appendingPathComponent("TransientScenePosters", isDirectory: true)
@@ -1101,7 +1174,10 @@ enum SceneOfflineBakeService {
             return nil
         }
 
-        guard generation == companionBakeGeneration else { return nil }
+        guard generation == companionBakeGeneration else {
+            print("[ScenePosterDiag] 中止(stale): 临时烘焙 1s 完成但被新应用取代，不抽帧 size=\(size.width)x\(size.height)")
+            return nil
+        }
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
         guard isUsableBakedVideo(at: videoURL),
               let posterURL = await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
@@ -2008,8 +2084,13 @@ enum SceneOfflineBakeService {
 
         try process.run()
         let processID = process.processIdentifier
+        let bakeFootprintLimit = SceneBakeProcessController.footprintLimitBytes(width: width, height: height)
         await MainActor.run {
-            SceneBakeProcessController.shared.attach(process: process, isCompanion: isCompanion)
+            SceneBakeProcessController.shared.attach(
+                process: process,
+                isCompanion: isCompanion,
+                footprintLimitBytes: bakeFootprintLimit
+            )
         }
         guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
             await MainActor.run {
@@ -2268,6 +2349,12 @@ enum SceneOfflineBakeService {
         await progressTask.value
         await stdoutTask.value
         stderrCapture.close()
+        let exitStatus = process.terminationStatus
+        let exitReason = process.terminationReason
+        print(
+            "[ScenePosterDiag] bake 进程退出: status=\(exitStatus) reason=\(exitReason) "
+                + "（.exit=自身退出, .uncaughtSignal=被信号杀死; status 9/15=SIGKILL/SIGTERM）"
+        )
         await MainActor.run {
             SceneBakeProcessController.shared.finish(pid: processID)
         }
@@ -2381,13 +2468,10 @@ enum SceneOfflineBakeService {
                 throw SceneOfflineBakeError.insufficientMemory
             }
 
-            eligibility = try await Task.detached(priority: .userInitiated) {
-                try SceneBakeEligibilityAnalyzer.analyze(
-                    contentRoot: resolvedRoot,
-                    intent: .desktopLoop,
-                    strict: false
-                )
-            }.value
+            guard let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: resolvedRoot) else {
+                throw SceneOfflineBakeError.insufficientMemory
+            }
+            eligibility = analyzed
             contentRoot = resolvedRoot
 
             await MainActor.run {

@@ -181,6 +181,11 @@ struct MyLibraryContentView: View {
     @State private var savedLibraryScrollOffset: CGFloat = -1
     /// 恢复成功后自增，驱动 LibraryScrollRestorer 重新触发
     @State private var libraryScrollRestoreToken: Int = 0
+    /// 库页首次出现时完成一次引导加载（全量 update + initialLoad）。
+    /// 详情往返的 re-appear 不再重跑：详情打开期间 revision publisher 仍在线上，
+    /// 数据变化已通过 debouncedUpdate 流入网格；重跑只会白白 gridReloadToken++
+    /// 触发整网格 reconfigure + 重发网络请求。
+    @State private var didBootstrapLibraryGrid = false
 
     // 壁纸比例筛选
     @State private var wallpaperRatioFilter: WallpaperRatioFilter = .all
@@ -393,9 +398,16 @@ struct MyLibraryContentView: View {
     private func libraryEventObservers(_ content: some View) -> some View {
         content
         .task {
+            // 每次出现都确保本地索引可用（缓存温热时是 no-op；失效时会重建并
+            // 经 libraryContentRevision → debouncedUpdate 刷新网格）。
             async let wallpaperIndex: Void = viewModel.ensureLocalWallpaperIndex()
             async let mediaIndex: Void = mediaViewModel.ensureLocalMediaIndex()
             _ = await (wallpaperIndex, mediaIndex)
+
+            // 引导加载只跑一次：详情往返的 re-appear 跳过全量 update 与
+            // initialLoad，避免返回时封面整网格重载。
+            guard !didBootstrapLibraryGrid else { return }
+            didBootstrapLibraryGrid = true
 
             updateWallpaperItems()
             updateMediaItems()

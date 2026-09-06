@@ -234,12 +234,13 @@ struct WaifuXApp {
 
     /// 配置 Kingfisher 高性能图片加载
     private static func configureKingfisher() {
-        // 内存缓存配置：128MB / 180 张 / 5 分钟过期 / 30 秒一次清理。
+        // 内存缓存配置：128MB / 512 张 / 15 分钟过期 / 30 秒一次清理。
         // 探索页只显示缩略图；过高的 totalCostLimit 会让 RSS 长期顶在高位。
-        // 主动 expiration 让长尾图片落到磁盘缓存，滚动时再回填。
+        // 库网格封面走独立的 LibraryCoverImageCache（LibraryGridCells.swift），
+        // 不受详情页大图挤占；这里放宽过期时长，减少切页/返回后的磁盘重解码。
         ImageCache.default.memoryStorage.config.totalCostLimit = 128 * 1024 * 1024 // 128MB
-        ImageCache.default.memoryStorage.config.countLimit = 180
-        ImageCache.default.memoryStorage.config.expiration = .seconds(5 * 60) // 5 min
+        ImageCache.default.memoryStorage.config.countLimit = 512
+        ImageCache.default.memoryStorage.config.expiration = .seconds(15 * 60) // 15 min
         ImageCache.default.memoryStorage.config.cleanInterval = 30             // 30s
 
         // 磁盘缓存配置
@@ -280,6 +281,7 @@ struct WaifuXApp {
         source.setEventHandler {
             // 内存紧张时清理所有内存缓存
             ImageCache.default.clearMemoryCache()
+            LibraryCoverImageCache.imageCache.clearMemoryCache()
             Task { @MainActor in
                 VideoThumbnailCache.shared.clearMemoryCache()
                 LocalImageThumbnailCache.shared.clearMemoryHints()
@@ -884,6 +886,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             ForegroundPrefetchManager.shared.stopAll()
             KingfisherManager.shared.downloader.cancelAll()
             ImageCache.default.clearMemoryCache()
+            LibraryCoverImageCache.imageCache.clearMemoryCache()
             VideoThumbnailCache.shared.clearMemoryCache()
             LocalImageThumbnailCache.shared.clearMemoryHints()
             WorkshopLibraryPreviewCache.shared.clearAll()
@@ -932,6 +935,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
         PreviewWindowManager.shared.closePreview()
         ImageCache.default.clearMemoryCache()
+        LibraryCoverImageCache.imageCache.clearMemoryCache()
         VideoThumbnailCache.shared.clearMemoryCache()
         LocalImageThumbnailCache.shared.clearMemoryHints()
         WorkshopLibraryPreviewCache.shared.clearAll()

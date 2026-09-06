@@ -85,6 +85,10 @@ final class VideoWallpaperManager: ObservableObject {
     private var externalTransitionGeneration: UInt64 = 0
     private var externalRendererRestartAttempt = 0
     private var externalRendererRestartWorkItem: DispatchWorkItem?
+    /// 无值守重启熔断上限：连续失败达到该次数后放弃自动重启。
+    /// 只有 daemon 成功 ready、用户显式停止/切换壁纸（cancelExternalRendererRestart）
+    /// 或 forceRecycle 才会复位计数，因此不影响正常使用。
+    private static let externalRendererRestartMaxAttempts = 8
     /// IPC 改为 async 后，连续的 set / 显示器重连可能在等待 socket 回包时交错，
     /// 从而覆盖彼此的 per-screen 映射。只串行实际修改 renderer 状态的短事务；
     /// 首帧交接仍由独立任务等待，不持有这个门。
@@ -245,6 +249,9 @@ final class VideoWallpaperManager: ObservableObject {
     private var volumeByScreenFingerprint: [String: Double] = [:]
 
     private var windows: [String: WallpaperVideoWindow] = [:]
+    /// 窗口创建时的物理屏指纹。screenID（CGDirectDisplayID）睡眠/重插后会重新编号，
+    /// 该映射让 existingVideoWindowEntry / 异键窗口收敛能按指纹找回旧键窗口。
+    private var windowFingerprintByScreenID: [String: String] = [:]
     private var players: [String: AVQueuePlayer] = [:]
     private var loopers: [String: AVPlayerLooper] = [:]
     /// Explicit global multi-display sync: one AVQueuePlayer for all target screens.
@@ -1072,6 +1079,19 @@ final class VideoWallpaperManager: ObservableObject {
         guard externalRenderingActive, hasActiveVideoWallpaper else { return }
         externalRendererRestartWorkItem?.cancel()
         externalRendererRestartAttempt += 1
+        // 无值守重启熔断：系统内存压力下 daemon 会被反复杀死，此前的无上限重启
+        // （退避封顶 2s）会变成每 2s 一轮「拉起 daemon → 重建每屏解码管线 → 被杀」
+        // 的搅拌器，主动阻止系统恢复，内存持续增长直到系统卡死（2026-09-05 用户实测）。
+        // 达到上限后放弃，等待用户下一次操作（切换/停止壁纸会复位计数）。
+        guard externalRendererRestartAttempt <= Self.externalRendererRestartMaxAttempts else {
+            AppLogger.error(.wallpaper, "video-renderer 连续重启失败达到上限，停止自动重启", metadata: [
+                "status": status,
+                "attempts": externalRendererRestartAttempt,
+                "maxAttempts": Self.externalRendererRestartMaxAttempts
+            ])
+            print("[VideoWallpaperManager] ⚠️ video-renderer 连续重启失败 \(externalRendererRestartAttempt) 次，停止自动重启；重新设置或关闭壁纸后自动恢复")
+            return
+        }
         // First crash: restart immediately. Later crashes stay under 2s so a
         // flapping helper cannot leave the desktop black for 10 seconds.
         let delay = min(2.0, Double(max(0, externalRendererRestartAttempt - 1)) * 0.25)
@@ -1834,6 +1854,10 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             captureScreens = NSScreen.screens
         }
+        // 先收敛贴在目标屏上、键已失配的旧窗口（睡眠唤醒重编号残留），
+        // 否则 frame 兜底 miss 时 createWindow 会在同一块屏再建一层，
+        // 形成双壁纸叠加，且后续按 screenID 的拆窗永远清不到它。
+        reconcileMisKeyedVideoWindows(for: captureScreens)
         WallpaperEngineXBridge.shared.prepareForNonExternalWallpaperSwitch(
             on: captureScreens,
             reason: "applyVideoWallpaper"
@@ -4984,6 +5008,7 @@ final class VideoWallpaperManager: ObservableObject {
             player.removeAllItems()
         }
         windows.removeAll()
+        windowFingerprintByScreenID.removeAll()
         players.removeAll()
         presentedVideoScreenIDs.removeAll()
         loopers.removeAll()
@@ -5168,6 +5193,11 @@ final class VideoWallpaperManager: ObservableObject {
         posterTasks[screenID]?.cancel()
         posterTasks.removeValue(forKey: screenID)
         resetFrameInterpolationState(for: screenID)
+
+        // 先收敛贴在该屏上、键已失配的旧窗口（睡眠唤醒重编号残留），
+        // 否则下面的 teardownKey 解析不到它们（fingerprint 兜底要求旧键
+        // 仍能解析到当前屏），视频层会残留在当前壁纸之上。
+        reconcileMisKeyedVideoWindows(for: [targetScreen])
 
         // 兼容 screenID 变化：按 fingerprint 找回旧 key 上的窗口/播放器。
         let windowKey = windows[screenID] != nil
@@ -5490,6 +5520,7 @@ final class VideoWallpaperManager: ObservableObject {
             window.contentView = nil
             window.orderOut(nil)
             windows.removeValue(forKey: screenID)
+            windowFingerprintByScreenID.removeValue(forKey: screenID)
             retainWindowsTemporarily([window])
         }
         if let player = playerBeforeRemoval {
@@ -6261,13 +6292,22 @@ final class VideoWallpaperManager: ObservableObject {
             // 防抖：延迟执行，避免屏幕参数变化时的频繁重建
             self.pendingRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
-                guard let self = self, self.hasActiveVideoWallpaper else { return }
+                guard let self = self else { return }
 
-                self.relinkDisplayStateForCurrentScreens()
-                // NSScreen.screens 在显示器重新枚举期间可能短暂缺屏。
-                // 必须等防抖窗口结束后再清理 orphan，否则一次瞬时抖动
-                // 就会销毁主屏 AVPlayer，且后续恢复不一定能及时重建。
-                self.teardownOrphanedVideoWindowsPreservingRestoreState()
+                if self.hasActiveVideoWallpaper {
+                    self.relinkDisplayStateForCurrentScreens()
+                }
+                // 残留窗口清理不能以 hasActiveVideoWallpaper 为前提：
+                // 切到 Scene/Web 后 URL map 已空、守卫原本直接 return，
+                // 键已失配的视频窗就永远等不到清理，叠在当前壁纸之上。
+                if !self.windows.isEmpty {
+                    // NSScreen.screens 在显示器重新枚举期间可能短暂缺屏。
+                    // 必须等防抖窗口结束后再清理 orphan，否则一次瞬时抖动
+                    // 就会销毁主屏 AVPlayer，且后续恢复不一定能及时重建。
+                    self.teardownOrphanedVideoWindowsPreservingRestoreState()
+                }
+
+                guard self.hasActiveVideoWallpaper else { return }
 
                 if VideoWallpaperDisplayRecoveryPolicy.shouldRebuildNativePipeline(
                     afterDisplayWake: false,
@@ -6337,6 +6377,60 @@ final class VideoWallpaperManager: ObservableObject {
         }
         syncCurrentVideoURL()
         currentPosterURL = posterURLByScreen.values.first ?? posterURLByScreenFingerprint.values.first
+    }
+
+    /// 把贴在同一块物理屏上、但键已失配的窗口收敛到当前 screenID。
+    ///
+    /// 睡眠/重插后 CGDirectDisplayID 会重新编号：旧键窗口仍贴在该屏上，而按
+    /// screenID 的拆窗/复用路径全部找不到它（stopNativeVideoWallpaperOnly 的
+    /// fingerprint 兜底要求旧键仍能解析到当前屏）。若 frame 又因分辨率/排列
+    /// 变化对不上，existingVideoWindowEntry 兜底 miss 后 createWindow 会在
+    /// 同一块屏上再建一层 → 用户看到两个动态壁纸叠加。
+    ///
+    /// 在 apply/stop 入口幂等调用：贴在目标屏上的异键窗口，单窗 rekey 到当前键
+    /// （保住"旧层保留到新层首帧就绪"的复用路径），已叠成多层的其余直接拆毁。
+    /// 键仍能解析到当前屏的窗口属于别的屏，一律不动——睡眠期 WindowServer 可能
+    /// 把窗口临时钳制到别的屏，此时按 frame 拆会误伤其它屏的活窗口。
+    private func reconcileMisKeyedVideoWindows(for targetScreens: [NSScreen]) {
+        guard !windows.isEmpty else { return }
+        let currentScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
+
+        for screen in targetScreens {
+            let screenID = screen.wallpaperScreenIdentifier
+            let screenFingerprint = screen.wallpaperScreenFingerprint
+
+            var misKeyedEntries: [(key: String, window: NSWindow)] = []
+            for (key, window) in windows {
+                guard key != screenID, !currentScreenIDs.contains(key) else { continue }
+                let fingerprintMatches = windowFingerprintByScreenID[key] == screenFingerprint
+                if fingerprintMatches || framesApproximatelyEqual(window.frame, screen.frame) {
+                    misKeyedEntries.append((key, window))
+                }
+            }
+            guard !misKeyedEntries.isEmpty else { continue }
+
+            if windows[screenID] == nil, let first = misKeyedEntries.first {
+                AppLogger.error(.wallpaper, "Reconciling mis-keyed video window onto current screen", metadata: [
+                    "staleScreenID": first.key,
+                    "currentScreenID": screenID
+                ])
+                rekeyVideoWindowState(from: first.key, to: screenID)
+                misKeyedEntries.removeFirst()
+            }
+            for entry in misKeyedEntries {
+                AppLogger.error(.wallpaper, "Tearing down stacked mis-keyed video window", metadata: [
+                    "staleScreenID": entry.key,
+                    "currentScreenID": screenID
+                ])
+                teardownWindow(for: entry.key)
+                videoURLByScreen.removeValue(forKey: entry.key)
+                posterURLByScreen.removeValue(forKey: entry.key)
+                volumeByScreen.removeValue(forKey: entry.key)
+                nativePausedScreenIDs.remove(entry.key)
+                videoTargetScreenIDs.remove(entry.key)
+                onEndModeScreens.remove(entry.key)
+            }
+        }
     }
 
     @objc private func handleScreensDidSleep() {
@@ -8054,6 +8148,15 @@ final class VideoWallpaperManager: ObservableObject {
                 return ExistingVideoWindowEntry(screenID: existingID, window: window)
             }
         }
+        // screenID 重编号且 frame 已变（唤醒后分辨率/排列调整）时的最后兜底：
+        // 用窗口创建时记录的物理屏指纹找回旧窗口。含硬件序列号的指纹跨重编号
+        // 稳定；无序列号的屏退化为含位置/分辨率的指纹，此时交由异键窗口收敛处理。
+        let targetFingerprint = screen.wallpaperScreenFingerprint
+        for (existingID, window) in windows {
+            if windowFingerprintByScreenID[existingID] == targetFingerprint {
+                return ExistingVideoWindowEntry(screenID: existingID, window: window)
+            }
+        }
         return nil
     }
 
@@ -8070,6 +8173,9 @@ final class VideoWallpaperManager: ObservableObject {
 
         if let window = windows.removeValue(forKey: oldScreenID) {
             windows[newScreenID] = window
+        }
+        if let fingerprint = windowFingerprintByScreenID.removeValue(forKey: oldScreenID) {
+            windowFingerprintByScreenID[newScreenID] = fingerprint
         }
         if let player = players.removeValue(forKey: oldScreenID) {
             players[newScreenID] = player
@@ -8790,6 +8896,7 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         windows[screenID] = window
+        windowFingerprintByScreenID[screenID] = screen.wallpaperScreenFingerprint
         players[screenID] = components.player
         applyCropToScreen(screen)
         scheduleVideoLetterboxAnalysis(screenID: screenID, videoURL: videoURL)
@@ -9183,6 +9290,7 @@ final class VideoWallpaperManager: ObservableObject {
             window.orderOut(nil)
         }
         windows.removeAll()
+        windowFingerprintByScreenID.removeAll()
 
         // 延迟释放窗口，让 AppKit 的 _NSWindowTransformAnimation 退出动画完成。
         // 延迟完成后必须移除 work item，否则闭包会继续持有旧 window。

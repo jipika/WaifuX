@@ -53,6 +53,10 @@ class WallpaperSchedulerService: ObservableObject {
     private let displayFingerprintsKey = "wallpaper_scheduler_display_fingerprints_v1"
     private let logTag = "[WallpaperScheduler]"
     private let globalSchedulerStateKey = "__global_display_sync__"
+    /// 用户从状态栏手动关闭壁纸后抑制定时轮换的屏幕（含全局键）。
+    /// 该屏重新出现活跃动态壁纸（用户手动开启/设置）时由 tick 自然解除。
+    private let userSuppressedScreensKey = "wallpaper_scheduler_user_suppressed_v1"
+    private var userSuppressedScreenIDs: Set<String> = []
     /// Match existing "interval - 0.5" eligibility slack.
     private let intervalEligibilitySlack: TimeInterval = 0.5
     /// Short poll when apply is blocked (manual set in flight, batch running).
@@ -1167,6 +1171,7 @@ class WallpaperSchedulerService: ObservableObject {
         // Anchor missing last-change times so the first switch waits a full interval
         // (matches previous repeating-timer behavior) instead of firing immediately.
         seedMissingLastChangeTimesIfNeeded()
+        restoreUserSuppressedScreensIfNeeded()
         scheduleNextChange()
         saveConfig()
         let delayDesc: String
@@ -1201,6 +1206,48 @@ class WallpaperSchedulerService: ObservableObject {
         if didSeed {
             persistSchedulerState()
         }
+    }
+
+    // MARK: - 手动关闭抑制
+
+    /// 从 UserDefaults 恢复抑制标记（跨启动保持「用户主动关闭」语义）。
+    private func restoreUserSuppressedScreensIfNeeded() {
+        guard userSuppressedScreenIDs.isEmpty else { return }
+        if let ids = UserDefaults.standard.stringArray(forKey: userSuppressedScreensKey) {
+            userSuppressedScreenIDs = Set(ids)
+        }
+    }
+
+    private func persistUserSuppressedScreens() {
+        UserDefaults.standard.set(Array(userSuppressedScreenIDs), forKey: userSuppressedScreensKey)
+    }
+
+    /// 该屏被抑制时：若已有活跃动态壁纸（用户手动开启/设置）则解除抑制并返回 false，否则返回 true。
+    private func isSuppressedForScheduling(screen: NSScreen, stateKey: String) -> Bool {
+        guard userSuppressedScreenIDs.contains(stateKey) else { return false }
+        let live = VideoWallpaperManager.shared.hasActiveWallpaper(on: screen)
+            || WallpaperEngineXBridge.shared.hasLivePresentation(on: screen)
+        if live {
+            userSuppressedScreenIDs.remove(stateKey)
+            persistUserSuppressedScreens()
+            print("\(logTag) Auto-switch suppression lifted for screen \(stateKey): wallpaper live again")
+            return false
+        }
+        return true
+    }
+
+    /// 用户手动关闭壁纸后调用：抑制该屏的定时轮换，防止调度器把刚关掉的壁纸自动拉起。
+    func suppressAutoSwitch(forScreen screen: NSScreen) {
+        userSuppressedScreenIDs.insert(screen.wallpaperScreenIdentifier)
+        persistUserSuppressedScreens()
+        print("\(logTag) Auto-switch suppressed by manual stop: \(screen.localizedName)")
+    }
+
+    /// 全局同步模式下手动关闭后抑制全局轮换入口。
+    func suppressAutoSwitchGlobally() {
+        userSuppressedScreenIDs.insert(globalSchedulerStateKey)
+        persistUserSuppressedScreens()
+        print("\(logTag) Global auto-switch suppressed by manual stop")
     }
 
     func stop() {
@@ -1945,6 +1992,12 @@ class WallpaperSchedulerService: ObservableObject {
             let displayConfig = resolvedDisplayConfig(for: screen)
             guard displayConfig.isEnabled else { continue }
             guard !displayConfig.isOnUnlockMode else { continue }
+
+            // 用户手动关闭该屏壁纸期间不自动拉起；重新开启（有活跃壁纸）时自然解除抑制。
+            guard !isSuppressedForScheduling(screen: screen, stateKey: screenID) else {
+                print("\(logTag) Skipping screen \(screenID): suppressed by manual stop")
+                continue
+            }
             guard let interval = timedIntervalSeconds(for: displayConfig) else { continue }
 
             // "播完即换"模式设置了秒级兜底时，Web/Scene/静态图都由定时器继续轮换。
@@ -2187,6 +2240,17 @@ class WallpaperSchedulerService: ObservableObject {
         guard global.isEnabled, !global.isOnUnlockMode else { return false }
         guard let interval = timedIntervalSeconds(for: global) else { return false }
         let now = Date()
+
+        // 用户手动全局关闭期间不自动拉起；任一屏重新出现活跃动态壁纸时自然解除。
+        if userSuppressedScreenIDs.contains(globalSchedulerStateKey) {
+            let anyLive = NSScreen.screens.contains { screen in
+                !isSuppressedForScheduling(screen: screen, stateKey: globalSchedulerStateKey)
+            }
+            if !anyLive {
+                print("\(logTag) Skipping global rotation: suppressed by manual stop")
+                return false
+            }
+        }
 
         if global.isOnEndMode {
             // Web/Scene 秒级兜底：仅在没有本机视频时由定时器推进。
