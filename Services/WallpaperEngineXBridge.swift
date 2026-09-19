@@ -406,6 +406,18 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
             .store(in: &self.cancellables)
 
+        // Space 切换：macOS 27 新 WindowManager 下 wallpaper-wgpu 窗口的
+        // Stationary/CanJoinAllSpaces 标签可能失效，切到其它 Space 后动态层
+        // 留在原 Space（渲染正常但桌面看不到）。统一拉回当前 Space。
+        NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.activeSpaceDidChangeNotification
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { @MainActor [weak self] _ in
+            self?.reassertRendererWindowsOnCurrentSpace()
+        }
+        .store(in: &self.cancellables)
+
         // Web 烘焙完成后，若该工程正作为实时 Web 壁纸运行，立刻将新 MP4 同步给锁屏。
         // 不能等首次静帧兜底的 6 秒定时器，否则会出现已有 MP4 仍短暂走静态帧的竞态。
         NotificationCenter.default.publisher(for: .sceneOfflineBakeDidComplete)
@@ -1117,6 +1129,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
                 _deinitPIDs.insert(launchedPID)
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) wallpaper-wgpu 已启动 (pid=\(launchedPID))")
+                // macOS 27：新进程的桌面窗口可能落在非当前 Space，延迟分拍拉回
+                scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
                 AppLogger.error(.wallpaper, "wallpaper-wgpu 进程已启动", metadata: ["screenID": screenID, "pid": launchedPID, "renderKind": renderKind.rawValue, "screenProcesses": screenProcesses.count])
 
                 // 异步等待 canvas_size 就绪后重算 crop
@@ -4600,6 +4614,76 @@ final class WallpaperEngineXBridge: ObservableObject {
         return nil
     }
 
+    // MARK: - Renderer 窗口可见性守护
+
+    /// 新启动 renderer 的延迟可见性守护任务（key = pid）
+    private var rendererWindowGuardTasks: [pid_t: Task<Void, Never>] = [:]
+
+    /// wallpaper-wgpu 的窗口由二进制进程自管（层级、Stationary/CanJoinAllSpaces
+    /// 标签都在进程内设置）。macOS 27 的新 WindowManager 下，该窗口启动后可能
+    /// 落在非当前 Space（CGWindowList 中不在 onscreen 列表）：进程渲染正常，
+    /// 但桌面只能看到静态底图，表现为「动态层被静态层盖住」。host 侧检测到后
+    /// 通过 AX AXRaise 把窗口拉回当前 Space。
+    ///
+    /// - Returns: true = 无需处理或已拉回；false = 窗口尚未创建/无 AX 权限
+    @discardableResult
+    private static func raiseRendererProcessWindowsIfNeeded(pid: pid_t) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        guard !rendererProcessHasOnscreenWindow(pid: pid) else { return true }
+        let appEl = AXUIElementCreateApplication(pid)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement], !windows.isEmpty else {
+            return false
+        }
+        var raised = false
+        for window in windows {
+            if AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success {
+                raised = true
+            }
+        }
+        if raised {
+            print("[WallpaperEngineXBridge] 🪟 已将离屏的 wallpaper-wgpu 窗口拉回当前 Space (pid=\(pid))")
+        }
+        return raised
+    }
+
+    /// 指定进程是否有至少一个窗口位于当前 Space
+    private static func rendererProcessHasOnscreenWindow(pid: pid_t) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return true
+        }
+        return list.contains { $0[kCGWindowOwnerPID as String] as? Int == Int(pid) }
+    }
+
+    /// 对当前管理的全部 wgpu 渲染进程执行可见性守护。
+    /// Space 切换、唤醒重建、热切换成功后调用；幂等（已可见时不动作）。
+    func reassertRendererWindowsOnCurrentSpace() {
+        guard isControllingExternalEngine else { return }
+        for info in screenProcesses.values {
+            Self.raiseRendererProcessWindowsIfNeeded(pid: info.pid)
+        }
+    }
+
+    /// 新进程启动后的延迟守护：窗口创建是异步的（wgpu 初始化通常 1~3s），
+    /// 分三拍检查，覆盖慢设备；进程被替换或取消时自动停止。
+    private func scheduleRendererWindowVisibilityGuard(pid: pid_t, screenID: String) {
+        rendererWindowGuardTasks[pid]?.cancel()
+        let task = Task { @MainActor [weak self] in
+            for delayNanoseconds in [1_000_000_000, 2_000_000_000, 5_000_000_000] {
+                try? await Task.sleep(nanoseconds: UInt64(delayNanoseconds))
+                if Task.isCancelled { return }
+                guard let self else { return }
+                // 该 pid 已不再是此屏的活跃进程（被热切换/重启替换）就停止
+                guard self.screenProcesses[screenID]?.pid == pid else { return }
+                guard !Self.rendererProcessHasOnscreenWindow(pid: pid) else { continue }
+                Self.raiseRendererProcessWindowsIfNeeded(pid: pid)
+            }
+            self?.rendererWindowGuardTasks.removeValue(forKey: pid)
+        }
+        rendererWindowGuardTasks[pid] = task
+    }
+
     /// 合并用户属性 JSON 与场景配置覆盖（__-prefixed system keys）
     /// 场景配置覆盖由 SceneConfigOverrideService 管理，两者合并为单一 JSON 传给 --user-properties
     private static func mergeSceneConfigOverrides(_ userProperties: String?, wallpaperPath: String) -> String? {
@@ -5060,6 +5144,11 @@ final class WallpaperEngineXBridge: ObservableObject {
             print("[WallpaperEngineXBridge] 忽略屏幕参数通知：壁纸正在设置中")
             return
         }
+
+        // macOS 27：显示器参数变化（分辨率/缩放/Windo​​wManager 事件）会把
+        // wallpaper-wgpu 的桌面窗口挤出当前 Space（渲染正常但桌面看不到），
+        // 与 Space 切换同等处理，立即拉回。
+        reassertRendererWindowsOnCurrentSpace()
 
         let previousConfigurations = lastAppliedScreenConfigurations
         let statesBeforeRestart = screenRenderStates
