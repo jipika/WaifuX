@@ -903,6 +903,37 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         forMainFrameOnly: false
     )
 
+    /// 生成 document-start 用户属性 shim：拦截页面对
+    /// `window.wallpaperPropertyListener` 的赋值，在页面 init() 定义监听器的
+    /// 同一同步上下文里先应用 pending 属性，确保 init 期读取的属性已就位。
+    /// 页面未定义监听器时 shim 无副作用；didFinish 的 bootstrap 仍保留作兜底。
+    static func makePropertyListenerShimUserScript(propertiesJSON: String) -> WKUserScript? {
+        guard let data = propertiesJSON.data(using: .utf8) else { return nil }
+        let encoded = data.base64EncodedString()
+        let source = """
+        (function(){
+          try {
+            var __propsJSON = atob("\(encoded)");
+            Object.defineProperty(window, 'wallpaperPropertyListener', {
+              configurable: true,
+              enumerable: true,
+              get: function() { return window.__wxPendingListener || null; },
+              set: function(v) {
+                window.__wxPendingListener = v;
+                try {
+                  var props = JSON.parse(__propsJSON);
+                  if (v && typeof v.applyUserProperties === 'function') {
+                    v.applyUserProperties(props);
+                  }
+                } catch(e) {}
+              }
+            });
+          } catch(e) {}
+        })();
+        """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
     /// 鼠标事件桥：Swift 侧通过全局事件监听捕获鼠标，再经 JS 注入模拟进 WebView。
     /// 解决 macOS Finder 桌面图标层遮挡 desktopWindow 层级窗口导致点击/移动无法到达 WKWebView 的问题。
     private static let mouseEventBridgeScript = WKUserScript(
@@ -2152,6 +2183,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
         ucc.addUserScript(Self.mouseEventBridgeScript)
+        // 用户属性必须在页面脚本运行前就位：WE 网页壁纸常在 init() 期
+        // （如同步监听赋值后紧接的场景选择）读取 forcedTime/bonuschar 等属性
+        // 决定内容；didFinish 之后再 evaluateJavaScript 投递为时已晚，
+        // 表现为「按时间切换场景/选项」不生效。
+        if let propsJSON = screenStates[screenIdx]?.injectedPropertiesJSON,
+           let shim = Self.makePropertyListenerShimUserScript(propertiesJSON: propsJSON) {
+            ucc.addUserScript(shim)
+        }
         if offscreen {
             ucc.addUserScript(Self.offlineBakeAudioSilenceStateScript)
             ucc.addUserScript(Self.offlineBakeSilentMediaScript)
