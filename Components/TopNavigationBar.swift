@@ -16,31 +16,6 @@ extension EnvironmentValues {
     }
 }
 
-// MARK: - 主标签类型
-public enum MainTab: String, CaseIterable {
-    case home, wallpaperExplore, mediaExplore, animeExplore, myMedia
-
-    var title: String {
-        switch self {
-        case .home: return t("nav.home")
-        case .wallpaperExplore: return t("nav.wallpaper")
-        case .animeExplore: return t("nav.anime")
-        case .mediaExplore: return t("nav.media")
-        case .myMedia: return t("nav.myMedia")
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .home: return "house"
-        case .wallpaperExplore: return "photo"
-        case .animeExplore: return "play.tv"
-        case .mediaExplore: return "film"
-        case .myMedia: return "heart"
-        }
-    }
-}
-
 // MARK: - 顶部导航栏组件
 struct TopNavigationBar: View {
     @Binding var selectedTab: MainTab
@@ -119,13 +94,13 @@ struct TopNavigationBar: View {
     /// 新版本首次启动时自动弹出使用教程
     private func checkAndShowTutorialOnNewVersion() {
         let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        let lastVersion = UserDefaults.standard.string(forKey: Self.lastTutorialVersionKey) ?? ""
+        let lastVersion = WaifuXPreferences.shared.string(forKey: Self.lastTutorialVersionKey) ?? ""
         guard !currentVersion.isEmpty else { return }
         if currentVersion != lastVersion {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 showHelpPopover = true
             }
-            UserDefaults.standard.set(currentVersion, forKey: Self.lastTutorialVersionKey)
+            WaifuXPreferences.shared.set(currentVersion, forKey: Self.lastTutorialVersionKey)
         }
     }
 }

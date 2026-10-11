@@ -1,7 +1,6 @@
 import SwiftUI
 
-// 导入 ThemeManager（如果可用）
-// 注意：ThemeManager 定义在 DesignSystem/ThemeManager.swift 中
+// ThemeManager 位于 DesignSystem/ThemeManager.swift，由主程序与 Helper 共用。
 
 // MARK: - Liquid Glass 设计系统
 // 基于 Apple 官方 Liquid Glass API (macOS 26+) 的兼容实现
@@ -935,96 +934,6 @@ public extension Color {
         )
     }
 }
-import SwiftUI
-import Combine
-
-// MARK: - 主题模式
-enum ThemeMode: String, CaseIterable, Identifiable {
-    case dark = "深色"
-    case light = "浅色"
-    case system = "跟随系统"
-    
-    var id: String { rawValue }
-    
-    var icon: String {
-        switch self {
-        case .dark: return "moon.fill"
-        case .light: return "sun.max.fill"
-        case .system: return "macpro.gen1"
-        }
-    }
-}
-
-// MARK: - 主题管理器
-@MainActor
-class ThemeManager: ObservableObject {
-    static let shared = ThemeManager()
-    
-    @Published var themeMode: ThemeMode = .dark {
-        didSet {
-            UserDefaults.standard.set(themeMode.rawValue, forKey: "themeMode")
-            applyTheme()
-        }
-    }
-    
-    var isDarkMode: Bool {
-        switch themeMode {
-        case .dark:
-            return true
-        case .light:
-            return false
-        case .system:
-            return !isSystemLightMode
-        }
-    }
-    
-    private var cancellables = Set<AnyCancellable>()
-    
-    private init() {
-        // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
-        // 使用默认深色主题（WaifuX 是纯深色设计），用户偏好通过 restoreSavedSettings() 延迟恢复
-        self.themeMode = .dark
-        
-        // 监听系统主题变化
-        DistributedNotificationCenter.default
-            .publisher(for: Notification.Name("AppleInterfaceThemeChangedNotification"))
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
-        
-        applyTheme()
-    }
-    
-    /// 延迟恢复保存的主题设置（必须在 applicationDidFinishLaunching 中调用）
-    func restoreSavedSettings() {
-        if let savedMode = UserDefaults.standard.string(forKey: "themeMode"),
-           let mode = ThemeMode(rawValue: savedMode) {
-            self.themeMode = mode
-            applyTheme()
-        }
-    }
-    
-    func applyTheme() {
-        objectWillChange.send()
-        
-        // 更新应用外观
-        let isDark = isDarkMode
-        DispatchQueue.main.async {
-            NSApp.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
-        }
-    }
-    
-    private var isSystemLightMode: Bool {
-        let appearance = NSApp.effectiveAppearance
-        var isLight = false
-        appearance.performAsCurrentDrawingAppearance {
-            isLight = appearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
-        }
-        return isLight
-    }
-}
-
 // MARK: - 主题颜色
 struct ThemeColors {
     let isDarkMode: Bool
