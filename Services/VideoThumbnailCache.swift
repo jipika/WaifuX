@@ -119,7 +119,11 @@ final class VideoThumbnailCache {
     private init() {
         // 设置缓存目录
         let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
-        cacheDirectory = caches[0].appendingPathComponent("WaifuX/VideoThumbnails", isDirectory: true)
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            cacheDirectory = URL(fileURLWithPath: root).appendingPathComponent("VideoThumbnails", isDirectory: true)
+        } else {
+            cacheDirectory = caches[0].appendingPathComponent("WaifuX/VideoThumbnails", isDirectory: true)
+        }
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
 
         memoryCache.countLimit = 50

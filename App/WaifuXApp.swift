@@ -7,6 +7,20 @@ import WebKit
 import Darwin
 import Sparkle
 
+/// 后台 Helper 连接横幅的挂载位置。
+///
+/// 横幅是窗口级 overlay，而 `EdgeToEdgeHostingView` 铺满整个窗口、自绘顶栏
+/// （红绿灯 + Tabs）就画在最顶部那一条：直接 `overlay(alignment: .top)`
+/// 会把横幅压在红绿灯与 Tabs 上面。这里让出顶栏高度，让横幅落在内容区顶部。
+private extension View {
+    func attachingBackgroundAgentBanner() -> some View {
+        overlay(alignment: .top) {
+            BackgroundAgentConnectionBanner()
+                .padding(.top, MainTopBarLayout.legacyContentTopPadding)
+        }
+    }
+}
+
 /// Coordinates ordinary app windows with the macOS Space that is currently active.
 ///
 /// `.moveToActiveSpace` is intentionally limited to user-facing windows. Desktop
@@ -55,13 +69,6 @@ enum WindowSpaceCoordinator {
             ?? NSScreen.screens.first
         return screen?.visibleFrame
     }
-}
-
-func frameInterpolationDebugPrint(_ message: String) {
-    NSLog("[VideoWallpaperManager] [FrameInterpolation] \(message)")
-    AppLogger.debug(.wallpaper, "FrameInterpolation", metadata: [
-        "message": message
-    ])
 }
 
 private func waifuxSignalHandler(_ signo: Int32) {
@@ -125,8 +132,14 @@ enum AppExitDiagnostics {
 
     private static func openLogIfNeeded() {
         guard fd < 0 else { return }
-        let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        var supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        #if DEBUG
+        if BackgroundRuntimeRole.isIsolatedTest,
+           let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            supportURL = URL(fileURLWithPath: root, isDirectory: true)
+        }
+        #endif
         let dirURL = supportURL.appendingPathComponent("WaifuX", isDirectory: true)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
         let path = dirURL.appendingPathComponent("waifux-exit.log").path
@@ -210,6 +223,56 @@ struct WaifuXApp {
     #endif
 
     static func main() {
+        #if DEBUG
+        if CommandLine.arguments.contains("--helper-service-diagnostics") {
+            MainActor.assumeIsolated {
+                let app = NSApplication.shared
+                app.setActivationPolicy(.accessory)
+                Task { @MainActor in
+                    do {
+                        let values = try await BackgroundAgentClient.shared.inspectRunningService()
+                        let data = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
+                        print(String(decoding: data, as: UTF8.self))
+                        app.terminate(nil)
+                    } catch {
+                        print("HELPER_SERVICE_DIAGNOSTICS_FAILED \(error.localizedDescription)")
+                        exit(1)
+                    }
+                }
+                app.run()
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--helper-ui-exit-probe") {
+            MainActor.assumeIsolated {
+                guard BackgroundRuntimeRole.isIsolatedTest else { exit(2) }
+                let app = NSApplication.shared
+                app.setActivationPolicy(.accessory)
+                let delegate = HelperUIExitProbeDelegate()
+                app.delegate = delegate
+                withExtendedLifetime(delegate) { app.run() }
+            }
+            return
+        }
+        #endif
+        if CommandLine.arguments.contains("--helper-proxy-probe") {
+            MainActor.assumeIsolated {
+                _ = NSApplication.shared
+                _ = WallpaperEngineXBridge.shared
+                _ = WallpaperSchedulerService.shared
+                _ = DynamicWallpaperAutoPauseManager.shared
+                _ = StatusBarController.shared
+                _ = LiquidGlassClockOverlayManager.shared
+                _ = NotchOverlayManager.shared
+                let values = VideoWallpaperManager.shared.backgroundSnapshot()
+                precondition(values["nativePlayerCount"] as? Int == 0)
+                precondition(values["nativeWindowCount"] as? Int == 0)
+                precondition(NSApp.windows.isEmpty)
+                precondition(!WallpaperSchedulerService.shared.isRunning)
+                print("UI_PROXY_REGRESSION_PASSED players=0 windows=0 scheduler=stopped")
+            }
+            return
+        }
         // keeper CLI 模式：由 LaunchAgent 以 --wallpaper-keeper 常驻运行，
         // 守护壁纸扩展被 pkd 清杀后自动重新拉载（见 WallpaperExtensionKeeper）。
         // 必须在一切 GUI/诊断初始化之前分流，keeper 不进入 App 生命周期。
@@ -271,7 +334,12 @@ struct WaifuXApp {
         // Wallsflow 封面图按出口 IP 被 Cloudflare 挑战（系统代理出口 403、直连放行）；
         // Kingfisher 只有全局 session，无法按 host 配代理 → 用 URLProtocol 给该域名分流。
         // 其他域名不经过这个 protocol，行为不变。
-        configuration.protocolClasses = [WallsflowDirectURLProtocol.self] + (configuration.protocolClasses ?? [])
+        // 动态桌面封面同理走传输层：服务端截图接口已失效，伪 host 的请求在此转成
+        // `DynamicWallpaperPosterService` 的本地抽帧结果（Range 取片 + AVFoundation）。
+        configuration.protocolClasses = [
+            DynamicWallpaperPosterURLProtocol.self,
+            WallsflowDirectURLProtocol.self
+        ] + (configuration.protocolClasses ?? [])
         downloader.sessionConfiguration = configuration
         downloader.downloadTimeout = 60.0
         // ⚠️ 不设置全局 .backgroundDecode：
@@ -390,9 +458,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     /// 设计目的：避免 ContentView 因 @StateObject 响应 ViewModel 的 @Published 变化而重算 body
     /// （会连锁导致下游 5 个 tab 子视图重建 binding/参数 → 全量重算）。
     /// 同时让 ViewModel 不再随主窗口隐藏/重建而销毁，避免数据重新加载。
+    #if DEBUG
+    // Bare-window lifecycle tests must not initialize network feed models.
+    lazy var wallpaperViewModel = WallpaperViewModel()
+    lazy var mediaViewModel = MediaExploreViewModel()
+    lazy var animeViewModel = AnimeViewModel()
+    #else
     let wallpaperViewModel = WallpaperViewModel()
     let mediaViewModel = MediaExploreViewModel()
     let animeViewModel = AnimeViewModel()
+    #endif
 
     // MARK: - 窗口尺寸（唯一真实来源，全局统一）
     /// 最小允许的窗口大小
@@ -418,6 +493,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
+        installHelperQuitHandlers()
+        WaifuXPreferences.shared.loadLegacyPreferences()
+        BackgroundAgentClient.shared.start()
         AppResponsivenessMonitor.startIfNeeded()
         AppResponsivenessMonitor.noteScenePhase("didFinishLaunching")
         AppResponsivenessMonitor.noteAppActive(NSApp.isActive)
@@ -459,34 +537,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         )
 
         // 1. 初始化状态栏控制器（轻量级，不阻塞）
-        StatusBarController.shared.configure(
-            showWindow: { [weak self] in
+        WaifuXUIActions.handler = { [weak self] action in
+            switch action {
+            case .main: self?.showMainWindow()
+            case .library:
+                MainNavigationRequestStore.requestLibraryTab()
                 self?.showMainWindow()
-            },
-            releaseMemory: { [weak self] in
-                self?.releaseForegroundMemoryNow()
-            },
-            quit: { [weak self] in
-                self?.quitApplication()
+            case .wallpaperDetail:
+                WaifuXPreferences.shared.synchronize()
+                self?.showMainWindow()
+                NotificationCenter.default.post(name: .openCurrentWallpaperDetail, object: nil)
+            case .settings: self?.showSettingsWindow(nil)
+            case .scheduler:
+                WaifuXPreferences.shared.set(true, forKey: "open_scheduler_settings")
+                self?.showSettingsWindow(nil)
+            case .updates: self?.checkForUpdates()
+            case .releaseMemory: self?.releaseForegroundMemoryNow()
             }
-        )
+        }
 
         // ⚠️ 在创建 ContentView 之前刷新功能模块启动快照。
         // ContentView 的 MainTabViewController.configure 在 makeNSViewController（视图设置）即跑，
         // 依赖 ModuleAvailability.shared 决定 addPage 哪些 tab。必须在此之前同步读 UserDefaults。
         // 直接读 UserDefaults 是安全的（非 @AppStorage、非 init 读取，与已存在的 line 316/399 一致）。
         ModuleAvailability.shared.refreshFromUserDefaults()
-
-        // 壁纸扩展守护（旧 keeper LaunchAgent）：运行期保活已迁移到 App 内置的
-        // WallpaperExtensionAgentHealer（参考 Phosphene 的 agent 重启自愈），
-        // 不再依赖独立常驻服务。此处默认改为关闭，仅当用户显式开过才对齐；
-        // 放后台避免 launchctl 阻塞启动。
-        Task.detached(priority: .utility) {
-            let enabled = UserDefaults.standard.object(
-                forKey: WallpaperExtensionKeeper.launchAgentDefaultsKey
-            ) as? Bool ?? false
-            WallpaperExtensionKeeper.syncLaunchAgentWithEnabledFlag(enabled)
-        }
 
         // 2. 立即创建窗口（使用 defer: false 立即渲染，不等待）
         let contentView = ContentView(
@@ -529,7 +603,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         window?.minSize = Self.minimumWindowSize
 
         // 设置 contentView
-        let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+        let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
         configureOpaqueHostingView(hostingView)
         window?.contentView = hostingView
 
@@ -543,40 +617,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
         window?.delegate = self
 
-        // 开机启动时不显示主窗口，仅后台运行（状态栏 + 动态壁纸自动应用）
-        let isLoginLaunch = UserDefaults.standard.bool(forKey: "launch_at_login")
-        if isLoginLaunch {
-            // 窗口已创建但保持隐藏，用户可通过 Dock 图标或状态栏菜单显示
-            // 动态壁纸恢复在 restoreAllDataAsync 中完成
-            // 登录启动不应短暂占用前台应用身份或累计屏幕使用时间。
-            enterBackgroundModeIfNoForegroundInterface(hideDockIcon: true)
-            AppResponsivenessMonitor.noteWindowVisible(false)
-            AppResponsivenessMonitor.noteScenePhase("loginLaunchHidden")
-        } else {
-            // ⚠️ 关键：立即显示窗口，不要等待
-            if let window {
-                WindowSpaceCoordinator.show(window)
-            }
-            AppResponsivenessMonitor.noteWindowVisible(true)
-            AppResponsivenessMonitor.noteScenePhase("mainWindowVisible")
+        // 登录恢复由独立 Helper 负责。主程序被打开就应显示界面；保存的
+        // launch_at_login 偏好不能证明这一次 UI 启动来自系统登录。
+        if let window {
+            WindowSpaceCoordinator.show(window)
         }
+        AppResponsivenessMonitor.noteWindowVisible(true)
+        AppResponsivenessMonitor.noteScenePhase("mainWindowVisible")
 
         // ⚠️ 关键：让出主线程，让 SwiftUI 完成首次布局渲染
         // 所有数据恢复在下一个 run loop 异步执行
         DispatchQueue.main.async { [weak self] in
             self?.restoreAllDataAsync()
+            if let pending = WaifuXPreferences.shared.dictionary(forKey: "background_pending_ui_action"),
+               let value = pending["action"] as? String,
+               let action = WaifuXUIActions.Action(rawValue: value) {
+                // 无论新鲜与否都清掉，避免陈旧请求（Helper 在线时写入的那份）在下次
+                // 冷启动时莫名其妙弹一次窗口。
+                WaifuXPreferences.shared.removeObject(forKey: "background_pending_ui_action")
+                let at = (pending["at"] as? TimeInterval) ?? 0
+                if Date().timeIntervalSince1970 - at < 30 {
+                    WaifuXUIActions.perform(action)
+                }
+            }
         }
-
-        // 预先在后台线程解压内嵌 assets（wallpaper-wgpu 渲染依赖），避免首次设置壁纸时阻塞主线程
-        WallpaperEngineEmbeddedAssets.prepareAssetsInBackground()
-
-        // 启动后错峰检查一次系统壁纸缓存水位（>2GB 时 LRU 清到 100MB，见 WallpaperSystemCacheJanitor）
-        WallpaperSystemCacheJanitor.shared.noteAppLaunch()
-
-        // .saver 是从 App 包里拷到 ~/Library/Screen Savers 的，App 升级后要同步那份副本
-        ScreenSaverService.shared.refreshInstalledVersionIfNeeded()
-        // 屏保跟随桌面壁纸：启动时对齐一次（壁纸状态恢复后观察者还会再同步）
-        ScreenSaverService.shared.syncFromDesktop(reason: "launch")
 
         // Sparkle 自动按 SUScheduledCheckInterval (24h) 检查更新，无需手动触发
     }
@@ -595,6 +659,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     /// 旧版 universal 客户端未声明 channel，会自动忽略所有带 channel 的 item（不会误装错架构包）。
     func allowedChannels(for updater: SPUUpdater) -> Set<String> {
         [WallpaperEngineAvailability.currentArchitecture]
+    }
+
+    /// Share manual/scheduled Sparkle check cycles, then offer component updates in their own window.
+    /// Waiting for the app-update session to finish avoids competing update prompts.
+    func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
+        RendererComponentUpdater.shared.check()
     }
 
     func standardUserDriverWillShowModalAlert() {
@@ -636,151 +706,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
     // MARK: - 异步恢复所有数据（在窗口显示后执行，避免阻塞主线程）
     private func restoreAllDataAsync() {
-        // ⚠️ 关键：分帧执行，每批数据恢复之间让出时间给主线程渲染 UI
-
-        // 第1帧：基础设置
-        DispatchQueue.main.async { [weak self] in
-            if #available(macOS 26.0, *) {
-                // ⚠️ 延迟到窗口显示后执行，避免启动卡死；在主线程执行避免后台线程调用
-                // Bundle/FileManager/NSWorkspace 等非线程安全 API 触发崩溃
-                self?.repairWallpaperExtensionRegistration()
-
-                // 扩展保活（App 内置，无额外服务）：pkd 杀扩展 / agent 空连接螺旋
-                // 时 killall WallpaperAgent 自愈。参考 Phosphene 的实现。
-                WallpaperExtensionAgentHealer.shared.start()
-            }
-
-            LocalizationService.shared.restoreSavedSettings()
-            ThemeManager.shared.restoreSavedSettings()
-            // DeepSeek Harness 在线观察：装了才轮询；在线时「设为壁纸」弹窗多出 Harness 目标
-            DSHHarnessBridge.shared.startAvailabilityMonitor()
-            // 探索排序需尽早恢复，赶在 ContentView 首次 initialLoad 之前
-            self?.wallpaperViewModel.restoreExploreSortPreferences()
-            self?.mediaViewModel.restoreExploreSortPreferences()
-
-            // 第2帧：权限和库数据
-            DispatchQueue.main.async {
-                DownloadPathManager.shared.migrateLegacyCustomFolderPreferenceIfNeeded()
-                WorkshopSourceManager.shared.refreshStoredSteamIdentity()
-                WorkshopSourceManager.shared.loadSteamProfileID()
-                SteamServiceManager.shared.start()
-                WallpaperLibraryService.shared.restoreSavedData()
-                LibraryFolderStore.shared.restoreSavedData()
-
-                // 第3帧：媒体库
-                DispatchQueue.main.async {
-                    MediaLibraryService.shared.restoreSavedData()
-                    // 壁纸库 + 文件夹 + 媒体库都已就位，清理空字符串 / 孤儿 / 跨集合 folderID
-                    LibraryFolderStore.shared.sanitizeLibraryFolderMemberships()
-
-                    // 旧版本的 LocalWallpaperScanner 只把陌生文件放在内存中。
-                    // 本次迁移在两套库记录恢复后补写一次持久化记录；完成后不再常规扫盘。
-                    Task(priority: .utility) {
-                        _ = await LocalWallpaperScanner.shared
-                            .rebuildManagedLibraryIndexForUpgradeIfNeeded()
-                        // 兜底：升级迁移之后仍然找不到任何一条活记录、磁盘上却还有文件时补建一次。
-                        // 38.0.14x 之前「只信持久化记录」的版本把迁移标记写早了，
-                        // 这批用户的「我的库」会永久空白（文件其实都还在）。
-                        _ = await LocalWallpaperScanner.shared
-                            .rebuildManagedLibraryIndexIfNoLiveRecords()
-                    }
-
-                    // 第4帧：动漫数据
-                    DispatchQueue.main.async {
-                        AnimeFavoriteStore.shared.restoreSavedData()
-                        AnimeProgressStore.shared.restoreSavedData()
-
-                        // 第4.5帧：恢复未完成迁移 + 修复孤儿路径
-                        DispatchQueue.main.async {
-                            Task {
-                                await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
-                                await DirectoryMigrationService.shared.repairOrphanedPathsIfNeeded()
-                            }
-                        }
-
-                        // 第5帧：播放缓存和任务
-                        DispatchQueue.main.async {
-                            PlaybackProgressCache.shared.restoreSavedData()
-                            DownloadTaskService.shared.restoreSavedTasks()
-                            if let self {
-                                PersistentDownloadQueueService.shared.configure(
-                                    wallpaperViewModel: self.wallpaperViewModel,
-                                    mediaViewModel: self.mediaViewModel
-                                )
-                            }
-                            WallpaperSchedulerService.shared.restoreSavedConfig()
-                            ExternalDisplayConnectionCoordinator.shared.start()
-
-                            // 启动锁屏扩展 Socket IPC 服务端（仅 macOS 26+）
-                            if #available(macOS 26.0, *) {
-                                WallpaperExtensionSocketServer.shared.start()
-                                LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
-                                // 仅当扩展 bundle 相对上次启动发生变化（App 更新）时才通知旧扩展退出。
-                                // macOS 27 上无条件 reload 会杀掉健康扩展，且 WallpaperAgent
-                                // 不会及时重新拉载（实测 ≥30 分钟），锁屏实例就此假死。
-                                WallpaperExtensionSocketServer.shared.notifyExtensionReloadIfBundleChanged()
-                            }
-
-                            // 恢复刘海隐藏设置（纯 UI 覆盖层，不依赖壁纸）
-                            let notchHidden = UserDefaults.standard.bool(forKey: "hide_notch")
-                            if notchHidden {
-                                NotchOverlayManager.shared.setEnabled(true)
-                            }
-
-                            // 先完成动态壁纸恢复，再恢复静态 overlay。视频 renderer 的启动
-                            // 现在是异步的；若静态层先出现，会短暂抢占桌面并造成闪屏。
-                            Task { @MainActor in
-                                // An older app version can leave a desktop-level
-                                // helper reparented to launchd. Reap it before
-                                // restoring persisted wallpaper state.
-                                await VideoRendererProcessController.shared
-                                    .reapOrphanedRenderersFromPreviousVersions()
-                                if WallpaperEngineXBridge.shared.hasPersistedRestoreState() {
-                                    await WallpaperEngineXBridge.shared.restoreIfNeeded()
-                                } else {
-                                    await VideoWallpaperManager.shared.restoreIfNeeded()
-                                    if !VideoWallpaperManager.shared.isVideoWallpaperActive {
-                                        await WallpaperEngineXBridge.shared.restoreIfNeeded()
-                                    }
-                                }
-                                StaticImageWallpaperOverlayManager.shared.restoreIfNeeded()
-                            }
-
-                            // 恢复动态壁纸自动暂停设置
-                            DynamicWallpaperAutoPauseManager.shared.restoreSettings()
-
-                            // 初始化静态壁纸颗粒蒙层（独立于壁纸设置，开关实时生效）
-                            StaticWallpaperGrainManager.shared.updateOverlay()
-
-                            // 初始化液态玻璃时钟 Overlay（桌面壁纸时钟，Metal 渲染）
-                            // 配置持久化由 LiquidGlassClockSettings 自动管理
-                            LiquidGlassClockOverlayManager.shared.refreshAll()
-
-                            // 第6帧：其他状态
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                // Sparkle 自动处理更新检查，无需手动恢复缓存状态
-
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    WallpaperViewModel().restoreAPIKeyState()
-                                    WallpaperSourceManager.shared.restoreState()
-
-                                    // 应用启动时的数据源选择（ping Google 决策）
-                                    Task {
-                                        await WallpaperSourceManager.shared.performStartupSourceSelection()
-                                    }
-
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                                        let vm = SettingsViewModel()
-                                        vm.restoreSavedSettings()
-                                        self?.settingsViewModel = vm
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        LocalizationService.shared.restoreSavedSettings()
+        ThemeManager.shared.restoreSavedSettings()
+        wallpaperViewModel.restoreExploreSortPreferences()
+        mediaViewModel.restoreExploreSortPreferences()
+        WallpaperLibraryService.shared.restoreSavedData()
+        MediaLibraryService.shared.restoreSavedData()
+        LibraryFolderStore.shared.restoreSavedData()
+        AnimeFavoriteStore.shared.restoreSavedData()
+        AnimeProgressStore.shared.restoreSavedData()
+        PlaybackProgressCache.shared.restoreSavedData()
+        DownloadTaskService.shared.restoreSavedTasks()
+        WallpaperSourceManager.shared.restoreState()
+        WorkshopSourceManager.shared.refreshStoredSteamIdentity()
+        WorkshopSourceManager.shared.loadSteamProfileID()
+        let vm = SettingsViewModel()
+        vm.restoreSavedSettings()
+        settingsViewModel = vm
+        wallpaperViewModel.restoreAPIKeyState()
+        Task { await WallpaperSourceManager.shared.performStartupSourceSelection() }
     }
 
     @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -805,11 +749,70 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // 最后一个窗口关闭时不退出应用，保持在后台运行（无 Dock 图标）
-        return false
+        if !helperExitInProgress { prepareForInterfaceExit() }
+        return true
+    }
+
+    private var helperExitInProgress = false
+    private var helperExitApproved = false
+    private var exitsInterfaceOnly = false
+    private var interfaceRelaunchURL: URL?
+    private var helperExitGeneration: UInt = 0
+    private var helperExitTask: Task<Void, Never>?
+
+    func installHelperQuitHandlers() {
+        BackgroundAgentClient.shared.onApplicationQuitRequested = { [weak self] in self?.quitApplication() }
+        BackgroundAgentClient.shared.onHelperStopped = { [weak self] in
+            // stopped is sent before final worker cleanup and process exit.
+            // Follow the normal quit path so the client still confirms exit.
+            self?.quitApplication()
+        }
+    }
+
+    /// Window close and an intentional UI relaunch preserve the background owner.
+    func prepareForInterfaceExit() {
+        guard !helperExitInProgress else { return }
+        exitsInterfaceOnly = true
+    }
+
+    func exitInterface() {
+        prepareForInterfaceExit()
+        NSApp.terminate(nil)
+    }
+
+    func relaunchInterface() {
+        guard !helperExitInProgress else { return }
+        interfaceRelaunchURL = Bundle.main.bundleURL
+        markIntentionalTermination(reason: "relaunch")
+        AppExitDiagnostics.record("relaunchRequested", metadata: ["bundle": Bundle.main.bundleURL.path])
+        exitInterface()
+    }
+
+    private func completeUIExit(_ sender: NSApplication) throws {
+        guard !helperExitApproved else { return }
+        if let bundleURL = interfaceRelaunchURL {
+            // The writer has acknowledged the final settings before a new UI
+            // can read them. No asynchronous gap separates launch from exit.
+            let launcher = Process()
+            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            launcher.arguments = ["-n", bundleURL.path]
+            launcher.standardOutput = FileHandle.nullDevice
+            launcher.standardError = FileHandle.nullDevice
+            try launcher.run()
+            interfaceRelaunchURL = nil
+            AppExitDiagnostics.record("relaunchTerminate")
+        }
+        helperExitApproved = true
+        sender.terminate(nil)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if helperExitApproved { return .terminateNow }
+        guard !helperExitInProgress else { return .terminateCancel }
+        helperExitInProgress = true
+        helperExitGeneration &+= 1
+        let generation = helperExitGeneration
+        if !exitsInterfaceOnly { BackgroundAgentClient.shared.beginApplicationQuit() }
         let frontmost = NSWorkspace.shared.frontmostApplication
         let metadata: [String: Any] = [
             "dynamicRendering": isDynamicWallpaperRendering,
@@ -819,11 +822,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             "appHidden": NSApp.isHidden,
             "mainWindowVisible": window?.isVisible ?? false,
             "settingsWindowVisible": settingsWindowController?.window?.isVisible ?? false,
-            "decision": "allow"
+            "decision": "allow",
+            "scope": exitsInterfaceOnly ? "interface" : "application"
         ]
         AppExitDiagnostics.record("applicationShouldTerminate", metadata: metadata)
-        // Dynamic renderers belong to the main app and are stopped in applicationWillTerminate.
-        return .terminateNow
+        // Keep the ordinary event loop running while acknowledging queued writes.
+        // .terminateLater enters AppKit's modal loop; a programmatic close from
+        // a main-queue/concurrency callback can then block both drain and timeout.
+        helperExitTask = Task {
+            do {
+                try await BackgroundAgentClient.shared.drainForUIExit()
+                guard generation == helperExitGeneration, !Task.isCancelled else { return }
+                if exitsInterfaceOnly {
+                    // The Helper can finish this sync after the UI process exits.
+                    _ = try? await BackgroundAgentClient.shared.request("cloud.syncOnUIExit")
+                }
+                guard generation == helperExitGeneration, !Task.isCancelled else { return }
+                if !exitsInterfaceOnly {
+                    try await BackgroundAgentClient.shared.stopForApplicationQuit()
+                }
+                guard generation == helperExitGeneration, !Task.isCancelled else { return }
+                try completeUIExit(sender)
+            } catch { failApplicationQuit(error, generation: generation) }
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(6))
+            guard generation == helperExitGeneration, !helperExitApproved else { return }
+            failApplicationQuit(NSError(domain: "WaifuXHelper", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: exitsInterfaceOnly
+                    ? "后台保存设置超时，界面尚未退出"
+                    : "后台服务停止超时"]), generation: generation)
+        }
+        return .terminateCancel
+    }
+
+    private func failApplicationQuit(_ error: Error, generation: UInt) {
+        guard generation == helperExitGeneration, !helperExitApproved else { return }
+        helperExitGeneration &+= 1
+        helperExitTask?.cancel()
+        helperExitTask = nil
+        helperExitInProgress = false
+        interfaceRelaunchURL = nil
+        BackgroundAgentClient.shared.applicationQuitFailed(error)
+        AppLogger.error(.general, "Application quit failed; UI retained", metadata: ["error": error.localizedDescription])
+        applicationQuitDidFail()
+    }
+
+    func applicationQuitDidFail() {
+        showMainWindow()
     }
 
     func showMainWindow() {
@@ -871,7 +917,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             window?.standardWindowButton(.zoomButton)?.isHidden = true
 
             // ⚠️ 先设置 contentView，再恢复保存的窗口尺寸
-            let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+            let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
             configureOpaqueHostingView(hostingView)
             window?.contentView = hostingView
 
@@ -890,7 +936,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                     minWidth: Self.minimumWindowSize.width,
                     minHeight: Self.minimumWindowSize.height
                 )
-            let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+            let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
             configureOpaqueHostingView(hostingView)
             window?.contentView = hostingView
         }
@@ -1048,6 +1094,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     }
 
     func quitApplication() {
+        exitsInterfaceOnly = false
+        BackgroundAgentClient.shared.beginApplicationQuit()
         markIntentionalTermination(reason: "quitApplication")
         AppExitDiagnostics.record("quitApplication")
         NSApp.terminate(nil)
@@ -1062,25 +1110,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
     func applicationWillTerminate(_ notification: Notification) {
         AppExitDiagnostics.record("applicationWillTerminate")
-
-        // 通知系统托管的扩展解除“仅锁屏播放”限制。
-        // 先让底层自解码恢复出帧，再拆 App 的覆盖层，减少退出交接时露出静帧。
-        if #available(macOS 26.0, *) {
-            WallpaperExtensionSocketServer.shared.notifyAppWillTerminate()
-        }
-
-        // 只清理动态壁纸窗口，不回退到旧静态壁纸
-        VideoWallpaperManager.shared.prepareForAppTermination()
-
-        if #available(macOS 26.0, *) {
-            WallpaperExtensionSocketServer.shared.clearDisplayVideos()
-            WallpaperExtensionSocketServer.shared.stop()
-        }
-
-        WallpaperEngineXBridge.shared.prepareForAppTermination()
-
-        // 应用退出时自动触发云同步（如果已启用）
-        CloudSyncService.shared.syncOnAppTerminate()
+        let children = BackgroundChildProcessCleanup.snapshot()
+        SceneOfflineBakeService.stopPreview()
+        // UI preview/export workers can still be alive after an asynchronous
+        // stop. Keep updater/relaunch tools outside this renderer cleanup.
+        let rendererNames: Set<String> = ["wallpaper-wgpu", "wallpaperengine-cli", "wallpaper-video-renderer", "ffmpeg", "dxc", "WaifuXSteamService"]
+        BackgroundChildProcessCleanup.terminate(children.filter {
+            let name = $0.executableName
+            return rendererNames.contains(name) ||
+                (name.hasSuffix("-x86_64") && rendererNames.contains(String(name.dropLast(7))))
+        })
+        BackgroundAgentClient.shared.disconnect()
     }
 
     /// 捕获 macOS 窗口布局循环异常。
@@ -1178,7 +1218,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // SocketServer 的 extensionReloadFingerprintDefaultsKey 分开，避免写序耦合。
         let fingerprint = WallpaperExtensionSocketServer.embeddedExtensionBundleFingerprint()
         let registrationFingerprintKey = "wallpaper_extension_registration_fingerprint"
-        let lastRegisteredFingerprint = UserDefaults.standard.string(forKey: registrationFingerprintKey)
+        let lastRegisteredFingerprint = WaifuXPreferences.shared.string(forKey: registrationFingerprintKey)
 
         // 第 2 步：Process 系统调用派发到后台，不阻塞主线程。
         // 先注册当前正在运行的 App/appex，再清理旧注册。
@@ -1190,6 +1230,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             if let fingerprint, fingerprint == lastRegisteredFingerprint,
                self.isExtensionElected(extensionURL: extensionURL) {
                 print("[WaifuXApp] Wallpaper extension registration healthy (fingerprint unchanged, elected) — skip repair")
+                return
+            }
+
+            // Even an update must wait for the current extension instance to
+            // leave. Registration can make pkd remove that healthy instance.
+            // The healer will register this bundle after the process is gone.
+            if WallpaperExtensionKeeper.isExtensionProcessRunning() {
+                print("[WaifuXApp] Wallpaper extension still running — defer registration")
                 return
             }
 
@@ -1219,11 +1267,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             // 不删除其他合法路径的登记（误伤用户另装副本），stale 判定仍由上方逻辑负责。
             self.verifyElectedWallpaperExtensionRegistration(extensionURL: extensionURL)
 
-            // 重启 WallpaperAgent，强制其从更新后的 PlugInKit 数据库重新加载扩展列表。
-            // 解决 brew 更新后 WallpaperAgent 内存缓存仍指向旧扩展的问题。
-            // （仅修复路径会走到这里；健康启动不再杀 agent/扩展）
-            self.runRegistrationTool("/usr/bin/killall", arguments: ["WallpaperAgent"], label: "killall WallpaperAgent")
-
             self.terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: currentAppURL)
 
             // NSWorkspace 必须在主线程
@@ -1232,7 +1275,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             }
 
             if let fingerprint {
-                UserDefaults.standard.set(fingerprint, forKey: registrationFingerprintKey)
+                WaifuXPreferences.shared.set(fingerprint, forKey: registrationFingerprintKey)
             }
         }
     }
@@ -1615,7 +1658,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         settingsWindow.delegate = self
 
         settingsWindow.contentView = EdgeToEdgeHostingView(
-            rootView: SettingsView(viewModel: settingsViewModel!)
+            rootView: SettingsView(viewModel: settingsViewModel!).defaultAppStorage(WaifuXPreferences.shared)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
         )
@@ -1644,6 +1687,212 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     }
 }
 
+#if DEBUG
+/// Runs the production close/terminate delegates on an empty AppKit window.
+/// Full ContentView startup and real SMAppService registration are excluded.
+@MainActor
+private final class HelperUIExitProbeDelegate: AppDelegate {
+    private var deferredExitObserved = false
+    private var previewWorker: Process?
+
+    override func applicationDidFinishLaunching(_ notification: Notification) {
+        installHelperQuitHandlers()
+        let probeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 32, height: 32),
+                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        probeWindow.isReleasedWhenClosed = false
+        probeWindow.delegate = self
+        window = probeWindow
+        Task {
+            do {
+                if let scenario = ProcessInfo.processInfo.environment["WAIFUX_UI_CLIENT_PROBE_SCENARIO"] {
+                    try await runClientLifecycleProbe(scenario, window: probeWindow)
+                    return
+                }
+                try await BackgroundAgentClient.shared.startIsolatedUIExitProbe()
+                let operation = ProcessInfo.processInfo.environment["WAIFUX_UI_EXIT_PROBE_CLOUD"]
+                if operation == "sync" { await CloudSyncService.shared.sync() }
+                if operation == "restore" { await CloudSyncService.shared.restoreFromCloud() }
+                if operation != nil {
+                    guard CloudSyncService.shared.lastError == nil else {
+                        throw CloudSyncService.shared.lastError!
+                    }
+                    print("UI_CLOUD_PROXY_PASSED operation=\(operation!)")
+                }
+                let video = VideoWallpaperManager.shared.backgroundSnapshot()
+                guard video["nativePlayerCount"] as? Int == 0,
+                      video["nativeWindowCount"] as? Int == 0,
+                      let value = ProcessInfo.processInfo.environment["WAIFUX_UI_EXIT_PROBE_VALUE"] else {
+                    throw CocoaError(.coderInvalidValue)
+                }
+                print("UI_EXIT_PROBE_CONNECTED pid=\(getpid()) players=0 wallpaperWindows=0")
+                if ProcessInfo.processInfo.environment["WAIFUX_UI_QUIT_PROBE_PREVIEW"] == "1" {
+                    let worker = Process()
+                    worker.executableURL = WaifuXHostBundle.bundleURL.appendingPathComponent("Contents/Resources/Resources/ffmpeg")
+                    worker.arguments = ["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=s=32x32:r=1", "-f", "null", "-"]
+                    worker.standardOutput = FileHandle.nullDevice
+                    worker.standardError = FileHandle.nullDevice
+                    try worker.run()
+                    previewWorker = worker
+                    kill(worker.processIdentifier, SIGSTOP)
+                    print("UI_QUIT_PREVIEW_PID=\(worker.processIdentifier)")
+                }
+                if ProcessInfo.processInfo.environment["WAIFUX_UI_EXIT_PROBE_UNRESPONSIVE_HELPER"] == "1" {
+                    try await BackgroundAgentClient.shared.pauseIsolatedHelperForExitProbe()
+                    print("UI_EXIT_PROBE_HELPER_PAUSED")
+                }
+                // Do not wait for this write here: the actual close delegate
+                // must drain the queued preference before terminating.
+                WaifuXPreferences.shared.set(value, forKey: "regression_ui_exit_ack")
+                let action = ProcessInfo.processInfo.environment["WAIFUX_UI_EXIT_PROBE_ACTION"]
+                if action == "helper-quit" || action == "helper-stopped" {
+                    print("UI_QUIT_PROBE_WAITING_FOR_HELPER")
+                    fflush(stdout)
+                    return
+                }
+                fflush(stdout)
+                if action == "quit" { quitApplication(); return }
+                if action == "main-menu-quit" {
+                    guard NSApp.sendAction(Selector(("quitApplicationFromMainMenu:")), to: self, from: nil) else {
+                        throw CocoaError(.featureUnsupported)
+                    }
+                    return
+                }
+                if action == "terminate" { NSApp.terminate(nil); return }
+                if action == "relaunch-interface" { prepareForInterfaceExit(); NSApp.terminate(nil); return }
+                if action == "escalate" { probeWindow.performClose(nil); quitApplication(); return }
+                // A real close button arrives from AppKit's event loop, outside
+                // the currently executing Swift concurrency job.
+                if ProcessInfo.processInfo.environment["WAIFUX_UI_EXIT_PROBE_CLOSE_FROM_TASK"] == "1" {
+                    probeWindow.performClose(nil)
+                } else {
+                    DispatchQueue.main.async { probeWindow.performClose(nil) }
+                }
+            } catch {
+                fputs("UI_EXIT_PROBE_FAILED \(error.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+            fputs("UI_EXIT_PROBE_FAILED AppKit termination timed out\n", stderr)
+            exit(3)
+        }
+    }
+
+    private func runClientLifecycleProbe(_ scenario: String, window: NSWindow) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard BackgroundRuntimeRole.isIsolatedTest,
+              let root = environment["WAIFUX_HELPER_TEST_ROOT"],
+              let value = environment["WAIFUX_UI_EXIT_PROBE_VALUE"] else { throw CocoaError(.featureUnsupported) }
+        let directory = URL(fileURLWithPath: root)
+        func waitForFile(_ name: String) async throws {
+            while !FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path) {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        func installQuitRequest() {
+            Task {
+                try await waitForFile("client.quit.request")
+                quitApplication()
+            }
+        }
+        if scenario == "startup-quit" {
+            WaifuXPreferences.shared.set(value, forKey: "regression_client_latest")
+            let startup = Task { try await BackgroundAgentClient.shared.startIsolatedUIExitProbe() }
+            try await waitForFile("startup.identified.reached")
+            let mutation = try BackgroundPropertyList.encode(["key": "regression_client_queued", "value": value,
+                "removed": false, "writerID": UUID().uuidString, "sequence": 1])
+            BackgroundAgentClient.shared.send("preferences.set", ["mutation": mutation])
+            installQuitRequest()
+            try Data().write(to: directory.appendingPathComponent("client.ready"))
+            try await startup.value
+            return
+        }
+        if scenario == "acknowledged-stop-quit" {
+            try await BackgroundAgentClient.shared.startIsolatedUIExitProbe()
+            WaifuXPreferences.shared.set(value, forKey: "regression_client_latest")
+            BackgroundAgentClient.shared.beginApplicationQuit()
+            try await BackgroundAgentClient.shared.drainForUIExit()
+            try await BackgroundAgentClient.shared.stopForApplicationQuit()
+            print("UI_CLIENT_STOP_ACKNOWLEDGED helperExited=true")
+            fflush(stdout)
+            NSApp.terminate(nil)
+            return
+        }
+        if scenario == "reset-preflight" || scenario == "reset-timeout" {
+            try await BackgroundAgentClient.shared.startIsolatedUIExitProbe()
+            WaifuXPreferences.shared.set(value, forKey: "regression_client_latest")
+            _ = try await BackgroundAgentClient.shared.request("test.preference", ["key": "regression_client_latest"])
+            let sentinel = directory.appendingPathComponent("reset-sentinel.txt")
+            try Data(value.utf8).write(to: sentinel)
+            if scenario == "reset-timeout" { try await BackgroundAgentClient.shared.pauseIsolatedHelperForExitProbe() }
+            let prepared = await SettingsViewModel().prepareForDataReset()
+            guard try Data(contentsOf: sentinel) == Data(value.utf8) else { throw CocoaError(.fileReadCorruptFile) }
+            if scenario == "reset-timeout" {
+                guard !prepared, WaifuXPreferences.shared.string(forKey: "regression_client_latest") == value else { throw CocoaError(.coderInvalidValue) }
+                print("UI_RESET_TIMEOUT_PASSED dataUntouched=true")
+                try BackgroundAgentClient.shared.resumeIsolatedHelperAfterQuitProbe()
+                quitApplication()
+            } else {
+                guard prepared else { throw CocoaError(.xpcConnectionInvalid) }
+                WaifuXPreferences.shared.resetAfterHelperStopped()
+                guard WaifuXPreferences.shared.string(forKey: "regression_client_latest") == nil else { throw CocoaError(.coderInvalidValue) }
+                print("UI_RESET_PREFLIGHT_PASSED sharedDomainCleared=true")
+                NSApp.terminate(nil)
+            }
+            fflush(stdout)
+            return
+        }
+        guard scenario == "reconnect-replay" || scenario == "reconnect-quit" else { throw CocoaError(.featureUnsupported) }
+        try await BackgroundAgentClient.shared.startIsolatedUIExitProbe()
+        WaifuXPreferences.shared.set(value + ".old", forKey: "regression_client_latest")
+        _ = try await BackgroundAgentClient.shared.request("test.preference", ["key": "regression_client_latest"])
+        try BackgroundAgentClient.shared.interruptIsolatedConnectionForProbe()
+        WaifuXPreferences.shared.set(value, forKey: "regression_client_latest")
+        try await waitForFile("reconnect.identified.reached")
+        if scenario == "reconnect-quit" { installQuitRequest() }
+        try Data().write(to: directory.appendingPathComponent("client.ready"))
+        while !BackgroundAgentClient.shared.isConnected { try await Task.sleep(for: .milliseconds(20)) }
+        guard scenario == "reconnect-replay" else { return }
+        let saved = try await BackgroundAgentClient.shared.request("test.preference", ["key": "regression_client_latest"])
+        guard saved["value"] as? String == value, try WaifuXPreferences.shared.pendingMutationData().isEmpty else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        try BackgroundAgentClient.shared.deliverObsoleteCallbacksForProbe()
+        try await Task.sleep(for: .milliseconds(200))
+        guard BackgroundAgentClient.shared.isConnected else { throw CocoaError(.xpcConnectionInvalid) }
+        print("UI_CLIENT_REPLAY_PASSED latestValue=true acknowledged=true obsoleteCallbacksIgnored=true")
+        fflush(stdout)
+        window.performClose(nil)
+    }
+
+    override func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let reply = super.applicationShouldTerminate(sender)
+        if reply == .terminateCancel { deferredExitObserved = true }
+        return reply
+    }
+
+    override func applicationWillTerminate(_ notification: Notification) {
+        super.applicationWillTerminate(notification)
+        guard deferredExitObserved, !BackgroundAgentClient.shared.isConnected else { exit(4) }
+        print("UI_APPKIT_EXIT_PROBE_PASSED deferredExit=true disconnected=true")
+        fflush(stdout)
+    }
+
+    override func applicationQuitDidFail() {
+        guard ProcessInfo.processInfo.environment["WAIFUX_UI_QUIT_PROBE_RETRY"] == "1" else {
+            fputs("UI_QUIT_PROBE_FAILED unexpected quit failure\n", stderr)
+            exit(5)
+        }
+        print("UI_QUIT_FAILURE_RETAINS_UI helperStillPaused=true")
+        fflush(stdout)
+        do {
+            try BackgroundAgentClient.shared.resumeIsolatedHelperAfterQuitProbe()
+            quitApplication()
+        } catch { exit(6) }
+    }
+}
+#endif
+
 // MARK: - NSWindowDelegate
 extension AppDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1651,10 +1900,9 @@ extension AppDelegate {
         if sender === settingsWindowController?.window {
             return handleSettingsWindowClose(sender)
         }
-        // 主窗口：点击关闭按钮时锁定所有加密文件夹并隐藏窗口
         FolderLockService.shared.lockAllFolders()
-        hideMainWindow()
-        return false
+        exitInterface()
+        return true
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
@@ -1735,6 +1983,8 @@ extension AppDelegate {
     /// 获取保存的窗口大小（如果有）
     private static func savedWindowFrame() -> NSSize? {
         let key = "NSWindow Frame \(WindowAutosaveName.mainWindow)"
+        // AppKit owns NSWindow's autosave in the UI's standard defaults domain.
+        // The shared Helper domain contains only the one-time migrated value.
         guard let frameString = UserDefaults.standard.string(forKey: key) else {
             return nil
         }

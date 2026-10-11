@@ -28,6 +28,20 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "ACAF4AE0329D1BF5967D00BE"
+               BuildableName = "WaifuXHelper.app"
+               BlueprintName = "WaifuXHelper"
+               ReferencedContainer = "container:WaifuX.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "4CB9C43382030B8AE13C405D"
                BuildableName = "WaifuXScreenSaver.saver"
                BlueprintName = "WaifuXScreenSaver"

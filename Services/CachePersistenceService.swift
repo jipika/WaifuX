@@ -27,10 +27,15 @@ final class CachePersistenceService {
     private let storageDiskPath: String
 
     private init() {
-        let appSupport = FileManager.default
+        let appSupport: URL
+        if let testRoot = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"], BackgroundRuntimeRole.isIsolatedTest {
+            appSupport = URL(fileURLWithPath: testRoot).appendingPathComponent("RecordsCache")
+        } else {
+            appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("com.waifux.app/CachePersistence")
+        }
 
         // DiskStorage.path = directory + "/" + name (与 hyperoslo/Cache DiskStorage 保持一致)
         storageDiskPath = appSupport.appendingPathComponent("Records", isDirectory: true).path

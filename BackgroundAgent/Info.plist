@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>WaifuX Helper</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>WaifuX 需要读取「正在播放」信息，以便 Web 音频可视化壁纸显示歌名、艺人与封面。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>WaifuX 在系统媒体接口不可用时，通过 Apple Events 读取 Music 的正在播放信息，供壁纸 Media Integration 使用。</string>
+	<key>NSScreenCaptureDescription</key>
+	<string>WaifuX 需要屏幕录制与系统音频捕获权限，用于动态壁纸显示、音频可视化和视频烘焙导出。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>WaifuX 需要捕获系统输出音频，为动态壁纸与桌面挂件提供实时音频可视化。</string>
+</dict>
+</plist>

@@ -64,7 +64,7 @@ final class DSHHarnessBridge: ObservableObject {
 
     // MARK: - 类型
 
-    enum Availability: Equatable {
+    enum Availability: Equatable, Codable, Sendable {
         case unknown
         case available(port: Int, version: String)
         case unavailable
@@ -141,7 +141,13 @@ final class DSHHarnessBridge: ObservableObject {
         return URLSession(configuration: configuration)
     }()
 
-    private init() {}
+    private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                if let data = snapshot["dsh"] as? Data, let value = try? JSONDecoder().decode(Availability.self, from: data) { self?.availability = value }
+            }
+        }
+    }
 
     // MARK: - 探测
 
@@ -159,7 +165,7 @@ final class DSHHarnessBridge: ObservableObject {
     /// 候选端口：用户覆盖值优先，其次桌面版硬编码端口。
     private var candidatePorts: [Int] {
         var ports: [Int] = []
-        if let override = UserDefaults.standard.object(forKey: Self.portOverrideKey) as? Int,
+        if let override = WaifuXPreferences.shared.object(forKey: Self.portOverrideKey) as? Int,
            override > 0, override < 65536 {
             ports.append(override)
         }
@@ -170,6 +176,12 @@ final class DSHHarnessBridge: ObservableObject {
     /// 刷新可用性（带缓存；探测本身是毫秒级的本机 GET）。
     @discardableResult
     func refreshAvailability(force: Bool = false) async -> Availability {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let arguments = (try? BackgroundPropertyList.encode(["force": force])) ?? Data()
+            let result = (try? await BackgroundRuntimeBridge.requestCodable("dsh.refresh.wait", arguments: arguments, resultKey: "result", as: Availability.self)) ?? .unavailable
+            availability = result
+            return result
+        }
         if !force, let lastProbeAt, Date().timeIntervalSince(lastProbeAt) < Self.availabilityTTL {
             return availability
         }
@@ -190,6 +202,7 @@ final class DSHHarnessBridge: ObservableObject {
 
     /// 常驻观察：装了 DSH 才轮询——可用时 20s 一次，不可用 60s 一次，未安装 300s 复查安装。
     func startAvailabilityMonitor() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         guard monitorTask == nil else { return }
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -207,6 +220,11 @@ final class DSHHarnessBridge: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
+    }
+
+    func stopAvailabilityMonitor() {
+        monitorTask?.cancel()
+        monitorTask = nil
     }
 
     private func performProbe() async -> Availability {
@@ -247,6 +265,9 @@ final class DSHHarnessBridge: ObservableObject {
         videoMuted: Bool = DSHHarnessBridge.defaultVideoMuted,
         videoRate: Double = DSHHarnessBridge.defaultVideoRate
     ) async throws -> [String: Any] {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return try await BackgroundRuntimeBridge.request("dsh.set.wait", ["url": media.url, "video": { if case .video = media { return true }; return false }(), "coverage": coverage.rawValue, "dim": dim, "videoLoop": videoLoop, "videoMuted": videoMuted, "videoRate": videoRate])
+        }
         let prepared = try await Self.prepareMedia(media)
         let current = await refreshAvailability()
         guard let port = current.port else { throw BridgeError.notRunning }
@@ -279,6 +300,7 @@ final class DSHHarnessBridge: ObservableObject {
 
     /// 清除 DSH 页面背景（恢复成不画背景层）。
     func clearBackground() async throws {
+        if BackgroundRuntimeRole.isRemoteUI { try await BackgroundRuntimeBridge.requestVoid("dsh.clear.wait"); return }
         let current = await refreshAvailability()
         guard let port = current.port else { throw BridgeError.notRunning }
         _ = try await post(port: port, route: "/dsh-theme-manager/background/clear", body: [:])

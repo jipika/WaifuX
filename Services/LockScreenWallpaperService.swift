@@ -108,10 +108,12 @@ final class LockScreenWallpaperService: ObservableObject {
     private let playbackStateFileName = "waifux-video-renderer-lock-state.json"
 
     private var sharedContainerURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
     }
 
     private init() {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         restoreStaticImageSourceURLs()
         restoreInitialPlaybackState()
         observeSystemPlaybackState()
@@ -304,6 +306,7 @@ final class LockScreenWallpaperService: ObservableObject {
     /// notification, then publish the same state through both notification
     /// centers for a renderer that is already alive.
     private func publishPlaybackState(source: String) {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let state = PlaybackState(
             isScreenLocked: playbackState.isScreenLocked,
             isDisplayAsleep: playbackState.isDisplayAsleep,
@@ -393,12 +396,14 @@ final class LockScreenWallpaperService: ObservableObject {
     ///     使扩展在冷启动 acquire 时为每块屏选到各自的视频。若为空，则仅写 legacy 全局路径。
     ///   - notify: 是否触发 Extension 重新加载
     func cacheMirroringSource(videoURL: URL, videoID: String, displayIDs: [UInt32] = [], notify: Bool = true) async throws {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("lock.cacheVideo", ["video": videoURL, "id": videoID, "displays": displayIDs, "notify": notify]); return }
+
         guard isAvailable else {
             print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
             return
         }
 
-        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+        guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
             print("[LockScreenWallpaper] 动态锁屏已关闭，跳过")
             return
         }
@@ -486,12 +491,14 @@ final class LockScreenWallpaperService: ObservableObject {
     /// 将静态图片写入共享容器，并绑定到每个显示器实例。
     /// 静态壁纸不再退回系统锁屏选择写入；扩展直接渲染这里部署的图片。
     func cacheStaticImageSource(imageURL: URL, displayIDs: [UInt32]) async throws {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("lock.cacheImage", ["image": imageURL, "displays": displayIDs]); return }
+
         guard isAvailable else {
             print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
             return
         }
 
-        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+        guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
             print("[LockScreenWallpaper] 动态锁屏已关闭，跳过静态图同步")
             return
         }
@@ -629,6 +636,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 清掉历史版本写入的实时帧源标记。当前 Web 锁屏只走静态图链路。
     func clearRealtimeSourceIfNeeded(notify: Bool = true) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.clearRealtime", ["notify": notify]); return }
+
         guard isAvailable, let container = sharedContainerURL else { return }
         let prefsURL = container.appendingPathComponent(prefsFileName)
         guard let data = try? Data(contentsOf: prefsURL),
@@ -649,6 +658,8 @@ final class LockScreenWallpaperService: ObservableObject {
     /// 清空当前锁屏镜像帧源缓存。
     /// 不触碰用户在系统设置里手动选择的显示器实例。
     func clearMirroringSourceCache(notify: Bool = true) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.clearCache", ["notify": notify]); return }
+
         guard isAvailable else { return }
 
         guard let container = sharedContainerURL else { return }
@@ -683,6 +694,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 暂停/恢复锁屏壁纸播放（用户手动控制）
     func setPaused(_ paused: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.paused", ["paused": paused]); return }
+
         guard isAvailable else { return }
         guard let container = sharedContainerURL else { return }
 
@@ -697,6 +710,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 设置是否仅在锁屏时播放（桌面暂停）
     func setAlwaysPauseDesktop(_ pause: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.desktopPaused", ["paused": pause]); return }
+
         guard isAvailable else { return }
         guard let container = sharedContainerURL else { return }
 
@@ -711,6 +726,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 设置指定显示器的暂停状态（per-display pause）
     func setDisplayPaused(_ paused: Bool, forDisplayID displayID: UInt32) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.displayPause", ["paused": paused, "display": displayID]); return }
+
         guard isAvailable else { return }
         guard let container = sharedContainerURL else { return }
 
@@ -740,6 +757,8 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 设置指定显示器的静音状态（per-display mute）
     func setDisplayMuted(_ muted: Bool, forDisplayID displayID: UInt32) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.displayMuted", ["muted": muted, "display": displayID]); return }
+
         guard isAvailable else { return }
         guard let container = sharedContainerURL else { return }
 
@@ -760,7 +779,8 @@ final class LockScreenWallpaperService: ObservableObject {
     // MARK: - Notification Helpers
 
     /// 通知 Extension 偏好设置已变更
-        func notifyExtensionPrefsChanged() {
+    func notifyExtensionPrefsChanged() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
@@ -784,12 +804,46 @@ final class LockScreenWallpaperService: ObservableObject {
 
     // MARK: - 纯图像处理（nonisolated：可从后台线程调用，不触碰任何实例状态）
 
+    private nonisolated static let staticImagePixelByteLimit = 32 * 1024 * 1024
+    private nonisolated static let staticImageMaximumDimension = 8192
+    private nonisolated static let thumbnailMaximumDimension = 1024
+    private nonisolated static let thumbnailPixelByteLimit = 16 * 1024 * 1024
+
+    private nonisolated static func staticImageFitsPixelBudget(width: Int, height: Int, bytesPerPixel: Int) -> Bool {
+        guard width > 16, height > 16,
+              width <= staticImageMaximumDimension, height <= staticImageMaximumDimension,
+              bytesPerPixel >= 4, bytesPerPixel <= 16 else { return false }
+        let (rowBytes, rowOverflow) = width.multipliedReportingOverflow(by: bytesPerPixel)
+        guard !rowOverflow else { return false }
+        // Reserve common decoder row padding before the full source is decoded.
+        let (paddedRowBytes, paddingOverflow) = rowBytes.addingReportingOverflow(255)
+        guard !paddingOverflow else { return false }
+        let (pixelBytes, pixelOverflow) = (paddedRowBytes & ~255).multipliedReportingOverflow(by: height)
+        return !pixelOverflow && pixelBytes > 0 && pixelBytes <= staticImagePixelByteLimit
+    }
+
     private nonisolated static func prepareStaticLockScreenImageData(_ data: Data, sourceURL: URL) -> (data: Data, fileExtension: String) {
         let fallbackExtension = Self.normalizedImageExtension(from: sourceURL)
-        guard UserDefaults.standard.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false,
+        guard WaifuXPreferences.shared.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return (data, fallbackExtension)
+        }
+        let width = pixelWidth.doubleValue
+        let height = pixelHeight.doubleValue
+        let depth = (properties[kCGImagePropertyDepth] as? NSNumber)?.doubleValue ?? 32
+        guard width.isFinite, height.isFinite, depth.isFinite,
+              width > 16, height > 16, width <= Double(staticImageMaximumDimension), height <= Double(staticImageMaximumDimension),
+              width.rounded(.down) == width, height.rounded(.down) == height,
+              depth > 0, depth <= 32,
+              Self.staticImageFitsPixelBudget(width: Int(width), height: Int(height), bytesPerPixel: max(4, Int(ceil(depth / 8)) * 4)),
+              Self.staticImageFitsPixelBudget(width: Int(width), height: Int(height), bytesPerPixel: 4),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
               let cropRect = Self.detectBlackBorderCropRect(in: image) else {
+            // Keep the original full-quality lock-screen image when cropping
+            // would exceed the decode/scan budget; only thumbnails are resized.
             return (data, fallbackExtension)
         }
 
@@ -838,11 +892,15 @@ final class LockScreenWallpaperService: ObservableObject {
     private nonisolated static func detectBlackBorderCropRect(in image: CGImage) -> CGRect? {
         let width = image.width
         let height = image.height
-        guard width > 16, height > 16 else { return nil }
+        guard Self.staticImageFitsPixelBudget(width: width, height: height, bytesPerPixel: 4) else { return nil }
+        let (decodedPixelBytes, decodedOverflow) = image.bytesPerRow.multipliedReportingOverflow(by: height)
+        guard !decodedOverflow, decodedPixelBytes > 0, decodedPixelBytes <= staticImagePixelByteLimit else { return nil }
 
         let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let (bytesPerRow, rowOverflow) = width.multipliedReportingOverflow(by: bytesPerPixel)
+        let (scanPixelBytes, scanOverflow) = height.multipliedReportingOverflow(by: bytesPerRow)
+        guard !rowOverflow, !scanOverflow, scanPixelBytes > 0, scanPixelBytes <= staticImagePixelByteLimit else { return nil }
+        var pixels = [UInt8](repeating: 0, count: scanPixelBytes)
         let didDraw = pixels.withUnsafeMutableBytes { rawBuffer -> Bool in
             guard let baseAddress = rawBuffer.baseAddress,
                   let ctx = CGContext(
@@ -970,6 +1028,8 @@ final class LockScreenWallpaperService: ObservableObject {
     }
 
     func syncDisplayInstancesToSocketServer() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.syncDisplays", [:]); return }
+
         guard #available(macOS 26.0, *), isAvailable else { return }
 
         let instances = currentDisplayInstances()
@@ -1000,6 +1060,8 @@ final class LockScreenWallpaperService: ObservableObject {
     /// 彻底清理锁屏实例：清除视频缓存、偏好设置、显示器实例列表、推送管线。
     /// 用户不再使用锁屏动态壁纸时调用。
     func clearLockScreenInstances() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.clearInstances", [:]); return }
+
         guard isAvailable else { return }
 
         // 1. 清空视频缓存和偏好，但先不要通知扩展，避免扩展在“半清理状态”下抢先刷新。
@@ -1019,7 +1081,7 @@ final class LockScreenWallpaperService: ObservableObject {
         VideoWallpaperManager.shared.clearExtensionState()
 
         // 5. 自动关闭设置中的动态锁屏开关
-        UserDefaults.standard.set(false, forKey: "dynamic_lock_screen_enabled")
+        WaifuXPreferences.shared.set(false, forKey: "dynamic_lock_screen_enabled")
 
         // 6. 最后统一通知扩展刷新（此时所有状态已清理完毕）
         notifyExtensionPrefsChanged()
@@ -1139,8 +1201,22 @@ final class LockScreenWallpaperService: ObservableObject {
     }
 
     private nonisolated static func writeThumbnail(imageData: Data, thumbnailID: String, thumbDir: URL) {
-        guard let image = NSImage(data: imageData),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false,
+            kCGImageSourceThumbnailMaxPixelSize: thumbnailMaximumDimension,
+        ]
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              cgImage.width > 0, cgImage.height > 0,
+              cgImage.width <= thumbnailMaximumDimension, cgImage.height <= thumbnailMaximumDimension else {
+            print("[LockScreenWallpaper] ⚠️ 静态图缩略图生成失败: \(thumbnailID)")
+            return
+        }
+        let (pixelBytes, pixelOverflow) = cgImage.bytesPerRow.multipliedReportingOverflow(by: cgImage.height)
+        guard !pixelOverflow, pixelBytes > 0, pixelBytes <= thumbnailPixelByteLimit,
               let dest = CGImageDestinationCreateWithURL(
                 Self.versionedThumbnailURL(prefix: thumbnailID, in: thumbDir) as CFURL,
                 "public.jpeg" as CFString,
@@ -1219,8 +1295,10 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 将当前显示器实例目录同步到 Socket IPC 服务端。
     func syncInstanceCatalogToSocketServer(notify: Bool = true) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.syncCatalog", ["notify": notify]); return }
+
         guard #available(macOS 26.0, *) else { return }
-        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+        guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
             print("[LockScreenWallpaper] syncInstanceCatalogToSocketServer: 动态锁屏已关闭，跳过")
             return
         }

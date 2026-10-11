@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.waifux.app.helper</string>
+    <key>BundleProgram</key><string>Contents/Helpers/WaifuXHelper.app/Contents/MacOS/WaifuXHelper</string>
+    <key>MachServices</key>
+    <dict><key>com.waifux.app.helper.control</key><true/></dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>

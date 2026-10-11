@@ -26,6 +26,10 @@ final class SleepPreventer {
 
     /// 按来源开启 / 关闭阻止休眠。同一来源重复调用是幂等的。
     func setPreventingSleep(_ enabled: Bool, reason: Reason) {
+        if BackgroundRuntimeRole.isRemoteUI, reason == .userSetting {
+            BackgroundRuntimeBridge.send("sleep.userSetting", ["enabled": enabled]); return
+        }
+
         if enabled {
             activeReasons.insert(reason)
         } else {

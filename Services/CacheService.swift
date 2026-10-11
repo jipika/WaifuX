@@ -7,6 +7,11 @@ actor CacheService {
     private let cacheDirectory: URL
 
     private init() {
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            cacheDirectory = URL(fileURLWithPath: root).appendingPathComponent("MediaCache", isDirectory: true)
+            try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            return
+        }
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             // 使用临时目录作为回退
             cacheDirectory = fileManager.temporaryDirectory.appendingPathComponent("WaifuX/Cache", isDirectory: true)

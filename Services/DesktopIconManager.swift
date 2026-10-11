@@ -32,6 +32,8 @@ final class DesktopIconManager {
     /// 设置桌面图标隐藏或显示
     /// - Parameter hidden: `true` 隐藏桌面图标，`false` 显示桌面图标
     func setDesktopIconsHidden(_ hidden: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.icons", ["hidden": hidden]); return }
+
         let value = hidden ? "false" : "true"
 
         // 1. 写入 Finder 偏好设置

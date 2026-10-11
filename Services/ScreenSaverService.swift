@@ -110,6 +110,12 @@ final class ScreenSaverService: ObservableObject {
     private var syncGeneration = UUID()
 
     private init() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        if BackgroundRuntimeRole.isRemoteUI {
+            isInstalled = !installedManagedSaverURLs.isEmpty
+            refreshConfiguredState()
+            return
+        }
         isInstalled = !installedManagedSaverURLs.isEmpty
         refreshConfiguredState()
         installFollowObservers()
@@ -146,6 +152,9 @@ final class ScreenSaverService: ObservableObject {
     /// 当前壁纸不可用作屏保（Scene/Web 未烘焙、文件丢失）时保留上一个可用配置，屏保不至于黑屏。
     @discardableResult
     func syncFromDesktop(reason: String, force: Bool = false) -> Bool {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return false }
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("saver.sync", ["reason": reason, "force": force]); return false }
+
         guard let candidate = desktopCandidate() else {
             syncTask?.cancel()
             syncTask = nil
@@ -188,6 +197,9 @@ final class ScreenSaverService: ObservableObject {
 
     /// 设置页「立即同步」：强制重写配置，用于修复被手动改动/损坏的 screensaver.json。
     func syncNow() async throws {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("saver.syncNow"); return }
+
         guard let candidate = desktopCandidate() else {
             throw ScreenSaverError.noDesktopWallpaper
         }
@@ -291,7 +303,9 @@ final class ScreenSaverService: ObservableObject {
 
     /// App 内随包分发的屏保组件（由 project.yml 的 Copy Files 阶段放进资源目录）。
     var bundledSaverURL: URL? {
-        let candidates = [
+        let candidates = WaifuXHostBundle.resourceCandidates(
+            named: "Screen Savers/\(Self.saverBundleName)"
+        ) + [
             Bundle.main.resourceURL?.appendingPathComponent("Screen Savers/\(Self.saverBundleName)"),
             Bundle.main.resourceURL?.appendingPathComponent(Self.saverBundleName),
             Bundle.main.bundleURL
@@ -304,6 +318,7 @@ final class ScreenSaverService: ObservableObject {
     // MARK: - 安装
 
     func install() throws {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         guard let bundledURL = bundledSaverURL else { throw ScreenSaverError.bundledComponentMissing }
         let directory = installedURL.deletingLastPathComponent()
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -342,6 +357,7 @@ final class ScreenSaverService: ObservableObject {
     }
 
     func uninstall() throws {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         for url in installedManagedSaverURLs {
             guard Bundle(url: url)?.bundleIdentifier == Self.saverBundleIdentifier else { continue }
             try fm.removeItem(at: url)
@@ -354,6 +370,7 @@ final class ScreenSaverService: ObservableObject {
     /// 只替换 App 不会更新用户目录里的那份；版本号在开发期不变，
     /// 所以像 Mirage 一样比对组件指纹（Info.plist + 可执行文件 + CodeResources）而不是版本号。
     func refreshInstalledVersionIfNeeded() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let existingURLs = installedManagedSaverURLs
         isInstalled = !existingURLs.isEmpty
         guard isInstalled, let bundledURL = bundledSaverURL else { return }
@@ -383,6 +400,7 @@ final class ScreenSaverService: ObservableObject {
     /// 把一张壁纸写成屏保配置。屏保立即热重载；未安装组件时也会写，
     /// 用户之后安装组件即生效。
     private func apply(_ candidate: Candidate, generation: UUID) async throws {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         guard fm.fileExists(atPath: candidate.renderURL.path) else {
             throw ScreenSaverError.mediaMissing(candidate.title)
         }
@@ -448,6 +466,7 @@ final class ScreenSaverService: ObservableObject {
     }
 
     private func notifyConfigurationChanged() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         DistributedNotificationCenter.default().postNotificationName(
             Self.configurationChangedNotification,
             object: nil,

@@ -54,7 +54,8 @@ struct IPCCommand: Codable {
 
 /// Socket 文件路径
 private var socketURL: URL? {
-    FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+    guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
+    return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
         .appendingPathComponent("socket/extension.ipc")
 }
 
@@ -67,7 +68,11 @@ private var socketURL: URL? {
 final class WallpaperExtensionSocketServer: @unchecked Sendable {
     static let shared = WallpaperExtensionSocketServer()
 
-    private var isRunning = false
+    private let runningLock = OSAllocatedUnfairLock(initialState: false)
+    private var isRunning: Bool {
+        get { runningLock.withLock { $0 } }
+        set { runningLock.withLock { $0 = newValue } }
+    }
     private let queue = DispatchQueue(label: "wallpaper-ext-ipc", qos: .userInitiated)
 
     /// 当前可用的锁屏实例列表（沿用 IPCVideoInfo 结构）
@@ -122,6 +127,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     }
 
     private func notifyCommandsChanged() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
@@ -217,6 +223,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 通知系统托管的 Wallpaper Extension：主 App 正在退出，
     /// 保留现有 CAContext 并切换为扩展自托管桌面播放。
     func notifyAppWillTerminate() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
@@ -231,6 +238,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 通知扩展重载：App 更新后启动时调用，旧扩展进程退出后 macOS WallpaperAgent 从新 bundle 重新加载。
     /// App 正常退出不触发此通知，扩展继续运行以保持锁屏壁纸不中断。
     func notifyExtensionReload() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
@@ -249,7 +257,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// App 更新（包括 Sparkle 原地替换和开发构建）都会改变该值。
     /// 必须在主线程调用：macOS 26+ 后台线程访问 Bundle 有崩溃风险。
     static func embeddedExtensionBundleFingerprint() -> String? {
-        let extensionURL = Bundle.main.bundleURL
+        let extensionURL = WaifuXHostBundle.bundleURL
             .appendingPathComponent("Contents/PlugIns/WaifuXWallpaperExtension.appex", isDirectory: true)
         guard let extBundle = Bundle(url: extensionURL) else { return nil }
         let info = extBundle.infoDictionary
@@ -271,8 +279,9 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 表现为锁屏实例死掉、后续设置壁纸无法同步过去。扩展侧有对应的
     /// bundle 指纹自检（bundle 未变则忽略 reload），这里是第一道闸。
     func notifyExtensionReloadIfBundleChanged() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let fingerprint = Self.embeddedExtensionBundleFingerprint()
-        let stored = UserDefaults.standard.string(forKey: Self.extensionReloadFingerprintDefaultsKey)
+        let stored = WaifuXPreferences.shared.string(forKey: Self.extensionReloadFingerprintDefaultsKey)
         guard let fingerprint else {
             os_log(.error, log: appLog, "无法读取内嵌扩展 bundle 指纹，跳过 reload（避免误杀存活扩展）")
             return
@@ -282,7 +291,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             return
         }
         os_log(.info, log: appLog, "扩展 bundle 变化 (%{public}@ → %{public}@)，广播 reload", stored ?? "nil", fingerprint)
-        UserDefaults.standard.set(fingerprint, forKey: Self.extensionReloadFingerprintDefaultsKey)
+        WaifuXPreferences.shared.set(fingerprint, forKey: Self.extensionReloadFingerprintDefaultsKey)
         notifyExtensionReload()
     }
 
@@ -307,6 +316,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 如果某个显示器既有 surface 又有 video 但没有 pusher，自动启动。
     /// 用于从主窗口关闭等异常场景中恢复。
     func performHealthCheck() {
+        guard isRunning, !BackgroundRuntimeRole.isIsolatedTest else { return }
         let displayIDs = surfLock.withLock { Array($0.keys) }
         for did in displayIDs {
             guard let videoInfo = videoMapLock.withLock({ $0[did] }) else { continue }
@@ -316,6 +326,9 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             if !LockScreenFramePusher.shared.isPushing(displayID: did) {
                 os_log(.info, log: appLog, "🩺 健康检查：display=%d 有 surface+video 但无 pusher，自动恢复", did)
                 DispatchQueue.main.async {
+                    guard self.isRunning,
+                          self.videoMapLock.withLock({ $0[did]?.videoURL }) == videoInfo.videoURL,
+                          self.surfLock.withLock({ $0[did] }) == surfaces else { return }
                     LockScreenFramePusher.shared.startPushing(
                         displayID: did,
                         videoURL: videoInfo.videoURL,
@@ -328,6 +341,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     /// 检查指定显示器是否 surface 和视频都就绪，是则启动帧推送
     private func startPusherIfNeeded(displayID: UInt32) {
+        guard isRunning, !BackgroundRuntimeRole.isIsolatedTest else { return }
         let surfaces = surfLock.withLock { $0[displayID] ?? [] }
         guard !surfaces.isEmpty else {
             os_log(.debug, log: appLog, "startPusherIfNeeded: display=%d 等待 surface 注册（当前 video=%{public}@）", displayID, videoMapLock.withLock { $0[displayID]?.videoID ?? "nil" })
@@ -352,6 +366,9 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         }
         // 在主线程启动帧推送（LockScreenFramePusher 内部会切后台队列）
         DispatchQueue.main.async {
+            guard self.isRunning,
+                  self.videoMapLock.withLock({ $0[displayID]?.videoURL }) == videoURL,
+                  self.surfLock.withLock({ $0[displayID] }) == surfaces else { return }
             // 取消该 display 的待处理重试并重置计数
             self.retryLock.lock()
             self.pendingRetries[displayID]?.cancel()
@@ -376,6 +393,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 供 LockScreenFramePusher 调用：FramePusher 异常停止后尝试自动恢复。
     /// 与初始注册的重试分开计数，避免被之前的重试耗尽配额。
     func scheduleRetryForRestart(displayID: UInt32) {
+        guard isRunning, !BackgroundRuntimeRole.isIsolatedTest else { return }
         retryLock.lock()
         // 重置重试计数：异常恢复是独立事件，不应受初始注册阶段的重试影响
         retryCounts.removeValue(forKey: displayID)
@@ -386,6 +404,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     }
 
     private func scheduleRetry(displayID: UInt32, reason: String) {
+        guard isRunning, !BackgroundRuntimeRole.isIsolatedTest else { return }
         retryLock.lock()
         let count = (retryCounts[displayID] ?? 0) + 1
         retryCounts[displayID] = count
@@ -408,6 +427,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     /// 启动监听。在主 App 启动时调用。
     func start() {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         guard !isRunning else { return }
         guard let sockURL = socketURL else {
             os_log(.error, log: appLog, "无法获取共享容器 URL")
@@ -462,7 +482,12 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     /// 停止监听。主 App 退出时调用。
     func stop() {
-        isRunning = false
+        let wasRunning = runningLock.withLock { running -> Bool in
+            let wasRunning = running
+            running = false
+            return wasRunning
+        }
+        clearDisplayVideos()
         fcLock.withLock { clients in
             for fd in clients {
                 shutdown(fd, SHUT_RDWR)
@@ -470,7 +495,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             }
             clients.removeAll()
         }
-        if let sockURL = socketURL {
+        if wasRunning, let sockURL = socketURL {
             try? FileManager.default.removeItem(at: sockURL)
         }
         os_log(.info, log: appLog, "已停止")
@@ -581,7 +606,8 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             return nil
         }
 
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+        guard !BackgroundRuntimeRole.isIsolatedTest,
+              let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
             return nil
         }
 

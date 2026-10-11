@@ -11,6 +11,7 @@ schemes:
     build:
       targets:
         WaifuX: all
+        WaifuXHelper: all
         WaifuXWallpaperExtension: all
         WaifuXScreenSaver: all
     run:
@@ -38,7 +39,8 @@ packages:
 settings:
   base:
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: H6W325NJX2
+    DEVELOPMENT_TEAM: SRHKTRJ83W
+    REGISTER_APP_GROUPS: YES
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: YES
 
@@ -73,6 +75,20 @@ targets:
         buildPhase: resources
       # 根目录源文件（未被以上子目录覆盖）
       - path: WallpaperEngineEmbeddedAssets.swift
+      - path: BackgroundAgent/BackgroundAgentWire.swift
+      - path: BackgroundAgent/WaifuXHostBundle.swift
+      - path: BackgroundAgent/RendererComponentStore.swift
+      - path: BackgroundAgent/BackgroundRuntimeRole.swift
+      - path: BackgroundAgent/BackgroundRuntimeBridge.swift
+      - path: BackgroundAgent/BackgroundAgentClient.swift
+      - path: BackgroundAgent/BackgroundAgentRegistration.swift
+      - path: BackgroundAgent/BackgroundChildProcessCleanup.swift
+      - path: BackgroundAgent/WaifuXPreferences.swift
+      - path: BackgroundAgent/com.waifux.app.helper.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     settings:
       base:
         PRODUCT_NAME: WaifuX
@@ -82,14 +98,14 @@ targets:
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: H6W325NJX2
+        DEVELOPMENT_TEAM: SRHKTRJ83W
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_FILE: App/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
         # 内嵌 assets zip 的 .o 文件由 scripts/build-wallpaper-wgpu.sh 手动生成并提交。
-        OTHER_LDFLAGS: $(inherited) $(SRCROOT)/Resources/zip_data.o $(SRCROOT)/Resources/zip_accessor.o
+        OTHER_LDFLAGS: $(inherited)
     dependencies:
       - package: SwiftSoup
       - package: Kanna
@@ -98,6 +114,12 @@ targets:
       - package: Sparkle
       - target: WaifuXWallpaperExtension
         embed: true
+      - target: WaifuXHelper
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       # 屏保组件：拷进 App 资源目录下的固定位置，用户点「安装」时再复制到 ~/Library/Screen Savers。
       # 用 Copy Files 阶段而不是 Run Script：脚本沙箱 deny 了构建产物目录，
       # 脚本里对 .app 内的 rm/mv 会被拒（Operation not permitted）。
@@ -202,7 +224,7 @@ targets:
             done
           fi
 
-          # Resources/assets 已通过 zip_data.o 嵌入主程序，不能再作为普通资源复制进 .app。
+          # Resources/assets 已通过 zip_data.o 嵌入 Helper，不能再作为普通资源复制进 .app。
           # Xcode 的 folder reference 会保留整棵 Resources 目录，这里清掉仅用于构建的产物，避免包体重复膨胀。
           BUNDLED_RESOURCES_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/Resources"
           if [[ -d "$BUNDLED_RESOURCES_DIR" ]]; then
@@ -286,6 +308,200 @@ targets:
       path: WaifuX.entitlements
       properties:
         com.apple.security.network.client: true
+        com.apple.security.automation.apple-events: true
+        com.apple.security.application-groups:
+          - group.com.waifux.app
+
+  WaifuXHelper:
+    type: application
+    platform: macOS
+    sources:
+      - path: Assets.xcassets
+      - path: BackgroundAgent
+        excludes:
+          - Info.plist
+          - BackgroundAgent.entitlements
+          - com.waifux.app.helper.plist
+      - path: Components/DisplaySelectorSheet.swift
+      - path: Components/ExploreChips.swift
+      - path: Components/PerformanceModifiers.swift
+      - path: Components/LiquidGlassAudioVisualizer.swift
+      - path: Components/LiquidGlassClockView.swift
+      - path: Components/LoopingVideoBackgroundView.swift
+      - path: Metal/FrameInterpolationMetalInterpolator.swift
+      - path: Metal/LiquidGlassMetalRenderer.swift
+      - path: Metal/VideoLoopAnalysisMetalComparator.swift
+      - path: Models/ContentModels.swift
+      - path: Models/AnimeRule.swift
+      - path: Models/DataSourceRule.swift
+      - path: Models/DisplayCropSettings.swift
+      - path: Models/DownloadError.swift
+      - path: Models/DownloadTask.swift
+      - path: Models/DynamicWallpaperItem.swift
+      - path: Models/FavoriteSource.swift
+      - path: Models/HeroPalette.swift
+      - path: Models/KonachanModels.swift
+      - path: Models/LibraryFolder.swift
+      - path: Models/LibraryFolderMembershipPolicy.swift
+      - path: Models/LiquidGlassClockConfiguration.swift
+      - path: Models/MainTab.swift
+      - path: Models/MediaFilters.swift
+      - path: Models/MediaItem.swift
+      - path: Models/MenuBarQuickWallpaperItem.swift
+      - path: Models/NetworkError.swift
+      - path: Models/NetworkState.swift
+      - path: Models/PixivModels.swift
+      - path: Models/SchedulerConfig.swift
+      - path: Models/WallhavenAPI.swift
+      - path: Models/Wallpaper.swift
+      - path: Models/WallpaperOption.swift
+      - path: Models/WorkshopWallpaper.swift
+      - path: Services/AppleMusicLyricsService.swift
+      - path: Services/AnimeFavoriteStore.swift
+      - path: Services/AnimeProgressStore.swift
+      - path: Services/PlaybackProgressCache.swift
+      - path: Services/Sync
+      - path: Services/BakeService.swift
+      - path: Services/CachePersistenceService.swift
+      - path: Services/CacheService.swift
+      - path: Services/CropAdjustOverlayController.swift
+      - path: Services/CropLayoutEngine.swift
+      - path: Services/CurrentWallpaperService.swift
+      - path: Services/UserLibrary.swift
+      - path: Services/DSHHarnessBridge.swift
+      - path: Services/DesktopIconManager.swift
+      - path: Services/DirectoryMigrationService.swift
+      - path: Services/DesktopWallpaperSyncManager.swift
+      - path: Services/DisplayCropSettingsStore.swift
+      - path: Services/DownloadPathManager.swift
+      - path: Services/DownloadTaskService.swift
+      - path: Services/DynamicWallpaperAutoPauseManager.swift
+      - path: Services/DynamicWallpaperService.swift
+      - path: Services/ExternalDisplayConnectionCoordinator.swift
+      - path: Services/FolderLockService.swift
+      - path: Services/FourKWallpapersParser.swift
+      - path: Services/FourKWallpapersService.swift
+      - path: Services/GlobalWallpaperSyncCoordinator.swift
+      - path: Services/HTMLParser.swift
+      - path: Services/ImportService.swift
+      - path: Services/KonachanAuthService.swift
+      - path: Services/KonachanService.swift
+      - path: Services/LibraryFolderStore.swift
+      - path: Services/WallpaperClockTicker.swift
+      - path: Services/LiquidGlassClockOverlayManager.swift
+      - path: Services/LocalImageThumbnailCache.swift
+      - path: Services/LocalWallpaperApplyService.swift
+      - path: Services/LocalWallpaperScanner.swift
+      - path: Services/LocalizationService.swift
+      - path: Services/LockScreenFramePusher.swift
+      - path: Services/LockScreenWallpaperService.swift
+      - path: Services/MediaLibraryService.swift
+      - path: Services/MediaService.swift
+      - path: Services/MenuBarQuickSwitcherController.swift
+      - path: Services/ModuleAvailability.swift
+      - path: Services/NetworkMonitor.swift
+      - path: Services/NetworkService.swift
+      - path: Services/NotchOverlayManager.swift
+      - path: Services/NowPlayingService.swift
+      - path: Services/PixivAuthService.swift
+      - path: Services/PixivService.swift
+      - path: Services/PowerSourceMonitor.swift
+      - path: Services/SceneBakeEligibilityService.swift
+      - path: Services/SceneConfigOverrideService.swift
+      - path: Services/SceneOfflineBakeService.swift
+      - path: Services/SceneWallpaperDesignService.swift
+      - path: Services/SceneWallpaperPropertiesService.swift
+      - path: Services/ScreenSaverService.swift
+      - path: Services/SleepPreventer.swift
+      - path: Services/StaticImageWallpaperOverlayManager.swift
+      - path: Services/StaticWallpaperApplyService.swift
+      - path: Services/StaticWallpaperGrainManager.swift
+      - path: Services/StatusBarController.swift
+      - path: Services/SteamServiceManager.swift
+      - path: Services/SystemAudioCaptureService.swift
+      - path: Services/SystemMemoryPressure.swift
+      - path: Services/TaskQueueStatusService.swift
+      - path: Services/VideoLoopAnalysisService.swift
+      - path: Services/VideoOptimizationQueueCheckpointStore.swift
+      - path: Services/VideoOptimizationQueueService.swift
+      - path: Services/VideoOptimizationRecordStore.swift
+      - path: Services/VideoRendererProcessController.swift
+      - path: Services/VideoThumbnailCache.swift
+      - path: Services/VideoTranscodeService.swift
+      - path: Services/VideoWallpaperManager.swift
+      - path: Services/VideoFreezeFrameBudget.swift
+      - path: Services/VideoPosterCacheBudget.swift
+      - path: Services/WallpaperDynamicTextParser.swift
+      - path: Services/WallpaperEngineAvailability.swift
+      - path: Services/WallpaperEngineXBridge.swift
+      - path: Services/WallpaperBatteryPauseOwnership.swift
+      - path: Services/WallpaperAutoPauseApplicationIdentity.swift
+      - path: Services/WallpaperExtensionSocketServer.swift
+      - path: Services/WallpaperSchedulerService.swift
+      - path: Services/WallpaperSourceManager.swift
+      - path: Services/WallpaperStoreSelectionProbe.swift
+      - path: Services/WallpaperSystemCacheJanitor.swift
+      - path: Services/WallpaperWebAudioRelay.swift
+      - path: Services/WallpaperWebMediaRelay.swift
+      - path: Services/WallsflowService.swift
+      - path: Services/WallsflowWebFetcher.swift
+      - path: Services/WebOfflineBakeService.swift
+      - path: Services/WebWallpaperDesignService.swift
+      - path: Services/WorkshopService.swift
+      - path: Services/WorkshopSourceManager.swift
+      - path: Utilities/AppFluidMotion.swift
+      - path: Utilities/OwnedProcessIdentity.swift
+      - path: Utilities/AppLogger.swift
+      - path: Utilities/ArcBackgroundSettings.swift
+      - path: Utilities/ArcFrostedGlass.swift
+      - path: Utilities/Debouncer.swift
+      - path: Utilities/DeferredResourceCleanup.swift
+      - path: Utilities/ExploreAtmosphere.swift
+      - path: Utilities/FileIO.swift
+      - path: Utilities/FrameInterpolationLogger.swift
+      - path: Utilities/GitHubHosts.swift
+      - path: Utilities/NSScreen+Wallpaper.swift
+      - path: Utilities/ProcessLiveness.swift
+      - path: Utilities/VideoPreloader.swift
+      - path: Utilities/WaifuXUIActions.swift
+      - path: Utilities/WallpaperExtensionAgentHealer.swift
+      - path: Utilities/WallpaperExtensionKeeper.swift
+      - path: Utilities/WebViewCookieSync.swift
+      - path: ViewModels/MediaExploreViewModel.swift
+      - path: ViewModels/WallpaperViewModel.swift
+      - path: Views/MenuBarQuickSwitcherView.swift
+      - path: Views/WebPropertyEditorPanelController.swift
+      - path: WallpaperEngineEmbeddedAssets.swift
+      - path: Models/MediaItem+LocalFiles.swift
+      - path: Services/WorkshopLibraryPreviewCache.swift
+      - path: DesignSystem/LiquidGlassDesignSystem.swift
+      - path: DesignSystem/ThemeManager.swift
+    dependencies:
+      - package: SwiftSoup
+      - package: Kanna
+      - package: Kingfisher
+      - package: Cache
+    settings:
+      base:
+        PRODUCT_NAME: WaifuXHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.helper
+        MARKETING_VERSION: 38.0.153
+        CURRENT_PROJECT_VERSION: 38.0.153
+        SWIFT_VERSION: "6.0"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WAIFUX_HELPER
+        OTHER_LDFLAGS: $(inherited) $(SRCROOT)/Resources/zip_data.o $(SRCROOT)/Resources/zip_accessor.o
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks @executable_path/../../../../../Frameworks
+        MACOSX_DEPLOYMENT_TARGET: "14.4"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: SRHKTRJ83W
+        ENABLE_HARDENED_RUNTIME: YES
+        INFOPLIST_FILE: BackgroundAgent/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: BackgroundAgent/BackgroundAgent.entitlements
+      properties:
+        com.apple.security.network.client: true
+        com.apple.security.automation.apple-events: true
         com.apple.security.application-groups:
           - group.com.waifux.app
 
@@ -303,13 +519,16 @@ targets:
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: H6W325NJX2
+        DEVELOPMENT_TEAM: SRHKTRJ83W
         ENABLE_HARDENED_RUNTIME: YES
         INFOPLIST_FILE: WaifuXWallpaperExtension/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: WaifuXWallpaperExtension/WallpaperExtension-Bridging-Header.h
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks
     entitlements:
       path: WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.waifux.app
 
   # 屏保组件：独立 .saver 包，由系统 legacyScreenSaver 进程加载。
   # 只读 App 写好的 ~/Library/Application Support/WaifuX/screensaver.json，
@@ -330,7 +549,7 @@ targets:
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: H6W325NJX2
+        DEVELOPMENT_TEAM: SRHKTRJ83W
         INFOPLIST_FILE: WaifuXScreenSaver/Info.plist
         WRAPPER_EXTENSION: saver
         SKIP_INSTALL: YES

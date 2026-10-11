@@ -16,6 +16,7 @@ final class StaticWallpaperGrainManager {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         // 监听颗粒开关和强度变化，实时更新蒙层
         ArcBackgroundSettings.shared.$grainTextureEnabled
             .map { _ in () }
@@ -60,6 +61,8 @@ final class StaticWallpaperGrainManager {
 
     /// 更新所有屏幕的颗粒蒙层
     func updateOverlay() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.grain", [:]); return }
+
         let grainEnabled = ArcBackgroundSettings.shared.grainTextureEnabled
         let grainIntensity = ArcBackgroundSettings.shared.grainIntensity
 
@@ -100,6 +103,7 @@ final class StaticWallpaperGrainManager {
 
     /// 为指定屏幕创建颗粒蒙层窗口
     private func createGrainWindow(for screen: NSScreen, intensity: Double) {
+        guard BackgroundRuntimeRole.allowsDesktopRendering else { return }
         let screenID = screen.wallpaperScreenIdentifier
         let frame = screen.frame
 
@@ -131,6 +135,8 @@ final class StaticWallpaperGrainManager {
 
     /// 刷新所有窗口（屏幕配置变化时调用）
     func refreshWindows() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.grainRefresh", [:]); return }
+
         // 移除不再存在的屏幕的窗口
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
         for (screenID, window) in grainWindows {

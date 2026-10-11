@@ -2,60 +2,60 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>WaifuX</string>
-    <key>CFBundleDisplayName</key>
-    <string>WaifuX</string>
-    <key>CFBundleIdentifier</key>
-    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-    <key>CFBundleVersion</key>
-    <string>$(CURRENT_PROJECT_VERSION)</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$(MARKETING_VERSION)</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2024 WaifuX. All rights reserved.</string>
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>zh</string>
-        <string>en</string>
-        <string>ja</string>
-    </array>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh</string>
-    <key>LSUIElement</key>
-    <false/>
-    <key>NSScreenCaptureDescription</key>
-    <string>WaifuX 需要屏幕录制与系统音频捕获权限，用于动态壁纸显示、音频可视化和视频烘焙导出。</string>
-    <key>NSAppleMusicUsageDescription</key>
-    <string>WaifuX 需要读取「正在播放」信息，以便 Web 音频可视化壁纸显示歌名、艺人与封面。</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>WaifuX 在系统媒体接口不可用时，通过 Apple Events 读取 Music 的正在播放信息，供壁纸 Media Integration 使用。</string>
-    <key>SUFeedURL</key>
-    <string>https://jipika.github.io/WaifuX/appcast.xml</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <!-- 只放行本机回环明文 HTTP：DeepSeek Harness 的插件接口是
-             http://127.0.0.1:<port>/dsh-theme-manager/...（免 token 的 prefix 路由） -->
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-    </dict>
+	<key>CFBundleName</key>
+	<string>WaifuX</string>
+	<key>CFBundleDisplayName</key>
+	<string>WaifuX</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2024 WaifuX. All rights reserved.</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh</string>
+		<string>en</string>
+		<string>ja</string>
+	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh</string>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSScreenCaptureDescription</key>
+	<string>WaifuX 需要屏幕录制与系统音频捕获权限，用于动态壁纸显示、音频可视化和视频烘焙导出。</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>WaifuX 需要读取「正在播放」信息，以便 Web 音频可视化壁纸显示歌名、艺人与封面。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>WaifuX 在系统媒体接口不可用时，通过 Apple Events 读取 Music 的正在播放信息，供壁纸 Media Integration 使用。</string>
+	<key>SUFeedURL</key>
+	<string>https://jipika.github.io/WaifuX/appcast.xml</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>WaifuX 需要捕获系统输出音频，为动态壁纸与桌面挂件提供实时音频可视化。</string>
 </dict>
 </plist>

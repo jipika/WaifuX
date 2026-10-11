@@ -17,6 +17,7 @@ final class LockScreenFramePusher {
     private init() {}
 
     func startPushing(displayID: UInt32, videoURL: URL, surfaceIDs: [IOSurfaceID]) {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let oldSession = sessionsLock.withLock { sessions -> Session? in
             let old = sessions[displayID]
             if old?.matches(videoURL: videoURL, surfaceIDs: surfaceIDs) == true {

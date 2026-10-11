@@ -22,6 +22,7 @@ final class NotchOverlayManager {
     private var isEnabled = false
 
     private init() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         // 监听屏幕配置变化（外接显示器插拔）
         NotificationCenter.default.addObserver(
             self,
@@ -43,6 +44,8 @@ final class NotchOverlayManager {
 
     /// 启用/禁用刘海隐藏
     func setEnabled(_ enabled: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.notch", ["enabled": enabled]); return }
+
         guard isEnabled != enabled else { return }
         isEnabled = enabled
         if enabled {
@@ -94,6 +97,7 @@ final class NotchOverlayManager {
     }
 
     private func createOverlay(for screen: NSScreen) {
+        guard BackgroundRuntimeRole.allowsDesktopRendering else { return }
         let screenID = screen.wallpaperScreenIdentifier
         let frame = menuBarFrame(for: screen)
 

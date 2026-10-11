@@ -24,6 +24,10 @@ actor UserLibrary {
     private var downloads: [DownloadRecord] = []
 
     init() {
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            self.libraryDirectory = URL(fileURLWithPath: root).appendingPathComponent("LegacyLibrary", isDirectory: true)
+            return
+        }
         // ⚠️ 不在 init 中做任何 I/O（FileManager/UserDefaults），避免 _CFXPreferences 递归栈溢出
         guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             self.libraryDirectory = fileManager.temporaryDirectory
@@ -186,6 +190,8 @@ actor UserLibrary {
     }
 
     func bulkUpdatePaths(oldPrefix: String, newPrefix: String) async {
+        // Migration runs in Helper; load the durable legacy index before rebasing.
+        downloads = loadData(from: downloadsPath) ?? []
         var changed = false
         for index in downloads.indices {
             if let localPath = downloads[index].localPath, localPath.hasPrefix(oldPrefix) {

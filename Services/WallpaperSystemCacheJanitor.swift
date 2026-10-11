@@ -105,6 +105,7 @@ final class WallpaperSystemCacheJanitor {
 
     /// 应用启动后调用：错峰检查一次 + 挂 24h 定时兜底
     func noteAppLaunch() {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         startDailySafetyNet()
         scheduleRun(delay: 90)
     }
@@ -123,8 +124,9 @@ final class WallpaperSystemCacheJanitor {
     }
 
     private func scheduleRun(delay: TimeInterval) {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         // 系统壁纸同步关闭时不产生新的解码缓存，无需检查
-        let syncEnabled = (UserDefaults.standard.object(forKey: "system_wallpaper_sync_enabled") as? Bool) ?? true
+        let syncEnabled = (WaifuXPreferences.shared.object(forKey: "system_wallpaper_sync_enabled") as? Bool) ?? true
         guard syncEnabled else { return }
         if let last = lastRunDate, Date().timeIntervalSince(last) < Self.minimumInterval {
             return
@@ -138,6 +140,8 @@ final class WallpaperSystemCacheJanitor {
     }
 
     private func runIfNeeded() {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest,
+              (WaifuXPreferences.shared.object(forKey: "system_wallpaper_sync_enabled") as? Bool) ?? true else { return }
         guard !sweepInFlight else { return } // 上一次扫描还在跑：幂等跳过
         lastRunDate = Date()
         let roots = Self.collectCacheRoots()

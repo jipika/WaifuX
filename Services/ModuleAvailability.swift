@@ -27,7 +27,7 @@ final class ModuleAvailability {
     /// 仅在 `applicationDidFinishLaunching` 创建 ContentView 之前调用一次。
     /// 直接读 UserDefaults（同步、安全），不依赖 SettingsViewModel。
     func refreshFromUserDefaults() {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         wallpaperEnabled = defaults.object(forKey: "module_wallpaper_enabled") as? Bool ?? true
         mediaEnabled = defaults.object(forKey: "module_media_enabled") as? Bool ?? true
         animeEnabled = defaults.object(forKey: "module_anime_enabled") as? Bool ?? true

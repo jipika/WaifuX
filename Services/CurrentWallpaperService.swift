@@ -20,6 +20,15 @@ final class CurrentWallpaperService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let self, let values = snapshot["current"] as? [String: String] else { return }
+                self.activeURLByScreenID = values.compactMapValues(URL.init(string:))
+                self.activeURLStrings = Set(values.values)
+                self.activeFilePaths = Set(self.activeURLByScreenID.values.filter(\.isFileURL).map { $0.standardizedFileURL.path })
+            }
+            return
+        }
         // 视频壁纸变化
         VideoWallpaperManager.shared.$wallpaperChangeCount
             .receive(on: DispatchQueue.main)
