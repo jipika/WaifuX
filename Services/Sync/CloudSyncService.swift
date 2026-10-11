@@ -20,19 +20,30 @@ final class CloudSyncService: ObservableObject {
     private let conflictResolver = CloudSyncConflictResolver.self
 
     private var cancellables = Set<AnyCancellable>()
+    private var exitSyncTask: Task<Void, Never>?
 
     private init() {
         lastSyncedAt = config.lastSyncedAt
+        #if !WAIFUX_HELPER
+        BackgroundAgentClient.shared.observe { [weak self] values in
+            if let cloud = values["cloud"] as? [String: Any] { self?.applyRemoteSnapshot(cloud) }
+        }
+        #endif
     }
 
     // MARK: - 主同步入口
 
     /// 执行完整同步（元数据 + 文件）
     func sync() async {
+        #if !WAIFUX_HELPER
+        await requestRemote("cloud.sync.wait")
+        return
+        #else
         guard !isSyncing else {
             lastError = CloudSyncError.syncInProgress
             return
         }
+        prepareLocalState()
 
         isSyncing = true
         lastError = nil
@@ -60,6 +71,7 @@ final class CloudSyncService: ObservableObject {
             lastError = CloudSyncError.internalError(reason: error.localizedDescription)
             syncStatusMessage = "同步失败: \(error.localizedDescription)"
         }
+        #endif
     }
 
     // MARK: - 本地文件夹同步
@@ -301,7 +313,12 @@ final class CloudSyncService: ObservableObject {
     // MARK: - 从云端恢复（首次配置）
 
     func restoreFromCloud() async {
+        #if !WAIFUX_HELPER
+        await requestRemote("cloud.restore.wait")
+        return
+        #else
         guard !isSyncing else { return }
+        prepareLocalState()
 
         isSyncing = true
         lastError = nil
@@ -330,6 +347,7 @@ final class CloudSyncService: ObservableObject {
             lastError = CloudSyncError.internalError(reason: error.localizedDescription)
             syncStatusMessage = "恢复失败: \(error.localizedDescription)"
         }
+        #endif
     }
 
     private func performLocalRestore() async throws {
@@ -421,10 +439,17 @@ final class CloudSyncService: ObservableObject {
     // MARK: - 应用退出时自动同步
 
     func syncOnAppTerminate() {
+        #if !WAIFUX_HELPER
+        BackgroundAgentClient.shared.send("cloud.syncOnUIExit")
+        #else
+        guard !isSyncing, exitSyncTask == nil else { return }
+        config.reloadFromPreferences()
         guard config.isEnabled else { return }
-        Task {
+        exitSyncTask = Task {
             await sync()
+            exitSyncTask = nil
         }
+        #endif
     }
 
     // MARK: - 错误清理
@@ -432,5 +457,53 @@ final class CloudSyncService: ObservableObject {
     func clearError() {
         lastError = nil
         syncStatusMessage = ""
+        #if !WAIFUX_HELPER
+        BackgroundAgentClient.shared.send("cloud.clearError")
+        #endif
     }
+
+    func backgroundSnapshot() -> [String: Any] {
+        var state: [String: Any] = ["running": isSyncing, "progress": syncProgress,
+            "status": syncStatusMessage, "error": lastError?.localizedDescription ?? ""]
+        if let lastSyncedAt { state["lastSyncedAt"] = lastSyncedAt.timeIntervalSince1970 }
+        return state
+    }
+
+    #if WAIFUX_HELPER
+    private func prepareLocalState() {
+        config.reloadFromPreferences()
+        // These UI-oriented stores are restored on demand. Exporting freshly
+        // initialized empty instances would erase persisted anime/progress data.
+        AnimeFavoriteStore.shared.restoreSavedData()
+        AnimeProgressStore.shared.restoreSavedData()
+        PlaybackProgressCache.shared.restoreSavedData()
+        LibraryGridOrderStore.shared.reloadFromPreferences()
+    }
+    #else
+    private func applyRemoteSnapshot(_ state: [String: Any]) {
+        isSyncing = state["running"] as? Bool ?? false
+        syncProgress = state["progress"] as? Double ?? 0
+        syncStatusMessage = state["status"] as? String ?? ""
+        if let timestamp = state["lastSyncedAt"] as? Double { lastSyncedAt = Date(timeIntervalSince1970: timestamp) }
+        let message = state["error"] as? String ?? ""
+        lastError = message.isEmpty ? nil : NSError(domain: "WaifuXCloudSync", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func requestRemote(_ operation: String) async {
+        do {
+            let response = try await BackgroundAgentClient.shared.request(operation)
+            if let state = response["cloud"] as? [String: Any] { applyRemoteSnapshot(state) }
+            WaifuXPreferences.shared.synchronize()
+            AnimeFavoriteStore.shared.restoreSavedData()
+            AnimeProgressStore.shared.restoreSavedData()
+            PlaybackProgressCache.shared.restoreSavedData()
+            LibraryGridOrderStore.shared.reloadFromPreferences()
+        } catch {
+            isSyncing = false
+            lastError = error
+            syncStatusMessage = error.localizedDescription
+        }
+    }
+    #endif
 }

@@ -42,9 +42,9 @@ enum CloudSyncDirectoryLayout {
     static let manifestFileName = "manifest.json"
     static let objectsDirName = "objects"
 
-    /// 计算某个 hash 对应的 objects 子目录
+    /// Path relative to the objects directory, which callers already supply.
     static func objectSubpath(hash: String) -> String {
         let prefix = String(hash.prefix(2))
-        return "\(objectsDirName)/\(prefix)/\(hash)"
+        return "\(prefix)/\(hash)"
     }
 }

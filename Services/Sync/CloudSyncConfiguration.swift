@@ -4,6 +4,7 @@ import Combine
 @MainActor
 final class CloudSyncConfiguration: ObservableObject {
     static let shared = CloudSyncConfiguration()
+    private var isLoading = false
 
     // MARK: - Published 属性（自动持久化到 UserDefaults）
     @Published var isEnabled: Bool = false {
@@ -16,6 +17,7 @@ final class CloudSyncConfiguration: ObservableObject {
 
     @Published var syncDirectoryURL: URL? {
         didSet {
+            guard !isLoading else { return }
             if let url = syncDirectoryURL {
                 // 存储 bookmark 以支持安全范围访问
                 do {
@@ -24,15 +26,15 @@ final class CloudSyncConfiguration: ObservableObject {
                         includingResourceValuesForKeys: nil,
                         relativeTo: nil
                     )
-                    UserDefaults.standard.set(bookmarkData, forKey: Self.syncDirectoryBookmarkKey)
-                    UserDefaults.standard.set(url.path, forKey: Self.syncDirectoryPathKey)
+                    WaifuXPreferences.shared.set(bookmarkData, forKey: Self.syncDirectoryBookmarkKey)
+                    WaifuXPreferences.shared.set(url.path, forKey: Self.syncDirectoryPathKey)
                 } catch {
                     // 存储路径作为 fallback
-                    UserDefaults.standard.set(url.path, forKey: Self.syncDirectoryPathKey)
+                    WaifuXPreferences.shared.set(url.path, forKey: Self.syncDirectoryPathKey)
                 }
             } else {
-                UserDefaults.standard.removeObject(forKey: Self.syncDirectoryBookmarkKey)
-                UserDefaults.standard.removeObject(forKey: Self.syncDirectoryPathKey)
+                WaifuXPreferences.shared.removeObject(forKey: Self.syncDirectoryBookmarkKey)
+                WaifuXPreferences.shared.removeObject(forKey: Self.syncDirectoryPathKey)
             }
         }
     }
@@ -110,35 +112,44 @@ final class CloudSyncConfiguration: ObservableObject {
 
     // MARK: - 持久化
     private func save() {
-        UserDefaults.standard.set(isEnabled, forKey: Self.isEnabledKey)
-        UserDefaults.standard.set(syncMode.rawValue, forKey: Self.syncModeKey)
-        UserDefaults.standard.set(conflictStrategy.rawValue, forKey: Self.conflictStrategyKey)
+        guard !isLoading else { return }
+        WaifuXPreferences.shared.set(isEnabled, forKey: Self.isEnabledKey)
+        WaifuXPreferences.shared.set(syncMode.rawValue, forKey: Self.syncModeKey)
+        WaifuXPreferences.shared.set(conflictStrategy.rawValue, forKey: Self.conflictStrategyKey)
         if let lastSyncedAt {
-            UserDefaults.standard.set(lastSyncedAt.timeIntervalSince1970, forKey: Self.lastSyncedAtKey)
+            WaifuXPreferences.shared.set(lastSyncedAt.timeIntervalSince1970, forKey: Self.lastSyncedAtKey)
         }
-        UserDefaults.standard.set(webDAVURLString, forKey: Self.webDAVURLKey)
-        UserDefaults.standard.set(webDAVUsername, forKey: Self.webDAVUsernameKey)
-        UserDefaults.standard.set(webDAVPassword, forKey: Self.webDAVPasswordKey)
+        WaifuXPreferences.shared.set(webDAVURLString, forKey: Self.webDAVURLKey)
+        WaifuXPreferences.shared.set(webDAVUsername, forKey: Self.webDAVUsernameKey)
+        WaifuXPreferences.shared.set(webDAVPassword, forKey: Self.webDAVPasswordKey)
     }
 
+    func reloadFromPreferences() { load() }
+
     private func load() {
-        isEnabled = UserDefaults.standard.bool(forKey: Self.isEnabledKey)
-        if let modeRaw = UserDefaults.standard.string(forKey: Self.syncModeKey),
+        isLoading = true
+        defer { isLoading = false }
+        syncDirectoryURL = nil
+        lastSyncedAt = nil
+        syncMode = .localFolder
+        conflictStrategy = .localPreferred
+        isEnabled = WaifuXPreferences.shared.bool(forKey: Self.isEnabledKey)
+        if let modeRaw = WaifuXPreferences.shared.string(forKey: Self.syncModeKey),
            let mode = CloudSyncMode(rawValue: modeRaw) {
             syncMode = mode
         }
-        if let strategyRaw = UserDefaults.standard.string(forKey: Self.conflictStrategyKey),
+        if let strategyRaw = WaifuXPreferences.shared.string(forKey: Self.conflictStrategyKey),
            let strategy = CloudSyncConflictStrategy(rawValue: strategyRaw) {
             conflictStrategy = strategy
         }
-        if let timestamp = UserDefaults.standard.object(forKey: Self.lastSyncedAtKey) as? TimeInterval {
+        if let timestamp = WaifuXPreferences.shared.object(forKey: Self.lastSyncedAtKey) as? TimeInterval {
             lastSyncedAt = Date(timeIntervalSince1970: timestamp)
         }
-        webDAVURLString = UserDefaults.standard.string(forKey: Self.webDAVURLKey) ?? ""
-        webDAVUsername = UserDefaults.standard.string(forKey: Self.webDAVUsernameKey) ?? ""
-        webDAVPassword = UserDefaults.standard.string(forKey: Self.webDAVPasswordKey) ?? ""
+        webDAVURLString = WaifuXPreferences.shared.string(forKey: Self.webDAVURLKey) ?? ""
+        webDAVUsername = WaifuXPreferences.shared.string(forKey: Self.webDAVUsernameKey) ?? ""
+        webDAVPassword = WaifuXPreferences.shared.string(forKey: Self.webDAVPasswordKey) ?? ""
         // 恢复目录 URL
-        if let bookmarkData = UserDefaults.standard.data(forKey: Self.syncDirectoryBookmarkKey) {
+        if let bookmarkData = WaifuXPreferences.shared.data(forKey: Self.syncDirectoryBookmarkKey) {
             var isStale = false
             if let url = try? URL(
                 resolvingBookmarkData: bookmarkData,
@@ -150,7 +161,7 @@ final class CloudSyncConfiguration: ObservableObject {
                 return
             }
         }
-        if let path = UserDefaults.standard.string(forKey: Self.syncDirectoryPathKey) {
+        if let path = WaifuXPreferences.shared.string(forKey: Self.syncDirectoryPathKey) {
             syncDirectoryURL = URL(fileURLWithPath: path)
         }
     }

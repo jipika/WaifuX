@@ -241,11 +241,11 @@ final class CloudSyncMetadataEngine {
     // MARK: - 内部：设备 ID
 
     private static let deviceID: String = {
-        if let stored = UserDefaults.standard.string(forKey: "cloud_sync_device_id") {
+        if let stored = WaifuXPreferences.shared.string(forKey: "cloud_sync_device_id") {
             return stored
         }
         let id = UUID().uuidString
-        UserDefaults.standard.set(id, forKey: "cloud_sync_device_id")
+        WaifuXPreferences.shared.set(id, forKey: "cloud_sync_device_id")
         return id
     }()
 }
@@ -573,11 +573,11 @@ extension CloudSyncMetadataEngine {
     // MARK: 数据源 Profile 合并
     func mergeDataSourceProfiles(_ cloudProfiles: DataSourceProfilesPayload) {
         do {
-            try DataSourceProfileStore.saveImportedProfiles(cloudProfiles.importedProfiles, defaults: .standard)
+            try DataSourceProfileStore.saveImportedProfiles(cloudProfiles.importedProfiles, defaults: WaifuXPreferences.shared)
         } catch {
             // 忽略持久化失败，仍更新 activeID
         }
-        UserDefaults.standard.set(cloudProfiles.activeID, forKey: "data_source_active_profile_id_v1")
+        WaifuXPreferences.shared.set(cloudProfiles.activeID, forKey: "data_source_active_profile_id_v1")
     }
 }
 
@@ -603,7 +603,7 @@ extension CloudSyncMetadataEngine {
 
     static func exportDataSourceProfiles() -> DataSourceProfilesPayload? {
         let profiles: [DataSourceProfile] = DataSourceProfileStore.importedProfiles()
-        let activeID = UserDefaults.standard.string(forKey: "data_source_active_profile_id_v1") ?? ""
+        let activeID = WaifuXPreferences.shared.string(forKey: "data_source_active_profile_id_v1") ?? ""
         guard !profiles.isEmpty else { return nil }
         return DataSourceProfilesPayload(activeID: activeID, importedProfiles: profiles)
     }
@@ -611,7 +611,7 @@ extension CloudSyncMetadataEngine {
 
 extension DataSourceProfileStore {
     static func importedProfiles() -> [DataSourceProfile] {
-        guard let data = UserDefaults.standard.data(forKey: "data_source_profiles_v1"),
+        guard let data = WaifuXPreferences.shared.data(forKey: "data_source_profiles_v1"),
               let profiles = try? JSONDecoder().decode([DataSourceProfile].self, from: data) else {
             return []
         }

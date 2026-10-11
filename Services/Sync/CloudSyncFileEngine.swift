@@ -46,6 +46,7 @@ final actor CloudSyncFileEngine {
             return entries
         }
 
+        let directoryPrefix = directoryURL.standardizedFileURL.resolvingSymlinksInPath().path + "/"
         for case let fileURL as URL in enumerator {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
@@ -56,8 +57,9 @@ final actor CloudSyncFileEngine {
                   let mtime = resourceValues.contentModificationDate else { continue }
 
             // 计算相对路径
-            let relativePath = basePath + "/" + fileURL.path
-                .replacingOccurrences(of: directoryURL.path + "/", with: "")
+            let canonicalPath = fileURL.standardizedFileURL.resolvingSymlinksInPath().path
+            guard canonicalPath.hasPrefix(directoryPrefix) else { continue }
+            let relativePath = basePath + "/" + canonicalPath.dropFirst(directoryPrefix.count)
 
             let hash = try computeFileHash(at: fileURL)
 
@@ -107,8 +109,11 @@ final actor CloudSyncFileEngine {
         destinationURL: URL
     ) throws {
         let objectPath = CloudSyncDirectoryLayout.objectSubpath(hash: hash)
-        let objectURL = objectsDir.appendingPathComponent(objectPath)
-
+        let currentURL = objectsDir.appendingPathComponent(objectPath)
+        // Older builds accidentally wrote objects/objects/<prefix>/<hash>.
+        // Read that layout when the new canonical location is absent.
+        let legacyURL = objectsDir.appendingPathComponent("objects").appendingPathComponent(objectPath)
+        let objectURL = fileManager.fileExists(atPath: currentURL.path) ? currentURL : legacyURL
         guard fileManager.fileExists(atPath: objectURL.path) else {
             throw CloudSyncError.fileReadFailed(path: objectURL.path)
         }
@@ -215,9 +220,8 @@ final actor CloudSyncFileEngine {
     }
 
     /// 确保同步目录结构存在
-    func ensureSyncDirectory(at rootURL: URL) throws {
-        let versionDir = rootURL.appendingPathComponent(CloudSyncDirectoryLayout.versionDir)
-        let objectsDir = versionDir.appendingPathComponent(CloudSyncDirectoryLayout.objectsDirName)
+    func ensureSyncDirectory(at versionRootURL: URL) throws {
+        let objectsDir = versionRootURL.appendingPathComponent(CloudSyncDirectoryLayout.objectsDirName)
 
         try fileManager.createDirectory(
             at: objectsDir,

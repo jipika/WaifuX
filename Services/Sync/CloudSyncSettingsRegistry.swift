@@ -157,7 +157,7 @@ enum CloudSyncSettingsRegistry {
 
     /// 读取所有白名单中的设置
     static func exportSettings() -> [CloudSyncSettingsCategory: [String: AnyCodable]] {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         var result: [CloudSyncSettingsCategory: [String: AnyCodable]] = [:]
 
         for entry in allEntries {
@@ -173,7 +173,7 @@ enum CloudSyncSettingsRegistry {
         _ settings: [CloudSyncSettingsCategory: [String: AnyCodable]],
         strategy: CloudSyncConflictStrategy = .cloudPreferred
     ) {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
 
         guard strategy == .cloudPreferred else { return }
 

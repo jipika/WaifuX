@@ -126,7 +126,13 @@ final actor CloudSyncWebDAVEngine {
         let objectURL = objectsBaseURL.appendingPathComponent(objectPath)
 
         // 下载远程文件
-        let data = try await client.get(url: objectURL, credentials: credentials)
+        let data: Data
+        do {
+            data = try await client.get(url: objectURL, credentials: credentials)
+        } catch CloudSyncError.webDAVNotFound {
+            let legacyURL = objectsBaseURL.appendingPathComponent("objects").appendingPathComponent(objectPath)
+            data = try await client.get(url: legacyURL, credentials: credentials)
+        }
 
         // 验证 hash
         let digest = SHA256.hash(data: data)
