@@ -104,7 +104,7 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
         connection.invalidationHandler = { [weak handler] in
             // SpiralRecovery：区分「agent 空转的空连接」（被接受但没调用任何方法就
             // 断开）与「服务过方法的正常断开」。连续空连接达到阈值时发 Darwin 通知
-            // 让主 App killall WallpaperAgent（见 WallpaperExtensionAgentHealer）。
+            // 请求 Helper 的安全健康检查，不重启 WallpaperAgent。
             if let handler, !handler.servedAnyMethod {
                 SpiralRecovery.noteEmptyConnection(pid: connection.processIdentifier)
             } else {
@@ -112,8 +112,9 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
             }
             handler?.stopObservingPrefs()
             handler?.agentProxy = nil
-            let ownedContextIDs = handler?.takeOwnedContextIDs() ?? []
-            let removed = WallpaperState.shared.removeContexts(ids: ownedContextIDs)
+            let ownedContexts = handler?.takeOwnedContexts() ?? [:]
+            let ownedContextIDs = Set(ownedContexts.keys)
+            let removed = WallpaperState.shared.removeContexts(ids: ownedContextIDs, ownedBy: ownedContexts)
             let remaining = WallpaperState.shared.activeContextCount
             guard !removed.isEmpty else {
                 // Benign teardown: no live contexts (settings-only connection, or
@@ -610,24 +611,23 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         return
                     }
 
+                    // Advance every context's generation before choosing a path.
+                    // A preceding image command may still be queued on main; it
+                    // must not overwrite this newer video command when it runs.
+                    let replacements = allContexts.compactMap {
+                        WallpaperState.shared.beginRendererReplacement(contextId: $0.contextId, expectedRootLayer: $0.rootLayer)
+                    }
                     // Path A: 有 renderer 的 context → 热切换视频
-                    let contextsWithRenderer = allContexts.filter { $0.renderer != nil }
+                    let contextsWithRenderer = replacements.filter { $0.context.renderer != nil }
                     if !contextsWithRenderer.isEmpty {
-                        for active in contextsWithRenderer {
+                        for replacement in contextsWithRenderer {
+                            let active = replacement.context
+                            defer { WallpaperState.shared.finishSetupTask(contextId: active.contextId, generation: replacement.generation) }
                             guard let renderer = active.renderer else { continue }
+                            guard WallpaperState.shared.commitRenderer(contextId: active.contextId,
+                                generation: replacement.generation, renderer: renderer, videoID: videoID).committed else { continue }
                             renderer.replaceVideo(with: url)
-                            WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, rootLayer: active.rootLayer)
-                            // 更新 context 的 videoID（保留原 wallpaperID 不变）
-                            let updated = ActiveWallpaper(
-                                caContext: active.caContext,
-                                rootLayer: active.rootLayer,
-                                renderer: renderer,
-                                displayID: active.displayID,
-                                videoID: videoID,
-                                contextId: active.contextId,
-                                wallpaperID: active.wallpaperID
-                            )
-                            _ = WallpaperState.shared.replaceContextById(contextId: active.contextId, context: updated)
+                            WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, displayID: displayID, rootLayer: active.rootLayer)
                         }
                         // 所有 context 更新完后统一写一次状态文件 + Darwin 通知，避免循环内重复 IO
                         WallpaperPrefs.shared.updateCurrentVideo()
@@ -635,7 +635,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                     }
 
                     // Path B: 无 renderer 的 context（之前是静态图模式）→ 创建新的视频 renderer
-                    let contextsWithoutRenderer = allContexts.filter { $0.renderer == nil }
+                    let contextsWithoutRenderer = replacements.filter { $0.context.renderer == nil }
                     if !contextsWithoutRenderer.isEmpty {
                         // per-displayID 全局清理只在循环外做一次：IOSurface 渲染器和 FrameChannel
                         // 回调都是按 displayID 共享的，桌面+锁屏两个 context 各自 dispatch 一次
@@ -643,30 +643,37 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         WallpaperState.shared.removeIOSurfaceRenderer(for: displayID)
                         FrameChannel.shared.unregisterCallback(displayID: displayID)
                     }
-                    for active in contextsWithoutRenderer {
+                    for replacement in contextsWithoutRenderer {
+                        let active = replacement.context
                         // handleSocketCommand 在 wallpaperCommandQueue（后台串行队列）上调用，
                         // rootLayer 修改需要派发到主线程（@MainActor Task 已处理）。
-                        let rootLayer = active.rootLayer
+                        let rootLayer = replacement.context.rootLayer
                         // ⚠️ 必须 @MainActor：AVSampleBufferDisplayLayer 的创建和添加到 rootLayer
                         // 需要在主线程执行，否则视频不会动画（displayLayer 无帧输出）。
-                        Task { @MainActor in
+                        let task = Task { @MainActor in
+                            defer { WallpaperState.shared.finishSetupTask(contextId: active.contextId, generation: replacement.generation) }
+                            guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return }
                             do {
-                                rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
                                 let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: url, displayID: displayID)
-                                // 更新这个特定 context 的 renderer（通过 contextId 精确匹配）
-                                _ = WallpaperState.shared.replaceContextRendererByContextId(
+                                guard !Task.isCancelled else { renderer.stop(); return }
+                                let committed = WallpaperState.shared.commitRenderer(
                                     contextId: active.contextId,
+                                    generation: replacement.generation,
                                     renderer: renderer,
                                     videoID: videoID
                                 )
+                                guard committed.committed else { renderer.stop(); return }
+                                committed.previous?.stop()
+                                rootLayer.contents = nil
                                 renderer.start()
                                 // 应用当前 policy（锁屏 / userPaused / display paused / 热限频等）。
                                 // 否则新建 renderer 会在暂停状态下也满速跑，直到下次 update() 才被拉回。
                                 Self.recomputeAndApplyPolicy()
                                 WallpaperPrefs.shared.updateCurrentVideo()
-                                WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, rootLayer: rootLayer)
+                                WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, displayID: displayID, rootLayer: rootLayer)
                                 extLog("[Commands] ✅ 已从静态图切回视频: display=\(displayID) video=\(videoID)")
                             } catch {
+                                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return }
                                 extLog("[Commands] ❌ 从静态图切回视频失败: \(error.localizedDescription)")
                                 WallpaperPrefs.shared.reportError("switch_video 失败: \(error.localizedDescription)")
                                 // 恢复：尝试加载缓存快照作为兜底内容，避免永久黑屏
@@ -691,6 +698,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                                 }
                             }
                         }
+                        WallpaperState.shared.retainSetupTask(task, contextId: active.contextId, generation: replacement.generation)
                     }
                 }
             }

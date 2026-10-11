@@ -30,6 +30,8 @@ final class WallpaperState: Sendable {
 
     private struct State: @unchecked Sendable {
         var activeContexts: [UInt32: ActiveWallpaper] = [:]
+        var contextGenerations = WallpaperContextGeneration()
+        var setupTasks: [UInt32: Task<Void, Never>] = [:]
         /// 已移除：历史上 wallpaperID → contextId 是单值映射，
         /// 桌面和锁屏两个 instance 共享同一 wallpaperID 时后者会覆盖前者，
         /// 导致被覆盖的 instance 的 renderer 被 stop（layers 全部拆除）→ 黑屏。
@@ -89,18 +91,62 @@ final class WallpaperState: Sendable {
 
     // MARK: - Context Management
 
-    /// 存储新的渲染上下文。
-    /// 同一 wallpaperID 可对应多个 contextId（桌面 + 锁屏两个独立 instance 各自 acquire）。
-    /// 历史上此处按 wallpaperID 去重，会把先 acquire 的 instance（通常是桌面）的 renderer stop 掉，
-    /// 导致该 instance 的 rootLayer layers 全部拆除 → 黑屏，且永远无法被 alwaysPauseDesktop policy 命中。
-    /// 现改为只按 contextId 存储/去重，同一 wallpaperID 多 instance 共存。
-    /// `wallpaperID` 形参会被持久化到 ActiveWallpaper.wallpaperID，供 invalidate / 几何更新等
-    /// 按真 wallpaperID 路由的路径使用（不要再用 videoID 比 wallpaperID — 两者属不同命名空间）。
-    func storeContext(_ context: ActiveWallpaper, id: UInt32, wallpaperID _: String?) -> ActiveWallpaper? {
+    /// Admit a placeholder before async loading so invalidate can reclaim it.
+    func beginContextSetup(_ context: ActiveWallpaper) -> UInt64 {
+        let result = lock.withLock { state -> (UInt64, Task<Void, Never>?, VideoRenderer?) in
+            let oldTask = state.setupTasks.removeValue(forKey: context.contextId)
+            let oldRenderer = state.activeContexts[context.contextId]?.renderer
+            state.activeContexts[context.contextId] = context
+            return (state.contextGenerations.admit(context.contextId), oldTask, oldRenderer)
+        }
+        result.1?.cancel()
+        result.2?.stop()
+        return result.0
+    }
+
+    func beginRendererReplacement(contextId: UInt32, expectedRootLayer: CALayer) -> (context: ActiveWallpaper, generation: UInt64)? {
+        let result = lock.withLock { state -> (ActiveWallpaper, UInt64, Task<Void, Never>?)? in
+            guard let context = state.activeContexts[contextId], context.rootLayer === expectedRootLayer else { return nil }
+            let task = state.setupTasks.removeValue(forKey: contextId)
+            return (context, state.contextGenerations.begin(contextId), task)
+        }
+        guard let result else { return nil }
+        result.2?.cancel()
+        return (result.0, result.1)
+    }
+
+    func isContextSetupCurrent(contextId: UInt32, generation: UInt64) -> Bool {
+        lock.withLock { $0.activeContexts[contextId] != nil && $0.contextGenerations.isCurrent(generation, for: contextId) }
+    }
+
+    func retainSetupTask(_ task: Task<Void, Never>, contextId: UInt32, generation: UInt64) {
+        let admitted = lock.withLock { state -> Bool in
+            guard state.contextGenerations.isPending(generation, for: contextId), state.activeContexts[contextId] != nil else { return false }
+            state.setupTasks[contextId] = task
+            return true
+        }
+        if !admitted { task.cancel() }
+    }
+
+    func finishSetupTask(contextId: UInt32, generation: UInt64) {
         lock.withLock { state in
-            let existing = state.activeContexts[id]
-            state.activeContexts[id] = context
-            return existing
+            guard state.contextGenerations.isCurrent(generation, for: contextId) else { return }
+            state.contextGenerations.finish(generation, for: contextId)
+            state.setupTasks.removeValue(forKey: contextId)
+        }
+    }
+
+    /// The caller stops the returned renderer, including one installed during an
+    /// earlier setup. A dead context can never be inserted again by a late task.
+    func commitRenderer(contextId: UInt32, generation: UInt64, renderer: VideoRenderer?, videoID: String?) -> (committed: Bool, previous: VideoRenderer?) {
+        lock.withLock { state in
+            guard let old = state.activeContexts[contextId], state.contextGenerations.isCurrent(generation, for: contextId) else { return (false, nil) }
+            state.activeContexts[contextId] = ActiveWallpaper(
+                caContext: old.caContext, rootLayer: old.rootLayer, renderer: renderer,
+                displayID: old.displayID, videoID: videoID ?? old.videoID,
+                contextId: contextId, wallpaperID: old.wallpaperID
+            )
+            return (true, old.renderer)
         }
     }
 
@@ -109,17 +155,22 @@ final class WallpaperState: Sendable {
     /// 历史实现按 videoID 比较 wallpaperID（命名空间不同，永远 mismatch），且循环里 `removed = ...`
     /// 会覆盖只剩最后一个，导致前面的 renderer 永久泄漏 — 现已修正。
     func removeContext(wallpaperID: String) -> [ActiveWallpaper] {
-        lock.withLock { state in
+        let result = lock.withLock { state -> ([ActiveWallpaper], [Task<Void, Never>]) in
             let matching = state.activeContexts.filter { $0.value.wallpaperID == wallpaperID }.map { $0.key }
             var removed: [ActiveWallpaper] = []
+            var tasks: [Task<Void, Never>] = []
             removed.reserveCapacity(matching.count)
             for id in matching {
+                state.contextGenerations.remove(id)
+                if let task = state.setupTasks.removeValue(forKey: id) { tasks.append(task) }
                 if let ctx = state.activeContexts.removeValue(forKey: id) {
                     removed.append(ctx)
                 }
             }
-            return removed
+            return (removed, tasks)
         }
+        for task in result.1 { task.cancel() }
+        return result.0
     }
 
     /// 只移除某一条 XPC 连接创建的 context。
@@ -127,32 +178,43 @@ final class WallpaperState: Sendable {
     /// WallpaperExtensionKit 可能为桌面、锁屏或不同显示器建立多条连接；
     /// 其中一条连接失效并不代表其它连接的 CAContext 也失效。失效回调必须
     /// 按连接归属清理，不能直接调用 removeAllContexts() 把其它屏幕一起带走。
-    func removeContexts(ids: Set<UInt32>) -> [ActiveWallpaper] {
+    func removeContexts(ids: Set<UInt32>, ownedBy owners: [UInt32: UInt64]? = nil) -> [ActiveWallpaper] {
         guard !ids.isEmpty else { return [] }
-        let removed = lock.withLock { state -> [ActiveWallpaper] in
+        let result = lock.withLock { state -> ([ActiveWallpaper], [Task<Void, Never>]) in
             var result: [ActiveWallpaper] = []
+            var tasks: [Task<Void, Never>] = []
             result.reserveCapacity(ids.count)
             for id in ids {
+                if let owners {
+                    guard let owner = owners[id], state.contextGenerations.isOwned(by: owner, contextID: id) else { continue }
+                }
+                state.contextGenerations.remove(id)
+                if let task = state.setupTasks.removeValue(forKey: id) { tasks.append(task) }
                 if let context = state.activeContexts.removeValue(forKey: id) {
                     result.append(context)
                 }
             }
-            return result
+            return (result, tasks)
         }
-        for context in removed {
+        for task in result.1 { task.cancel() }
+        for context in result.0 {
             context.renderer?.stop()
         }
-        return removed
+        return result.0
     }
 
     func removeAllContexts() -> [ActiveWallpaper] {
-        let removed = lock.withLock { state -> ([ActiveWallpaper], [IOSurfaceFrameRenderer]) in
+        let removed = lock.withLock { state -> ([ActiveWallpaper], [IOSurfaceFrameRenderer], [Task<Void, Never>]) in
             let all = Array(state.activeContexts.values)
             let ioRenderers = Array(state.ioSurfaceRenderers.values)
+            let tasks = Array(state.setupTasks.values)
+            state.setupTasks.removeAll()
+            state.contextGenerations.removeAll()
             state.activeContexts.removeAll()
             state.ioSurfaceRenderers.removeAll()
-            return (all, ioRenderers)
+            return (all, ioRenderers, tasks)
         }
+        for task in removed.2 { task.cancel() }
         for ctx in removed.0 { ctx.renderer?.stop() }
         for renderer in removed.1 { renderer.stop() }
         return removed.0
@@ -308,6 +370,9 @@ final class WallpaperState: Sendable {
     /// 替换指定 contextId 的上下文，返回旧的上下文（如果存在）。
     func replaceContextById(contextId: UInt32, context: ActiveWallpaper) -> ActiveWallpaper? {
         lock.withLock { state in
+            guard let current = state.activeContexts[contextId],
+                  current.rootLayer === context.rootLayer,
+                  current.renderer === context.renderer else { return nil }
             let old = state.activeContexts.removeValue(forKey: contextId)
             state.activeContexts[contextId] = context
             return old

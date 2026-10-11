@@ -27,6 +27,19 @@ final class VideoRenderer: @unchecked Sendable {
     private var currentPolicy: PlaybackPolicy = .full
     private var rampTimer: (any DispatchSourceTimer)?
     private var deepPauseTimer: (any DispatchSourceTimer)?
+    private var recoveryWorkItem: DispatchWorkItem?
+    private var recoveryPolicy = VideoPlaybackRecoveryPolicy()
+    private var playbackGeneration: UInt64 = 0
+    private var readerHasDeliveredFrame = false
+    private var hasStarted = false
+    private var preloadTask: Task<Void, Never>?
+    private var replacementTask: Task<Void, Never>?
+    private var replacementGeneration: UInt64 = 0
+    private let imageTaskLock = NSLock()
+    private var backgroundImageTask: Task<Void, Never>?
+    private var stillImageTask: Task<Void, Never>?
+    private var backgroundImageGeneration: UInt64 = 0
+    private var stillImageGeneration: UInt64 = 0
 
     private var currentReader: AVAssetReader?
     private var currentOutput: AVAssetReaderTrackOutput?
@@ -46,7 +59,10 @@ final class VideoRenderer: @unchecked Sendable {
 
     static func create(rootLayer: CALayer, videoURL: URL, displayID: UInt32) async throws -> VideoRenderer {
         let asset = AVURLAsset(url: videoURL)
-        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let tracks = try await withTaskCancellationHandler(operation: {
+            try await asset.loadTracks(withMediaType: .video)
+        }, onCancel: { asset.cancelLoading() })
+        try Task.checkCancellation()
         guard let track = tracks.first else {
             throw CocoaError(.fileReadCorruptFile, userInfo: [
                 NSLocalizedDescriptionKey: "No video track found in \(videoURL.lastPathComponent)",
@@ -54,11 +70,13 @@ final class VideoRenderer: @unchecked Sendable {
         }
 
         let videoSize = await Self.displaySize(for: track)
+        try Task.checkCancellation()
 
         // CALayer / AVSampleBufferDisplayLayer 创建与 addSublayer 必须在主线程：
         // 历史上整个 init 在 acquire 的非主线程 Task 上执行，会触发 Quartz thread-checker
         // 警告，且远程 CAContext 下偶发渲染管线无帧输出。
-        return await MainActor.run {
+        return try await MainActor.run {
+            try Task.checkCancellation()
             let bounds = rootLayer.bounds
             let layout = Self.aspectFillLayout(videoSize: videoSize, in: bounds)
 
@@ -127,24 +145,13 @@ final class VideoRenderer: @unchecked Sendable {
         CMTimebaseSetRate(timebase, rate: 0.0)
         displayLayer.controlTimebase = timebase
 
-        // 即时同步底图：如果 BMP 缓存为空（首次启动 / 清理后），同步提取视频首帧
-        // 作为 backgroundFrameLayer 内容，避免锁屏 acquire 后黑屏。
-        // 异步 generateBackgroundFrame 完成后会用更高质量封面覆盖。
-        if backgroundFrameLayer.contents == nil {
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) {
-                backgroundFrameLayer.contents = cgImage
-                backgroundFrameLayer.opacity = 1
-                extLog("  [Renderer] 同步首帧底图已设置: \(asset.url.lastPathComponent)")
-            }
-        }
-        // 第三级兜底：BMP 缓存与首帧提取都失败（解码器异常/文件损坏）时挂系统桌面图，
-        // 保证 acquire 后永不纯黑。动态首帧就绪后 displayLayer 会盖在上面。
+        // 首帧只走下面可取消的异步任务。同步 copyCGImage 在外置盘阻塞或
+        // 损坏视频上会卡住扩展主线程，并与异步封面重复创建解码器。
+        // 无 BMP 时先用有预算的系统图占位，动态帧就绪后覆盖。
         if backgroundFrameLayer.contents == nil, let systemImage = SystemFallbackImage.image() {
             backgroundFrameLayer.contents = systemImage
             backgroundFrameLayer.opacity = 1
-            extLog("  [Renderer] ⚠️ BMP 缓存与首帧均不可用，已挂系统桌面图兜底: \(asset.url.lastPathComponent)")
+            extLog("  [Renderer] 无 BMP 缓存，已挂系统桌面图等待异步首帧: \(asset.url.lastPathComponent)")
         }
         generateBackgroundFrame(for: asset)
     }
@@ -252,40 +259,42 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Playback Control
 
     func start() {
-        guard let reader = try? AVAssetReader(asset: asset) else { return }
-        let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
-        output.alwaysCopiesSampleData = false
-        reader.add(output)
-        reader.startReading()
-
-        // 在第一次入队前重置 timebase，使帧不会被视为迟到
-        CMTimebaseSetTime(timebase, time: .zero)
-
-        if let firstSample = output.copyNextSampleBuffer() {
-            renderer.enqueue(firstSample)
+        queue.async { [weak self] in
+            guard let self, self.isRunning, !self.hasStarted else { return }
+            self.hasStarted = true
+            self.recoveryPolicy.recordSuccessfulFrame()
+            self.recreatePlayback()
+            CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
         }
-
-        currentReader = reader
-        currentOutput = output
-        ptsOffset = .zero
-        lastEnqueuedEnd = .zero
-
-        // 开始推进 timebase — 播放开始
-        CMTimebaseSetRate(timebase, rate: 1.0)
-
-        prepareNextReader()
-        feedFromCurrentReader()
     }
 
     func stop() {
-        cancelDeepPauseTimer()
         queue.sync {
             isRunning = false
+            playbackGeneration &+= 1
+            replacementGeneration &+= 1
+            cancelRamp()
+            cancelDeepPauseTimer()
+            recoveryWorkItem?.cancel()
+            recoveryWorkItem = nil
+            preloadTask?.cancel()
+            preloadTask = nil
+            replacementTask?.cancel()
+            replacementTask = nil
             renderer.stopRequestingMediaData()
+            renderer.flush()
             currentReader?.cancelReading()
             nextReader?.cancelReading()
+            currentReader = nil
+            currentOutput = nil
+            nextReader = nil
+            nextOutput = nil
+            CMTimebaseSetRate(timebase, rate: 0.0)
         }
+        cancelImageTasks()
         DispatchQueue.main.async { [displayLayer, backgroundFrameLayer, stillFrameLayer] in
+            backgroundFrameLayer.contents = nil
+            stillFrameLayer.contents = nil
             displayLayer.removeFromSuperlayer()
             backgroundFrameLayer.removeFromSuperlayer()
             stillFrameLayer.removeFromSuperlayer()
@@ -297,6 +306,10 @@ final class VideoRenderer: @unchecked Sendable {
         isPaused = true
         CMTimebaseSetRate(timebase, rate: 0.0)
         generateStillFrame()
+        queue.async { [weak self] in
+            guard let self, self.isRunning, self.isPaused else { return }
+            self.scheduleDeepPause()
+        }
     }
 
     func resume() {
@@ -309,6 +322,7 @@ final class VideoRenderer: @unchecked Sendable {
         isPaused = false
         cancelDeepPauseTimer()
         stillFrameLayer.opacity = 0
+        stillFrameLayer.contents = nil
         if currentReader == nil {
             // 从深度暂停中唤醒 — reader 已被释放，重建前先恢复
             queue.async { [weak self] in
@@ -329,6 +343,7 @@ final class VideoRenderer: @unchecked Sendable {
             guard let self, self.isRunning else { return }
             self.cancelRamp()
             self.cancelDeepPauseTimer()
+            self.recoveryPolicy.recordSuccessfulFrame()
             self.recreatePlayback()
             CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
             extLog("  [Renderer] 显示器唤醒后已重建解码管线")
@@ -337,15 +352,20 @@ final class VideoRenderer: @unchecked Sendable {
 
     /// 热切换视频文件。保留当前 CAContext/layer，只替换视频源。
     func replaceVideo(with videoURL: URL) {
-        let newAsset = AVURLAsset(url: videoURL)
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            guard let track = try? await newAsset.loadTracks(withMediaType: .video).first else {
-                extLog("[Renderer] ❌ 新视频无轨道: \(videoURL.lastPathComponent)")
-                return
-            }
-            queue.async { [weak self] in
-                guard let self, isRunning else { return }
+        queue.async { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.replacementTask?.cancel()
+            self.replacementGeneration &+= 1
+            let generation = self.replacementGeneration
+            let newAsset = AVURLAsset(url: videoURL)
+            self.replacementTask = Task.detached(priority: .userInitiated) { [weak self] in
+                guard let track = try? await withTaskCancellationHandler(operation: {
+                    try await newAsset.loadTracks(withMediaType: .video).first
+                }, onCancel: { newAsset.cancelLoading() }), !Task.isCancelled else { return }
+                guard let self else { return }
+                self.queue.async { [weak self] in
+                guard let self, isRunning, replacementGeneration == generation else { return }
+                replacementTask = nil
                 // 停止当前管线，切换到新视频
                 renderer.stopRequestingMediaData()
                 renderer.flush()
@@ -353,6 +373,7 @@ final class VideoRenderer: @unchecked Sendable {
                 nextReader?.cancelReading()
                 asset = newAsset
                 videoTrack = track
+                recoveryPolicy.recordSuccessfulFrame()
                 applyAspectFillLayout(for: track)
                 generateBackgroundFrame(for: newAsset)
                 ptsOffset = .zero
@@ -374,6 +395,7 @@ final class VideoRenderer: @unchecked Sendable {
                 }
 
                 extLog("[Renderer] ✅ 热切换视频: \(newAsset.url.lastPathComponent)")
+                }
             }
         }
     }
@@ -454,6 +476,7 @@ final class VideoRenderer: @unchecked Sendable {
         isPaused = false
         cancelDeepPauseTimer()
         stillFrameLayer.opacity = 0
+        stillFrameLayer.contents = nil
 
         if currentReader == nil {
             // 深度暂停：没有帧可用于 ramp。立即唤醒而不是对空管道运行 2 秒 ramp。
@@ -527,6 +550,12 @@ final class VideoRenderer: @unchecked Sendable {
         deepPauseTimer = nil
         guard isRunning, isPaused, currentReader != nil else { return }
         renderer.stopRequestingMediaData()
+        playbackGeneration &+= 1
+        renderer.flush()
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        preloadTask?.cancel()
+        preloadTask = nil
         currentReader?.cancelReading()
         nextReader?.cancelReading()
         currentReader = nil
@@ -539,6 +568,13 @@ final class VideoRenderer: @unchecked Sendable {
     /// 在渲染队列上从头重建播放管线。由深度暂停唤醒和错误恢复路径使用。
     /// 从零重启时间线 — 调用者负责恢复 timebase 速率。
     private func recreatePlayback() {
+        guard isRunning else { return }
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        preloadTask?.cancel()
+        preloadTask = nil
+        playbackGeneration &+= 1
+        readerHasDeliveredFrame = false
         renderer.stopRequestingMediaData()
         renderer.flush()
         ptsOffset = .zero
@@ -554,6 +590,7 @@ final class VideoRenderer: @unchecked Sendable {
             extLog("  [Renderer] 重建时创建 reader 失败 — 启用 BMP 底图兜底")
             currentReader = nil
             currentOutput = nil
+            scheduleRecovery(reason: "创建 reader 失败")
             // R6 兜底：唤醒/恢复失败时用缓存 BMP 代替黑屏
             if let bmp = loadCachedSnapshotImage() {
                 DispatchQueue.main.async { [weak self] in
@@ -567,8 +604,12 @@ final class VideoRenderer: @unchecked Sendable {
         }
         let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
         output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { scheduleRecovery(reason: "无法添加 reader output"); return }
         reader.add(output)
-        reader.startReading()
+        guard reader.startReading() else {
+            scheduleRecovery(reason: "startReading 失败: \(reader.error?.localizedDescription ?? "unknown")")
+            return
+        }
         currentReader = reader
         currentOutput = output
 
@@ -579,21 +620,26 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Preloaded Loop Reader（预加载循环读取器）
 
     private func prepareNextReader() {
+        let generation = playbackGeneration
         queue.async { [weak self] in
-            guard let self, isRunning else { return }
+            guard let self, isRunning, playbackGeneration == generation else { return }
 
             let nextURL = variantSelector?()
             if let nextURL, nextURL != asset.url {
                 let newAsset = AVURLAsset(url: nextURL)
-                Task.detached { @Sendable [weak self] in
-                    guard let self else { return }
-                    guard let track = try? await newAsset.loadTracks(withMediaType: .video).first else {
+                preloadTask?.cancel()
+                preloadTask = Task.detached { @Sendable [weak self] in
+                    guard let track = try? await withTaskCancellationHandler(operation: {
+                        try await newAsset.loadTracks(withMediaType: .video).first
+                    }, onCancel: { newAsset.cancelLoading() }), !Task.isCancelled else {
                         extLog("  [Renderer] 变体无视频轨道: \(nextURL.lastPathComponent)")
                         return
                     }
+                    guard let self else { return }
                     nonisolated(unsafe) let loadedTrack = track
                     queue.async { [weak self] in
-                        guard let self, isRunning else { return }
+                        guard let self, isRunning, playbackGeneration == generation else { return }
+                        preloadTask = nil
                         installNextReader(asset: newAsset, track: loadedTrack)
                     }
                 }
@@ -612,6 +658,7 @@ final class VideoRenderer: @unchecked Sendable {
         }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
         output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { return }
         reader.add(output)
         nextReader = reader
         nextOutput = output
@@ -620,7 +667,12 @@ final class VideoRenderer: @unchecked Sendable {
     /// 在循环边界处交换到预加载的 next reader。
     /// 使用时间偏移实现无缝继续 — 无需 flush，无需重置 timebase。
     private func swapToNextReader() {
+        guard isRunning else { return }
         renderer.stopRequestingMediaData()
+        playbackGeneration &+= 1
+        preloadTask?.cancel()
+        preloadTask = nil
+        readerHasDeliveredFrame = false
 
         // 推进偏移，使下一轮的 DTS/PTS 继续时间线
         ptsOffset = lastEnqueuedEnd
@@ -640,16 +692,21 @@ final class VideoRenderer: @unchecked Sendable {
             extLog("  [Renderer] Next reader 未就绪，同步创建")
             guard let reader = try? AVAssetReader(asset: asset) else {
                 extLog("  [Renderer] 无法创建回退 reader")
+                scheduleRecovery(reason: "创建循环 reader 失败")
                 return
             }
             let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
             output.alwaysCopiesSampleData = false
+            guard reader.canAdd(output) else { scheduleRecovery(reason: "无法添加循环 output"); return }
             reader.add(output)
             currentReader = reader
             currentOutput = output
         }
 
-        currentReader?.startReading()
+        guard currentReader?.startReading() == true else {
+            scheduleRecovery(reason: "循环 startReading 失败: \(currentReader?.error?.localizedDescription ?? "unknown")")
+            return
+        }
 
         prepareNextReader()
         feedFromCurrentReader()
@@ -658,20 +715,19 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Playback Loop（播放循环）
 
     private func feedFromCurrentReader() {
+        let generation = playbackGeneration
         renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard let self, isRunning else {
                 self?.renderer.stopRequestingMediaData()
                 return
             }
+            guard playbackGeneration == generation else { return }
 
             // 不可恢复的失败 — 完全重置
             // 异步调度：requestMediaDataWhenReady 不可重入
             if renderer.status == .failed {
                 extLog("  [Renderer] 状态失败: \(renderer.error?.localizedDescription ?? "unknown")，恢复中")
-                renderer.stopRequestingMediaData()
-                queue.async { [weak self] in
-                    self?.recoverFromError()
-                }
+                scheduleRecovery(reason: "解码器失败: \(renderer.error?.localizedDescription ?? "unknown")")
                 return
             }
 
@@ -681,7 +737,7 @@ final class VideoRenderer: @unchecked Sendable {
             }
 
             while renderer.isReadyForMoreMediaData {
-                if let sample = currentOutput?.copyNextSampleBuffer() {
+                if let sample = autoreleasepool(invoking: { currentOutput?.copyNextSampleBuffer() }) {
                     let adjusted = offsetTimingForLoop(sample)
 
                     // 跟踪最高结束时间（max 处理 B 帧重排序）
@@ -689,21 +745,34 @@ final class VideoRenderer: @unchecked Sendable {
                     // NaN 污染时间线偏移
                     let pts = CMSampleBufferGetPresentationTimeStamp(adjusted)
                     let dur = CMSampleBufferGetDuration(adjusted)
-                    if pts.isValid {
-                        let sampleEnd = dur.isValid && dur > .zero
+                    guard pts.isNumeric, pts.seconds.isFinite else { continue }
+                    if pts.isNumeric {
+                        let sampleEnd = dur.isNumeric && dur > .zero
                             ? CMTimeAdd(pts, dur)
                             : CMTimeAdd(pts, CMTime(value: 1, timescale: 60))
+                        guard sampleEnd.isNumeric else { continue }
                         if sampleEnd > lastEnqueuedEnd {
                             lastEnqueuedEnd = sampleEnd
                         }
                     }
 
+                    readerHasDeliveredFrame = true
                     renderer.enqueue(adjusted)
+                    if renderer.status == .rendering { recoveryPolicy.recordSuccessfulFrame() }
                 } else {
                     // 异步调度：requestMediaDataWhenReady 不可重入
                     renderer.stopRequestingMediaData()
+                    guard VideoPlaybackRecoveryPolicy.canContinueLoop(
+                        completed: currentReader?.status == .completed,
+                        deliveredValidFrame: readerHasDeliveredFrame,
+                        timelineAdvanced: lastEnqueuedEnd > ptsOffset
+                    ) else {
+                        scheduleRecovery(reason: "Reader 未完成有效循环: \(currentReader?.error?.localizedDescription ?? "empty or failed")")
+                        return
+                    }
                     queue.async { [weak self] in
-                        self?.swapToNextReader()
+                        guard let self, self.isRunning, self.playbackGeneration == generation else { return }
+                        self.swapToNextReader()
                     }
                     return
                 }
@@ -740,54 +809,154 @@ final class VideoRenderer: @unchecked Sendable {
     }
 
     /// 在解码器错误后从头重置并重新开始播放。
-    private func recoverFromError() {
-        recreatePlayback()
-        CMTimebaseSetRate(timebase, rate: isPaused ? 0.0 : 1.0)
+    private func scheduleRecovery(reason: String) {
+        guard isRunning, recoveryWorkItem == nil else { return }
+        renderer.stopRequestingMediaData()
+        renderer.flush()
+        currentReader?.cancelReading()
+        nextReader?.cancelReading()
+        currentReader = nil
+        currentOutput = nil
+        nextReader = nil
+        nextOutput = nil
+        preloadTask?.cancel()
+        preloadTask = nil
+        playbackGeneration &+= 1
+        CMTimebaseSetRate(timebase, rate: 0.0)
+        let generation = playbackGeneration
+        switch recoveryPolicy.recordFailure() {
+        case .stop:
+            extLog("  [Renderer] 连续失败超过重试上限，保留静态底图: \(reason)")
+        case .retry(let delay):
+            extLog("  [Renderer] \(delay)s 后有限重试 (\(recoveryPolicy.consecutiveFailures)): \(reason)")
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.isRunning, self.playbackGeneration == generation else { return }
+                self.recoveryWorkItem = nil
+                self.recreatePlayback()
+                if self.currentReader != nil {
+                    CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
+                }
+            }
+            recoveryWorkItem = work
+            queue.asyncAfter(deadline: .now() + delay, execute: work)
+        }
     }
 
     // MARK: - Background Frame（底图）
 
+    private func cancelImageTasks() {
+        imageTaskLock.lock()
+        backgroundImageGeneration &+= 1
+        stillImageGeneration &+= 1
+        let background = backgroundImageTask
+        let still = stillImageTask
+        backgroundImageTask = nil
+        stillImageTask = nil
+        imageTaskLock.unlock()
+        background?.cancel()
+        still?.cancel()
+    }
+
     private func generateBackgroundFrame(for sourceAsset: AVURLAsset) {
-        Task.detached(priority: .utility) { [weak self] in
+        imageTaskLock.lock()
+        backgroundImageGeneration &+= 1
+        let generation = backgroundImageGeneration
+        let oldTask = backgroundImageTask
+        backgroundImageTask = nil
+        imageTaskLock.unlock()
+        oldTask?.cancel()
+        let task = Task.detached(priority: .utility) { [weak self] in
             let generator = AVAssetImageGenerator(asset: sourceAsset)
             generator.appliesPreferredTrackTransform = true
+            if #available(macOS 15.0, *) { generator.dynamicRangePolicy = .forceSDR }
+            generator.maximumSize = CGSize(width: WallpaperSnapshotPixelBudget.maximumVideoImageDimension,
+                                           height: WallpaperSnapshotPixelBudget.maximumVideoImageDimension)
 
-            guard let cgImage = try? await generator.image(at: .zero).image else {
+            guard let cgImage = try? await withTaskCancellationHandler(operation: {
+                try await generator.image(at: .zero).image
+            }, onCancel: { generator.cancelAllCGImageGeneration() }), !Task.isCancelled else {
+                if Task.isCancelled { return }
                 extLog("  [Renderer] 底图封面生成失败")
                 return
             }
+            guard WallpaperSnapshotPixelBudget.acceptsDecodedImage(width: cgImage.width, height: cgImage.height, bytesPerRow: cgImage.bytesPerRow) else { return }
 
             DispatchQueue.main.async {
-                guard let self, self.asset.url == sourceAsset.url else { return }
+                guard let self else { return }
+                self.imageTaskLock.lock()
+                let current = self.backgroundImageGeneration == generation
+                if current { self.backgroundImageTask = nil }
+                self.imageTaskLock.unlock()
+                guard current else { return }
                 self.backgroundFrameLayer.contents = cgImage
                 self.backgroundFrameLayer.opacity = 1
                 extLog("  [Renderer] 底图封面已渲染: \(sourceAsset.url.lastPathComponent)")
             }
         }
+        imageTaskLock.lock()
+        let admitted = backgroundImageGeneration == generation
+        if admitted { backgroundImageTask = task }
+        imageTaskLock.unlock()
+        if !admitted { task.cancel() }
     }
 
     // MARK: - Still Frame（静帧）
 
     private func generateStillFrame() {
         let captureTime = CMTimebaseGetTime(timebase)
-        let currentAsset = asset
-
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let currentAsset = AVURLAsset(url: asset.url)
+        imageTaskLock.lock()
+        stillImageGeneration &+= 1
+        let generation = stillImageGeneration
+        let oldTask = stillImageTask
+        stillImageTask = nil
+        imageTaskLock.unlock()
+        oldTask?.cancel()
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
             let generator = AVAssetImageGenerator(asset: currentAsset)
             generator.requestedTimeToleranceBefore = .zero
             generator.requestedTimeToleranceAfter = .zero
             generator.appliesPreferredTrackTransform = true
+            if #available(macOS 15.0, *) { generator.dynamicRangePolicy = .forceSDR }
+            generator.maximumSize = CGSize(width: WallpaperSnapshotPixelBudget.maximumVideoImageDimension,
+                                           height: WallpaperSnapshotPixelBudget.maximumVideoImageDimension)
 
-            guard let (cgImage, _) = try? await generator.image(at: captureTime) else {
+            // The timebase covers all loops; the asset contains only one loop.
+            let duration = try? await withTaskCancellationHandler(operation: {
+                try await currentAsset.load(.duration)
+            }, onCancel: { currentAsset.cancelLoading() })
+            let requestTime: CMTime
+            if let duration, duration.isValid, duration.seconds.isFinite, duration.seconds > 0,
+               captureTime.isValid, captureTime.seconds.isFinite, captureTime.seconds >= 0 {
+                requestTime = CMTime(seconds: captureTime.seconds.truncatingRemainder(dividingBy: duration.seconds), preferredTimescale: 600)
+            } else {
+                requestTime = .zero
+            }
+            guard !Task.isCancelled else { return }
+            guard let (cgImage, _) = try? await withTaskCancellationHandler(operation: {
+                try await generator.image(at: requestTime)
+            }, onCancel: { generator.cancelAllCGImageGeneration() }), !Task.isCancelled else {
+                if Task.isCancelled { return }
                 extLog("  [Renderer] 静帧生成失败")
                 return
             }
+            guard WallpaperSnapshotPixelBudget.acceptsDecodedImage(width: cgImage.width, height: cgImage.height, bytesPerRow: cgImage.bytesPerRow) else { return }
 
             DispatchQueue.main.async {
-                guard let self, self.isPaused else { return }
+                guard let self else { return }
+                self.imageTaskLock.lock()
+                let current = self.stillImageGeneration == generation
+                if current { self.stillImageTask = nil }
+                self.imageTaskLock.unlock()
+                guard current, self.isPaused else { return }
                 self.stillFrameLayer.contents = cgImage
                 self.stillFrameLayer.opacity = 1
             }
         }
+        imageTaskLock.lock()
+        let admitted = stillImageGeneration == generation
+        if admitted { stillImageTask = task }
+        imageTaskLock.unlock()
+        if !admitted { task.cancel() }
     }
 }

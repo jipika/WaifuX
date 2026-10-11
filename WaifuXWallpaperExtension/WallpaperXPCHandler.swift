@@ -89,7 +89,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     /// separate connections for desktop/lock-screen instances and displays, so
     /// an invalidated connection must not tear down contexts owned by others.
     private let ownedContextLock = NSLock()
-    private var ownedContextIDs: Set<UInt32> = []
+    private var ownedContexts: [UInt32: UInt64] = [:]
+    private var connectionInvalidated = false
     private var previousPresentationMode = "default"
     /// 上次收到 presentationMode == "locked" 的时间。用于防止 screenIsUnlocked
     /// DistributedNotification 偶发丢失导致 isScreenLocked 永久卡死。
@@ -113,25 +114,29 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         SpiralRecovery.noteHealthyConnection()
     }
 
-    func registerOwnedContext(_ contextID: UInt32) {
+    private func beginOwnedContext(_ context: ActiveWallpaper) -> UInt64? {
         ownedContextLock.lock()
-        ownedContextIDs.insert(contextID)
-        ownedContextLock.unlock()
+        defer { ownedContextLock.unlock() }
+        guard !connectionInvalidated else { return nil }
+        let generation = WallpaperState.shared.beginContextSetup(context)
+        ownedContexts[context.contextId] = generation
+        return generation
     }
 
     func forgetOwnedContexts(_ contextIDs: Set<UInt32>) {
         guard !contextIDs.isEmpty else { return }
         ownedContextLock.lock()
-        ownedContextIDs.subtract(contextIDs)
+        for id in contextIDs { ownedContexts.removeValue(forKey: id) }
         ownedContextLock.unlock()
     }
 
-    func takeOwnedContextIDs() -> Set<UInt32> {
+    func takeOwnedContexts() -> [UInt32: UInt64] {
         ownedContextLock.lock()
         defer { ownedContextLock.unlock() }
-        let ids = ownedContextIDs
-        ownedContextIDs.removeAll()
-        return ids
+        let contexts = ownedContexts
+        connectionInvalidated = true
+        ownedContexts.removeAll()
+        return contexts
     }
 
     private static func extractWallpaperContextIdentifier(from object: Any?) -> String? {
@@ -532,13 +537,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         }
 
         let contextId = caContext.contextId
-        // Register before starting asynchronous renderer setup. If the XPC
-        // connection dies during setup, its partially-created context still
-        // belongs to this handler and can be reclaimed safely.
-        registerOwnedContext(contextId)
-
         guard let replyObj = createRemoteContextXPC(contextId: contextId) else {
-            forgetOwnedContexts([contextId])
             reply(nil, NSError(domain: "WaifuXExtension", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create WallpaperRemoteContextXPC"]))
             return
         }
@@ -575,20 +574,25 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
         if let did = displayID {
             let instanceID = choiceConfiguration ?? "display-\(did)"
+            let placeholder = ActiveWallpaper(
+                caContext: caContext, rootLayer: rootLayer, renderer: nil,
+                displayID: did, videoID: instanceID, contextId: contextId,
+                wallpaperID: wallpaperIDString
+            )
+            guard let generation = beginOwnedContext(placeholder) else {
+                reply(nil, CancellationError())
+                return
+            }
             extLog("  Setting up display instance \(instanceID) for display \(did)")
             caContext.layer = rootLayer
             CATransaction.flush()
             doReply("context ready")
 
-            let unsafeCAContext = caContext
-            let unsafeRootLayer = rootLayer
-
             Self.startLocalVideoFallbackTask(
                 displayID: did,
                 instanceID: instanceID,
-                rootLayer: unsafeRootLayer,
-                caContext: unsafeCAContext,
-                contextId: contextId,
+                context: placeholder,
+                generation: generation,
                 wallpaperIDString: wallpaperIDString,
                 doReply: doReply
             )
@@ -597,57 +601,50 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 doReply("timeout")
             }
         } else {
-            extLog("  No displayID in acquire request — using solid color fallback")
-            let gradientLayer = CAGradientLayer()
-            gradientLayer.colors = [
-                CGColor(red: 0.1, green: 0.1, blue: 0.2, alpha: 1.0),
-                CGColor(red: 0.0, green: 0.0, blue: 0.1, alpha: 1.0),
-            ]
-            gradientLayer.frame = layerFrame
-            gradientLayer.contentsScale = scaleFactor
-            rootLayer.addSublayer(gradientLayer)
-            caContext.layer = rootLayer
-            _ = WallpaperState.shared.storeContext(
-                ActiveWallpaper(caContext: caContext, rootLayer: rootLayer, renderer: nil, displayID: displayID, videoID: choiceConfiguration, contextId: contextId, wallpaperID: wallpaperIDString),
-                id: contextId,
-                wallpaperID: wallpaperIDString
-            )
-            doReply("no display")
+            reply(nil, NSError(domain: "WaifuXExtension", code: 4,
+                               userInfo: [NSLocalizedDescriptionKey: "Cannot determine display ID"]))
         }
     }
 
     private static func startLocalVideoFallbackTask(
         displayID: UInt32,
         instanceID: String,
-        rootLayer: CALayer,
-        caContext: CAContext,
-        contextId: UInt32,
+        context: ActiveWallpaper,
+        generation: UInt64,
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
     ) {
-        Task {
+        let contextId = context.contextId
+        let task = Task { @MainActor in
+            defer { WallpaperState.shared.finishSetupTask(contextId: contextId, generation: generation) }
+            guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
+            guard let caContext = context.caContext as? CAContext else { return }
             extLog("  [Acquire] 使用扩展本地解码 display=\(displayID)")
             await startLocalVideoFallback(
                 displayID: displayID,
                 instanceID: instanceID,
-                rootLayer: rootLayer,
+                rootLayer: context.rootLayer,
                 caContext: caContext,
                 contextId: contextId,
+                generation: generation,
                 wallpaperIDString: wallpaperIDString,
                 doReply: doReply
             )
         }
+        WallpaperState.shared.retainSetupTask(task, contextId: contextId, generation: generation)
     }
 
-    private static func startLocalVideoFallback(
+    @MainActor private static func startLocalVideoFallback(
         displayID: UInt32,
         instanceID: String,
         rootLayer: CALayer,
         caContext: CAContext,
         contextId: UInt32,
+        generation: UInt64,
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
     ) async {
+        guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
         // 静态图和视频热切换都可能恰好落在 WallpaperAgent 重建 context 的窗口。
         // 静态图必须优先于待处理视频消费，避免旧视频命令在下一次 acquire 时反向覆盖新图片。
         if let pendingImageURL = WallpaperState.shared.takePendingImage(for: displayID) {
@@ -659,6 +656,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 rootLayer: rootLayer,
                 caContext: caContext,
                 contextId: contextId,
+                generation: generation,
                 wallpaperIDString: wallpaperIDString,
                 doReply: doReply
             )
@@ -670,27 +668,21 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             extLog("  [Acquire] 📦 应用待处理视频 display=\(displayID) video=\(pendingURL.lastPathComponent)")
             do {
                 let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: pendingURL, displayID: displayID)
-                let activeCtx = ActiveWallpaper(
-                    caContext: caContext,
-                    rootLayer: rootLayer,
-                    renderer: renderer,
-                    displayID: displayID,
-                    videoID: instanceID,
-                    contextId: contextId,
-                    wallpaperID: wallpaperIDString
-                )
-                let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
-                existing?.renderer?.stop()
+                guard !Task.isCancelled else { renderer.stop(); return }
+                let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: renderer, videoID: instanceID)
+                guard committed.committed else { renderer.stop(); return }
+                committed.previous?.stop()
                 renderer.start()
                 // 应用当前 policy（可能正处于锁屏 / userPaused / display paused 等暂停状态），
                 // 否则新 renderer 会一直满速跑到下一次 update() 才被拉回。
                 WaifuXWallpaperExtension.recomputeAndApplyPolicy()
-                writeSnapshotCacheIfPossible(videoURL: pendingURL, videoID: instanceID, rootLayer: rootLayer)
+                writeSnapshotCacheIfPossible(videoURL: pendingURL, videoID: instanceID, displayID: displayID, rootLayer: rootLayer)
                 WallpaperPrefs.shared.setActive(true)
                 extLog("  [Acquire] ✅ 待处理视频渲染已启动 display=\(displayID) video=\(pendingURL.lastPathComponent)")
                 doReply("pending video applied")
                 return
             } catch {
+                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
                 extLog("  [Acquire] ❌ 待处理视频渲染失败: \(error.localizedDescription)，回退到 prefs")
             }
         }
@@ -703,25 +695,19 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         if let videoURL = prefsVideoURL(for: displayID) {
             do {
                 let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: videoURL, displayID: displayID)
-                let activeCtx = ActiveWallpaper(
-                    caContext: caContext,
-                    rootLayer: rootLayer,
-                    renderer: renderer,
-                    displayID: displayID,
-                    videoID: instanceID,
-                    contextId: contextId,
-                    wallpaperID: wallpaperIDString
-                )
-                let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
-                existing?.renderer?.stop()
+                guard !Task.isCancelled else { renderer.stop(); return }
+                let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: renderer, videoID: instanceID)
+                guard committed.committed else { renderer.stop(); return }
+                committed.previous?.stop()
                 renderer.start()
                 // 应用当前 policy，避免锁屏/暂停状态下新 renderer 自动播放。
                 WaifuXWallpaperExtension.recomputeAndApplyPolicy()
-                writeSnapshotCacheIfPossible(videoURL: videoURL, videoID: instanceID, rootLayer: rootLayer)
+                writeSnapshotCacheIfPossible(videoURL: videoURL, videoID: instanceID, displayID: displayID, rootLayer: rootLayer)
                 WallpaperPrefs.shared.setActive(true)
                 extLog("  [Acquire] ✅ 本地回退渲染已启动 display=\(displayID) video=\(videoURL.lastPathComponent)")
                 doReply("local video fallback")
             } catch {
+                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
                 extLog("  [Acquire] ❌ 本地回退视频渲染失败: \(error.localizedDescription)")
                 // 视频播放失败，尝试回退到 prefs 中指定的静态图
                 if let imageURL = prefsImageURL(for: displayID) {
@@ -732,6 +718,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                         rootLayer: rootLayer,
                         caContext: caContext,
                         contextId: contextId,
+                        generation: generation,
                         wallpaperIDString: wallpaperIDString,
                         doReply: doReply
                     )
@@ -752,6 +739,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 rootLayer: rootLayer,
                 caContext: caContext,
                 contextId: contextId,
+                generation: generation,
                 wallpaperIDString: wallpaperIDString,
                 doReply: doReply
             )
@@ -767,6 +755,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 rootLayer: rootLayer,
                 caContext: caContext,
                 contextId: contextId,
+                generation: generation,
                 wallpaperIDString: wallpaperIDString,
                 doReply: doReply
             )
@@ -846,38 +835,45 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         return url
     }
 
-    static func writeSnapshotCacheIfPossible(videoURL: URL, videoID: String, rootLayer: CALayer) {
+    static func writeSnapshotCacheIfPossible(videoURL: URL, videoID: String, displayID: UInt32, rootLayer: CALayer) {
         let scale = rootLayer.contentsScale > 0 ? rootLayer.contentsScale : 1
-        let width = max(1, Int(rootLayer.bounds.width * scale))
-        let height = max(1, Int(rootLayer.bounds.height * scale))
-        Task {
-            await writeBMPSnapshot(
+        // These dimensions identify the target display in Apple's cache filename;
+        // the decoded image and actual BMP allocation use the independent budget.
+        let width = rootLayer.bounds.width * scale
+        let height = rootLayer.bounds.height * scale
+        guard width.isFinite, height.isFinite, width >= 1, height >= 1,
+              width <= 32768, height <= 32768 else { return }
+        requestBMPSnapshot(
                 videoURL: videoURL,
                 videoID: videoID,
-                displayPixelWidth: width,
-                displayPixelHeight: height
+                displayID: displayID,
+                displayPixelWidth: Int(width),
+                displayPixelHeight: Int(height)
             )
-        }
     }
 
-    private static func renderStaticImage(
+    @MainActor private static func renderStaticImage(
         imageURL: URL,
         displayID: UInt32,
         instanceID: String,
         rootLayer: CALayer,
         caContext: CAContext,
         contextId: UInt32,
+        generation: UInt64,
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
     ) {
-        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
+        guard let image = loadBudgetedSnapshotImage(imageURL) else {
             extLog("  [Acquire] ❌ 静态图加载失败: \(imageURL.path)")
             WallpaperPrefs.shared.setActive(true)
             doReply("static image failed")
             return
         }
 
+        let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: nil, videoID: instanceID)
+        guard committed.committed else { return }
+        committed.previous?.stop()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
@@ -885,17 +881,6 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID)
         CATransaction.commit()
 
-        let activeCtx = ActiveWallpaper(
-            caContext: caContext,
-            rootLayer: rootLayer,
-            renderer: nil,
-            displayID: displayID,
-            videoID: instanceID,
-            contextId: contextId,
-            wallpaperID: wallpaperIDString
-        )
-        let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
-        existing?.renderer?.stop()
         WallpaperPrefs.shared.setActive(true)
         extLog("  [Acquire] ✅ 静态图渲染已启动 display=\(displayID) image=\(imageURL.lastPathComponent)")
         doReply("static image")
@@ -935,17 +920,28 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        guard let image = loadBudgetedSnapshotImage(imageURL) else {
             extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID)")
             return
+        }
+
+        let replacements = allContexts.compactMap {
+            WallpaperState.shared.beginRendererReplacement(contextId: $0.contextId, expectedRootLayer: $0.rootLayer)
         }
 
         // CALayer / CATransaction 不是线程安全的；handleSocketCommand 把这个调用挂在
         // wallpaperCommandQueue（utility 后台串行队列）上，必须切到主线程做 layer 修改。
         // image 和 allContexts 都是 Sendable，可直接捕获到 @Sendable 闭包里。
         let applyBlock: @Sendable () -> Void = {
-            for active in allContexts {
+            for replacement in replacements {
+                let active = replacement.context
+                defer { WallpaperState.shared.finishSetupTask(contextId: active.contextId, generation: replacement.generation) }
+                let committed = WallpaperState.shared.commitRenderer(
+                    contextId: active.contextId, generation: replacement.generation,
+                    renderer: nil, videoID: sourceID
+                )
+                guard committed.committed else { continue }
+                committed.previous?.stop()
                 let rootLayer = active.rootLayer
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
@@ -954,14 +950,6 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID)
                 CATransaction.commit()
 
-                if let renderer = active.renderer {
-                    renderer.stop()
-                }
-                _ = WallpaperState.shared.replaceContextRendererByContextId(
-                    contextId: active.contextId,
-                    renderer: nil,
-                    videoID: sourceID
-                )
             }
         }
 
@@ -1094,25 +1082,19 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func snapshot(withId _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func snapshot(withId id: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
         noteServed()
         extLog("=== SNAPSHOT ===")
-        var currentTime: CMTime?
-        WallpaperState.shared.forEachRenderer { renderer in
-            currentTime = CMTimebaseGetTime(renderer.timebase)
+        let identifier = Self.extractWallpaperContextIdentifier(from: id)
+        let context = identifier.flatMap { WallpaperState.shared.activeContext(wallpaperID: $0) }
+        if identifier != nil, context == nil {
+            reply(nil, nil)
+            return
         }
-        Task {
-            if let snapshotXPC = await createSnapshotViaRuntime(currentTime: currentTime) {
-                // 诊断性 XPC 编码测试：在 macOS 26+ 上验证 WallpaperSnapshotXPC 可编码
-                // 但不再因测试失败而丢弃快照——系统自身会处理编码异常
-                if #available(macOS 26.0, *) {
-                    do {
-                        _ = try NSKeyedArchiver.archivedData(withRootObject: snapshotXPC, requiringSecureCoding: false)
-                        extLog("  Snapshot XPC encode test passed")
-                    } catch {
-                        extLog("  ⚠️ Snapshot XPC encode test failed: \(error.localizedDescription) — 仍然发送快照让系统处理")
-                    }
-                }
+        var currentTime: CMTime?
+        if let renderer = context?.renderer { currentTime = CMTimebaseGetTime(renderer.timebase) }
+        requestSnapshotViaRuntime(displayID: context?.displayID, currentTime: currentTime) { snapshotXPC in
+            if let snapshotXPC {
                 reply(snapshotXPC, nil)
                 extLog("  Snapshot replied (IOSurface)")
             } else {
