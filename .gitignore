@@ -28,6 +28,8 @@ Docs/superpowers
 *.dSYM
 
 # Cache directories
+__pycache__/
+*.py[cod]
 .derivedData/
 .WallHavenCache/
 .WallHavenImageCache/
@@ -58,7 +60,10 @@ LocalConfig.json
 
 Docs/*.md
 WebWallpaperDemo/
-# Temp
+# Temp / 一次性脚本：跑完即弃的调试、诊断、图标生成脚本不入库
+# 判据：全仓库零引用 + 产物已入库（或已被新实现取代）+ 硬编码本机路径这类一次性特征。
+# 产物入库、脚本本身归档到仓库外 WallHaven-pruned/（含 README.txt 清单与恢复方法）。
+tmp/
 
 # Linux 壁纸引擎 CLI（macOS 项目无用，死文件）
 linux-wallpaperengine-cli
@@ -88,10 +93,11 @@ Resources/assets/
 SteamService/bin/
 SteamService/obj/
 
-# Node (root level) — playwright 临时测试，不提交
+# Node（仅根级）— playwright 临时测试，不提交
+# 必须锚定根目录：未锚定的 package.json 会连带忽略 landing/package.json（Vite 项目源文件）
 node_modules/
-package-lock.json
-package.json
+/package-lock.json
+/package.json
 
 # .NET shared framework：目录名 Microsoft.NETCore.App 以 .app 结尾，
 # 会被上方 `*.app` 规则误伤 → 整个 shared/ 不进 git，CI 产物缺 .NET 框架
