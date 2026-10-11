@@ -8,6 +8,7 @@ class WallpaperSchedulerService: ObservableObject {
 
     @Published var config: SchedulerConfig = .default
     @Published var isRunning: Bool = false
+    private var isPreparingForProcessTermination = false
 
     /// Tracks last-applied item ID per screen to avoid immediate repeats.
     private var lastChangedItemIDs: [String: String] = [:]
@@ -40,8 +41,6 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// One-shot deadline timer: fire at the earliest due switch, then recompute.
     private var dispatchTimer: DispatchSourceTimer?
-    /// Keeps the process out of App Nap while a timed rotation is armed.
-    private var schedulerActivity: NSObjectProtocol?
     /// After a failed timed apply, retry this screen no earlier than this date
     /// (avoids waiting a full user interval on transient failures).
     private var failedApplyRetryAfter: [String: Date] = [:]
@@ -117,6 +116,15 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let self, let values = snapshot["scheduler"] as? [String: Any] else { return }
+                if let data = values["config"] as? Data, let config = try? JSONDecoder().decode(SchedulerConfig.self, from: data) { self.config = config }
+                self.isRunning = values["running"] as? Bool ?? false
+            }
+            return
+        }
+
         DistributedNotificationCenter.default.addObserver(
             self,
             selector: #selector(handleScreenLocked),
@@ -194,6 +202,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// 手动为指定屏幕切换下一张壁纸。即使该屏幕暂时关闭自动切换，也允许使用
     /// 已保存的轮换范围、顺序和文件夹过滤来选取下一张。
     func triggerNextWallpaperNow(for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.triggerNextWallpaperNow", ["screenID": screenID]); return }
+
         print("\(logTag) Manual next wallpaper requested for screen \(screenID)")
         if config.isGlobalDisplaySyncEnabled {
             applyNextGlobalWallpaper(requiredMode: nil, preferImmediatePresentation: true)
@@ -203,10 +213,14 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func triggerNextGlobalWallpaperNow() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.triggerNextGlobalWallpaperNow", [:]); return }
+
         applyNextGlobalWallpaper(requiredMode: nil, preferImmediatePresentation: true)
     }
 
     func triggerRandomWallpaperNow(for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.triggerRandomWallpaperNow", ["screenID": screenID]); return }
+
         if config.isGlobalDisplaySyncEnabled {
             applyNextGlobalWallpaper(requiredMode: nil, overrideOrder: .random, preferImmediatePresentation: true)
             return
@@ -262,6 +276,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func relinkDisplayConfigsForCurrentScreens() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         // 排布未稳时由 params-change 的稳定管线负责 relink，避免两处并发迁移。
         guard !isScreenArrangementSettling else {
             print("\(logTag) Skip relink: screen arrangement still settling")
@@ -282,6 +298,7 @@ class WallpaperSchedulerService: ObservableObject {
         overrideOrder: ScheduleOrder? = nil,
         preferImmediatePresentation: Bool = false
     ) {
+        guard !isPreparingForProcessTermination else { return }
         if case .onEnd? = requiredMode, manualWallpaperApplyInFlight {
             print("\(logTag) Skipping on-end next for \(screenID): manual wallpaper setting in progress")
             return
@@ -473,6 +490,7 @@ class WallpaperSchedulerService: ObservableObject {
         overrideOrder: ScheduleOrder? = nil,
         preferImmediatePresentation: Bool = false
     ) {
+        guard !isPreparingForProcessTermination else { return }
         if case .onEnd? = requiredMode, manualWallpaperApplyInFlight {
             print("\(logTag) Skipping global on-end rotation: manual wallpaper setting in progress")
             return
@@ -617,7 +635,6 @@ class WallpaperSchedulerService: ObservableObject {
             guard let self else { return }
             self.isScreenLocked = true
             self.cancelDispatchTimer()
-            self.endSchedulerActivity()
             self.cancelTimedRotation()
             print("\(self.logTag) Screen locked, pausing scheduler")
         }
@@ -648,7 +665,6 @@ class WallpaperSchedulerService: ObservableObject {
             if locked {
                 self.isScreenLocked = true
                 self.cancelDispatchTimer()
-                self.endSchedulerActivity()
                 self.cancelTimedRotation()
                 print("\(self.logTag) Playback state: screen locked, pausing scheduler")
             } else {
@@ -1176,6 +1192,8 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// 延迟恢复保存的调度配置与运行状态
     func restoreSavedConfig() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         loadConfig()
         loadDisplayFingerprints()
         restoreSchedulerState()
@@ -1190,15 +1208,15 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// 恢复随机一轮状态与上次切换时间，确保应用重启后随机不重复、间隔不立即触发
     private func restoreSchedulerState() {
-        if let data = UserDefaults.standard.data(forKey: usedItemIDsKey),
+        if let data = WaifuXPreferences.shared.data(forKey: usedItemIDsKey),
            let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
             usedItemIDs = decoded.mapValues { Set($0) }
         }
-        if let data = UserDefaults.standard.data(forKey: lastChangeTimesKey),
+        if let data = WaifuXPreferences.shared.data(forKey: lastChangeTimesKey),
            let decoded = try? PropertyListDecoder().decode([String: Date].self, from: data) {
             lastChangeTimes = decoded
         }
-        if let data = UserDefaults.standard.data(forKey: lastChangedItemIDsKey),
+        if let data = WaifuXPreferences.shared.data(forKey: lastChangedItemIDsKey),
            let decoded = try? PropertyListDecoder().decode([String: String].self, from: data) {
             lastChangedItemIDs = decoded
         }
@@ -1207,13 +1225,13 @@ class WallpaperSchedulerService: ObservableObject {
     private func persistSchedulerState() {
         let encodableUsed = usedItemIDs.mapValues { Array($0) }
         if let data = try? JSONEncoder().encode(encodableUsed) {
-            UserDefaults.standard.set(data, forKey: usedItemIDsKey)
+            WaifuXPreferences.shared.set(data, forKey: usedItemIDsKey)
         }
         if let data = try? PropertyListEncoder().encode(lastChangeTimes) {
-            UserDefaults.standard.set(data, forKey: lastChangeTimesKey)
+            WaifuXPreferences.shared.set(data, forKey: lastChangeTimesKey)
         }
         if let data = try? PropertyListEncoder().encode(lastChangedItemIDs) {
-            UserDefaults.standard.set(data, forKey: lastChangedItemIDsKey)
+            WaifuXPreferences.shared.set(data, forKey: lastChangedItemIDsKey)
         }
     }
 
@@ -1221,6 +1239,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// 期间覆盖手动选择。成功/失败后的时间状态由 completeManualWallpaperApply 处理。
     @MainActor
     func beginManualWallpaperApply() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         var tasksToDrain: [Task<Void, Never>] = []
         if let timedRotationTask {
             tasksToDrain.append(timedRotationTask)
@@ -1263,6 +1283,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// 调度器，不把一次失败的手动操作误记成最近一次壁纸切换。
     @MainActor
     func completeManualWallpaperApply(success: Bool, screenIDs: Set<String>) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         manualWallpaperApplyInFlight = false
         guard success else {
             if isRunning {
@@ -1296,6 +1318,9 @@ class WallpaperSchedulerService: ObservableObject {
     // MARK: - Control
 
     func start() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.start", [:]); return }
+
+        guard !isPreparingForProcessTermination else { return }
         guard !isRunning else { return }
         isRunning = true
         // Anchor missing last-change times so the first switch waits a full interval
@@ -1343,13 +1368,13 @@ class WallpaperSchedulerService: ObservableObject {
     /// 从 UserDefaults 恢复抑制标记（跨启动保持「用户主动关闭」语义）。
     private func restoreUserSuppressedScreensIfNeeded() {
         guard userSuppressedScreenIDs.isEmpty else { return }
-        if let ids = UserDefaults.standard.stringArray(forKey: userSuppressedScreensKey) {
+        if let ids = WaifuXPreferences.shared.stringArray(forKey: userSuppressedScreensKey) {
             userSuppressedScreenIDs = Set(ids)
         }
     }
 
     private func persistUserSuppressedScreens() {
-        UserDefaults.standard.set(Array(userSuppressedScreenIDs), forKey: userSuppressedScreensKey)
+        WaifuXPreferences.shared.set(Array(userSuppressedScreenIDs), forKey: userSuppressedScreensKey)
     }
 
     /// 该屏被抑制时：若已有活跃动态壁纸（用户手动开启/设置）则解除抑制并返回 false，否则返回 true。
@@ -1368,6 +1393,8 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// 用户手动关闭壁纸后调用：抑制该屏的定时轮换，防止调度器把刚关掉的壁纸自动拉起。
     func suppressAutoSwitch(forScreen screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.suppressAutoSwitch", ["screen": screen]); return }
+
         userSuppressedScreenIDs.insert(screen.wallpaperScreenIdentifier)
         persistUserSuppressedScreens()
         print("\(logTag) Auto-switch suppressed by manual stop: \(screen.localizedName)")
@@ -1375,14 +1402,17 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// 全局同步模式下手动关闭后抑制全局轮换入口。
     func suppressAutoSwitchGlobally() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.suppressAutoSwitchGlobally", [:]); return }
+
         userSuppressedScreenIDs.insert(globalSchedulerStateKey)
         persistUserSuppressedScreens()
         print("\(logTag) Global auto-switch suppressed by manual stop")
     }
 
     func stop() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.stop", [:]); return }
+
         cancelDispatchTimer()
-        endSchedulerActivity()
         cancelTimedRotation()
         failedApplyRetryAfter.removeAll()
         isRunning = false
@@ -1392,9 +1422,34 @@ class WallpaperSchedulerService: ObservableObject {
         print("\(logTag) Stopped.")
     }
 
+    /// Teardown is permanent for this Helper process. Ordinary stop/start is
+    /// also used by configuration changes and must remain reusable.
+    func prepareForProcessTermination() {
+        guard BackgroundRuntimeRole.isHelper, !isPreparingForProcessTermination else { return }
+        isPreparingForProcessTermination = true
+        globalRotationGeneration &+= 1
+        globalRotationTask?.cancel()
+        globalRotationTask = nil
+        activeGlobalRotationIsManual = false
+        pendingManualGlobalRotation = nil
+        displayModeTransitionGeneration &+= 1
+        displayModeTransitionTask?.cancel()
+        displayModeTransitionTask = nil
+        onEndSwitchGeneration &+= 1
+        for task in onEndSwitchTasks.values { task.cancel() }
+        onEndSwitchTasks.removeAll()
+        onEndSwitchInFlightScreens.removeAll()
+        pendingOnEndSwitchScreenIDs.removeAll()
+        pendingCleanupWorkItem?.cancel()
+        pendingCleanupWorkItem = nil
+        stop()
+    }
+
     /// 手动设置壁纸后调用：重置该屏幕的调度计时器，避免刚设置完就被自动切换覆盖。
     /// - Parameter screenID: 被手动设置壁纸的屏幕标识符；nil 表示重置所有屏幕。
     func notifyManualWallpaperChange(screenID: String? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.notifyManualWallpaperChange", ["screenID": screenID]); return }
+
         manualWallpaperApplyInFlight = false
         cancelTimedRotation()
         let now = Date()
@@ -1420,6 +1475,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateConfig(_ newConfig: SchedulerConfig) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateConfig", ["newConfig": try! JSONEncoder().encode(newConfig)]); return }
+
         // 根据各屏启用的内容类型校验 folderIDs：移除属于已关闭类型
         // 的文件夹 ID。若全部失效则回退为 nil（全部），避免文件夹过滤把候选清空导致自动更换失效。
         var validated = newConfig
@@ -1477,6 +1534,8 @@ class WallpaperSchedulerService: ObservableObject {
     // MARK: - Per-Display Updates
 
     func updateGlobalDisplaySyncEnabled(_ enabled: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplaySyncEnabled", ["enabled": enabled]); return }
+
         guard config.isGlobalDisplaySyncEnabled != enabled else { return }
 
         displayModeTransitionGeneration &+= 1
@@ -1508,7 +1567,6 @@ class WallpaperSchedulerService: ObservableObject {
 
         // updateConfig 会按独立配置启动计时器；模式切换完成前先阻止它抢跑。
         cancelDispatchTimer()
-        endSchedulerActivity()
         cancelTimedRotation()
 
         displayModeTransitionTask = Task { @MainActor [weak self] in
@@ -1598,6 +1656,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateGlobalDisplayEnabled(_ enabled: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayEnabled", ["enabled": enabled]); return }
+
         let wasUsingOnEndPlayback = config.globalDisplayConfig.isEnabled
             && config.globalDisplayConfig.isOnEndMode
         updateGlobalDisplayConfig { $0.isEnabled = enabled }
@@ -1609,6 +1669,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateGlobalDisplayInterval(_ minutes: Int) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayInterval", ["minutes": minutes]); return }
+
         let wasOnEndMode = config.globalDisplayConfig.isOnEndMode
         updateGlobalDisplayConfig { $0.intervalMinutes = minutes }
         if wasOnEndMode != config.globalDisplayConfig.isOnEndMode {
@@ -1617,22 +1679,32 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateGlobalDisplayOrder(_ order: ScheduleOrder) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayOrder", ["order": order.rawValue]); return }
+
         updateGlobalDisplayConfig { $0.order = order }
     }
 
     func updateGlobalDisplayIncludeWallpapers(_ include: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayIncludeWallpapers", ["include": include]); return }
+
         updateGlobalDisplayConfig { $0.includeWallpapers = include }
     }
 
     func updateGlobalDisplayIncludeMedia(_ include: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayIncludeMedia", ["include": include]); return }
+
         updateGlobalDisplayConfig { $0.includeMedia = include }
     }
 
     func updateGlobalDisplayFolderIDs(_ folderIDs: [String]?) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayFolderIDs", ["folderIDs": folderIDs]); return }
+
         updateGlobalDisplayConfig { $0.folderIDs = folderIDs }
     }
 
     func updateGlobalDisplayWebSceneSwitchSeconds(_ seconds: Int?) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateGlobalDisplayWebSceneSwitchSeconds", ["seconds": seconds]); return }
+
         updateGlobalDisplayConfig { $0.webSceneSwitchSeconds = seconds }
     }
 
@@ -1747,6 +1819,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayEnabled(_ enabled: Bool, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayEnabled", ["enabled": enabled, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1785,6 +1859,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayInterval(_ minutes: Int, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayInterval", ["minutes": minutes, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1824,6 +1900,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayOrder(_ order: ScheduleOrder, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayOrder", ["order": order.rawValue, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1833,6 +1911,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayIncludeWallpapers(_ include: Bool, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayIncludeWallpapers", ["include": include, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1842,6 +1922,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayIncludeMedia(_ include: Bool, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayIncludeMedia", ["include": include, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1851,6 +1933,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayFolderIDs(_ folderIDs: [String]?, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayFolderIDs", ["folderIDs": folderIDs, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1860,6 +1944,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func updateDisplayWebSceneSwitchSeconds(_ seconds: Int?, for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.updateDisplayWebSceneSwitchSeconds", ["seconds": seconds, "screenID": screenID]); return }
+
         let screenID = canonicalDisplayConfigScreenID(screenID)
         var newConfig = config
         var displayConfig = newConfig.storedDisplayConfig(for: screenID)
@@ -1871,6 +1957,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// 外接显示器变更后，重新把当前全局壁纸覆盖到完整的屏幕集合。
     /// 调度器只发起统一应用；媒体类型分发不在此处实现。
     func synchronizeCurrentGlobalWallpaperToConnectedDisplays() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.synchronizeCurrentGlobalWallpaperToConnectedDisplays", [:]); return }
+
         guard config.isGlobalDisplaySyncEnabled else { return }
         if VideoWallpaperManager.shared.isVideoWallpaperActive {
             VideoWallpaperManager.shared.refreshSharedDecoderTargets()
@@ -1882,6 +1970,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// Configures a newly connected external display to use the same schedulable
     /// range as the primary display while choosing its first item randomly.
     func configureExternalDisplayForRandomAllWallpapers(_ screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.configureExternalDisplayForRandomAllWallpapers", ["screen": screen]); return }
+
         guard !config.isGlobalDisplaySyncEnabled else { return }
         let screenID = displayConfigScreenID(for: screen)
         var newConfig = config
@@ -1899,6 +1989,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// Keeps the display outside automatic rotation until the user explicitly
     /// chooses a wallpaper or enables its scheduler settings.
     func configureExternalDisplayWithoutAutoSwitch(_ screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.configureExternalDisplayWithoutAutoSwitch", ["screen": screen]); return }
+
         guard !config.isGlobalDisplaySyncEnabled else { return }
         let screenID = displayConfigScreenID(for: screen)
         var newConfig = config
@@ -1911,6 +2003,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// Removes scheduler-only state for a disconnected display that the user did
     /// not choose to retain. Rendering services own cleanup of their own states.
     func discardPersistedDisplayState(screenID: String, fingerprint: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.discardPersistedDisplayState", ["screenID": screenID, "fingerprint": fingerprint]); return }
+
         var newConfig = config
         let matchingIDs = Set(newConfig.displayConfigs.keys.filter {
             $0 == screenID || displayFingerprints[$0] == fingerprint
@@ -2078,39 +2172,18 @@ class WallpaperSchedulerService: ObservableObject {
         dispatchTimer = nil
     }
 
-    private func beginSchedulerActivityIfNeeded() {
-        guard schedulerActivity == nil else { return }
-        // Resist App Nap so 1-minute deadlines stay accurate; still allow idle sleep.
-        schedulerActivity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiatedAllowingIdleSystemSleep],
-            reason: "Wallpaper auto-switch timer"
-        )
-    }
-
-    private func endSchedulerActivity() {
-        if let activity = schedulerActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            schedulerActivity = nil
-        }
-    }
-
     /// Arm a one-shot timer for the next due switch (not a fixed repeating period).
     /// - Parameter earliestDelay: Optional floor on delay (e.g. empty-library poll backoff).
     private func scheduleNextChange(earliestDelay: TimeInterval = 0) {
         cancelDispatchTimer()
-        guard isRunning, !isScreenLocked else {
-            endSchedulerActivity()
-            return
-        }
+        guard isRunning, !isScreenLocked else { return }
 
         let now = Date()
         guard let nextFire = nextTimerFireDate(from: now) else {
-            endSchedulerActivity()
             print("\(logTag) All enabled displays use event-driven modes, no timer needed")
             return
         }
 
-        beginSchedulerActivityIfNeeded()
         let delay = max(nextFire.timeIntervalSince(now), minimumTimerDelay, earliestDelay)
         let timer = DispatchSource.makeTimerSource(queue: .main)
         // One-shot: recompute after each fire so interval tracks last successful apply.
@@ -2361,6 +2434,7 @@ class WallpaperSchedulerService: ObservableObject {
         toScreenID screenID: String,
         preferImmediatePresentation: Bool = false
     ) async -> Bool {
+        guard !isPreparingForProcessTermination, !Task.isCancelled else { return false }
         guard let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else {
             return false
         }
@@ -2456,6 +2530,7 @@ class WallpaperSchedulerService: ObservableObject {
         to screens: [NSScreen],
         preferImmediatePresentation: Bool = false
     ) async -> Bool {
+        guard !isPreparingForProcessTermination, !Task.isCancelled else { return false }
         let displayConfig = config.globalDisplayConfig
         let requirePlaybackEndSupport = displayConfig.isOnEndMode
             && displayConfig.webSceneSwitchSeconds == nil
@@ -2753,7 +2828,7 @@ class WallpaperSchedulerService: ObservableObject {
                 // 不得反向替换桌面实时渲染——否则轮播第二次起会变成播放固定时长的
                 // 烘焙视频而非 wallpaper-wgpu 实时渲染。
                 // on-end 模式下：如果设置了 webSceneSwitchSeconds（走定时器），允许实时渲染。
-                let isRealtimeRenderingEnabled = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+                let isRealtimeRenderingEnabled = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
                 let preferRealtimeForScene = isRealtimeRenderingEnabled && (!onEndMode || webSceneSwitchEnabled)
                 var bakedVideoPath: String? = nil
                 var sceneBakeItemID: String? = nil
@@ -2876,7 +2951,7 @@ class WallpaperSchedulerService: ObservableObject {
 
     private func saveConfig() {
         if let encoded = try? JSONEncoder().encode(config) {
-            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+            WaifuXPreferences.shared.set(encoded, forKey: userDefaultsKey)
         }
         syncDisplayFingerprints()
         saveDisplayFingerprints()
@@ -2884,19 +2959,19 @@ class WallpaperSchedulerService: ObservableObject {
 
     private func saveDisplayFingerprints() {
         if let data = try? PropertyListEncoder().encode(displayFingerprints) {
-            UserDefaults.standard.set(data, forKey: displayFingerprintsKey)
+            WaifuXPreferences.shared.set(data, forKey: displayFingerprintsKey)
         }
     }
 
     private func loadDisplayFingerprints() {
-        if let data = UserDefaults.standard.data(forKey: displayFingerprintsKey),
+        if let data = WaifuXPreferences.shared.data(forKey: displayFingerprintsKey),
            let decoded = try? PropertyListDecoder().decode([String: String].self, from: data) {
             displayFingerprints = decoded
         }
     }
 
     private func loadConfig() {
-        if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
+        if let data = WaifuXPreferences.shared.data(forKey: userDefaultsKey),
            let loadedConfig = try? JSONDecoder().decode(SchedulerConfig.self, from: data) {
             config = loadedConfig
         }

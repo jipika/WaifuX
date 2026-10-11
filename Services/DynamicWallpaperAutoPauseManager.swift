@@ -45,8 +45,8 @@ final class DynamicWallpaperAutoPauseManager {
     private var globalAutoPausedNativePlayingScreenIDs: Set<String> = []
     /// 触发全局自动暂停（电池）前，原生视频里已经处于手动暂停状态的屏幕。
     private var globalAutoPausedNativeManuallyPausedScreenIDs: Set<String> = []
-    /// 全局自动暂停（电池）前，Wallpaper Engine 的全局暂停状态。
-    private var globalAutoPausedExternalEngine = false
+    /// 全局自动暂停（电池）对 Wallpaper Engine 的暂停所有权。
+    private var externalBatteryPause = WallpaperBatteryPauseOwnership()
     /// 当前被全屏窗口覆盖的屏幕 ID 列表。
     private var fullscreenCoveredScreenIDs: Set<String> = []
     /// 全屏检测后台队列（避免 CGWindowListCopyWindowInfo 阻塞主线程）
@@ -115,27 +115,27 @@ final class DynamicWallpaperAutoPauseManager {
 
     /// 前台存在其他应用时自动暂停动态壁纸（排除 Finder）
     var pauseWhenOtherAppForeground: Bool {
-        get { UserDefaults.standard.bool(forKey: pauseWhenOtherAppKey) }
+        get { WaifuXPreferences.shared.bool(forKey: pauseWhenOtherAppKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: pauseWhenOtherAppKey)
+            WaifuXPreferences.shared.set(newValue, forKey: pauseWhenOtherAppKey)
             updateTimer()
         }
     }
 
     /// 仅让鼠标当前所在显示器继续播放动态壁纸，其他显示器暂停。
     var pauseInactiveDisplays: Bool {
-        get { UserDefaults.standard.bool(forKey: pauseInactiveDisplaysKey) }
+        get { WaifuXPreferences.shared.bool(forKey: pauseInactiveDisplaysKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: pauseInactiveDisplaysKey)
+            WaifuXPreferences.shared.set(newValue, forKey: pauseInactiveDisplaysKey)
             updateTimer()
         }
     }
 
     /// 检测到有全屏窗口覆盖时自动暂停动态壁纸
     var pauseWhenFullscreenCovers: Bool {
-        get { UserDefaults.standard.bool(forKey: pauseWhenFullscreenKey) }
+        get { WaifuXPreferences.shared.bool(forKey: pauseWhenFullscreenKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: pauseWhenFullscreenKey)
+            WaifuXPreferences.shared.set(newValue, forKey: pauseWhenFullscreenKey)
             updateTimer()
         }
     }
@@ -144,19 +144,19 @@ final class DynamicWallpaperAutoPauseManager {
     /// 首次读取时从旧布尔开关 `pause_on_battery_power` 迁移。
     var batteryPolicy: WallpaperPlaybackTriggerPolicy {
         get {
-            if let raw = UserDefaults.standard.string(forKey: batteryPolicyKey),
+            if let raw = WaifuXPreferences.shared.string(forKey: batteryPolicyKey),
                let policy = WallpaperPlaybackTriggerPolicy(rawValue: raw) {
                 return policy
             }
-            let legacy = UserDefaults.standard.object(forKey: pauseOnBatteryKey) as? Bool
+            let legacy = WaifuXPreferences.shared.object(forKey: pauseOnBatteryKey) as? Bool
             let policy: WallpaperPlaybackTriggerPolicy = (legacy == true) ? .pause : .keepRunning
-            UserDefaults.standard.set(policy.rawValue, forKey: batteryPolicyKey)
+            WaifuXPreferences.shared.set(policy.rawValue, forKey: batteryPolicyKey)
             return policy
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: batteryPolicyKey)
+            WaifuXPreferences.shared.set(newValue.rawValue, forKey: batteryPolicyKey)
             // 同步旧布尔 key，保持其他读取方兼容
-            UserDefaults.standard.set(newValue == .pause, forKey: pauseOnBatteryKey)
+            WaifuXPreferences.shared.set(newValue == .pause, forKey: pauseOnBatteryKey)
             handleBatterySettingChange()
         }
     }
@@ -171,22 +171,22 @@ final class DynamicWallpaperAutoPauseManager {
     /// 默认 `.pause` 与历史行为一致：休眠期间暂停播放器省电，唤醒后自动恢复。
     var displaySleepPolicy: WallpaperPlaybackTriggerPolicy {
         get {
-            if let raw = UserDefaults.standard.string(forKey: displaySleepPolicyKey),
+            if let raw = WaifuXPreferences.shared.string(forKey: displaySleepPolicyKey),
                let policy = WallpaperPlaybackTriggerPolicy(rawValue: raw) {
                 return policy
             }
             return .pause
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: displaySleepPolicyKey)
+            WaifuXPreferences.shared.set(newValue.rawValue, forKey: displaySleepPolicyKey)
         }
     }
 
     /// 非本应用窗口对某屏的累计覆盖比例 ≥ 阈值时，按屏暂停该屏壁纸
     var pauseWhenWindowCoverage: Bool {
-        get { UserDefaults.standard.bool(forKey: pauseWhenWindowCoverageKey) }
+        get { WaifuXPreferences.shared.bool(forKey: pauseWhenWindowCoverageKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: pauseWhenWindowCoverageKey)
+            WaifuXPreferences.shared.set(newValue, forKey: pauseWhenWindowCoverageKey)
             updateTimer()
         }
     }
@@ -194,14 +194,15 @@ final class DynamicWallpaperAutoPauseManager {
     /// 覆盖比例阈值（百分比 30~100）。setter 兼容 0.30~1.0 与 30~100 两种入参。
     var windowCoveragePauseThreshold: Double {
         get {
-            let raw = UserDefaults.standard.double(forKey: windowCoverageThresholdKey)
+            let raw = WaifuXPreferences.shared.double(forKey: windowCoverageThresholdKey)
             let percent = raw > 0 ? raw : 50
             return max(30, min(100, percent))
         }
         set {
             let percent = newValue > 1.0 ? newValue : newValue * 100
             let clamped = max(30, min(100, percent))
-            UserDefaults.standard.set(clamped, forKey: windowCoverageThresholdKey)
+            WaifuXPreferences.shared.set(clamped, forKey: windowCoverageThresholdKey)
+            guard BackgroundRuntimeRole.isHelper else { BackgroundRuntimeBridge.send("policy.reevaluate"); return }
             // 阈值变化时若开关已开，立即重算
             if pauseWhenWindowCoverage {
                 if AXIsProcessTrusted() {
@@ -214,6 +215,8 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
     private init() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         // 监听电源状态变化通知
         NotificationCenter.default.addObserver(
             self,
@@ -288,6 +291,8 @@ final class DynamicWallpaperAutoPauseManager {
 
     /// 当动态壁纸刚被重新应用或被用户手动恢复时，立刻重新计算自动暂停状态。
     func reevaluateCurrentState() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("policy.reevaluate", [:]); return }
+
         updateTimer()
         // Sleep can span the power-source notification and wake can arrive
         // before IOKit has published the new state. Re-read it here and
@@ -486,6 +491,8 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
     func suppressForegroundPauseForMainWindowHide(duration: TimeInterval = 1.0) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("policy.suppressForegroundPauseForMainWindowHide", ["duration": duration]); return }
+
         suppressForegroundPauseUntil = Date().addingTimeInterval(duration)
     }
 
@@ -493,6 +500,8 @@ final class DynamicWallpaperAutoPauseManager {
     /// 新启动的 wallpaper-wgpu 进程不应被旧的前台暂停状态误杀（SIGSTOP）。
     /// 当用户之后切走应用时，NSWorkspace app activation 通知会重新施加前台暂停。
     func clearForegroundPauseForWallpaperSwitch() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("policy.clearForegroundPauseForWallpaperSwitch", [:]); return }
+
         foregroundDetectionGeneration &+= 1
         // The video manager resets its renderer pause state while replacing a
         // video. Allow a battery-triggered global pause to snapshot the new
@@ -545,12 +554,17 @@ final class DynamicWallpaperAutoPauseManager {
     }
 
     private func updateTimer() {
+        guard BackgroundRuntimeRole.isHelper else { BackgroundRuntimeBridge.send("policy.reevaluate"); return }
+
         let needsPollingForFullscreenOrForeground = pauseWhenFullscreenCovers
             || pauseWhenOtherAppForeground
             || pauseInactiveDisplays
         // AX 事件在长期空闲后可能停更。遮挡暂停必须保留慢轮询，否则窗口关掉后永远不恢复。
         let needsPollingForWindowCoverage = pauseWhenWindowCoverage
-        let needsTimer = needsPollingForFullscreenOrForeground || needsPollingForWindowCoverage
+        let hasDynamicWallpaper = VideoWallpaperManager.shared.isVideoWallpaperActive
+            || WallpaperEngineXBridge.shared.isControllingExternalEngine
+        let needsTimer = hasDynamicWallpaper
+            && (needsPollingForFullscreenOrForeground || needsPollingForWindowCoverage)
         if needsTimer {
             // 共用一个 3s 轮询，覆盖两类无法仅靠通知捕获的状态变化：
             // - 全屏覆盖：CGWindowList 无法用通知替代
@@ -616,13 +630,13 @@ final class DynamicWallpaperAutoPauseManager {
         }
 
         // 窗口覆盖 + AX 可用：事件驱动模式，立即 setup AXObserver
-        if pauseWhenWindowCoverage && AXIsProcessTrusted() {
+        if hasDynamicWallpaper && pauseWhenWindowCoverage && AXIsProcessTrusted() {
             handleAppActivationChange()
             checkWindowCoverageAX()
         }
 
         // 窗口覆盖关闭时，停止 AXObserver
-        if !pauseWhenWindowCoverage {
+        if !hasDynamicWallpaper || !pauseWhenWindowCoverage {
             stopAXObserver()
             windowCoverageCoalescer.reset()
         }
@@ -652,6 +666,9 @@ final class DynamicWallpaperAutoPauseManager {
         let hasNative = VideoWallpaperManager.shared.isVideoWallpaperActive
         let hasExternal = WallpaperEngineXBridge.shared.isControllingExternalEngine
         guard hasNative || hasExternal else {
+            // Policy flags may stay enabled after switching to a static wallpaper.
+            // There is nothing to inspect until a dynamic wallpaper is applied again.
+            stopTimer()
             foregroundDetectionGeneration &+= 1
             foregroundPausedScreenIDs.removeAll()
             inactiveDisplayPausedScreenIDs.removeAll()
@@ -664,7 +681,7 @@ final class DynamicWallpaperAutoPauseManager {
             deferredResumeScreenIDsAfterBattery.removeAll()
             globalAutoPausedNativePlayingScreenIDs.removeAll()
             globalAutoPausedNativeManuallyPausedScreenIDs.removeAll()
-            globalAutoPausedExternalEngine = false
+            externalBatteryPause.reset()
             fullscreenCoveredScreenIDs.removeAll()
             fullscreenAutoPausedScreenIDs.removeAll()
             fullscreenAutoPausedExternalEngine = false
@@ -702,10 +719,11 @@ final class DynamicWallpaperAutoPauseManager {
         // NSScreen 必须在主线程读；后台读 NSScreen.screens 在多显示器下常会漏掉外接屏。
         let screenFrames = currentScreenFrames()
         guard !screenFrames.isEmpty else { return }
+        let excludedProcessIDs = autoPauseExcludedProcessIDs()
 
-        fullscreenDetectionQueue.async { [weak self, screenFrames] in
+        fullscreenDetectionQueue.async { [weak self, screenFrames, excludedProcessIDs] in
             guard let self else { return }
-            let newFullscreenIDs = Self.fullscreenCoveredScreenIDs(in: screenFrames)
+            let newFullscreenIDs = Self.fullscreenCoveredScreenIDs(in: screenFrames, excluding: excludedProcessIDs)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -780,6 +798,8 @@ final class DynamicWallpaperAutoPauseManager {
     // MARK: - 电池供电处理
 
     private func handleBatterySettingChange() {
+        guard BackgroundRuntimeRole.isHelper else { BackgroundRuntimeBridge.send("policy.reevaluate"); return }
+
         if pauseOnBatteryPower {
             PowerSourceMonitor.shared.startMonitoring()
         } else {
@@ -845,12 +865,10 @@ final class DynamicWallpaperAutoPauseManager {
             if self.pauseWhenWindowCoverage {
                 let frontApp = NSWorkspace.shared.frontmostApplication
                 let bundleID = frontApp?.bundleIdentifier
-                let ourBundleID = Bundle.main.bundleIdentifier
-                let finderBundleID = "com.apple.finder"
                 let axTrusted = AXIsProcessTrusted()
 
                 if let pid = frontApp?.processIdentifier,
-                   bundleID != ourBundleID && bundleID != finderBundleID {
+                   WallpaperAutoPauseApplicationIdentity.shouldInspectForeground(bundleID) {
                     if axTrusted {
                         // 非 Finder 且非本应用：启动 AXObserver + 立即检测一次
                         self.setupAXObserver(for: pid)
@@ -898,12 +916,10 @@ final class DynamicWallpaperAutoPauseManager {
         }
 
         let frontmostBundleID = frontmostApp.bundleIdentifier
-        let ourBundleID = Bundle.main.bundleIdentifier
-        let finderBundleID = "com.apple.finder"
 
         // The app/Finder path cannot cover the desktop for this policy. Keep
         // the fast path synchronous, but do not enumerate the window server.
-        guard frontmostBundleID != ourBundleID && frontmostBundleID != finderBundleID else {
+        guard WallpaperAutoPauseApplicationIdentity.shouldInspectForeground(frontmostBundleID) else {
             applyForegroundCoverageResult(newForegroundPausedIDs: [])
             return
         }
@@ -1148,10 +1164,18 @@ final class DynamicWallpaperAutoPauseManager {
     /// 检查前台是否是非本应用且非 Finder 的其他应用（全局判断，供旧逻辑兼容）
     private func isOtherAppInForeground() -> Bool {
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return false }
-        let bundleID = frontmostApp.bundleIdentifier
-        let ourBundleID = Bundle.main.bundleIdentifier
-        let finderBundleID = "com.apple.finder"
-        return bundleID != ourBundleID && bundleID != finderBundleID
+        return WallpaperAutoPauseApplicationIdentity.shouldInspectForeground(frontmostApp.bundleIdentifier)
+    }
+
+    /// Capture app identities once on the main actor for each existing window
+    /// check. The background queue uses only this snapshot, with no extra poll.
+    private func autoPauseExcludedProcessIDs() -> Set<pid_t> {
+        WallpaperAutoPauseApplicationIdentity.excludedProcessIDs(
+            applications: NSWorkspace.shared.runningApplications.map {
+                (bundleIdentifier: $0.bundleIdentifier, processIdentifier: $0.processIdentifier)
+            },
+            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+        )
     }
 
     private var isForegroundPauseSuppressed: Bool {
@@ -1169,14 +1193,13 @@ final class DynamicWallpaperAutoPauseManager {
     ///
     /// - Parameter screenFrames: 主线程快照的 `screenID → frame` 映射；
     ///   后台禁止再读 `NSScreen.screens`（多显示器下会漏外接屏）。
-    nonisolated private static func fullscreenCoveredScreenIDs(in screenFrames: [String: CGRect]) -> Set<String> {
+    nonisolated private static func fullscreenCoveredScreenIDs(in screenFrames: [String: CGRect], excluding excludedProcessIDs: Set<pid_t>) -> Set<String> {
         guard !screenFrames.isEmpty else { return [] }
         guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
 
         let desktopFrame = screenFrames.values.reduce(CGRect.null) { $0.union($1) }
-        let myPID = ProcessInfo.processInfo.processIdentifier
         var coveredIDs = Set<String>()
 
         for window in windowList {
@@ -1192,7 +1215,7 @@ final class DynamicWallpaperAutoPauseManager {
             } else {
                 ownerPID = nil
             }
-            if let ownerPID, ownerPID == myPID { continue }
+            if let ownerPID, excludedProcessIDs.contains(ownerPID) { continue }
 
             let rawBounds: CGRect
             if let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
@@ -1230,7 +1253,7 @@ final class DynamicWallpaperAutoPauseManager {
         return coveredIDs
     }
 
-    nonisolated private static func captureWindowSnapshot(screenFrames: [String: CGRect]) -> WindowSnapshot? {
+    nonisolated private static func captureWindowSnapshot(screenFrames: [String: CGRect], excluding excludedProcessIDs: Set<pid_t>) -> WindowSnapshot? {
         let screenRects = Array(screenFrames.values)
         let desktopFrame = screenRects.reduce(CGRect.null) { $0.union($1) }
 
@@ -1266,7 +1289,7 @@ final class DynamicWallpaperAutoPauseManager {
             )
         }
 
-        return WindowSnapshot(screenFrames: screenFrames, windows: windows)
+        return WindowSnapshot(screenFrames: screenFrames, windows: windows, excludedProcessIDs: excludedProcessIDs)
     }
 
     /// 判断覆盖快照是否可信。
@@ -1278,9 +1301,8 @@ final class DynamicWallpaperAutoPauseManager {
     ) -> Bool {
         guard !previouslyCoveredScreenIDs.isEmpty else { return true }
 
-        let myPID = ProcessInfo.processInfo.processIdentifier
         let hasForeignContentWindow = snapshot.windows.contains { window in
-            window.isVisibleContentWindow(excluding: myPID)
+            window.isVisibleContentWindow(excluding: snapshot.excludedProcessIDs)
         }
         if hasForeignContentWindow { return true }
 
@@ -1296,11 +1318,10 @@ final class DynamicWallpaperAutoPauseManager {
 
     nonisolated private static func windowCoverageRatios(in snapshot: WindowSnapshot) -> [String: CGFloat] {
         var ratios: [String: CGFloat] = [:]
-        let myPID = ProcessInfo.processInfo.processIdentifier
 
         for (screenID, screenFrame) in snapshot.screenFrames {
             let candidateRects = snapshot.windows.compactMap { window -> CGRect? in
-                guard window.isVisibleContentWindow(excluding: myPID) else { return nil }
+                guard window.isVisibleContentWindow(excluding: snapshot.excludedProcessIDs) else { return nil }
                 let intersection = window.bounds.intersection(screenFrame)
                 guard !intersection.isNull, !intersection.isEmpty else { return nil }
                 return intersection
@@ -1706,18 +1727,11 @@ final class DynamicWallpaperAutoPauseManager {
         let weBridge = WallpaperEngineXBridge.shared
 
         // ---- 外部引擎 ----
-        if weBridge.isControllingExternalEngine {
-            if weBridge.isExternalPaused {
-                // WE 已被其他原因（手动/全屏/覆盖）暂停：不能记成电池暂停，
-                // 否则插电恢复会误唤醒它；但绝不能在这里提前 return——
-                // 此前会把后面原生视频的全局暂停一并跳过（混合壁纸场景漏暂停）。
-                globalAutoPausedExternalEngine = false
-            } else {
-                globalAutoPausedExternalEngine = true
-                weBridge.pauseWallpaper()
-            }
-        } else {
-            globalAutoPausedExternalEngine = false
+        if externalBatteryPause.requestPause(
+            isManagingEngine: weBridge.isControllingExternalEngine,
+            isPaused: weBridge.isExternalPaused
+        ) {
+            weBridge.pauseWallpaper()
         }
 
         // ---- 原生视频 ----
@@ -1754,12 +1768,11 @@ final class DynamicWallpaperAutoPauseManager {
         let weBridge = WallpaperEngineXBridge.shared
 
         // ---- 外部引擎恢复 ----
-        if globalAutoPausedExternalEngine {
+        if externalBatteryPause.release() {
             if weBridge.isControllingExternalEngine, weBridge.isExternalPaused {
                 weBridge.resumeWallpaper()
             }
             fullscreenAutoPausedExternalEngine = false
-            globalAutoPausedExternalEngine = false
 
             // 恢复外部引擎后，按屏重新施加仍有效的暂停原因（全屏/前台/窗口覆盖）
             if weBridge.isControllingExternalEngine {
@@ -1924,10 +1937,11 @@ final class DynamicWallpaperAutoPauseManager {
         let screenFrames = currentScreenFrames()
         guard !screenFrames.isEmpty else { return }
         let previouslyCovered = windowCoverageCoveredScreenIDs.union(windowCoveragePausedScreenIDs)
+        let excludedProcessIDs = autoPauseExcludedProcessIDs()
 
-        fullscreenDetectionQueue.async { [weak self, screenFrames] in
+        fullscreenDetectionQueue.async { [weak self, screenFrames, excludedProcessIDs] in
             guard let self else { return }
-            guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames) else { return }
+            guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames, excluding: excludedProcessIDs) else { return }
             let ratios = Self.windowCoverageRatios(in: snapshot)
             let screenIDs = Set(snapshot.screenFrames.keys)
 
@@ -2040,10 +2054,11 @@ final class DynamicWallpaperAutoPauseManager {
         let screenFrames = currentScreenFrames()
         guard !screenFrames.isEmpty else { return }
         let previouslyCovered = windowCoverageCoveredScreenIDs.union(windowCoveragePausedScreenIDs)
+        let excludedProcessIDs = autoPauseExcludedProcessIDs()
 
-        fullscreenDetectionQueue.async { [weak self, screenFrames] in
+        fullscreenDetectionQueue.async { [weak self, screenFrames, excludedProcessIDs] in
             guard let self else { return }
-            guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames) else { return }
+            guard let snapshot = Self.captureWindowSnapshot(screenFrames: screenFrames, excluding: excludedProcessIDs) else { return }
             let ratios = Self.windowCoverageRatios(in: snapshot)
             let screenIDs = Set(snapshot.screenFrames.keys)
 
@@ -2105,11 +2120,14 @@ private struct WindowSnapshot: @unchecked Sendable {
         let alpha: Double
         let bounds: CGRect
 
-        func isVisibleContentWindow(excluding excludedPID: pid_t) -> Bool {
-            pid != excludedPID && layer == 0 && alpha > 0
+        func isVisibleContentWindow(excluding excludedProcessIDs: Set<pid_t>) -> Bool {
+            WallpaperAutoPauseApplicationIdentity.isForeignContentWindow(
+                ownerPID: pid, layer: layer, alpha: alpha, excluding: excludedProcessIDs
+            )
         }
     }
 
     let screenFrames: [String: CGRect]
     let windows: [Window]
+    let excludedProcessIDs: Set<pid_t>
 }
