@@ -2,7 +2,7 @@ import Foundation
 import Security
 import CFNetwork
 
-enum SteamServiceLoginState: Equatable {
+enum SteamServiceLoginState: Equatable, Codable {
     case idle
     case loggingIn
     case waitingForQR(challengeURL: String)
@@ -13,7 +13,7 @@ enum SteamServiceLoginState: Equatable {
 }
 
 /// 一条订阅记录（来自 SteamKit2 CPublishedFile_GetUserFiles，type=mysubscriptions）。
-struct SteamSubscriptionItem {
+struct SteamSubscriptionItem: Codable, Sendable {
     let workshopID: String
     let subscribedAt: Date
     let updatedAt: Date
@@ -22,7 +22,7 @@ struct SteamSubscriptionItem {
 }
 
 /// listSubscriptions 的一页结果；`total` 是服务端总数，精确翻页用。
-struct SteamSubscriptionPage {
+struct SteamSubscriptionPage: Codable, Sendable {
     let total: Int
     let startIndex: Int
     let items: [SteamSubscriptionItem]
@@ -95,12 +95,30 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     private var qrWatchdogWorkItem: DispatchWorkItem?
     private static let qrChallengeStaleInterval: TimeInterval = 30
 
+    @MainActor func backgroundSnapshot() -> [String: Any] {
+        ["available": isAvailable, "loggedIn": isLoggedIn, "account": accountName, "steamID": steamID, "login": (try? JSONEncoder().encode(loginState)) ?? Data()]
+    }
+
     private override init() {
-        loginID = Self.loadLoginID(forKey: loginIDKey)
+        loginID = BackgroundRuntimeRole.isRemoteUI ? 0 : Self.loadLoginID(forKey: loginIDKey)
         super.init()
+        if BackgroundRuntimeRole.isRemoteUI {
+            Task { @MainActor in
+                BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                    guard let self, let values = snapshot["steam"] as? [String: Any] else { return }
+                    self.isAvailable = values["available"] as? Bool ?? false
+                    self.isLoggedIn = values["loggedIn"] as? Bool ?? false
+                    self.accountName = values["account"] as? String ?? ""
+                    self.steamID = values["steamID"] as? String ?? ""
+                    if let data = values["login"] as? Data, let state = try? JSONDecoder().decode(SteamServiceLoginState.self, from: data) { self.loginState = state }
+                }
+            }
+        }
     }
 
     func start() {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.start", [:]) }; return }
+
         ioQueue.async { [weak self] in
             guard let self else { return }
             self.explicitShutdown = false
@@ -109,6 +127,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func shutdown() {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.shutdown", [:]) }; return }
+
         ioQueue.sync {
             explicitShutdown = true
             restartWorkItem?.cancel()
@@ -142,6 +162,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func login(username: String, password: String, guardCode: String? = nil) async throws {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let arguments = try BackgroundPropertyList.encode(["username": username, "password": password].merging(guardCode.map { ["code": $0] } ?? [:]) { _, new in new })
+            try await BackgroundRuntimeBridge.requestVoid("steam.login.wait", arguments: arguments)
+            return
+        }
+
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !password.isEmpty else {
             throw SteamServiceError.authenticationFailed("Steam 用户名和密码不能为空。", "MISSING_CREDENTIALS")
@@ -201,6 +227,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     /// a QR code for the Steam mobile app, and stores the resulting refresh
     /// token through the shared `loggedIn` event.
     func loginWithQR() {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.loginWithQR", [:]) }; return }
+
         ioQueue.async { [weak self] in
             guard let self else { return }
             guard loginContinuation == nil else { return }
@@ -263,6 +291,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func submitGuardCode(_ code: String) {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.submitGuardCode", ["code": code]) }; return }
+
         ioQueue.async { [weak self] in
             guard let self, !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             sendCommandOnQueue("submitChallenge", fields: ["code": code])
@@ -270,6 +300,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func cancelLogin() {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.cancelLogin", [:]) }; return }
+
         ioQueue.async { [weak self] in
             guard let self else { return }
             sendCommandOnQueue("cancelLogin")
@@ -279,16 +311,18 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func logout() {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.logout", [:]) }; return }
+
         ioQueue.async { [weak self] in
             guard let self else { return }
-            let username = UserDefaults.standard.string(forKey: usernameKey) ?? accountName
+            let username = WaifuXPreferences.shared.string(forKey: usernameKey) ?? accountName
             sendCommandOnQueue("logout")
             stopQRLoginOnQueue()
             if !username.isEmpty {
                 _ = deleteKeychainValue(account: refreshTokenAccount(username))
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
-            UserDefaults.standard.removeObject(forKey: usernameKey)
+            WaifuXPreferences.shared.removeObject(forKey: usernameKey)
             sessionIsLoggedIn = false
             resolveRestoreWaitersOnQueue(isLoggedIn: false)
             updateOnMain {
@@ -305,6 +339,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         outputRoot: URL,
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> URL {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let url = try await BackgroundRuntimeBridge.requestCodable("steam.download.wait", arguments: BackgroundPropertyList.encode(["id": workshopID, "root": outputRoot.absoluteString]), resultKey: "url", as: URL.self)
+            progressHandler?(1)
+            return url
+        }
+
         guard !workshopID.isEmpty else {
             throw SteamServiceError.downloadFailed("Workshop ID 不能为空。", "INVALID_WORKSHOP_ID")
         }
@@ -380,6 +420,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     func cancelDownload(taskID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.cancelDownload", ["taskID": taskID]) }; return }
+
         ioQueue.async { [weak self] in
             self?.sendCommandOnQueue("cancelDownload", fields: ["taskId": taskID])
         }
@@ -393,6 +435,10 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     /// 的窗口期里主线程的 `isLoggedIn` 是旧值 true，而 ioQueue 上的
     /// `sessionIsLoggedIn` 已被终止处理清掉——不等待就会误报"需要重新登录"。
     func fetchSubscriptions(startIndex: Int) async throws -> SteamSubscriptionPage {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return try await BackgroundRuntimeBridge.requestCodable("steam.subscriptions.wait", arguments: BackgroundPropertyList.encode(["start": startIndex]), resultKey: "page", as: SteamSubscriptionPage.self)
+        }
+
         let ready: Bool = await withCheckedContinuation { continuation in
             ioQueue.async { [weak self] in
                 guard let self else {
@@ -549,7 +595,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     private func restoreSessionOnQueue() {
         guard loginContinuation == nil,
               !restoringSession,
-              let username = UserDefaults.standard.string(forKey: usernameKey),
+              let username = WaifuXPreferences.shared.string(forKey: usernameKey),
               !username.isEmpty,
               case .value(let token) = keychainRead(account: refreshTokenAccount(username)) else {
             return
@@ -570,6 +616,13 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         await withCheckedContinuation { continuation in
             ioQueue.async { [weak self] in
                 guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                // A prior shutdown or failed restart can leave a saved token
+                // without a live .NET process. Restore must first reconnect
+                // the service or its waiter would never receive a response.
+                guard self.ensureStartedOnQueue() else {
                     continuation.resume(returning: false)
                     return
                 }
@@ -682,7 +735,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             if let guardData = event["guardData"] as? String, !guardData.isEmpty {
                 _ = setKeychainValue(guardData, account: guardDataAccount(resolvedUsername))
             }
-            UserDefaults.standard.set(resolvedUsername, forKey: usernameKey)
+            WaifuXPreferences.shared.set(resolvedUsername, forKey: usernameKey)
             restoringSession = false
             restartCount = 0
             sessionIsLoggedIn = true
@@ -707,7 +760,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 self.steamID = ""
                 self.loginState = wasRestoring ? .failed("保存的 Steam 会话已失效，请重新登录。") : .idle
             }
-            if wasRestoring, let username = UserDefaults.standard.string(forKey: usernameKey) {
+            if wasRestoring, let username = WaifuXPreferences.shared.string(forKey: usernameKey) {
                 _ = deleteKeychainValue(account: refreshTokenAccount(username))
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
@@ -720,7 +773,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             sessionIsLoggedIn = false
             resolveRestoreWaitersOnQueue(isLoggedIn: false)
             if wasRestoring, errorCode == "AUTH_FAILED",
-               let username = UserDefaults.standard.string(forKey: usernameKey) {
+               let username = WaifuXPreferences.shared.string(forKey: usernameKey) {
                 _ = deleteKeychainValue(account: refreshTokenAccount(username))
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
@@ -931,8 +984,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         #endif
 
         let candidates: [URL] = [
-            Bundle.main.resourceURL?.appendingPathComponent("WaifuXSteamService/\(architecture)") ,
-            Bundle.main.resourceURL?.appendingPathComponent("Resources/WaifuXSteamService/\(architecture)"),
+            WaifuXHostBundle.resourcesURL.appendingPathComponent("WaifuXSteamService/\(architecture)") ,
+            WaifuXHostBundle.resourcesURL.appendingPathComponent("Resources/WaifuXSteamService/\(architecture)"),
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("build/SteamService/\(architecture)")
         ].compactMap { $0 }
@@ -955,12 +1008,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     private static func loadLoginID(forKey key: String) -> UInt32 {
-        if let number = UserDefaults.standard.object(forKey: key) as? NSNumber,
+        if let number = WaifuXPreferences.shared.object(forKey: key) as? NSNumber,
            number.uint32Value != 0 {
             return number.uint32Value
         }
         let value = UInt32.random(in: 1...UInt32.max)
-        UserDefaults.standard.set(Int(value), forKey: key)
+        WaifuXPreferences.shared.set(Int(value), forKey: key)
         return value
     }
 

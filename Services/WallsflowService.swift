@@ -264,25 +264,40 @@ actor WallsflowService {
 
     /// 抓取 HTML（列表 / 搜索 / 详情）。
     ///
-    /// Wallsflow 的 Cloudflare 挑战按**出口 IP** 下发：本机全局流量走系统代理
-    /// （FastStunnel）时，任何请求都会被 403 挑战；改为直连则放行。因此这里默认走直连
-    /// 会话，失败（被挑战 / 网络不可达）再回退系统代理，两种网络环境都能工作。
+    /// Wallsflow 的 Cloudflare 按**来访出口 IP 的实时信誉**决定是否下发挑战：
+    /// 请求头再像浏览器也只是提高通过率（家宽动态 IP 重拨一次就可能从 200 翻成
+    /// 403，2026-10-06 实测）。回退链共三级：
+    /// 1. URLSession 直连（`connectionProxyDictionary = [:]`，绕开系统代理）
+    /// 2. URLSession 走系统代理（覆盖"必须靠代理出网"的环境）
+    /// 3. **`WallsflowWebFetcher`**：离屏 WKWebView 过挑战（非交互挑战 JS 自动
+    ///    通过、用户无感），拿到 HTML 的同时把 `cf_clearance` 同步进共享 cookie
+    ///    存储，后续请求可复用站点允许的会话；有效期由站点决定。
     func fetchHTML(from url: URL) async throws -> String {
         do {
             return try await networkService.fetchString(
                 from: url,
-                headers: defaultHeaders,
+                headers: currentHeaders,
                 bypassSystemProxy: true
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             print("[WallsflowService] 直连抓取失败，回退系统代理 | url=\(url.absoluteString) error=\(error.localizedDescription)")
-            return try await networkService.fetchString(
-                from: url,
-                headers: defaultHeaders,
-                bypassSystemProxy: false
-            )
+            do {
+                return try await networkService.fetchString(
+                    from: url,
+                    headers: currentHeaders,
+                    bypassSystemProxy: false
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("[WallsflowService] 系统代理仍失败，走 WebView 过挑战 | url=\(url.absoluteString) error=\(error.localizedDescription)")
+                let html = try await WallsflowWebFetcher.shared.fetchHTML(from: url)
+                // 挑战通过后 cookie 已回灌；对齐 UA 后轻量路径即可自行带票。
+                syncedUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
+                return html
+            }
         }
     }
 
@@ -311,6 +326,19 @@ actor WallsflowService {
             )
         }
     }
+
+    /// 请求头：默认浏览器头 + （WebFetcher 过挑战成功后）与 cf_clearance 绑定的实际 UA。
+    private var currentHeaders: [String: String] {
+        var headers = defaultHeaders
+        if let synced = syncedUserAgent {
+            headers["User-Agent"] = synced
+            for key in Self.clientHintHeaders.keys { headers.removeValue(forKey: key) }
+        }
+        return headers
+    }
+
+    /// 由当前 actor 保护，读取页面后同步更新，再向调用者返回。
+    private var syncedUserAgent: String?
 
     // MARK: - 清除缓存
 

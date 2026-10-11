@@ -10,13 +10,32 @@ actor NetworkService {
     /// 走本机 FastStunnel 出口必被挑战，直连则放行）。
     private let directSession: URLSession
     private let cache: URLCache
+    private var proxySettings: ProxySettings
+    #if DEBUG
+    private(set) var proxySessionGeneration: UInt64 = 0
+    #endif
+
+    private struct ProxySettings: Equatable {
+        let host: String?
+        let port: Int?
+
+        init(enabled: Bool, host: String, port: String) {
+            if enabled, !host.isEmpty, let number = Int(port), number > 0 {
+                self.host = host
+                self.port = number
+            } else {
+                self.host = nil
+                self.port = nil
+            }
+        }
+    }
 
     // MARK: - Retry Configuration
     private var defaultRetryConfig: RetryConfiguration = .default
     private var networkMonitor: NetworkMonitor? = nil
 
     /// 基础配置：所有会话共用（缓存 / 超时 / Cookie / 蜂窝）。
-    private static func makeConfiguration() -> URLSessionConfiguration {
+    private static func makeConfiguration(proxy: ProxySettings? = nil) -> URLSessionConfiguration {
         let config = URLSessionConfiguration.default
         config.requestCachePolicy = .returnCacheDataElseLoad  // 使用缓存加快加载
         // 媒体整文件下载可达数十 MB；60s 资源超时会导致 Wallsflow 等大 MP4 中途失败。
@@ -32,6 +51,16 @@ actor NetworkService {
         config.waitsForConnectivity = true
         // 启用后台会话
         config.isDiscretionary = false
+        if let host = proxy?.host, let port = proxy?.port {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true,
+                kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: port,
+                kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host,
+                kCFNetworkProxiesHTTPSPort: port
+            ]
+        }
         return config
     }
 
@@ -39,7 +68,12 @@ actor NetworkService {
         // 使用全局 URLCache.shared（已在 WaifuXApp.swift 中配置），避免重复缓存层
         self.cache = URLCache.shared
 
-        self.session = URLSession(configuration: Self.makeConfiguration())
+        let preferences = WaifuXPreferences.shared
+        let proxy = ProxySettings(enabled: preferences.bool(forKey: "proxy_enabled"),
+                                  host: preferences.string(forKey: "proxy_host") ?? "",
+                                  port: preferences.string(forKey: "proxy_port") ?? "")
+        self.proxySettings = proxy
+        self.session = URLSession(configuration: Self.makeConfiguration(proxy: proxy))
 
         // 空字典 = 不使用任何代理（覆盖系统代理设置）；不要传 nil，nil 会继续跟随系统设置。
         let directConfig = Self.makeConfiguration()
@@ -50,20 +84,17 @@ actor NetworkService {
     // MARK: - Proxy Configuration
 
     func updateProxyConfiguration(enabled: Bool, host: String, port: String) {
-        let config = Self.makeConfiguration()
-
-        if enabled, !host.isEmpty, let portInt = Int(port), portInt > 0 {
-            config.connectionProxyDictionary = [
-                kCFNetworkProxiesHTTPEnable: true,
-                kCFNetworkProxiesHTTPProxy: host,
-                kCFNetworkProxiesHTTPPort: portInt,
-                kCFNetworkProxiesHTTPSEnable: true,
-                kCFNetworkProxiesHTTPSProxy: host,
-                kCFNetworkProxiesHTTPSPort: portInt
-            ]
-        }
-
-        self.session = URLSession(configuration: config)
+        let next = ProxySettings(enabled: enabled, host: host, port: port)
+        guard next != proxySettings else { return }
+        let previous = session
+        session = URLSession(configuration: Self.makeConfiguration(proxy: next))
+        proxySettings = next
+        // Finish existing downloads on their original connection while allowing
+        // future requests to use the new proxy, then release the old session.
+        previous.finishTasksAndInvalidate()
+        #if DEBUG
+        proxySessionGeneration &+= 1
+        #endif
     }
 
     // MARK: - Retry Configuration
