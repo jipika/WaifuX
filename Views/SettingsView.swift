@@ -208,8 +208,8 @@ struct SettingsView: View {
         .id(localization.currentLanguage)
         .onAppear {
             let key = "settings.openSchedulerOnNextAppearance"
-            if UserDefaults.standard.bool(forKey: key) {
-                UserDefaults.standard.removeObject(forKey: key)
+            if WaifuXPreferences.shared.bool(forKey: key) {
+                WaifuXPreferences.shared.removeObject(forKey: key)
                 selectedTab = .scheduler
             }
         }
@@ -1845,6 +1845,23 @@ private struct AboutSettingsTab: View {
                                 .font(.system(size: 13))
                         }
                         .frame(height: 28)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Divider()
+                HStack(spacing: 12) {
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("渲染组件").font(.system(size: 13, weight: .medium))
+                        Text("Scene、Web 与视频引擎可独立更新")
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("检查组件更新") {
+                        RendererComponentUpdater.shared.check(userInitiated: true)
                     }
                     .buttonStyle(.bordered)
                 }

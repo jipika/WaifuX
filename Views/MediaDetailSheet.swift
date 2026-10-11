@@ -22,6 +22,8 @@ struct MediaDetailSheet: View {
     @State private var isSettingWallpaper = false
     @State private var showError = false
     @State private var errorMessage = ""
+    /// 当前错误是否为屏幕录制权限类：弹窗需要多给一个「打开系统设置」入口。
+    @State private var errorNeedsScreenCaptureSettings = false
     @State private var isMuted = true
     @State private var isVisible = false
     @State private var isMediaLoaded = false
@@ -385,9 +387,11 @@ struct MediaDetailSheet: View {
         .ignoresSafeArea()
         .glassAlert(t("mediaError"), isPresented: $showError,
                     message: errorMessage,
-                    actions: [
-                        GlassAlertAction(t("ok"), role: .cancel)
-                    ])
+                    actions: mediaErrorActions)
+        .onChange(of: showError) { _, isShowing in
+            // 同一个「媒体错误」弹窗被多处复用：关闭后立刻复位，避免后续无关错误带出权限按钮。
+            if !isShowing { errorNeedsScreenCaptureSettings = false }
+        }
         .glassAlert(t("delete"), isPresented: $showDeleteConfirm,
                     message: t("deleteConfirmMessage"),
                     actions: [
@@ -805,6 +809,7 @@ struct MediaDetailSheet: View {
                 LoopingVideoBackgroundView(
                     url: previewVideoURL,
                     isMuted: isMuted,
+                    fallbackURL: resolvedItem.previewVideoFallbackURL,
                     onReady: { @MainActor in
                         withAnimation(.easeInOut(duration: 0.3)) {
                             isMediaLoaded = true
@@ -1376,7 +1381,7 @@ struct MediaDetailSheet: View {
             return
         }
 
-        let dynamicLockEnabled = UserDefaults.standard.bool(forKey: "dynamic_lock_screen_enabled")
+        let dynamicLockEnabled = WaifuXPreferences.shared.bool(forKey: "dynamic_lock_screen_enabled")
         if dynamicLockEnabled {
             // 动态锁屏（macOS 26+）：推静态图给锁屏扩展，扩展切到静态图渲染
             do {
@@ -1533,7 +1538,7 @@ struct MediaDetailSheet: View {
                     bakeProgress = 0
                     if shouldAutoApplyAfterBake {
                         // 实时渲染：桌面已由实时引擎渲染，不自动覆盖；仅缓存
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+                        if WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled") {
                             sceneBakeStatusFlash = t("sceneBake.cached")
                             print("[MediaDetailSheet] 实时渲染模式：烘焙完成，产物已缓存（锁屏/companion 由统一 apply 路径处理）")
                         } else if SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) {
@@ -1608,7 +1613,7 @@ struct MediaDetailSheet: View {
                     bakeProgress = 0
                     if shouldAutoApplyAfterBake {
                         // 与 scene 一致：实时开着只缓存；非实时则应用烘焙循环视频
-                        if UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled") {
+                        if WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled") {
                             sceneBakeStatusFlash = t("sceneBake.cached")
                             print("[MediaDetailSheet] 实时渲染模式：Web 烘焙完成，产物已缓存（不覆盖当前实时壁纸）")
                         } else if SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) {
@@ -1625,6 +1630,7 @@ struct MediaDetailSheet: View {
                 await MainActor.run {
                     isBakingScene = false
                     bakeProgress = 0
+                    errorNeedsScreenCaptureSettings = Self.isScreenCapturePermissionError(error)
                     errorMessage = Self.truncateErrorMessage(error.localizedDescription)
                     showError = true
                 }
@@ -2305,6 +2311,7 @@ struct MediaDetailSheet: View {
     /// 删前捕获 folderID 写入 Job，落盘复活时按 Job 归属恢复原文件夹（含根目录）。
     /// `fromOptimizationReset` 时沿用原优化重置的 loading / toast 行为。
     private func redownloadCurrentItem(fromOptimizationReset: Bool = false) {
+        Task { @MainActor in
         guard canRedownloadItem, !isResettingVideoOptimization else { return }
 
         let downloadingItem = resolvedItem
@@ -2321,7 +2328,7 @@ struct MediaDetailSheet: View {
         ].compactMap { $0 }
 
         // 先落盘 Job（带 folderID），失败则不删旧文件（与 MyLibrary 行为一致）
-        guard PersistentDownloadQueueService.shared.stage(
+        guard await PersistentDownloadQueueService.shared.stage(
             [downloadingItem],
             folderID: preservedFolderID
         ) else {
@@ -2396,6 +2403,8 @@ struct MediaDetailSheet: View {
                     sceneBakeStatusFlash = nil
                 }
             }
+        }
+
         }
     }
 
@@ -2950,6 +2959,15 @@ struct MediaDetailSheet: View {
                 return nil
             case 53: // ESC：优先关闭当前弹窗，再关闭预览，最后返回详情栈
                 if CropAdjustOverlayController.shared.isAdjusting { return event }
+                // 详情页自身的 glassAlert 呈现中：放行 Esc 交给弹窗自己关闭，否则会直接 onClose()
+                if self.showError
+                    || self.showDeleteConfirm
+                    || self.showRedownloadConfirm
+                    || self.showDeleteBakeConfirm
+                    || self.showRemoveFrameInterpolationBlacklistConfirm
+                    || self.showSteamLoginRequiredAlert {
+                    return event
+                }
                 if DisplaySelectorManager.shared.isShowingSelector {
                     // 显示器选择弹窗盖在详情页上，Esc 先关它，不能直接退出详情页
                     DisplaySelectorManager.shared.handleCancel()
@@ -3036,6 +3054,7 @@ struct MediaDetailSheet: View {
             collectionTitle: item.collectionTitle,
             summary: item.summary,
             previewVideoURL: item.previewVideoURL,
+            previewVideoFallbackURL: item.previewVideoFallbackURL,
             posterURL: item.posterURL,
             tags: item.tags,
             exactResolution: item.exactResolution,
@@ -3150,6 +3169,38 @@ struct MediaDetailSheet: View {
         if message.count <= maxLength { return message }
         let endIndex = message.index(message.startIndex, offsetBy: maxLength)
         return String(message[..<endIndex]) + "\n\n[日志已截断，完整错误请查看控制台]"
+    }
+
+    /// 「媒体错误」弹窗按钮：屏幕录制权限类错误追加「打开系统设置」。
+    private var mediaErrorActions: [GlassAlertAction] {
+        var actions: [GlassAlertAction] = []
+        if errorNeedsScreenCaptureSettings {
+            actions.append(GlassAlertAction(t("sceneBake.permission.openSettings")) {
+                Self.openScreenCaptureSettings()
+            })
+        }
+        actions.append(GlassAlertAction(t("ok"), role: .cancel))
+        return actions
+    }
+
+    /// 屏幕录制权限类错误（App 侧枚举，或 CLI 透传的 stderr 文案）：这类失败要让用户能一步
+    /// 跳到授权页，否则只会拿到「未在限定时间内返回 Web 烘焙画面」这种无处下手的文案。
+    private static func isScreenCapturePermissionError(_ error: Error) -> Bool {
+        if (error as? SceneOfflineBakeError)?.isScreenCapturePermissionFailure == true { return true }
+        // CLI 的错误是跨进程按 stderr 文本回传的，这里只能做短语匹配。用完整短语是为了不把
+        // 「零帧」那条同样提到「屏幕录制权限」的文案误判成权限问题（避免把用户往系统设置引）。
+        return error.localizedDescription.contains("需要「屏幕录制」权限")
+    }
+
+    /// 打开「系统设置 → 隐私与安全性 → 屏幕录制」。深链在部分 macOS 版本上不被识别，失败退回设置首页。
+    private static func openScreenCaptureSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+           NSWorkspace.shared.open(url) {
+            return
+        }
+        if let fallback = URL(string: "x-apple.systempreferences:") {
+            NSWorkspace.shared.open(fallback)
+        }
     }
 
     private func presentWorkshopDownloadError(_ message: String) {
@@ -3504,7 +3555,7 @@ struct MediaDetailSheet: View {
         // 非实时 scene 且尚无烘焙产物：保留详情页「先烘再设」流程（会阻塞生成 MP4）
         // 纯静态 scene（渲染器 detect-static 判定）烘焙无意义，跳过 prefer-bake 直接实时应用
         let contentRoot = sceneEngineContentRoot(for: localURL)
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
         let hasUsableBake = SceneOfflineBakeService.usableArtifact(from: currentDownloadRecord) != nil
         let projectType = Self.projectTypeString(at: contentRoot)
         if projectType == "scene", !isRealtime, !hasUsableBake,
@@ -3791,7 +3842,7 @@ struct MediaDetailSheet: View {
                 if let path = WallpaperEngineXBridge.shared.currentWallpaperPathForDesign {
                     let hash = abs(path.hashValue)
                     let cacheKey = "cached_frame_\(hash)"
-                    if let cachedPath = UserDefaults.standard.string(forKey: cacheKey),
+                    if let cachedPath = WaifuXPreferences.shared.string(forKey: cacheKey),
                        FileManager.default.fileExists(atPath: cachedPath) {
                         imageURL = URL(fileURLWithPath: cachedPath)
                     }
@@ -4557,6 +4608,7 @@ struct MediaDetailSheet: View {
             collectionTitle: item.collectionTitle,
             summary: item.summary,
             previewVideoURL: item.previewVideoURL,
+            previewVideoFallbackURL: item.previewVideoFallbackURL,
             posterURL: item.posterURL,
             tags: item.tags,
             exactResolution: item.exactResolution,

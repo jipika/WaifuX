@@ -1704,6 +1704,9 @@ struct WallpaperDetailSheet: View {
                 return nil
             case 53: // ESC：优先关闭当前弹窗，再关闭预览，最后返回详情栈
                 if CropAdjustOverlayController.shared.isAdjusting { return event }
+                // 详情页自身的 glassAlert 呈现中：放行 Esc 交给弹窗（原生 alert 的 cancel role /
+                // 自绘卡片的 .cancelAction 快捷键）自己关闭，否则这里会直接 onClose() 把详情页一并关掉
+                if self.showError || self.showDeleteConfirm { return event }
                 if DisplaySelectorManager.shared.isShowingSelector {
                     // 显示器选择弹窗盖在详情页上，Esc 先关它，不能直接退出详情页
                     DisplaySelectorManager.shared.handleCancel()

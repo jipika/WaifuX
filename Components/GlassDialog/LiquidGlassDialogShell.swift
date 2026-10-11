@@ -24,6 +24,19 @@ struct GlassAlertAction: Identifiable {
         self.role = role
         self.handler = handler
     }
+
+    /// 走系统原生 alert 时的按钮 role 映射：cancel 让系统接管 Esc，destructive 走系统红字；
+    /// plain / primary 由系统按 alert 规则选默认按钮（不再由我们推断）
+    var nativeRole: ButtonRole? {
+        switch role {
+        case .cancel:
+            return .cancel
+        case .destructive:
+            return .destructive
+        case .plain, .primary:
+            return nil
+        }
+    }
 }
 
 // MARK: - 统一玻璃弹窗卡片
@@ -40,21 +53,21 @@ struct GlassAlertCard: View {
     @State private var appeared = false
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 14) {
             if let icon {
                 ZStack {
                     Circle()
                         .fill(iconTint.opacity(0.15))
-                        .frame(width: 46, height: 46)
+                        .frame(width: 40, height: 40)
 
                     Image(systemName: icon)
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(iconTint)
                 }
                 .liquidGlassSurface(.regular, tint: iconTint.opacity(0.12), in: Circle())
             }
 
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(LiquidGlassColors.textPrimary)
@@ -74,18 +87,12 @@ struct GlassAlertCard: View {
                 accessory
             }
 
-            VStack(spacing: 10) {
-                ForEach(Array(actions.enumerated()), id: \.offset) { index, action in
-                    alertButton(action, index: index) {
-                        fire(index)
-                    }
-                }
-            }
+            actionButtons
         }
-        .padding(24)
-        .frame(width: 340)
+        .padding(20)
+        .frame(width: 300)
         .liquidGlassSurface(.prominent, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: Color.black.opacity(0.3), radius: 28, y: 10)
+        .shadow(color: Color.black.opacity(0.3), radius: 20, y: 8)
         .scaleEffect(appeared ? 1.0 : 0.92)
         .opacity(appeared ? 1.0 : 0.0)
         .onAppear {
@@ -97,6 +104,31 @@ struct GlassAlertCard: View {
 
     // MARK: 按钮
 
+    /// 按钮区：两个按钮并排（对齐系统 alert 的双按钮形态），其余情况纵列
+    @ViewBuilder
+    private var actionButtons: some View {
+        if actions.count == 2 {
+            HStack(spacing: 8) {
+                button(at: 0)
+                button(at: 1)
+            }
+        } else {
+            VStack(spacing: 8) {
+                ForEach(Array(actions.enumerated()), id: \.offset) { index, action in
+                    alertButton(action, index: index) {
+                        fire(index)
+                    }
+                }
+            }
+        }
+    }
+
+    private func button(at index: Int) -> some View {
+        alertButton(actions[index], index: index) {
+            fire(index)
+        }
+    }
+
     @ViewBuilder
     private func alertButton(_ action: GlassAlertAction, index: Int, onTap: @escaping () -> Void) -> some View {
         let base = Button {
@@ -106,7 +138,7 @@ struct GlassAlertCard: View {
                 .font(.system(size: 13, weight: isDefaultAction(action) ? .semibold : .medium))
                 .foregroundStyle(buttonForeground(action))
                 .frame(maxWidth: .infinity)
-                .frame(height: 38)
+                .frame(height: 34)
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .liquidGlassSurface(
                     surfaceLevel(for: action),
