@@ -39,11 +39,23 @@ enum SystemFallbackImage {
     private static func decode(_ url: URL) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               CGImageSourceGetCount(source) > 0 else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        // A system HEIC can be much larger than a display. The emergency
+        // placeholder only needs a small thumbnail, including HDR sources.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false,
+            kCGImageSourceThumbnailMaxPixelSize: 1024,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              image.width > 0, image.width <= 1024, image.height > 0, image.height <= 1024 else { return nil }
+        let (bytes, overflow) = image.bytesPerRow.multipliedReportingOverflow(by: image.height)
+        return !overflow && bytes > 0 && bytes <= 16 * 1024 * 1024 ? image : nil
     }
 }
 
-/// 双检锁缓存（CGImage 非 Sendable，不能直接放进 OSAllocatedUnfairLock 的状态元组）。
+/// 一次性加载缓存，串行合并并发首次请求（CGImage 非 Sendable）。
 private final class FallbackImageCache: @unchecked Sendable {
     private let lock = NSLock()
     private var cachedImage: CGImage?
@@ -55,11 +67,9 @@ private final class FallbackImageCache: @unchecked Sendable {
             defer { lock.unlock() }
             return cachedImage
         }
-        lock.unlock()
-
+        // Compute once while holding the lock. Concurrent acquire requests must
+        // not each scan and decode the same fallback before resolved is set.
         let computed = SystemFallbackImage.loadFirstDecodableImage()
-
-        lock.lock()
         if !resolved {
             cachedImage = computed
             resolved = true

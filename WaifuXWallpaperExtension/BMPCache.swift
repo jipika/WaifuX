@@ -9,7 +9,7 @@
 //
 //  参考 Phosphene (MIT) 的实现。
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import CryptoKit
 import Foundation
 import ImageIO
@@ -41,8 +41,7 @@ func loadCachedSnapshotImage() -> CGImage? {
 
     guard let url = bmpURL else { return nil }
 
-    guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+    guard let cgImage = loadBudgetedSnapshotImage(url) else {
         extLog("  [InitContent] 解码缓存 BMP 失败: \(url.lastPathComponent)")
         return nil
     }
@@ -54,10 +53,39 @@ func loadCachedSnapshotImage() -> CGImage? {
 /// 将视频的第一帧以 BMP 格式写入 Agent 的缓存目录。
 /// 每个视频有自己的 BMP 文件（通过 videoID hash 键控），
 /// 确保 Agent 在视频之间切换时显示正确的缓存帧。
-func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: Int, displayPixelHeight: Int) async {
-    guard let cacheDir = WallpaperState.shared.cacheDirectoryURL else {
+private struct BMPSnapshotRequest: Equatable, Sendable {
+    let displayID: UInt32
+    let videoURL: URL
+    let videoID: String?
+    let displayPixelWidth: Int
+    let displayPixelHeight: Int
+    let cacheDirectory: URL
+}
+
+private let bmpSnapshotWork = LatestWallpaperSnapshotWork<BMPSnapshotRequest, Bool>(maximumReplies: 0, maximumKeys: 16,
+                                                                                 key: { $0.displayID }, cacheIf: { $0 },
+                                                                                 cacheLifetime: { _ in 60 }) { request in
+    await wallpaperSnapshotDecodeGate.perform { await writeBMPSnapshot(request) }
+}
+
+func requestBMPSnapshot(videoURL: URL, videoID: String? = nil, displayID: UInt32, displayPixelWidth: Int, displayPixelHeight: Int) {
+    guard let cacheDir = WallpaperState.shared.cacheDirectoryURL,
+          displayPixelWidth > 0, displayPixelHeight > 0 else { return }
+    bmpSnapshotWork.submit(BMPSnapshotRequest(displayID: displayID, videoURL: videoURL, videoID: videoID,
+                                            displayPixelWidth: displayPixelWidth, displayPixelHeight: displayPixelHeight,
+                                            cacheDirectory: cacheDir))
+}
+
+private func writeBMPSnapshot(_ request: BMPSnapshotRequest) async -> Bool {
+    guard !Task.isCancelled else { return false }
+    let videoURL = request.videoURL
+    let videoID = request.videoID
+    let displayPixelWidth = request.displayPixelWidth
+    let displayPixelHeight = request.displayPixelHeight
+    let cacheDir = request.cacheDirectory
+    guard WallpaperState.shared.cacheDirectoryURL == cacheDir else {
         extLog("  [BMPCache] 无 cacheDirectoryURL，跳过")
-        return
+        return false
     }
 
     let gained = cacheDir.startAccessingSecurityScopedResource()
@@ -65,40 +93,37 @@ func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: 
 
     guard gained else {
         extLog("  [BMPCache] 无法获取安全作用域资源访问")
-        return
+        return false
     }
 
     let hashHex = videoHash(for: videoID ?? videoURL.lastPathComponent)
 
-    // 检查现有 BMP 是否已匹配请求的尺寸
-    if let existing = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
-        for bmp in existing where bmp.pathExtension == "bmp" && bmp.lastPathComponent.hasPrefix(hashHex) {
-            let components = bmp.deletingPathExtension().lastPathComponent.components(separatedBy: "-")
-            if components.count == 5,
-               let existingW = Int(components[1]),
-               let existingH = Int(components[2]),
-               existingW == displayPixelWidth,
-               existingH == displayPixelHeight {
-                extLog("  [BMPCache] 现有 BMP 匹配 \(displayPixelWidth)x\(displayPixelHeight) for \(videoID ?? "?")，跳过")
-                return
-            }
-        }
-    }
-
+    // A display's instance ID can survive a video switch. Matching the existing
+    // filename/size cannot establish that its contents come from this video.
+    // The coordinator deduplicates the complete request instead.
     let asset = AVURLAsset(url: videoURL)
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
+    if #available(macOS 15.0, *) { generator.dynamicRangePolicy = .forceSDR }
+    generator.maximumSize = CGSize(width: WallpaperSnapshotPixelBudget.maximumVideoImageDimension,
+                                   height: WallpaperSnapshotPixelBudget.maximumVideoImageDimension)
 
     let cgImage: CGImage
     do {
-        cgImage = try await generator.image(at: .zero).image
+        cgImage = try await withTaskCancellationHandler(operation: {
+            try await generator.image(at: .zero).image
+        }, onCancel: { generator.cancelAllCGImageGeneration() })
     } catch {
         extLog("  [BMPCache] 获取视频帧失败: \(error)")
-        return
+        return false
     }
 
-    let width = cgImage.width
-    let height = cgImage.height
+    guard !Task.isCancelled,
+          WallpaperSnapshotPixelBudget.acceptsDecodedImage(width: cgImage.width, height: cgImage.height, bytesPerRow: cgImage.bytesPerRow),
+          let layout = WallpaperSnapshotPixelBudget.layout(width: Double(cgImage.width), height: Double(cgImage.height)) else { return false }
+
+    let width = layout.width
+    let height = layout.height
     let bytesPerPixel = 3 // 24bpp BGR
     let rawRowBytes = width * bytesPerPixel
     let paddedRowBytes = (rawRowBytes + 3) & ~3
@@ -126,15 +151,19 @@ func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: 
 
     guard rendered else {
         extLog("  [BMPCache] CGContext 渲染失败")
-        return
+        return false
     }
 
     // 转换 BGRA → BGR24 并添加行填充
-    var pixelData = Data(count: pixelDataSize)
+    let fileHeaderSize = 14
+    let dibHeaderSize = 40
+    let headerSize = fileHeaderSize + dibHeaderSize
+    let fileSize = headerSize + pixelDataSize
+    var bmp = Data(count: fileSize)
     bgraData.withUnsafeBytes { bgra in
-        pixelData.withUnsafeMutableBytes { bgr in
+        bmp.withUnsafeMutableBytes { bgr in
             let src = bgra.baseAddress!.assumingMemoryBound(to: UInt8.self)
-            let dst = bgr.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            let dst = bgr.baseAddress!.advanced(by: headerSize).assumingMemoryBound(to: UInt8.self)
             for y in 0 ..< height {
                 for x in 0 ..< width {
                     let si = y * bgraRowBytes + x * 4
@@ -148,13 +177,6 @@ func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: 
     }
 
     // 构建 BMP: 14 字节文件头 + 40 字节 BITMAPINFOHEADER + 像素数据
-    let fileHeaderSize = 14
-    let dibHeaderSize = 40
-    let headerSize = fileHeaderSize + dibHeaderSize
-    let fileSize = headerSize + pixelDataSize
-
-    var bmp = Data(count: headerSize)
-
     bmp[0] = 0x42; bmp[1] = 0x4D // "BM"
     bmpWriteLE32(&bmp, offset: 2, value: UInt32(fileSize))
     bmpWriteLE32(&bmp, offset: 10, value: UInt32(headerSize))
@@ -168,25 +190,34 @@ func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: 
     bmpWriteLE32(&bmp, offset: d + 16, value: 0) // BI_RGB
     bmpWriteLE32(&bmp, offset: d + 20, value: UInt32(pixelDataSize))
 
-    bmp.append(pixelData)
+    bgraData = Data()
+    guard !Task.isCancelled, WallpaperState.shared.cacheDirectoryURL == cacheDir else { return false }
 
     let timestamp = Date().timeIntervalSinceReferenceDate
     let timestampHex = String(format: "%016llx", timestamp.bitPattern)
     let filename = "\(hashHex)-\(displayPixelWidth)-\(displayPixelHeight)-0-\(timestampHex).bmp"
 
-    // 从缓存中删除此视频的旧 BMP 文件
-    if let contents = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
-        for file in contents where file.pathExtension == "bmp" && file.lastPathComponent.hasPrefix(hashHex) {
-            try? FileManager.default.removeItem(at: file)
-        }
-    }
-
     let bmpURL = cacheDir.appendingPathComponent(filename)
     do {
+        guard !Task.isCancelled else { return false }
         try bmp.write(to: bmpURL, options: .atomic)
         extLog("  [BMPCache] 已写入 \(bmp.count) 字节 → \(filename)")
     } catch {
         extLog("  [BMPCache] 写入失败: \(error)")
+        return false
+    }
+
+    // Preserve the previous fallback until the replacement is fully written.
+    // A cancelled decode must not remove the last usable snapshot.
+    guard !Task.isCancelled, WallpaperState.shared.cacheDirectoryURL == cacheDir else { return false }
+    // Two displays may use the same video ID at different native resolutions.
+    // Keep the other resolution's cache. Equal ID/resolution can share a BMP.
+    let matchingCachePrefix = "\(hashHex)-\(displayPixelWidth)-\(displayPixelHeight)-"
+    if let contents = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+        for file in contents where file != bmpURL && file.pathExtension == "bmp" && file.lastPathComponent.hasPrefix(matchingCachePrefix) {
+            guard !Task.isCancelled else { return false }
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     // 写入 cacheVersion.db
@@ -196,6 +227,7 @@ func writeBMPSnapshot(videoURL: URL, videoID: String? = nil, displayPixelWidth: 
     } catch {
         extLog("  [BMPCache] cacheVersion.db 失败: \(error)")
     }
+    return true
 }
 
 /// 为视频标识符生成一致的 hash 前缀。
