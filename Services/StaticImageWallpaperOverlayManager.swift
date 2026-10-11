@@ -26,6 +26,8 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 每个屏幕的静态图 overlay 窗口（key 为 screenID）
     private var imageWindows: [String: NSWindow] = [:]
+    private var remoteActiveScreens = Set<String>()
+    private var isTerminating = false
 
     /// 每个屏幕当前显示的图片 URL（内存镜像，供 refreshWindows 重建使用）
     private var imageByScreen: [String: URL] = [:]
@@ -40,6 +42,8 @@ final class StaticImageWallpaperOverlayManager {
     /// 每屏静态图源文件自带黑边的内容裁切框。只在全屏自动铺满模式下叠加。
     private var imageLetterboxContentCrops: [String: UnitRect] = [:]
     private var imageLetterboxAnalysisTasks: [String: Task<UnitRect?, Never>] = [:]
+    private var presentationRequests: [String: UUID] = [:]
+    private var imageLetterboxAnalysisTokens: [String: UUID] = [:]
     private var imageLetterboxCropCache: [String: UnitRect] = [:]
     private var imageLetterboxNoCropCache = Set<String>()
 
@@ -50,6 +54,17 @@ final class StaticImageWallpaperOverlayManager {
     private static let fingerprintStateKey = "static_image_overlay_fingerprint_state_v1"
 
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let self, let values = snapshot["staticOverlay"] as? [String: Any] else { return }
+                imageByScreen = (values["screens"] as? [String: String] ?? [:]).compactMapValues(URL.init(string:))
+                imageByScreenFingerprint = (values["fingerprints"] as? [String: String] ?? [:]).compactMapValues(URL.init(string:))
+                imageSizes = (values["sizes"] as? [String: [Double]] ?? [:]).compactMapValues { $0.count == 2 ? CGSize(width: $0[0], height: $0[1]) : nil }
+                remoteActiveScreens = Set(values["active"] as? [String] ?? [])
+                stateChangeSignal &+= 1
+            }
+            return
+        }
         // Space 切换后重新显示 overlay（desktop 级窗口可能被系统重排）
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -83,37 +98,71 @@ final class StaticImageWallpaperOverlayManager {
         )
     }
 
+    func backgroundSnapshot() -> [String: Any] {
+        ["screens": imageByScreen.mapValues(\.absoluteString), "fingerprints": imageByScreenFingerprint.mapValues(\.absoluteString), "sizes": imageSizes.mapValues { [$0.width, $0.height] }, "active": Array(imageWindows.keys)]
+    }
+
     // MARK: - 显示 / 隐藏
 
     /// 为所有屏幕显示同一张静态图，并持久化状态。
     func showAll(imageURL: URL) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        let requests = NSScreen.screens.map { ($0, beginPresentation(for: $0)) }
         Task { @MainActor in
-            await showAllPrepared(imageURL: imageURL)
+            for (screen, token) in requests {
+                await showPrepared(imageURL: imageURL, for: screen, token: token)
+            }
         }
     }
 
     /// 为所有屏幕显示同一张静态图：先完成黑边分析，再真正更新 overlay。
     func showAllPrepared(imageURL: URL) async {
-        for screen in NSScreen.screens {
-            await showPrepared(imageURL: imageURL, for: screen)
+        guard BackgroundRuntimeRole.isHelper else { return }
+
+        let requests = NSScreen.screens.map { ($0, beginPresentation(for: $0)) }
+        for (screen, token) in requests {
+            await showPrepared(imageURL: imageURL, for: screen, token: token)
         }
         persistState()
     }
 
     /// 为指定屏幕显示静态图（覆盖已有窗口），并持久化状态。
     func show(imageURL: URL, for screen: NSScreen) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        let token = beginPresentation(for: screen)
         Task { @MainActor in
-            await showPrepared(imageURL: imageURL, for: screen)
+            await showPrepared(imageURL: imageURL, for: screen, token: token)
         }
     }
 
     /// 为指定屏幕显示静态图：先完成黑边分析，再真正更新 overlay。
     func showPrepared(imageURL: URL, for screen: NSScreen) async {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        await showPrepared(imageURL: imageURL, for: screen, token: beginPresentation(for: screen))
+    }
+
+    private func beginPresentation(for screen: NSScreen) -> UUID {
+        let screenID = screen.wallpaperScreenIdentifier
+        invalidatePresentation(for: screenID)
+        let token = UUID()
+        presentationRequests[screenID] = token
+        return token
+    }
+
+    private func invalidatePresentation(for screenID: String) {
+        presentationRequests.removeValue(forKey: screenID)
+        imageLetterboxAnalysisTokens.removeValue(forKey: screenID)
+        imageLetterboxAnalysisTasks.removeValue(forKey: screenID)?.cancel()
+    }
+
+    private func showPrepared(imageURL: URL, for screen: NSScreen, token: UUID) async {
+        let screenID = screen.wallpaperScreenIdentifier
+        guard !isTerminating, !Task.isCancelled, presentationRequests[screenID] == token else { return }
+
         guard FileManager.default.fileExists(atPath: imageURL.path) else {
             print("[StaticImageOverlay] ⚠️ 图片不存在，跳过 overlay 显示: \(imageURL.path)")
             return
         }
-        let screenID = screen.wallpaperScreenIdentifier
         let screenFingerprint = screen.wallpaperScreenFingerprint
         guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
             AppLogger.error(.wallpaper, "Static overlay skipped because screen disconnected before prepare", metadata: [
@@ -142,6 +191,9 @@ final class StaticImageWallpaperOverlayManager {
         }
 
         let contentCrop = await imageLetterboxCropIfNeeded(screenID: screenID, imageURL: imageURL)
+        // hide/clear or even A -> B -> A supersedes this request. A URL check
+        // alone cannot stop an older analysis from resurrecting an overlay.
+        guard !isTerminating, !Task.isCancelled, presentationRequests[screenID] == token else { return }
         guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
             imageLetterboxContentCrops.removeValue(forKey: screenID)
             imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
@@ -179,7 +231,10 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 隐藏指定屏幕的 overlay（保留持久化记录，供下次 restoreIfNeeded 恢复）。
     func hide(for screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.hideScreen", ["screen": screen]); return }
+
         let screenID = screen.wallpaperScreenIdentifier
+        invalidatePresentation(for: screenID)
         if let window = imageWindows.removeValue(forKey: screenID) {
             window.orderOut(nil)
             window.contentView = nil
@@ -189,6 +244,8 @@ final class StaticImageWallpaperOverlayManager {
 
     /// 隐藏所有屏幕的 overlay（保留持久化记录）。
     func hideAll() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.hide", [:]); return }
+        for screenID in Array(presentationRequests.keys) { invalidatePresentation(for: screenID) }
         for (_, window) in imageWindows {
             window.orderOut(nil)
             window.contentView = nil
@@ -197,8 +254,16 @@ final class StaticImageWallpaperOverlayManager {
         stateChangeSignal &+= 1
     }
 
+    func prepareForProcessTermination() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        isTerminating = true
+        hideAll()
+    }
+
     /// 彻底清除持久化状态（切到视频/场景/web 或系统壁纸时调用）。
     func clearState() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.clear", [:]); return }
+
         imageByScreen.removeAll()
         imageByScreenFingerprint.removeAll()
         imageSizes.removeAll()
@@ -206,13 +271,15 @@ final class StaticImageWallpaperOverlayManager {
         for task in imageLetterboxAnalysisTasks.values { task.cancel() }
         imageLetterboxAnalysisTasks.removeAll()
         hideAll()
-        UserDefaults.standard.removeObject(forKey: Self.stateKey)
-        UserDefaults.standard.removeObject(forKey: Self.fingerprintStateKey)
+        WaifuXPreferences.shared.removeObject(forKey: Self.stateKey)
+        WaifuXPreferences.shared.removeObject(forKey: Self.fingerprintStateKey)
         stateChangeSignal &+= 1
     }
 
     /// 彻底清除指定屏幕的静态壁纸状态，不影响其它显示器。
     func clearState(for screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.clearScreen", ["screen": screen]); return }
+
         let screenID = screen.wallpaperScreenIdentifier
         let fingerprint = screen.wallpaperScreenFingerprint
         imageByScreen.removeValue(forKey: screenID)
@@ -233,18 +300,22 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     func hasActiveWallpaper(on screens: [NSScreen]) -> Bool {
-        screens.contains { screen in
+        if BackgroundRuntimeRole.isRemoteUI { return screens.contains { remoteActiveScreens.contains($0.wallpaperScreenIdentifier) } }
+        return screens.contains { screen in
             imageWindows[screen.wallpaperScreenIdentifier] != nil
         }
     }
 
     /// 该屏当前是否存在 overlay 窗口（渲染器健康巡检判断残留遮挡用）。
     func hasOverlayWindow(for screen: NSScreen) -> Bool {
-        imageWindows[screen.wallpaperScreenIdentifier] != nil
+        if BackgroundRuntimeRole.isRemoteUI { return remoteActiveScreens.contains(screen.wallpaperScreenIdentifier) }
+        return imageWindows[screen.wallpaperScreenIdentifier] != nil
     }
 
     /// 动态目标在后方加载时保持旧静态图可见，避免新 renderer 的未稳定首帧抢到前方。
     func keepPresentationFront(on screens: [NSScreen]) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         for screen in screens {
             guard let window = imageWindows[screen.wallpaperScreenIdentifier] else { continue }
             window.orderFrontRegardless()
@@ -272,6 +343,8 @@ final class StaticImageWallpaperOverlayManager {
 
     /// App 启动时调用：系统壁纸同步关闭且无活跃动态壁纸时，从持久化状态重建 overlay。
     func restoreIfNeeded() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         // 系统壁纸同步开启 → 走系统壁纸，不需要 overlay
         guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
             return
@@ -312,9 +385,7 @@ final class StaticImageWallpaperOverlayManager {
                 )
             guard let urlString, let url = URL(string: urlString) else { continue }
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            Task { @MainActor in
-                await showPrepared(imageURL: url, for: screen)
-            }
+            show(imageURL: url, for: screen)
             restored += 1
         }
         if restored > 0 {
@@ -324,6 +395,7 @@ final class StaticImageWallpaperOverlayManager {
 
     @discardableResult
     func restorePreviousImageIfAvailable(for screen: NSScreen) -> Bool {
+        guard BackgroundRuntimeRole.isHelper else { return false }
         guard !extensionOwnsDesktop(screen) else { return false }
         guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else { return false }
         guard !VideoWallpaperManager.shared.isVideoWallpaperActive else { return false }
@@ -347,9 +419,7 @@ final class StaticImageWallpaperOverlayManager {
             return false
         }
 
-        Task { @MainActor in
-            await showPrepared(imageURL: url, for: screen)
-        }
+        show(imageURL: url, for: screen)
         print("[StaticImageOverlay] Restored previous static wallpaper for reconnected display: \(screen.localizedName)")
         return true
     }
@@ -357,6 +427,8 @@ final class StaticImageWallpaperOverlayManager {
     /// Removes persistence for one disconnected display without touching the
     /// overlay windows or image registrations of other displays.
     func discardPersistedImageState(screenID: String, fingerprint: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.discard", ["id": screenID, "fingerprint": fingerprint]); return }
+        invalidatePresentation(for: screenID)
         imageByScreen.removeValue(forKey: screenID)
         imageByScreenFingerprint.removeValue(forKey: fingerprint)
         imageSizes.removeValue(forKey: screenID)
@@ -368,6 +440,7 @@ final class StaticImageWallpaperOverlayManager {
     // MARK: - 窗口创建
 
     private func createWindow(for screen: NSScreen, imageURL: URL) {
+        guard !isTerminating, BackgroundRuntimeRole.allowsDesktopRendering else { return }
         let screenID = screen.wallpaperScreenIdentifier
         let frame = screen.frame
 
@@ -475,7 +548,12 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     func refreshWindows() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.staticRefresh", [:]); return }
+
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
+        for screenID in Array(presentationRequests.keys) where !currentScreenIDs.contains(screenID) {
+            invalidatePresentation(for: screenID)
+        }
         AppLogger.error(.wallpaper, "Static overlay refresh windows", metadata: [
             "currentScreens": currentScreenIDs.joined(separator: ","),
             "windowScreens": imageWindows.keys.sorted().joined(separator: ","),
@@ -515,9 +593,7 @@ final class StaticImageWallpaperOverlayManager {
                     ])
                     continue
                 }
-                Task { @MainActor in
-                    await showPrepared(imageURL: imageURL, for: screen)
-                }
+                show(imageURL: imageURL, for: screen)
             } else if let imageURL = WallpaperScreenIdentity.value(
                 in: imageByScreenFingerprint,
                 forFingerprint: screen.wallpaperScreenFingerprint
@@ -530,9 +606,7 @@ final class StaticImageWallpaperOverlayManager {
                     ])
                     continue
                 }
-                Task { @MainActor in
-                    await showPrepared(imageURL: imageURL, for: screen)
-                }
+                show(imageURL: imageURL, for: screen)
             }
         }
     }
@@ -545,9 +619,12 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     func refreshAutoRemoveImageLetterbox() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.imageLetterbox", [:]); return }
+
         guard autoRemoveImageLetterboxEnabled else {
             for task in imageLetterboxAnalysisTasks.values { task.cancel() }
             imageLetterboxAnalysisTasks.removeAll()
+            imageLetterboxAnalysisTokens.removeAll()
             imageLetterboxContentCrops.removeAll()
             for screen in NSScreen.screens {
                 let screenID = screen.wallpaperScreenIdentifier
@@ -568,7 +645,7 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     private var autoRemoveImageLetterboxEnabled: Bool {
-        UserDefaults.standard.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
+        WaifuXPreferences.shared.object(forKey: "auto_remove_video_letterbox") as? Bool ?? false
     }
 
     func preparedSystemWallpaperURL(for imageURL: URL) async -> URL {
@@ -591,15 +668,16 @@ final class StaticImageWallpaperOverlayManager {
             return await existingTask.value
         }
 
+        let token = UUID()
         let task = Task.detached(priority: .utility) {
             await StaticImageLetterboxAnalyzer.analyze(url: imageURL)
         }
+        imageLetterboxAnalysisTokens[screenID] = token
         imageLetterboxAnalysisTasks[screenID] = task
         let crop = await task.value
-
-        if imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL {
-            self.imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
-        }
+        guard !task.isCancelled, imageLetterboxAnalysisTokens[screenID] == token else { return nil }
+        imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
+        imageLetterboxAnalysisTokens.removeValue(forKey: screenID)
         if let crop {
             imageLetterboxCropCache[cacheKey] = crop
         } else {
@@ -609,8 +687,10 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     private func refreshImageLetterboxCrop(screenID: String, imageURL: URL) async -> UnitRect? {
+        let presentationToken = presentationRequests[screenID]
         let crop = await imageLetterboxCropIfNeeded(screenID: screenID, imageURL: imageURL)
-        guard autoRemoveImageLetterboxEnabled else { return crop }
+        guard !Task.isCancelled, autoRemoveImageLetterboxEnabled,
+              presentationToken != nil, presentationRequests[screenID] == presentationToken else { return crop }
         guard imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL else {
             return crop
         }
@@ -642,21 +722,21 @@ final class StaticImageWallpaperOverlayManager {
         let dict = imageByScreen.mapValues { $0.absoluteString }
         let fpDict = imageByScreenFingerprint.mapValues { $0.absoluteString }
         if dict.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.stateKey)
+            WaifuXPreferences.shared.removeObject(forKey: Self.stateKey)
         } else if let data = try? JSONSerialization.data(withJSONObject: dict),
                   let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: Self.stateKey)
+            WaifuXPreferences.shared.set(str, forKey: Self.stateKey)
         }
         if fpDict.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.fingerprintStateKey)
+            WaifuXPreferences.shared.removeObject(forKey: Self.fingerprintStateKey)
         } else if let data = try? JSONSerialization.data(withJSONObject: fpDict),
                   let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: Self.fingerprintStateKey)
+            WaifuXPreferences.shared.set(str, forKey: Self.fingerprintStateKey)
         }
     }
 
     private func loadState() -> [String: String]? {
-        guard let str = UserDefaults.standard.string(forKey: Self.stateKey),
+        guard let str = WaifuXPreferences.shared.string(forKey: Self.stateKey),
               let data = str.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
             return nil
@@ -665,7 +745,7 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     private func loadFingerprintState() -> [String: String]? {
-        guard let str = UserDefaults.standard.string(forKey: Self.fingerprintStateKey),
+        guard let str = WaifuXPreferences.shared.string(forKey: Self.fingerprintStateKey),
               let data = str.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
             return nil
@@ -681,9 +761,7 @@ final class StaticImageWallpaperOverlayManager {
             guard let urlString = savedByFingerprint[fingerprint],
                   let url = URL(string: urlString),
                   FileManager.default.fileExists(atPath: url.path) else { continue }
-            Task { @MainActor in
-                await showPrepared(imageURL: url, for: screen)
-            }
+            show(imageURL: url, for: screen)
             restored += 1
         }
         if restored > 0 {
@@ -757,13 +835,27 @@ private enum StaticImageLetterboxAnalyzer {
     private static let overscanPixels = 2
 
     static func analyze(url: URL) async -> UnitRect? {
-        await Task.detached(priority: .utility) {
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        let task = Task.detached(priority: .utility) { () -> UnitRect? in
+            // Edge ratios need only a small sample. Decoding the full wallpaper
+            // and then making another RGBA copy can exceed gigabytes for scans.
+            guard !Task.isCancelled,
+                  let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 1_024,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceShouldAllowFloat: false
+                  ] as CFDictionary), !Task.isCancelled else {
                 return nil
             }
             return detectCropRect(in: image)
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     static func croppedImageFileURL(for url: URL) async -> URL? {

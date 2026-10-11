@@ -11,7 +11,7 @@ enum MigrationPhase: String, Codable {
 }
 
 /// 迁移阶段信息（用于 UI 展示）
-enum MigrationStep {
+enum MigrationStep: Codable, Sendable {
     case copying
     case updatingPaths
     case deleting
@@ -39,7 +39,7 @@ enum MigrationStep {
 
 // MARK: - 进度与结果
 
-struct MigrationProgress {
+struct MigrationProgress: Codable, Sendable {
     let step: MigrationStep
     let currentFileName: String
     let processedCount: Int
@@ -48,7 +48,7 @@ struct MigrationProgress {
     let fractionCompleted: Double
 }
 
-enum MigrationResult {
+enum MigrationResult: Codable, Sendable {
     case success(movedFiles: Int, deletedFiles: Int)
     case partial(successCount: Int, failCount: Int, errors: [String])
     case failure(error: String)
@@ -74,10 +74,19 @@ final class DirectoryMigrationService {
     static let shared = DirectoryMigrationService()
 
     private let stateKey = "migration_state_v1"
+    private(set) var isMigrating = false
     /// 每处理多少个文件回一次进度 + yield（平衡 UI 刷新与调度开销）
     private static let progressStride = 4
 
-    private init() {}
+    private var remoteProgressHandler: (@MainActor (MigrationProgress) -> Void)?
+    private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let bytes = snapshot["migration"] as? Data, let progress = try? JSONDecoder().decode(MigrationProgress.self, from: bytes) else { return }
+                self?.remoteProgressHandler?(progress)
+            }
+        }
+    }
 
     // MARK: - Public API
 
@@ -87,6 +96,25 @@ final class DirectoryMigrationService {
         to newRoot: URL,
         progressHandler: @escaping @MainActor (MigrationProgress) -> Void
     ) async -> MigrationResult {
+        if BackgroundRuntimeRole.isRemoteUI {
+            remoteProgressHandler = progressHandler
+            defer { remoteProgressHandler = nil }
+            do {
+                return try await BackgroundRuntimeBridge.requestCodable("directory.migrate.wait", arguments: BackgroundPropertyList.encode(["old": oldRoot.absoluteString, "new": newRoot.absoluteString]), resultKey: "result", as: MigrationResult.self)
+            } catch { return .failure(error: error.localizedDescription) }
+        }
+
+        guard !isMigrating else { return .failure(error: "目录迁移正在进行，请等待完成") }
+        let source = oldRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        let destination = newRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        guard source != destination,
+              !destination.hasPrefix(source + "/"),
+              !source.hasPrefix(destination + "/") else {
+            return .failure(error: "原目录与目标目录不能相同或相互包含")
+        }
+        isMigrating = true
+        defer { isMigrating = false }
+
         let oldPath = oldRoot.path
         let newPath = newRoot.path
 
@@ -156,6 +184,18 @@ final class DirectoryMigrationService {
         }
         updateCopiedCount(successCount)
 
+        // A partial copy is not a committed migration. Keep every library and
+        // playback reference on the readable source until the full copy succeeds.
+        // The destination copies can be reused on retry; the sources stay intact.
+        if failCount > 0 {
+            clearMigrationState()
+            print(
+                "[DirectoryMigrationService] Path updates and deletion skipped: "
+                    + "\(failCount)/\(totalCount) file(s) failed to copy; source left intact"
+            )
+            return .partial(successCount: successCount, failCount: failCount, errors: errors)
+        }
+
         // ── 阶段 B：更新路径记录 ──
         saveMigrationState(MigrationStateRecord(
             phase: .updatingPaths,
@@ -177,17 +217,7 @@ final class DirectoryMigrationService {
         )
 
         // ── 阶段 C：删除旧文件（后台 I/O）──
-        // 只有在复制零失败时才允许删源：外置盘掉线/空间不足/权限不足导致复制失败时
-        // 仍继续删源会直接丢数据，这正是「迁移后我的库变空白」的另一条路径
-        // （默认路径下 oldRoot 就是 ~/Library/Application Support/WaifuX）。
-        if failCount > 0 {
-            clearMigrationState()
-            print(
-                "[DirectoryMigrationService] Deletion skipped: "
-                    + "\(failCount)/\(totalCount) file(s) failed to copy; source left intact"
-            )
-            return .partial(successCount: successCount, failCount: failCount, errors: errors)
-        }
+        // Copy failures return before any paths are committed or sources deleted.
 
         saveMigrationState(MigrationStateRecord(
             phase: .deleting,
@@ -202,7 +232,7 @@ final class DirectoryMigrationService {
             let batch = Array(filesToMigrate[start..<end])
 
             let batchDeleted = await Task.detached(priority: .userInitiated) {
-                Self.deleteBatch(batch)
+                Self.deleteVerifiedBatch(batch, from: oldRoot, verifiedAgainst: newRoot)
             }.value
             deletedCount += batchDeleted
 
@@ -235,20 +265,22 @@ final class DirectoryMigrationService {
             handler: progressHandler
         )
 
-        // 迁移完成，清除状态
-        clearMigrationState()
-
-        if failCount == 0 {
-            return .success(movedFiles: successCount, deletedFiles: deletedCount)
-        } else {
-            return .partial(successCount: successCount, failCount: failCount, errors: errors)
+        // The target may be unplugged or modified after copying. Keep both
+        // the remaining sources and the deletion checkpoint until verified.
+        guard deletedCount == totalCount else {
+            return .partial(successCount: successCount,
+                            failCount: totalCount - deletedCount,
+                            errors: ["部分原文件未删除：目标副本缺失、内容不同或删除失败，已保留原文件和恢复记录"])
         }
+        clearMigrationState()
+        return .success(movedFiles: successCount, deletedFiles: deletedCount)
     }
 
     // MARK: - 中断恢复（启动时调用）
 
     /// 检查是否有未完成的迁移，根据阶段决定回滚或继续
     func recoverIncompleteMigrationIfNeeded() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
         guard let record = loadMigrationState() else { return }
 
         let oldURL = URL(fileURLWithPath: record.oldPath)
@@ -267,16 +299,24 @@ final class DirectoryMigrationService {
             _ = await migrate(from: oldURL, to: newURL, progressHandler: { _ in })
 
         case .deleting:
-            // 路径已更新到新目录，只需继续删除旧文件
+            guard !isMigrating else { return }
+            isMigrating = true
+            defer { isMigrating = false }
+            // The destination can disappear between sessions (for example an
+            // unplugged drive). Verify each copy before deleting its source.
             print("[DirectoryMigrationService] Resuming deletion of old files at \(record.oldPath)")
-            clearMigrationState()
-            await Self.deleteFilesAsync(at: oldURL)
+            if await Self.deleteFilesAsync(at: oldURL, verifiedAgainst: newURL) {
+                clearMigrationState()
+            } else {
+                print("[DirectoryMigrationService] Recovery kept source files and checkpoint: destination copy missing or different")
+            }
         }
     }
 
     // MARK: - 修复孤儿路径
 
     func repairOrphanedPathsIfNeeded() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
         guard DownloadPathManager.shared.hasCustomRoot else { return }
 
         let defaultRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -336,7 +376,7 @@ final class DirectoryMigrationService {
 
     // MARK: - 数据修复
 
-    struct RepairResult {
+    struct RepairResult: Codable, Sendable {
         var repairedCount: Int = 0
         var removedCount: Int = 0
         var healthyCount: Int = 0
@@ -346,6 +386,9 @@ final class DirectoryMigrationService {
 
     /// 修复已有下载记录的断裂路径，并显式扫描受管目录补建未知文件的记录。
     func repairBrokenRecords() async -> RepairResult {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return (try? await BackgroundRuntimeBridge.requestCodable("directory.repair.wait", arguments: Data(), resultKey: "result", as: RepairResult.self)) ?? RepairResult()
+        }
         let fm = FileManager.default
         var result = RepairResult()
 
@@ -504,17 +547,17 @@ final class DirectoryMigrationService {
 
     private func saveMigrationState(_ record: MigrationStateRecord) {
         if let data = try? JSONEncoder().encode(record) {
-            UserDefaults.standard.set(data, forKey: stateKey)
+            WaifuXPreferences.shared.set(data, forKey: stateKey)
         }
     }
 
     private func loadMigrationState() -> MigrationStateRecord? {
-        guard let data = UserDefaults.standard.data(forKey: stateKey) else { return nil }
+        guard let data = WaifuXPreferences.shared.data(forKey: stateKey) else { return nil }
         return try? JSONDecoder().decode(MigrationStateRecord.self, from: data)
     }
 
     private func clearMigrationState() {
-        UserDefaults.standard.removeObject(forKey: stateKey)
+        WaifuXPreferences.shared.removeObject(forKey: stateKey)
     }
 
     private func updateCopiedCount(_ count: Int) {
@@ -532,20 +575,23 @@ final class DirectoryMigrationService {
     }
 
     /// 后台异步删除目录下所有文件（不阻塞主线程）
-    private nonisolated static func deleteFilesAsync(at root: URL) async {
+    private nonisolated static func deleteFilesAsync(at root: URL, verifiedAgainst destination: URL) async -> Bool {
         let files = collectFiles(at: root)
         let stride = 16
+        var complete = true
         for start in Swift.stride(from: 0, to: files.count, by: stride) {
             let end = min(start + stride, files.count)
             let batch = Array(files[start..<end])
-            await Task.detached(priority: .utility) {
-                _ = Self.deleteBatch(batch)
+            let deleted = await Task.detached(priority: .utility) {
+                Self.deleteVerifiedBatch(batch, from: root, verifiedAgainst: destination)
             }.value
+            if deleted != batch.count { complete = false }
             await Task.yield()
         }
         await Task.detached(priority: .utility) {
             Self.cleanupEmptyDirectories(at: root)
         }.value
+        return complete
     }
 
     nonisolated private static func copyBatch(
@@ -556,7 +602,11 @@ final class DirectoryMigrationService {
         let fm = FileManager.default
         var outcome = CopyBatchOutcome()
         for sourceURL in sources {
-            let relative = relativePath(from: sourceURL, base: oldRoot)
+            guard let relative = relativePath(from: sourceURL, base: oldRoot) else {
+                outcome.failCount += 1
+                outcome.errors.append("\(sourceURL.lastPathComponent): 文件不属于原目录")
+                continue
+            }
             let destURL = newRoot.appendingPathComponent(relative)
             let fileName = sourceURL.lastPathComponent
             do {
@@ -578,10 +628,20 @@ final class DirectoryMigrationService {
         return outcome
     }
 
-    nonisolated private static func deleteBatch(_ sources: [URL]) -> Int {
+    nonisolated private static func deleteVerifiedBatch(
+        _ sources: [URL], from root: URL, verifiedAgainst destination: URL
+    ) -> Int {
         let fm = FileManager.default
         var deleted = 0
         for sourceURL in sources {
+            guard let relative = relativePath(from: sourceURL, base: root) else { continue }
+            let target = destination.appendingPathComponent(relative)
+            guard relativePath(from: target, base: destination) == relative,
+                  let sourceValues = try? sourceURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  sourceValues.isRegularFile == true, sourceValues.isSymbolicLink != true,
+                  let targetValues = try? target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  targetValues.isRegularFile == true, targetValues.isSymbolicLink != true,
+                  fm.contentsEqual(atPath: sourceURL.path, andPath: target.path) else { continue }
             do {
                 try fm.removeItem(at: sourceURL)
                 deleted += 1
@@ -612,20 +672,24 @@ final class DirectoryMigrationService {
         return files
     }
 
-    nonisolated private static func relativePath(from url: URL, base: URL) -> String {
-        let basePath = base.path.hasSuffix("/") ? base.path : base.path + "/"
-        let fullPath = url.path
+    nonisolated private static func relativePath(from url: URL, base: URL) -> String? {
+        // Directory enumeration may return /private/var while the selected root
+        // still uses /var. Compare canonical paths and retain the full hierarchy.
+        let root = base.resolvingSymlinksInPath().standardizedFileURL.path
+        let basePath = root.hasSuffix("/") ? root : root + "/"
+        let fullPath = url.resolvingSymlinksInPath().standardizedFileURL.path
         if fullPath.hasPrefix(basePath) {
             return String(fullPath.dropFirst(basePath.count))
         }
-        return url.lastPathComponent
+        return nil
     }
 
     nonisolated private static func cleanupEmptyDirectories(at root: URL) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: root.path) else { return }
         func cleanup(_ url: URL) {
-            guard fm.fileExists(atPath: url.path) else { return }
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true else { return }
             do {
                 let contents = try fm.contentsOfDirectory(atPath: url.path)
                 for name in contents {

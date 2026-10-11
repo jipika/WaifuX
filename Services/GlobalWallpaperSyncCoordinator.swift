@@ -77,6 +77,7 @@ final class GlobalWallpaperSyncCoordinator {
     }
 
     private struct PendingRequest {
+        let id: UUID
         let snapshot: Snapshot
         let animatedTransition: Bool
         let continuation: CheckedContinuation<Bool, Error>
@@ -103,9 +104,11 @@ final class GlobalWallpaperSyncCoordinator {
     private var lastSuccessfulSnapshot: Snapshot?
     private var pendingRequests: [PendingRequest] = []
     private var activeTask: Task<Void, Never>?
+    private var activeRequestID: UUID?
+    private var isStopping = false
 
     private init() {
-        guard let data = UserDefaults.standard.data(forKey: Self.stateKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: Self.stateKey),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data),
               FileManager.default.fileExists(atPath: snapshot.localPath) else {
             return
@@ -122,6 +125,8 @@ final class GlobalWallpaperSyncCoordinator {
         localURL: URL,
         options: LocalWallpaperApplyService.Options
     ) async throws -> Bool {
+        try Task.checkCancellation()
+        guard !isStopping else { throw CancellationError() }
         let snapshot = Snapshot(
             localPath: localURL.standardizedFileURL.path,
             muted: options.muted,
@@ -131,20 +136,46 @@ final class GlobalWallpaperSyncCoordinator {
             reason: options.reason
         )
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingRequests.append(PendingRequest(
-                snapshot: snapshot,
-                animatedTransition: options.animatedTransition,
-                continuation: continuation
-            ))
-            startNextRequestIfNeeded()
+        let id = UUID()
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingRequests.append(PendingRequest(
+                    id: id,
+                    snapshot: snapshot,
+                    animatedTransition: options.animatedTransition,
+                    continuation: continuation
+                ))
+                startNextRequestIfNeeded()
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in self?.cancelRequest(id) }
+        })
+    }
+
+    /// A cancelled caller must not leave a detached wallpaper transaction in
+    /// the queue. The active request completes its own continuation exactly once.
+    private func cancelRequest(_ id: UUID) {
+        if activeRequestID == id {
+            activeTask?.cancel()
+        } else if let index = pendingRequests.firstIndex(where: { $0.id == id }) {
+            pendingRequests.remove(at: index).continuation.resume(throwing: CancellationError())
         }
+    }
+
+    func prepareForProcessExit() {
+        isStopping = true
+        let abandoned = pendingRequests
+        pendingRequests.removeAll()
+        for request in abandoned { request.continuation.resume(throwing: CancellationError()) }
+        activeTask?.cancel()
     }
 
     /// Called when the user turns global sync on while wallpapers may already
     /// differ per display. Prefer the durable last success; otherwise capture
     /// the primary screen's live wallpaper, including bake metadata when known.
     func synchronizeCurrentWallpaperAfterEnabling() {
+        guard !isStopping else { return }
         if let lastSuccessfulSnapshot,
            FileManager.default.fileExists(atPath: lastSuccessfulSnapshot.localPath) {
             Task {
@@ -170,6 +201,7 @@ final class GlobalWallpaperSyncCoordinator {
     /// Re-broadcast the last successful global wallpaper to the current screen
     /// set after a display is connected (or the set otherwise grows).
     func reapplyToConnectedDisplays() {
+        guard !isStopping else { return }
         guard !NSScreen.screens.isEmpty else { return }
 
         if let lastSuccessfulSnapshot,
@@ -201,8 +233,9 @@ final class GlobalWallpaperSyncCoordinator {
     }
 
     private func startNextRequestIfNeeded() {
-        guard activeTask == nil, !pendingRequests.isEmpty else { return }
+        guard !isStopping, activeTask == nil, !pendingRequests.isEmpty else { return }
         let request = pendingRequests.removeFirst()
+        activeRequestID = request.id
         activeTask = Task { [weak self] in
             guard let self else {
                 request.continuation.resume(throwing: CancellationError())
@@ -217,11 +250,14 @@ final class GlobalWallpaperSyncCoordinator {
             }
 
             self.activeTask = nil
+            self.activeRequestID = nil
             self.startNextRequestIfNeeded()
         }
     }
 
     private func perform(_ request: PendingRequest) async throws -> Bool {
+        try Task.checkCancellation()
+        guard !isStopping else { throw CancellationError() }
         guard FileManager.default.fileExists(atPath: request.snapshot.localPath) else {
             throw LocalWallpaperApplyService.ApplyError.missingFile(request.snapshot.localPath)
         }
@@ -241,29 +277,35 @@ final class GlobalWallpaperSyncCoordinator {
                 targetScreens: targetScreens,
                 options: options
             )
+            try Task.checkCancellation()
+            guard !isStopping else { throw CancellationError() }
             guard applied else { throw TransactionError.applicationReturnedFalse }
             lastSuccessfulSnapshot = request.snapshot
             persistLastSuccessfulSnapshot()
             return true
         } catch {
+            // Quit/caller cancellation is terminal. Rolling back here would
+            // create new windows/players after the exit cleanup has started.
+            if error is CancellationError || Task.isCancelled || isStopping { throw CancellationError() }
             guard let rollbackSnapshot,
                   rollbackSnapshot.localPath != request.snapshot.localPath,
                   FileManager.default.fileExists(atPath: rollbackSnapshot.localPath) else {
                 throw error
             }
             do {
-                _ = try await LocalWallpaperApplyService.apply(
+                let rolledBack = try await LocalWallpaperApplyService.apply(
                     localURL: rollbackSnapshot.localURL,
                     targetScreens: NSScreen.screens,
                     options: rollbackSnapshot.options(isGlobalTransaction: true)
                 )
-                throw error
+                try Task.checkCancellation()
+                guard !isStopping else { throw CancellationError() }
+                guard rolledBack else { throw TransactionError.applicationReturnedFalse }
             } catch let rollbackError {
-                if rollbackError.localizedDescription == error.localizedDescription {
-                    throw error
-                }
+                if rollbackError is CancellationError || Task.isCancelled || isStopping { throw CancellationError() }
                 throw TransactionError.rollbackFailed(original: error, rollback: rollbackError)
             }
+            throw error
         }
     }
 
@@ -317,9 +359,9 @@ final class GlobalWallpaperSyncCoordinator {
     private func persistLastSuccessfulSnapshot() {
         guard let lastSuccessfulSnapshot,
               let data = try? JSONEncoder().encode(lastSuccessfulSnapshot) else {
-            UserDefaults.standard.removeObject(forKey: Self.stateKey)
+            WaifuXPreferences.shared.removeObject(forKey: Self.stateKey)
             return
         }
-        UserDefaults.standard.set(data, forKey: Self.stateKey)
+        WaifuXPreferences.shared.set(data, forKey: Self.stateKey)
     }
 }
