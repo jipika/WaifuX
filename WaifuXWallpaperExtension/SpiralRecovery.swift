@@ -3,12 +3,12 @@
 //
 //  背景（macOS 27 实测）：WallpaperAgent 偶发进入「空连接螺旋」——不断接受
 //  XPC 连接却不发任何方法调用就断开（2026-09-24 18:03 同时观察到 snapshot
-//  连续 NSCocoaErrorDomain 4101）。正常操作永远不会产生连续空连接：每个真实
-//  连接至少服务一个方法，会把计数清零。因此连续 4 次空连接只能是真螺旋。
+//  连续 NSCocoaErrorDomain 4101）。连续空连接可作为健康检查线索；服务过实际
+//  方法的连接会把计数清零。达到阈值并不等于已确认系统宿主失效。
 //
-//  动作：发 Darwin 通知给主 App（App 内 WallpaperExtensionAgentHealer 监听
-//  后 killall WallpaperAgent；launchd 立即拉起新 agent，新 agent 重建壁纸
-//  管线时必然重新 acquire 本扩展）。扩展自己无权重启宿主。
+//  动作：发 Darwin 通知给后台 Helper 的 WallpaperExtensionAgentHealer，
+//  由它执行带存活检查与退避的安全健康检查。不会重启 WallpaperAgent，
+//  也不会因本信号重注册仍存活的扩展；系统是否重新 acquire 由系统决定。
 //
 //  参考：kageroumado/phosphene PhospheneExtension/SpiralRecovery.swift (MIT)
 
@@ -16,13 +16,13 @@ import Foundation
 import os
 
 enum SpiralRecovery {
-    /// 主 App 的 WallpaperExtensionAgentHealer 监听此通知后 killall WallpaperAgent。
+    /// Helper 的 WallpaperExtensionAgentHealer 监听此通知并执行安全健康检查。
     static let agentStuckNotification = "com.waifux.app.wallpaper.agentStuck"
 
-    /// 触发自愈的连续空连接数。压低阈值是为了在 RunningBoard 挂起我们之前出手。
+    /// 发出健康检查信号的连续空连接数。
     private static let emptyThreshold = 4
 
-    /// 两次自愈信号的最小间隔（agent kill + 重拉需要几秒）。
+    /// 两次健康检查信号的最小间隔，避免连续空连接造成通知风暴。
     private static let recoveryCooldown: TimeInterval = 20.0
 
     /// 连续空连接计数。withLock 返回自增后的值，决策放锁外。
@@ -55,7 +55,7 @@ enum SpiralRecovery {
             }
         }
         try? Data("\(Date().timeIntervalSince1970)".utf8).write(to: lastRecoveryURL)
-        extLog("  [spiral] STUCK — \(count) consecutive empty connections from agent pid \(pid), no acquire. Signaling app to killall WallpaperAgent.")
+        extLog("  [spiral] \(count) consecutive empty connections from agent pid \(pid), no acquire. Requesting a safe Helper health check.")
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
             CFNotificationName(agentStuckNotification as CFString),

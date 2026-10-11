@@ -1,5 +1,5 @@
 //  WallpaperExtensionAgentHealer.swift
-//  扩展保活（App 内置，无额外常驻服务）——参考 Phosphene 的自愈设计
+//  扩展保活（App 内置，无额外常驻服务）
 //
 //  背景（2026-09-24 18:23 日志实锤）：macOS 27 的 pkd 会自发
 //  「remove all extension instances: caller = pkd」，杀掉
@@ -7,23 +7,8 @@
 //  interruption 后 runtime-resolver 判「Computed lifecycle action nothing」，
 //  ≥3 小时不重新拉载，桌面静默死掉。
 //
-//  旧的 WallpaperExtensionKeeper（独立 LaunchAgent + lsregister/pluginkit
-//  序列）退役：注册工具操作本身可能唤醒 pkd 清点插件库，且 revive 验证窗口
-//  实测不稳定（150s 内经常拉不起来）。macOS 26 时代「不 killall WallpaperAgent」
-//  的铁律针对的是「扩展还活着时重启会回收健康实例」；如今扩展已被 pkd 杀死，
-//  重启 agent 是唯一出路，且 agent 启动必然重新 acquire 扩展，不碰 pluginkit。
-//
-//  新方案（Phosphene 验证的路线，全部在 App 进程内）：
-//  1. 30s 周期检查：系统壁纸仍选中我们的扩展 && 扩展进程连续 2 个周期不存在
-//     → killall WallpaperAgent。launchd 立即拉起新 agent，新 agent 重建壁纸
-//     管线时必然重新 acquire 扩展（全程不做任何 lsregister/pluginkit 写操作）。
-//  2. 监听扩展侧 SpiralRecovery 的 agentStuck Darwin 通知（agent 空连接螺旋，
-//     扩展还活着但被晾死）→ 同样 killall WallpaperAgent。
-//  3. 20s 冷却 + 验证窗口 90s（keeper 实测 agent 重拉载 75–90s）+
-//     失败指数退避（30s → 600s 封顶）。
-//
-//  参考：kageroumado/phosphene (MIT) —— SpiralRecovery 的 Darwin 通知 +
-//  README「auto-heals by restarting the agent」。
+//  仅当系统选中我们的扩展，且扩展进程连续缺失时，用 Keeper 的安全注册
+//  序列尝试恢复。绝不重启 WallpaperAgent，也不碰仍然存活的扩展实例。
 
 import Foundation
 import os
@@ -42,29 +27,37 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
     private let pollInterval: TimeInterval = 30
     private let confirmTicks = 2                 // 连续 2 个周期进程都缺失才动手（防 proc 表抖动）
     private let healCooldown: TimeInterval = 20  // Phosphene 同款最小信号间隔
-    private let verifyWindow: TimeInterval = 90  // agent 重启后等待扩展重新拉载的窗口
+    private let verifyWindow: TimeInterval = 150 // 与 Keeper 的拉载验证窗口一致
     private let backoffBase: TimeInterval = 30
     private let backoffCap: TimeInterval = 600
 
     // MARK: 状态
     private let stateLock = NSLock()
     private var started = false
+    private var pollTimer: Timer?
     private var consecutiveMissing = 0
     private var lastHealAt: Date?
     private var pendingVerifySince: Date?
     private var backoffDelay: TimeInterval = 0
+    private var healInProgress = false
+    private var embeddedExtensionURL: URL?
+    private var lifecycleGeneration: UInt64 = 0
 
     private init() {}
 
     // MARK: - 启动（幂等；主线程调用，Timer 挂 main RunLoop）
 
     func start() {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         stateLock.lock()
         if started {
             stateLock.unlock()
             return
         }
         started = true
+        lifecycleGeneration &+= 1
+        embeddedExtensionURL = WaifuXHostBundle.bundleURL
+            .appendingPathComponent("Contents/PlugIns/WaifuXWallpaperExtension.appex", isDirectory: true)
         stateLock.unlock()
 
         installDarwinObserver()
@@ -72,8 +65,23 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.tick()
         }
+        pollTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         os_log(.info, log: log, "ExtensionHealer started (poll=%{public}llds)", Int(pollInterval))
+    }
+
+    func stop() {
+        stateLock.lock()
+        started = false
+        lifecycleGeneration &+= 1
+        consecutiveMissing = 0
+        pendingVerifySince = nil
+        healInProgress = false
+        let timer = pollTimer
+        pollTimer = nil
+        stateLock.unlock()
+        timer?.invalidate()
+        CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque())
     }
 
     // MARK: - Darwin 通知（扩展 agentStuck）
@@ -95,13 +103,17 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
     }
 
     fileprivate func handleAgentStuckSignal() {
-        // 扩展侧已连续 4 次空连接实锤 agent 螺旋，无需防抖确认
+        // 扩展仍在运行时不能执行注册；这里只允许进程已消失时尝试恢复。
         heal(reason: "spiral-signal-from-extension")
     }
 
     // MARK: - 周期检查
 
     private func tick() {
+        stateLock.lock()
+        let isStarted = started
+        stateLock.unlock()
+        guard isStarted else { return }
         let selection = WallpaperStoreSelectionProbe.currentSelection()
         guard selection == .selected else {
             // 用户没选我们（或读不到 Index.plist），一切归零
@@ -135,7 +147,13 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
     // MARK: - 自愈动作
 
     private func heal(reason: String) {
+        guard WallpaperStoreSelectionProbe.currentSelection() == .selected,
+              extensionProcessPids().isEmpty else { return }
         stateLock.lock()
+        if !started || healInProgress || pendingVerifySince != nil {
+            stateLock.unlock()
+            return
+        }
         if let last = lastHealAt {
             let elapsed = Date().timeIntervalSince(last)
             let cooldown = healCooldown + backoffDelay
@@ -146,13 +164,33 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
             }
         }
         let now = Date()
+        guard let extensionURL = embeddedExtensionURL else {
+            stateLock.unlock()
+            return
+        }
         lastHealAt = now
         pendingVerifySince = now
+        healInProgress = true
+        let generation = lifecycleGeneration
         stateLock.unlock()
 
-        os_log(.info, log: log, "extension dead while selected (%{public}@) → killall WallpaperAgent", reason)
-        let ok = killWallpaperAgent()
-        os_log(.info, log: log, "killall WallpaperAgent %{public}@", ok ? "done" : "failed")
+        os_log(.info, log: log, "extension missing while selected (%{public}@) → safe registration", reason)
+        DispatchQueue.global(qos: .utility).async { [weak self, extensionURL] in
+            guard let self else { return }
+            let ok = WallpaperExtensionKeeper.reviveExtension(at: extensionURL, shouldContinue: { [weak self] in
+                self?.isCurrentHealingGeneration(generation) == true
+            })
+            self.stateLock.lock()
+            if self.lifecycleGeneration == generation { self.healInProgress = false }
+            self.stateLock.unlock()
+            os_log(.info, log: self.log, "safe extension registration %{public}@", ok ? "succeeded" : "failed")
+        }
+    }
+
+    private func isCurrentHealingGeneration(_ generation: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return started && lifecycleGeneration == generation
     }
 
     private func verifySuccessIfPending() {
@@ -185,21 +223,6 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
     }
 
     // MARK: - 系统探查
-
-    private func killWallpaperAgent() -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        p.arguments = ["WallpaperAgent"]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-            p.waitUntilExit()
-            return p.terminationStatus == 0
-        } catch {
-            return false
-        }
-    }
 
     /// 扩展进程枚举（与 keeper 同款 libproc 实现）。桌面实例与锁屏实例共用同一
     /// 可执行名，任何实例存活都算活着——绝不误杀健康 agent。

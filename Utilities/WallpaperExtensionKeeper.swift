@@ -118,6 +118,11 @@ enum WallpaperExtensionKeeper {
         }, excludingPID: getpid())
     }
 
+    /// Registration wakes pkd and can remove a healthy extension instance.
+    static func isExtensionProcessRunning() -> Bool {
+        !processPids(matching: { $0.hasSuffix(extensionExecutableSuffix) }).isEmpty
+    }
+
     private static func processPids(
         matching predicate: (String) -> Bool,
         excludingPID excluded: pid_t? = nil
@@ -149,26 +154,41 @@ enum WallpaperExtensionKeeper {
     /// 重新注册内嵌扩展，触发 WallpaperAgent 重新拉载。
     /// 与 WaifuXApp 启动 repair 的注册序列一致（lsregister -f → pluginkit -a → -e use）。
     static func reviveExtension() -> Bool {
-        let extensionURL = Bundle.main.bundleURL
+        let extensionURL = WaifuXHostBundle.bundleURL
             .appendingPathComponent("Contents/PlugIns/WaifuXWallpaperExtension.appex", isDirectory: true)
+        return reviveExtension(at: extensionURL)
+    }
+
+    static func reviveExtension(at extensionURL: URL, shouldContinue: @Sendable () -> Bool = { true }) -> Bool {
+        guard !BackgroundRuntimeRole.isIsolatedTest, shouldContinue() else { return false }
         guard FileManager.default.fileExists(atPath: extensionURL.path) else {
             keeperLog("embedded appex missing at \(extensionURL.path)")
             return false
         }
 
+        guard WallpaperStoreSelectionProbe.currentSelection() == .selected else {
+            keeperLog("extension no longer selected — skip registration")
+            return false
+        }
+
         // revive 前最后一道闸：注册操作会触发 pkd remove all instances，
         // 对存活扩展执行等于亲手触发本案凶器，因此此刻仍确认扩展不在才动手。
-        guard processPids(matching: { $0.hasSuffix(extensionExecutableSuffix) }).isEmpty else {
+        guard !isExtensionProcessRunning() else {
             keeperLog("extension appeared just before revive — skip registration")
             return true
         }
+        guard shouldContinue() else { return false }
 
         runTool(
             "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
             arguments: ["-f", extensionURL.path],
             label: "lsregister"
         )
+        guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
+        guard !isExtensionProcessRunning() else { return true }
         runTool("/usr/bin/pluginkit", arguments: ["-a", extensionURL.path], label: "pluginkit add")
+        guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
+        guard !isExtensionProcessRunning() else { return true }
         runTool(
             "/usr/bin/pluginkit",
             arguments: ["-e", "use", "-i", extensionBundleID],
@@ -177,6 +197,7 @@ enum WallpaperExtensionKeeper {
 
         var waited: UInt32 = 0
         while waited < reviveVerifyWindowSeconds {
+            guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
             sleep(5)
             waited += 5
             if !processPids(matching: { $0.hasSuffix(extensionExecutableSuffix) }).isEmpty {
