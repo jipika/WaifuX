@@ -3912,6 +3912,7 @@ private enum WebOfflineBakeError: LocalizedError {
     case writerFailed(String)
     case captureFailed
     case streamCaptureFailed(String)
+    case screenCapturePermissionDenied
 
     var errorDescription: String? {
         switch self {
@@ -3920,6 +3921,8 @@ private enum WebOfflineBakeError: LocalizedError {
         case .writerFailed(let message): return message
         case .captureFailed: return "无法从 Web 渲染器捕获画面"
         case .streamCaptureFailed(let message): return message
+        case .screenCapturePermissionDenied:
+            return "需要「屏幕录制」权限才能烘焙 Web 壁纸：请到「系统设置 → 隐私与安全性 → 屏幕录制」中勾选 WaifuX，勾选后重启应用再试"
         }
     }
 }
@@ -4087,7 +4090,10 @@ private final class WebRealtimeStreamRecorder: NSObject, SCStreamOutput, SCStrea
                 return
             }
             self.finish(.failure(
-                WebOfflineBakeError.streamCaptureFailed("ScreenCaptureKit 未在限定时间内返回 Web 烘焙画面")
+                WebOfflineBakeError.streamCaptureFailed(
+                    "ScreenCaptureKit 未在限定时间内返回 Web 烘焙画面"
+                        + "（可能是屏幕录制权限未生效，或烘焙窗口未被系统合成；windowID=\(self.options.windowID)）"
+                )
             ))
         }
     }
@@ -4558,6 +4564,14 @@ private final class WebOfflineBakeRunner {
               options.duration > 0,
               requestedFPSIsValid else {
             finish(.failure(WebOfflineBakeError.invalidArguments("烘焙尺寸、帧率或时长无效")))
+            return
+        }
+
+        // 缺「屏幕录制」权限时 SCStream 仍能建起来，但一帧都收不到，最终只会报「未在限定
+        // 时间内返回 Web 烘焙画面」这种误导性文案；这里提前查，直接给可操作的错误。
+        // 本进程不做 CGRequestScreenCaptureAccess：CLI 没有 UI，系统弹窗会归因到宿主进程。
+        guard CGPreflightScreenCaptureAccess() else {
+            finish(.failure(WebOfflineBakeError.screenCapturePermissionDenied))
             return
         }
 
@@ -5577,46 +5591,48 @@ private func writePID(_ pid: Int32) {
 }
 
 private func readPID() -> Int32? {
-    guard let text = try? String(contentsOfFile: PID_PATH, encoding: .utf8),
-          let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
-    return pid
+    OwnedDaemonPIDFile.readPID(at: URL(fileURLWithPath: PID_PATH))
+}
+
+private func daemonIdentity() -> OwnedProcessIdentity? {
+    OwnedDaemonPIDFile.identity(at: URL(fileURLWithPath: PID_PATH),
+                               expectedExecutables: [URL(fileURLWithPath: CommandLine.arguments[0])])
 }
 
 private func isDaemonRunning() -> Bool {
-    guard let pid = readPID() else { return false }
-    return kill(pid, 0) == 0
+    daemonIdentity()?.stillMatches() == true
 }
 
 private func stopDaemonIfRunning() {
+    let pidFile = URL(fileURLWithPath: PID_PATH)
+    let priorPID = readPID()
+    let identity = daemonIdentity()
     // 1. 尝试通过 socket 发送优雅停止命令
-    if FileManager.default.fileExists(atPath: SOCKET_PATH) {
+    if identity != nil, FileManager.default.fileExists(atPath: SOCKET_PATH) {
         _ = Client.send(IPCMessage(command: .stop, path: nil, screen: nil))
         Thread.sleep(forTimeInterval: 0.2)
     }
-    // 2. 如果 PID 文件存在且进程还在，先 SIGTERM 它并等待退出（避免 pkill 误伤未来的新进程）
-    if let pid = readPID(), kill(pid, 0) == 0 {
-        kill(pid, SIGTERM)
+    // 2. 只结束相同 UID、出生时间、执行文件与 daemon 参数的进程。
+    // 数字 PID 文件可能已过期，不能向复用了该 PID 的其他软件发信号。
+    if let identity, identity.stillMatches() {
+        identity.signal(SIGCONT)
+        identity.signal(SIGTERM)
         // 轮询等待旧进程退出，最多 1.5 秒
         for _ in 0..<15 {
             Thread.sleep(forTimeInterval: 0.1)
-            if kill(pid, 0) != 0 { break }
+            if !identity.stillMatches() { break }
         }
         // 如果还在，再 SIGKILL
-        if kill(pid, 0) == 0 {
-            kill(pid, SIGKILL)
+        if identity.signal(SIGKILL) {
             Thread.sleep(forTimeInterval: 0.2)
         }
     }
-    // 3. 兜底：pkill 清理可能残留的同名进程（此时应无新进程）
-    let pkill = Process()
-    pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-    pkill.arguments = ["-f", "wallpaperengine-cli daemon"]
-    try? pkill.run()
-    pkill.waitUntilExit()
-    // 4. 清理文件
-    removeSocket()
-    if FileManager.default.fileExists(atPath: PID_PATH) {
-        try? FileManager.default.removeItem(atPath: PID_PATH)
+    // 3. 不使用全局同名 pkill，也不删除刚刚被新 daemon 替换的文件。
+    if let priorPID, readPID() == priorPID {
+        removeSocket()
+        OwnedDaemonPIDFile.remove(at: pidFile, ifPIDMatches: priorPID)
+    } else if priorPID == nil, readPID() == nil {
+        removeSocket()
     }
 }
 
@@ -6345,16 +6361,7 @@ struct WallpaperEngineCLI {
 
     private static func startDaemonProcess() {
         // 清理可能残留的旧 daemon 进程和文件
-        let pkill = Process()
-        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        pkill.arguments = ["-f", "wallpaperengine-cli daemon"]
-        try? pkill.run()
-        pkill.waitUntilExit()
-
-        removeSocket()
-        if FileManager.default.fileExists(atPath: PID_PATH) {
-            try? FileManager.default.removeItem(atPath: PID_PATH)
-        }
+        stopDaemonIfRunning()
 
         let executable = CommandLine.arguments[0]
         let task = Process()

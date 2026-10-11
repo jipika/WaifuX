@@ -40,6 +40,7 @@ public final class WallpaperWebAudioRelay {
     // MARK: - 状态
 
     private var referenceCount: Int = 0
+    private let captureOwner = UUID()
     private var cancellable: AnyCancellable?
     private var lastSendNs: UInt64 = 0
     private var lastSilentSendNs: UInt64 = 0
@@ -53,7 +54,7 @@ public final class WallpaperWebAudioRelay {
     public func start() {
         referenceCount += 1
         guard referenceCount == 1 else { return }
-        SystemAudioCaptureService.shared.start()
+        SystemAudioCaptureService.shared.acquire(owner: captureOwner)
         cancellable = SystemAudioCaptureService.shared.spectrum64Publisher
             .sink { [weak self] spectrum in
                 self?.handle(spectrum)
@@ -67,7 +68,7 @@ public final class WallpaperWebAudioRelay {
         guard referenceCount == 0 else { return }
         cancellable?.cancel()
         cancellable = nil
-        SystemAudioCaptureService.shared.stop()
+        SystemAudioCaptureService.shared.release(owner: captureOwner)
         lastSendNs = 0
         lastSilentSendNs = 0
         silentSinceNs = nil

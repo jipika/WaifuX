@@ -11,6 +11,8 @@ enum SceneOfflineBakeError: LocalizedError {
     case contentRootMissing
     case insufficientMemory
     case concurrentBakeInProgress
+    /// 屏幕录制权限未授予：Web 烘焙依赖 ScreenCaptureKit 抓合成器帧，缺权限时流能启动但收不到帧。
+    case screenCapturePermissionRequired
     case bakeProcessFailed(String)
 
     var errorDescription: String? {
@@ -21,8 +23,15 @@ enum SceneOfflineBakeError: LocalizedError {
         case .contentRootMissing: return "内容目录不存在，请重新下载"
         case .insufficientMemory: return LocalizationService.shared.t("sceneBake.error.insufficientMemory.bake")
         case .concurrentBakeInProgress: return LocalizationService.shared.t("sceneBake.error.concurrent")
+        case .screenCapturePermissionRequired: return LocalizationService.shared.t("sceneBake.error.screenCapturePermission")
         case .bakeProcessFailed(let msg): return msg
         }
+    }
+
+    /// 屏幕录制权限类失败：UI 需要额外给「打开系统设置」入口。
+    var isScreenCapturePermissionFailure: Bool {
+        if case .screenCapturePermissionRequired = self { return true }
+        return false
     }
 }
 
@@ -308,12 +317,12 @@ actor OfflineBakeSerialQueue {
 final class SceneOfflineBakeProgressTracker {
     static let shared = SceneOfflineBakeProgressTracker()
 
-    enum State: Equatable {
+    enum State: Equatable, Codable {
         case queued
         case running
     }
 
-    struct Entry: Identifiable, Equatable {
+    struct Entry: Identifiable, Equatable, Codable {
         let id: UUID
         let itemID: String?
         let persistentJob: PersistentOfflineBakeJob?
@@ -330,6 +339,20 @@ final class SceneOfflineBakeProgressTracker {
     private var claimedRestoredJobIDs = Set<UUID>()
 
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI || BackgroundRuntimeRole.isIsolatedTest {
+            entries = []
+            if BackgroundRuntimeRole.isRemoteUI {
+                BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                    guard let self, let bytes = snapshot["bakes"] as? Data, let entries = try? JSONDecoder().decode([Entry].self, from: bytes) else { return }
+                    let oldEntries = self.entries
+                    self.entries = entries
+                    for entry in entries { self.notifyProgress(itemID: entry.itemID, progress: entry.progress) }
+                    for entry in oldEntries where !entries.contains(where: { $0.id == entry.id }) { self.notifyProgress(itemID: entry.itemID, progress: 1) }
+                }
+            }
+            return
+        }
+
         let restoredJobs = OfflineBakeQueueCheckpointStore.shared.load()
         entries = restoredJobs.map {
             Entry(
@@ -430,6 +453,7 @@ final class SceneOfflineBakeProgressTracker {
     }
 
     private func persistPendingJobs() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         OfflineBakeQueueCheckpointStore.shared.save(entries.compactMap(\.persistentJob))
     }
 
@@ -680,7 +704,7 @@ enum SceneOfflineBakeService {
         if let requestedFPS {
             selectedFPS = Double(requestedFPS)
         } else {
-            let savedFPS = UserDefaults.standard.double(forKey: "scene_bake_fps")
+            let savedFPS = WaifuXPreferences.shared.double(forKey: "scene_bake_fps")
             selectedFPS = savedFPS >= 15 ? savedFPS : 30
         }
         return Int32(min(max(selectedFPS, 15), maximumBakeFPS))
@@ -765,6 +789,7 @@ enum SceneOfflineBakeService {
     /// 递增代数并终止 in-flight bake 进程。在每次壁纸应用入口调用。
     @MainActor
     static func cancelRealtimeCompanionBake(reason: String) {
+        guard BackgroundRuntimeRole.isHelper else { return }
         companionBakeGenerationLock.lock()
         _companionBakeGeneration &+= 1
         companionBakeGenerationLock.unlock()
@@ -781,7 +806,8 @@ enum SceneOfflineBakeService {
 
     @MainActor
     static func scheduleRealtimeCompanionBake(path: String, targetScreens: [NSScreen]? = nil, reason: String) {
-        let autoBakeEnabled = UserDefaults.standard.bool(forKey: "auto_bake_scene")
+        guard BackgroundRuntimeRole.isHelper else { return }
+        let autoBakeEnabled = WaifuXPreferences.shared.bool(forKey: "auto_bake_scene")
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
         guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
             print("[SceneOfflineBake] realtime companion bake skipped (\(reason)): not a scene project \(contentRoot.path)")
@@ -2158,12 +2184,24 @@ enum SceneOfflineBakeService {
         companionGeneration: UInt? = nil,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var values: [String: Any] = ["eligibility": try JSONEncoder().encode(eligibility), "root": contentRoot.absoluteString, "cacheID": cacheItemID, "renderer": renderer.rawValue, "companion": isCompanion]
+            values["duration"] = durationSeconds
+            values["fps"] = fps.map { Int($0) }
+            values["itemID"] = persistArtifactToItemID
+            values["progressItemID"] = progressItemID
+            values["title"] = displayTitle
+            let artifact = try await BackgroundRuntimeBridge.requestCodable("bake.scene.wait", arguments: BackgroundPropertyList.encode(values), resultKey: "artifact", as: SceneBakeArtifact.self)
+            await progress?(1)
+            return artifact
+        }
+
         let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
         let effectiveDuration: Double
         if let durationSeconds {
             effectiveDuration = durationSeconds
         } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+            let saved = WaifuXPreferences.shared.double(forKey: "scene_bake_duration")
             effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
         }
         let trackedItemID = progressItemID ?? persistArtifactToItemID
@@ -2261,6 +2299,7 @@ enum SceneOfflineBakeService {
     /// UUID is reused so recovery does not create a second visible queue item.
     @MainActor
     static func resumePersistedBakeQueue() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
         let jobs = SceneOfflineBakeProgressTracker.shared.pendingPersistentJobs
         guard !jobs.isEmpty else { return }
 
@@ -2931,12 +2970,21 @@ enum SceneOfflineBakeService {
         renderer: SceneBakeRenderer = .wallpaperWgpu,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var values: [String: Any] = ["record": try JSONEncoder().encode(record), "renderer": renderer.rawValue]
+            values["duration"] = durationSeconds
+            values["fps"] = fps.map { Int($0) }
+            let artifact = try await BackgroundRuntimeBridge.requestCodable("bake.record.wait", arguments: BackgroundPropertyList.encode(values), resultKey: "artifact", as: SceneBakeArtifact.self)
+            await progress?(1)
+            return artifact
+        }
+
         let effectiveFPS = resolvedBakeFPS(requestedFPS: fps)
         let effectiveDuration: Double
         if let durationSeconds {
             effectiveDuration = durationSeconds
         } else {
-            let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+            let saved = WaifuXPreferences.shared.double(forKey: "scene_bake_duration")
             effectiveDuration = saved >= 5 ? min(max(saved, 5), 60) : 15
         }
         let eligibility: SceneBakeEligibilitySnapshot

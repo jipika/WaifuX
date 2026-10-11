@@ -221,7 +221,7 @@ enum VideoFrameInterpolationAnalyzer {
     }
 }
 
-struct FrameInterpolationQueueItem: Identifiable, Equatable {
+struct FrameInterpolationQueueItem: Identifiable, Equatable, Codable {
     enum Operation: String, CaseIterable, Codable, Hashable {
         // Keep the previous raw value so existing optimization history remains decodable.
         case loopTransition = "loopAnalysis"
@@ -235,7 +235,7 @@ struct FrameInterpolationQueueItem: Identifiable, Equatable {
         }
     }
 
-    enum Status: Equatable {
+    enum Status: Equatable, Codable {
         case waiting
         case analyzing
         case running
@@ -347,7 +347,7 @@ struct FrameInterpolationRecordItem: Identifiable, Equatable, Codable {
 }
 
 
-struct VideoOptimizationAutomaticPolicy: Equatable {
+struct VideoOptimizationAutomaticPolicy: Equatable, Codable {
     /// 下载 / 烘焙完成后是否自动「优化视频」。
     /// 与手动入口一致：先循环分析，再补帧（Scene bake 产物跳过循环分析）。
     var automaticallyOptimizeVideos: Bool
@@ -377,7 +377,7 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// 兼容旧属性名：映射到统一自动优化开关。
     @Published var autoInterpolateOnDownload: Bool {
         didSet {
-            UserDefaults.standard.set(autoInterpolateOnDownload, forKey: Self.autoOnDownloadKey)
+            WaifuXPreferences.shared.set(autoInterpolateOnDownload, forKey: Self.autoOnDownloadKey)
         }
     }
 
@@ -408,15 +408,36 @@ final class VideoOptimizationQueueService: ObservableObject {
     private static let legacyAutoAnalyzeLoopKey = "auto_analyze_loop_point"
     private static let historyKey = "video_optimization_history_v1"
 
+    func backgroundSnapshot() -> Data {
+        (try? BackgroundPropertyList.encode([
+            "items": JSONEncoder().encode(items),
+            "completed": JSONEncoder().encode(completedInterpolationItems),
+            "blacklisted": JSONEncoder().encode(blacklistedInterpolationItems),
+            "history": JSONEncoder().encode(history),
+            "policy": JSONEncoder().encode(automaticPolicy)
+        ])) ?? Data()
+    }
+
+    private func receiveBackgroundSnapshot(_ snapshot: [String: Any]) {
+        guard let bytes = snapshot["optimization"] as? Data, let values = try? BackgroundPropertyList.decode(bytes) else { return }
+        if let data = values["items"] as? Data, let decoded = try? JSONDecoder().decode([FrameInterpolationQueueItem].self, from: data) { items = decoded }
+        if let data = values["completed"] as? Data, let decoded = try? JSONDecoder().decode([FrameInterpolationRecordItem].self, from: data) { completedInterpolationItems = decoded }
+        if let data = values["blacklisted"] as? Data, let decoded = try? JSONDecoder().decode([FrameInterpolationRecordItem].self, from: data) { blacklistedInterpolationItems = decoded }
+        if let data = values["history"] as? Data, let decoded = try? JSONDecoder().decode([VideoOptimizationHistoryRecord].self, from: data) { history = decoded }
+    }
+
     private init() {
         // 不在单例初始化阶段读取 UserDefaults。macOS 26+ 上启动早期读偏好设置
         // 可能触发 _CFXPreferences 递归；真实设置由 SettingsViewModel 延迟恢复后同步过来。
         self.autoInterpolateOnDownload = false
         self.autoEnqueueEnabled = false
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.observe { [weak self] snapshot in self?.receiveBackgroundSnapshot(snapshot) } }
     }
 
     /// 由设置页恢复偏好后调用（兼容旧签名）。
     func applySettings(autoOnDownload: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.applySettings0", ["autoOnDownload": autoOnDownload]); return }
+
         applySettings(
             automaticPolicy: VideoOptimizationAutomaticPolicy(
                 automaticallyOptimizeVideos: autoOnDownload,
@@ -427,14 +448,16 @@ final class VideoOptimizationQueueService: ObservableObject {
 
     /// 统一自动优化策略：开关打开后按「循环分析 → 补帧」入队（与手动优化一致）。
     func applySettings(automaticPolicy: VideoOptimizationAutomaticPolicy) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.applySettings1", ["automaticPolicy": try? JSONEncoder().encode(automaticPolicy)]); return }
+
         self.automaticPolicy = automaticPolicy
         autoInterpolateOnDownload = automaticPolicy.automaticallyOptimizeVideos
         autoEnqueueEnabled = automaticPolicy.automaticallyOptimizeVideos
-        UserDefaults.standard.set(automaticPolicy.automaticallyOptimizeVideos, forKey: Self.autoOnDownloadKey)
+        WaifuXPreferences.shared.set(automaticPolicy.automaticallyOptimizeVideos, forKey: Self.autoOnDownloadKey)
         // 旧双开关一并同步，避免其它路径读到分叉状态。
-        UserDefaults.standard.set(automaticPolicy.automaticallyOptimizeVideos, forKey: Self.legacyAutoAnalyzeLoopKey)
+        WaifuXPreferences.shared.set(automaticPolicy.automaticallyOptimizeVideos, forKey: Self.legacyAutoAnalyzeLoopKey)
         // 清理旧的「切换壁纸时自动补帧」开关，避免再被读回。
-        UserDefaults.standard.set(false, forKey: Self.legacyAutoEnqueueKey)
+        WaifuXPreferences.shared.set(false, forKey: Self.legacyAutoEnqueueKey)
         restoreQueueCheckpointIfNeeded()
     }
 
@@ -537,6 +560,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         videoURL: URL,
         title: String? = nil
     ) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueAutomaticOptimizationIfNeeded", ["videoURL": videoURL, "title": title]); return nil }
+
         let policy = automaticPolicy
         guard policy.automaticallyOptimizeVideos else { return nil }
         guard videoURL.isFileURL,
@@ -612,6 +637,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// remain available.
     @discardableResult
     func enqueueAfterBakeIfNeeded(videoURL: URL, title: String? = nil) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueAfterBakeIfNeeded", ["videoURL": videoURL, "title": title]); return nil }
+
         let policy = automaticPolicy
         guard videoURL.isFileURL,
               FileManager.default.fileExists(atPath: videoURL.path) else {
@@ -682,6 +709,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// Registers a completed download as a new optimization origin. A re-download
     /// must not inherit terminal states from the previous optimized file.
     func registerDownloadedSource(videoURL: URL, sourceURL: URL? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.registerDownloadedSource", ["videoURL": videoURL, "sourceURL": sourceURL]); return }
+
         resetOptimizationState(videoURL: videoURL)
         VideoOptimizationRecordStore.shared.recordDownloadedSource(for: videoURL, sourceURL: sourceURL)
     }
@@ -693,6 +722,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         sourcePath: String,
         artifact: SceneBakeArtifact
     ) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.registerBakedSource", ["videoURL": videoURL, "sourcePath": sourcePath, "artifact": try? JSONEncoder().encode(artifact)]); return }
+
         VideoOptimizationRecordStore.shared.recordBakeArtifact(
             for: videoURL,
             sourcePath: sourcePath,
@@ -703,6 +734,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// Clears in-flight queue work and the adjacent sidecar so a replaced source
     /// can start a fresh lifecycle.
     func resetOptimizationState(videoURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.resetOptimizationState", ["videoURL": videoURL]); return }
+
         let standardizedURL = videoURL.standardizedFileURL
         let matchingIDs = items.compactMap { item in
             item.videoURL.standardizedFileURL == standardizedURL ? item.id : nil
@@ -729,6 +762,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         title: String? = nil,
         operations: [FrameInterpolationQueueItem.Operation]
     ) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.requestAfterSourceRestore", ["videoURL": videoURL, "title": title, "operations": operations.map(\.rawValue)]); return }
+
         let ops = normalizedOperations(operations)
         guard !ops.isEmpty else { return }
         sourceRestoreRequests[videoURL.standardizedFileURL.path] = .enqueue(
@@ -741,6 +776,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     func cancelSourceRestoreRequest(videoURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.cancelSourceRestoreRequest", ["videoURL": videoURL]); return }
+
         sourceRestoreRequests.removeValue(forKey: videoURL.standardizedFileURL.path)
         persistQueueCheckpointImmediately()
     }
@@ -767,6 +804,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueOptimizeVideo", ["videoURL": videoURL, "title": title, "targetFPS": targetFPS, "source": source.rawValue]); return nil }
+
         let fps = FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(
             targetFPS ?? FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
         )
@@ -821,7 +860,9 @@ final class VideoOptimizationQueueService: ObservableObject {
         title: String? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> UUID? {
-        enqueue(
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueLoopTransition", ["videoURL": videoURL, "title": title, "source": source.rawValue]); return nil }
+
+        return enqueue(
             videoURL: videoURL,
             title: title,
             targetFPS: FrameInterpolationTargetFPSResolver.targetFPSForManualAction(),
@@ -837,7 +878,9 @@ final class VideoOptimizationQueueService: ObservableObject {
         title: String? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> UUID? {
-        enqueueLoopTransition(videoURL: videoURL, title: title, source: source)
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueLoopAnalysis", ["videoURL": videoURL, "title": title, "source": source.rawValue]); return nil }
+
+        return enqueueLoopTransition(videoURL: videoURL, title: title, source: source)
     }
 
     /// Explicit frame interpolation without a preceding loop step.
@@ -849,6 +892,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueFrameInterpolation", ["videoURL": videoURL, "title": title, "targetFPS": targetFPS, "source": source.rawValue]); return nil }
+
         let fps = FrameInterpolationTargetFPSResolver.nearestAllowedFixedFPS(
             targetFPS ?? FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
         )
@@ -900,7 +945,9 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> UUID? {
-        enqueueOptimizeVideo(
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueLoopTransitionThenInterpolation", ["videoURL": videoURL, "title": title, "targetFPS": targetFPS, "source": source.rawValue]); return nil }
+
+        return enqueueOptimizeVideo(
             videoURL: videoURL,
             title: title,
             targetFPS: targetFPS,
@@ -914,6 +961,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int,
         reason: String
     ) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.markInterpolationNotNeeded", ["videoURL": videoURL, "title": title, "targetFPS": targetFPS, "reason": reason]); return }
+
         ensureInterpolationRecordsLoaded()
         let record = makeInterpolationRecord(videoURL: videoURL, title: title, targetFPS: targetFPS)
         _ = VideoOptimizationRecordStore.shared.removeEvents(
@@ -963,6 +1012,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> [UUID] {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueFolder", ["folderURL": folderURL, "operation": operation.rawValue, "targetFPS": targetFPS, "source": source.rawValue]); return [] }
+
         let extensions = Set(["mp4", "mov", "m4v", "mkv"])
         guard let enumerator = FileManager.default.enumerator(
             at: folderURL,
@@ -989,6 +1040,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         targetFPS: Int? = nil,
         source: FrameInterpolationQueueItem.Source = .manual
     ) -> [UUID] {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueLibraryFolder", ["folder": try? JSONEncoder().encode(folder), "targetFPS": targetFPS, "source": source.rawValue]); return [] }
+
         let effectiveTargetFPS = targetFPS ?? FrameInterpolationTargetFPSResolver.targetFPSForManualAction()
         let targets = libraryOptimizationTargets(in: folder)
         for target in targets {
@@ -1080,6 +1133,8 @@ final class VideoOptimizationQueueService: ObservableObject {
         videoURL: URL,
         title: String? = nil
     ) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.enqueueAfterDownloadIfNeeded", ["videoURL": videoURL, "title": title]); return nil }
+
         let path = videoURL.standardizedFileURL.path
         if let request = sourceRestoreRequests.removeValue(forKey: path) {
             persistQueueCheckpointImmediately()
@@ -1235,6 +1290,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     func removeCompleted(videoURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.removeCompleted", ["videoURL": videoURL]); return }
+
         ensureInterpolationRecordsLoaded()
         _ = VideoOptimizationRecordStore.shared.removeEvents(
             matching: [.frameApplied, .frameNotNeeded],
@@ -1246,6 +1303,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     func markBlacklisted(videoURL: URL, title: String, targetFPS: Int) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.markBlacklisted", ["videoURL": videoURL, "title": title, "targetFPS": targetFPS]); return }
+
         ensureInterpolationRecordsLoaded()
         let record = makeInterpolationRecord(videoURL: videoURL, title: title, targetFPS: targetFPS)
         _ = VideoOptimizationRecordStore.shared.removeEvents(
@@ -1268,6 +1327,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     func removeBlacklisted(videoURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.removeBlacklisted", ["videoURL": videoURL]); return }
+
         ensureInterpolationRecordsLoaded()
         _ = VideoOptimizationRecordStore.shared.removeEvents(
             matching: [.frameBlacklisted],
@@ -1286,6 +1347,13 @@ final class VideoOptimizationQueueService: ObservableObject {
         source: FrameInterpolationQueueItem.Source,
         operations: [FrameInterpolationQueueItem.Operation] = [.frameInterpolation]
     ) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI {
+            guard videoURL.isFileURL, FileManager.default.fileExists(atPath: videoURL.path) else { return nil }
+            let requestedID = UUID()
+            BackgroundRuntimeBridge.send("optimization.enqueue", ["url": videoURL, "title": title, "fps": targetFPS, "source": source.rawValue, "operations": operations.map(\.rawValue), "requestedID": requestedID.uuidString])
+            return requestedID
+        }
+
         guard targetFPS > 0 else { return nil }
         guard videoURL.isFileURL,
               FileManager.default.fileExists(atPath: videoURL.path) else {
@@ -1702,6 +1770,8 @@ final class VideoOptimizationQueueService: ObservableObject {
 
     /// 取消等待或正在执行的任务。取消不会影响同队列中的其它视频。
     func cancel(id: UUID) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.cancel", ["id": id.uuidString]); return }
+
         if let task = runningTasks[id] {
             task.cancel()
             return
@@ -1712,6 +1782,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// 仅重试失败任务；成功和主动取消不会被隐式重新执行。
     @discardableResult
     func retry(historyID: UUID) -> UUID? {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("optimization.retry", ["historyID": historyID.uuidString]); return nil }
+
         ensureHistoryLoaded()
         guard let record = history.first(where: { $0.id == historyID }),
               record.outcome == .failed else {
@@ -1959,6 +2031,7 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     private func restoreQueueCheckpointIfNeeded() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         guard !didRestoreQueueCheckpoint else { return }
         didRestoreQueueCheckpoint = true
 
@@ -2001,6 +2074,7 @@ final class VideoOptimizationQueueService: ObservableObject {
     /// every terminal removal flushes immediately so completed work cannot be
     /// resurrected after a relaunch.
     private func scheduleQueueCheckpointSave() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         queueCheckpointSaveTask?.cancel()
         let itemSnapshot = items
         let sourceRestoreSnapshot = Array(sourceRestoreRequests.values)
@@ -2015,6 +2089,8 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     private func persistQueueCheckpointImmediately() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         queueCheckpointSaveTask?.cancel()
         VideoOptimizationQueueCheckpointStore.shared.save(
             items,
@@ -2144,7 +2220,7 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     private static func loadInterpolationRecords(key: String) -> [FrameInterpolationRecordItem] {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = WaifuXPreferences.shared.data(forKey: key),
               let records = try? JSONDecoder().decode([FrameInterpolationRecordItem].self, from: data) else {
             return []
         }
@@ -2153,14 +2229,14 @@ final class VideoOptimizationQueueService: ObservableObject {
 
     private static func saveInterpolationRecords(_ records: [FrameInterpolationRecordItem], key: String) {
         if let data = try? JSONEncoder().encode(records) {
-            UserDefaults.standard.set(data, forKey: key)
+            WaifuXPreferences.shared.set(data, forKey: key)
         }
     }
 
     private func ensureHistoryLoaded() {
         guard !historyLoaded else { return }
         defer { historyLoaded = true }
-        guard let data = UserDefaults.standard.data(forKey: Self.historyKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: Self.historyKey),
               let records = try? JSONDecoder().decode([VideoOptimizationHistoryRecord].self, from: data) else {
             return
         }
@@ -2168,8 +2244,10 @@ final class VideoOptimizationQueueService: ObservableObject {
     }
 
     private func saveHistory() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         guard let data = try? JSONEncoder().encode(history) else { return }
-        UserDefaults.standard.set(data, forKey: Self.historyKey)
+        WaifuXPreferences.shared.set(data, forKey: Self.historyKey)
     }
 }
 

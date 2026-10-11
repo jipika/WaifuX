@@ -7,7 +7,7 @@ import CoreMedia
 import CoreVideo
 import ScreenCaptureKit
 
-struct BakeVideoResult: Sendable {
+struct BakeVideoResult: Sendable, Codable {
     let outputURL: URL
     let width: Int
     let height: Int
@@ -73,6 +73,11 @@ final class BakeService: ObservableObject {
 
     private var renderProcess: Process?
     private var renderPID: pid_t?
+    private var rendererIdentities: [OwnedProcessIdentity] = []
+    private var retiringRendererIdentities: [Int32: [OwnedProcessIdentity]] = [:]
+    private var processTerminationRequested = false
+    private var rendererLaunchesInProgress = 0
+    private var rendererLaunchExitWaiters: [CheckedContinuation<Void, Never>] = []
     private var isCancelled = false
 
     private init() {}
@@ -101,13 +106,24 @@ final class BakeService: ObservableObject {
         duration: TimeInterval = 12,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> BakeVideoResult {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var values: [String: Any] = ["path": scenePath, "output": outputURL.absoluteString, "fps": fps, "duration": duration]
+            values["assets"] = assetsPath
+            values["width"] = targetWidth
+            values["height"] = targetHeight
+            let result = try await BackgroundRuntimeBridge.requestCodable("bake.video.wait", arguments: BackgroundPropertyList.encode(values), resultKey: "result", as: BakeVideoResult.self)
+            progress?(1)
+            return result
+        }
+
+        guard !processTerminationRequested else { throw CancellationError() }
         guard !isBaking else { throw BakeError.alreadyBaking }
         defer {
             if let process = renderProcess, process.isRunning {
                 process.terminate()
-                let pid = process.processIdentifier
+                let identity = OwnedProcessIdentity.capture(process.processIdentifier)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                    if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+                    identity?.signal(SIGKILL)
                 }
             }
             if renderProcess == nil, let pid = renderPID {
@@ -119,6 +135,7 @@ final class BakeService: ObservableObject {
             isCancelled = false
             renderProcess = nil
             renderPID = nil
+            rendererIdentities.removeAll()
         }
 
         isBaking = true
@@ -139,11 +156,13 @@ final class BakeService: ObservableObject {
             resolvedAssets = ""
             print("[BakeService] ⚠️ assets 为空，未传入 --assets 参数")
         }
+        try checkCanContinueBaking()
 
         // 2. 检查屏幕录制权限（--wallpaper 模式下渲染器直接铺到桌面层，无需辅助功能）
         statusText = "检查屏幕录制权限..."
         if !checkScreenCapturePermission() {
             let granted = await requestScreenCapturePermission()
+            try checkCanContinueBaking()
             guard granted else {
                 print("[BakeService] ❌ 屏幕录制权限被拒绝")
                 isBaking = false
@@ -176,6 +195,7 @@ final class BakeService: ObservableObject {
             let wrapper = try Self.prepareRendererWrapper(for: cliURL)
             launchedPID = try await launchRendererWrapper(wrapper, arguments: args)
             renderPID = launchedPID
+            try checkCanContinueBaking()
             statusText = "等待渲染窗口..."
             self.progress = 0.05
             progress?(0.05)
@@ -245,16 +265,15 @@ final class BakeService: ObservableObject {
 
     /// 取消烘焙
     func cancel() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("bake.cancel"); return }
         isCancelled = true
         statusText = "已取消"
         if let process = renderProcess {
             process.terminate()
             // watchdog
-            let pid = process.processIdentifier
+            let identity = OwnedProcessIdentity.capture(process.processIdentifier)
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                if kill(pid, 0) == 0 {
-                    kill(pid, SIGKILL)
-                }
+                identity?.signal(SIGKILL)
             }
         }
         if renderProcess == nil, let pid = renderPID {
@@ -262,9 +281,69 @@ final class BakeService: ObservableObject {
         }
         renderProcess = nil
         renderPID = nil
+        rendererIdentities.removeAll()
         isBaking = false
         progress = 0
     }
+
+    /// Final process teardown cannot rely on a watchdog that runs after the
+    /// Helper has exited. The NSWorkspace wrapper is owned by launchd and is
+    /// therefore not included in the Helper's ordinary descendant snapshot.
+    func prepareForProcessTermination() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        processTerminationRequested = true
+        isCancelled = true
+        let allIdentities = rendererIdentities + retiringRendererIdentities.values.flatMap { $0 }
+        var visited = Set<Int32>()
+        for identity in allIdentities where !visited.contains(identity.pid) && identity.stillMatches() {
+            visited.insert(identity.pid)
+            let children = BackgroundChildProcessCleanup.snapshot(rootPID: identity.pid)
+            BackgroundChildProcessCleanup.terminate(children)
+            identity.signal(SIGKILL)
+        }
+        if let process = renderProcess, process.isRunning,
+           let identity = OwnedProcessIdentity.capture(process.processIdentifier) {
+            identity.signal(SIGKILL)
+        }
+        renderProcess = nil
+        renderPID = nil
+        rendererIdentities.removeAll()
+        retiringRendererIdentities.removeAll()
+        isBaking = false
+        progress = 0
+        statusText = "已取消"
+    }
+
+    /// LaunchServices owns wrapper processes, so a pending launch must finish
+    /// reporting its PID before the Helper can leave. UI quit still has its
+    /// existing deadline and retains the UI if the Helper cannot finish.
+    func finishPendingRendererLaunchesForProcessTermination() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        if rendererLaunchesInProgress > 0 {
+            await withCheckedContinuation { rendererLaunchExitWaiters.append($0) }
+        }
+        prepareForProcessTermination()
+    }
+
+    private func checkCanContinueBaking() throws {
+        try Task.checkCancellation()
+        guard !isCancelled, !processTerminationRequested else { throw CancellationError() }
+    }
+
+    #if DEBUG
+    /// Exercise the production LaunchServices path without a real wallpaper or
+    /// screen recording permission. Available only to the isolated Helper job.
+    func regressionLaunchWrapperForProcessTermination(executableURL: URL,
+                                                      arguments: [String]) async throws -> Int32 {
+        guard BackgroundRuntimeRole.isIsolatedTest, !processTerminationRequested else {
+            throw CocoaError(.featureUnsupported)
+        }
+        let wrapper = try Self.prepareRendererWrapper(for: executableURL)
+        let pid = try await launchRendererWrapper(wrapper, arguments: arguments)
+        renderPID = pid
+        return pid
+    }
+    #endif
 
     // MARK: - 窗口查找
 
@@ -1347,7 +1426,7 @@ final class BakeService: ObservableObject {
             print("[BakeService] ⚠️ 静态帧写入失败: \(error.localizedDescription)")
             return
         }
-        UserDefaults.standard.set(fileURL.path, forKey: cacheKey)
+        WaifuXPreferences.shared.set(fileURL.path, forKey: cacheKey)
 
         // ⚠️ 动态锁屏启用时跳过设置静态桌面壁纸，
         // 避免覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例。
@@ -1421,11 +1500,11 @@ final class BakeService: ObservableObject {
         process.standardError = FileHandle.nullDevice
 
         try process.run()
+        let identity = OwnedProcessIdentity.capture(process.processIdentifier)
         defer {
             process.terminate()
-            let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+                identity?.signal(SIGKILL)
             }
         }
 
@@ -1492,8 +1571,14 @@ final class BakeService: ObservableObject {
 
     private static func prepareRendererWrapper(for rendererURL: URL) throws -> RendererWrapperBundle {
         let fm = FileManager.default
-        let cacheBase = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let cacheBase: URL
+        if BackgroundRuntimeRole.isIsolatedTest,
+           let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            cacheBase = URL(fileURLWithPath: root).appendingPathComponent("BakeWrapperCache", isDirectory: true)
+        } else {
+            cacheBase = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        }
         let bundleURL = cacheBase
             .appendingPathComponent("com.waifux.wallpaperengine", isDirectory: true)
             .appendingPathComponent("BakeRendererWrapper", isDirectory: true)
@@ -1504,6 +1589,14 @@ final class BakeService: ObservableObject {
 
         try fm.createDirectory(at: macOSURL, withIntermediateDirectories: true)
 
+        let bundleIdentifier: String
+        if BackgroundRuntimeRole.isIsolatedTest {
+            let service = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_SERVICE"] ?? UUID().uuidString
+            let suffix = service.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
+            bundleIdentifier = "\(Self.rendererWrapperBundleIdentifier).test.\(String(suffix))"
+        } else {
+            bundleIdentifier = Self.rendererWrapperBundleIdentifier
+        }
         let infoPlist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1514,7 +1607,7 @@ final class BakeService: ObservableObject {
             <key>CFBundleExecutable</key>
             <string>wallpaper-wgpu-launcher</string>
             <key>CFBundleIdentifier</key>
-            <string>\(Self.rendererWrapperBundleIdentifier)</string>
+            <string>\(bundleIdentifier)</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleName</key>
@@ -1556,6 +1649,16 @@ final class BakeService: ObservableObject {
     }
 
     private func launchRendererWrapper(_ wrapper: RendererWrapperBundle, arguments: [String]) async throws -> pid_t {
+        guard !processTerminationRequested else { throw CancellationError() }
+        rendererLaunchesInProgress += 1
+        defer {
+            rendererLaunchesInProgress -= 1
+            if rendererLaunchesInProgress == 0 {
+                let waiters = rendererLaunchExitWaiters
+                rendererLaunchExitWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
         let rendererDirectory = wrapper.renderedBinaryURL.deletingLastPathComponent()
         let rendererLibDirectory = rendererDirectory.appendingPathComponent("lib")
         let bundleResourceDirectory = rendererDirectory.deletingLastPathComponent()
@@ -1579,18 +1682,37 @@ final class BakeService: ObservableObject {
         configuration.createsNewApplicationInstance = true
 
         let app = try await NSWorkspace.shared.openApplication(at: wrapper.bundleURL, configuration: configuration)
+        if let identity = OwnedProcessIdentity.capture(app.processIdentifier) {
+            rendererIdentities = [identity]
+            // LaunchServices may report the PID before the launcher script has
+            // exec'ed wgpu. Both executable phases share the captured birth time.
+            let rendererPath = wrapper.renderedBinaryURL.standardizedFileURL.resolvingSymlinksInPath().path
+            if identity.executablePath != rendererPath {
+                rendererIdentities.append(OwnedProcessIdentity(pid: identity.pid, uid: identity.uid,
+                    startedSeconds: identity.startedSeconds, startedMicroseconds: identity.startedMicroseconds,
+                    executablePath: rendererPath))
+            }
+        }
+        if processTerminationRequested {
+            // A LaunchServices reply can arrive after shutdown started. Its
+            // detached descendants still belong to this launch and must be
+            // stopped before the wrapper is killed and they are reparented.
+            prepareForProcessTermination()
+        }
         return app.processIdentifier
     }
 
     private func terminateRenderer(pid: pid_t) {
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
-            app.terminate()
-        } else {
-            kill(pid, SIGTERM)
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
+        let identities = rendererIdentities.filter { $0.pid == pid }
+        if !identities.isEmpty { retiringRendererIdentities[pid] = identities }
+        for identity in identities { identity.signal(SIGCONT); identity.signal(SIGTERM) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+            for identity in identities { identity.signal(SIGKILL) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let remaining = self.retiringRendererIdentities[pid]?.filter { $0.stillMatches() } ?? []
+                if remaining.isEmpty { self.retiringRendererIdentities.removeValue(forKey: pid) }
+                else { self.retiringRendererIdentities[pid] = remaining }
             }
         }
     }

@@ -56,6 +56,14 @@ public struct LyricsLineState: Equatable, Sendable {
 public final class AppleMusicLyricsService: ObservableObject {
 
     public static let shared = AppleMusicLyricsService()
+    private static var developerTokenOverride: String?
+    private static var storefrontOverride: String?
+
+    static func configureEnvironment(developerToken: String, storefront: String) {
+        developerTokenOverride = developerToken.isEmpty ? nil : developerToken
+        storefrontOverride = storefront.isEmpty ? nil : storefront
+        shared.tokens = nil
+    }
 
     @Published public private(set) var currentDoc: LyricsDoc?
     @Published public private(set) var currentLine: LyricsLineState = .empty
@@ -221,6 +229,7 @@ public final class AppleMusicLyricsService: ObservableObject {
     }
 
     private static func resolveDeveloperToken() async throws -> String {
+        if let developerTokenOverride { return developerTokenOverride }
         if let env = ProcessInfo.processInfo.environment["WAIFUX_APPLE_MUSIC_DEVELOPER_TOKEN"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !env.isEmpty {
@@ -322,6 +331,7 @@ public final class AppleMusicLyricsService: ObservableObject {
     }
 
     private static func resolveStorefront() async -> String {
+        if let storefrontOverride { return storefrontOverride.lowercased() }
         if let env = ProcessInfo.processInfo.environment["WAIFUX_APPLE_MUSIC_STOREFRONT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !env.isEmpty {

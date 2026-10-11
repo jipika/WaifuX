@@ -74,6 +74,13 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
 
     /// 会话代号：每次 start/重建递增，旧的启动重试循环发现代号过期自动退出
     private var tapGeneration: UInt64 = 0
+    private var captureOwners = Set<UUID>()
+    private let legacyCaptureOwner = UUID()
+    private var tapSessionTask: Task<Void, Never>?
+    private var isTerminating = false
+    #if DEBUG
+    private(set) var isolatedTapStartAttempts = 0
+    #endif
     private var deviceSwitchDebounceTask: Task<Void, Never>?
     private var defaultOutputListenerBlock: AudioObjectPropertyListenerBlock?
     private var systemAudioPermissionAlertShown = false
@@ -132,16 +139,45 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
 
     /// 启动音频捕获（失败时带退避自动重试）
     public func start() {
-        guard !isRunning else { return }
+        acquire(owner: legacyCaptureOwner)
+    }
+
+    /// Each visible consumer owns one request. Releasing a clock must not stop
+    /// the audio stream still used by a web wallpaper on another display.
+    public func acquire(owner: UUID) {
+        guard !isTerminating, captureOwners.insert(owner).inserted else { return }
+        guard !isRunning, tapSessionTask == nil else { return }
         tapGeneration &+= 1
         let gen = tapGeneration
-        Task { await runTapSession(gen: gen) }
+        tapSessionTask = Task { [weak self] in
+            await self?.runTapSession(gen: gen)
+            guard let self, self.tapGeneration == gen else { return }
+            self.tapSessionTask = nil
+        }
     }
 
     /// 停止音频捕获并释放资源
     public func stop() {
-        guard isRunning else { return }
+        release(owner: legacyCaptureOwner)
+    }
+
+    public func release(owner: UUID) {
+        guard captureOwners.remove(owner) != nil, captureOwners.isEmpty else { return }
+        stopCapture()
+    }
+
+    func stopAllForProcessTermination() {
+        isTerminating = true
+        captureOwners.removeAll()
+        stopCapture()
+    }
+
+    private func stopCapture() {
+        // start() schedules a task before isRunning becomes true. Invalidate
+        // that task and its retries even when no tap has been created yet.
         tapGeneration &+= 1
+        tapSessionTask?.cancel()
+        tapSessionTask = nil
         deviceSwitchDebounceTask?.cancel()
         deviceSwitchDebounceTask = nil
         stopCoreAudioTap()
@@ -154,7 +190,7 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
     private func runTapSession(gen: UInt64) async {
         var attempt = 0
         while attempt < Self.tapStartMaxAttempts {
-            guard gen == tapGeneration, !isRunning else { return }
+            guard !Task.isCancelled, !captureOwners.isEmpty, gen == tapGeneration, !isRunning else { return }
             if startCoreAudioTap() { return }
             attempt += 1
             guard gen == tapGeneration else { return }
@@ -189,6 +225,12 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
     // 或 processes:deviceUID:stream:。前者是唯一能在 IOProc 模式下拿到非零数据的 init。
 
     private func startCoreAudioTap() -> Bool {
+        #if DEBUG
+        if BackgroundRuntimeRole.isIsolatedTest {
+            isolatedTapStartAttempts += 1
+            return false
+        }
+        #endif
         // 预创建 FFT 资源
         if Self.fftSetup == nil {
             Self.fftSetup = vDSP_create_fftsetup(vDSP_Length(Self.fftSizeLog2), FFTRadix(kFFTRadix2))
@@ -375,14 +417,19 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
 
     /// 整体重建 tap，让捕获跟随新的默认输出设备（频谱先归零，新 tap 起来后恢复）
     private func rebuildTapForDeviceSwitch() {
-        guard isRunning else { return }
+        guard isRunning, !captureOwners.isEmpty, !isTerminating else { return }
         print("[AudioCapture] 🔄 默认输出设备变化 → 重建 process tap")
         tapGeneration &+= 1
         let gen = tapGeneration
+        tapSessionTask?.cancel()
         stopCoreAudioTap()
         isRunning = false
         resetSpectrum()
-        Task { await runTapSession(gen: gen) }
+        tapSessionTask = Task { [weak self] in
+            await self?.runTapSession(gen: gen)
+            guard let self, self.tapGeneration == gen else { return }
+            self.tapSessionTask = nil
+        }
     }
 
     /// IOProc 回调 —— 在 CoreAudio 实时线程被调用
@@ -524,7 +571,7 @@ extension SystemAudioCaptureService {
         let new64 = downsamplePtr(fftDb, srcCount: half, targetCount: 64)
 
         DispatchQueue.main.async {
-            guard let svc = sharedRef else { return }
+            guard let svc = sharedRef, svc.isRunning else { return }
             smoothInPlace(into: &svc.spectrum16, from: new16, factor: smoothFactor)
             smoothInPlace(into: &svc.spectrum32, from: new32, factor: smoothFactor)
             smoothInPlace(into: &svc.spectrum64, from: new64, factor: smoothFactor)

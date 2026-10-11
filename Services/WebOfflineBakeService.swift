@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreGraphics
 import CryptoKit
 import Foundation
 
@@ -62,6 +63,13 @@ enum WebOfflineBakeService {
         }
         guard let cli = WallpaperEngineXBridge.resolvedLegacyCLIExecutableURL() else {
             throw SceneOfflineBakeError.webCliNotFound
+        }
+        // Web 烘焙靠 ScreenCaptureKit 抓合成器帧：缺「屏幕录制」权限时 SCStream 仍能启动，
+        // 但在限定时间内一帧都收不到，最终只报「未在限定时间内返回 Web 烘焙画面」这种误导性
+        // 文案。这里先确认权限，缺权限直接给可操作的引导（与 scene 烘焙同一口径）。
+        guard await ensureScreenCapturePermission() else {
+            print("[WebOfflineBake] 屏幕录制权限预检失败，中止烘焙（在系统设置勾选后需重启应用才生效）")
+            throw SceneOfflineBakeError.screenCapturePermissionRequired
         }
 
         let analysisId = stableAnalysisId(for: contentRoot)
@@ -308,7 +316,7 @@ enum WebOfflineBakeService {
     }
 
     static func scheduleAutoBakeAfterDownload(itemID: String, localFileURL: URL) {
-        guard UserDefaults.standard.bool(forKey: "auto_bake_scene"),
+        guard WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
               isWebProject(at: localFileURL) else {
             return
         }
@@ -374,7 +382,7 @@ enum WebOfflineBakeService {
         if let requested {
             return min(max(requested, 5), 60)
         }
-        let saved = UserDefaults.standard.double(forKey: "scene_bake_duration")
+        let saved = WaifuXPreferences.shared.double(forKey: "scene_bake_duration")
         return saved >= 5 ? min(max(saved, 5), 60) : 15
     }
 
@@ -494,6 +502,18 @@ enum WebOfflineBakeService {
             return nil
         }
         return VideoInspection(duration: duration, width: width, height: height, fps: fps)
+    }
+
+    /// 屏幕录制权限预检：已授权直接放行；从未决定过时用 `CGRequestScreenCaptureAccess`
+    /// 唤起系统对话框，仍未授权则交给调用方引导用户去系统设置（本机进程已授权但尚未重启时，
+    /// preflight 也可能仍返回 false，所以文案里要写明「勾选后需重启应用」）。
+    private static func ensureScreenCapturePermission() async -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume(returning: CGRequestScreenCaptureAccess())
+            }
+        }
     }
 
     private static func runCLI(

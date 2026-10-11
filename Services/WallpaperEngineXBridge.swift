@@ -309,6 +309,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 正在设置壁纸中（防止 `restoreIfNeeded` 等场景重复调用 `setWallpaper`）
     private(set) var isSettingWallpaper = false
+    private var isTerminating = false
+    private var legacyClientProcesses: [Int32: OwnedProcessIdentity] = [:]
     /// 跨类型切换代次：新的 apply/static/video 请求会递增，旧 setWallpaper 收尾直接退出。
     private var wallpaperSwitchGeneration: UInt64 = 0
     /// 视频 -> Scene/Web 的准备态。旧视频由 VideoWallpaperManager 保持到这里
@@ -364,7 +366,40 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     // MARK: - 初始化
 
+    private var remoteScreens: [String: [String: Any]] = [:]
+    private var remoteIsWeb = false
+    private var remoteIsScene = false
+
+    func backgroundSnapshot() -> [String: Any] {
+        var screens: [String: Any] = [:]
+        for screen in NSScreen.screens where isManaging(screen: screen) {
+            var state: [String: Any] = ["paused": isPaused(screenID: screen.wallpaperScreenIdentifier), "web": isWebWallpaperOn(screen: screen), "live": hasLivePresentation(on: screen)]
+            state["path"] = currentWallpaperPath(for: screen)
+            if let size = canvasSize(for: screen) { state["size"] = [Double(size.width), Double(size.height)] }
+            screens[screen.wallpaperScreenIdentifier] = state
+        }
+        var result: [String: Any] = ["screens": screens, "controlling": isControllingExternalEngine, "paused": isExternalPaused, "web": isCurrentWallpaperWeb, "scene": isCurrentWallpaperScene, "change": NSNumber(value: renderStateChangeCount)]
+        result["path"] = currentWallpaperPathForDesign
+        return result
+    }
+
+    private func receiveBackgroundSnapshot(_ snapshot: [String: Any]) {
+        guard let values = snapshot["engine"] as? [String: Any] else { return }
+        remoteScreens = values["screens"] as? [String: [String: Any]] ?? [:]
+        lastWallpaperPath = values["path"] as? String
+        remoteIsWeb = values["web"] as? Bool ?? false
+        remoteIsScene = values["scene"] as? Bool ?? false
+        isControllingExternalEngine = values["controlling"] as? Bool ?? false
+        isExternalPaused = values["paused"] as? Bool ?? false
+        renderStateChangeCount = (values["change"] as? NSNumber)?.uint64Value ?? 0
+    }
+
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in self?.receiveBackgroundSnapshot(snapshot) }
+            return
+        }
+
         // 监听 VideoWallpaperManager 恢复自己播放时，清空外部接管标记。
         // 显式 @MainActor 标注闭包，不加 Task { @MainActor } 包装（包装本身也会触发断言）
         VideoWallpaperManager.shared.$currentVideoURL
@@ -482,10 +517,13 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 返回指定屏幕上正在渲染的壁纸文件路径（scene/web）
     func currentWallpaperPath(for screen: NSScreen) -> String? {
-        renderState(for: screen)?.path
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screen.wallpaperScreenIdentifier]?["path"] as? String }
+        return renderState(for: screen)?.path
     }
 
     func reloadCurrentSceneWallpaperForDesign() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.designReload", [:]); return }
+
         guard isCurrentWallpaperScene, let path = currentWallpaperPathForDesign else { return }
         Task { @MainActor in
             try? await setWallpaper(path: path)
@@ -493,14 +531,18 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     var isCurrentWallpaperWeb: Bool {
-        isControllingExternalEngine && activeRenderKind == .web
+        if BackgroundRuntimeRole.isRemoteUI { return remoteIsWeb }
+        return isControllingExternalEngine && activeRenderKind == .web
     }
 
     var isCurrentWallpaperScene: Bool {
-        isControllingExternalEngine && activeRenderKind == .scene
+        if BackgroundRuntimeRole.isRemoteUI { return remoteIsScene }
+        return isControllingExternalEngine && activeRenderKind == .scene
     }
 
     func prepareForNonExternalWallpaperSwitch(on screens: [NSScreen], reason: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.prepareSwitch", ["screens": screens, "reason": reason]); return }
+
         wallpaperSwitchGeneration &+= 1
         bakedStaticUpdateGeneration &+= 1
         if pendingCrossTypeTransition != nil {
@@ -548,6 +590,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         preserveExistingRendererUntilReady: Bool = false,
         requireAllTargetScreens: Bool = false
     ) async throws {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("engine.apply", ["path": path, "assets": assetsPath, "screens": targetScreens, "properties": userProperties, "restart": forceRestart, "preservePause": preserveAutoPauseState, "preserveRenderer": preserveExistingRendererUntilReady, "requireAll": requireAllTargetScreens]); return }
+        guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
+
         // 拆架构占位：x86_64 包不含 wallpaper-wgpu / 内嵌 assets，scene 渲染入口直接短路，
         // 给出明确的用户可读错误，而不是等到 spawn 阶段才报 EBADARCH。
         if !WallpaperEngineAvailability.sceneRenderingSupported {
@@ -600,6 +645,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                 throw WallpaperEngineError.executionFailed("上一项壁纸设置任务尚未结束，请稍后重试")
             }
         }
+        guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
         isSettingWallpaper = true
         wallpaperSwitchGeneration &+= 1
         let switchGeneration = wallpaperSwitchGeneration
@@ -875,12 +921,12 @@ final class WallpaperEngineXBridge: ObservableObject {
         baseArgs += ["--wallpaper", "--background"]
 
         // 超分辨率模式
-        if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
-            let percent = UserDefaults.standard.double(forKey: "upscaling_percent")
+        if WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") {
+            let percent = WaifuXPreferences.shared.double(forKey: "upscaling_percent")
             let clamped = percent > 0 ? max(30, min(100, Int(percent))) : 70
             baseArgs += ["--upscaling", "\(clamped)"]
             print("[WallpaperEngineXBridge] 超分辨率模式已启用，缩放比例: \(clamped)%")
-            if UserDefaults.standard.bool(forKey: "effect_reduction_enabled") {
+            if WaifuXPreferences.shared.bool(forKey: "effect_reduction_enabled") {
                 baseArgs += ["--effect-reduction"]
                 print("[WallpaperEngineXBridge] 性能模式（effect-reduction）已启用")
             }
@@ -934,12 +980,12 @@ final class WallpaperEngineXBridge: ObservableObject {
                 print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
                 print("[WallpaperEngineXBridge] 📋   setWallpaper=\(resolvedPath)")
                 print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
-                print("[WallpaperEngineXBridge] 📋   upscaling=\(UserDefaults.standard.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
-                if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
-                    let percent = UserDefaults.standard.double(forKey: "upscaling_percent")
+                print("[WallpaperEngineXBridge] 📋   upscaling=\(WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
+                if WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") {
+                    let percent = WaifuXPreferences.shared.double(forKey: "upscaling_percent")
                     let clamped = percent > 0 ? max(30, min(100, Int(percent))) : 70
                     print("[WallpaperEngineXBridge] 📋   upscaling_percent=\(clamped)%")
-                    print("[WallpaperEngineXBridge] 📋   effect_reduction=\(UserDefaults.standard.bool(forKey: "effect_reduction_enabled"))")
+                    print("[WallpaperEngineXBridge] 📋   effect_reduction=\(WaifuXPreferences.shared.bool(forKey: "effect_reduction_enabled"))")
                 }
                 print("[WallpaperEngineXBridge] 📋   userProperties=\(effectiveUserProperties ?? "nil")")
                 // crop/audio 控制文件路径
@@ -949,12 +995,12 @@ final class WallpaperEngineXBridge: ObservableObject {
                 print("[WallpaperEngineXBridge] 📋   wallpaperControlURL=\(wcURL.path)")
 
                 // 准备热切换控制参数（包含超分辨率/性能模式参数）
-                let upscalingEnabled = UserDefaults.standard.bool(forKey: "upscaling_enabled")
+                let upscalingEnabled = WaifuXPreferences.shared.bool(forKey: "upscaling_enabled")
                 let upscalingPercentValue: Int? = upscalingEnabled ? {
-                    let percent = UserDefaults.standard.double(forKey: "upscaling_percent")
+                    let percent = WaifuXPreferences.shared.double(forKey: "upscaling_percent")
                     return percent > 0 ? max(30, min(100, Int(percent))) : 70
                 }() : nil
-                let effectReductionEnabled = upscalingEnabled ? UserDefaults.standard.bool(forKey: "effect_reduction_enabled") : false
+                let effectReductionEnabled = upscalingEnabled ? WaifuXPreferences.shared.bool(forKey: "effect_reduction_enabled") : false
 
                 // 热切换必须先清除旧裁切和旧 canvas-size，再通知 renderer 加载新壁纸。
                 // 否则等待新画布尺寸的任务会把仍可读取的旧文件误判为新场景尺寸，
@@ -1061,12 +1107,12 @@ final class WallpaperEngineXBridge: ObservableObject {
             print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
             print("[WallpaperEngineXBridge] 📋   path=\(resolvedPath)")
             print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
-            print("[WallpaperEngineXBridge] 📋   upscaling=\(UserDefaults.standard.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
-            if UserDefaults.standard.bool(forKey: "upscaling_enabled") {
-                let up = UserDefaults.standard.double(forKey: "upscaling_percent")
+            print("[WallpaperEngineXBridge] 📋   upscaling=\(WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
+            if WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") {
+                let up = WaifuXPreferences.shared.double(forKey: "upscaling_percent")
                 let cl = up > 0 ? max(30, min(100, Int(up))) : 70
                 print("[WallpaperEngineXBridge] 📋   upscaling_percent=\(cl)%")
-                print("[WallpaperEngineXBridge] 📋   effect_reduction=\(UserDefaults.standard.bool(forKey: "effect_reduction_enabled"))")
+                print("[WallpaperEngineXBridge] 📋   effect_reduction=\(WaifuXPreferences.shared.bool(forKey: "effect_reduction_enabled"))")
             }
             print("[WallpaperEngineXBridge] 📋   userProperties=\(effectiveUserProperties ?? "nil")")
 
@@ -1098,7 +1144,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             perScreenArgs += ["--screen", "\(screenX),\(screenY),\(screenW),\(screenH),\(scale)"]
 
             // 渲染帧率
-            let userFPS = UserDefaults.standard.double(forKey: "wallpaper_engine_fps")
+            let userFPS = WaifuXPreferences.shared.double(forKey: "wallpaper_engine_fps")
             let userFPSClamped = userFPS.isFinite ? max(60, min(240, userFPS)) : 60
             let screenMaxFPS = screen.maxRefreshRate
             let effectiveFPS = min(Int(userFPSClamped), screenMaxFPS)
@@ -1429,6 +1475,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     ///   - reloadScene: 是否重载当前场景。重置覆盖值时必须重载，
     ///     因为 wallpaper-control 的 setProperties 是局部更新，缺失键会保留旧运行时值。
     func refreshWallpaperProperties(userProperties: String?, reloadScene: Bool = false) async throws {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("engine.properties", ["properties": userProperties, "reload": reloadScene]); return }
+
         guard let path = lastWallpaperPath else {
             print("[WallpaperEngineXBridge] ❌ refreshWallpaperProperties: lastWallpaperPath 为空，没有正在运行的壁纸")
             throw WallpaperEngineError.executionFailed("没有正在运行的壁纸")
@@ -1607,6 +1655,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 暂停渲染（发送 SIGSTOP）
     func pauseWallpaper() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.pause", [:]); return }
+
         if screenRenderStates.values.contains(where: { $0.renderKind == .web }) || activeRenderKind == .web {
             // web 渲染由旧 CLI 的 daemon 持有，必须通过其 IPC 暂停
             sendLegacyWebPlaybackCommand("pause", to: webRenderScreenIDs)
@@ -1643,6 +1693,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 恢复渲染（发送 SIGCONT）
     func resumeWallpaper() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.resume", [:]); return }
+
         if screenRenderStates.values.contains(where: { $0.renderKind == .web }) || activeRenderKind == .web {
             sendLegacyWebPlaybackCommand("resume", to: webRenderScreenIDs)
         }
@@ -1752,6 +1804,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 暂停指定屏幕的渲染（scene：SIGSTOP；web：按屏 IPC）
     func pauseWallpaper(for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenPause", ["id": screenID]); return }
+
         guard isControllingExternalEngine else { return }
 
         // scene：有独立 wallpaper-wgpu 进程，按屏 SIGSTOP
@@ -1789,6 +1843,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 恢复指定屏幕的渲染（scene：SIGCONT；web：按屏 IPC）
     func resumeWallpaper(for screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenResume", ["id": screenID]); return }
+
         guard isControllingExternalEngine else { return }
 
         if let info = screenProcesses[screenID] {
@@ -1824,6 +1880,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 与断屏保留 orphan 恢复态不同：主动关闭会删除该屏 render state，
     /// 重插显示器 / 重启 App 后不再自动恢复该屏，其余屏幕不受影响。
     func stopWallpaper(forScreenID screenID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenStop", ["id": screenID]); return }
+
         guard isControllingExternalEngine else { return }
 
         let isManagedScreen = screenProcesses[screenID] != nil
@@ -1877,11 +1935,13 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 指定屏幕当前是否已由全局或按屏策略暂停。
     func isPaused(screenID: String) -> Bool {
-        isExternalPaused || perScreenPausedScreenIDs.contains(screenID)
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screenID]?["paused"] as? Bool ?? false }
+        return isExternalPaused || perScreenPausedScreenIDs.contains(screenID)
     }
 
     /// 检查指定 screenID 是否被外部引擎管理（有 scene 进程，或在 target / renderStates 中）
     func isManaging(screenID: String) -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screenID] != nil }
         if screenProcesses[screenID] != nil { return true }
         if targetScreenIDs.contains(screenID) { return true }
         if screenRenderStates[screenID] != nil { return true }
@@ -1889,6 +1949,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     func setMuted(_ muted: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.muted", ["muted": muted]); return }
+
         updateRendererAudioControls(muted: muted)
         if isCurrentWallpaperWeb {
             let vol = muted ? nil : VideoWallpaperManager.shared.volume
@@ -1897,6 +1959,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     func setVolume(_ volume: Double, for targetScreen: NSScreen? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.volume", ["volume": volume, "screen": targetScreen]); return }
+
         updateRendererAudioControls(volume: volume, targetScreen: targetScreen)
         if isCurrentWallpaperWeb {
             sendAudioControlToWebDaemon(muted: nil, volume: volume)
@@ -2171,6 +2235,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 只要有任意一块在线 web 壁纸，就启 media relay（Media Integration）。
     /// 任何会改变 `screenRenderStates` 或新增/停止 web 渲染的路径都应该在尾部调用一次。
     func ensureAudioRelayMatchesActiveWallpaper(projectRoot: String? = nil) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         var needsAudio = false
         var needsMedia = false
         // 只扫描当前在线屏上的 web 壁纸；断线保留的 orphan state 不得继续占用中继
@@ -2229,12 +2295,16 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 任何"完全停止外部引擎/暂停"的路径必须调用，确保 relay 不残留 SCK。
     func stopAudioRelayIfActive() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         guard audioRelayActiveForCurrentWallpaper else { return }
         WallpaperWebAudioRelay.shared.stop()
         audioRelayActiveForCurrentWallpaper = false
     }
 
     func stopMediaRelayIfActive() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         guard mediaRelayActiveForCurrentWallpaper else { return }
         WallpaperWebMediaRelay.shared.stop()
         mediaRelayActiveForCurrentWallpaper = false
@@ -2242,6 +2312,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 切换暂停/恢复
     func toggleWallpaper() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.toggle", [:]); return }
+
         guard isControllingExternalEngine else {
             print("[WallpaperEngineXBridge] toggleWallpaper: 跳过，当前未控制外部引擎")
             return
@@ -2257,12 +2329,17 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 停止渲染（终止进程）
     func stopWallpaper() {
+        if BackgroundRuntimeRole.isIsolatedTest { return }
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.stop", [:]); return }
+
         print("[WallpaperEngineXBridge] stopWallpaper: 停止所有实时渲染 (进程数=\(screenProcesses.count))")
         ensureStoppedForNonCLIWallpaper()
     }
 
     /// 用户从状态栏关闭动态壁纸时调用：停止当前 renderer，但保留持久化状态，方便再次点击开启恢复。
     func disableWallpaperKeepingRestoreState() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.disable", [:]); return }
+
         print("[WallpaperEngineXBridge] disableWallpaperKeepingRestoreState: 关闭渲染并保留恢复状态 (进程数=\(screenProcesses.count))")
         // 对称关闭静态图 overlay（保持久化，与保留 WE 恢复状态语义一致）
         StaticImageWallpaperOverlayManager.shared.hideAll()
@@ -2287,6 +2364,9 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 切换为**非** wallpaper-wgpu 壁纸时必须调用
     func ensureStoppedForNonCLIWallpaper() {
+        if BackgroundRuntimeRole.isIsolatedTest { return }
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.ensureStopped", [:]); return }
+
         let processCount = screenProcesses.count
         AppLogger.error(.wallpaper, "ensureStoppedForNonCLIWallpaper(全局)", metadata: ["processCount": processCount])
         print("[WallpaperEngineXBridge] ensureStoppedForNonCLIWallpaper: 开始清理 \(processCount) 个渲染进程")
@@ -2311,16 +2391,19 @@ final class WallpaperEngineXBridge: ObservableObject {
         targetScreenIDs.removeAll()
         targetScreenFingerprints.removeAll()
         lastAppliedScreenConfigurations.removeAll()
-        UserDefaults.standard.removeObject(forKey: controllingExternalKey)
-        UserDefaults.standard.removeObject(forKey: targetScreenIDsKey)
-        UserDefaults.standard.removeObject(forKey: targetScreenFingerprintsKey)
-        UserDefaults.standard.removeObject(forKey: screenRenderStatesKey)
+        WaifuXPreferences.shared.removeObject(forKey: controllingExternalKey)
+        WaifuXPreferences.shared.removeObject(forKey: targetScreenIDsKey)
+        WaifuXPreferences.shared.removeObject(forKey: targetScreenFingerprintsKey)
+        WaifuXPreferences.shared.removeObject(forKey: screenRenderStatesKey)
         screenRenderStates.removeAll()
         print("[WallpaperEngineXBridge] ensureStoppedForNonCLIWallpaper: 清理完成")
     }
 
     /// 切换指定屏幕为非 wallpaper-wgpu 壁纸时调用，避免误杀其他屏幕的实时渲染。
     func ensureStoppedForNonCLIWallpaper(for targetScreen: NSScreen?) {
+        if BackgroundRuntimeRole.isIsolatedTest { return }
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.ensureScreenStopped", ["screen": targetScreen]); return }
+
         guard let targetScreen else {
             AppLogger.error(.wallpaper, "ensureStoppedForNonCLIWallpaper(for:): targetScreen 为 nil，转为全量清理")
             ensureStoppedForNonCLIWallpaper()
@@ -2392,6 +2475,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 新壁纸。普通同步入口为了兼容旧调用仍是 fire-and-forget；过渡路径不能用它，
     /// 否则黑场退去时旧 WKWebView 仍可能盖在新视频/照片上。
     func ensureStoppedForNonCLIWallpaperForTransition(for targetScreen: NSScreen) async {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try? await BackgroundRuntimeBridge.request("engine.ensureTransitionStopped", ["screen": targetScreen]); return }
+
         let screenID = targetScreen.wallpaperScreenIdentifier
         terminateUntrackedDesktopRenderers(
             targetScreenIDs: Set([screenID]),
@@ -2454,6 +2539,14 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 应用退出前调用：立即杀死所有渲染进程，不等待退出，避免阻塞主线程导致 App 卡死。
     func prepareForAppTermination() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        isTerminating = true
+        wallpaperSwitchGeneration &+= 1
+        bakedStaticUpdateGeneration &+= 1
+        for identity in legacyClientProcesses.values { identity.signal(SIGKILL) }
+        legacyClientProcesses.removeAll()
+        if BackgroundRuntimeRole.isIsolatedTest { return }
+
         // `stopScreenProcess` 会先移除字典记录，再等待 watchdog。若用户恰好在
         // 这段窗口退出 App，只遍历 screenProcesses 会漏掉仍活着的子进程。
         let discoveredPIDs = Set(Self.discoverDesktopRenderers().map(\.pid))
@@ -2485,51 +2578,53 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 同步终止 `/tmp/wallpaperengine-cli.pid` 指向的 daemon 进程（无视 `activeRenderKind`）。
     /// App 退出 / 切换壁纸时使用，避免遗留 daemon 持续渲染 web 壁纸。
     private static func killLegacyDaemonIfRunning(waitForExit: Bool) async {
-        let pidPath = "/tmp/wallpaperengine-cli.pid"
-        guard let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8) else {
-            return
-        }
-        let trimmed = pidStr.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pid = pid_t(trimmed), pid > 0, kill(pid, 0) == 0 else {
-            // 进程已经不在了，顺手清掉过期的 PID 文件
-            try? FileManager.default.removeItem(atPath: pidPath)
+        let file = URL(fileURLWithPath: "/tmp/wallpaperengine-cli.pid")
+        guard let pid = OwnedDaemonPIDFile.readPID(at: file) else { return }
+        guard let cli = resolvedLegacyCLIExecutableURL(),
+              let identity = OwnedDaemonPIDFile.identity(at: file, expectedExecutables: [cli]) else {
+            // A stale file can name a reused PID owned by another application.
+            OwnedDaemonPIDFile.remove(at: file, ifPIDMatches: pid)
             return
         }
 
         print("[WallpaperEngineXBridge] 终止旧 CLI daemon (pid=\(pid)) waitForExit=\(waitForExit)")
-        kill(pid, SIGTERM)
+        identity.signal(SIGCONT)
+        identity.signal(SIGTERM)
 
         if waitForExit {
             let deadline = Date().addingTimeInterval(1.5)
-            while kill(pid, 0) == 0 && Date() < deadline {
+            while identity.stillMatches() && Date() < deadline {
                 try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
             }
-            if kill(pid, 0) == 0 {
+            if identity.stillMatches() {
                 print("[WallpaperEngineXBridge] daemon 未响应 SIGTERM，改发 SIGKILL")
-                kill(pid, SIGKILL)
+                identity.signal(SIGKILL)
                 let killDeadline = Date().addingTimeInterval(0.5)
-                while kill(pid, 0) == 0 && Date() < killDeadline {
+                while identity.stillMatches() && Date() < killDeadline {
                     try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                 }
             }
+            OwnedDaemonPIDFile.remove(at: file, ifPIDMatches: pid)
+        } else {
+            // Keep the PID file discoverable until the process has actually
+            // stopped, so a full quit during this grace period can still reap it.
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                identity.signal(SIGKILL)
+                OwnedDaemonPIDFile.remove(at: file, ifPIDMatches: pid)
+            }
         }
-
-        try? FileManager.default.removeItem(atPath: pidPath)
     }
 
     /// App 退出时同步杀死旧 CLI daemon，不等待退出，避免阻塞主线程。
     private static func killLegacyDaemonSync() {
-        let pidPath = "/tmp/wallpaperengine-cli.pid"
-        guard let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8) else { return }
-        let trimmed = pidStr.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pid = pid_t(trimmed), pid > 0 else {
-            try? FileManager.default.removeItem(atPath: pidPath)
-            return
+        let file = URL(fileURLWithPath: "/tmp/wallpaperengine-cli.pid")
+        guard let pid = OwnedDaemonPIDFile.readPID(at: file) else { return }
+        if let cli = resolvedLegacyCLIExecutableURL(),
+           let identity = OwnedDaemonPIDFile.identity(at: file, expectedExecutables: [cli]) {
+            identity.signal(SIGKILL)
         }
-        if kill(pid, 0) == 0 {
-            kill(pid, SIGKILL)
-        }
-        try? FileManager.default.removeItem(atPath: pidPath)
+        OwnedDaemonPIDFile.remove(at: file, ifPIDMatches: pid)
     }
 
     /// Scene renderer writes canvas-size after the current project has initialized.
@@ -2658,6 +2753,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func setWebWallpaper(path: String, targetScreens: [NSScreen]?) async throws {
+        guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
         let screens = targetScreens?.isEmpty == false ? targetScreens! : NSScreen.screens
         guard !screens.isEmpty else {
             throw WallpaperEngineError.executionFailed("没有可用的 Web 壁纸目标显示器")
@@ -2686,11 +2782,11 @@ final class WallpaperEngineXBridge: ObservableObject {
             guard let cropData = try? JSONEncoder().encode(initialCrop.parameters) else {
                 throw WallpaperEngineError.executionFailed("Web 壁纸裁切参数编码失败")
             }
-            let configuredFPS = UserDefaults.standard.object(forKey: "wallpaper_engine_fps") as? Double ?? 60
+            let configuredFPS = WaifuXPreferences.shared.object(forKey: "wallpaper_engine_fps") as? Double ?? 60
             let safeFPS = configuredFPS.isFinite ? configuredFPS : 60
             let requestedFPS = Int(max(60, min(240, safeFPS)))
             let effectiveFPS = max(60, min(requestedFPS, screen.maxRefreshRate))
-            let configuredRenderScale = UserDefaults.standard.object(
+            let configuredRenderScale = WaifuXPreferences.shared.object(
                 forKey: "web_wallpaper_render_scale_percent"
             ) as? Double ?? 100
             let safeRenderScale = configuredRenderScale.isFinite ? configuredRenderScale : 100
@@ -3144,29 +3240,51 @@ final class WallpaperEngineXBridge: ObservableObject {
     private static func runLegacyCLIClientCommandDetailed(
         _ arguments: [String]
     ) async throws -> (status: Int32, output: String) {
+        guard !shared.isTerminating, !Task.isCancelled else { throw CancellationError() }
         guard let cli = Self.resolvedLegacyCLIExecutableURL() else {
             print("[WallpaperEngineXBridge] ❌ wallpaperengine-cli 二进制未找到，已搜索所有路径")
             throw WallpaperEngineError.legacyCliNotFound
         }
         let env = legacyCLILaunchEnvironment(for: cli)
-        return try await Task.detached(priority: .userInitiated) { () throws -> (Int32, String) in
-            let process = Process()
-            process.executableURL = cli
-            process.arguments = arguments
-            process.environment = env
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            try process.run()
+        let process = Process()
+        process.executableURL = cli
+        process.arguments = arguments
+        process.environment = env
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        // Spawn on the same actor as the termination fence. A detached task
+        // must not launch a new daemon after quit has finished reaping children.
+        try process.run()
+        let pid = process.processIdentifier
+        let identity = OwnedProcessIdentity.capture(pid)
+        if let identity { shared.legacyClientProcesses[pid] = identity }
+        defer { shared.legacyClientProcesses.removeValue(forKey: pid) }
+        let result = await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) { () -> (Int32, String) in
+            // Drain before waiting so a full stdout pipe cannot deadlock exit.
+            var data = Data()
+            while true {
+                let chunk = pipe.fileHandleForReading.readData(ofLength: 16 * 1_024)
+                if chunk.isEmpty { break }
+                let remaining = max(0, 128 * 1_024 - data.count)
+                data.append(chunk.prefix(remaining))
+            }
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return (process.terminationStatus, output)
-        }.value
+            }.value
+        } onCancel: {
+            identity?.signal(SIGKILL)
+        }
+        guard !shared.isTerminating, !Task.isCancelled else { throw CancellationError() }
+        return result
     }
 
     func applyWebWallpaperProperties(_ propertiesJSON: String) async throws {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("engine.webProperties", ["properties": propertiesJSON]); return }
+
         guard isCurrentWallpaperWeb else {
             throw WallpaperEngineError.executionFailed("当前没有运行中的 Web 壁纸")
         }
@@ -3275,6 +3393,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func launchRendererProcess(executableURL: URL, arguments: [String], generation: UInt64, screenID: String) throws -> RendererLaunch {
+        guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
         print("[WallpaperEngineXBridge] launchRendererProcess: 启动渲染进程 screen=\(screenID) executable=\(executableURL.lastPathComponent)")
         // 脱敏参数日志：排除 --user-properties 后的长 JSON，避免日志过大
         let safeArgs = arguments.map { arg in
@@ -3322,7 +3441,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 启动后 10s 内不采样，避免场景加载期的正常瞬时峰值误杀。
     private func startRendererMemoryWatchdog(process: Process, screenID: String) {
         let pid = process.processIdentifier
-        let limitMB = UInt64(max(512, UserDefaults.standard.object(forKey: "scene_renderer_memory_limit_mb") as? Int ?? 2560))
+        let limitMB = UInt64(max(512, WaifuXPreferences.shared.object(forKey: "scene_renderer_memory_limit_mb") as? Int ?? 2560))
         let limitBytes = limitMB * 1_048_576
         let startedAt = Date()
         let graceInterval: TimeInterval = 10
@@ -3736,6 +3855,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     // MARK: - 状态恢复
 
     func restoreIfNeeded() async {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         // 已在控制中（上一个 restore 已完成），跳过避免重复启动
         guard !isControllingExternalEngine else {
             print("[WallpaperEngineXBridge] restoreIfNeeded: 已处于控制状态，跳过")
@@ -3765,13 +3886,13 @@ final class WallpaperEngineXBridge: ObservableObject {
             return
         }
 
-        if let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) {
+        if let path = WaifuXPreferences.shared.string(forKey: lastWallpaperPathKey) {
             lastWallpaperPath = path
         }
-        targetScreenIDs = Set(UserDefaults.standard.stringArray(forKey: targetScreenIDsKey) ?? [])
-        targetScreenFingerprints = Set(UserDefaults.standard.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
+        targetScreenIDs = Set(WaifuXPreferences.shared.stringArray(forKey: targetScreenIDsKey) ?? [])
+        targetScreenFingerprints = Set(WaifuXPreferences.shared.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
 
-        guard UserDefaults.standard.bool(forKey: controllingExternalKey) else { return }
+        guard WaifuXPreferences.shared.bool(forKey: controllingExternalKey) else { return }
         guard let path = lastWallpaperPath else { return }
 
         // ✅ 检查路径是否存在，不存在则清除持久化状态，避免启动已失效的渲染器
@@ -3852,14 +3973,14 @@ final class WallpaperEngineXBridge: ObservableObject {
     private func preserveRestoreState(_ states: [ScreenRenderState]) {
         guard !states.isEmpty else { return }
         if let data = try? JSONEncoder().encode(states) {
-            UserDefaults.standard.set(data, forKey: screenRenderStatesKey)
+            WaifuXPreferences.shared.set(data, forKey: screenRenderStatesKey)
         }
         if let path = states.first?.path {
-            UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
+            WaifuXPreferences.shared.set(path, forKey: lastWallpaperPathKey)
         }
-        UserDefaults.standard.set(true, forKey: controllingExternalKey)
-        UserDefaults.standard.set(Array(states.map(\.screenID)), forKey: targetScreenIDsKey)
-        UserDefaults.standard.set(Array(states.map(\.screenFingerprint)), forKey: targetScreenFingerprintsKey)
+        WaifuXPreferences.shared.set(true, forKey: controllingExternalKey)
+        WaifuXPreferences.shared.set(Array(states.map(\.screenID)), forKey: targetScreenIDsKey)
+        WaifuXPreferences.shared.set(Array(states.map(\.screenFingerprint)), forKey: targetScreenFingerprintsKey)
     }
 
     private func createAudioControlURL(screenID: String) -> URL {
@@ -3916,6 +4037,7 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 供 overlay 预览取 wgpu canvas 尺寸（scene 就绪后才有值；未就绪时用 scene.json 画布）。
     func canvasSize(for screen: NSScreen) -> CGSize? {
+        if BackgroundRuntimeRole.isRemoteUI { guard let size = remoteScreens[screen.wallpaperScreenIdentifier]?["size"] as? [Double], size.count == 2 else { return nil }; return CGSize(width: size[0], height: size[1]) }
         let screenID = screen.wallpaperScreenIdentifier
         let info = screenProcesses[screenID]
             ?? screenProcesses.values.first(where: { $0.screenID == screenID })
@@ -4253,7 +4375,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func persistedScreenRenderStates() -> [ScreenRenderState]? {
-        guard let data = UserDefaults.standard.data(forKey: screenRenderStatesKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: screenRenderStatesKey),
               let states = try? JSONDecoder().decode([ScreenRenderState].self, from: data) else {
             return nil
         }
@@ -4276,35 +4398,36 @@ final class WallpaperEngineXBridge: ObservableObject {
     private func persistState() {
         if !screenRenderStates.isEmpty {
             if let data = try? JSONEncoder().encode(Array(screenRenderStates.values)) {
-                UserDefaults.standard.set(data, forKey: screenRenderStatesKey)
+                WaifuXPreferences.shared.set(data, forKey: screenRenderStatesKey)
             }
             if let path = lastWallpaperPath ?? screenRenderStates.values.first?.path {
-                UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
+                WaifuXPreferences.shared.set(path, forKey: lastWallpaperPathKey)
             }
-            UserDefaults.standard.set(true, forKey: controllingExternalKey)
-            UserDefaults.standard.set(Array(targetScreenIDs), forKey: targetScreenIDsKey)
-            UserDefaults.standard.set(Array(targetScreenFingerprints), forKey: targetScreenFingerprintsKey)
+            WaifuXPreferences.shared.set(true, forKey: controllingExternalKey)
+            WaifuXPreferences.shared.set(Array(targetScreenIDs), forKey: targetScreenIDsKey)
+            WaifuXPreferences.shared.set(Array(targetScreenFingerprints), forKey: targetScreenFingerprintsKey)
         } else if let path = lastWallpaperPath, isControllingExternalEngine {
-            UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
-            UserDefaults.standard.set(isControllingExternalEngine, forKey: controllingExternalKey)
-            UserDefaults.standard.set(Array(targetScreenIDs), forKey: targetScreenIDsKey)
-            UserDefaults.standard.set(Array(targetScreenFingerprints), forKey: targetScreenFingerprintsKey)
+            WaifuXPreferences.shared.set(path, forKey: lastWallpaperPathKey)
+            WaifuXPreferences.shared.set(isControllingExternalEngine, forKey: controllingExternalKey)
+            WaifuXPreferences.shared.set(Array(targetScreenIDs), forKey: targetScreenIDsKey)
+            WaifuXPreferences.shared.set(Array(targetScreenFingerprints), forKey: targetScreenFingerprintsKey)
         } else {
             clearPersistedState()
         }
     }
 
     private func clearPersistedState() {
-        UserDefaults.standard.removeObject(forKey: lastWallpaperPathKey)
-        UserDefaults.standard.removeObject(forKey: controllingExternalKey)
-        UserDefaults.standard.removeObject(forKey: targetScreenIDsKey)
-        UserDefaults.standard.removeObject(forKey: targetScreenFingerprintsKey)
-        UserDefaults.standard.removeObject(forKey: screenRenderStatesKey)
+        WaifuXPreferences.shared.removeObject(forKey: lastWallpaperPathKey)
+        WaifuXPreferences.shared.removeObject(forKey: controllingExternalKey)
+        WaifuXPreferences.shared.removeObject(forKey: targetScreenIDsKey)
+        WaifuXPreferences.shared.removeObject(forKey: targetScreenFingerprintsKey)
+        WaifuXPreferences.shared.removeObject(forKey: screenRenderStatesKey)
     }
 
     /// 检查 wallpaper-wgpu 是否正在管理指定屏幕
     func isManaging(screen: NSScreen) -> Bool {
-        screenRenderStates[screen.wallpaperScreenIdentifier] != nil ||
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screen.wallpaperScreenIdentifier] != nil }
+        return screenRenderStates[screen.wallpaperScreenIdentifier] != nil ||
         {
             let matches = screenRenderStates.values.filter {
                 WallpaperScreenIdentity.fingerprintsMatch(
@@ -4325,6 +4448,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// target/render state 当作活跃窗口。Scene 进程退出后状态可能短暂滞留；若仍
     /// 按跨类型处理，新视频的黑色预热窗会直接暴露在桌面上，看起来像长黑场。
     func hasLivePresentation(on screen: NSScreen) -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screen.wallpaperScreenIdentifier]?["live"] as? Bool ?? false }
         processPendingTermination()
         let state = renderState(for: screen)
         if state?.renderKind == .web {
@@ -4359,6 +4483,7 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 该屏的外部引擎是否为 web 壁纸（web 暂不支持可视区域调节）。
     func isWebWallpaperOn(screen: NSScreen) -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { return remoteScreens[screen.wallpaperScreenIdentifier]?["web"] as? Bool ?? false }
         guard isManaging(screen: screen) else { return false }
         let id = screen.wallpaperScreenIdentifier
         if let state = screenRenderStates[id], state.renderKind == .web { return true }
@@ -4374,6 +4499,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 批量更新持久化状态中的壁纸路径（目录迁移后调用）
     func bulkUpdatePaths(oldPrefix: String, newPrefix: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.paths", ["old": oldPrefix, "new": newPrefix]); return }
+
         if var states = persistedScreenRenderStates(), !states.isEmpty {
             var changed = false
             states = states.map { state in
@@ -4389,13 +4516,13 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
             }
             if changed, let data = try? JSONEncoder().encode(states) {
-                UserDefaults.standard.set(data, forKey: screenRenderStatesKey)
+                WaifuXPreferences.shared.set(data, forKey: screenRenderStatesKey)
             }
         }
-        guard let path = UserDefaults.standard.string(forKey: lastWallpaperPathKey) else { return }
+        guard let path = WaifuXPreferences.shared.string(forKey: lastWallpaperPathKey) else { return }
         if path.hasPrefix(oldPrefix) {
             let newPath = newPrefix + String(path.dropFirst(oldPrefix.count))
-            UserDefaults.standard.set(newPath, forKey: lastWallpaperPathKey)
+            WaifuXPreferences.shared.set(newPath, forKey: lastWallpaperPathKey)
             lastWallpaperPath = newPath
             print("[WallpaperEngineXBridge] Updated persisted path from \(oldPrefix) to \(newPrefix)")
         }
@@ -4404,19 +4531,19 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 检查是否有可恢复的持久化实时渲染壁纸状态
     func hasPersistedRestoreState() -> Bool {
-        if let data = UserDefaults.standard.data(forKey: screenRenderStatesKey),
+        if let data = WaifuXPreferences.shared.data(forKey: screenRenderStatesKey),
            let states = try? JSONDecoder().decode([ScreenRenderState].self, from: data),
            !states.isEmpty {
             return true
         }
-        return UserDefaults.standard.bool(forKey: controllingExternalKey)
-            && UserDefaults.standard.string(forKey: lastWallpaperPathKey) != nil
+        return WaifuXPreferences.shared.bool(forKey: controllingExternalKey)
+            && WaifuXPreferences.shared.string(forKey: lastWallpaperPathKey) != nil
     }
 
     func hasPersistedRestoreState(for screen: NSScreen) -> Bool {
         let screenID = screen.wallpaperScreenIdentifier
         let fingerprint = screen.wallpaperScreenFingerprint
-        if let data = UserDefaults.standard.data(forKey: screenRenderStatesKey),
+        if let data = WaifuXPreferences.shared.data(forKey: screenRenderStatesKey),
            let states = try? JSONDecoder().decode([ScreenRenderState].self, from: data),
            states.contains(where: {
                $0.screenID == screenID
@@ -4428,12 +4555,12 @@ final class WallpaperEngineXBridge: ObservableObject {
             return true
         }
 
-        guard UserDefaults.standard.bool(forKey: controllingExternalKey),
-              UserDefaults.standard.string(forKey: lastWallpaperPathKey) != nil else {
+        guard WaifuXPreferences.shared.bool(forKey: controllingExternalKey),
+              WaifuXPreferences.shared.string(forKey: lastWallpaperPathKey) != nil else {
             return false
         }
-        let targetIDs = Set(UserDefaults.standard.stringArray(forKey: targetScreenIDsKey) ?? [])
-        let targetFingerprints = Set(UserDefaults.standard.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
+        let targetIDs = Set(WaifuXPreferences.shared.stringArray(forKey: targetScreenIDsKey) ?? [])
+        let targetFingerprints = Set(WaifuXPreferences.shared.stringArray(forKey: targetScreenFingerprintsKey) ?? [])
         return targetIDs.contains(screenID)
             || WallpaperScreenIdentity.containsFingerprint(
                 targetFingerprints,
@@ -4442,6 +4569,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     func restorePreviousWallpaperIfAvailable(for screen: NSScreen) async -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { return (try? await BackgroundRuntimeBridge.request("engine.restorePrevious", ["screen": screen])["success"] as? Bool) ?? false }
+
         // 注意用无参版本做存在性检查：虚拟/无序列号外接屏的连接指纹每次连接都
         // 可能变化，按屏精确匹配的版本会直接把恢复入口挡死（表现为副屏每次重连
         // 都被当成「新显示器」弹窗、renderer 永不恢复）。
@@ -4537,6 +4666,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 显示器热拔插的运行时回收请走 `cleanupOrphanedScreenRuntimes`，
     /// 以便保留 fingerprint 状态供重插恢复。
     func discardPersistedWallpaperState(screenID: String, fingerprint: String) async {
+        if BackgroundRuntimeRole.isRemoteUI { _ = try? await BackgroundRuntimeBridge.request("engine.discard", ["id": screenID, "fingerprint": fingerprint]); return }
+
         // 先停掉该屏的运行时（scene 进程 / web daemon），再清持久化
         await stopRuntimeForDisconnectedScreen(screenID: screenID, fingerprint: fingerprint, preferredCLIIndex: nil)
 
@@ -4796,19 +4927,19 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 合并：内存中的全量 screenRenderStates（含 orphan）+ 目标集合
         if !screenRenderStates.isEmpty {
             if let data = try? JSONEncoder().encode(Array(screenRenderStates.values)) {
-                UserDefaults.standard.set(data, forKey: screenRenderStatesKey)
+                WaifuXPreferences.shared.set(data, forKey: screenRenderStatesKey)
             }
             if let path = lastWallpaperPath ?? screenRenderStates.values.first?.path {
-                UserDefaults.standard.set(path, forKey: lastWallpaperPathKey)
+                WaifuXPreferences.shared.set(path, forKey: lastWallpaperPathKey)
             }
-            UserDefaults.standard.set(!screenRenderStates.isEmpty, forKey: controllingExternalKey)
+            WaifuXPreferences.shared.set(!screenRenderStates.isEmpty, forKey: controllingExternalKey)
             // target IDs 只写当前在线的；fingerprint 写全量以便重插匹配
             let onlineIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
             let onlineTargetIDs = targetScreenIDs.intersection(onlineIDs)
             let allFingerprints = Set(screenRenderStates.values.map(\.screenFingerprint))
                 .union(targetScreenFingerprints)
-            UserDefaults.standard.set(Array(onlineTargetIDs), forKey: targetScreenIDsKey)
-            UserDefaults.standard.set(Array(allFingerprints), forKey: targetScreenFingerprintsKey)
+            WaifuXPreferences.shared.set(Array(onlineTargetIDs), forKey: targetScreenIDsKey)
+            WaifuXPreferences.shared.set(Array(allFingerprints), forKey: targetScreenFingerprintsKey)
             targetScreenFingerprints = allFingerprints
         } else {
             clearPersistedState()
@@ -4819,6 +4950,11 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 解析 bundled `wallpaper-wgpu` 可执行文件路径
     nonisolated static func resolvedCLIExecutableURL() -> URL? {
+        if let updated = RendererComponentStore.executableURL(.wgpu) { return updated }
+        for candidate in WaifuXHostBundle.resourceCandidates(named: "wallpaper-wgpu")
+        where FileManager.default.isExecutableFile(atPath: candidate.path) {
+            return candidate
+        }
         // 1. Bundle 内（folder reference 场景）
         if let url = Bundle.main.url(forResource: "wallpaper-wgpu", withExtension: nil) {
             print("[WallpaperEngineXBridge] 找到 wallpaper-wgpu: Bundle.main.url")
@@ -4883,6 +5019,12 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 解析 `wallpaperengine-cli` 可执行文件路径（web 壁纸 daemon）
     nonisolated static func resolvedLegacyCLIExecutableURL() -> URL? {
+        if let running = RendererComponentStore.runningWebExecutableURL() { return running }
+        if let updated = RendererComponentStore.executableURL(.web) { return updated }
+        for candidate in WaifuXHostBundle.resourceCandidates(named: "wallpaperengine-cli")
+        where FileManager.default.isExecutableFile(atPath: candidate.path) {
+            return candidate
+        }
         // 1. Bundle 内（folder reference 场景）
         if let url = Bundle.main.url(forResource: "wallpaperengine-cli", withExtension: nil) {
             print("[WallpaperEngineXBridge] 找到 wallpaperengine-cli: Bundle.main.url")
@@ -5049,11 +5191,13 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// 对当前管理的全部 wgpu 渲染进程执行可见性守护。
     /// Space 切换、唤醒重建、热切换成功后调用；幂等（已可见时不动作）。
     func reassertRendererWindowsOnCurrentSpace() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         guard isControllingExternalEngine else { return }
         let screenCount = NSScreen.screens.count
         // com.apple.spaces spans-displays：true = 各屏共享 Space，false = 每块显示器独立 Space。
         // 27.2 公开的多屏桌面层回归集中在后者，所以只在窗口确实不在当前 Space 时记下这个开关。
-        let separateSpaces = UserDefaults.standard.bool(forKey: "spans-displays") == false
+        let separateSpaces = WaifuXPreferences.shared.bool(forKey: "spans-displays") == false
         for info in screenProcesses.values {
             let visible = Self.rendererProcessHasOnscreenWindow(pid: info.pid)
             if !visible {
@@ -5222,7 +5366,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
 
         let cacheKey = Self.bakedStaticCacheKey(for: path)
-        UserDefaults.standard.set(imageURL.path, forKey: cacheKey)
+        WaifuXPreferences.shared.set(imageURL.path, forKey: cacheKey)
 
         // 系统壁纸同步关闭时：动态 scene 仍由 wgpu 渲染，但不得写系统桌面静态图。
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {

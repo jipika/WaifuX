@@ -1,7 +1,9 @@
 import Foundation
 import CryptoKit
 
-// MARK: - 通过汇编 .incbin 嵌入在 WaifuX 主二进制中的 ZIP 材质包
+#if WAIFUX_HELPER
+
+// MARK: - 通过汇编 .incbin 嵌入在 WaifuXHelper 二进制中的 ZIP 材质包
 //（运行时解压后传给 wallpaper-wgpu --assets）
 //
 // zip_data.o / zip_accessor.o 是 universal object（含 arm64 + x86_64 切片），
@@ -40,67 +42,55 @@ enum WallpaperEngineEmbeddedAssets {
         return nil
     }
 
-    /// 在后台线程解压 assets。App 启动时调用一次即可。
-    /// 如果已缓存则立即返回；否则异步解压，完成后更新缓存。
-    static func prepareAssetsInBackground() {
+    /// Materialize only for consumers that need scene assets. Concurrent callers
+    /// await one task instead of repeatedly hashing the payload during polling.
+    static func prepareAssetsInBackground() { _ = ensurePreparation() }
+
+    static func awaitAssetsReady() async -> String? {
+        return await ensurePreparation().value
+    }
+
+    private static func ensurePreparation() -> Task<String?, Never> {
         prepLock.lock()
-        // 已经在准备中或已就绪
-        if preparationTask != nil {
-            prepLock.unlock()
-            return
-        }
-        // 如果磁盘上已有解压产物，直接标记缓存
-        if let diskPath = findExistingExtractOnDisk() {
-            cachedAssetsRoot = diskPath
-            prepLock.unlock()
-            return
+        defer { prepLock.unlock() }
+        if let pending = preparationTask { return pending }
+        if let ready = cachedAssetsRoot, FileManager.default.fileExists(atPath: ready) {
+            return Task { ready }
         }
         let task = Task.detached(priority: .utility) {
-            return extractAssets()
+            let result = findExistingExtractOnDisk() ?? extractAssets()
+            finishPreparation(result)
+            return result
         }
         preparationTask = task
+        return task
+    }
+
+    private static func finishPreparation(_ root: String?) {
+        prepLock.lock()
+        cachedAssetsRoot = root
+        preparationTask = nil
         prepLock.unlock()
-
-        // 完成后写入缓存
-        Task.detached(priority: .utility) {
-            let result = await task.value
-            await MainActor.run {
-                Self.prepLock.lock()
-                if let result {
-                    Self.cachedAssetsRoot = result
-                }
-                Self.preparationTask = nil
-                Self.prepLock.unlock()
-            }
-        }
     }
 
-    /// 异步等待 assets 就绪（可安全在主线程调用）。
-    static func awaitAssetsReady() async -> String? {
-        if let ready = materializedAssetsRootIfPresent() {
-            return ready
+    private static let embeddedCacheKey: String? = {
+        guard let data = readEmbeddedZip() else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }()
+
+    private static let extractionCacheBase: URL? = {
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            return URL(fileURLWithPath: root).appendingPathComponent("AssetsCache")
         }
-        // 触发后台解压
-        prepareAssetsInBackground()
-        // 等待完成（通过轮询检查，避免在 async 上下文使用锁）
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline {
-            if let ready = materializedAssetsRootIfPresent() {
-                return ready
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        }
-        return materializedAssetsRootIfPresent()
-    }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+    }()
 
     // MARK: - Private
 
     /// 在磁盘缓存目录中查找已存在的解压产物
     private static func findExistingExtractOnDisk() -> String? {
-        guard let zipData = readEmbeddedZip() else { return nil }
-        let digest = SHA256.hash(data: zipData)
-        let cacheKey = digest.map { String(format: "%02x", $0) }.joined()
-        guard let cacheBase = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+        guard let cacheKey = embeddedCacheKey else { return nil }
+        guard let cacheBase = extractionCacheBase else {
             return nil
         }
         let extractRoot = cacheBase
@@ -124,10 +114,9 @@ enum WallpaperEngineEmbeddedAssets {
         }
         print("[WallpaperEngineEmbeddedAssets] 内嵌 ZIP 数据大小: \(zipData.count) bytes")
 
-        let digest = SHA256.hash(data: zipData)
-        let cacheKey = digest.map { String(format: "%02x", $0) }.joined()
+        guard let cacheKey = embeddedCacheKey else { return nil }
 
-        guard let cacheBase = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+        guard let cacheBase = extractionCacheBase else {
             print("[WallpaperEngineEmbeddedAssets] ❌ 无法获取 cachesDirectory")
             return nil
         }
@@ -211,3 +200,30 @@ enum WallpaperEngineEmbeddedAssets {
         return data
     }
 }
+
+#else
+/// The UI never maps or extracts the embedded asset payload.
+enum WallpaperEngineEmbeddedAssets {
+    private static let lock = NSLock()
+    private static nonisolated(unsafe) var cachedRoot: String?
+    static func materializedAssetsRootIfPresent() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedRoot
+    }
+    static func prepareAssetsInBackground() {
+        Task { _ = await awaitAssetsReady() }
+    }
+    static func awaitAssetsReady() async -> String? {
+        if let cached = materializedAssetsRootIfPresent() { return cached }
+        let root = try? await BackgroundRuntimeBridge.requestCodable("assets.prepare.wait", arguments: Data(), resultKey: "root", as: String.self)
+        cache(root)
+        return root
+    }
+    private static func cache(_ root: String?) {
+        lock.lock()
+        cachedRoot = root
+        lock.unlock()
+    }
+}
+#endif
