@@ -38,15 +38,20 @@ final class DynamicWallpaperService: ObservableObject {
     /// 数据文件是否从 Bundle 加载（而非用户目录）
     private(set) var isUsingBundledData = false
 
-    /// OSS 基础 URL - Collection 视频
-    private let collectionOSSBase = "https://whbalzachome.oss-cn-hangzhou.aliyuncs.com/"
-    /// OSS 基础 URL - Exclusive 视频
-    private let exclusiveOSSBase = "https://hongkongossofwhbalzac.oss-accelerate.aliyuncs.com/"
+    /// OSS/CDN 基础 URL - Collection 视频
+    /// 2026-10-06: 原 whbalzachome.oss-cn-hangzhou bucket 的 Collection 视频已全部 NoSuchKey，
+    /// 开发者把资源整体迁到了 cdn.dynamicwallpaperengine.com（旧香港 bucket 也已被 referer 白名单锁死 403）
+    private let collectionOSSBase = "https://cdn.dynamicwallpaperengine.com/"
+    /// OSS/CDN 基础 URL - Exclusive 视频
+    private let exclusiveOSSBase = "https://cdn.dynamicwallpaperengine.com/"
 
     // MARK: - 数据文件名
 
-    private let collectionFileName = "list246.json"
-    private let exclusiveFileName = "exclusive111.json"
+    private let collectionFileName = "list247.json"
+    private let exclusiveFileName = "exclusive112.json"
+    /// 兼容旧快照文件名（仅读取，不再生成）
+    private let legacyCollectionFileNames = ["list246.json", "list244.json"]
+    private let legacyExclusiveFileNames = ["exclusive111.json", "exclusive109.json"]
     private let dataSubdirectory = "dongtai"
 
     // MARK: - Init
@@ -280,8 +285,9 @@ final class DynamicWallpaperService: ObservableObject {
 
     // MARK: - URL 解析
 
-    /// 判断给定的 URL 字符串是否为本服务可处理的 OSS 视频链接
+    /// 判断给定的 URL 字符串是否为本服务可处理的 OSS/CDN 视频链接
     func canHandleOSSURL(_ urlString: String) -> Bool {
+        urlString.contains("cdn.dynamicwallpaperengine.com") ||
         urlString.contains("whbalzachome.oss-cn-hangzhou.aliyuncs.com") ||
         urlString.contains("hongkongossofwhbalzac.oss-accelerate.aliyuncs.com")
     }
@@ -358,6 +364,13 @@ final class DynamicWallpaperService: ObservableObject {
             if loadJSONFiles(collectionURL: collectionURL, exclusiveURL: exclusiveURL) {
                 return true
             }
+            // 回退到旧版本快照文件名
+            for (col, exc) in zip(legacyCollectionFileNames, legacyExclusiveFileNames) {
+                if loadJSONFiles(collectionURL: bundleDir.appendingPathComponent(col),
+                                 exclusiveURL: bundleDir.appendingPathComponent(exc)) {
+                    return true
+                }
+            }
         }
         return false
     }
@@ -372,7 +385,17 @@ final class DynamicWallpaperService: ObservableObject {
         let collectionURL = dataDir.appendingPathComponent(collectionFileName)
         let exclusiveURL = dataDir.appendingPathComponent(exclusiveFileName)
 
-        return loadJSONFiles(collectionURL: collectionURL, exclusiveURL: exclusiveURL)
+        if loadJSONFiles(collectionURL: collectionURL, exclusiveURL: exclusiveURL) {
+            return true
+        }
+        // 回退到旧版本快照文件名
+        for (col, exc) in zip(legacyCollectionFileNames, legacyExclusiveFileNames) {
+            if loadJSONFiles(collectionURL: dataDir.appendingPathComponent(col),
+                             exclusiveURL: dataDir.appendingPathComponent(exc)) {
+                return true
+            }
+        }
+        return false
     }
 
     /// 加载两个 JSON 文件

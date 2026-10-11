@@ -13,6 +13,8 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
     let isMuted: Bool
     var contentMode: ContentMode = .fill
     var cornerRadius: CGFloat = 0
+    /// 主源播放失败时的回退源（例如动态桌面：轻量预览片缺失 → 原片）。仅回退一次。
+    var fallbackURL: URL?
     let onReady: (@MainActor @Sendable () -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -25,13 +27,13 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             cornerRadius: cornerRadius
         )
         context.coordinator.attach(to: view)
-        context.coordinator.update(url: url, isMuted: isMuted, in: view)
+        context.coordinator.update(url: url, isMuted: isMuted, fallbackURL: fallbackURL, in: view)
         return view
     }
 
     func updateNSView(_ nsView: LoopingVideoPlayerContainerView, context: Context) {
         nsView.setCornerRadius(cornerRadius)
-        context.coordinator.update(url: url, isMuted: isMuted, in: nsView)
+        context.coordinator.update(url: url, isMuted: isMuted, fallbackURL: fallbackURL, in: nsView)
     }
 
     static func dismantleNSView(_ nsView: LoopingVideoPlayerContainerView, coordinator: Coordinator) {
@@ -51,6 +53,9 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         private var statusObservation: NSKeyValueObservation?
         private var resolveTask: Task<Void, Never>?
         private var didSignalReady = false
+        /// 主源失败后的回退源与「只回退一次」标记
+        private var fallbackURL: URL?
+        private var didTryFallback = false
 
         init(onReady: (@MainActor @Sendable () -> Void)?) {
             self.onReady = onReady
@@ -60,8 +65,9 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             containerView = view
         }
 
-        func update(url: URL, isMuted: Bool, in view: LoopingVideoPlayerContainerView) {
+        func update(url: URL, isMuted: Bool, fallbackURL: URL?, in view: LoopingVideoPlayerContainerView) {
             attach(to: view)
+            self.fallbackURL = fallbackURL
 
             if requestedURL != url {
                 configurePlayer(with: url, in: view)
@@ -92,6 +98,7 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             requestedURL = nil
             playingURL = nil
             didSignalReady = false
+            didTryFallback = false
             containerView?.playerLayer.player = nil
         }
 
@@ -202,13 +209,21 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
 
             statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] observed, _ in
                 let status = observed.status
+                let errorDescription = observed.error?.localizedDescription ?? "?"
                 DispatchQueue.main.async {
-                    if status == .readyToPlay || status == .failed {
-                        if status == .failed {
-                            print("[LoopingVideoBackground] item failed: \(observed.error?.localizedDescription ?? "?")")
+                    guard let self else { return }
+                    guard status == .readyToPlay || status == .failed else { return }
+                    if status == .failed {
+                        print("[LoopingVideoBackground] item failed: \(errorDescription)")
+                        // 主源不可用（例如轻量预览片缺失）→ 回退备用源，只重试一次
+                        if !self.didTryFallback, let fallback = self.fallbackURL, let container = self.containerView {
+                            self.didTryFallback = true
+                            print("[LoopingVideoBackground] fallback → \(fallback.lastPathComponent)")
+                            self.startPlayback(with: fallback, in: container)
+                            return
                         }
-                        self?.signalReadyOnce()
                     }
+                    self.signalReadyOnce()
                 }
             }
 

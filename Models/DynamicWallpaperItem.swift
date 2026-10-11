@@ -16,6 +16,9 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
     var category: String
     let isPopular: Int
     let isAtWork: Int
+    /// 2026-10 新增字段（list247/exclusive112）：疑似会员解锁标记；
+    /// 实测 hidden=1 的老条目视频在新 CDN 上仍可下载，解析时容忍缺失，不据此过滤
+    let isHidden: Int?
 
     enum CodingKeys: String, CodingKey {
         case hasAudio = "has_audio"
@@ -30,6 +33,7 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
         case category = "category"
         case isPopular = "is_popular"
         case isAtWork = "is_at_work"
+        case isHidden = "is_hidden"
     }
 
     init(from decoder: any Decoder) throws {
@@ -47,6 +51,7 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
         self.category = try container.decode(String.self, forKey: .category)
         self.isPopular = try container.decode(Int.self, forKey: .isPopular)
         self.isAtWork = try container.decode(Int.self, forKey: .isAtWork)
+        self.isHidden = try container.decodeIfPresent(Int.self, forKey: .isHidden)
     }
 }
 
@@ -208,11 +213,10 @@ extension DynamicWallpaperRawItem {
         videoName.contains("_") && !videoName.hasPrefix("168") ? "collection" : "exclusive"
     }
 
-    /// OSS 基础 URL
+    /// OSS/CDN 基础 URL
+    /// 2026-10-06: 原阿里云 OSS 双节点已失效（杭州 404 / 香港 403 referer 白名单），统一走新 CDN
     var ossBaseURL: String {
-        detectedListType == "collection"
-            ? "https://whbalzachome.oss-cn-hangzhou.aliyuncs.com/"
-            : "https://hongkongossofwhbalzac.oss-accelerate.aliyuncs.com/"
+        "https://cdn.dynamicwallpaperengine.com/"
     }
 
     /// 完整的远程视频 URL
@@ -221,11 +225,28 @@ extension DynamicWallpaperRawItem {
         return URL(string: "\(ossBaseURL)\(path)\(videoName)")!
     }
 
-    /// OSS 视频截图缩略图 URL
+    /// 封面 URL：改由客户端抽帧生成。
+    ///
+    /// 旧实现是给视频地址挂 `?x-oss-process=video/snapshot,t_1000,f_jpg,w_640`——
+    /// 数据源迁到 `cdn.dynamicwallpaperengine.com`（Cloudflare 前置静态桶）后该参数被**整体忽略**，
+    /// 返回的是整段 mp4（实测连回源 MISS 也一样），Kingfisher 必然解码失败、封面永远空着；
+    /// 服务端也没有任何截图资源可换。因此改走 `DynamicWallpaperPosterService`（Range 取片 + 抽帧），
+    /// 由 `DynamicWallpaperPosterURLProtocol` 在 Kingfisher 传输层接住。
     var remoteThumbnailURL: URL {
-        let path = detectedListType == "collection" ? videoPathHangzhou : videoPathHongkong
-        let base = "\(ossBaseURL)\(path)\(videoName)"
-        return URL(string: "\(base)?x-oss-process=video/snapshot,t_1000,f_jpg,w_640") ?? remoteVideoURL
+        DynamicWallpaperPosterRoute.posterURL(for: remoteVideoURL)
+    }
+
+    /// 详情页/首页背景用的**轻量预览片**（`.../Videos/00_preview/{video_name}`）。
+    ///
+    /// 原片 19~96MB、AVPlayer 起播 2~7.75s；官方预览片实测 60KB~4MB、约 1.9s 起播，
+    /// 详情页背景循环用它能显著省流量、快速动起来（代价是 720×480，全屏背景略糊）。
+    /// 2026-10-08 抽样：collection 31/31 命中（含带空格文件名），
+    /// **exclusive 抽样 0/5 全 404**（官方没给独家条目做预览片）→ 这类仍回退原片。
+    var remotePreviewVideoURL: URL? {
+        guard detectedListType == "collection" else { return nil }
+        var path = videoPathHangzhou
+        if !path.hasSuffix("/") { path += "/" }
+        return URL(string: "\(ossBaseURL)\(path)00_preview/\(videoName)")
     }
 
     /// 转换为统一的 MediaItem（index 仅用于顺序参考，不作为 ID）
@@ -264,7 +285,8 @@ extension DynamicWallpaperRawItem {
             resolutionLabel: resolutionLabel,
             collectionTitle: categoryEnum?.title,
             summary: nil,
-            previewVideoURL: remoteVideoURL,
+            previewVideoURL: remotePreviewVideoURL ?? remoteVideoURL,
+            previewVideoFallbackURL: remotePreviewVideoURL == nil ? nil : remoteVideoURL,
             posterURL: remoteThumbnailURL,
             tags: tags,
             exactResolution: isFourK == 1 ? "3840x2160" : "1920x1080",
@@ -283,6 +305,47 @@ extension DynamicWallpaperRawItem {
             createdAt: nil,
             updatedAt: nil
         )
+    }
+}
+
+// MARK: - 封面抽帧路由
+
+/// 「动态桌面」封面伪 URL 的路由约定：Host 侧 `DynamicWallpaperPosterURLProtocol` /
+/// `DynamicWallpaperPosterService` 与 Model 侧共用同一套 host 与编解码规则。
+///
+/// 放在本文件（而不是 Protocol 文件）是因为 `Models/DynamicWallpaperItem.swift`
+/// 同时被 **WaifuXHelper** target 编译，而 Helper 的 sources 是显式清单、
+/// 不含封面抽帧实现——路由约定必须落在两个 target 都能看到的文件里，
+/// 否则 Helper 编译 `remoteThumbnailURL` 时会报 cannot find ... in scope。
+enum DynamicWallpaperPosterRoute {
+    /// 伪 host：`.invalid` 为保留顶级域，万一某条链路没注册 Protocol，
+    /// DNS 会立刻失败而不是发出真实请求（`.local` 会走 mDNS 查询，慢且噪声大）。
+    static let host = "dongtai-poster.waifux.invalid"
+
+    /// 由视频地址构造封面伪 URL：`https://<host>/poster?src=<encode(视频地址)>`
+    static func posterURL(for videoURL: URL) -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/poster"
+        components.queryItems = [URLQueryItem(name: "src", value: videoURL.absoluteString)]
+        if let url = components.url {
+            return url
+        }
+        // URLComponents 对合法 http(s) 输入不会失败；兜底仍返回一个必然失败、
+        // 但绝不会让 Kingfisher 去下载整段视频的地址
+        return URL(string: "https://\(host)/poster")!
+    }
+
+    /// 从封面伪 URL 还原视频地址；不是本路由的 URL 返回 nil。
+    static func videoURL(from posterURL: URL) -> URL? {
+        guard posterURL.host?.lowercased() == host,
+              let components = URLComponents(url: posterURL, resolvingAgainstBaseURL: false),
+              let source = components.queryItems?.first(where: { $0.name == "src" })?.value,
+              let videoURL = URL(string: source) else {
+            return nil
+        }
+        return videoURL
     }
 }
 

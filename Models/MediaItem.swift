@@ -84,6 +84,9 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let collectionTitle: String?
     let summary: String?
     var previewVideoURL: URL?
+    /// 主 preview 源播放失败时的回退源（动态桌面：`00_preview` 轻量预览片 → 原片）。
+    /// 只有"候选成对出现"的来源才填；其它来源保持 nil。
+    var previewVideoFallbackURL: URL?
     let posterURL: URL?
     let tags: [String]
     let exactResolution: String?
@@ -115,6 +118,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
         collectionTitle: String?,
         summary: String? = nil,
         previewVideoURL: URL? = nil,
+        previewVideoFallbackURL: URL? = nil,
         posterURL: URL? = nil,
         tags: [String] = [],
         exactResolution: String? = nil,
@@ -142,6 +146,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
         self.collectionTitle = collectionTitle
         self.summary = summary
         self.previewVideoURL = previewVideoURL
+        self.previewVideoFallbackURL = previewVideoFallbackURL
         self.posterURL = posterURL
         self.tags = tags
         self.exactResolution = exactResolution
@@ -302,6 +307,7 @@ extension MediaItem {
             collectionTitle: collectionTitle ?? existing.collectionTitle,
             summary: summary ?? existing.summary,
             previewVideoURL: previewVideoURL ?? existing.previewVideoURL,
+            previewVideoFallbackURL: previewVideoFallbackURL ?? existing.previewVideoFallbackURL,
             posterURL: posterURL ?? existing.posterURL,
             tags: tags.isEmpty ? existing.tags : tags,
             exactResolution: exactResolution ?? existing.exactResolution,
