@@ -22,6 +22,21 @@ enum WallpaperPosterGeometry {
 }
 
 enum WallpaperScreenIdentity {
+    /// Shared command resolver; topology can be supplied by regression tests.
+    static func commandTargetIndex(
+        identifier: String?, fingerprint: String,
+        screens: [(id: String, fingerprint: String)]
+    ) -> Int? {
+        let direct = screens.indices.filter { screens[$0].id == identifier }
+        guard direct.count <= 1 else { return nil }
+        // A current ID + exact fingerprint is authoritative. Position-tolerant
+        // recovery of stale commands must also be unique across the topology:
+        // an ID can be reused for another identical no-serial monitor.
+        if let index = direct.first, screens[index].fingerprint == fingerprint { return index }
+        let matches = screens.indices.filter { fingerprintsMatch(screens[$0].fingerprint, fingerprint) }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     static func fingerprint(legacyFingerprint: String, hasHardwareSerial: Bool, position: CGPoint) -> String {
         guard !hasHardwareSerial else { return legacyFingerprint }
         return "\(legacyFingerprint):position:\(Int(position.x.rounded()))x\(Int(position.y.rounded()))"

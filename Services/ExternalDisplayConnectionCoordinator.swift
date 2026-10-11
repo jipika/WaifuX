@@ -218,13 +218,13 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
     }
 
     private var knownDisplayFingerprints: Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: knownDisplayFingerprintsKey) ?? [])
+        Set(WaifuXPreferences.shared.stringArray(forKey: knownDisplayFingerprintsKey) ?? [])
     }
 
     private func markDisplayAsKnown(_ fingerprint: String) {
         var fingerprints = knownDisplayFingerprints
         guard fingerprints.insert(fingerprint).inserted else { return }
-        UserDefaults.standard.set(fingerprints.sorted(), forKey: knownDisplayFingerprintsKey)
+        WaifuXPreferences.shared.set(fingerprints.sorted(), forKey: knownDisplayFingerprintsKey)
     }
 
     private func markDisplaysAsKnown<S: Sequence>(_ fingerprints: S) where S.Element == String {
@@ -232,11 +232,11 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
         let originalCount = known.count
         known.formUnion(fingerprints)
         guard known.count != originalCount else { return }
-        UserDefaults.standard.set(known.sorted(), forKey: knownDisplayFingerprintsKey)
+        WaifuXPreferences.shared.set(known.sorted(), forKey: knownDisplayFingerprintsKey)
     }
 
     private func migrateLegacyRetainedDisplayFingerprintsIfNeeded() {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         guard defaults.object(forKey: knownDisplayFingerprintsKey) == nil else { return }
 
         let retained = Set(defaults.stringArray(forKey: legacyRetainedDisplayFingerprintsKey) ?? [])
@@ -246,21 +246,13 @@ final class ExternalDisplayConnectionCoordinator: NSObject {
 
     private func openLibrary() {
         MainNavigationRequestStore.requestLibraryTab()
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.showMainWindow()
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        WaifuXUIActions.perform(.library)
     }
 
     private func openSchedulerSettings() {
-        UserDefaults.standard.set(true, forKey: "settings.openSchedulerOnNextAppearance")
+        WaifuXPreferences.shared.set(true, forKey: "settings.openSchedulerOnNextAppearance")
         NotificationCenter.default.post(name: .openSchedulerSettings, object: nil)
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.showSettingsWindow(nil)
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        WaifuXUIActions.perform(.scheduler)
     }
 
     private static func currentExternalScreens() -> [NSScreen] {

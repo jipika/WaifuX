@@ -109,11 +109,13 @@ final class DisplayCropSettingsStore: ObservableObject {
     // MARK: - Init
 
     init(testDefaults: UserDefaults? = nil) {
-        self.defaults = testDefaults ?? UserDefaults.standard
+        self.defaults = testDefaults ?? WaifuXPreferences.shared
         load()
         // 启动时做一次重链 + 去腐：修复重启后 displayID 互换导致的设置串台。
-        reconcileWithCurrentScreens()
-        observeScreenChanges()
+        if BackgroundRuntimeRole.isHelper {
+            reconcileWithCurrentScreens()
+            observeScreenChanges()
+        }
     }
 
     deinit {
@@ -200,6 +202,11 @@ final class DisplayCropSettingsStore: ObservableObject {
     }
 
     // MARK: - Persistence (App 端)
+
+    func reloadFromPreferences() {
+        load()
+        reconcileWithCurrentScreens()
+    }
 
     private func load() {
         // v1 → v2 迁移：pan 从 [-1,1]/0=居中 改为 [0,1]/0.5=居中，公式 newPan = oldPan/2 + 0.5。
@@ -292,6 +299,7 @@ final class DisplayCropSettingsStore: ObservableObject {
     /// 可直接解析为 UInt32；解析失败的（fallback 格式 "name:x:y"）跳过——
     /// 这些 fallback 屏的扩展端走不到，丢失无影响。
     func writeSharedCropPrefs() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         guard let containerURL = sharedContainerURL() else { return }
         var dict: [String: DisplayCropSettings] = [:]
         for (screenID, s) in settingsByScreen {
@@ -331,12 +339,14 @@ final class DisplayCropSettingsStore: ObservableObject {
     }
 
     private nonisolated static func sharedContainerURL() -> URL? {
-        FileManager.default.containerURL(
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
+        return FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.com.waifux.app")
     }
 
     private func sharedContainerURL() -> URL? {
-        Self.sharedContainerURL()
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
+        return Self.sharedContainerURL()
     }
 
     // 测试用：不写文件，直接返回 [displayID: settings]（取任一屏）。
@@ -359,6 +369,12 @@ final class DisplayCropSettingsStore: ObservableObject {
     ///   - 上述全部 + 广播 Darwin 通知（扩展端 re-acquire 一次）
     ///   - Bridge 在收到 notification + interactive=false 时才重启 wgpu 进程
     private func notifyChange(screenID: String, interactive: Bool) {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        if BackgroundRuntimeRole.isRemoteUI {
+            guard let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
+            BackgroundRuntimeBridge.send("crop.update", ["id": screenID, "screen": screen, "settings": try? JSONEncoder().encode(settings(forScreenID: screenID)), "interactive": interactive])
+            return
+        }
         writeSharedCropPrefs()
 
         if !interactive {

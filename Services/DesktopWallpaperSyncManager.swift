@@ -44,6 +44,15 @@ final class DesktopWallpaperSyncManager {
     private static let originalFingerprintStateKey = "desktop_wallpaper_sync_original_fingerprint_state_v1"
 
     private init() {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let self, let values = snapshot["desktop"] as? [String: Any] else { return }
+                lastSetImageURLByScreen = (values["screens"] as? [String: String] ?? [:]).compactMapValues(URL.init(string:))
+                lastSetImageURLByFingerprint = (values["fingerprints"] as? [String: String] ?? [:]).compactMapValues(URL.init(string:))
+            }
+            return
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(handleActiveSpaceChanged),
@@ -76,8 +85,13 @@ final class DesktopWallpaperSyncManager {
         purgeLegacyRendererCaptureState()
     }
 
+    func backgroundSnapshot() -> [String: Any] {
+        ["screens": lastSetImageURLByScreen.mapValues(\.absoluteString), "fingerprints": lastSetImageURLByFingerprint.mapValues(\.absoluteString)]
+    }
+
     /// 在 WaifuX 首次改写某屏系统壁纸前，记录当时的系统桌面图。
     func captureOriginalSystemWallpaperIfNeeded(for screens: [NSScreen]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.capture", ["screens": screens]); return }
         var changed = false
         for screen in screens {
             let fingerprint = screen.wallpaperScreenFingerprint
@@ -96,6 +110,8 @@ final class DesktopWallpaperSyncManager {
 
     /// 恢复指定显示器在 WaifuX 接管前的系统壁纸；没有可用快照时只清理 WaifuX 的同步记录。
     func restoreOriginalSystemWallpaper(for screen: NSScreen) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.restore", ["screen": screen]); return }
+
         let fingerprint = screen.wallpaperScreenFingerprint
         defer {
             originalImageURLByFingerprint.removeValue(forKey: fingerprint)
@@ -125,14 +141,14 @@ final class DesktopWallpaperSyncManager {
     private func persistOriginalFingerprintState() {
         let state = originalImageURLByFingerprint.mapValues(\.absoluteString)
         if state.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.originalFingerprintStateKey)
+            WaifuXPreferences.shared.removeObject(forKey: Self.originalFingerprintStateKey)
         } else if let data = try? JSONEncoder().encode(state) {
-            UserDefaults.standard.set(data, forKey: Self.originalFingerprintStateKey)
+            WaifuXPreferences.shared.set(data, forKey: Self.originalFingerprintStateKey)
         }
     }
 
     private func loadOriginalFingerprintState() {
-        guard let data = UserDefaults.standard.data(forKey: Self.originalFingerprintStateKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: Self.originalFingerprintStateKey),
               let state = try? JSONDecoder().decode([String: String].self, from: data) else {
             return
         }
@@ -148,6 +164,7 @@ final class DesktopWallpaperSyncManager {
     ///   - screen: 目标屏幕；nil 表示注册到所有当前屏幕
     ///   - options: 设置选项
     func registerWallpaperSet(_ url: URL, for screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.register", ["url": url, "screen": screen, "options": Dictionary(uniqueKeysWithValues: options.map { ($0.key.rawValue, $0.value) })]); return }
         // 系统壁纸同步关闭时禁止注册，防止后续 Space 切换时绕开关闭状态重新写入系统壁纸。
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
             print("[DesktopWallpaperSyncManager] 🧊 系统壁纸同步已关闭，跳过注册")
@@ -209,6 +226,7 @@ final class DesktopWallpaperSyncManager {
     /// 清除静态壁纸注册（例如用户手动在系统设置里改了壁纸）
     /// - Parameter screen: 目标屏幕；nil 表示清除所有屏幕
     func clearRegistration(for screen: NSScreen? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.clear", ["screen": screen]); return }
         if let screen = screen {
             let screenID = screen.wallpaperScreenIdentifier
             let fingerprint = screen.wallpaperScreenFingerprint
@@ -226,6 +244,7 @@ final class DesktopWallpaperSyncManager {
     }
 
     func clearRegistration(screenID: String, fingerprint: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.clearIdentity", ["id": screenID, "fingerprint": fingerprint]); return }
         lastSetImageURLByScreen.removeValue(forKey: screenID)
         lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
         lastOptionsByScreen.removeValue(forKey: screenID)
@@ -235,6 +254,7 @@ final class DesktopWallpaperSyncManager {
 
     /// 应用变为活跃时的备用同步入口（处理 activeSpaceDidChangeNotification 丢失的情况）
     func syncOnAppActivation() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.activation"); return }
         let screenCount = NSScreen.screens.count
         if screenCount <= 1, !requiresActivationRecoverySync {
             AppLogger.debug(.ui, "Desktop wallpaper activation sync skipped", metadata: [
@@ -387,15 +407,15 @@ final class DesktopWallpaperSyncManager {
     private func persistFingerprintState() {
         let fpDict = lastSetImageURLByFingerprint.mapValues { $0.absoluteString }
         if fpDict.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.fingerprintStateKey)
+            WaifuXPreferences.shared.removeObject(forKey: Self.fingerprintStateKey)
         } else if let data = try? JSONSerialization.data(withJSONObject: fpDict),
                   let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: Self.fingerprintStateKey)
+            WaifuXPreferences.shared.set(str, forKey: Self.fingerprintStateKey)
         }
     }
 
     private func loadFingerprintState() {
-        guard let str = UserDefaults.standard.string(forKey: Self.fingerprintStateKey),
+        guard let str = WaifuXPreferences.shared.string(forKey: Self.fingerprintStateKey),
               let data = str.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
             return
@@ -432,8 +452,8 @@ final class DesktopWallpaperSyncManager {
             lastOptionsByScreen.removeValue(forKey: screenID)
         }
 
-        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("cached_frame_") {
-            UserDefaults.standard.removeObject(forKey: key)
+        for key in WaifuXPreferences.shared.dictionaryRepresentation().keys where key.hasPrefix("cached_frame_") {
+            WaifuXPreferences.shared.removeObject(forKey: key)
         }
         try? FileManager.default.removeItem(at: legacyDirectory)
 

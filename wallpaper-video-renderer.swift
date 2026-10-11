@@ -106,24 +106,18 @@ private enum RendererScreenIdentity {
     }
 
     static func resolvedIndex(
-        proposedIndex: Int,
-        stableID: String
-    ) -> Int {
-        let ordered = orderedScreens(NSScreen.screens)
-        if let index = ordered.firstIndex(where: {
-            identifier(for: $0) == stableID
-        }) {
-            return index
-        }
-        if let index = ordered.firstIndex(where: {
-            fingerprint(for: $0) == stableID
-        }) {
-            return index
-        }
-        if ordered.indices.contains(proposedIndex) {
-            return proposedIndex
-        }
-        return proposedIndex
+        stableID: String,
+        previousScreens: [VideoRendererScreenRouting.Screen] = [],
+        expectedFingerprint: String? = nil
+    ) -> Int? {
+        VideoRendererScreenRouting.resolvedIndex(
+            stableID: stableID,
+            screens: orderedScreens(NSScreen.screens).map {
+                .init(identifier: identifier(for: $0), fingerprint: fingerprint(for: $0))
+            },
+            previousScreens: previousScreens,
+            expectedFingerprint: expectedFingerprint
+        )
     }
 }
 
@@ -183,6 +177,7 @@ private struct IPCMessage: Codable {
     // 通用
     var screen: Int?            // 目标屏索引（NSScreen.screens 的稳定排序索引）
     var screenID: String?       // 主进程稳定屏幕标识，事件回传优先使用
+    var screenFingerprint: String? // Captured physical target; survives display ID reuse.
     var requestID: String?      // 当前 set/reload 请求 ID，过滤迟到事件
     // set
     var path: String?           // 视频文件路径
@@ -474,9 +469,6 @@ private final class VideoRendererDaemon {
     // MARK: IPC 服务端
 
     private func startServer(path: String) -> Bool {
-        // 移除旧 socket
-        unlink(path)
-
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             AppLogger.error(.wallpaper, "video-renderer socket() 失败")
@@ -487,7 +479,12 @@ private final class VideoRendererDaemon {
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = path.utf8CString
         let sunPathSize = MemoryLayout.size(ofValue: sockaddr_un().sun_path)
-        let count = min(pathBytes.count - 1, sunPathSize - 1)
+        guard pathBytes.count <= sunPathSize else {
+            AppLogger.error(.wallpaper, "video-renderer socket path exceeds sockaddr_un.sun_path")
+            close(fd)
+            return false
+        }
+        let count = pathBytes.count - 1
         withUnsafeMutableBytes(of: &addr.sun_path) { dest in
             for i in 0..<count {
                 dest[i] = UInt8(bitPattern: pathBytes[i])
@@ -504,9 +501,18 @@ private final class VideoRendererDaemon {
             close(fd)
             return false
         }
+        // A local process running under another account must not be able to
+        // send wallpaper commands to this renderer.
+        guard chmod(path, 0o600) == 0 else {
+            AppLogger.error(.wallpaper, "video-renderer socket chmod() failed: \(errno)")
+            unlink(path)
+            close(fd)
+            return false
+        }
 
         guard listen(fd, 5) == 0 else {
             AppLogger.error(.wallpaper, "video-renderer listen() 失败: \(errno)")
+            unlink(path)
             close(fd)
             return false
         }
@@ -649,27 +655,15 @@ private final class VideoRendererDaemon {
     // MARK: 命令处理
 
     private func resolvedScreenIndex(for msg: IPCMessage) -> Int? {
-        guard let requestedScreen = msg.screen else { return nil }
-        if let stableScreenID = msg.screenID,
-           let existingKey = screenStates.first(where: {
-               $0.value.screenID == stableScreenID
-                   || $0.value.screenFingerprint == stableScreenID
-           })?.key {
-            return existingKey
-        }
-        if let fingerprint = currentFingerprint(matching: msg.screenID),
-           let existingKey = screenStates.first(where: {
-               $0.value.screenFingerprint == fingerprint
-                   || currentFingerprint(matching: $0.value.screenID) == fingerprint
-           })?.key {
-            return existingKey
-        }
-        guard let stableScreenID = msg.screenID else {
-            return requestedScreen
+        guard msg.screen != nil, let stableScreenID = msg.screenID else { return nil }
+        let previousScreens = screenStates.values.compactMap { state -> VideoRendererScreenRouting.Screen? in
+            guard let fingerprint = state.screenFingerprint else { return nil }
+            return .init(identifier: state.screenID, fingerprint: fingerprint)
         }
         return RendererScreenIdentity.resolvedIndex(
-            proposedIndex: requestedScreen,
-            stableID: stableScreenID
+            stableID: stableScreenID,
+            previousScreens: previousScreens,
+            expectedFingerprint: msg.screenFingerprint
         )
     }
 
@@ -686,6 +680,9 @@ private final class VideoRendererDaemon {
     }
 
     private func handleCommand(_ msg: IPCMessage) async -> String {
+        if msg.screen != nil && resolvedScreenIndex(for: msg) == nil {
+            return "ERROR: stale display topology"
+        }
         // seek 命令需要 await，单独处理
         if msg.command == .seek {
             guard let screen = resolvedScreenIndex(for: msg),
@@ -717,7 +714,9 @@ private final class VideoRendererDaemon {
                 return "ERROR: missing set params"
             }
             let stableScreenID = msg.screenID ?? "screen-index-\(requestedScreen)"
-            let screen = resolvedScreenIndex(for: msg) ?? requestedScreen
+            guard let screen = resolvedScreenIndex(for: msg) else {
+                return "ERROR: stale display topology"
+            }
             if screen != requestedScreen {
                 AppLogger.info(
                     .wallpaper,
@@ -729,7 +728,12 @@ private final class VideoRendererDaemon {
                     ]
                 )
             }
-            let frame = CGRect(x: x, y: y, width: w, height: h)
+            let requestedFrame = CGRect(x: x, y: y, width: w, height: h)
+            let orderedScreens = RendererScreenIdentity.orderedScreens(NSScreen.screens)
+            // The host's frame may have been captured before a hotplug or
+            // resolution change. The renderer owns the current screen frame.
+            let frame = orderedScreens.indices.contains(screen)
+                ? orderedScreens[screen].frame : requestedFrame
             let screenFingerprint = currentScreenFingerprint(at: screen)
             guard FileManager.default.fileExists(atPath: path) else {
                 return "ERROR: video file unavailable"

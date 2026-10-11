@@ -15,14 +15,16 @@ struct ExtensionMultiDisplayConnectionRegression {
         let handler = try source("WaifuXWallpaperExtension/WallpaperXPCHandler.swift", from: root)
         let extensionMain = try source("WaifuXWallpaperExtension/WaifuXWallpaperExtension.swift", from: root)
 
-        precondition(state.contains("func removeContexts(ids: Set<UInt32>)"),
+        precondition(state.contains("func removeContexts(ids: Set<UInt32>, ownedBy owners: [UInt32: UInt64]?"),
                      "WallpaperState must expose per-connection context cleanup")
-        precondition(handler.contains("ownedContextIDs"),
+        precondition(handler.contains("ownedContexts: [UInt32: UInt64]"),
                      "XPC handlers must track the contexts they acquired")
-        precondition(handler.contains("registerOwnedContext(contextId)"),
+        precondition(handler.contains("beginOwnedContext(placeholder)"),
                      "acquire must register context ownership before async setup")
-        precondition(extensionMain.contains("WallpaperState.shared.removeContexts(ids: ownedContextIDs)"),
+        precondition(extensionMain.contains("WallpaperState.shared.removeContexts(ids: ownedContextIDs, ownedBy: ownedContexts)"),
                      "XPC invalidation must reclaim only the invalidated connection's contexts")
+        precondition(state.contains("state.contextGenerations.isOwned(by: owner, contextID: id)"),
+                     "cleanup must reject an obsolete connection ownership token")
         precondition(extensionMain.contains("if remaining > 0"),
                      "one invalidated display connection must not exit a live multi-display extension")
 
