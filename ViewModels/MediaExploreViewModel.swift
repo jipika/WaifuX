@@ -162,7 +162,9 @@ final class MediaExploreViewModel: ObservableObject {
     init() {
         // 缓存 UserDefaults 值，避免后台线程访问触发 _CFXPreferences 递归崩溃
         // 注意：此读取本身也有风险，但为既有路径；探索排序改为 restoreExploreSortPreferences() 延迟恢复
-        persistDownloadedMediaToAppLibrary = UserDefaults.standard.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
+        persistDownloadedMediaToAppLibrary = WaifuXPreferences.shared.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
+
+        if BackgroundRuntimeRole.isHelper { return }
 
         // 注册内存压力通知（由 WaifuXApp.configureKingfisher 中的 DispatchSource 触发）
         // ⚠️ 外层闭包必须 [weak self]，否则 observer block 强捕获 self → 实例永不释放。
@@ -1120,7 +1122,7 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 是否与设置一致：下载后写入应用内媒体库（而非仅临时缓存）。与系统「下载」文件夹无关。
-    /// 缓存值在 init 时读取，避免后台线程访问 UserDefaults.standard 触发 _CFXPreferences 递归崩溃。
+    /// 缓存值在 init 时读取，避免后台线程访问 WaifuXPreferences.shared 触发 _CFXPreferences 递归崩溃。
     private let persistDownloadedMediaToAppLibrary: Bool
 
     func download(_ item: MediaItem, preferredOption: MediaDownloadOption? = nil) async throws {
@@ -1523,6 +1525,7 @@ final class MediaExploreViewModel: ObservableObject {
             collectionTitle: original.collectionTitle,
             summary: updatedItem.summary,
             previewVideoURL: updatedItem.previewVideoURL ?? original.previewVideoURL,
+            previewVideoFallbackURL: updatedItem.previewVideoFallbackURL ?? original.previewVideoFallbackURL,
             posterURL: updatedItem.posterURL ?? original.posterURL,
             tags: original.tags,
             exactResolution: original.exactResolution,
@@ -1665,7 +1668,6 @@ final class MediaExploreViewModel: ObservableObject {
             // 防御：若仍拿到 HTML（鉴权/跳转失败）或非媒体载荷，勿落盘污染缓存。
             if WallsflowService.isProtectedMediaURL(downloadOption.remoteURL) {
                 if Self.looksLikeHTMLPayload(data)
-                    || data.count < 64_000
                     || !Self.looksLikeISOBMFF(data) {
                     print("[MediaExploreViewModel] Rejected Wallsflow payload: size=\(data.count) html=\(Self.looksLikeHTMLPayload(data)) ftyp=\(Self.looksLikeISOBMFF(data))")
                     throw NetworkError.invalidResponse
@@ -2008,7 +2010,7 @@ final class MediaExploreViewModel: ObservableObject {
         workshopDays = days
         if let menuRawValue {
             workshopSortMenuRawValue = menuRawValue
-            UserDefaults.standard.set(menuRawValue, forKey: Self.workshopSortMenuDefaultsKey)
+            WaifuXPreferences.shared.set(menuRawValue, forKey: Self.workshopSortMenuDefaultsKey)
         }
         await loadWorkshopFeedInternal(
             query: workshopSearchQuery,
@@ -2025,7 +2027,7 @@ final class MediaExploreViewModel: ObservableObject {
         guard !hasRestoredExploreSort else { return }
         hasRestoredExploreSort = true
 
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         if let raw = defaults.string(forKey: Self.workshopSortMenuDefaultsKey) {
             applyWorkshopSortMenuRawValue(raw)
         }
@@ -2358,7 +2360,7 @@ final class MediaExploreViewModel: ObservableObject {
     func setDongTaiSort(sortBy: DynamicWallpaperSortOption) async {
         invalidatePreservedExploreFeed()
         dongtaiSortBy = sortBy
-        UserDefaults.standard.set(sortBy.rawValue, forKey: Self.dongtaiSortDefaultsKey)
+        WaifuXPreferences.shared.set(sortBy.rawValue, forKey: Self.dongtaiSortDefaultsKey)
         await loadDongTaiFeedInternal(
             query: dongtaiSearchQuery,
             categories: dongtaiCurrentCategories,
@@ -2905,6 +2907,7 @@ final class MediaExploreViewModel: ObservableObject {
             collectionTitle: item.collectionTitle,
             summary: item.summary,
             previewVideoURL: item.previewVideoURL,
+            previewVideoFallbackURL: item.previewVideoFallbackURL,
             posterURL: item.posterURL,
             tags: item.tags,
             exactResolution: item.exactResolution,
@@ -3024,11 +3027,8 @@ final class MediaExploreViewModel: ObservableObject {
             return true
         }
 
-        // 过小的“视频”几乎一定是坏文件（热链 HTML 也常 < 512KB）
-        if videoExts.contains(ext), size < 64_000 {
-            return true
-        }
-
+        // Valid short/compressible videos can be smaller than 64 KB. Size is not
+        // a corruption test; inspect HTML and the expected container header.
         if videoExts.contains(ext) {
             // webm/mkv 为 EBML (0x1A45DFA3)；mp4/mov/m4v 为 ISO BMFF `ftyp`
             if ext == "webm" || ext == "mkv" {

@@ -6,7 +6,7 @@ import Foundation
 final class LocalWallpaperScanner {
     static let shared = LocalWallpaperScanner()
 
-    struct ReindexResult {
+    struct ReindexResult: Codable, Sendable {
         let indexedWallpapers: Int
         let indexedMedia: Int
 
@@ -64,6 +64,7 @@ final class LocalWallpaperScanner {
     
     /// 强制重新扫描本地文件
     func forceRescan() async {
+        if BackgroundRuntimeRole.isRemoteUI { try? await BackgroundRuntimeBridge.requestVoid("library.rescan.wait"); return }
         await scanLocalFiles(force: true)
     }
 
@@ -71,7 +72,7 @@ final class LocalWallpaperScanner {
     /// 该方法只能在 AppDelegate 的延迟恢复阶段调用，此时 UserDefaults 已可安全访问。
     /// 如果受管根目录暂时不可用（例如外置盘未挂载），不写完成标记，下次启动会重试。
     func rebuildManagedLibraryIndexForUpgradeIfNeeded() async -> ReindexResult? {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         guard defaults.integer(forKey: Self.persistentIndexMigrationKey)
             < Self.persistentIndexMigrationVersion else {
             return nil
@@ -145,6 +146,9 @@ final class LocalWallpaperScanner {
     /// 显式扫描受管目录，并把没有持久化下载记录的文件补建为本地记录。
     /// 仅供“修复数据”和升级迁移调用，不能作为常规列表或轮播的数据源。
     func rebuildManagedLibraryIndex() async -> ReindexResult {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return (try? await BackgroundRuntimeBridge.requestCodable("library.reindex.wait", arguments: Data(), resultKey: "result", as: ReindexResult.self)) ?? ReindexResult(indexedWallpapers: 0, indexedMedia: 0)
+        }
         await scanLocalFiles(force: true)
 
         var knownWallpaperPaths = Set(

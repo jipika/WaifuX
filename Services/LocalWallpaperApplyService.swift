@@ -19,7 +19,7 @@ enum LocalWallpaperApplyService {
         }
     }
 
-    struct Options {
+    struct Options: Codable {
         /// 所有用户可见的壁纸切换默认启用首帧预热过渡；恢复/回滚路径可显式关闭。
         var animatedTransition: Bool = true
         /// 播完即换且未开 web/scene 定时：跳过无播放完成事件的类型
@@ -50,6 +50,9 @@ enum LocalWallpaperApplyService {
         targetScreens: [NSScreen]?,
         options: Options = Options()
     ) async throws -> Bool {
+        try Task.checkCancellation()
+        if BackgroundRuntimeRole.isRemoteUI { return (try await BackgroundRuntimeBridge.request("wallpaper.apply", ["url": localURL, "screens": targetScreens, "options": try JSONEncoder().encode(options)])["success"] as? Bool) ?? false }
+
         guard FileManager.default.fileExists(atPath: localURL.path) else {
             throw ApplyError.missingFile(localURL.path)
         }
@@ -83,6 +86,7 @@ enum LocalWallpaperApplyService {
                 )
             }
         }
+        try Task.checkCancellation()
         func succeeded() -> Bool {
             applySucceeded = true
             return true
@@ -128,7 +132,7 @@ enum LocalWallpaperApplyService {
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
         ensurePresetHTMLGenerated(at: contentRoot)
 
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
         let contentType = determineWorkshopContentType(at: contentRoot)
         let allowNonVideoInOnEnd = !options.requirePlaybackEndSupport || screens.contains { hasWebSceneTimer(for: $0) }
 
@@ -337,17 +341,9 @@ enum LocalWallpaperApplyService {
         }
     }
 
-    /// 复用的静态壁纸执行器：应用静态图是高频路径（调度器自动换壁纸、全局同步、菜单栏
-    /// 快速切换都走这里）。每次新建 WallpaperViewModel 的代价不只是实例本身——其 init
-    /// 会重建一份全量本地库快照 cachedAllLocalWallpapers（数千条记录、数 MB），旧版还会
-    /// 因 observer 强捕获导致实例泄漏（vmmap 中 659 份快照 ≈ 4GB 的来源）。
-    /// setWallpaper 不读写实例状态，共用一个实例是安全的。
-    private static let applyViewModel = WallpaperViewModel()
-
     private static func applyStaticImage(_ imageURL: URL, to screens: [NSScreen]) async throws {
-        let vm = applyViewModel
         if screens.count == 1, let only = screens.first {
-            try await vm.setWallpaper(from: imageURL, option: .desktop, for: only)
+            try await StaticWallpaperApplyService.apply(from: imageURL, option: .desktop, for: only)
             return
         }
 
@@ -356,7 +352,7 @@ enum LocalWallpaperApplyService {
         var appliedScreens: [NSScreen] = []
         do {
             for screen in screens {
-                try await vm.setWallpaper(from: imageURL, option: .desktop, for: screen)
+                try await StaticWallpaperApplyService.apply(from: imageURL, option: .desktop, for: screen)
                 appliedScreens.append(screen)
             }
         } catch {
@@ -380,7 +376,7 @@ enum LocalWallpaperApplyService {
         if WallpaperEngineXBridge.resolvedCLIExecutableURL() == nil {
             throw ApplyError.failed("wallpaper-wgpu 渲染器未找到")
         }
-        let isRealtime = UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+        let isRealtime = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
         // user properties 仅 scene 实时有意义；web 传 nil
         let userProps = (scheduleSceneCompanionBake && isRealtime)
             ? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: path)
@@ -391,8 +387,41 @@ enum LocalWallpaperApplyService {
             userProperties: userProps,
             requireAllTargetScreens: options.isGlobalTransaction
         )
+        // 实时 scene / web 不经过 applyVideo，系统桌面与锁屏的静态底图不会被刷新：
+        // 有可用高清 poster 时在这里补一次注册；无 poster 时保持旧图（与 applyVideo 的
+        // 「没有 HD poster 就不写 fallback」策略一致）。
+        syncSystemWallpaperPosterIfAvailable(for: screens, options: options)
         // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，
         // 覆盖启动恢复、显示器重连等绕过本服务的 Scene 设置入口。
+    }
+
+    /// 给「不走 applyVideo」的渲染路径补系统壁纸底图。
+    ///
+    /// 2026-10-08 实锤：弹窗设置 Workshop 工程壁纸后 macOS 桌面静态图不跟随——
+    /// `.scene` 实时/兜底渲染与 `.web` 实时渲染都走 `applyRenderer`，这条路径原本
+    /// 只 `setWallpaper`（动态层），没有任何系统壁纸写入，而 `.video` 工程走的
+    /// `applyVideo` 早就有 immediate poster 注册。开关、动态锁屏、跨进程转发等守卫
+    /// 都在 `registerWallpaperSet` 内部，这里只负责挑 poster。
+    private static func syncSystemWallpaperPosterIfAvailable(for screens: [NSScreen], options: Options) {
+        var posterURL: URL?
+        if let itemID = options.sceneBakeItemID {
+            posterURL = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID)
+        }
+        if posterURL == nil, let bakedPath = options.bakedVideoPath {
+            posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
+                forLocalVideo: URL(fileURLWithPath: bakedPath),
+                sceneBakeItemID: options.sceneBakeItemID
+            )
+        }
+        guard let posterURL else { return }
+
+        AppLogger.debug(.wallpaper, "applyRenderer 补写系统壁纸底图", metadata: [
+            "poster": posterURL.lastPathComponent,
+            "screens": screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
+        ])
+        for screen in screens {
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+        }
     }
 
     private static func hasWebSceneTimer(for screen: NSScreen) -> Bool {

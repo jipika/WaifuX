@@ -1,6 +1,6 @@
 import Foundation
 
-enum WallpaperOption {
+enum WallpaperOption: String, Codable {
     case desktop
     case lockScreen
     case both

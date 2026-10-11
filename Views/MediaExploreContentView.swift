@@ -402,11 +402,21 @@ struct MediaExploreContentView: View {
     private func mediaGridContainer(contentWidth: CGFloat) -> some View {
         // AppKit NSCollectionView 自滚动 + 视口高度。
         // allowsScrolling=true → clipView 等于可见区域，cell 正常复用，不会撑满内存。
-        let columnCount = ExploreGridLayout.columnCount(for: contentWidth)
+        // 壁纸引擎（Steam Workshop）源封面本身是正方形：该源下卡片改用 1:1 封面并多显示一列。
+        let usesSquareCover = workshopSourceManager.activeSource == .wallpaperEngine
+        let columnCount = usesSquareCover
+            ? ExploreGridLayout.squareCoverColumnCount(for: contentWidth)
+            : ExploreGridLayout.columnCount(for: contentWidth)
         let spacing = ExploreGridLayout.spacing
         let cardWidth = max(1, floor((contentWidth - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount)))
-        // 统一卡片高度（16:10 封面 + 44pt 底栏），与旧 LazyVGrid 的 uniformMediaCardHeight 一致
-        let uniformAspectRatio = MediaItem.effectiveAspectRatio(columnWidth: cardWidth)
+        // 统一卡片高度（16:10 封面 + 44pt 底栏；壁纸引擎源为 1:1 封面 + 44pt 底栏），
+        // 与旧 LazyVGrid 的 uniformMediaCardHeight 一致
+        let uniformAspectRatio = MediaItem.effectiveAspectRatio(
+            columnWidth: cardWidth,
+            coverAspectRatio: usesSquareCover
+                ? MediaCardMetrics.squareCoverAspectRatio
+                : MediaCardMetrics.defaultCoverAspectRatio
+        )
         // 一页只生成一次 Set；不要让每个新 Cell 都重复构造同一份收藏索引。
         let favoriteIDSet = viewModel.favoriteIDSet
         let fullHeader = max(measuredFullHeaderHeight, 0)
@@ -976,7 +986,7 @@ struct MediaExploreContentView: View {
     }
 
     private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
-        if workshopSourceManager.isSteamAuthenticated && UserDefaults.standard.bool(forKey: "show_all_workshop_content") {
+        if workshopSourceManager.isSteamAuthenticated && WaifuXPreferences.shared.bool(forKey: "show_all_workshop_content") {
             [.everyone, .questionable, .mature]
         } else {
             [.everyone, .questionable]
@@ -1426,7 +1436,8 @@ struct MediaExploreContentView: View {
     // MARK: - Grid
 
     // 媒体网格卡片几何：列数/间距沿用 ExploreGridLayout；统一卡片高宽比
-    // （16:10 封面 + 44pt 底栏）由 `MediaItem.effectiveAspectRatio(columnWidth:)` 提供，
+    // （16:10 封面 + 44pt 底栏；壁纸引擎源 1:1 封面 + 44pt 底栏 + 多一列）
+    // 由 `MediaItem.effectiveAspectRatio(columnWidth:coverAspectRatio:)` 提供，
     // 与旧 LazyVGrid 时代的 uniformMediaCardHeight 公式一致。
 
     // MARK: - UI Components
@@ -1735,6 +1746,9 @@ struct MediaExploreContentView: View {
     private func handleSourceChange() {
         // 仅重置 UI 筛选状态，不触发数据加载——加载由 ViewModel.$activeSource sink 统一负责
         resetAllFilters(reloadData: false)
+        // 换源会改变网格几何（壁纸引擎源 = 1:1 封面 + 多一列）：即使新旧源条目数恰好相同，
+        // 也强制让 AppKit 网格按新列数/新封面比例重排一次。
+        gridLayoutRefreshToken &+= 1
     }
 
     private func handleWorkshopURLSubmit() {

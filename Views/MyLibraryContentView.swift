@@ -302,7 +302,7 @@ struct MyLibraryContentView: View {
         private static let subTabKey = "my_library_last_sub_tab_v1"
 
         static func load() -> (contentType: ContentType, subTab: SubTab)? {
-            let defaults = UserDefaults.standard
+            let defaults = WaifuXPreferences.shared
             guard let contentValue = defaults.string(forKey: contentTypeKey),
                   let contentType = ContentType(rawValue: contentValue) else {
                 return nil
@@ -313,7 +313,7 @@ struct MyLibraryContentView: View {
         }
 
         static func save(contentType: ContentType, subTab: SubTab) {
-            let defaults = UserDefaults.standard
+            let defaults = WaifuXPreferences.shared
             defaults.set(contentType.rawValue, forKey: contentTypeKey)
             defaults.set(subTab.rawValue, forKey: subTabKey)
         }
@@ -415,9 +415,11 @@ struct MyLibraryContentView: View {
         .task {
             // 每次出现都确保本地索引可用（缓存温热时是 no-op；失效时会重建并
             // 经 libraryContentRevision → debouncedUpdate 刷新网格）。
+            let loadStart = Date()
             async let wallpaperIndex: Void = viewModel.ensureLocalWallpaperIndex()
             async let mediaIndex: Void = mediaViewModel.ensureLocalMediaIndex()
             _ = await (wallpaperIndex, mediaIndex)
+            let indexReady = Date()
 
             // 引导加载只跑一次：详情往返的 re-appear 跳过全量 update 与
             // initialLoad，避免返回时封面整网格重载。
@@ -426,10 +428,18 @@ struct MyLibraryContentView: View {
 
             updateWallpaperItems()
             updateMediaItems()
+            let itemsReady = Date()
 
             async let initialLoad: Void = viewModel.initialLoad()
             async let animeFavoritesLoad: Void = loadAnimeFavorites()
             _ = await (initialLoad, animeFavoritesLoad)
+
+            // 分段耗时：定位「我的库加载慢」到底卡在索引、条目构建还是 initialLoad。
+            AppLogger.debug(.general, "[LibraryLoad] 我的库加载分段耗时", metadata: [
+                "indexMS": Int(indexReady.timeIntervalSince(loadStart) * 1000),
+                "itemsMS": Int(itemsReady.timeIntervalSince(indexReady) * 1000),
+                "loadMS": Int(Date().timeIntervalSince(itemsReady) * 1000),
+            ])
         }
         .onAppear {
             restoreLastLibraryPageIfNeeded()
@@ -1269,6 +1279,11 @@ struct MyLibraryContentView: View {
         pendingMediaDeletion != nil ||
         showSyncProfileSheet ||
         showSyncSelectionSheet ||
+        // glassAlert 结果类弹窗（带图标，走自绘玻璃）也要挡住 Esc，避免直接退回上一层
+        showImportResultAlert ||
+        showSyncFetchErrorAlert ||
+        showSyncServiceLoginHint ||
+        showSyncResultAlert ||
         NSApp.modalWindow != nil
     }
 
@@ -3744,9 +3759,10 @@ struct MyLibraryContentView: View {
 
     /// 先持久化下载队列，再清优化状态与旧文件，最后启动传输。
     private func redownloadMediaRecords(_ records: [MediaDownloadRecord], folderID: String?) {
+        Task { @MainActor in
         guard !records.isEmpty else { return }
 
-        guard PersistentDownloadQueueService.shared.stage(
+        guard await PersistentDownloadQueueService.shared.stage(
             records.map(\.item),
             folderID: folderID
         ) else {
@@ -3765,6 +3781,8 @@ struct MyLibraryContentView: View {
         updateMediaItems()
 
         PersistentDownloadQueueService.shared.start(using: mediaViewModel)
+
+        }
     }
 
     private func matchesLibrarySearch(for folder: LibraryFolder, query: String) -> Bool {

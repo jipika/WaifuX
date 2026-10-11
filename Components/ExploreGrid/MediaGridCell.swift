@@ -1,8 +1,24 @@
 import AppKit
 import Kingfisher
 
+/// 媒体卡片度量常量。
+///
+/// ⚠️ 必须放在非隔离类型里：`MediaGridCell` 继承 `NSCollectionViewItem`，Swift 6 下整个类型
+/// 是 `@MainActor` 隔离的，其 `static let` 不能在非隔离上下文（嵌套类型的属性初始化式、
+/// 非隔离函数的默认参数）中引用，否则报
+/// 「main actor-isolated default value in a nonisolated context」。
+enum MediaCardMetrics {
+    /// 默认封面宽高比（16:10）。
+    static let defaultCoverAspectRatio: CGFloat = 1.6
+    /// 正方形封面宽高比（1:1）。壁纸引擎（Steam Workshop）源封面本身是正方形。
+    static let squareCoverAspectRatio: CGFloat = 1.0
+    /// 底部信息栏高度。卡片几何（`MediaItem.effectiveAspectRatio`）与
+    /// `MediaGridCell.layoutContentFrames` 的封面区高度计算共用同一个值。
+    static let bottomBarHeight: CGFloat = 44
+}
+
 /// 媒体网格 Cell — 对齐 SwiftUI `MediaCardView` 的视觉结构
-/// - 16:10 图片区域（整卡 16pt 圆角裁切）
+/// - 图片区域：默认 16:10；壁纸引擎（Steam Workshop）源封面为正方形 1:1（整卡 16pt 圆角裁切）
 /// - 左侧标签 / 右侧分辨率胶囊
 /// - 底部实心标题栏 + 收藏心形（SF Symbol）
 /// - hover：1.02 缩放 + 边框提亮 + 投影 + GIF 封面动画播放
@@ -12,14 +28,13 @@ final class MediaGridCell: ExploreGridItem {
 
     private enum Layout {
         static let outerCornerRadius: CGFloat = 16
-        static let bottomBarHeight: CGFloat = 44
+        static let bottomBarHeight: CGFloat = MediaCardMetrics.bottomBarHeight
         static let overlayPadding: CGFloat = 10
         static let badgeSpacing: CGFloat = 6
         static let bottomHorizontalPadding: CGFloat = 14
         static let heartSymbolSize: CGFloat = 13
     }
 
-    static let imageAspectRatio: CGFloat = 1.6
     private static let maxDecodeEdge: CGFloat = 1600
     private static let minDecodeEdge: CGFloat = 640
     private static let maxAnimatedGIFBytes: Int64 = 32 * 1024 * 1024
@@ -530,9 +545,15 @@ private extension NSColor {
 
 extension MediaItem {
     /// 用于 ExploreGridLayout 的有效宽高比（包含底部信息栏）
-    static func effectiveAspectRatio(columnWidth: CGFloat) -> CGFloat {
+    /// - Parameter coverAspectRatio: 封面区宽高比（宽/高）。默认 16:10；
+    ///   壁纸引擎源封面为正方形，调用方显式传 `MediaCardMetrics.squareCoverAspectRatio`。
+    static func effectiveAspectRatio(
+        columnWidth: CGFloat,
+        coverAspectRatio: CGFloat = MediaCardMetrics.defaultCoverAspectRatio
+    ) -> CGFloat {
         guard columnWidth > 0 else { return 1.6 }
-        let imageHeight = columnWidth / 1.6
-        return columnWidth / (imageHeight + 44)
+        let safeCoverRatio = max(coverAspectRatio, 0.1)
+        let imageHeight = columnWidth / safeCoverRatio
+        return columnWidth / (imageHeight + MediaCardMetrics.bottomBarHeight)
     }
 }

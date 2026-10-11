@@ -9,15 +9,36 @@ final class LibraryFolderStore: ObservableObject {
     @Published private(set) var wallpaperFolders: [LibraryFolder] = []
     @Published private(set) var mediaFolders: [LibraryFolder] = []
 
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let wallpaperFoldersKey = "library_wallpaper_folders_v1"
     private let mediaFoldersKey = "library_media_folders_v1"
 
-    private init() {}
+    private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observeLibrary { [weak self] snapshot in
+                guard let self else { return }
+                if let bytes = snapshot["wallpaperFolders"] as? Data, let folders = try? JSONDecoder().decode([LibraryFolder].self, from: bytes) { self.wallpaperFolders = folders }
+                if let bytes = snapshot["mediaFolders"] as? Data, let folders = try? JSONDecoder().decode([LibraryFolder].self, from: bytes) { self.mediaFolders = folders }
+            }
+        }
+    }
 
     // MARK: - 延迟恢复
 
+    func acceptCreatedFolder(_ folder: LibraryFolder) {
+        if folder.contentType == .wallpaper {
+            guard !wallpaperFolders.contains(where: { $0.id == folder.id }) else { return }
+            wallpaperFolders.append(folder)
+            persistWallpaperFolders()
+        } else {
+            guard !mediaFolders.contains(where: { $0.id == folder.id }) else { return }
+            mediaFolders.append(folder)
+            persistMediaFolders()
+        }
+    }
+
     func restoreSavedData() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         let decoder = JSONDecoder()
         if let data = defaults.data(forKey: wallpaperFoldersKey),
            let decoded = try? decoder.decode([LibraryFolder].self, from: data) {
@@ -36,6 +57,7 @@ final class LibraryFolderStore: ObservableObject {
     /// 这是只读审计。文件夹定义和库记录分开持久化，暂时缺失的文件夹
     /// 列表不能证明记录归属无效，因此绝不在这里改写 folderID。
     func sanitizeLibraryFolderMemberships() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         let wallpaperFavIDs = Set(
             wallpaperFolders
                 .filter { $0.collection == .favorites }
@@ -94,6 +116,13 @@ final class LibraryFolderStore: ObservableObject {
 
     @discardableResult
     func createFolder(name: String, contentType: LibraryFolder.FolderContentType, parentID: String? = nil, collection: LibraryFolder.FolderCollection = .downloads) -> LibraryFolder {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let folder = LibraryFolder(name: name, contentType: contentType, parentFolderID: parentID, collection: collection)
+            if contentType == .wallpaper { wallpaperFolders.append(folder) } else { mediaFolders.append(folder) }
+            BackgroundRuntimeBridge.send("library.folder.create", ["folder": try? JSONEncoder().encode(folder)])
+            return folder
+        }
+
         let folder = LibraryFolder(name: name, contentType: contentType, parentFolderID: parentID, collection: collection)
         if contentType == .wallpaper {
             wallpaperFolders.append(folder)
@@ -315,6 +344,8 @@ final class LibraryFolderStore: ObservableObject {
     }
 
     func renameFolder(id: String, contentType: LibraryFolder.FolderContentType, newName: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.renameFolder", ["id": id, "contentType": try? JSONEncoder().encode(contentType), "newName": newName]); return }
+
         if contentType == .wallpaper {
             if let index = wallpaperFolders.firstIndex(where: { $0.id == id }) {
                 wallpaperFolders[index].name = newName
@@ -334,6 +365,8 @@ final class LibraryFolderStore: ObservableObject {
 
     /// 切换文件夹加密状态（锁定/取消锁定）
     func toggleFolderLock(id: String, contentType: LibraryFolder.FolderContentType) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.toggleFolderLock", ["id": id, "contentType": try? JSONEncoder().encode(contentType)]); return }
+
         if contentType == .wallpaper {
             guard let index = wallpaperFolders.firstIndex(where: { $0.id == id }) else { return }
             wallpaperFolders[index].isLocked.toggle()
@@ -353,6 +386,8 @@ final class LibraryFolderStore: ObservableObject {
 
     /// 设置文件夹加密状态
     func setFolderLock(id: String, contentType: LibraryFolder.FolderContentType, locked: Bool) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.setFolderLock", ["id": id, "contentType": try? JSONEncoder().encode(contentType), "locked": locked]); return }
+
         if contentType == .wallpaper {
             guard let index = wallpaperFolders.firstIndex(where: { $0.id == id }) else { return }
             wallpaperFolders[index].isLocked = locked
@@ -370,6 +405,8 @@ final class LibraryFolderStore: ObservableObject {
     }
 
     func deleteFolder(id: String, contentType: LibraryFolder.FolderContentType) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.deleteFolder", ["id": id, "contentType": try? JSONEncoder().encode(contentType)]); return }
+
         // 先递归删除子文件夹
         let children = subfolders(of: id, contentType: contentType)
         for child in children {
@@ -423,6 +460,8 @@ final class LibraryFolderStore: ObservableObject {
     /// 同步导入壁纸文件夹（云同步使用）。
     /// 按 folder.id 合并，而不是整表替换，避免云端旧快照抹掉本地新建文件夹。
     func syncImportWallpaperFolders(_ folders: [LibraryFolder]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.syncImportWallpaperFolders", ["folders": try? JSONEncoder().encode(folders)]); return }
+
         wallpaperFolders = Self.mergeFolders(local: wallpaperFolders, remote: folders)
         persistWallpaperFolders()
         sanitizeLibraryFolderMemberships()
@@ -430,6 +469,8 @@ final class LibraryFolderStore: ObservableObject {
 
     /// 同步导入媒体文件夹（云同步使用）。按 folder.id 合并。
     func syncImportMediaFolders(_ folders: [LibraryFolder]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.folder.syncImportMediaFolders", ["folders": try? JSONEncoder().encode(folders)]); return }
+
         mediaFolders = Self.mergeFolders(local: mediaFolders, remote: folders)
         persistMediaFolders()
         sanitizeLibraryFolderMemberships()
@@ -500,15 +541,21 @@ final class LibraryGridOrderStore: ObservableObject {
 
     @Published private(set) var revision = 0
 
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let orderKey = "library_grid_order_v1"
     private var orders: [String: [String]] = [:]
 
     private init() {
-        if let data = defaults.data(forKey: orderKey),
-           let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
-            orders = decoded
-        }
+        reloadFromPreferences()
+    }
+
+    func reloadFromPreferences() {
+        let saved = defaults.data(forKey: orderKey).flatMap {
+            try? JSONDecoder().decode([String: [String]].self, from: $0)
+        } ?? [:]
+        guard orders != saved else { return }
+        orders = saved
+        revision += 1
     }
 
     func orderedIDs(for ids: [String], scope: LibraryGridOrderScope) -> [String] {

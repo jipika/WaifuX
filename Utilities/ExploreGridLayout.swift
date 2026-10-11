@@ -13,6 +13,9 @@ public struct ScrollNearBottomState: Equatable {
 enum ExploreGridLayout {
     static let spacing: CGFloat = 16
 
+    /// 列数上限。媒体探索页的壁纸引擎源会在默认分级上 +1 列（见 `squareCoverColumnCount`）。
+    static let maximumColumnCount = 5
+
     /// `contentWidth` 为已扣除水平内边距后的可用宽度。
     static func columnCount(for contentWidth: CGFloat) -> Int {
         let w = max(0, contentWidth)
@@ -30,6 +33,12 @@ enum ExploreGridLayout {
             }
         }
         return 2
+    }
+
+    /// 正方形封面源（壁纸引擎 Steam Workshop）的列数：默认分级 +1，封顶 `maximumColumnCount`。
+    /// 封面从 16:10 变 1:1 后单卡明显更高，多一列才能让整体卡片尺度与其它源接近。
+    static func squareCoverColumnCount(for contentWidth: CGFloat) -> Int {
+        min(columnCount(for: contentWidth) + 1, maximumColumnCount)
     }
 
     static func columns(for contentWidth: CGFloat) -> [GridItem] {

@@ -43,7 +43,7 @@ final class MediaLibraryService: ObservableObject {
     private let recentsKey = "media_recents_v1"
     private let legacyFavoritesKey = "media_favorites_v1"
     private let legacyDownloadsKey = "media_downloads_v1"
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
 
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
@@ -53,7 +53,25 @@ final class MediaLibraryService: ObservableObject {
     /// 文件存在性缓存，避免主线程反复 FileManager.fileExists(atPath:)
     private let fileCache = FileExistenceCache.shared
 
+    func backgroundLibrarySnapshot() -> Data {
+        (try? BackgroundPropertyList.encode([
+            "favorites": JSONEncoder().encode(favoriteRecords),
+            "downloads": JSONEncoder().encode(downloadRecords),
+            "recents": JSONEncoder().encode(recentItems)
+        ])) ?? Data()
+    }
+
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observeLibrary { [weak self] values in
+                guard let self, let data = values["media"] as? Data, let snapshot = try? BackgroundPropertyList.decode(data) else { return }
+                if let bytes = snapshot["favorites"] as? Data, let records = try? JSONDecoder().decode([MediaFavoriteRecord].self, from: bytes) { self.favoriteRecords = records }
+                if let bytes = snapshot["downloads"] as? Data, let records = try? JSONDecoder().decode([MediaDownloadRecord].self, from: bytes) { self.downloadRecords = records }
+                if let bytes = snapshot["recents"] as? Data, let records = try? JSONDecoder().decode([MediaItem].self, from: bytes) { self.recentItems = records }
+            }
+            return
+        }
+
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 注册内存压力通知，自动清空文件存在性缓存
         // 用静态数组持有 observer token（非 Sendable），避免 deinit 中访问 actor 隔离属性
@@ -78,6 +96,7 @@ final class MediaLibraryService: ObservableObject {
 
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         loadPersistedState()
     }
 
@@ -135,6 +154,8 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func toggleFavorite(_ item: MediaItem) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.toggleFavorite0", ["item": try? JSONEncoder().encode(item)]); return }
+
         // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
         if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id && $0.isActive }) {
             favoriteRecords[index].item = item
@@ -178,6 +199,8 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func markAsLooped(localFilePath path: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.markAsLooped0", ["path": path]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
         downloadRecords[index].isLooped = true
         saveDlToCache(downloadRecords[index])
@@ -263,6 +286,8 @@ final class MediaLibraryService: ObservableObject {
     ///   - 软删除复活（重新下载）：以本次传入的 folderID 为权威归属（含 nil=根目录），
     ///     并清掉已随物理文件删除的烘焙/循环状态，避免脏 sidecar。
     func recordDownload(item: MediaItem, localFileURL: URL, folderID: String? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.recordDownload0", ["item": try? JSONEncoder().encode(item), "localFileURL": localFileURL, "folderID": folderID]); return }
+
         let targetFolderID = Self.normalizedFolderID(folderID)
         var persistedItem = item
         if let index = downloadRecords.firstIndex(where: { $0.item.id == item.id }) {
@@ -344,6 +369,8 @@ final class MediaLibraryService: ObservableObject {
     /// Applying a wallpaper is an explicit user action, so it must not remain cache-only.
     /// - Parameter folderID: 可选目标文件夹；已有同内容记录时也会补写归属。
     func ensureDownloadRecord(item: MediaItem, localFileURL: URL, folderID: String? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.ensureDownloadRecord0", ["item": try? JSONEncoder().encode(item), "localFileURL": localFileURL, "folderID": folderID]); return }
+
         // 优先走 O(1) 索引：下载刚完成再点「设为壁纸」时几乎总能命中，
         // 避免对整表线性扫描 + 昂贵路径规范化把主线程卡住。
         let existing: MediaDownloadRecord? = {
@@ -686,6 +713,8 @@ final class MediaLibraryService: ObservableObject {
     /// 由 `SceneBakeEligibilityAnalyzer` 在后台线程完成后调用，写入带 UUID 的分析快照。
     /// - Parameter triggerAutoBake: 为 false 时不在此触发后台自动烘焙（例如用户正在「设为壁纸」流程里同步烘焙）。
     func attachSceneBakeEligibility(itemID: String, snapshot: SceneBakeEligibilitySnapshot, triggerAutoBake: Bool = true) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.attachSceneBakeEligibility0", ["itemID": itemID, "snapshot": try? JSONEncoder().encode(snapshot), "triggerAutoBake": triggerAutoBake]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
             return
         }
@@ -700,7 +729,7 @@ final class MediaLibraryService: ObservableObject {
             syncDlIndex()
             downloadRecords = Array(downloadRecords)
             if triggerAutoBake,
-               UserDefaults.standard.bool(forKey: "auto_bake_scene"),
+               WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
                snapshot.isEligibleForOfflineBake,
                SceneOfflineBakeService.usableArtifact(from: downloadRecords[index]) == nil {
                 SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
@@ -727,7 +756,7 @@ final class MediaLibraryService: ObservableObject {
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
 
-        if triggerAutoBake, UserDefaults.standard.bool(forKey: "auto_bake_scene"), snapshot.isEligibleForOfflineBake {
+        if triggerAutoBake, WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"), snapshot.isEligibleForOfflineBake {
             SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
         }
     }
@@ -737,6 +766,8 @@ final class MediaLibraryService: ObservableObject {
         artifact: SceneBakeArtifact,
         regeneratePoster: Bool = true
     ) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.attachSceneBakeArtifact0", ["itemID": itemID, "artifact": try? JSONEncoder().encode(artifact), "regeneratePoster": regeneratePoster]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID && $0.isActive }) else {
             return
         }
@@ -765,6 +796,8 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func upsert(_ item: MediaItem) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.upsert0", ["item": try? JSONEncoder().encode(item)]); return }
+
         var persistedItem = item
 
         if let favoriteIndex = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
@@ -803,6 +836,8 @@ final class MediaLibraryService: ObservableObject {
     ///   - itemID: 媒体项ID
     ///   - newURL: 新的文件URL
     func updateDownloadPath(for itemID: String, newURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.updateDownloadPath0", ["itemID": itemID, "newURL": newURL]); return }
+
         if let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) {
             downloadRecords[index].localFilePath = newURL.path
             saveDlToCache(downloadRecords[index])
@@ -814,6 +849,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 批量替换下载记录中的路径前缀（用于目录迁移）
     func bulkUpdateDownloadPaths(oldPrefix: String, newPrefix: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.bulkUpdateDownloadPaths0", ["oldPrefix": oldPrefix, "newPrefix": newPrefix]); return }
+
         var changed = false
         // 更新下载记录
         for index in downloadRecords.indices {
@@ -879,6 +916,8 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func recordViewed(_ item: MediaItem) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.recordViewed0", ["item": try? JSONEncoder().encode(item)]); return }
+
         recentItems.removeAll { $0.id == item.id }
         recentItems.insert(item, at: 0)
         recentItems = Array(recentItems.prefix(18))
@@ -891,6 +930,8 @@ final class MediaLibraryService: ObservableObject {
     /// 批量删除收藏记录
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeFavoriteRecords(withIDs ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.removeFavoriteRecords0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         for (index, record) in favoriteRecords.enumerated() {
             if ids.contains(record.item.id) {
                 favoriteRecords[index].metadata.markLocalMutation(deleted: true)
@@ -904,6 +945,8 @@ final class MediaLibraryService: ObservableObject {
     /// 删除单个下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecord(withID id: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.removeDownloadRecord0", ["id": id]); return }
+
         if let index = downloadRecords.firstIndex(where: { $0.item.id == id }) {
             let record = downloadRecords[index]
             let filePath = record.localFilePath
@@ -926,6 +969,8 @@ final class MediaLibraryService: ObservableObject {
     /// 批量删除下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeDownloadRecords(withIDs ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.removeDownloadRecords0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         var recordsToDelete: [MediaDownloadRecord] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.item.id) {
@@ -974,6 +1019,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 公开方法：清除指定下载记录的 Scene 烘焙缓存（删除文件 + 重置 artifact），供重新烘焙使用
     func clearSceneBakeArtifact(itemID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.clearSceneBakeArtifact0", ["itemID": itemID]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
         let record = downloadRecords[index]
         deleteSceneBakeArtifacts(for: record)
@@ -997,6 +1044,8 @@ final class MediaLibraryService: ObservableObject {
     /// 用户在「更多」菜单点「删除烘焙产物」时使用，便于删除后立即用 poster 重设锁屏/桌面。
     /// sceneBakeEligibility 保留，用户后续仍可重新烘焙。
     func clearSceneBakeArtifactKeepingPoster(itemID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.clearSceneBakeArtifactKeepingPoster0", ["itemID": itemID]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
         let record = downloadRecords[index]
         deleteSceneBakeArtifacts(for: record)
@@ -1070,6 +1119,8 @@ final class MediaLibraryService: ObservableObject {
     /// 批量删除最近播放记录
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeRecentItems(withIDs ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.removeRecentItems0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         recentItems.removeAll { ids.contains($0.id) }
         persistRecents()
     }
@@ -1138,6 +1189,8 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func moveItemsToRoot(fromFolder folderID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.moveItemsToRoot0", ["folderID": folderID]); return }
+
         guard let folderID = Self.normalizedFolderID(folderID) else { return }
         var favoritesChanged = false
         for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
@@ -1197,6 +1250,7 @@ final class MediaLibraryService: ObservableObject {
     /// - Returns: 清理的记录数量
     @discardableResult
     func cleanupInvalidDownloadRecords() -> Int {
+        guard BackgroundRuntimeRole.isHelper else { return 0 }
         var cleanedCount = 0
 
         for (index, record) in downloadRecords.enumerated() {
@@ -1219,6 +1273,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 修复指定记录的路径（由 DirectoryMigrationService 调用）
     func repairDownloadPath(itemID: String, newPath: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.repairDownloadPath0", ["itemID": itemID, "newPath": newPath]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
         let oldPath = downloadRecords[index].localFilePath
         let oldPrefix = (oldPath as NSString).deletingLastPathComponent
@@ -1246,6 +1302,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
     func deactivateDownloadRecord(itemID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.deactivateDownloadRecord0", ["itemID": itemID]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
         downloadRecords[index].metadata.markLocalMutation(deleted: true)
         saveDlToCache(downloadRecords[index])
@@ -1358,7 +1416,7 @@ final class MediaLibraryService: ObservableObject {
         storage?.cancel()
         let work = DispatchWorkItem(block: { @Sendable in
             if let data = try? JSONEncoder().encode(value) {
-                UserDefaults.standard.set(data, forKey: key)
+                WaifuXPreferences.shared.set(data, forKey: key)
             }
         })
         storage = work
@@ -1375,6 +1433,7 @@ final class MediaLibraryService: ObservableObject {
 
     /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
     func persistDownloads() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         rebuildDlCache()
     }
 
@@ -1382,6 +1441,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 同步导入收藏记录（合并模式）
     func syncImportFavorites(_ records: [MediaFavoriteRecord]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.syncImportFavorites0", ["records": try? JSONEncoder().encode(records)]); return }
+
         for record in records {
             let id = record.id
             if let existingIndex = favoriteRecords.firstIndex(where: { $0.id == id }) {
@@ -1397,6 +1458,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 同步导入下载记录（合并模式）
     func syncImportDownloads(_ records: [MediaDownloadRecord]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.syncImportDownloads0", ["records": try? JSONEncoder().encode(records)]); return }
+
         for record in records {
             let id = record.id
             if let existingIndex = downloadRecords.firstIndex(where: { $0.id == id }) {
@@ -1412,12 +1475,16 @@ final class MediaLibraryService: ObservableObject {
 
     /// 同步导入最近浏览记录
     func syncImportRecents(_ items: [MediaItem]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.syncImportRecents0", ["items": try? JSONEncoder().encode(items)]); return }
+
         recentItems = Array(deduplicated(items).prefix(18))
         persistRecents()
     }
 
     /// 同步删除收藏（按 ID 集合）
     func syncRemoveFavorites(ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.syncRemoveFavorites0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         favoriteRecords.removeAll { ids.contains($0.id) }
         for id in ids {
             _ = deleteFavFromCache(id)
@@ -1427,6 +1494,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 同步删除下载（按 ID 集合）
     func syncRemoveDownloads(ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.syncRemoveDownloads0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         downloadRecords.removeAll { ids.contains($0.id) }
         for id in ids {
             _ = deleteDlFromCache(id)
@@ -1522,7 +1591,7 @@ final class WallpaperLibraryService: ObservableObject {
     private let legacyFavoritesKey = "local_favorites"
     private let legacyCloudFavoritesKey = "cloud_favorites"
     private let legacyDownloadsKey = "wallpaper_downloads_v1"
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
 
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
@@ -1532,7 +1601,23 @@ final class WallpaperLibraryService: ObservableObject {
     /// 文件存在性缓存，避免主线程反复 FileManager.fileExists(atPath:)
     private let fileCache = FileExistenceCache.shared
 
+    func backgroundLibrarySnapshot() -> Data {
+        (try? BackgroundPropertyList.encode([
+            "favorites": JSONEncoder().encode(favoriteRecords),
+            "downloads": JSONEncoder().encode(downloadRecords)
+        ])) ?? Data()
+    }
+
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observeLibrary { [weak self] values in
+                guard let self, let data = values["wallpaper"] as? Data, let snapshot = try? BackgroundPropertyList.decode(data) else { return }
+                if let bytes = snapshot["favorites"] as? Data, let records = try? JSONDecoder().decode([WallpaperFavoriteRecord].self, from: bytes) { self.favoriteRecords = records }
+                if let bytes = snapshot["downloads"] as? Data, let records = try? JSONDecoder().decode([WallpaperDownloadRecord].self, from: bytes) { self.downloadRecords = records }
+            }
+            return
+        }
+
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 用静态数组持有 observer token（非 Sendable），避免 deinit 中访问 actor 隔离属性
         Self.registerMemoryPressureObserver(service: self)
@@ -1556,6 +1641,7 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         loadPersistedState()
     }
 
@@ -1606,6 +1692,8 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func toggleFavorite(_ wallpaper: Wallpaper) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.toggleFavorite0", ["wallpaper": try? JSONEncoder().encode(wallpaper)]); return }
+
         // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
         if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) {
             favoriteRecords[index].wallpaper = wallpaper
@@ -1658,6 +1746,8 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func markAsLooped(localFilePath path: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.markAsLooped0", ["path": path]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
         downloadRecords[index].isLooped = true
         saveDlToCache(downloadRecords[index])
@@ -1699,6 +1789,8 @@ final class WallpaperLibraryService: ObservableObject {
     /// - Parameter folderID: 可选目标文件夹。传入时写入/覆盖归属；
     ///   不传时保留已有 folderID（避免二次 record 把作者批量下载归夹冲掉）。
     func recordDownload(_ wallpaper: Wallpaper, fileURL: URL, folderID: String? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.recordDownload0", ["wallpaper": try? JSONEncoder().encode(wallpaper), "fileURL": fileURL, "folderID": folderID]); return }
+
         let targetFolderID = Self.normalizedFolderID(folderID)
         if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
             downloadRecords[index].wallpaper = wallpaper
@@ -1732,6 +1824,8 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func upsert(_ wallpaper: Wallpaper) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.upsert0", ["wallpaper": try? JSONEncoder().encode(wallpaper)]); return }
+
         if let favoriteIndex = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
             favoriteRecords[favoriteIndex].wallpaper = wallpaper
             saveFavToCache(favoriteRecords[favoriteIndex])
@@ -1749,6 +1843,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 批量更新壁纸（性能优化：只持久化一次）
     func upsertBatch(_ wallpapers: [Wallpaper]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.upsertBatch0", ["wallpapers": try? JSONEncoder().encode(wallpapers)]); return }
+
         var favoritesChanged = false
         var downloadsChanged = false
 
@@ -1781,6 +1877,8 @@ final class WallpaperLibraryService: ObservableObject {
     ///   - wallpaperID: 壁纸ID
     ///   - newURL: 新的文件URL
     func updateDownloadPath(for wallpaperID: String, newURL: URL) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.updateDownloadPath0", ["wallpaperID": wallpaperID, "newURL": newURL]); return }
+
         if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
             downloadRecords[index].localFilePath = newURL.path
             saveDlToCache(downloadRecords[index])
@@ -1792,6 +1890,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 批量替换下载记录和收藏记录中的路径前缀（用于目录迁移）
     func bulkUpdateDownloadPaths(oldPrefix: String, newPrefix: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.bulkUpdateDownloadPaths0", ["oldPrefix": oldPrefix, "newPrefix": newPrefix]); return }
+
         var changed = false
         // 更新下载记录
         for index in downloadRecords.indices {
@@ -1873,6 +1973,8 @@ final class WallpaperLibraryService: ObservableObject {
     /// 批量删除壁纸收藏
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeWallpaperFavorites(withIDs ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.removeWallpaperFavorites0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         for (index, record) in favoriteRecords.enumerated() {
             if ids.contains(record.wallpaper.id) {
                 favoriteRecords[index].metadata.markLocalMutation(deleted: true)
@@ -1886,6 +1988,8 @@ final class WallpaperLibraryService: ObservableObject {
     /// 批量删除壁纸下载记录（含物理文件）
     /// - Parameter ids: 要删除的项目 ID 集合
     func removeWallpaperDownloads(withIDs ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.removeWallpaperDownloads0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         var filesToDelete: [String] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.wallpaper.id) {
@@ -1945,6 +2049,7 @@ final class WallpaperLibraryService: ObservableObject {
     /// - Returns: 清理的记录数量
     @discardableResult
     func cleanupInvalidDownloadRecords() -> Int {
+        guard BackgroundRuntimeRole.isHelper else { return 0 }
         var cleanedCount = 0
 
         for (index, record) in downloadRecords.enumerated() {
@@ -1967,6 +2072,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 修复指定记录的路径（由 DirectoryMigrationService 调用）
     func repairDownloadPath(recordID: String, newPath: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.repairDownloadPath0", ["recordID": recordID, "newPath": newPath]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
         downloadRecords[index].localFilePath = newPath
         saveDlToCache(downloadRecords[index])
@@ -1975,6 +2082,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
     func deactivateDownloadRecord(recordID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.deactivateDownloadRecord0", ["recordID": recordID]); return }
+
         guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
         downloadRecords[index].metadata.markLocalMutation(deleted: true)
         saveDlToCache(downloadRecords[index])
@@ -2042,6 +2151,8 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func moveItemsToRoot(fromFolder folderID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.moveItemsToRoot0", ["folderID": folderID]); return }
+
         guard let folderID = Self.normalizedFolderID(folderID) else { return }
         var favoritesChanged = false
         for index in favoriteRecords.indices where favoriteRecords[index].folderID == folderID {
@@ -2190,6 +2301,7 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
     func persistDownloads() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         rebuildDlCache()
     }
 
@@ -2197,6 +2309,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 同步导入收藏记录（合并模式，不覆盖本地已有记录除非云端更新）
     func syncImportFavorites(_ records: [WallpaperFavoriteRecord]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.syncImportFavorites0", ["records": try? JSONEncoder().encode(records)]); return }
+
         for record in records {
             let id = record.id
             if let existingIndex = favoriteRecords.firstIndex(where: { $0.id == id }) {
@@ -2214,6 +2328,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 同步导入下载记录（合并模式）
     func syncImportDownloads(_ records: [WallpaperDownloadRecord]) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.syncImportDownloads0", ["records": try? JSONEncoder().encode(records)]); return }
+
         for record in records {
             let id = record.id
             if let existingIndex = downloadRecords.firstIndex(where: { $0.id == id }) {
@@ -2229,6 +2345,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 同步删除收藏（按 ID 集合）
     func syncRemoveFavorites(ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.syncRemoveFavorites0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         favoriteRecords.removeAll { ids.contains($0.id) }
         for id in ids {
             _ = deleteFavFromCache(id)
@@ -2238,6 +2356,8 @@ final class WallpaperLibraryService: ObservableObject {
 
     /// 同步删除下载（按 ID 集合）
     func syncRemoveDownloads(ids: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.syncRemoveDownloads0", ["ids": try? JSONEncoder().encode(ids)]); return }
+
         downloadRecords.removeAll { ids.contains($0.id) }
         for id in ids {
             _ = deleteDlFromCache(id)

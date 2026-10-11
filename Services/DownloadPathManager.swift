@@ -17,7 +17,7 @@ final class DownloadPathManager {
     private static let legacyCustomFolderPathKey = "download_folder_path"
     private static let legacyPermissionRequestedKey = "download_permission_requested"
 
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let fileManager = FileManager.default
     /// 当前已 `startAccessingSecurityScopedResource` 的自定义父目录（进程内保持访问）
     private var activeSecurityScopedRootURL: URL?
@@ -41,6 +41,9 @@ final class DownloadPathManager {
     /// 根目录: 默认 ~/Library/Application Support/WaifuX/，或用户自定义目录下 WaifuX/
     /// 自定义目录会先恢复 security-scoped 访问，确保导入/下载写到设置里的存储位置。
     var rootFolderURL: URL {
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            return URL(fileURLWithPath: root).appendingPathComponent("WaifuX", isDirectory: true)
+        }
         let url: URL
         if let customRoot = resolveCustomRootURL() {
             ensureSecurityScopedAccess(to: customRoot)
@@ -405,20 +408,20 @@ enum MainNavigationRequestStore {
     }
 
     static func requestLibraryTab() {
-        UserDefaults.standard.set(libraryTabValue, forKey: pendingTabKey)
+        WaifuXPreferences.shared.set(libraryTabValue, forKey: pendingTabKey)
         NotificationCenter.default.post(name: .switchToLibraryTab, object: nil)
     }
 
     static func consumeLibraryTabRequest() -> Bool {
-        guard UserDefaults.standard.string(forKey: pendingTabKey) == libraryTabValue else {
+        guard WaifuXPreferences.shared.string(forKey: pendingTabKey) == libraryTabValue else {
             return false
         }
-        UserDefaults.standard.removeObject(forKey: pendingTabKey)
+        WaifuXPreferences.shared.removeObject(forKey: pendingTabKey)
         return true
     }
 
     static func clearLibraryTabRequest() {
-        UserDefaults.standard.removeObject(forKey: pendingTabKey)
+        WaifuXPreferences.shared.removeObject(forKey: pendingTabKey)
     }
 
     static func requestWallpaperDetail(_ request: MainWallpaperDetailRequest) {
@@ -434,16 +437,16 @@ enum MainNavigationRequestStore {
         }
 
         guard let payload else { return }
-        UserDefaults.standard.set(kind.rawValue, forKey: pendingWallpaperDetailKindKey)
-        UserDefaults.standard.set(payload, forKey: pendingWallpaperDetailPayloadKey)
+        WaifuXPreferences.shared.set(kind.rawValue, forKey: pendingWallpaperDetailKindKey)
+        WaifuXPreferences.shared.set(payload, forKey: pendingWallpaperDetailPayloadKey)
         NotificationCenter.default.post(name: .openCurrentWallpaperDetail, object: nil)
     }
 
     static func consumeWallpaperDetailRequest() -> MainWallpaperDetailRequest? {
         defer { clearWallpaperDetailRequest() }
-        guard let rawKind = UserDefaults.standard.string(forKey: pendingWallpaperDetailKindKey),
+        guard let rawKind = WaifuXPreferences.shared.string(forKey: pendingWallpaperDetailKindKey),
               let kind = WallpaperDetailKind(rawValue: rawKind),
-              let payload = UserDefaults.standard.data(forKey: pendingWallpaperDetailPayloadKey) else {
+              let payload = WaifuXPreferences.shared.data(forKey: pendingWallpaperDetailPayloadKey) else {
             return nil
         }
 
@@ -458,7 +461,7 @@ enum MainNavigationRequestStore {
     }
 
     static func clearWallpaperDetailRequest() {
-        UserDefaults.standard.removeObject(forKey: pendingWallpaperDetailKindKey)
-        UserDefaults.standard.removeObject(forKey: pendingWallpaperDetailPayloadKey)
+        WaifuXPreferences.shared.removeObject(forKey: pendingWallpaperDetailKindKey)
+        WaifuXPreferences.shared.removeObject(forKey: pendingWallpaperDetailPayloadKey)
     }
 }

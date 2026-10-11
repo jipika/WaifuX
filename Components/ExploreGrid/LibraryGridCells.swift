@@ -56,6 +56,47 @@ enum LibraryCoverImageCache {
         ) else { return }
         snapshotCache.setObject(image, forKey: key as NSString, cost: rep.pixelsWide * rep.pixelsHigh * 4)
     }
+
+    // MARK: - 竖卡模糊底
+
+    /// 竖图卡片的模糊填充底：同一张封面的超小模糊副本（48px 长边一次高斯模糊，放大铺满）。
+    /// 走「预生成 + 缓存」而不是给图层挂 CIFilter —— 滚动时零滤镜合成成本。
+    private nonisolated(unsafe) static let blurredSnapshotCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 400
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
+
+    static func blurredSnapshot(forKey key: String) -> NSImage? {
+        blurredSnapshotCache.object(forKey: key as NSString)
+    }
+
+    static func storeBlurredSnapshot(_ image: NSImage, forKey key: String) {
+        blurredSnapshotCache.setObject(image, forKey: key as NSString)
+    }
+
+    /// 共享 CIContext：每次新建要 10ms 以上，共享后单张 48px 模糊只剩 1–3ms。
+    private nonisolated(unsafe) static let blurContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    /// 把图缩到 48px 长边再模糊，成本与原始尺寸无关。
+    nonisolated static func makeBlurredSnapshot(from image: NSImage) -> NSImage? {
+        guard let cgSource = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let input = CIImage(cgImage: cgSource)
+        let longest = max(input.extent.width, input.extent.height)
+        guard longest > 0 else { return nil }
+
+        let scale = 48 / longest
+        let small = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let blur = CIFilter(name: "CIGaussianBlur") else { return nil }
+        blur.setValue(small, forKey: kCIInputImageKey)
+        blur.setValue(6, forKey: kCIInputRadiusKey)
+        guard let output = blur.outputImage?.cropped(to: small.extent) else { return nil }
+
+        let context = Self.blurContext
+        guard let cgImage = context.createCGImage(output, from: small.extent) else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
 }
 
 /// 我的库卡片统一布局度量（与 LibraryCardMetrics 对齐）
@@ -436,6 +477,9 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
         bottomBar.addSubview(eyeStat)
         bottomBar.addSubview(fileStat)
 
+        // 竖图卡片的模糊填充底必须在 coverImageView 之下（封面 fit 后两侧露底）。
+        containerView.addSubview(coverBackdropView, positioned: .below, relativeTo: coverImageView)
+
         contentView.addSubview(categoryBadge)
         contentView.addSubview(purityBadge)
         contentView.addSubview(resolutionBadge)
@@ -509,6 +553,7 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
             currentBadge.isHidden = true
         }
 
+        applyPortraitCoverLayout(for: model)
         loadCoverImages(model: model)
 
         if containerView.bounds.width > 0, containerView.bounds.height > 0 {
@@ -555,6 +600,11 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
         layoutTopBadges(in: bounds, imageHeight: imageHeight)
         layoutSelectionOverlay(in: bounds, imageHeight: imageHeight)
         syncGIFOverlayFrame()
+
+        // 竖图模糊底与封面同框：封面 fit 后两侧露底，由这一层铺满
+        coverBackdropView.frame = coverImageView.frame
+        coverBackdropView.layer?.cornerRadius = coverImageView.layer?.cornerRadius ?? 0
+        coverBackdropView.layer?.maskedCorners = coverImageView.layer?.maskedCorners ?? []
     }
 
     private func layoutTopBadges(in bounds: CGRect, imageHeight: CGFloat) {
@@ -672,15 +722,65 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
         .retryStrategy(DelayRetryStrategy(maxRetryCount: 1, retryInterval: .seconds(0.5)))
     ]
 
+    /// 竖图卡片的模糊填充底：封面在竖图上改成 fit（完整显示）后，两侧露出的空白
+    /// 由同一张图的模糊副本铺满，观感对齐壁纸详情页；横图这一层隐藏。
+    private let coverBackdropView: ExploreGridCoverImageView = {
+        let view = ExploreGridCoverImageView()
+        view.preferredContentsGravity = .resizeAspectFill
+        view.isHidden = true
+        return view
+    }()
+
+    /// 竖图卡片完整显示原图 + 两侧模糊底。
+    ///
+    /// 只有**本地封面**（原图 / 本地缩略图，都保比例）才走 fit —— 远程站点 thumb
+    /// 是横裁中心图，fit 出来只是更小的一条，还不如维持铺满裁切。
+    private func applyPortraitCoverLayout(for model: LibraryWallpaperCellModel) {
+        let isPortrait = model.wallpaper.dimensionY > model.wallpaper.dimensionX
+        let hasLocalCover: Bool = {
+            guard let local = model.localFileURL, local.isFileURL else { return false }
+            return LocalImageThumbnailCache.isRasterImageFile(local)
+        }()
+        let useFittedCover = isPortrait && hasLocalCover
+
+        setCoverContentsGravity(useFittedCover ? .resizeAspect : .resizeAspectFill)
+        coverBackdropView.isHidden = !useFittedCover
+        coverBackdropView.image = useFittedCover
+            ? LibraryCoverImageCache.blurredSnapshot(forKey: model.wallpaper.id)
+            : nil
+    }
+
+    /// 封面就绪后补上模糊底：48px 长边一次高斯模糊（共享 CIContext，单张 1–3ms），
+    /// 结果进进程级缓存，之后每张竖卡都直接命中，滚动不再产生滤镜成本。
+    private func updateBackdrop(with image: NSImage, model: LibraryWallpaperCellModel) {
+        guard !coverBackdropView.isHidden else { return }
+        let key = model.wallpaper.id
+        if let cached = LibraryCoverImageCache.blurredSnapshot(forKey: key) {
+            coverBackdropView.image = cached
+            return
+        }
+        guard let blurred = LibraryCoverImageCache.makeBlurredSnapshot(from: image) else { return }
+        LibraryCoverImageCache.storeBlurredSnapshot(blurred, forKey: key)
+        guard currentModel?.wallpaper.id == key else { return }
+        coverBackdropView.image = blurred
+    }
+
     /// 封面候选（与旧 WallpaperEditCard.resolvedThumbURL 同源）：
     /// SSD 列表缩略图 > 站点 thumb。两者都存在时本地优先，失败自动回退另一张。
     private func loadCoverImages(model: LibraryWallpaperCellModel) {
         var candidates: [URL] = []
         if let local = model.localFileURL,
            local.isFileURL,
-           LocalImageThumbnailCache.isRasterImageFile(local),
-           let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: local) {
-            candidates.append(cached)
+           LocalImageThumbnailCache.isRasterImageFile(local) {
+            if let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: local) {
+                candidates.append(cached)
+            } else if local.pathExtension.lowercased() != "gif" {
+                // 没有现成缩略图时直接用本地原图（coverImageOptions 已带 512 降采样），
+                // 不要为了封面去下载远程缩略图：本机外网慢，整屏并发抓远端会把骨架屏
+                // 拖到数秒（实测进库 shimmer 持续 5s，而数据层只有 681ms）。
+                // GIF 走静态兜底路径，不在这里直读原图。
+                candidates.append(local)
+            }
         }
         if let remote = model.wallpaper.thumbURL ?? model.wallpaper.smallThumbURL,
            !candidates.contains(remote) {
@@ -740,6 +840,7 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
                 switch result {
                 case .success(let value):
                     LibraryCoverImageCache.storeSnapshot(value.image, forKey: model.wallpaper.id)
+                    self?.updateBackdrop(with: value.image, model: model)
                     if self?.coverLoadGeneration == generation {
                         self?.coverRetryTask?.cancel()
                         self?.coverRetryTask = nil

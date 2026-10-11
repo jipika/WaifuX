@@ -61,6 +61,12 @@ class DownloadTaskService: ObservableObject {
     private let taskStorage = DownloadTaskStorage()
 
     private init() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.observe { [weak self] snapshot in
+                guard let bytes = snapshot["downloads"] as? Data, let tasks = try? JSONDecoder().decode([DownloadTask].self, from: bytes) else { return }
+                self?.tasks = tasks
+            }
+        }
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 任务列表通过 restoreSavedTasks() 延迟恢复
     }
@@ -114,6 +120,8 @@ class DownloadTaskService: ObservableObject {
     }
 
     func pauseTask(id: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.pauseTask", ["id": id]); return }
+
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
 
         PersistentDownloadQueueService.shared.pause(jobID: id)
@@ -132,6 +140,8 @@ class DownloadTaskService: ObservableObject {
     }
 
     func resumeTask(id: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.resumeTask", ["id": id]); return }
+
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         guard tasks[index].status == .paused
                 || tasks[index].status == .failed
@@ -148,6 +158,8 @@ class DownloadTaskService: ObservableObject {
     }
 
     func cancelTask(id: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.cancelTask", ["id": id]); return }
+
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
 
         PersistentDownloadQueueService.shared.cancel(jobID: id)
@@ -214,6 +226,8 @@ class DownloadTaskService: ObservableObject {
 
     /// 取消所有活动的下载
     func cancelAllActiveDownloads() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.cancelAll"); return }
+
         let activeTaskIDs = tasks
             .filter(\.isRunning)
             .map(\.id)
@@ -223,6 +237,8 @@ class DownloadTaskService: ObservableObject {
     }
 
     func removeTask(id: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.removeTask", ["id": id]); return }
+
         objectWillChange.send()
         tasks.removeAll { $0.id == id }
         lastProgressUpdateTimes.removeValue(forKey: id)
@@ -379,7 +395,7 @@ class DownloadTaskService: ObservableObject {
         let key = userDefaultsKey
         Self.persistQueue.async {
             if let encoded = try? JSONEncoder().encode(currentTasks) {
-                UserDefaults.standard.set(encoded, forKey: key)
+                WaifuXPreferences.shared.set(encoded, forKey: key)
             }
         }
     }
@@ -401,7 +417,7 @@ class DownloadTaskService: ObservableObject {
     }
 
     private func loadTasks() {
-        if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
+        if let data = WaifuXPreferences.shared.data(forKey: userDefaultsKey),
            let loadedTasks = try? JSONDecoder().decode([DownloadTask].self, from: data) {
             // 重置中间态任务为暂停状态（因为重启后下载不会自动继续）
             tasks = loadedTasks.map { task in
@@ -582,16 +598,38 @@ final class PersistentDownloadQueueService {
     private var terminalResultOrder: [String] = []
     private var didRestore = false
     private var shouldResumeWaitingJobsAfterRestore = false
+    var hasExecutableWork: Bool {
+        !activeWorkers.isEmpty || jobs.contains { $0.state == .queued || $0.state == .waitingForSteamLogin }
+    }
+
     private weak var wallpaperViewModel: WallpaperViewModel?
     private weak var mediaViewModel: MediaExploreViewModel?
 
     private init() {}
 
     /// 应用启动时注入长期存活的执行器，并恢复所有未完成 Job。
+    var hasPersistedWork: Bool {
+        guard let bytes = try? Data(contentsOf: checkpointURL), let snapshot = try? JSONDecoder().decode(Snapshot.self, from: bytes) else { return false }
+        return !snapshot.jobs.isEmpty
+    }
+
+    func submitWallpaper(_ wallpaper: Wallpaper, folderID: String?) throws -> String {
+        try upsert(payload: .wallpaper(wallpaper), folderID: folderID, source: .manual, persistImmediately: true)
+    }
+
+    func submitMedia(_ item: MediaItem, option: MediaDownloadOption?, saveToLibrary: Bool, folderID: String?) throws -> String {
+        let payload: Payload = item.id.hasPrefix("workshop_") ? .workshop(item) : .media(item, option, saveToLibrary: saveToLibrary)
+        return try upsert(payload: payload, folderID: folderID, source: .manual, persistImmediately: true)
+    }
+
+    func waitForRemoteCompletion(id: String) async throws -> URL? { try await waitForCompletion(of: id) }
+
     func configure(
         wallpaperViewModel: WallpaperViewModel,
         mediaViewModel: MediaExploreViewModel
     ) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+
         self.wallpaperViewModel = wallpaperViewModel
         self.mediaViewModel = mediaViewModel
 
@@ -614,6 +652,12 @@ final class PersistentDownloadQueueService {
         folderID: String?,
         using viewModel: WallpaperViewModel
     ) async throws {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let result = try await BackgroundRuntimeBridge.request("download.submitWallpaper", ["wallpaper": try JSONEncoder().encode(wallpaper), "folderID": folderID])
+            _ = try await BackgroundRuntimeBridge.request("download.wait", ["id": result["id"]])
+            return
+        }
+
         wallpaperViewModel = viewModel
         let id = try upsert(
             payload: .wallpaper(wallpaper),
@@ -631,6 +675,13 @@ final class PersistentDownloadQueueService {
         folderID: String?,
         using viewModel: MediaExploreViewModel
     ) async throws -> URL {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let result = try await BackgroundRuntimeBridge.request("download.submitMedia", ["item": try JSONEncoder().encode(item), "option": try option.map { try JSONEncoder().encode($0) }, "save": saveToLibrary, "folderID": folderID])
+            let completion = try await BackgroundRuntimeBridge.request("download.wait", ["id": result["id"]])
+            guard let string = completion["url"] as? String, let url = URL(string: string) else { throw QueueError.missingResult }
+            return url
+        }
+
         mediaViewModel = viewModel
         let payload: Payload = item.id.hasPrefix("workshop_")
             ? .workshop(item)
@@ -652,6 +703,12 @@ final class PersistentDownloadQueueService {
         folderID: String?,
         using viewModel: MediaExploreViewModel
     ) async throws {
+        if BackgroundRuntimeRole.isRemoteUI {
+            let result = try await BackgroundRuntimeBridge.request("download.submitMedia", ["item": try JSONEncoder().encode(item), "save": true, "folderID": folderID])
+            _ = try await BackgroundRuntimeBridge.request("download.wait", ["id": result["id"]])
+            return
+        }
+
         mediaViewModel = viewModel
         let id = try upsert(
             payload: .workshop(item),
@@ -665,7 +722,11 @@ final class PersistentDownloadQueueService {
     /// 重新下载必须先完整落盘 Job，再允许调用方删除旧文件。
     /// `folderID` 为 nil 或空时，下载完成后回到库根目录。
     @discardableResult
-    func stage(_ items: [MediaItem], folderID: String?) -> Bool {
+    func stage(_ items: [MediaItem], folderID: String?) async -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return (try? await BackgroundRuntimeBridge.request("download.stage", ["items": try JSONEncoder().encode(items), "folderID": folderID])["success"] as? Bool) ?? false
+        }
+
         guard !items.isEmpty else { return false }
         let originalJobs = jobs
         var presentationPayloads: [Payload] = []
@@ -709,11 +770,15 @@ final class PersistentDownloadQueueService {
 
     /// 兼容旧调用；新调度器始终滚动补齐两个槽位，不再按固定批次等待。
     func start(using viewModel: MediaExploreViewModel) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.start"); return }
+
         mediaViewModel = viewModel
         pump()
     }
 
     func pause(jobID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.pause", ["id": jobID]); return }
+
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
         jobs[index].state = .paused
         jobs[index].updatedAt = .now
@@ -722,6 +787,8 @@ final class PersistentDownloadQueueService {
     }
 
     func resume(jobID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.resume", ["id": jobID]); return }
+
         guard let index = jobs.firstIndex(where: { $0.id == jobID }),
               jobs[index].state == .paused
                 || jobs[index].state == .failed
@@ -738,6 +805,8 @@ final class PersistentDownloadQueueService {
     }
 
     func resumeWaitingForSteamLogin() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.resumeLogin"); return }
+
         guard didRestore else {
             shouldResumeWaitingJobsAfterRestore = true
             return
@@ -762,6 +831,8 @@ final class PersistentDownloadQueueService {
     }
 
     func cancel(jobID: String) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.cancel", ["id": jobID]); return }
+
         activeWorkers[jobID]?.task.cancel()
         activeWorkers.removeValue(forKey: jobID)
         jobs.removeAll { $0.id == jobID }
@@ -773,6 +844,8 @@ final class PersistentDownloadQueueService {
     }
 
     func retry(_ task: DownloadTask) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("download.retry", ["task": try? JSONEncoder().encode(task)]); return }
+
         if jobs.contains(where: { $0.id == task.id }) {
             resume(jobID: task.id)
             return
@@ -803,6 +876,12 @@ final class PersistentDownloadQueueService {
     }
 
     func retryAndWait(_ task: DownloadTask) async throws {
+        if BackgroundRuntimeRole.isRemoteUI {
+            _ = try await BackgroundRuntimeBridge.request("download.retry", ["task": try JSONEncoder().encode(task)])
+            _ = try await BackgroundRuntimeBridge.request("download.wait", ["id": task.id])
+            return
+        }
+
         retry(task)
         guard jobs.contains(where: { $0.id == task.id }) else {
             throw QueueError.missingResult
@@ -907,6 +986,7 @@ final class PersistentDownloadQueueService {
             activeWorkers[job.id] = ActiveWorker(token: workerToken, task: worker)
             DownloadTaskService.shared.registerDownloadTask(id: job.id, task: worker)
         }
+        NotificationCenter.default.post(name: .backgroundDownloadWorkersChanged, object: nil)
     }
 
     private func execute(_ job: Job) async throws -> URL? {
@@ -1081,7 +1161,7 @@ final class PersistentDownloadQueueService {
             }
         }
         if persistJobs() {
-            UserDefaults.standard.removeObject(forKey: legacyDefaultsKey)
+            WaifuXPreferences.shared.removeObject(forKey: legacyDefaultsKey)
         }
     }
 
@@ -1099,7 +1179,7 @@ final class PersistentDownloadQueueService {
     }
 
     private func mergeLegacyMediaJobs() {
-        guard let data = UserDefaults.standard.data(forKey: legacyDefaultsKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: legacyDefaultsKey),
               let legacyJobs = try? JSONDecoder().decode([LegacyMediaJob].self, from: data) else {
             return
         }
@@ -1187,7 +1267,10 @@ final class PersistentDownloadQueueService {
     }
 
     private var checkpointURL: URL {
-        FileManager.default
+        if BackgroundRuntimeRole.isIsolatedTest, let root = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            return URL(fileURLWithPath: root).appendingPathComponent("DownloadQueue/download-queue-v2.json")
+        }
+        return FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("com.waifux.app", isDirectory: true)
