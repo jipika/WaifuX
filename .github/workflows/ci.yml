@@ -64,7 +64,22 @@ jobs:
               run: bash scripts/sync-version.sh && grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
 
             - name: Generate Xcode Project
-              run: xcodegen generate
+              run: |
+                xcodegen generate
+                python3 scripts/verify-project-configuration.py
+                python3 Tests/HelperProvisioningRegression.py
+                python3 scripts/test-helper-display-controls.py
+                python3 scripts/test-helper-appearance.py
+                python3 scripts/test-helper-build-identity.py
+                python3 scripts/test-helper-child-cleanup.py
+                python3 scripts/test-background-preferences.py
+                python3 scripts/test-wallpaper-battery-pause.py
+                python3 scripts/test-owned-daemon-identity.py
+                python3 scripts/test-helper-network-proxy.py
+                python3 scripts/test-background-isolation.py
+                python3 scripts/test-wallpaper-extension-lifecycle.py
+                python3 scripts/test-native-video-resources.py
+                python3 scripts/test-wallpaper-snapshot-work.py
 
             - name: Cache SPM Dependencies
               uses: actions/cache@v5
@@ -111,6 +126,7 @@ jobs:
                   APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
                   APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
                   APPLE_APP_PROVISIONING_PROFILE: ${{ secrets.APPLE_APP_PROVISIONING_PROFILE }}
+                  APPLE_HELPER_PROVISIONING_PROFILE: ${{ secrets.APPLE_HELPER_PROVISIONING_PROFILE }}
                   APPLE_EXTENSION_PROVISIONING_PROFILE: ${{ secrets.APPLE_EXTENSION_PROVISIONING_PROFILE }}
               run: |
                   # 创建专用 keychain 并导入证书
@@ -154,9 +170,25 @@ jobs:
                       exit 1
                     fi
 
+                    if [[ "$label" == "helper" ]]; then
+                      local application_id
+                      application_id=$(/usr/libexec/PlistBuddy -c 'Print Entitlements:com.apple.application-identifier' "$profile_plist" 2>/dev/null || true)
+                      if [[ "$application_id" != *".com.waifux.app.helper" ]]; then
+                        echo "❌ Helper profile 的 App ID 不匹配 com.waifux.app.helper"
+                        exit 1
+                      fi
+                      if ! /usr/libexec/PlistBuddy -c 'Print Entitlements:com.apple.security.application-groups' "$profile_plist" | grep -Fq 'group.com.waifux.app'; then
+                        echo "❌ Helper profile 缺少 group.com.waifux.app"
+                        exit 1
+                      fi
+                    fi
+
                     if [[ "$label" == "app" ]]; then
                       echo "WAIFUX_APP_PROVISIONING_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
                       echo "WAIFUX_APP_PROVISIONING_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
+                    elif [[ "$label" == "helper" ]]; then
+                      echo "WAIFUX_HELPER_PROVISIONING_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
+                      echo "WAIFUX_HELPER_PROVISIONING_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
                     else
                       echo "WAIFUX_EXTENSION_PROVISIONING_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
                       echo "WAIFUX_EXTENSION_PROVISIONING_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
@@ -170,6 +202,12 @@ jobs:
                   else
                     APP_PROFILE_UUID=""
                     echo "❌ 未配置 APPLE_APP_PROVISIONING_PROFILE，Developer ID 签名会丢失 App application-groups entitlement"
+                    exit 1
+                  fi
+
+                  PROFILE_UUID=""
+                  if ! install_profile_from_base64 "$APPLE_HELPER_PROVISIONING_PROFILE" "helper" "1"; then
+                    echo "❌ 未配置 APPLE_HELPER_PROVISIONING_PROFILE，Helper 无法安全使用共享 App Group"
                     exit 1
                   fi
 
