@@ -22,13 +22,14 @@ case "$TARGET_ARCH" in
   universal)
     # 过渡 universal 包用：lipo 合并两个架构产物。
     # 输出到 build/ 临时目录，不覆盖仓库提交的 arm64-only Resources/wallpaperengine-cli。
-    "$0" arm64
-    "$0" x86_64
+    WAIFUX_DEFER_COMPONENT_VERSION=1 "$0" arm64
+    WAIFUX_DEFER_COMPONENT_VERSION=1 "$0" x86_64
     mkdir -p "$ROOT/build"
     LIPO_OUT="$ROOT/build/wallpaperengine-cli-universal"
     lipo "$ROOT/Resources/wallpaperengine-cli" "$ROOT/Resources/wallpaperengine-cli-x86_64" \
       -create -output "$LIPO_OUT"
     codesign --force -s - "$LIPO_OUT" 2>/dev/null || true
+    python3 "$ROOT/scripts/renderer_component_versions.py" --component web
     echo "[build-wallpaperengine-cli] universal OK → $LIPO_OUT"
     exit 0
     ;;
@@ -39,6 +40,7 @@ case "$TARGET_ARCH" in
 esac
 
 SRC_MAIN="$ROOT/wallpaperengine-cli.swift"
+SRC_PROCESS_IDENTITY="$ROOT/Utilities/OwnedProcessIdentity.swift"
 
 if [[ ! -f "$SRC_MAIN" ]]; then
   echo "error: missing $SRC_MAIN" >&2
@@ -57,7 +59,7 @@ swiftc -parse-as-library \
   -Xlinker -rpath -Xlinker @loader_path/../Resources \
   -framework AppKit -framework AVFoundation -framework IOKit -framework WebKit -framework Combine \
   -o "$OUT_CLI" \
-  "$SRC_MAIN"
+  "$SRC_MAIN" "$SRC_PROCESS_IDENTITY"
 
 # strip 调试与本地符号，进一步减小体积（与仓库已提交的优化版对齐）
 strip -x -S "$OUT_CLI" 2>/dev/null || true
@@ -69,6 +71,10 @@ fi
 
 if [[ "$TARGET_ARCH" == "arm64" ]]; then
   cp "$OUT_CLI" "$ROOT/wallpaperengine-cli"
+fi
+
+if [[ "${WAIFUX_DEFER_COMPONENT_VERSION:-0}" != "1" ]]; then
+  python3 "$ROOT/scripts/renderer_component_versions.py" --component web
 fi
 
 echo "[build-wallpaperengine-cli] OK ($TARGET_ARCH) → $OUT_CLI"

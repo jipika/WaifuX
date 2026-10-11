@@ -1,0 +1,28 @@
+{
+  "wgpu": {
+    "version": "1.0.1",
+    "revision": 2,
+    "sourceSHA256": {
+      "dxc": "b2d8382e27af429a1333a2f29acd1fc4890bea68690f082c72fcdd2b8bdd57c6",
+      "dxc-x86_64": "4af6cdfbf3bb36a89b87161fb6cc8841f6941f59570e422cb4802c227f831aab",
+      "lib/libdxcompiler.dylib": "03b9536328da279e435257a9e80670d0fdacf43223b54561f7b7fd18d1462117",
+      "libdxcompiler-x86_64.dylib": "4038160a2b7a2edc598ba08da4afd8152582e87ae67ae61522543165a1cfa14e",
+      "wallpaper-wgpu": "dab8b6d6bfb26b642831786a951489b14e308f6a3c898a162fd4a1e644242a46",
+      "wallpaper-wgpu-x86_64": "42176db77e8a7bd7288317ab5a7af78ce24cf6fc3576a82db2a33e8b646227d4"
+    }
+  },
+  "web": {
+    "version": "1.0.3",
+    "revision": 4,
+    "sourceSHA256": {
+      "ffmpeg": "87238c63a588d89a11d0ae88f5e8507f24da833b88badda4a30d7b8f5189d777",
+      "ffmpeg-x86_64": "b13b53c8eae2728fc14c7cd3cffa9aeca1d44771415ade510b24717718ae1a2e",
+      "wallpaperengine-cli": "4085aab1b7b4dab9422a94b3b5f0bf821cb46a6e121150139e83dbddc7bf981a",
+      "wallpaperengine-cli-x86_64": "e42fc4f81062699e2dd353a276a1744a044fe0b3bfbe16d7a938b9ccc86f7741"
+    }
+  },
+  "video": {
+    "version": "1.0.0",
+    "revision": 1
+  }
+}

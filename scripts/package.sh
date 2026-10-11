@@ -187,6 +187,10 @@ if [[ -f "$STEAM_SERVICE_ENTITLEMENTS" && -d "$PROJECT_DIR/SteamService/prebuilt
 fi
 echo "✅ 签名完成"
 
+# 捕获手动替换 Resources 的情况，并与已发布组件的版本高水位对齐。
+# 完整 App 必须携带同一份版本记录，避免已安装的旧热更新覆盖新版内置组件。
+python3 "$PROJECT_DIR/scripts/renderer_component_versions.py" --refresh-feed
+
 # 清理旧构建（保留 build/ 下其它产物，例如双架构流程里另一个架构已导出的 .app）
 echo "🧹 清理旧构建..."
 rm -rf "$BUILD_DIR/$ARCHIVE_NAME" "$BUILD_DIR/$APP_NAME" "$BUILD_DIR/exportOptions.plist"
@@ -416,10 +420,47 @@ sign_exported_app() {
   sign_nested_code() {
     local code_path="$1"
     local extension_entitlements="$PROJECT_DIR/WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
+    local agent_entitlements="$PROJECT_DIR/BackgroundAgent/BackgroundAgent.entitlements"
     if [[ "$(basename "$code_path")" == "wallpaper-wgpu" && -f "$renderer_entitlements" ]]; then
       codesign --force --timestamp=none --options runtime --entitlements "$renderer_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force --options runtime --entitlements "$renderer_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force -s "$identity" "$code_path" 2>/dev/null || true
+    elif [[ "$code_path" == */Contents/Helpers/WaifuXHelper.app ]]; then
+      if [[ "$identity" == "-" && -z "${WAIFUX_ALLOW_MISSING_APPGROUP:-}" ]]; then
+        echo "❌ 正式 Helper 包必须使用 Developer ID 签名；ad-hoc 仅允许显式本地验证" >&2
+        return 1
+      fi
+      if [[ -n "${WAIFUX_HELPER_PROVISIONING_PROFILE_PATH:-}" && -f "$WAIFUX_HELPER_PROVISIONING_PROFILE_PATH" ]]; then
+        cp "$WAIFUX_HELPER_PROVISIONING_PROFILE_PATH" "$code_path/Contents/embedded.provisionprofile"
+      fi
+      if [[ -f "$code_path/Contents/embedded.provisionprofile" || "$identity" == "-" ]]; then
+        local agent_sign_entitlements="$agent_entitlements"
+        if [[ "$identity" != "-" && -z "${WAIFUX_ALLOW_MISSING_APPGROUP:-}" ]]; then
+          agent_sign_entitlements="$BUILD_DIR/helper-distribution-entitlements.plist"
+          python3 "$PROJECT_DIR/scripts/verify-helper-provisioning.py" --app "$code_path" \
+            --prepare-entitlements "$agent_entitlements" --output-entitlements "$agent_sign_entitlements" || return 1
+        fi
+        codesign --force --timestamp=none --options runtime --entitlements "$agent_sign_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
+          codesign --force --options runtime --entitlements "$agent_sign_entitlements" -s "$identity" "$code_path"
+        local agent_ent_check
+        agent_ent_check=$(codesign -d --entitlements - "$code_path" 2>/dev/null || true)
+        if ! echo "$agent_ent_check" | grep -q "com.apple.security.application-groups"; then
+          echo "❌ Agent 签名缺少 application-groups entitlement: $code_path" >&2
+          return 1
+        fi
+      else
+        if [[ -z "${WAIFUX_ALLOW_MISSING_APPGROUP:-}" ]]; then
+          echo "❌ Helper 已接管后台；需配置 APPLE_HELPER_PROVISIONING_PROFILE（com.waifux.app.helper + group.com.waifux.app）" >&2
+          return 1
+        fi
+        echo "  ⚠️ 缺少 Helper profile：仅允许本地验证，产物不可对外分发"
+        codesign --force --timestamp=none --options runtime --entitlements "$agent_entitlements" -s "$identity" "$code_path"
+      fi
+      codesign --verify --strict "$code_path" || return 1
+      if [[ "$identity" != "-" && -z "${WAIFUX_ALLOW_MISSING_APPGROUP:-}" ]]; then
+        python3 "$PROJECT_DIR/scripts/verify-helper-provisioning.py" --app "$code_path" || return 1
+      fi
+      echo "  ✅ 后台 Agent 已签名: $(basename "$code_path")"
     elif [[ "$code_path" == *.appex ]]; then
       # Developer ID + App Groups 需要 provisioning profile 授权。
       # 因此优先使用 CI 预签名 .appex；缺失时有 profile 则交给 Xcode 签，否则才尝试直接 codesign。
@@ -579,6 +620,13 @@ sign_exported_app() {
     find "$app_path/Contents/Resources" -type d \( -name "*.app" -o -name "*.framework" -o -name "*.saver" \) -print 2>/dev/null \
       | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-
   )
+
+  if [[ -d "$app_path/Contents/Helpers/WaifuXHelper.app" ]]; then
+    sign_nested_code "$app_path/Contents/Helpers/WaifuXHelper.app"
+  else
+    echo "❌ 打包产物缺少 WaifuXHelper.app" >&2
+    return 1
+  fi
 
   if [[ -d "$app_path/Contents/Frameworks" ]]; then
     while IFS= read -r framework_path; do

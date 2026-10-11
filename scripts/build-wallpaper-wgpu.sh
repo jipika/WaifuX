@@ -341,4 +341,7 @@ if [[ -f "$DEST_DIR/wallpaper-wgpu" ]]; then
   cp "$DEST_DIR/wallpaper-wgpu" "$ROOT/wallpaper-wgpu"
 fi
 
+# DXC 属于 wgpu，FFmpeg 属于 web；只为内容变化的组件递增版本。
+python3 "$ROOT/scripts/renderer_component_versions.py" --component wgpu web
+
 echo "✅ build-wallpaper-wgpu 完成"

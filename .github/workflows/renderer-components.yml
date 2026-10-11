@@ -1,0 +1,110 @@
+name: Publish Renderer Components
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to publish (uses committed prebuilt Resources)
+        type: choice
+        options: [wgpu, web, video, all]
+        required: true
+      minimum_app_version:
+        description: Oldest compatible App version
+        required: true
+      maximum_app_version:
+        description: Newest compatible App version
+        required: true
+      minimum_system_version:
+        description: Oldest compatible macOS version
+        default: '14.4'
+        required: true
+      notes:
+        description: Optional update description (can be left blank)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renderer-component-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMPONENT: ${{ inputs.component }}
+      MIN_APP_VERSION: ${{ inputs.minimum_app_version }}
+      MAX_APP_VERSION: ${{ inputs.maximum_app_version }}
+      MIN_SYSTEM_VERSION: ${{ inputs.minimum_system_version }}
+      COMPONENT_NOTES: ${{ inputs.notes }}
+      APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Import release certificate and notarization credentials
+        env:
+          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          APPLE_SIGNING_CERTIFICATE_PWD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          COMPONENT_KEYCHAIN="$RUNNER_TEMP/components.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$COMPONENT_KEYCHAIN"
+          security set-keychain-settings -t 7200 -u "$COMPONENT_KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$COMPONENT_KEYCHAIN"
+          security list-keychains -d user -s "$COMPONENT_KEYCHAIN"
+          security default-keychain -s "$COMPONENT_KEYCHAIN"
+          printf '%s' "$APPLE_SIGNING_CERTIFICATE" | base64 -D > "$RUNNER_TEMP/components.p12"
+          security import "$RUNNER_TEMP/components.p12" -P "$APPLE_SIGNING_CERTIFICATE_PWD" -k "$COMPONENT_KEYCHAIN" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$COMPONENT_KEYCHAIN"
+          xcrun notarytool store-credentials renderer-components --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id SRHKTRJ83W
+      - name: Fetch current feed and prepare signed components
+        run: |
+          set -euo pipefail
+          FEED_STATUS=$(curl --location --silent --show-error --output "$RUNNER_TEMP/previous-components.json" --write-out '%{http_code}' 'https://github.com/jipika/WaifuX/releases/download/renderer-components/components.json')
+          if [ "$FEED_STATUS" = 404 ]; then
+            printf '%s\n' '{"schemaVersion":1,"releases":[]}' > "$RUNNER_TEMP/previous-components.json"
+          elif [ "$FEED_STATUS" != 200 ]; then
+            exit 1
+          fi
+          printf '%s\n' "$COMPONENT_NOTES" > "$RUNNER_TEMP/component-notes.txt"
+          python3 scripts/package-renderer-components.py \
+            --component "$COMPONENT" \
+            --minimum-app-version "$MIN_APP_VERSION" --maximum-app-version "$MAX_APP_VERSION" \
+            --minimum-system-version "$MIN_SYSTEM_VERSION" --notes-file "$RUNNER_TEMP/component-notes.txt" \
+            --previous-feed "$RUNNER_TEMP/previous-components.json" --notary-profile renderer-components \
+            --release-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/component-release"
+      - name: Publish immutable assets, then advance the component feed
+        run: |
+          set -euo pipefail
+          # Unchanged component contents and compatibility: nothing to publish.
+          if [ ! -f "$RUNNER_TEMP/component-release/release-tag.txt" ]; then
+            exit 0
+          fi
+          COMPONENT_TAG=$(cat "$RUNNER_TEMP/component-release/release-tag.txt")
+          COMPONENT_TITLE=$(cat "$RUNNER_TEMP/component-release/release-title.txt")
+          ASSETS=()
+          for asset in "$RUNNER_TEMP/component-release"/*; do
+            case "$(basename "$asset")" in components.json|release-tag.txt|release-title.txt) continue ;; esac
+            ASSETS+=("$asset")
+          done
+          gh release create "$COMPONENT_TAG" "${ASSETS[@]}" --target "$GITHUB_SHA" \
+            --title "$COMPONENT_TITLE" \
+            --notes-file "$RUNNER_TEMP/component-notes.txt" --prerelease --latest=false
+          if ! gh release view renderer-components >/dev/null 2>&1; then
+            gh release create renderer-components --target "$GITHUB_SHA" --title 'Renderer component update feed' \
+              --notes 'Independent renderer updates. Install through WaifuX component updates.' --prerelease --latest=false
+          fi
+          gh release upload renderer-components "$RUNNER_TEMP/component-release/components.json" --clobber
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/components.keychain-db" || true
+          rm -f "$RUNNER_TEMP/components.p12"
