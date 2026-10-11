@@ -7,7 +7,7 @@ import SwiftUI
 final class GuessYouLikeService {
     static let shared = GuessYouLikeService()
 
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let lastUpdateKey = "gyl_lastUpdate"
     private let cachedItemsKey = "gyl_cachedItems"
     private let cacheVersionKey = "gyl_cacheVersion"

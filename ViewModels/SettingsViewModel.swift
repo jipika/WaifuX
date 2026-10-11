@@ -12,35 +12,35 @@ class SettingsViewModel: ObservableObject {
     private var systemWallpaperSyncTransitionGeneration: UInt64 = 0
 
     @Published var saveToDownloads = true {
-        didSet { UserDefaults.standard.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
+        didSet { WaifuXPreferences.shared.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
     }
-    @Published private var themeModeRawValue: String = ThemeMode.system.rawValue { didSet { UserDefaults.standard.set(themeModeRawValue, forKey: "theme_mode") } }
-    @Published var launchAtLogin = false { didSet { UserDefaults.standard.set(launchAtLogin, forKey: "launch_at_login") } }
+    @Published private var themeModeRawValue: String = ThemeMode.dark.rawValue
+    @Published var launchAtLogin = false { didSet { WaifuXPreferences.shared.set(launchAtLogin, forKey: "launch_at_login") } }
     @Published var swapMenuBarClickActions = false {
-        didSet { UserDefaults.standard.set(swapMenuBarClickActions, forKey: "menu_bar_swap_click_actions") }
+        didSet { WaifuXPreferences.shared.set(swapMenuBarClickActions, forKey: "menu_bar_swap_click_actions") }
     }
     /// 永不休眠：持有 IOPM assertion，阻止空闲息屏 / 系统睡眠，锁屏时桌面可继续显示。
     @Published var preventSystemSleep = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(preventSystemSleep, forKey: "prevent_system_sleep")
+            WaifuXPreferences.shared.set(preventSystemSleep, forKey: "prevent_system_sleep")
             SleepPreventer.shared.setPreventingSleep(preventSystemSleep, reason: .userSetting)
         }
     }
     @Published var grainTextureEnabled = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled")
+            WaifuXPreferences.shared.set(grainTextureEnabled, forKey: "grain_texture_enabled")
             ArcBackgroundSettings.shared.grainTextureEnabled = grainTextureEnabled
             VideoWallpaperManager.shared.refreshGrainOverlay()
         }
     }
-    @Published var grainTextureQuality = "high" { didSet { UserDefaults.standard.set(grainTextureQuality, forKey: "grain_texture_quality") } }
+    @Published var grainTextureQuality = "high" { didSet { WaifuXPreferences.shared.set(grainTextureQuality, forKey: "grain_texture_quality") } }
     /// 颗粒度强度 0.0~1.0，同步到 ArcBackgroundSettings.grainIntensity
     @Published var grainIntensity: Double = 0.5 {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(grainIntensity, forKey: "arc_grain_intensity")
+            WaifuXPreferences.shared.set(grainIntensity, forKey: "arc_grain_intensity")
             ArcBackgroundSettings.shared.grainIntensity = grainIntensity
             VideoWallpaperManager.shared.refreshGrainOverlay()
         }
@@ -49,14 +49,14 @@ class SettingsViewModel: ObservableObject {
     @Published var hideNotch = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(hideNotch, forKey: "hide_notch")
+            WaifuXPreferences.shared.set(hideNotch, forKey: "hide_notch")
             NotchOverlayManager.shared.setEnabled(hideNotch)
         }
     }
-    @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
-    @Published var pauseInactiveDisplays = false { didSet { UserDefaults.standard.set(pauseInactiveDisplays, forKey: "pause_inactive_displays") } }
-    @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
-    @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
+    @Published var pauseWhenOtherAppForeground = false { didSet { WaifuXPreferences.shared.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
+    @Published var pauseInactiveDisplays = false { didSet { WaifuXPreferences.shared.set(pauseInactiveDisplays, forKey: "pause_inactive_displays") } }
+    @Published var pauseWhenFullscreenCovers = false { didSet { WaifuXPreferences.shared.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
+    @Published var pauseOnBatteryPower = false { didSet { WaifuXPreferences.shared.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
     /// 电池供电时播放策略（继续播放 / 暂停），落到 DynamicWallpaperAutoPauseManager 持久化
     @Published var batteryPlaybackPolicy: WallpaperPlaybackTriggerPolicy = .keepRunning {
         didSet {
@@ -71,16 +71,16 @@ class SettingsViewModel: ObservableObject {
             DynamicWallpaperAutoPauseManager.shared.displaySleepPolicy = displaySleepPlaybackPolicy
         }
     }
-    @Published var pauseWhenWindowCoverage = false { didSet { UserDefaults.standard.set(pauseWhenWindowCoverage, forKey: "pause_when_window_coverage") } }
-    @Published var windowCoveragePauseThreshold: Double = 50 { didSet { UserDefaults.standard.set(windowCoveragePauseThreshold, forKey: "window_coverage_pause_threshold") } }
+    @Published var pauseWhenWindowCoverage = false { didSet { WaifuXPreferences.shared.set(pauseWhenWindowCoverage, forKey: "pause_when_window_coverage") } }
+    @Published var windowCoveragePauseThreshold: Double = 50 { didSet { WaifuXPreferences.shared.set(windowCoveragePauseThreshold, forKey: "window_coverage_pause_threshold") } }
     /// 默认关闭：桌面 AVPlayerLayer 开启逐帧 HDR 元数据时，在部分 15.x + XDR 上会偶发整层 tone-map 闪暗。
     /// 用户仍可在设置里手动打开；仅影响新创建的 AVPlayerItem。
-    @Published var hdrEnabled = false { didSet { UserDefaults.standard.set(hdrEnabled, forKey: "hdr_enabled") } }
+    @Published var hdrEnabled = false { didSet { WaifuXPreferences.shared.set(hdrEnabled, forKey: "hdr_enabled") } }
     /// 使用独立视频渲染子进程；默认关闭，使用 App 内置播放器。
     @Published var externalVideoRendererEnabled = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(
+            WaifuXPreferences.shared.set(
                 externalVideoRendererEnabled,
                 forKey: VideoWallpaperManager.externalVideoRendererDefaultsKey
             )
@@ -90,7 +90,7 @@ class SettingsViewModel: ObservableObject {
     @Published var autoRemoveVideoLetterbox = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
+            WaifuXPreferences.shared.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
             VideoWallpaperManager.shared.refreshAutoRemoveVideoLetterbox()
             StaticImageWallpaperOverlayManager.shared.refreshAutoRemoveImageLetterbox()
         }
@@ -99,14 +99,14 @@ class SettingsViewModel: ObservableObject {
     @Published var portraitBlurFillEnabled = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
+            WaifuXPreferences.shared.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
         }
     }
     /// Wallhaven 探索页默认隐藏竖图。
     @Published var hidePortraitWallpapersByDefault = true {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(
+            WaifuXPreferences.shared.set(
                 hidePortraitWallpapersByDefault,
                 forKey: WallhavenBrowsePreferences.hidePortraitByDefaultKey
             )
@@ -117,7 +117,7 @@ class SettingsViewModel: ObservableObject {
     @Published var hidePeopleWallpapersByDefault = true {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(
+            WaifuXPreferences.shared.set(
                 hidePeopleWallpapersByDefault,
                 forKey: WallhavenBrowsePreferences.hidePeopleByDefaultKey
             )
@@ -132,7 +132,7 @@ class SettingsViewModel: ObservableObject {
                 frameInterpolationTargetFPS = normalized
                 return
             }
-            UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
+            WaifuXPreferences.shared.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
             VideoWallpaperManager.shared.refreshFrameInterpolationSettings()
             applyVideoOptimizationSettings()
         }
@@ -142,25 +142,25 @@ class SettingsViewModel: ObservableObject {
     @Published var autoOptimizeVideosAfterDownload = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
+            WaifuXPreferences.shared.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
             // 旧双开关一并同步，避免分叉。
-            UserDefaults.standard.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
+            WaifuXPreferences.shared.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
             // 旧 key 清理，防止被当成「切换时自动补帧」读回。
-            UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
+            WaifuXPreferences.shared.set(false, forKey: "frame_interpolation_auto_enqueue")
             // 清理已废弃的总开关，避免其它路径误读。
-            UserDefaults.standard.set(true, forKey: "frame_interpolation_enabled")
-            UserDefaults.standard.set(true, forKey: "loop_point_analysis_enabled")
+            WaifuXPreferences.shared.set(true, forKey: "frame_interpolation_enabled")
+            WaifuXPreferences.shared.set(true, forKey: "loop_point_analysis_enabled")
             applyVideoOptimizationSettings()
         }
     }
-    @Published var showAllWorkshopContent = false { didSet { UserDefaults.standard.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
+    @Published var showAllWorkshopContent = false { didSet { WaifuXPreferences.shared.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
     /// 场景壁纸实时渲染模式开关
     /// 开启后，设置场景壁纸将使用 wallpaper-wgpu 实时渲染桌面，而非烘焙视频
     /// 与桌面动态元素（时钟、音频柱状图等）互斥
     @Published var sceneRealtimeRenderingEnabled = true {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
+            WaifuXPreferences.shared.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
             // 与桌面动态元素互斥
             if sceneRealtimeRenderingEnabled {
                 LiquidGlassClockSettings.shared.update { $0.enabled = false }
@@ -171,45 +171,45 @@ class SettingsViewModel: ObservableObject {
     /// 超分辨率模式开关
     /// 开启后，动态壁纸将以低分辨率运行，利用 Apple MetalFX 超分辨率技术提升性能
     @Published var upscalingEnabled = true {
-        didSet { UserDefaults.standard.set(upscalingEnabled, forKey: "upscaling_enabled") }
+        didSet { WaifuXPreferences.shared.set(upscalingEnabled, forKey: "upscaling_enabled") }
     }
 
     /// 超分辨率缩放比例 (30% ~ 100%)
     @Published var upscalingPercent: Double = 70 {
-        didSet { UserDefaults.standard.set(upscalingPercent, forKey: "upscaling_percent") }
+        didSet { WaifuXPreferences.shared.set(upscalingPercent, forKey: "upscaling_percent") }
     }
 
     /// 性能模式（--effect-reduction）：压缩次级采样等 effect 中间 RT 精度
     /// 仅在超分模式启用时生效；默认关闭以避免静默损失 effect 精度
     @Published var effectReductionEnabled = false {
-        didSet { UserDefaults.standard.set(effectReductionEnabled, forKey: "effect_reduction_enabled") }
+        didSet { WaifuXPreferences.shared.set(effectReductionEnabled, forKey: "effect_reduction_enabled") }
     }
 
     /// 壁纸引擎实时渲染帧率上限 (60 ~ 显示器最大刷新率)
     @Published var wallpaperEngineFPS: Double = 60 {
-        didSet { UserDefaults.standard.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
+        didSet { WaifuXPreferences.shared.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
     }
 
     /// Web 壁纸画布分辨率比例；100% 保持原画质，降低后减少 WebGL 像素占用。
     @Published var webWallpaperRenderScalePercent: Double = 100 {
         didSet {
-            UserDefaults.standard.set(webWallpaperRenderScalePercent, forKey: "web_wallpaper_render_scale_percent")
+            WaifuXPreferences.shared.set(webWallpaperRenderScalePercent, forKey: "web_wallpaper_render_scale_percent")
         }
     }
 
     /// 壁纸引擎离线烘焙帧率 (15 ~ 显示器最高刷新率)
     @Published var sceneBakeFPS: Double = 30 {
-        didSet { UserDefaults.standard.set(sceneBakeFPS, forKey: "scene_bake_fps") }
+        didSet { WaifuXPreferences.shared.set(sceneBakeFPS, forKey: "scene_bake_fps") }
     }
 
     /// 壁纸引擎离线烘焙时长（秒）
     @Published var sceneBakeDuration: Double = 15 {
-        didSet { UserDefaults.standard.set(sceneBakeDuration, forKey: "scene_bake_duration") }
+        didSet { WaifuXPreferences.shared.set(sceneBakeDuration, forKey: "scene_bake_duration") }
     }
 
     /// 下载完成后自动烘焙场景壁纸
     @Published var autoBakeScene: Bool = true {
-        didSet { UserDefaults.standard.set(autoBakeScene, forKey: "auto_bake_scene") }
+        didSet { WaifuXPreferences.shared.set(autoBakeScene, forKey: "auto_bake_scene") }
     }
 
     /// 动态锁屏壁纸开关（仅 macOS 26+ 可用，关闭后走旧逻辑）
@@ -223,7 +223,7 @@ class SettingsViewModel: ObservableObject {
                     return
                 }
             }
-            UserDefaults.standard.set(dynamicLockScreenEnabled, forKey: "dynamic_lock_screen_enabled")
+            WaifuXPreferences.shared.set(dynamicLockScreenEnabled, forKey: "dynamic_lock_screen_enabled")
             // 开启时立即同步显示器实例到共享容器，使系统锁屏设置能发现 WaifuX 实例
             if dynamicLockScreenEnabled {
                 // 动态锁屏接管后，停止保留旧静态桌面同步登记，避免后续 Space 切换重放 poster。
@@ -252,14 +252,11 @@ class SettingsViewModel: ObservableObject {
         didSet {
             // 批量恢复期间抑制副作用，避免启动时无谓折腾 launchctl
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(
+            WaifuXPreferences.shared.set(
                 wallpaperExtensionKeeperEnabled,
                 forKey: WallpaperExtensionKeeper.launchAgentDefaultsKey
             )
-            let enabled = wallpaperExtensionKeeperEnabled
-            Task.detached(priority: .utility) {
-                WallpaperExtensionKeeper.syncLaunchAgentWithEnabledFlag(enabled)
-            }
+            BackgroundRuntimeBridge.send("runtime.refreshSettings")
         }
     }
 
@@ -271,7 +268,7 @@ class SettingsViewModel: ObservableObject {
         didSet {
             // 批量恢复期间抑制联动副作用，避免启动时误清实例
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
+            WaifuXPreferences.shared.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
             // 通知 web daemon：关同步后不得再 setDesktopImageURL
             VideoWallpaperManager.shared.publishSystemWallpaperSyncControlToWebDaemon()
             // 单向联动：关闭系统壁纸同步时，强制关闭动态锁屏并清理锁屏实例
@@ -297,89 +294,8 @@ class SettingsViewModel: ObservableObject {
 
     /// Preserves each display's visible static image when the presentation
     /// backend changes between the system desktop and the in-app overlay.
-    private func migrateStaticWallpaperPresentation(
-        systemSyncEnabled: Bool,
-        generation: UInt64
-    ) async {
-        guard systemWallpaperSyncTransitionGeneration == generation,
-              self.systemWallpaperSyncEnabled == systemSyncEnabled else {
-            return
-        }
-
-        let screens = NSScreen.screens
-        let overlay = StaticImageWallpaperOverlayManager.shared
-
-        if !systemSyncEnabled {
-            for screen in screens {
-                guard systemWallpaperSyncTransitionGeneration == generation,
-                      !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen),
-                      !WallpaperEngineXBridge.shared.isManaging(screen: screen),
-                      overlay.imageURL(for: screen) == nil,
-                      let imageURL = DesktopWallpaperSyncManager.shared.imageURL(for: screen),
-                      FileManager.default.fileExists(atPath: imageURL.path) else {
-                    continue
-                }
-                await overlay.showPrepared(imageURL: imageURL, for: screen)
-                guard systemWallpaperSyncTransitionGeneration == generation,
-                      !self.systemWallpaperSyncEnabled else {
-                    if overlay.imageURL(for: screen)?.standardizedFileURL == imageURL.standardizedFileURL {
-                        overlay.clearState(for: screen)
-                    }
-                    return
-                }
-            }
-            return
-        }
-
-        let staticEntries = screens.compactMap { screen -> (NSScreen, URL)? in
-            guard let imageURL = overlay.imageURL(for: screen),
-                  FileManager.default.fileExists(atPath: imageURL.path) else {
-                return nil
-            }
-            return (screen, imageURL)
-        }
-        guard !staticEntries.isEmpty else { return }
-
-        let workspace = NSWorkspace.shared
-        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-            .allowClipping: true
-        ]
-
-        for (screen, imageURL) in staticEntries {
-            guard systemWallpaperSyncTransitionGeneration == generation,
-                  self.systemWallpaperSyncEnabled else {
-                return
-            }
-
-            let preparedURL = await overlay.preparedSystemWallpaperURL(for: imageURL)
-            guard systemWallpaperSyncTransitionGeneration == generation,
-                  self.systemWallpaperSyncEnabled else {
-                return
-            }
-            do {
-                try workspace.setDesktopImageURLForAllSpaces(
-                    preparedURL,
-                    for: screen,
-                    options: fillOptions
-                )
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(
-                    preparedURL,
-                    for: screen,
-                    options: fillOptions
-                )
-            } catch {
-                AppLogger.error(.wallpaper, "Failed to migrate static overlay into system wallpaper", metadata: [
-                    "screen": screen.localizedName,
-                    "error": error.localizedDescription
-                ])
-                continue
-            }
-
-            if overlay.imageURL(for: screen)?.standardizedFileURL == imageURL.standardizedFileURL {
-                overlay.clearState(for: screen)
-            }
-        }
+    private func migrateStaticWallpaperPresentation(systemSyncEnabled: Bool, generation: UInt64) async {
+        BackgroundRuntimeBridge.send("desktop.syncMode", ["enabled": systemSyncEnabled])
     }
 
     // MARK: - 功能模块开关（壁纸页 / 媒体页 / 动漫页）
@@ -388,33 +304,33 @@ class SettingsViewModel: ObservableObject {
     // 而非这三个标志——这样切换开关在当前会话不立即生效（避免 tab 树重建 / 管线半加载）。
     // `hasPendingModuleChanges` 对比快照判定"待应用"，UI 据此显示"立即重启"。
     @Published var wallpaperModuleEnabled: Bool = true {
-        didSet { UserDefaults.standard.set(wallpaperModuleEnabled, forKey: "module_wallpaper_enabled") }
+        didSet { WaifuXPreferences.shared.set(wallpaperModuleEnabled, forKey: "module_wallpaper_enabled") }
     }
     @Published var mediaModuleEnabled: Bool = true {
-        didSet { UserDefaults.standard.set(mediaModuleEnabled, forKey: "module_media_enabled") }
+        didSet { WaifuXPreferences.shared.set(mediaModuleEnabled, forKey: "module_media_enabled") }
     }
     @Published var animeModuleEnabled: Bool = true {
-        didSet { UserDefaults.standard.set(animeModuleEnabled, forKey: "module_anime_enabled") }
+        didSet { WaifuXPreferences.shared.set(animeModuleEnabled, forKey: "module_anime_enabled") }
     }
 
     @Published var proxyEnabled = false {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
+            WaifuXPreferences.shared.set(proxyEnabled, forKey: "proxy_enabled")
             syncProxySettings()
         }
     }
     @Published var proxyHost: String = "" {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
+            WaifuXPreferences.shared.set(proxyHost, forKey: "proxy_host")
             syncProxySettings()
         }
     }
     @Published var proxyPort: String = "" {
         didSet {
             guard !isBatchUpdating else { return }
-            UserDefaults.standard.set(proxyPort, forKey: "proxy_port")
+            WaifuXPreferences.shared.set(proxyPort, forKey: "proxy_port")
             syncProxySettings()
         }
     }
@@ -445,36 +361,36 @@ class SettingsViewModel: ObservableObject {
     /// 其余纯 UserDefaults 写入属性在批量期间已被跳过——这里统一补写一次即可。
     private func applyDeferredSideEffects() {
         // UserDefaults 补写（批量期间 didSet 未执行）
-        UserDefaults.standard.set(grainTextureEnabled, forKey: "grain_texture_enabled")
-        UserDefaults.standard.set(grainIntensity, forKey: "arc_grain_intensity")
-        UserDefaults.standard.set(hideNotch, forKey: "hide_notch")
-        UserDefaults.standard.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
-        UserDefaults.standard.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
-        UserDefaults.standard.set(
+        WaifuXPreferences.shared.set(grainTextureEnabled, forKey: "grain_texture_enabled")
+        WaifuXPreferences.shared.set(grainIntensity, forKey: "arc_grain_intensity")
+        WaifuXPreferences.shared.set(hideNotch, forKey: "hide_notch")
+        WaifuXPreferences.shared.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
+        WaifuXPreferences.shared.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
+        WaifuXPreferences.shared.set(
             hidePortraitWallpapersByDefault,
             forKey: WallhavenBrowsePreferences.hidePortraitByDefaultKey
         )
-        UserDefaults.standard.set(
+        WaifuXPreferences.shared.set(
             hidePeopleWallpapersByDefault,
             forKey: WallhavenBrowsePreferences.hidePeopleByDefaultKey
         )
         NotificationCenter.default.post(name: .wallhavenDefaultFiltersChanged, object: nil)
-        UserDefaults.standard.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
+        WaifuXPreferences.shared.set(frameInterpolationTargetFPS, forKey: "frame_interpolation_target_fps")
         // 手动优化始终可用；总开关已废弃，写 true 以免旧代码路径误判为关闭。
-        UserDefaults.standard.set(true, forKey: "frame_interpolation_enabled")
-        UserDefaults.standard.set(true, forKey: "loop_point_analysis_enabled")
-        UserDefaults.standard.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
+        WaifuXPreferences.shared.set(true, forKey: "frame_interpolation_enabled")
+        WaifuXPreferences.shared.set(true, forKey: "loop_point_analysis_enabled")
+        WaifuXPreferences.shared.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
         applyVideoOptimizationSettings()
-        UserDefaults.standard.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
-        UserDefaults.standard.set(false, forKey: "frame_interpolation_auto_enqueue")
-        UserDefaults.standard.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
-        UserDefaults.standard.set(
+        WaifuXPreferences.shared.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
+        WaifuXPreferences.shared.set(false, forKey: "frame_interpolation_auto_enqueue")
+        WaifuXPreferences.shared.set(sceneRealtimeRenderingEnabled, forKey: "scene_realtime_rendering_enabled")
+        WaifuXPreferences.shared.set(
             externalVideoRendererEnabled,
             forKey: VideoWallpaperManager.externalVideoRendererDefaultsKey
         )
-        UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled")
-        UserDefaults.standard.set(proxyHost, forKey: "proxy_host")
-        UserDefaults.standard.set(proxyPort, forKey: "proxy_port")
+        WaifuXPreferences.shared.set(proxyEnabled, forKey: "proxy_enabled")
+        WaifuXPreferences.shared.set(proxyHost, forKey: "proxy_host")
+        WaifuXPreferences.shared.set(proxyPort, forKey: "proxy_port")
 
         // 单例级联副作用
         ArcBackgroundSettings.shared.grainTextureEnabled = grainTextureEnabled
@@ -492,9 +408,9 @@ class SettingsViewModel: ObservableObject {
         syncProxySettings()
 
         // 纯 UserDefaults 属性（批量期间 didSet 被跳过，统一补写）
-        UserDefaults.standard.set(autoBakeScene, forKey: "auto_bake_scene")
-        UserDefaults.standard.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
-        UserDefaults.standard.set(preventSystemSleep, forKey: "prevent_system_sleep")
+        WaifuXPreferences.shared.set(autoBakeScene, forKey: "auto_bake_scene")
+        WaifuXPreferences.shared.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
+        WaifuXPreferences.shared.set(preventSystemSleep, forKey: "prevent_system_sleep")
         // 启动恢复后同步给 web daemon，避免旧 daemon 仍按默认写系统桌面
         VideoWallpaperManager.shared.publishSystemWallpaperSyncControlToWebDaemon()
         // 恢复「永不休眠」电源 assertion（批量期间 didSet 被抑制）
@@ -538,7 +454,7 @@ class SettingsViewModel: ObservableObject {
             objectWillChange.send()
             let trimmedValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             Self._cachedAPIKey = trimmedValue.isEmpty ? nil : trimmedValue
-            UserDefaults.standard.set(trimmedValue, forKey: apiKeyUserDefaultsKey)
+            WaifuXPreferences.shared.set(trimmedValue, forKey: apiKeyUserDefaultsKey)
 
             // 同步更新 WallpaperViewModel 的 API Key 缓存，确保实时生效
             WallpaperViewModel.updateSharedAPIKeyCache(trimmedValue)
@@ -558,12 +474,10 @@ class SettingsViewModel: ObservableObject {
         // 第一步：快速恢复基本设置（UserDefaults 读取很快）
         // 用 withBatchUpdate 包裹：一次性赋值 20+ 个 @Published，期间 didSet 的
         // 单例副作用与 UserDefaults 写入被抑制，结束后统一补齐，避免启动时数十次级联。
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         withBatchUpdate {
             saveToDownloads = defaults.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
-            if let raw = defaults.string(forKey: "theme_mode"), let _ = ThemeMode(rawValue: raw) {
-                themeModeRawValue = raw
-            }
+            themeModeRawValue = ThemeManager.savedMode(in: defaults).rawValue
             launchAtLogin = defaults.bool(forKey: "launch_at_login")
             swapMenuBarClickActions = defaults.bool(forKey: "menu_bar_swap_click_actions")
             preventSystemSleep = defaults.bool(forKey: "prevent_system_sleep")
@@ -766,8 +680,41 @@ class SettingsViewModel: ObservableObject {
         await updateCacheSize()
     }
 
+    /// A reset may remove data only after a bounded, acknowledged Helper stop.
+    /// Keeping this preflight separate allows an isolated AppKit regression to
+    /// exercise failure without deleting the user's cache or media files.
+    func prepareForDataReset() async -> Bool {
+        let client = BackgroundAgentClient.shared
+        client.beginApplicationQuit()
+        var timedOut = false
+        let preflight = Task {
+            try await client.drainForUIExit()
+            try Task.checkCancellation()
+            try await client.stopForApplicationQuit()
+            try Task.checkCancellation()
+        }
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            timedOut = true
+            preflight.cancel()
+            client.applicationQuitFailed(NSError(domain: "WaifuXHelper", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "后台服务停止超时，未重置任何数据"]))
+        }
+        defer { deadline.cancel() }
+        do {
+            try await preflight.value
+            deadline.cancel()
+        } catch {
+            if !timedOut { client.applicationQuitFailed(error) }
+            return false
+        }
+        return true
+    }
+
     /// 重置所有数据（缓存、UserDefaults、Application Support）
     func resetAllData() async {
+        guard await prepareForDataReset() else { return }
         let fm = FileManager.default
 
         // 1. Kingfisher 内存 + 磁盘缓存
@@ -802,10 +749,7 @@ class SettingsViewModel: ObservableObject {
         }
 
         // 5. UserDefaults
-        if let bundleId = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: bundleId)
-            UserDefaults.standard.synchronize()
-        }
+        WaifuXPreferences.shared.resetAfterHelperStopped()
 
         await updateCacheSize()
 
@@ -1000,18 +944,9 @@ class SettingsViewModel: ObservableObject {
     }
 
     func toggleLaunchAtLogin() {
-        if #available(macOS 14.0, *) {
-            let service = SMAppService.mainApp
-            do {
-                if launchAtLogin {
-                    try service.unregister()
-                } else {
-                    try service.register()
-                }
-                launchAtLogin.toggle()
-            } catch {
-                print("Failed to toggle launch at login: \(error)")
-            }
-        }
+        // LaunchAgent owns login restoration; stop launching the full UI at login.
+        if SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
+        BackgroundAgentClient.shared.start()
+        launchAtLogin.toggle()
     }
 }

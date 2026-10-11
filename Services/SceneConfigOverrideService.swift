@@ -135,7 +135,7 @@ enum SceneConfigOverrideService {
 
     /// 加载指定壁纸的场景配置覆盖
     static func loadOverrides(for wallpaperPath: String) -> [SceneConfigOverrideKey: AnyCodableValue] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey(for: wallpaperPath)),
+        guard let data = WaifuXPreferences.shared.data(forKey: storageKey(for: wallpaperPath)),
               let dict = try? JSONDecoder().decode([String: AnyCodableValue].self, from: data) else {
             return [:]
         }
@@ -152,7 +152,7 @@ enum SceneConfigOverrideService {
     static func saveOverrides(_ overrides: [SceneConfigOverrideKey: AnyCodableValue], for wallpaperPath: String) {
         let dict = Dictionary(uniqueKeysWithValues: overrides.map { ($0.rawValue, $1) })
         if let data = try? JSONEncoder().encode(dict) {
-            UserDefaults.standard.set(data, forKey: storageKey(for: wallpaperPath))
+            WaifuXPreferences.shared.set(data, forKey: storageKey(for: wallpaperPath))
         }
     }
 
@@ -172,7 +172,7 @@ enum SceneConfigOverrideService {
 
     /// 重置所有覆盖
     static func resetAllOverrides(for wallpaperPath: String) {
-        UserDefaults.standard.removeObject(forKey: storageKey(for: wallpaperPath))
+        WaifuXPreferences.shared.removeObject(forKey: storageKey(for: wallpaperPath))
     }
 
     /// 是否有任何覆盖

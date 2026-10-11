@@ -35,7 +35,7 @@ actor RuleLoader {
     private func copyDefaultRulesFromBundle() async {
         // 检查是否已经复制过
         let copiedKey = "default_rules_copied_v1"
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         guard !defaults.bool(forKey: copiedKey) else { return }
 
         // 从 Bundle 加载默认规则

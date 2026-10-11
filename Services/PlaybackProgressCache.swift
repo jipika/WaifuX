@@ -48,7 +48,7 @@ class PlaybackProgressCache: ObservableObject {
 
     @Published private(set) var progresses: [PlaybackProgress] = []
 
-    private let userDefaults = UserDefaults.standard
+    private let userDefaults = WaifuXPreferences.shared
     private let cacheKey = "playback_progress_cache"
     private var saveTimer: Timer?
     private var currentProgress: PlaybackProgress?

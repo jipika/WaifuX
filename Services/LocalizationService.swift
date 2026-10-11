@@ -7,7 +7,7 @@ class LocalizationService: ObservableObject {
 
     @Published var currentLanguage: Language {
         didSet {
-            UserDefaults.standard.set(currentLanguage.rawValue, forKey: "app_language")
+            WaifuXPreferences.shared.set(currentLanguage.rawValue, forKey: "app_language")
             NotificationCenter.default.post(name: .appLanguageDidChange, object: nil)
         }
     }
@@ -34,7 +34,7 @@ class LocalizationService: ObservableObject {
 
     /// 延迟恢复用户保存的语言偏好（必须在 applicationDidFinishLaunching 中调用）
     func restoreSavedSettings() {
-        if let saved = UserDefaults.standard.string(forKey: "app_language"),
+        if let saved = WaifuXPreferences.shared.string(forKey: "app_language"),
            let language = Language(rawValue: saved) {
             self.currentLanguage = language
         } else {
@@ -349,6 +349,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.outputMissing": "The baked MP4 was not found or is too small. Wait a moment and try setting wallpaper again.",
         "loopProcessing": "Generating seamless loop video…",
         "sceneBake.error.concurrent": "Another bake is already running. Wait for it to finish before starting a new one.",
+        "sceneBake.error.screenCapturePermission": "Screen Recording permission is required to bake this Web wallpaper. Open System Settings → Privacy & Security → Screen Recording, turn on WaifuX, then restart the app and try again.",
+        "sceneBake.permission.openSettings": "Open System Settings",
         "sceneBake.success": "Offline bake finished — wallpaper applied.",
         "sceneBake.wallClockHint": "Clock/date text is excluded from baking; the baked artifact only keeps the video image.",
         "wallpaperContent": "WALLPAPER CONTENT",
@@ -1888,6 +1890,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.outputMissing": "未找到烘焙生成的视频，或文件过小尚未写完。请稍候再点「设为壁纸」。",
         "loopProcessing": "正在生成循环过渡视频…",
         "sceneBake.error.concurrent": "已有烘焙任务在进行，请等待结束后再试。",
+        "sceneBake.error.screenCapturePermission": "需要「屏幕录制」权限才能烘焙 Web 壁纸：请到「系统设置 → 隐私与安全性 → 屏幕录制」中勾选 WaifuX（勾选后需重启应用才生效），再重试烘焙。",
+        "sceneBake.permission.openSettings": "打开系统设置",
         "sceneBake.success": "离线烘焙已完成，壁纸已应用。",
         "wallpaperContent": "壁纸内容",
         "shareWallpaper": "分享壁纸",
@@ -3428,6 +3432,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "sceneBake.error.outputMissing": "ベイク済み動画が見つからないか、書き込み未完了の可能性があります。少し待ってからもう一度お試しください。",
         "loopProcessing": "シームレスループ動画を生成中…",
         "sceneBake.error.concurrent": "別のベイクが実行中です。終了してから再度お試しください。",
+        "sceneBake.error.screenCapturePermission": "Web 壁紙のベイクには「画面収録」の許可が必要です。「システム設定 → プライバシーとセキュリティ → 画面収録」で WaifuX を有効にし（有効化後はアプリの再起動が必要です）、もう一度お試しください。",
+        "sceneBake.permission.openSettings": "システム設定を開く",
         "sceneBake.success": "ベイク完了 — 壁紙を適用しました。",
         "sceneBake.wallClockHint": "時計/日付テキストはベイクから除外され、ベイク済みデータには動画のみが含まれます。",
         "wallpaperContent": "壁紙コンテンツ",

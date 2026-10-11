@@ -79,7 +79,7 @@ class AnimeFavoriteStore: ObservableObject {
     private let animeFavCategory = "anime/fav"
 
     /// UserDefaults key — 仅迁移用
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let favoritesKey = "anime_favorites_v1"
 
     @Published private(set) var favorites: [String: FavoriteAnime] = [:]
@@ -193,6 +193,7 @@ class AnimeFavoriteStore: ObservableObject {
     }
 
     /// 从 ViewModel 添加收藏
+    #if !WAIFUX_HELPER
     func addFavorite(from viewModel: AnimeDetailViewModel, status: FavoriteAnime.WatchStatus = .planToWatch) {
         let anime = viewModel.anime
         let bangumiId = viewModel.bangumiDetail?.id
@@ -203,6 +204,7 @@ class AnimeFavoriteStore: ObservableObject {
             status: status
         )
     }
+    #endif
 
     /// 移除收藏
     func removeFavorite(animeId: String) {

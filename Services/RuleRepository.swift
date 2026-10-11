@@ -32,7 +32,7 @@ actor RuleRepository {
 
         // 保存到 UserDefaults（必须在 MainActor 上执行，避免 Hang Risk）
         await MainActor.run {
-            UserDefaults.standard.set("https://github.com/\(owner)/\(repo)", forKey: "rule_repository_url")
+            WaifuXPreferences.shared.set("https://github.com/\(owner)/\(repo)", forKey: "rule_repository_url")
         }
 
         print("[RuleRepository] Configured repository: \(owner)/\(repo)")
@@ -42,7 +42,7 @@ actor RuleRepository {
     func loadConfiguredRepository() async {
         // 读取 UserDefaults（必须在 MainActor 上执行，避免 Hang Risk）
         let savedURL = await MainActor.run {
-            UserDefaults.standard.string(forKey: "rule_repository_url")
+            WaifuXPreferences.shared.string(forKey: "rule_repository_url")
         }
         guard let savedURL else {
             print("[RuleRepository] 未配置规则仓库 URL，请在设置中配置")

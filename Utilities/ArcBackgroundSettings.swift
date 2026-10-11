@@ -184,8 +184,10 @@ final class ArcBackgroundSettings: ObservableObject {
 
     // MARK: - 持久化
 
+    func reloadFromPreferences() { loadSettings() }
+
     private func loadSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         if let raw = defaults.string(forKey: "arc_theme_mode"),
            let mode = ArcThemeMode(rawValue: raw) {
             themeMode = mode
@@ -212,7 +214,7 @@ final class ArcBackgroundSettings: ObservableObject {
     }
 
     private func saveSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         defaults.set(themeMode.rawValue, forKey: "arc_theme_mode")
         defaults.set(accentColor.toHex() ?? "8B5CF6", forKey: "arc_accent_color")
         defaults.set(frostedIntensity, forKey: "arc_frosted_intensity")

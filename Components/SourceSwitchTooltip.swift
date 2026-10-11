@@ -8,7 +8,7 @@ struct SourceSwitchTooltip: ViewModifier {
     @State private var isVisible: Bool = false
 
     private var hasBeenDismissed: Bool {
-        UserDefaults.standard.bool(forKey: tooltipKey)
+        WaifuXPreferences.shared.bool(forKey: tooltipKey)
     }
 
     func body(content: Content) -> some View {
@@ -49,7 +49,7 @@ struct SourceSwitchTooltip: ViewModifier {
                     .multilineTextAlignment(.center)
 
                 Button {
-                    UserDefaults.standard.set(true, forKey: tooltipKey)
+                    WaifuXPreferences.shared.set(true, forKey: tooltipKey)
                     withAnimation(.easeOut(duration: 0.25)) {
                         isVisible = false
                     }

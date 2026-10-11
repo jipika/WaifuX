@@ -146,7 +146,7 @@ class WallpaperSourceManager: ObservableObject {
     private var hasShownAutoSwitchToast: Bool = false  // 是否已显示过自动降级提示（只提示一次）
 
     private init() {
-        // ⚠️ 绝对不能在 init() 中读 UserDefaults.standard！
+        // ⚠️ 绝对不能在 init() 中读 WaifuXPreferences.shared！
         // macOS 26+ 上会触发 _CFXPreferences 隐式递归导致栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV）
         // 所有状态通过 AppDelegate 调用 restoreState() 延迟恢复
         activeSource = .wallhaven
@@ -156,12 +156,12 @@ class WallpaperSourceManager: ObservableObject {
 
     /// ⚠️ 延迟恢复持久化状态（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreState() {
-        if let saved = UserDefaults.standard.string(forKey: selectedSourceKey),
+        if let saved = WaifuXPreferences.shared.string(forKey: selectedSourceKey),
            let source = SourceType(rawValue: saved) {
             activeSource = source
         }
-        isAutoSwitched = UserDefaults.standard.bool(forKey: autoSwitchedKey)
-        let timestamp = UserDefaults.standard.double(forKey: lastHealthCheckKey)
+        isAutoSwitched = WaifuXPreferences.shared.bool(forKey: autoSwitchedKey)
+        let timestamp = WaifuXPreferences.shared.double(forKey: lastHealthCheckKey)
         if timestamp > 0 {
             lastHealthCheckTime = Date(timeIntervalSince1970: timestamp)
         }
@@ -227,8 +227,8 @@ class WallpaperSourceManager: ObservableObject {
         hasShownAutoSwitchToast = false  // 重置，允许下次自动降级时再次提示
 
         // 持久化
-        UserDefaults.standard.set(source.rawValue, forKey: selectedSourceKey)
-        UserDefaults.standard.set(false, forKey: autoSwitchedKey)
+        WaifuXPreferences.shared.set(source.rawValue, forKey: selectedSourceKey)
+        WaifuXPreferences.shared.set(false, forKey: autoSwitchedKey)
 
         lastSwitchMessage = "已切换到 \(source.displayName)"
 
@@ -300,8 +300,8 @@ class WallpaperSourceManager: ObservableObject {
             consecutiveFailures = 0
             consecutiveSuccesses = 0
 
-            UserDefaults.standard.set(nextSource.rawValue, forKey: selectedSourceKey)
-            UserDefaults.standard.set(true, forKey: autoSwitchedKey)
+            WaifuXPreferences.shared.set(nextSource.rawValue, forKey: selectedSourceKey)
+            WaifuXPreferences.shared.set(true, forKey: autoSwitchedKey)
 
             // 只在首次自动降级时提示，后续不再重复
             if !hasShownAutoSwitchToast {
@@ -345,8 +345,8 @@ class WallpaperSourceManager: ObservableObject {
         consecutiveSuccesses = 0
 
         // 持久化
-        UserDefaults.standard.set(nextSource.rawValue, forKey: selectedSourceKey)
-        UserDefaults.standard.set(true, forKey: autoSwitchedKey)
+        WaifuXPreferences.shared.set(nextSource.rawValue, forKey: selectedSourceKey)
+        WaifuXPreferences.shared.set(true, forKey: autoSwitchedKey)
 
         // 只在首次自动降级时提示，后续不再重复
         if !hasShownAutoSwitchToast {
@@ -390,8 +390,8 @@ class WallpaperSourceManager: ObservableObject {
                     isAutoSwitched = false
                     consecutiveFailures = 0
                     consecutiveSuccesses = 0
-                    UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
-                    UserDefaults.standard.set(false, forKey: autoSwitchedKey)
+                    WaifuXPreferences.shared.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
+                    WaifuXPreferences.shared.set(false, forKey: autoSwitchedKey)
                 }
                 isInitialSourceSelectionComplete = true
             }
@@ -408,8 +408,8 @@ class WallpaperSourceManager: ObservableObject {
                         isAutoSwitched = false
                         consecutiveFailures = 0
                         consecutiveSuccesses = 0
-                        UserDefaults.standard.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
-                        UserDefaults.standard.set(false, forKey: autoSwitchedKey)
+                        WaifuXPreferences.shared.set(SourceType.wallhaven.rawValue, forKey: selectedSourceKey)
+                        WaifuXPreferences.shared.set(false, forKey: autoSwitchedKey)
                     }
                     isInitialSourceSelectionComplete = true
                 }
@@ -421,8 +421,8 @@ class WallpaperSourceManager: ObservableObject {
                     isAutoSwitched = true
                     consecutiveFailures = 0
                     consecutiveSuccesses = 0
-                    UserDefaults.standard.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
-                    UserDefaults.standard.set(true, forKey: autoSwitchedKey)
+                    WaifuXPreferences.shared.set(SourceType.fourKWallpapers.rawValue, forKey: selectedSourceKey)
+                    WaifuXPreferences.shared.set(true, forKey: autoSwitchedKey)
 
                     isInitialSourceSelectionComplete = true
                 }

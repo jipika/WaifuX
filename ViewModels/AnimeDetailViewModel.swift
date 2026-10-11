@@ -1055,13 +1055,13 @@ class AnimeDetailViewModel: ObservableObject {
 
         // 保存到 UserDefaults
         if let encoded = try? JSONEncoder().encode(settings) {
-            UserDefaults.standard.set(encoded, forKey: "danmakuSettings")
+            WaifuXPreferences.shared.set(encoded, forKey: "danmakuSettings")
         }
     }
 
     /// 加载弹幕设置
     func loadDanmakuSettings() {
-        if let data = UserDefaults.standard.data(forKey: "danmakuSettings"),
+        if let data = WaifuXPreferences.shared.data(forKey: "danmakuSettings"),
            let settings = try? JSONDecoder().decode(DanmakuSettings.self, from: data) {
             danmakuSettings = settings
         }
@@ -1072,12 +1072,12 @@ class AnimeDetailViewModel: ObservableObject {
     func updateEnhancementSettings(_ settings: PlayerEnhancementSettings) {
         enhancementSettings = settings
         if let encoded = try? JSONEncoder().encode(settings) {
-            UserDefaults.standard.set(encoded, forKey: "playerEnhancementSettings")
+            WaifuXPreferences.shared.set(encoded, forKey: "playerEnhancementSettings")
         }
     }
     
     func loadEnhancementSettings() {
-        if let data = UserDefaults.standard.data(forKey: "playerEnhancementSettings"),
+        if let data = WaifuXPreferences.shared.data(forKey: "playerEnhancementSettings"),
            let settings = try? JSONDecoder().decode(PlayerEnhancementSettings.self, from: data) {
             enhancementSettings = settings
         }

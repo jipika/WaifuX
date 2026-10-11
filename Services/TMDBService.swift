@@ -188,7 +188,7 @@ actor TMDBService {
     // MARK: - 持久化缓存
     
     private func restoreBackdropCache() async {
-        guard let data = UserDefaults.standard.data(forKey: Self.backdropCacheKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: Self.backdropCacheKey),
               let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
             return
         }
@@ -197,7 +197,7 @@ actor TMDBService {
     
     private func persistBackdropCache() {
         guard let data = try? JSONEncoder().encode(backdropCache) else { return }
-        UserDefaults.standard.set(data, forKey: Self.backdropCacheKey)
+        WaifuXPreferences.shared.set(data, forKey: Self.backdropCacheKey)
     }
     
     // MARK: - 搜索动漫并获取横屏背景

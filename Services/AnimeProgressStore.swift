@@ -57,7 +57,7 @@ struct AnimeProgressSummary: Codable, Equatable {
 class AnimeProgressStore: ObservableObject {
     static let shared = AnimeProgressStore()
     
-    private let defaults = UserDefaults.standard
+    private let defaults = WaifuXPreferences.shared
     private let episodeProgressKey = "anime_episode_progress_v1"
     private let animeSummaryKey = "anime_progress_summary_v1"
     

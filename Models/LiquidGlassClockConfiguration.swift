@@ -288,15 +288,17 @@ public final class LiquidGlassClockSettings: ObservableObject {
     }
 
     // MARK: - 持久化
+    func reloadFromPreferences() { load() }
+
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: configKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: configKey),
               let decoded = try? JSONDecoder().decode(LiquidGlassClockConfiguration.self, from: data)
         else { return }
-        config = decoded
+        if config != decoded { config = decoded }
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(config) else { return }
-        UserDefaults.standard.set(data, forKey: configKey)
+        WaifuXPreferences.shared.set(data, forKey: configKey)
     }
 }

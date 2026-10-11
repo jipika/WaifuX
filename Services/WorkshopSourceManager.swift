@@ -175,8 +175,8 @@ class WorkshopSourceManager: ObservableObject {
     }
 
     func clearSteamIdentity() {
-        UserDefaults.standard.removeObject(forKey: localIdentityKey)
-        UserDefaults.standard.removeObject(forKey: legacyCredentialsKey)
+        WaifuXPreferences.shared.removeObject(forKey: localIdentityKey)
+        WaifuXPreferences.shared.removeObject(forKey: legacyCredentialsKey)
         steamIdentity = nil
         steamCredentialState = .missing
     }
@@ -200,7 +200,7 @@ class WorkshopSourceManager: ObservableObject {
     /// 用户 Steam 社区档案 ID（64位数字 ID 或自定义 URL）用于获取订阅列表
     @Published var steamProfileID: String = "" {
         didSet {
-            UserDefaults.standard.set(steamProfileID, forKey: profileIDKey)
+            WaifuXPreferences.shared.set(steamProfileID, forKey: profileIDKey)
         }
     }
 
@@ -208,7 +208,7 @@ class WorkshopSourceManager: ObservableObject {
 
     /// 加载已保存的 Steam Profile ID
     func loadSteamProfileID() {
-        if let saved = UserDefaults.standard.string(forKey: profileIDKey), !saved.isEmpty {
+        if let saved = WaifuXPreferences.shared.string(forKey: profileIDKey), !saved.isEmpty {
             steamProfileID = saved
         }
     }
@@ -227,7 +227,7 @@ class WorkshopSourceManager: ObservableObject {
     }
 
     private func loadStoredIdentity() -> LocalIdentityLoadResult {
-        let defaults = UserDefaults.standard
+        let defaults = WaifuXPreferences.shared
         if let data = defaults.data(forKey: localIdentityKey) {
             guard let identity = try? JSONDecoder().decode(SteamIdentity.self, from: data) else {
                 return .failure("本地 Steam 账号信息已损坏，请重新登录。")
@@ -255,7 +255,7 @@ class WorkshopSourceManager: ObservableObject {
             steamCredentialState = .failure("账号数据编码失败，请重试。")
             return
         }
-        UserDefaults.standard.set(data, forKey: localIdentityKey)
+        WaifuXPreferences.shared.set(data, forKey: localIdentityKey)
         steamIdentity = identity
         steamCredentialState = .available(username: identity.username)
     }
@@ -401,7 +401,7 @@ class WorkshopSourceManager: ObservableObject {
 
     /// 恢复持久化状态
     private func restoreState() {
-        if let saved = UserDefaults.standard.string(forKey: selectedSourceKey),
+        if let saved = WaifuXPreferences.shared.string(forKey: selectedSourceKey),
            let source = SourceType(rawValue: saved) {
             activeSource = source
         }
@@ -432,7 +432,7 @@ class WorkshopSourceManager: ObservableObject {
         let previousSource = activeSource
         activeSource = source
 
-        UserDefaults.standard.set(source.rawValue, forKey: selectedSourceKey)
+        WaifuXPreferences.shared.set(source.rawValue, forKey: selectedSourceKey)
 
         lastSwitchMessage = "已切换到 \(source.displayName) - \(source.subtitle)"
 
