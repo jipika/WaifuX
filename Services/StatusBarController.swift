@@ -297,7 +297,7 @@ final class StatusBarController: NSObject {
     // MARK: - 单例
     static let shared = StatusBarController()
 
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private lazy var statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private lazy var quickSwitcherController = MenuBarQuickSwitcherController()
 
@@ -342,8 +342,14 @@ final class StatusBarController: NSObject {
     // 标记是否已配置，防止重复配置
     private var isConfigured = false
 
+    var backgroundSnapshot: [String: Any] {
+        ["configured": isConfigured, "visible": isConfigured && statusItem.isVisible,
+         "hasButton": isConfigured && statusItem.button != nil]
+    }
+
     private override init() {
         super.init()
+        guard BackgroundRuntimeRole.isHelper else { return }
         configureStatusItem()
         bindWallpaperState()
         bindTaskQueueState()
@@ -365,6 +371,7 @@ final class StatusBarController: NSObject {
         self.releaseMemoryHandler = releaseMemory
         self.quitHandler = quit
         self.isConfigured = true
+        AppLogger.info(.startup, "Helper menu bar configured", metadata: backgroundSnapshot)
     }
 
     private func configureStatusItem() {
@@ -437,7 +444,7 @@ final class StatusBarController: NSObject {
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
 
-        let clickActionsSwapped = UserDefaults.standard.bool(forKey: "menu_bar_swap_click_actions")
+        let clickActionsSwapped = WaifuXPreferences.shared.bool(forKey: "menu_bar_swap_click_actions")
         let showQuickSwitcher = (event.type == .leftMouseUp) != clickActionsSwapped
 
         if showQuickSwitcher {
@@ -453,9 +460,9 @@ final class StatusBarController: NSObject {
                 onOpenDesignWallpaper: { [weak self] in
                     self?.openWebWallpaperDesignPanel()
                 },
-                onOpenDetail: { [weak self] request in
+                onOpenDetail: { request in
                     MainNavigationRequestStore.requestWallpaperDetail(request)
-                    self?.showWindowHandler?()
+                    WaifuXUIActions.perform(.wallpaperDetail)
                 },
                 onQuit: { [weak self] in
                     // 与右键菜单退出同链路：quitHandler → WaifuXApp.quitApplication()
@@ -464,8 +471,16 @@ final class StatusBarController: NSObject {
                 }
             )
         } else if event.type == .leftMouseUp || event.type == .rightMouseUp {
+            // 右键弹菜单前的准备耗时：`refreshMenuState()` 会逐屏查锁屏暂停态/静音/
+            // 当前壁纸，并解析当前壁纸工程的 project.json。`popUpMenu` 本身是阻塞的
+            // （要到菜单关闭才返回），所以打点必须放在它之前，否则量到的是「菜单
+            // 存活时长」而不是准备耗时。
+            let menuPrepareStart = Date()
             quickSwitcherController.dismiss()
             refreshMenuState()
+            AppLogger.debug(.general, "状态栏右键菜单准备耗时", metadata: [
+                "refreshMS": Int(Date().timeIntervalSince(menuPrepareStart) * 1000),
+            ])
             statusItem.popUpMenu(menu)
         }
     }
@@ -704,7 +719,7 @@ final class StatusBarController: NSObject {
 
         // 场景高级设置（仅在实时渲染场景壁纸时显示）
         let shouldShowSceneConfig = weBridge.isCurrentWallpaperScene
-            && UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+            && WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
         sceneConfigItem.isHidden = !shouldShowSceneConfig
         sceneConfigItem.isEnabled = shouldShowSceneConfig
         if shouldShowSceneConfig, let path = weBridge.currentWallpaperPathForDesign {
@@ -978,13 +993,13 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func openMyLibrary() {
-        MainNavigationRequestStore.requestLibraryTab()
-        showWindowHandler?()
+        WaifuXUIActions.perform(.library)
     }
 
     @objc private func openAppSettingsPanel() {
-        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
-        appDelegate.showSettingsWindow(nil)
+        // 与 Helper 拆分前一致：设置 UI 只在 UI 进程存在，这里走 XPC 让 UI 进程
+        // 把原本的完整设置窗口拉出来（Helper 内不做精简版设置面板）。
+        WaifuXUIActions.perform(.settings)
     }
 
     @objc private func releaseForegroundMemory() {
@@ -1076,7 +1091,7 @@ final class StatusBarController: NSObject {
             return
         }
         MainNavigationRequestStore.requestWallpaperDetail(request)
-        showWindowHandler?()
+        WaifuXUIActions.perform(.wallpaperDetail)
     }
 
     private func currentWallpaperDetailRequest(for screen: NSScreen) -> MainWallpaperDetailRequest? {
@@ -1256,7 +1271,7 @@ final class StatusBarController: NSObject {
     private static let restartableWallpaperKey = "statusbar_restartable_wallpaper_v1"
 
     private static func loadRestartableStore() -> [String: RestartableWallpaper] {
-        guard let data = UserDefaults.standard.data(forKey: restartableWallpaperKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: restartableWallpaperKey),
               let store = try? JSONDecoder().decode([String: RestartableWallpaper].self, from: data) else {
             return [:]
         }
@@ -1265,7 +1280,7 @@ final class StatusBarController: NSObject {
 
     private static func saveRestartableStore(_ store: [String: RestartableWallpaper]) {
         if let data = try? JSONEncoder().encode(store) {
-            UserDefaults.standard.set(data, forKey: restartableWallpaperKey)
+            WaifuXPreferences.shared.set(data, forKey: restartableWallpaperKey)
         }
     }
 
@@ -1455,7 +1470,27 @@ final class StatusBarController: NSObject {
         }
     }
 
+    /// 「设计壁纸 / 场景高级设置」两项是否出现，取决于当前壁纸的工程是否可编辑 ——
+    /// 而 `hasEditableProperties` 要解析工程的 `project.json`（读盘 + JSON 解码）。
+    /// 左键弹窗（`canDesignCurrentWallpaper`）和右键菜单（`refreshMenuState`）**每次**
+    /// 都要问一遍，等于每次点图标都去读一次盘。这里按「当前壁纸路径 + 实时渲染开关」
+    /// 缓存结果：两者没变就直接复用（壁纸换了就自动失效重算）。
+    private var cachedDesignTarget: WallpaperDesignTarget?
+    private var cachedDesignTargetKey: String?
+
     private func resolvedWallpaperDesignTarget() -> WallpaperDesignTarget? {
+        let key = (weBridge.currentWallpaperPathForDesign ?? "<none>")
+            + "|" + String(WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled"))
+        if let cachedDesignTargetKey, cachedDesignTargetKey == key {
+            return cachedDesignTarget
+        }
+        let resolved = computeWallpaperDesignTarget()
+        cachedDesignTargetKey = key
+        cachedDesignTarget = resolved
+        return resolved
+    }
+
+    private func computeWallpaperDesignTarget() -> WallpaperDesignTarget? {
         if let sceneWallpaperPath = currentSceneDesignWallpaperPath() {
             return .sceneDesign(sceneWallpaperPath)
         }
@@ -1470,7 +1505,7 @@ final class StatusBarController: NSObject {
             return .web(wallpaperPath)
         }
         if weBridge.isCurrentWallpaperScene {
-            return UserDefaults.standard.bool(forKey: "scene_realtime_rendering_enabled")
+            return WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
                 ? .scene(wallpaperPath)
                 : .sceneDesign(wallpaperPath)
         }
@@ -1506,7 +1541,7 @@ final class StatusBarController: NSObject {
 
     /// 触发 Sparkle 检查更新（UI 反馈由 Sparkle 内置弹窗处理）
     @objc private func checkForUpdates() {
-        AppDelegate.shared?.checkForUpdates()
+        WaifuXUIActions.perform(.updates)
     }
 
     /// 从 NSScreen 获取 CGDirectDisplayID（用于 per-display prefs 的 key）

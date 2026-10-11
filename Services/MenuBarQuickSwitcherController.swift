@@ -194,11 +194,11 @@ private enum MenuBarQuickFolderSelectionStore {
         var selections = loadSelections()
         selections[scopeID] = folderIDs ?? []
         guard let data = try? JSONEncoder().encode(selections) else { return }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        WaifuXPreferences.shared.set(data, forKey: defaultsKey)
     }
 
     private static func loadSelections() -> [String: [String]] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let data = WaifuXPreferences.shared.data(forKey: defaultsKey),
               let selections = try? JSONDecoder().decode([String: [String]].self, from: data) else {
             return [:]
         }
@@ -230,6 +230,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     private var targetScreenFingerprint: String?
     private var lastBatchIDs = Set<String>()
     private var previewTasks: [String: Task<Void, Never>] = [:]
+    /// contentRoot 解析与 dependency 就绪状态缓存：每次点「设壁纸」都要读
+    /// project.json 并探外置盘路径，缓存后同一工程只算一次（依赖下载完成后
+    /// 立即写入 `dependencyReadyRoots`）。与 `items()` 的记录指纹缓存同一思路。
+    private var resolvedContentRoots: [String: URL] = [:]
+    private var dependencyReadyRoots: Set<String> = []
 
     var isSelectedItemFavorite: Bool {
         guard let selectedItem else { return false }
@@ -547,7 +552,9 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     
         do {
             // Workshop 目录：先解析 content root，且补齐 dependency（与 MediaDetailSheet 一致）。
+            let prepareStart = Date()
             let applyURL = try await prepareApplyURL(for: selectedItem)
+            let prepareDone = Date()
     
             // 入库校验：确保 MediaLibraryService.shared.downloadRecord(forLocalFilePath:) 能命中，
             // 否则后续 bake artifact 查找会失败。异步补录，不阻塞设壁纸热路径。
@@ -587,6 +594,13 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 targetScreens: screens,
                 options: options
             )
+            // 分段耗时：定位「点设壁纸后要等」到底卡在 prepare（工程解析/dependency）
+            // 还是 apply 本体（渲染切换）。
+            AppLogger.debug(.wallpaper, "菜单栏设置壁纸分段耗时", metadata: [
+                "item": selectedItem.id,
+                "prepareMS": Int(prepareDone.timeIntervalSince(prepareStart) * 1000),
+                "applyMS": Int(Date().timeIntervalSince(prepareDone) * 1000),
+            ])
             guard success else {
                 throw LocalWallpaperApplyService.ApplyError.failed(
                     t("menubar.quick.applyFailed")
@@ -623,9 +637,14 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             return item.localURL
         }
 
-        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: item.localURL)
+        let cacheKey = item.localURL.standardizedFileURL.path
+        let contentRoot = resolvedContentRoots[cacheKey]
+            ?? WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: item.localURL)
+        resolvedContentRoots[cacheKey] = contentRoot
 
-        if let dependencyID = readWorkshopDependencyID(from: contentRoot),
+        // dependency 已就绪的工程直接放行；否则读一次 project.json 并在需要时下载。
+        if !dependencyReadyRoots.contains(contentRoot.path),
+           let dependencyID = readWorkshopDependencyID(from: contentRoot),
            !isWorkshopDependencyDownloaded(dependencyID: dependencyID) {
             errorMessage = t("menubar.quick.downloadingDependency")
             try await WorkshopService.shared.downloadWorkshopItem(
@@ -637,6 +656,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             errorMessage = nil
         }
 
+        // 只有走完 dependency 检查才标记就绪；下载刚完成也算就绪。
+        dependencyReadyRoots.insert(contentRoot.path)
         return contentRoot
     }
 
@@ -694,10 +715,21 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         return false
     }
 
+    /// 同时最多跑几个缩略图生成任务。
+    ///
+    /// 缩略图要读原片抽帧（原片常常在外置盘），一次开十几个任务会互相抢 IO，
+    /// 且每个任务完成都会触发一次 SwiftUI 重排 —— 直接表现为「弹窗一出来就卡」。
+    private static let previewWarmupConcurrency = 2
+
     func warmVisiblePreviews() async {
         let itemsToWarm = batchItems.filter { $0.thumbnailURL == nil }
         for item in itemsToWarm {
+            if Task.isCancelled { return }
             guard previewTasks[item.id] == nil else { continue }
+            while previewTasks.count >= Self.previewWarmupConcurrency {
+                try? await Task.sleep(for: .milliseconds(40))
+                if Task.isCancelled { return }
+            }
             previewTasks[item.id] = Task { @MainActor [weak self] in
                 guard let self else { return }
                 let thumbnailURL = await MenuBarQuickWallpaperRepository.shared.previewURL(for: item)
@@ -790,7 +822,43 @@ private final class MenuBarQuickWallpaperRepository {
 
     private let fileManager = FileManager.default
 
+    /// 打开弹窗的路径是同步的，而重建一次列表要对每条记录做多次存在性检查
+    /// （原片还挂在外置盘上）：库一大，单次就是几百次 stat，直接表现为
+    /// 「点开菜单栏要等一等」。这里按「文件夹选择 + 记录指纹」整份缓存结果；
+    /// 记录集合、归属或路径一变指纹就变、缓存自动失效 —— 指纹只做内存遍历，
+    /// 比磁盘 stat 便宜几个数量级。
+    private var cachedItems: [MenuBarQuickWallpaperItem] = []
+    private var cachedKey: String?
+
     func items(folderIDs: [String]?) -> [MenuBarQuickWallpaperItem] {
+        let key = recordFingerprint(folderIDs: folderIDs)
+        if cachedKey == key {
+            return cachedItems
+        }
+        let items = buildItems(folderIDs: folderIDs)
+        cachedItems = items
+        cachedKey = key
+        return items
+    }
+
+    private func recordFingerprint(folderIDs: [String]?) -> String {
+        var hasher = Hasher()
+        hasher.combine(folderIDs?.joined(separator: "|") ?? "*")
+        for record in WallpaperLibraryService.shared.downloadedWallpapers {
+            hasher.combine(record.id)
+            hasher.combine(record.folderID)
+            hasher.combine(record.localFilePath)
+        }
+        for record in MediaLibraryService.shared.downloadedItems {
+            hasher.combine(record.id)
+            hasher.combine(record.folderID)
+            hasher.combine(record.localFilePath)
+            hasher.combine(record.sceneBakeArtifact?.videoPath)
+        }
+        return String(hasher.finalize())
+    }
+
+    private func buildItems(folderIDs: [String]?) -> [MenuBarQuickWallpaperItem] {
         let wallpaperItems = WallpaperLibraryService.shared.downloadedWallpapers
             .filter {
                 matchesFolderSelection($0.folderID, selectedFolderIDs: folderIDs)

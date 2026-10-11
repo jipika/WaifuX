@@ -49,7 +49,7 @@ public struct LiquidGlassClockView: View {
     @State private var spectrum: [Float] = Array(repeating: 0, count: 32)
 
     /// 每秒更新一次的定时器
-    private let timer = Timer.publish(every: 1, tolerance: 0.1, on: .main, in: .common).autoconnect()
+    @State private var clockConsumerID = UUID()
 
     public init(config: LiquidGlassClockConfiguration) {
         self.config = config
@@ -57,7 +57,7 @@ public struct LiquidGlassClockView: View {
 
     public var body: some View {
         textOverlayContent
-            .onReceive(timer) { newDate in
+            .onReceive(WallpaperClockTicker.shared.$now) { newDate in
                 // 不使用 withAnimation 包裹整个状态更新，避免玻璃背景和音频可视化走动画管线
                 // 时间文字的动画由 .contentTransition(.numericText) 和 .animation 精确控制
                 now = newDate
@@ -66,9 +66,12 @@ public struct LiquidGlassClockView: View {
                 spectrum = newSpectrum
             }
             .onAppear {
+                WallpaperClockTicker.shared.acquire(clockConsumerID, seconds: config.showSeconds)
                 // 初始订阅：获取当前频谱值
                 spectrum = currentSpectrumSnapshot
             }
+            .onDisappear { WallpaperClockTicker.shared.release(clockConsumerID) }
+            .onChange(of: config.showSeconds) { _, value in WallpaperClockTicker.shared.acquire(clockConsumerID, seconds: value) }
             // audioBarCount 变化时，spectrumPublisher 会指向不同的频段 Publisher。
             // onReceive 在视图首次构建时绑定一次，不会自动重新订阅，因此用 .id 强制
             // 在频段切换时重建该视图分支，使 onReceive 重新绑定到新的 Publisher。

@@ -12,6 +12,9 @@ struct MenuBarQuickSwitcherView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var readyVideoURL: URL?
+    /// hero 视频是否已「武装」：停留够久才真正加载视频预览（见 body 里的 .task）。
+    @State private var videoPreviewArmed = false
+    private static let videoPreviewArmDelay = Duration.milliseconds(450)
 
     // Panel: previous height kept; width bumped slightly for breathing room.
     private let panelWidth: CGFloat = 370
@@ -83,6 +86,16 @@ struct MenuBarQuickSwitcherView: View {
         .task(id: viewModel.previewWarmupToken) {
             await viewModel.warmVisiblePreviews()
         }
+        .task(id: viewModel.selectedItem?.id) {
+            // hero 视频延迟武装：连点缩略图时不要每个都起一个播放器 —— 外置盘原片
+            // 解码是弹窗里最贵的一步（CPU + IO + 一路 AVPlayer 内存）。停留超过
+            // 这个时间才真正加载视频预览；快速划过时只显示静帧。
+            videoPreviewArmed = false
+            guard viewModel.selectedItem?.videoPreviewURL != nil else { return }
+            try? await Task.sleep(for: Self.videoPreviewArmDelay)
+            guard !Task.isCancelled else { return }
+            videoPreviewArmed = true
+        }
         .onChange(of: viewModel.selectedItem?.videoPreviewURL) { _, _ in
             readyVideoURL = nil
         }
@@ -100,7 +113,7 @@ struct MenuBarQuickSwitcherView: View {
                             .transition(.opacity)
                     }
                     .overlay {
-                        if let videoURL = selected.videoPreviewURL {
+                        if videoPreviewArmed, let videoURL = selected.videoPreviewURL {
                             LoopingVideoBackgroundView(
                                 url: videoURL,
                                 isMuted: true,

@@ -52,7 +52,11 @@ public final class LiquidGlassClockOverlayManager {
     private var currentConfig: LiquidGlassClockConfiguration = .init()
 
     /// 每秒定时器，驱动时钟刷新
-    private var clockTickTimer: Timer?
+    private var clockTickSubscription: AnyCancellable?
+    private let clockConsumerID = UUID()
+    private let audioCaptureOwner = UUID()
+    private var sleepReasons = Set<String>()
+    private var isTerminating = false
 
     /// 各屏幕对应的 MTKView 引用（用于暂停/恢复）
     private var metalViews: [String: MTKView] = [:]
@@ -60,8 +64,26 @@ public final class LiquidGlassClockOverlayManager {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        guard BackgroundRuntimeRole.isHelper else { return }
         // Dock 安全区域监听
         setupDockObserver()
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for (name, reason, asleep) in [
+            (NSWorkspace.willSleepNotification, "system", true),
+            (NSWorkspace.didWakeNotification, "system", false),
+            (NSWorkspace.screensDidSleepNotification, "display", true),
+            (NSWorkspace.screensDidWakeNotification, "display", false)
+        ] {
+            workspaceCenter.publisher(for: name)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    if asleep { self.sleepReasons.insert(reason) }
+                    else { self.sleepReasons.remove(reason) }
+                    self.syncBackgroundResources()
+                }
+                .store(in: &cancellables)
+        }
 
         // 监听配置变化 → 刷新所有窗口
         LiquidGlassClockSettings.shared.$config
@@ -131,6 +153,9 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 立即刷新所有屏幕的时钟窗口（外部调用，如热键切换、壁纸切换）
     public func refreshAll() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.clock", [:]); return }
+        guard !isTerminating else { return }
+
         let config = LiquidGlassClockSettings.shared.config
         if shouldShowClock(config: config) {
             if clockWindows.isEmpty {
@@ -139,16 +164,12 @@ public final class LiquidGlassClockOverlayManager {
                 // 窗口已存在时也必须更新内容（壁纸切换时 sidecar 数据已变化）
                 updateAllWindows(config: config)
             }
-            if config.enabled {
-                startClockTimer()
-            } else {
-                stopClockTimer()
-            }
         } else {
             destroyAllWindows()
             stopClockTimer()
         }
         currentConfig = config
+        syncBackgroundResources()
         // 确保所有窗口置前
         for (_, window) in clockWindows {
             window.orderFront(nil)
@@ -157,21 +178,25 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 强制销毁所有窗口并重建（屏幕配置变化时）
     public func rebuildAll() {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("overlay.clockRebuild", [:]); return }
+
         destroyAllWindows()
-        let config = LiquidGlassClockSettings.shared.config
-        if shouldShowClock(config: config) {
-            createWindowsForAllScreens(config: config)
-        }
+        refreshAll()
+    }
+
+    func prepareForProcessTermination() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        isTerminating = true
+        cancellables.removeAll()
+        dockCancellables.removeAll()
+        destroyAllWindows()
     }
 
     // MARK: - 视频壁纸状态联动
 
     /// 视频壁纸暂停/恢复 → 暂停/恢复 Metal 渲染
-    private func onVideoPausedChanged(_ isPaused: Bool) {
-        guard currentConfig.enabled, currentConfig.metalShaderEnabled else { return }
-        for (_, mtkView) in metalViews {
-            LiquidGlassMetalRenderer.shared.setPaused(isPaused, view: mtkView)
-        }
+    private func onVideoPausedChanged(_ _: Bool) {
+        syncBackgroundResources()
     }
 
     /// 检查当前视频壁纸是否有关联的动态文本 sidecar
@@ -193,32 +218,7 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 视频壁纸激活状态变化 → 检查 sidecar JSON + 总开关，仅当允许时才创建时钟
     private func onVideoWallpaperStateChanged() {
-        let videoActive = VideoWallpaperManager.shared.isVideoWallpaperActive
-        let config = LiquidGlassClockSettings.shared.config
-
-        // 总开关关闭时，不显示任何桌面动态元素
-        guard config.enabled else {
-            destroyAllWindows()
-            return
-        }
-
-        if videoActive {
-            // 仅当烘焙视频有关联的动态文本 sidecar 时才显示时钟
-            guard currentVideoHasDynamicText() else {
-                destroyAllWindows()
-                return
-            }
-            if clockWindows.isEmpty {
-                createWindowsForAllScreens(config: config)
-            } else {
-                updateAllWindows(config: config)
-            }
-            if config.showAudioVisualizer {
-                SystemAudioCaptureService.shared.start()
-            }
-        } else {
-            destroyAllWindows()
-        }
+        refreshAll()
     }
 
     /// 判断是否应创建时钟窗口（检查 sidecar + enabled）
@@ -247,68 +247,42 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 启动每秒定时器（驱动 MTKView 重绘 + SwiftUI 时钟更新）
     private func startClockTimer() {
-        guard clockTickTimer == nil else { return }
-        clockTickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.currentConfig.enabled else { return }
-
-                // 轮询检测 Dock 区域变化（兜底：Dock 位置改变等无通知的变更）
-                self.pollDockInsets()
-
-                if self.currentConfig.metalShaderEnabled {
-                    // Metal 路径：手动触发重绘（shouldRedraw 内部会跳过无效帧）
-                    for (_, mtkView) in self.metalViews {
-                        LiquidGlassMetalRenderer.shared.requestRedraw(view: mtkView)
-                    }
-                }
+        let config = LiquidGlassClockSettings.shared.config
+        WallpaperClockTicker.shared.acquire(clockConsumerID, seconds: config.showSeconds || (config.metalShaderEnabled && config.animationEnabled))
+        guard clockTickSubscription == nil else { return }
+        clockTickSubscription = WallpaperClockTicker.shared.$now.sink { [weak self] _ in
+            guard let self, currentConfig.enabled else { return }
+            pollDockInsets()
+            if currentConfig.metalShaderEnabled {
+                for view in metalViews.values { LiquidGlassMetalRenderer.shared.requestRedraw(view: view) }
             }
         }
     }
 
     private func stopClockTimer() {
-        clockTickTimer?.invalidate()
-        clockTickTimer = nil
+        clockTickSubscription = nil
+        WallpaperClockTicker.shared.release(clockConsumerID)
+    }
+
+    private func syncBackgroundResources() {
+        let active = !isTerminating && currentConfig.enabled && !clockWindows.isEmpty
+            && sleepReasons.isEmpty && !VideoWallpaperManager.shared.isPaused
+        if active { startClockTimer() } else { stopClockTimer() }
+        if active && currentConfig.showAudioVisualizer {
+            SystemAudioCaptureService.shared.acquire(owner: audioCaptureOwner)
+        } else {
+            SystemAudioCaptureService.shared.release(owner: audioCaptureOwner)
+        }
+        for view in metalViews.values {
+            LiquidGlassMetalRenderer.shared.setPaused(!active, view: view)
+        }
     }
 
     // MARK: - 配置变化处理
 
     private func onConfigChanged(_ newConfig: LiquidGlassClockConfiguration) {
-        let wasEnabled = currentConfig.enabled
-
-        // 音频柱状图开关变化 → 启停系统音频捕获
-        if newConfig.showAudioVisualizer != currentConfig.showAudioVisualizer {
-            if newConfig.showAudioVisualizer && newConfig.enabled {
-                SystemAudioCaptureService.shared.start()
-            } else if !newConfig.showAudioVisualizer {
-                SystemAudioCaptureService.shared.stop()
-            }
-        }
-
-        if newConfig.enabled != wasEnabled {
-            if newConfig.enabled {
-                // 检查 sidecar：有视频壁纸时只在该壁纸有动态文本时创建
-                if shouldShowClock(config: newConfig) {
-                    createWindowsForAllScreens(config: newConfig)
-                }
-                // 启动音频捕获（如果启用了柱状图）
-                if newConfig.showAudioVisualizer {
-                    SystemAudioCaptureService.shared.start()
-                }
-                startClockTimer()
-            } else {
-                // 关闭桌面动态元素时，销毁所有窗口（包括 sidecar 补偿层）
-                destroyAllWindows()
-                stopClockTimer()
-                // 关闭时钟时也停止音频捕获
-                SystemAudioCaptureService.shared.stop()
-            }
-        } else if shouldShowClock(config: newConfig) {
-            // 已启用→检查是否需要更新
-            if newConfig != currentConfig {
-                updateAllWindows(config: newConfig)
-            }
-        }
         currentConfig = newConfig
+        refreshAll()
     }
 
     // MARK: - 窗口管理
@@ -327,6 +301,7 @@ public final class LiquidGlassClockOverlayManager {
             stopClockTimer()
         }
         currentConfig = config
+        syncBackgroundResources()
     }
 
     /// 为所有屏幕创建时钟窗口
@@ -342,6 +317,7 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 为指定屏幕创建单个时钟窗口
     private func createWindow(for screen: NSScreen, config: LiquidGlassClockConfiguration) {
+        guard !isTerminating, BackgroundRuntimeRole.allowsDesktopRendering else { return }
         let screenID = screen.wallpaperScreenIdentifier
         let frame = screen.frame
 
@@ -402,6 +378,8 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 销毁所有屏幕的时钟窗口
     private func destroyAllWindows() {
+        stopClockTimer()
+        SystemAudioCaptureService.shared.release(owner: audioCaptureOwner)
         for window in clockWindows.values {
             window.orderOut(nil)
             window.contentView = nil
@@ -630,7 +608,7 @@ private struct RendererDynamicTextOverlayView: View {
 
     @State private var now = Date()
 
-    private let timer = Timer.publish(every: 1, tolerance: 0.1, on: .main, in: .common).autoconnect()
+    @State private var clockConsumerID = UUID()
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -659,7 +637,9 @@ private struct RendererDynamicTextOverlayView: View {
             }
         }
         .frame(width: screenSize.width, height: screenSize.height)
-        .onReceive(timer) { now = $0 }
+        .onReceive(WallpaperClockTicker.shared.$now) { now = $0 }
+        .onAppear { WallpaperClockTicker.shared.acquire(clockConsumerID, seconds: true) }
+        .onDisappear { WallpaperClockTicker.shared.release(clockConsumerID) }
     }
 
     /// 按 C++ FreeType 实际渲染尺寸计算 SwiftUI pt 字号
