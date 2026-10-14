@@ -190,15 +190,15 @@ final class DynamicWallpaperService: ObservableObject {
         case .popular:
             filtered.sort {
                 if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
-                if $0.newestSortKey != $1.newestSortKey {
-                    return $0.newestSortKey > $1.newestSortKey
+                if $0.newestSortIndex != $1.newestSortIndex {
+                    return $0.newestSortIndex > $1.newestSortIndex
                 }
                 return $0.videoName > $1.videoName
             }
         case .newest:
             filtered.sort {
-                if $0.newestSortKey != $1.newestSortKey {
-                    return $0.newestSortKey > $1.newestSortKey
+                if $0.newestSortIndex != $1.newestSortIndex {
+                    return $0.newestSortIndex > $1.newestSortIndex
                 }
                 return $0.videoName > $1.videoName
             }
@@ -206,8 +206,8 @@ final class DynamicWallpaperService: ObservableObject {
             filtered.sort {
                 if $0.hasAudio != $1.hasAudio { return $0.hasAudio > $1.hasAudio }
                 if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
-                if $0.newestSortKey != $1.newestSortKey {
-                    return $0.newestSortKey > $1.newestSortKey
+                if $0.newestSortIndex != $1.newestSortIndex {
+                    return $0.newestSortIndex > $1.newestSortIndex
                 }
                 return $0.videoName > $1.videoName
             }
@@ -215,8 +215,8 @@ final class DynamicWallpaperService: ObservableObject {
             filtered.sort {
                 if $0.isFourK != $1.isFourK { return $0.isFourK > $1.isFourK }
                 if $0.isPopular != $1.isPopular { return $0.isPopular > $1.isPopular }
-                if $0.newestSortKey != $1.newestSortKey {
-                    return $0.newestSortKey > $1.newestSortKey
+                if $0.newestSortIndex != $1.newestSortIndex {
+                    return $0.newestSortIndex > $1.newestSortIndex
                 }
                 return $0.videoName > $1.videoName
             }
@@ -432,6 +432,8 @@ final class DynamicWallpaperService: ObservableObject {
             // 修正数据：去除 category 字段首尾空白字符
             for i in items.indices {
                 items[i].category = items[i].category.trimmingCharacters(in: .whitespaces)
+                // 记录列表内位置（collection/exclusive 各自独立计数），供“最新”排序使用
+                items[i].listIndex = i
             }
             allRawItems.append(contentsOf: items)
             return true

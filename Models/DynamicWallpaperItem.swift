@@ -19,6 +19,12 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
     /// 2026-10 新增字段（list247/exclusive112）：疑似会员解锁标记；
     /// 实测 hidden=1 的老条目视频在新 CDN 上仍可下载，解析时容忍缺失，不据此过滤
     let isHidden: Int?
+    /// 条目在本列表（collection/exclusive 各自独立）JSON 数组中的位置。
+    /// 官方更新列表是文件同名覆盖 + 新条目追加在数组尾部（2026-10-14 实测 +119 条全落 index 6483-6601，
+    /// 全部 385 条新命名条目都在尾段 6217+），数组位置 = 上架顺序；老命名的时间戳在数组顺序中有
+    /// ≤8 分钟的相邻抖动、无大回退，位置序与时间序基本一致且更权威。
+    /// 运行时由 DynamicWallpaperService.parseAndAppend 填充，不属于 JSON 字段。
+    var listIndex: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case hasAudio = "has_audio"
@@ -52,6 +58,7 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
         self.isPopular = try container.decode(Int.self, forKey: .isPopular)
         self.isAtWork = try container.decode(Int.self, forKey: .isAtWork)
         self.isHidden = try container.decodeIfPresent(Int.self, forKey: .isHidden)
+        self.listIndex = 0
     }
 }
 
@@ -186,16 +193,10 @@ enum DynamicWallpaperSortOption: String, CaseIterable, Identifiable, SortOptionP
 // MARK: - 媒体项转换
 
 extension DynamicWallpaperRawItem {
-    /// 从文件名提取用于“最新”排序的时间序列。
-    /// Collection 文件名以分类号开头，不能直接按完整文件名比较。
-    var newestSortKey: String {
-        let stem = videoName.hasSuffix(".mp4")
-            ? String(videoName.dropLast(4))
-            : videoName
-        let parts = stem.split(separator: "_", omittingEmptySubsequences: true)
-        guard parts.count >= 2 else { return stem }
-        return parts.dropFirst().map(String.init).joined(separator: "_")
-    }
+    /// “最新”排序键 = 本列表 JSON 数组内位置（尾部 = 最新上架）。
+    /// 2026-10 前实现是从文件名抠时间戳字符串（如 1_154884390000001.mp4 → 154884390000001），
+    /// 但官方 10 月起改用英文蛇形命名（alpine_hut_bench.mp4），无时间戳可抠，旧实现对新条目失效。
+    var newestSortIndex: Int { listIndex }
 
     /// 基于 videoName 的稳定唯一标识（不依赖排序位置）
     var stableItemID: String {
