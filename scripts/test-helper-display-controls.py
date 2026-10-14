@@ -17,6 +17,10 @@ CASES = [
     ('renderer-routing-regression', [
         'VideoRendererScreenRouting.swift', 'Tests/VideoRendererScreenRoutingTests.swift',
     ]),
+    ('wake-display-relink-regression', [
+        'Utilities/NSScreen+Wallpaper.swift', 'Models/SchedulerConfig.swift',
+        'Tests/WakeDisplayRelinkRegression.swift',
+    ]),
     ('cloud-file-regression', [
         'Services/Sync/CloudSyncModels.swift', 'Services/Sync/CloudSyncError.swift',
         'Services/Sync/CloudSyncFileEngine.swift', 'Tests/CloudSyncFileEngineRegression.swift',

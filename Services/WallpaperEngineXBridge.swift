@@ -139,6 +139,10 @@ private struct ScreenProcessInfo {
     /// 若不一致（旋转/分辨率变化）则跳过热切换、走重启路径以更新 --screen 参数。
     let launchedScreenWidth: Int
     let launchedScreenHeight: Int
+    /// 首帧等待预算基点：fresh launch = 渲染进程 spawn 完成时刻。
+    /// Helper 冷启动首次解压内嵌 assets 发生在 spawn 之前（可能 5~8s），
+    /// 首帧死线必须从 spawn 之后起算，否则重场景加载会被解压时间挤爆预算。
+    let sceneBudgetStartedAt: Date
 }
 
 private struct RendererAudioControlState: Codable {
@@ -950,6 +954,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         var anyLaunchFailed = false
         var failedScreenIDs = Set<String>()
         var lastLaunchError: Error?
+        // fresh launch 屏的首帧预算基点（spawn 时刻）。热切换屏不进表，
+        // waitForScenePresentationReady 对它们用「从现在起算」的默认预算。
+        var sceneFreshLaunchBudgetStarts: [String: Date] = [:]
 
         for screen in effectiveScreens {
             guard wallpaperSwitchGeneration == switchGeneration else { return }
@@ -1045,6 +1052,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     userProperties: userProperties,
                     cliScreenIndex: renderKind == .web ? Self.legacyCLIScreenIndex(for: screen) : nil
                 )
+                // 热切换屏没有进程启动边界，首帧预算从写入控制文件后起算
+                sceneFreshLaunchBudgetStarts[screenID] = Date()
                 if let acURL = existingInfo.audioControlURL {
                     writeAudioControl(
                         url: acURL,
@@ -1226,7 +1235,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     canvasSizeURL: canvasSizeURL,
                     wallpaperControlURL: wallpaperControlURL,
                     launchedScreenWidth: screenW,
-                    launchedScreenHeight: screenH
+                    launchedScreenHeight: screenH,
+                    sceneBudgetStartedAt: Date()
                 )
                 screenRenderStates[screenID] = ScreenRenderState(
                     screenID: screenID,
@@ -1237,6 +1247,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                     cliScreenIndex: renderKind == .web ? Self.legacyCLIScreenIndex(for: screen) : nil
                 )
                 _deinitPIDs.insert(launchedPID)
+                sceneFreshLaunchBudgetStarts[screenID] = Date()
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) wallpaper-wgpu 已启动 (pid=\(launchedPID))")
                 // macOS 27：新进程的桌面窗口可能落在非当前 Space，延迟分拍拉回
                 scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
@@ -1332,7 +1343,8 @@ final class WallpaperEngineXBridge: ObservableObject {
             try await waitForScenePresentationReady(
                 path: resolvedPath,
                 screens: effectiveScreens,
-                generation: switchGeneration
+                generation: switchGeneration,
+                freshLaunchBudgetStarts: sceneFreshLaunchBudgetStarts
             )
         }
 
@@ -1356,7 +1368,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     try await waitForScenePresentationReady(
                         path: resolvedPath,
                         screens: effectiveScreens,
-                        generation: switchGeneration
+                        generation: switchGeneration,
+                        freshLaunchBudgetStarts: sceneFreshLaunchBudgetStarts
                     )
                 }
             } catch {
@@ -1381,7 +1394,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     try await waitForScenePresentationReady(
                         path: resolvedPath,
                         screens: effectiveScreens,
-                        generation: switchGeneration
+                        generation: switchGeneration,
+                        freshLaunchBudgetStarts: sceneFreshLaunchBudgetStarts
                     )
                 }
             } catch {
@@ -1555,10 +1569,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         ])
     }
 
-    /// 渲染器运行期健康巡检：每 10s 对每个活跃 scene 渲染器做三项检查——
+    /// 渲染器运行期健康巡检：每 10s 对每个活跃 scene 渲染器做两项检查——
     /// ① 进程被外部 SIGSTOP（我方未暂停）→ SIGCONT 恢复并留痕；
-    /// ② 窗口 alpha 卡在低值（启动淡入或运行期 WindowServer 异常）→ 注入 presentationAlpha=1；
-    /// ③ 残留静态 overlay 窗口盖在活跃渲染器上 → 收掉并留痕。
+    /// ② 残留静态 overlay 窗口盖在活跃渲染器上 → 收掉并留痕。
     /// 之前 +3s 一次性校验只覆盖启动瞬间，运行期发生的冻结完全无感知。
     private func ensureRendererHealthLoop() {
         guard rendererHealthLoop == nil else { return }
@@ -1588,15 +1601,6 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
             guard !pausedByUs else { continue }
 
-            if let alpha = Self.desktopWindowAlpha(pid: info.pid), alpha < 0.5,
-               let controlURL = info.wallpaperControlURL {
-                Self.injectPresentationAlpha(controlURL)
-                logRendererHealth("alpha", screenID: screenID, message: "Renderer window stuck at low alpha; injected presentationAlpha", metadata: [
-                    "pid": info.pid,
-                    "alpha": String(format: "%.4f", alpha)
-                ])
-            }
-
             if !screenLocked,
                let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
                hasLivePresentation(on: screen),
@@ -1623,34 +1627,6 @@ final class WallpaperEngineXBridge: ObservableObject {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return false }
         return info.kp_proc.p_stat == 4
-    }
-
-    /// 读取指定进程在桌面层级窗口的 kCGWindowAlpha；找不到窗口返回 nil。
-    private static func desktopWindowAlpha(pid: pid_t) -> Double? {
-        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        for window in list {
-            guard let ownerPID = window["kCGWindowOwnerPID"] as? Int,
-                  ownerPID == Int(pid),
-                  let layer = window["kCGWindowLayer"] as? Int,
-                  layer < 0 else { continue }
-            return window["kCGWindowAlpha"] as? Double
-        }
-        return nil
-    }
-
-    /// 向 wallpaper-control JSON 合入 presentationAlpha=1（保留其余字段）。
-    private static func injectPresentationAlpha(_ url: URL) {
-        var state: [String: Any] = [:]
-        if let data = try? Data(contentsOf: url),
-           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            state = object
-        }
-        state["presentationAlpha"] = 1
-        if let data = try? JSONSerialization.data(withJSONObject: state) {
-            try? data.write(to: url, options: .atomic)
-        }
     }
 
     /// 暂停渲染（发送 SIGSTOP）
@@ -2633,13 +2609,28 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// wallpaper switch busy until timeout). Require the new canvas generation and a
     /// live process to remain stable briefly, then leave several display intervals for
     /// the first drawable before entering the black commit.
+    ///
+    /// 预算基点是「渲染工作真正开始」的时刻，而不是本函数被调用的时刻：
+    /// fresh launch 从渲染进程 spawn 完成（ScreenProcessInfo.sceneBudgetStartedAt）
+    /// 起算 —— Helper 冷启动首次解压内嵌 assets 的耗时发生在 spawn 之前，
+    /// 不得挤占场景加载预算（2026-10-13 实锤：解压 6s + 重场景加载 9s >
+    /// 从 setWallpaper 起算的 10s 死线 → 超时误杀刚完成加载的 renderer，
+    /// 第二次尝试因 assets 已缓存而秒成功）。热切换没有进程启动边界，
+    /// 预算从进入本函数起算。
     private func waitForScenePresentationReady(
         path: String,
         screens: [NSScreen],
-        generation: UInt64
+        generation: UInt64,
+        freshLaunchBudgetStarts: [String: Date] = [:]
     ) async throws {
         let expectedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-        let deadline = Date().addingTimeInterval(10)
+        // 12s：重场景（600 粒子 + 4K ASTC 纹理）实测 8~9s，留出余量；
+        // 真正卡死的 renderer 仍会被这个死线回收，不会泄漏进程。
+        let sceneLoadBudget: TimeInterval = 12
+        // 有 fresh launch 屏时死线锚定最早的进程 spawn 时刻；
+        // 纯热切换时锚定进入本函数的时刻。
+        let budgetAnchor = freshLaunchBudgetStarts.values.min() ?? Date()
+        let deadline = budgetAnchor.addingTimeInterval(sceneLoadBudget)
         var stableSince: Date?
         while Date() < deadline {
             guard wallpaperSwitchGeneration == generation else {
@@ -4113,8 +4104,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         setProperties: String?,
         upscaling: Bool? = nil,
         upscalingPercent: Int? = nil,
-        effectReduction: Bool? = nil,
-        presentationAlpha: Double? = nil
+        effectReduction: Bool? = nil
     ) -> Bool {
         var dict: [String: Any] = [:]
         if let sw = setWallpaper {
@@ -4137,9 +4127,6 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         if let effectReduction = effectReduction {
             dict["effect_reduction"] = effectReduction
-        }
-        if let presentationAlpha = presentationAlpha {
-            dict["presentationAlpha"] = max(0, min(1, presentationAlpha))
         }
         do {
             let data = try JSONSerialization.data(withJSONObject: dict, options: [])
@@ -4265,29 +4252,27 @@ final class WallpaperEngineXBridge: ObservableObject {
         persistState()
     }
 
-    /// The new renderer is ready and ordered behind the old one. Stop the old
-    /// process only now so WindowServer can reveal the prepared replacement
-    /// without exposing a black desktop frame.
+    /// 新 renderer 就绪后，由 Helper 的快照窗口遮住旧进程退出，再淡出露出新画面。
+    /// 转场由宿主统一处理，不依赖 renderer 的窗口透明度控制。
     private func commitPreparedRenderersReplacingOld(
         _ preservedRenderers: [String: PreservedRenderer]
     ) async {
-        // Trigger the old renderer's in-process alpha animation. Older
-        // wallpaper-wgpu binaries ignore this unknown control field and still
-        // fall back to the same no-black-frame handoff.
-        for preserved in preservedRenderers.values {
-            if let controlURL = preserved.info.wallpaperControlURL {
-                _ = writeWallpaperControl(
-                    url: controlURL,
-                    setWallpaper: nil,
-                    assets: nil,
-                    setProperties: nil,
-                    presentationAlpha: 0.001
-                )
+        let screens = NSScreen.screens.filter {
+            preservedRenderers[$0.wallpaperScreenIdentifier] != nil
+        }
+        var didTeardownOldContent = false
+        await WallpaperCrossTypeTransitionCoordinator.shared.commitPreparedContent(on: screens) {
+            didTeardownOldContent = true
+            for preserved in preservedRenderers.values {
+                await self.stopDetachedRenderer(preserved)
             }
         }
-        try? await Task.sleep(nanoseconds: 380_000_000)
-        for preserved in preservedRenderers.values {
-            await stopDetachedRenderer(preserved)
+        // 新请求可能在快照提交前作废转场。旧进程已经脱离 screenProcesses，
+        // 仍需回收，避免留下无人管理的 renderer；不触碰新请求的活跃进程。
+        if !didTeardownOldContent {
+            for preserved in preservedRenderers.values {
+                await stopDetachedRenderer(preserved)
+            }
         }
     }
 
@@ -5265,7 +5250,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
 
         if #available(macOS 26.0, *),
-           VideoWallpaperManager.shared.isLockScreenEnabled {
+           VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             print("[WallpaperEngineXBridge] 🔒 动态锁屏已接管，跳过 Scene 烘焙封面的桌面同步")
             return
         }
@@ -5360,7 +5345,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         guard FileManager.default.fileExists(atPath: imageURL.path) else { return false }
 
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过烘焙封面的系统桌面写入")
             return true
         }
