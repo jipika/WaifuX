@@ -105,6 +105,14 @@ else
   echo "  ⚠️  未找到 $WGPU_DIST_X86，x86_64 渲染器组件跳过部署"
 fi
 
+# 新 SDK + Rust 默认 Intel deployment target 会把 CoreMedia C 符号绑到 Swift
+# overlay，导致客户机器在 main() 之前 dyld 退出。部署旧预编译件时修正并验证。
+for renderer in "$DEST_DIR/wallpaper-wgpu" "$DEST_DIR/wallpaper-wgpu-x86_64"; do
+  if [[ -f "$renderer" ]]; then
+    python3 "$ROOT/scripts/renderer_coremedia_compat.py" --repair "$renderer"
+  fi
+done
+
 # ── 1.5 复制 ffmpeg（web 壁纸离线烘焙的音频 mux 用） ────────────
 # 优先使用静态单文件版（无 lib/ 闭包依赖，可随包分发）：
 #   arm64  源：$WAIFUX_FFMPEG_SRC → /tmp/ff-out-arm64/ffmpeg-arm64 → homebrew 动态版兜底
@@ -215,6 +223,14 @@ elif [[ -n "$DXC_DYLIB_SRC" && -f "$DXC_DYLIB_SRC" ]]; then
 else
   echo "  ⚠️  libdxcompiler.dylib 未找到，跳过复制"
 fi
+
+# 发布基线固定为 macOS 14.4。DXC/FFmpeg 也必须满足，不能只检查主渲染器。
+# 原生依赖在 wallpaper-wgpu/scripts/build-macos-dependencies.py 中从源重建。
+python3 "$ROOT/scripts/renderer_coremedia_compat.py" --minimum-macos 14.4 \
+  "$DEST_DIR/wallpaper-wgpu" "$DEST_DIR/wallpaper-wgpu-x86_64" \
+  "$DEST_DIR/dxc" "$DEST_DIR/dxc-x86_64" \
+  "$DEST_LIB_DIR/libdxcompiler.dylib" "$DEST_DIR/libdxcompiler-x86_64.dylib" \
+  "$DEST_DIR/ffmpeg" "$DEST_DIR/ffmpeg-x86_64"
 
 # ── 3. 生成内嵌 assets (.incbin) ─────────────────────────────────
 ASSETS_DIR="$ROOT/Resources/assets"

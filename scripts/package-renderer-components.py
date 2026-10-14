@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 
 from renderer_component_versions import FILES, fingerprints, read_feed, source_path, sync_versions, version
+from renderer_coremedia_compat import verify as verify_renderer_coremedia
 
 ROOT = Path(__file__).resolve().parents[1]
 TEAM = "SRHKTRJ83W"
@@ -28,6 +29,8 @@ def run(*args: str) -> str:
 
 def prepare_dependencies(binary: Path, component: str, relative_path: str) -> None:
     """Make DXC relocatable and refuse dependencies absent from the component payload."""
+    if component == "wgpu" and relative_path == "wallpaper-wgpu":
+        verify_renderer_coremedia(binary)
     dependencies = [line.strip().split(" (compatibility version", 1)[0]
                     for line in run("otool", "-L", str(binary)).splitlines()[1:]]
     if relative_path.endswith(".dylib"):

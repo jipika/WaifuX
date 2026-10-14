@@ -5,8 +5,7 @@
 #
 # 拆架构分发（38.0.154+）：
 #   - WaifuX-arm64.dmg   内置 wallpaper-wgpu + DXC + ffmpeg/lib 全家桶（scene 渲染可用）
-#   - WaifuX-x86_64.dmg  不携带 scene 渲染器（wgpu 生态 arm64-only），web daemon 用 x86_64 CLI，
-#                        主 App 内 scene 入口由 WallpaperEngineAvailability 占位短路
+#   - WaifuX-x86_64.dmg  携带 x86_64 scene 渲染器、DXC、ffmpeg 与 web daemon
 # 扩展（.appex）与屏保（.saver）保持 universal，两个包共用。
 
 set -e
@@ -122,6 +121,16 @@ require_packaged_file "$PROJECT_DIR/Resources/zip_accessor.o" "wallpaper-wgpu em
 fix_ffmpeg_install_names "$PROJECT_DIR/Resources/ffmpeg" "$PROJECT_DIR/Resources/lib"
 verify_packaged_ffmpeg "$PROJECT_DIR/Resources/ffmpeg"
 fi
+
+# 打包必须拒绝错误的 CoreMedia 绑定；不能用本机构建机能启动代替 Intel 兼容性。
+case "$PKG_ARCH" in
+  arm64) renderer_inputs=(wallpaper-wgpu dxc lib/libdxcompiler.dylib ffmpeg) ;;
+  x86_64) renderer_inputs=(wallpaper-wgpu-x86_64 dxc-x86_64 libdxcompiler-x86_64.dylib ffmpeg-x86_64) ;;
+  universal) renderer_inputs=(wallpaper-wgpu dxc lib/libdxcompiler.dylib ffmpeg wallpaper-wgpu-x86_64 dxc-x86_64 libdxcompiler-x86_64.dylib ffmpeg-x86_64) ;;
+esac
+for renderer_input in "${renderer_inputs[@]}"; do
+  python3 "$PROJECT_DIR/scripts/renderer_coremedia_compat.py" --minimum-macos 14.4 "$PROJECT_DIR/Resources/$renderer_input"
+done
 
 # wallpaperengine-cli 仅作为 web 壁纸 daemon 保留（不嵌入 assets，体积约 640KB）。
 # 拆架构后每个包带各自架构的 CLI：arm64 用已提交的 Resources/wallpaperengine-cli，
