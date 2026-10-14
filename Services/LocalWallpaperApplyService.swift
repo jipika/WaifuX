@@ -387,10 +387,14 @@ enum LocalWallpaperApplyService {
             userProperties: userProps,
             requireAllTargetScreens: options.isGlobalTransaction
         )
+        try Task.checkCancellation()
         // 实时 scene / web 不经过 applyVideo，系统桌面与锁屏的静态底图不会被刷新：
-        // 有可用高清 poster 时在这里补一次注册；无 poster 时保持旧图（与 applyVideo 的
+        // 有可用高清 poster 时在这里补一次系统写入；无 poster 时保持旧图（与 applyVideo 的
         // 「没有 HD poster 就不写 fallback」策略一致）。
-        syncSystemWallpaperPosterIfAvailable(for: screens, options: options)
+        let currentScreens = screens.filter {
+            WallpaperEngineXBridge.shared.currentWallpaperPath(for: $0) == path
+        }
+        syncSystemWallpaperPosterIfAvailable(for: currentScreens, options: options)
         // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，
         // 覆盖启动恢复、显示器重连等绕过本服务的 Scene 设置入口。
     }
@@ -400,9 +404,12 @@ enum LocalWallpaperApplyService {
     /// 2026-10-08 实锤：弹窗设置 Workshop 工程壁纸后 macOS 桌面静态图不跟随——
     /// `.scene` 实时/兜底渲染与 `.web` 实时渲染都走 `applyRenderer`，这条路径原本
     /// 只 `setWallpaper`（动态层），没有任何系统壁纸写入，而 `.video` 工程走的
-    /// `applyVideo` 早就有 immediate poster 注册。开关、动态锁屏、跨进程转发等守卫
-    /// 都在 `registerWallpaperSet` 内部，这里只负责挑 poster。
+    /// `applyVideo` 早就有 immediate poster 注册。
+    /// 登记只保存路径，不会执行系统写入；这里必须先实际设置再登记。
     private static func syncSystemWallpaperPosterIfAvailable(for screens: [NSScreen], options: Options) {
+        guard !BackgroundRuntimeRole.isIsolatedTest,
+              VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+              !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else { return }
         var posterURL: URL?
         if let itemID = options.sceneBakeItemID {
             posterURL = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID)
@@ -419,8 +426,19 @@ enum LocalWallpaperApplyService {
             "poster": posterURL.lastPathComponent,
             "screens": screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
         ])
+        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+            .allowClipping: true
+        ]
         for screen in screens {
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+            do {
+                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
+                DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
+            } catch {
+                AppLogger.error(.wallpaper, "同步渲染壁纸的系统底图失败", metadata: [
+                    "screen": screen.wallpaperScreenIdentifier, "error": error.localizedDescription
+                ])
+            }
         }
     }
 
