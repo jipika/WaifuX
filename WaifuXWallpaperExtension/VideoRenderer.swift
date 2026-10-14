@@ -17,6 +17,7 @@ final class VideoRenderer: @unchecked Sendable {
     let timebase: CMTimebase
     private let renderer: AVSampleBufferVideoRenderer
     private let rootLayer: CALayer
+    private let viewportLayer = CALayer()
     private let backgroundFrameLayer: CALayer
     private let stillFrameLayer: CALayer
     private var asset: AVURLAsset
@@ -47,7 +48,9 @@ final class VideoRenderer: @unchecked Sendable {
     private var nextOutput: AVAssetReaderTrackOutput?
 
     /// 该渲染器所属的 displayID，用于读取 App Group 里的可视区域 crop 配置。
-    private let displayID: UInt32
+    // 仅在主线程读取/更新布局状态，几何刷新不再同步等待 AVAssetTrack 加载。
+    private var displayID: UInt32
+    private var layoutVideoSize: CGSize
 
     // 无缝循环状态
     private var ptsOffset: CMTime = .zero
@@ -71,6 +74,9 @@ final class VideoRenderer: @unchecked Sendable {
 
         let videoSize = await Self.displaySize(for: track)
         try Task.checkCancellation()
+        guard ExtDisplayGeometry.isValid(size: videoSize) else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
+        }
 
         // CALayer / AVSampleBufferDisplayLayer 创建与 addSublayer 必须在主线程：
         // 历史上整个 init 在 acquire 的非主线程 Task 上执行，会触发 Quartz thread-checker
@@ -92,24 +98,26 @@ final class VideoRenderer: @unchecked Sendable {
                 displayLayer: displayLayer,
                 asset: asset,
                 videoTrack: track,
-                fillFrame: layout.frame,
+                videoSize: videoSize,
                 displayID: displayID
             )
         }
     }
 
-    private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack, fillFrame: CGRect, displayID: UInt32) {
+    private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack, videoSize: CGSize, displayID: UInt32) {
         self.displayLayer = displayLayer
         self.renderer = displayLayer.sampleBufferRenderer
         self.rootLayer = rootLayer
         self.asset = asset
         self.videoTrack = videoTrack
         self.displayID = displayID
+        self.layoutVideoSize = videoSize
         self.backgroundFrameLayer = CALayer()
         self.stillFrameLayer = CALayer()
 
-        // 裁剪 displayLayer 超出 rootLayer 边界的部分（fillFrame 在宽高比不一致时会超出 rootLayer.bounds）
+        // viewport 同时约束视频、底图、暂停帧，固定比例时不会漏到 letterbox 区域。
         rootLayer.masksToBounds = true
+        rootLayer.addSublayer(viewportLayer)
 
         backgroundFrameLayer.frame = rootLayer.bounds
         backgroundFrameLayer.contentsGravity = .resizeAspectFill
@@ -120,23 +128,25 @@ final class VideoRenderer: @unchecked Sendable {
         // backgroundFrameLayer.opacity=0 → 桌面看到的是黑屏，没有底图可见。
         // 用 BMP 缓存（上次会话写入的当前视频快照）做即时兜底，避免暂停态启动黑屏。
         // 异步 generateBackgroundFrame 完成后会用更高质量的视频封面覆盖 contents。
-        if let cachedBMP = loadCachedSnapshotImage() {
+        if let cachedBMP = ExtCropLayers.staticImage(in: rootLayer) ?? loadCachedSnapshotImage() {
             backgroundFrameLayer.contents = cachedBMP
             backgroundFrameLayer.opacity = 1
         } else {
             backgroundFrameLayer.opacity = 0
         }
-        rootLayer.addSublayer(backgroundFrameLayer)
+        viewportLayer.addSublayer(backgroundFrameLayer)
 
         displayLayer.backgroundColor = CGColor(gray: 0, alpha: 0)
         displayLayer.isOpaque = false
-        rootLayer.addSublayer(displayLayer)
+        viewportLayer.addSublayer(displayLayer)
 
         stillFrameLayer.frame = rootLayer.bounds
         stillFrameLayer.contentsGravity = .resizeAspectFill
         stillFrameLayer.contentsScale = rootLayer.contentsScale
         stillFrameLayer.opacity = 0
-        rootLayer.addSublayer(stillFrameLayer)
+        viewportLayer.addSublayer(stillFrameLayer)
+        ExtCropLayers.removeStaticImage(from: rootLayer)
+        rootLayer.contents = nil
 
         var tb: CMTimebase?
         CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &tb)
@@ -153,6 +163,7 @@ final class VideoRenderer: @unchecked Sendable {
             backgroundFrameLayer.opacity = 1
             extLog("  [Renderer] 无 BMP 缓存，已挂系统桌面图等待异步首帧: \(asset.url.lastPathComponent)")
         }
+        applyAspectFillLayout(videoSize: videoSize)
         generateBackgroundFrame(for: asset)
     }
 
@@ -203,56 +214,24 @@ final class VideoRenderer: @unchecked Sendable {
         }
     }
 
-    func relayoutForCurrentDisplayGeometry() {
-        applyAspectFillLayout(for: videoTrack)
+    func relayoutForCurrentDisplayGeometry(displayID: UInt32? = nil) {
+        // 调用方在主线程；不要在锁屏/唤醒时阻塞主线程等待外置盘视频元数据。
+        if let displayID { self.displayID = displayID }
+        applyAspectFillLayout(videoSize: layoutVideoSize)
     }
 
     private func applyAspectFillLayout(videoSize: CGSize) {
+        guard viewportLayer.superlayer === rootLayer, ExtDisplayGeometry.isValid(size: videoSize) else { return }
+        layoutVideoSize = videoSize
         let bounds = rootLayer.bounds
-        rootLayer.masksToBounds = true
         let settings = ExtCropPrefs.settings(forDisplayID: displayID)
-
-        if settings.shouldApplyCrop {
-            let layout = ExtCropEngine.compute(
-                wallpaperSize: videoSize, screenSize: bounds.size, settings: settings)
-            let geometry = ExtCropGeometry.layerGeometry(layout: layout, in: bounds)
-            rootLayer.backgroundColor = layout.letterboxColor
-            // contentsRect 在远程 CAContext + AVSampleBufferDisplayLayer 路径中
-            // 不能可靠地表达“先裁切、再等比例铺满”。若配合 .resize，
-            // 竖屏会把整张横屏帧直接压进窄 viewport。改用超出 root bounds 的
-            // videoFrame，并由 rootLayer.masksToBounds 完成真实裁切。
-            displayLayer.frame = geometry.videoFrame
-            displayLayer.videoGravity = .resizeAspectFill
-            displayLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            displayLayer.contentsScale = rootLayer.contentsScale
-            backgroundFrameLayer.frame = geometry.videoFrame
-            backgroundFrameLayer.contentsGravity = .resizeAspectFill
-            backgroundFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            stillFrameLayer.frame = geometry.videoFrame
-            stillFrameLayer.contentsGravity = .resizeAspectFill
-            stillFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            stillFrameLayer.contentsScale = rootLayer.contentsScale
-            extLog(
-                "[VideoRenderer] layout crop video=\(Int(videoSize.width))x\(Int(videoSize.height)) "
-                    + "display=\(Int(bounds.width))x\(Int(bounds.height)) "
-                    + "frame=\(Int(geometry.videoFrame.width))x\(Int(geometry.videoFrame.height))"
-            )
-        } else {
-            // 现状 aspect-fill
-            rootLayer.backgroundColor = nil
-            let fill = Self.aspectFillLayout(videoSize: videoSize, in: bounds)
-            backgroundFrameLayer.frame = bounds
-            displayLayer.frame = fill.frame
-            displayLayer.videoGravity = .resizeAspectFill
-            displayLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            displayLayer.contentsScale = rootLayer.contentsScale
-            backgroundFrameLayer.contentsGravity = .resizeAspectFill
-            backgroundFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            stillFrameLayer.frame = bounds
-            stillFrameLayer.contentsGravity = .resizeAspectFill
-            stillFrameLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            stillFrameLayer.contentsScale = rootLayer.contentsScale
-            extLog("[VideoRenderer] layout updated video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(fill.scale)")
+        displayLayer.videoGravity = .resizeAspectFill
+        let changed = ExtCropLayers.apply(
+            rootLayer: rootLayer, viewportLayer: viewportLayer,
+            contentLayers: [displayLayer, backgroundFrameLayer, stillFrameLayer],
+            sourceSize: videoSize, settings: settings)
+        if changed {
+            extLog("[VideoRenderer] layout displayID=\(displayID) video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) viewport=\(viewportLayer.frame) frame=\(displayLayer.frame) preset=\(settings.aspectPreset.rawValue)")
         }
     }
 
@@ -292,12 +271,13 @@ final class VideoRenderer: @unchecked Sendable {
             CMTimebaseSetRate(timebase, rate: 0.0)
         }
         cancelImageTasks()
-        DispatchQueue.main.async { [displayLayer, backgroundFrameLayer, stillFrameLayer] in
+        DispatchQueue.main.async { [viewportLayer, displayLayer, backgroundFrameLayer, stillFrameLayer] in
             backgroundFrameLayer.contents = nil
             stillFrameLayer.contents = nil
             displayLayer.removeFromSuperlayer()
             backgroundFrameLayer.removeFromSuperlayer()
             stillFrameLayer.removeFromSuperlayer()
+            viewportLayer.removeFromSuperlayer()
         }
     }
 

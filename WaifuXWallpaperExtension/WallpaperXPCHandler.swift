@@ -226,32 +226,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             collectDescriptions(request, depth: 0)
         }
 
-        func number(after marker: String) -> Double? {
-            for desc in descriptions {
-                guard let range = desc.range(of: marker) else { continue }
-                let tail = desc[range.upperBound...].drop(while: { $0 == " " })
-                let token = tail.prefix { char in
-                    char.isNumber || char == "." || char == "-"
-                }
-                if let value = Double(token) {
-                    return value
-                }
-            }
-            return nil
-        }
-
-        let displayID = number(after: "directDisplayID: ").flatMap { UInt32(exactly: Int($0)) }
-            ?? number(after: "displayID: ").flatMap { UInt32(exactly: Int($0)) }
-        let width = number(after: "width: ")
-        let height = number(after: "height: ")
-        let size: CGSize?
-        if let width, let height, width > 0, height > 0 {
-            size = CGSize(width: width, height: height)
-        } else {
-            size = nil
-        }
-        let scale = number(after: "scaleFactor: ").flatMap { $0 > 0 ? CGFloat($0) : nil }
-        return (displayID, size, scale)
+        return ExtDisplayGeometry.parse(descriptions: descriptions)
     }
 
     private static func applyDisplayGeometryUpdate(
@@ -260,23 +235,17 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         size requestedSize: CGSize?,
         scale requestedScale: CGFloat?
     ) {
-        // 收集所有需要更新的 context。
-        // 桌面 + 锁屏两个 instance 共享 displayID 但各自有独立 context — 以前
-        // 用 `activeContextForCommand(displayID:)` 只取第一个，导致拔插显示器/分辨率
-        // 切换时另一个 layer 的 frame/scale 不更新。改用 allActiveContexts(for:) 全部更新。
-        let contexts: [ActiveWallpaper]
-        if let wallpaperID,
-           let active = WallpaperState.shared.activeContext(wallpaperID: wallpaperID) {
-            contexts = [active]
-        } else if let displayID {
-            contexts = WallpaperState.shared.allActiveContexts(for: displayID)
-        } else {
-            contexts = WallpaperState.shared.activeContextsSnapshot()
-        }
-
-        guard !contexts.isEmpty else { return }
-
         let applyBlock: @Sendable () -> Void = {
+            // 在主线程取得最新实例，避免排队期间静态图/视频已热切换。
+            // wallpaperID 也可对应桌面 + 锁屏两个 context，不能只更新 first。
+            let contexts = WallpaperState.shared.activeContextsSnapshot().filter { active in
+                ExtDisplayGeometry.matches(
+                    wallpaperID: wallpaperID, displayID: displayID,
+                    contextWallpaperID: active.wallpaperID, contextDisplayID: active.displayID,
+                    contextDisplayIsActive: active.displayID.map { CGDisplayIsActive($0) != 0 } ?? false)
+            }
+            let contextDisplayIDs = Set(contexts.compactMap { $0.displayID })
+            let hasTarget = displayID != nil || (wallpaperID != nil && contextDisplayIDs.count == 1)
             // per-display 的 IOSurface 重分配只做一次（surface 是按 display 共享的）
             var reallocatedDisplays = Set<UInt32>()
 
@@ -285,26 +254,27 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 guard let targetDisplayID else { continue }
 
                 let metrics = Self.displayMetrics(for: targetDisplayID)
-                let targetSize = requestedSize ?? metrics?.size
-                let targetScale = requestedScale ?? metrics?.scale ?? active.rootLayer.contentsScale
-                guard let targetSize, targetSize.width > 0, targetSize.height > 0 else { continue }
+                // 无目标的 update 只能逐屏取 metrics，不能把某一屏尺寸广播到其它屏。
+                let targetSize = (hasTarget ? requestedSize : nil) ?? metrics?.size ?? active.rootLayer.bounds.size
+                let targetScale = (hasTarget ? requestedScale : nil) ?? metrics?.scale ?? active.rootLayer.contentsScale
+                guard ExtDisplayGeometry.isValid(size: targetSize), targetScale.isFinite, targetScale > 0 else { continue }
 
                 let oldBounds = active.rootLayer.bounds
                 let oldScale = active.rootLayer.contentsScale
                 let needsFrame = abs(oldBounds.width - targetSize.width) > 0.5
                     || abs(oldBounds.height - targetSize.height) > 0.5
                 let needsScale = abs(oldScale - targetScale) > 0.001
-                guard needsFrame || needsScale else { continue }
 
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
                 active.rootLayer.frame = CGRect(origin: .zero, size: targetSize)
                 active.rootLayer.bounds = CGRect(origin: .zero, size: targetSize)
                 active.rootLayer.contentsScale = targetScale
-                active.renderer?.relayoutForCurrentDisplayGeometry()
+                relayoutContent(active, displayID: targetDisplayID)
 
                 // IOSurface 渲染器也需要重新布局，但分辨率重分配 per-display 只做一次。
-                if let ioRenderer = WallpaperState.shared.ioSurfaceRenderer(for: targetDisplayID) {
+                if let ioRenderer = WallpaperState.shared.ioSurfaceRenderer(for: targetDisplayID),
+                   ioRenderer.displayLayer.superlayer === active.rootLayer, needsFrame || needsScale {
                     ioRenderer.relayout(rootLayer: active.rootLayer)
 
                     if reallocatedDisplays.insert(targetDisplayID).inserted {
@@ -328,17 +298,17 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
                 CATransaction.commit()
 
-                if let wallpaperID, active.displayID != targetDisplayID {
-                    WallpaperState.shared.updateContextDisplayID(wallpaperID: wallpaperID, displayID: targetDisplayID)
-                } else if active.displayID != targetDisplayID {
+                if active.displayID != targetDisplayID {
                     WallpaperState.shared.updateContextDisplayID(rootLayer: active.rootLayer, displayID: targetDisplayID)
                 }
 
-                extLog(
-                    "[Geometry] updated context=\(active.contextId) display=\(targetDisplayID) "
-                        + "\(Int(oldBounds.width))x\(Int(oldBounds.height))@\(oldScale) -> "
-                        + "\(Int(targetSize.width))x\(Int(targetSize.height))@\(targetScale)"
-                )
+                if needsFrame || needsScale || active.displayID != targetDisplayID {
+                    extLog(
+                        "[Geometry] updated context=\(active.contextId) display=\(targetDisplayID) "
+                            + "\(Int(oldBounds.width))x\(Int(oldBounds.height))@\(oldScale) -> "
+                            + "\(Int(targetSize.width))x\(Int(targetSize.height))@\(targetScale)"
+                    )
+                }
             }
         }
 
@@ -346,6 +316,29 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             applyBlock()
         } else {
             DispatchQueue.main.async(execute: applyBlock)
+        }
+    }
+
+    /// 裁剪设置通知不保证 WallpaperAgent 会重新 acquire；就地刷新全部现存实例。
+    /// 保留每个 context 的尺寸（系统预览可能不同于物理显示器）。
+    static func refreshActiveCropLayouts() {
+        let applyBlock: @Sendable () -> Void = {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for active in WallpaperState.shared.activeContextsSnapshot() {
+                guard let displayID = active.displayID else { continue }
+                relayoutContent(active, displayID: displayID)
+            }
+            CATransaction.commit()
+        }
+        if Thread.isMainThread { applyBlock() } else { DispatchQueue.main.async(execute: applyBlock) }
+    }
+
+    private static func relayoutContent(_ active: ActiveWallpaper, displayID: UInt32) {
+        if let renderer = active.renderer {
+            renderer.relayoutForCurrentDisplayGeometry(displayID: displayID)
+        } else if let image = ExtCropLayers.staticImage(in: active.rootLayer) ?? ExtCropLayers.imageContents(in: active.rootLayer) {
+            applyStaticCrop(rootLayer: active.rootLayer, image: image, displayID: displayID)
         }
     }
 
@@ -357,39 +350,17 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
         let wallpaperIDString = Self.extractWallpaperContextIdentifier(from: id)
 
-        // Extract displayID and destSize from request via Mirror
-        var displayID: UInt32?
-        var destSize = CGSize(width: 1920, height: 1080)
-        var didParseDestinationSize = false
-        var scaleFactor: CGFloat = 1.0
+        // acquire/update 共用校验后的尺寸解析，失败时按目标显示器回退。
+        let requestGeometry = Self.requestDisplayGeometry(from: request)
+        var displayID = requestGeometry.displayID
+        var destSize = requestGeometry.size ?? .zero
+        var scaleFactor = requestGeometry.scale ?? 1.0
         var choiceConfiguration: String?
 
         if let reqObj = request as? NSObject {
             let mirror = Mirror(reflecting: reqObj)
             if let innerValue = mirror.children.first?.value {
                 let desc = String(describing: innerValue)
-                if let dRange = desc.range(of: "displayID: ") {
-                    let after = desc[dRange.upperBound...]
-                    if let end = after.range(of: ",") ?? after.range(of: ")") {
-                        displayID = UInt32(after[..<end.lowerBound].trimmingCharacters(in: .whitespaces))
-                    }
-                }
-                if let wRange = desc.range(of: "width: "), let hRange = desc.range(of: "height: ") {
-                    let afterW = desc[wRange.upperBound...]
-                    let afterH = desc[hRange.upperBound...]
-                    if let endW = afterW.range(of: ",") ?? afterW.range(of: ")"),
-                       let endH = afterH.range(of: ",") ?? afterH.range(of: ")") {
-                        destSize.width = CGFloat(Double(afterW[..<endW.lowerBound].trimmingCharacters(in: .whitespaces)) ?? 1920)
-                        destSize.height = CGFloat(Double(afterH[..<endH.lowerBound].trimmingCharacters(in: .whitespaces)) ?? 1080)
-                        didParseDestinationSize = destSize.width > 0 && destSize.height > 0
-                    }
-                }
-                if let sRange = desc.range(of: "scaleFactor: ") {
-                    let after = desc[sRange.upperBound...]
-                    if let end = after.range(of: ",") ?? after.range(of: ")") {
-                        scaleFactor = CGFloat(Double(after[..<end.lowerBound].trimmingCharacters(in: .whitespaces)) ?? 1.0)
-                    }
-                }
                 _ = desc.contains("isPreview: true")
                 // 尝试解析 String 格式的 configuration: Optional("display-instance-id")
                 if let cRange = desc.range(of: "configuration: Optional(\""), let cEnd = desc[cRange.upperBound...].range(of: "\")") {
@@ -489,11 +460,18 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        if !didParseDestinationSize, let did = displayID,
-           let metrics = Self.displayMetrics(for: did) {
-            destSize = metrics.size
-            scaleFactor = metrics.scale
-            extLog("[acquire] ⚠️ request 未提供有效目标尺寸，使用 display metrics: display=\(did) size=\(Int(destSize.width))x\(Int(destSize.height)) scale=\(scaleFactor)")
+        if let did = displayID, let metrics = Self.displayMetrics(for: did) {
+            if requestGeometry.size == nil {
+                destSize = metrics.size
+                extLog("[acquire] request 无有效目标尺寸，使用 display metrics: display=\(did) size=\(destSize)")
+            }
+            if requestGeometry.scale == nil { scaleFactor = metrics.scale }
+        }
+        guard ExtDisplayGeometry.isValid(size: destSize), scaleFactor.isFinite, scaleFactor > 0 else {
+            extLog("[acquire] ❌ 无有效显示尺寸 display=\(displayID ?? 0)")
+            reply(nil, NSError(domain: "WaifuXExtension", code: 5,
+                               userInfo: [NSLocalizedDescriptionKey: "Cannot determine display geometry"]))
+            return
         }
 
         // Seed currentVideoID only on first launch when UserDefaults has no value yet,
@@ -886,30 +864,12 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         doReply("static image")
     }
 
-    /// 应用可视区域 crop 到静态图 rootLayer。
-    /// contentsRect = 壁纸裁切框（源）；contentsCenter = 可视框（目标）；backgroundColor = letterbox。
-    /// shouldApplyCrop=false 时回现状 resizeAspectFill。
+    /// 静态图与视频共用等比 layer 几何。contentsCenter 是九宫格拉伸区，不能当目标 viewport。
     private static func applyStaticCrop(rootLayer: CALayer, image: CGImage, displayID: UInt32) {
         let settings = ExtCropPrefs.settings(forDisplayID: displayID)
-        guard settings.shouldApplyCrop else {
-            rootLayer.contentsGravity = .resizeAspectFill
-            rootLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            rootLayer.contentsCenter = CGRect(x: 0, y: 0, width: 1, height: 1)
-            rootLayer.backgroundColor = nil
-            return
+        if ExtCropLayers.setStaticImage(image, in: rootLayer, settings: settings) {
+            extLog("[StaticRenderer] layout displayID=\(displayID) image=\(image.width)x\(image.height) display=\(rootLayer.bounds.size) scale=\(rootLayer.contentsScale) preset=\(settings.aspectPreset.rawValue) zoom=\(settings.zoom)")
         }
-        let wallpaperSize = CGSize(width: image.width, height: image.height)
-        let screenSize = rootLayer.bounds.size
-        let layout = ExtCropEngine.compute(
-            wallpaperSize: wallpaperSize, screenSize: screenSize, settings: settings)
-        rootLayer.contentsGravity = .resize
-        rootLayer.contentsRect = CGRect(
-            x: layout.wallpaperCropRect.x, y: layout.wallpaperCropRect.y,
-            width: layout.wallpaperCropRect.w, height: layout.wallpaperCropRect.h)
-        rootLayer.contentsCenter = CGRect(
-            x: layout.viewportRect.x, y: layout.viewportRect.y,
-            width: layout.viewportRect.w, height: layout.viewportRect.h)
-        rootLayer.backgroundColor = layout.letterboxColor
     }
 
     static func switchActiveContextToStaticImage(displayID: UInt32, sourceID: String, imageURL: URL) {

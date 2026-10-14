@@ -733,6 +733,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                 // fallback 路径服务，启动时扫一次即可。如有真实库变化导致缓存失效，
                 // clearCaches() + 共享容器目录扫描会即时反映。
                 WallpaperState.shared.clearCaches()
+                WallpaperXPCHandler.refreshActiveCropLayouts()
                 extLog("[Extension] prefsChanged — caches cleared")
                 // 与 commandsChanged 路径共用同一串行后台队列，避免并发 drain 竞争，
                 // 且不阻塞主线程。
