@@ -382,6 +382,10 @@ final class DirectoryMigrationService {
         var healthyCount: Int = 0
         var migratedCount: Int = 0
         var indexedCount: Int = 0
+        /// 本次归零的孤儿文件夹归属条数（记录挂在已不存在文件夹上）。
+        var orphanedMembershipCount: Int = 0
+        /// 文件夹定义尚未加载（空有效集合）导致归零中止。
+        var orphanedMembershipAborted: Bool = false
     }
 
     /// 修复已有下载记录的断裂路径，并显式扫描受管目录补建未知文件的记录。
@@ -453,6 +457,38 @@ final class DirectoryMigrationService {
             }
         }
         WallpaperLibraryService.shared.persistDownloads()
+
+        // ── 孤儿文件夹归属修复 ──
+        // 文件夹定义丢失（清理工具误删 Group Container 偏好）时，挂在孤儿
+        // folderID 上的记录会被网格的根目录过滤永久隐藏，而上面的路径修复
+        // 与重扫都判定「文件健康」。这里仅在用户主动修复时把它们移回根目录。
+        let folderStore = LibraryFolderStore.shared
+        if folderStore.didRestoreFromDisk {
+            let valid = folderStore.exportValidFolderIDs()
+            if valid.isEmptyForAllCollections {
+                // 用户本来就没有任何文件夹：没有孤儿可言，无需归零。
+                print("[Repair] No folders defined; skipping orphan membership repair")
+            } else {
+                let wallpaperCleared = WallpaperLibraryService.shared.clearOrphanFolderMemberships(
+                    validFavoriteFolderIDs: valid.wallpaperFavorites,
+                    validDownloadFolderIDs: valid.wallpaperDownloads
+                )
+                let mediaCleared = MediaLibraryService.shared.clearOrphanFolderMemberships(
+                    validFavoriteFolderIDs: valid.mediaFavorites,
+                    validDownloadFolderIDs: valid.mediaDownloads
+                )
+                if wallpaperCleared < 0 || mediaCleared < 0 {
+                    result.orphanedMembershipAborted = true
+                    print("[Repair] Orphan membership repair aborted: folder definitions not loaded")
+                } else {
+                    result.orphanedMembershipCount = max(wallpaperCleared, 0) + max(mediaCleared, 0)
+                    print("[Repair] Cleared \(result.orphanedMembershipCount) orphaned folder memberships")
+                }
+            }
+        } else {
+            result.orphanedMembershipAborted = true
+            print("[Repair] Folder store not restored yet; skipping orphan membership repair")
+        }
 
         // 所有内容现在都应经由软件导入；这一步只在用户主动修复时运行，
         // 用于恢复旧版本、缓存损坏或迁移中断后遗留的未索引文件。
