@@ -114,6 +114,10 @@ final class ScreenSaverService: ObservableObject {
         if BackgroundRuntimeRole.isRemoteUI {
             isInstalled = !installedManagedSaverURLs.isEmpty
             refreshConfiguredState()
+            DistributedNotificationCenter.default().publisher(for: Self.configurationChangedNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.refreshConfiguredState() }
+                .store(in: &cancellables)
             return
         }
         isInstalled = !installedManagedSaverURLs.isEmpty
@@ -127,10 +131,10 @@ final class ScreenSaverService: ObservableObject {
     /// 不需要在设置里单独挑一张。观察桌面壁纸变化与烘焙产物落库两个信号。
     private func installFollowObservers() {
         // CurrentWallpaperService 聚合了视频 / Scene / Web / 静图四条管线的活跃路径
-        CurrentWallpaperService.shared.$activeFilePaths
+        CurrentWallpaperService.shared.$activeURLByScreenID
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
-            .removeDuplicates()
             .sink { [weak self] _ in
                 self?.syncFromDesktop(reason: "wallpaperChanged")
             }
@@ -139,9 +143,9 @@ final class ScreenSaverService: ObservableObject {
         // Scene / Web 的离线烘焙（含实时伴生烘焙）完成后会更新下载记录，
         // 此时屏保才能从"上一个可用壁纸"切到烘焙 MP4，所以监听记录变化再同步一次。
         MediaLibraryService.shared.$downloadRecords
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
-            .removeDuplicates()
             .sink { [weak self] _ in
                 self?.syncFromDesktop(reason: "libraryChanged")
             }
@@ -317,8 +321,21 @@ final class ScreenSaverService: ObservableObject {
 
     // MARK: - 安装
 
-    func install() throws {
+    /// UI waits for the Helper's result; it never mutates the installed component.
+    func install() async throws {
         guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
+        if BackgroundRuntimeRole.isRemoteUI {
+            defer { refreshConfiguredState() }
+            _ = try await BackgroundRuntimeBridge.request("saver.install")
+            return
+        }
+        try installLocally()
+    }
+
+    /// Keep component maintenance synchronous on the Helper's MainActor so
+    /// startup refresh and user requests cannot interleave their file mutations.
+    private func installLocally() throws {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         guard let bundledURL = bundledSaverURL else { throw ScreenSaverError.bundledComponentMissing }
         let directory = installedURL.deletingLastPathComponent()
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -356,8 +373,18 @@ final class ScreenSaverService: ObservableObject {
         syncFromDesktop(reason: "install")
     }
 
-    func uninstall() throws {
+    func uninstall() async throws {
         guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
+        if BackgroundRuntimeRole.isRemoteUI {
+            defer { refreshConfiguredState() }
+            _ = try await BackgroundRuntimeBridge.request("saver.uninstall")
+            return
+        }
+        try uninstallLocally()
+    }
+
+    private func uninstallLocally() throws {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         for url in installedManagedSaverURLs {
             guard Bundle(url: url)?.bundleIdentifier == Self.saverBundleIdentifier else { continue }
             try fm.removeItem(at: url)
@@ -370,7 +397,7 @@ final class ScreenSaverService: ObservableObject {
     /// 只替换 App 不会更新用户目录里的那份；版本号在开发期不变，
     /// 所以像 Mirage 一样比对组件指纹（Info.plist + 可执行文件 + CodeResources）而不是版本号。
     func refreshInstalledVersionIfNeeded() {
-        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
         let existingURLs = installedManagedSaverURLs
         isInstalled = !existingURLs.isEmpty
         guard isInstalled, let bundledURL = bundledSaverURL else { return }
@@ -387,7 +414,7 @@ final class ScreenSaverService: ObservableObject {
         }()
         guard needsRefresh else { return }
         do {
-            try install()
+            try installLocally()
             let build = Bundle(url: bundledURL)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
             print("[ScreenSaverService] 已安装的屏保组件已刷新到最新构建 \(build)")
         } catch {
@@ -454,6 +481,7 @@ final class ScreenSaverService: ObservableObject {
     /// 实时裁剪由 App Group 的 waifux-crop-prefs.json 承担（屏保按秒轮询），
     /// 这里只保留写入配置时的快照作为兜底，所以不需要额外的同步队列。
     func refreshConfiguredState() {
+        isInstalled = !installedManagedSaverURLs.isEmpty
         guard let data = try? Data(contentsOf: configurationURL),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               (object["version"] as? Int) == Self.configurationVersion else {

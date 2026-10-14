@@ -59,6 +59,95 @@ struct LockScreenHardeningRegression {
     // MARK: - 1. Index.plist 选择探测
 
     static func testSelectionProbe() {
+        func choice(_ provider: String, setAt: TimeInterval = 100) -> [String: Any] {
+            ["Desktop": ["LastSet": Date(timeIntervalSince1970: setAt),
+                         "Content": ["Choices": [["Provider": provider]]]]]
+        }
+        let extensionChoice = choice(WallpaperStoreSelectionProbe.extensionBundleID, setAt: 100)
+        let imageChoice = choice("com.apple.wallpaper.choice.image", setAt: 200)
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": imageChoice],
+                "Spaces": ["old-space": ["Default": extensionChoice, "Displays": ["current": extensionChoice]]],
+                "SystemDefault": imageChoice
+            ], displayUUIDs: ["current"]) == .notSelected,
+            "旧 Space 的扩展记录不能阻止当前普通系统墙纸同步"
+        )
+        let disconnectedRoot: [String: Any] = [
+            "Displays": ["current": imageChoice, "disconnected": extensionChoice],
+            "Spaces": ["old-space": ["Default": extensionChoice,
+                "Displays": ["current": extensionChoice, "disconnected": extensionChoice]]]
+        ]
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: disconnectedRoot, displayUUIDs: ["current"]) == .notSelected,
+            "拔掉的显示器与历史 Space 不能阻止当前屏幕跟随"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: disconnectedRoot) == .selected,
+            "未提供在线显示器的 keeper 探测保持原有保守语义"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": imageChoice],
+                "Spaces": ["new-space": ["Displays": ["current":
+                    choice(WallpaperStoreSelectionProbe.extensionBundleID, setAt: 300)]]]
+            ], displayUUIDs: ["current"]) == .unknown,
+            "Space 中较新的扩展选择必须继续受保护"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": imageChoice],
+                "Spaces": ["other-space": ["Displays": ["other": extensionChoice]]]
+            ], displayUUIDs: ["current", "other"]) == .unknown,
+            "另一显示器的普通墙纸不能覆盖未匹配显示器的扩展选择"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": imageChoice],
+                "Spaces": ["undated-space": ["Default": ["Desktop": ["Content":
+                    ["Choices": [["Provider": WallpaperStoreSelectionProbe.extensionBundleID]]]]]]]
+            ], displayUUIDs: ["current"]) == .unknown,
+            "缺少设置日期时不能猜测 Space 扩展已过期"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": imageChoice],
+                "Spaces": ["idle-space": ["Displays": ["current": ["Idle": extensionChoice["Desktop"]!]]]]
+            ], displayUUIDs: ["current"]) == .unknown,
+            "新桌面图片不能覆盖独立 Idle 扩展选择"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["first": imageChoice, "second": extensionChoice]
+            ], displayUUIDs: ["first", "second"]) == .selected,
+            "任一显示器仍选扩展时必须保护其系统选择"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "AllSpacesAndDisplays": extensionChoice,
+                "Displays": ["old": imageChoice]
+            ], displayUUIDs: ["old"]) == .selected,
+            "统一应用到所有显示器的扩展选择优先"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "AllSpacesAndDisplays": imageChoice, "Displays": [String: Any]()
+            ], displayUUIDs: ["current"]) == .notSelected,
+            "统一系统墙纸允许没有逐屏记录"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "SystemDefault": imageChoice
+            ], displayUUIDs: ["current"]) == .unknown,
+            "仅有系统默认值不足以断言在线显示器没有选择扩展"
+        )
+        expect(
+            WallpaperStoreSelectionProbe.selectionState(root: [
+                "Displays": ["current": ["Unrecognized": true]],
+                "SystemDefault": imageChoice
+            ], displayUUIDs: ["current"]) == .unknown,
+            "无法识别当前显示器 choice 时不得放行系统墙纸覆盖"
+        )
         // 已选择：Displays 根 + 深层嵌套的 Provider
         let selectedRoot: [String: Any] = [
             "Displays": [

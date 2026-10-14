@@ -82,6 +82,7 @@ final class LockScreenWallpaperService: ObservableObject {
 
     /// 已写入共享容器的视频 ID 集合（兼容旧缓存清理）
     private var deployedVideoIDs: Set<String> = []
+    private var sourceRequestIDs: [UInt32: UUID] = [:]
 
     /// 当前系统锁屏/显示器可见性状态，供主进程和外部 renderer 共同读取。
     private(set) var playbackState = PlaybackState(
@@ -395,17 +396,15 @@ final class LockScreenWallpaperService: ObservableObject {
     ///   - displayIDs: 使用该视频的显示器集合。若提供，则写入 per-display 路径映射，
     ///     使扩展在冷启动 acquire 时为每块屏选到各自的视频。若为空，则仅写 legacy 全局路径。
     ///   - notify: 是否触发 Extension 重新加载
-    func cacheMirroringSource(videoURL: URL, videoID: String, displayIDs: [UInt32] = [], notify: Bool = true) async throws {
+    func cacheMirroringSource(videoURL: URL, videoID: String, displayIDs: [UInt32] = [], notify: Bool = true, generation: UInt64 = 0) async throws {
         if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("lock.cacheVideo", ["video": videoURL, "id": videoID, "displays": displayIDs, "notify": notify]); return }
 
         guard isAvailable else {
-            print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
-            return
+            throw LockScreenError.appGroupNotAvailable
         }
 
         guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
-            print("[LockScreenWallpaper] 动态锁屏已关闭，跳过")
-            return
+            throw CancellationError()
         }
 
         guard videoURL.isFileURL, FileManager.default.fileExists(atPath: videoURL.path) else {
@@ -417,22 +416,33 @@ final class LockScreenWallpaperService: ObservableObject {
         }
 
         let videoDir = container.appendingPathComponent(videoDirName, isDirectory: true)
-        try FileManager.default.createDirectory(at: videoDir, withIntermediateDirectories: true)
-
-        // 清理不再需要的旧视频（保留当前部署的和新视频）
-        var keepIDs = deployedVideoIDs
-        keepIDs.insert(videoID)
-        cleanupOldVideos(in: videoDir, keeping: keepIDs)
-
-        // 用 hard link 将视频放到共享容器（同一卷不占额外空间）
         let destURL = videoDir.appendingPathComponent("\(videoID).mp4")
-        if FileManager.default.fileExists(atPath: destURL.path) {
-            try? FileManager.default.removeItem(at: destURL)
+        let requestID = UUID()
+        let requestDisplays = displayIDs.isEmpty ? [UInt32(0)] : displayIDs
+        for displayID in requestDisplays { sourceRequestIDs[displayID] = requestID }
+        func checkCurrentRequest() throws {
+            try Task.checkCancellation()
+            guard requestDisplays.allSatisfy({ sourceRequestIDs[$0] == requestID }),
+                  generation == 0 || WallpaperExtensionSocketServer.isCurrentGeneration(generation),
+                  WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+                throw CancellationError()
+            }
         }
-        do {
-            try FileManager.default.linkItem(at: videoURL, to: destURL)
-        } catch {
-            try FileManager.default.copyItem(at: videoURL, to: destURL)
+        // Cross-volume copies can take seconds. Keep them off Helper's UI and
+        // playback thread; only publish the complete file if this request wins.
+        let stagedURL = try await Task.detached(priority: .utility) {
+            try Self.stageMirroringVideo(videoURL, destination: destURL)
+        }.value
+        defer {
+            if stagedURL != destURL { try? FileManager.default.removeItem(at: stagedURL) }
+        }
+        try checkCurrentRequest()
+        if stagedURL != destURL {
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                _ = try FileManager.default.replaceItemAt(destURL, withItemAt: stagedURL)
+            } else {
+                try FileManager.default.moveItem(at: stagedURL, to: destURL)
+            }
         }
 
         deployedVideoIDs.insert(videoID)
@@ -471,11 +481,20 @@ final class LockScreenWallpaperService: ObservableObject {
 
         currentMirroringSourcePath = destURL.path
 
+        // 新副本已落盘且已被 prefs 引用（受保护）→ 此时淘汰历史副本最安全：
+        // 绝不会删掉扩展正在读的那一份，也不会删掉刚写进去的这一份。
+        let protected = Self.applyAppGroupVideoBudget(in: videoDir, prefs: prefs, displayInstances: loadDisplayInstances())
+
         // 先生成缩略图，再同步实例目录，确保封面路径在新目录中立即生效。
         // 缩略图解码在后台线程执行，避免阻塞 MainActor。
+        // 缩略图淘汰与生成同批在后台完成：这一目录只按 videoID 命名、跨 ID 永不回收，
+        // 上千壁纸轮换时会一直涨，必须和视频副本一样封顶。
+        let protectedThumbnails = protected
         await Task.detached(priority: .userInitiated) {
             Self.generateThumbnail(in: container, videoURL: destURL, videoID: videoID)
+            Self.applyAppGroupThumbnailBudget(in: container, protectedPaths: protectedThumbnails)
         }.value
+        try checkCurrentRequest()
         // 更新显示器实例目录（此时缩略图已就绪，posterThumbnailPath 能查到最新文件）
         syncInstanceCatalogToSocketServer(notify: notify)
         WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: videoID, videoURL: destURL)
@@ -507,6 +526,17 @@ final class LockScreenWallpaperService: ObservableObject {
             throw LockScreenError.appGroupNotAvailable
         }
 
+        // Supersede pending video copies for these displays before yielding.
+        let requestID = UUID()
+        for displayID in displayIDs { sourceRequestIDs[displayID] = requestID }
+        func checkCurrentRequest() throws {
+            try Task.checkCancellation()
+            guard displayIDs.allSatisfy({ sourceRequestIDs[$0] == requestID }),
+                  WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+                throw CancellationError()
+            }
+        }
+
         let originalImageData: Data
         if imageURL.isFileURL {
             guard FileManager.default.fileExists(atPath: imageURL.path) else {
@@ -527,6 +557,7 @@ final class LockScreenWallpaperService: ObservableObject {
         let preparedImage = await Task.detached(priority: .userInitiated) {
             Self.prepareStaticLockScreenImageData(originalImageData, sourceURL: sourceURLForPrepare)
         }.value
+        try checkCurrentRequest()
         let imageData = preparedImage.data
         let ext = preparedImage.fileExtension
         var lastPath: String?
@@ -541,6 +572,7 @@ final class LockScreenWallpaperService: ObservableObject {
                 await Task.detached(priority: .userInitiated) {
                     Self.writeThumbnail(imageData: imageData, thumbnailID: sourceID, thumbDir: thumbDir)
                 }.value
+                try checkCurrentRequest()
             }
             WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: sourceID, videoURL: destURL)
             lastPath = destURL.path
@@ -609,7 +641,9 @@ final class LockScreenWallpaperService: ObservableObject {
         do {
             // 把 displayIDs 传给 cacheMirroringSource，写入 per-display 路径映射，
             // 使扩展在冷启动 acquire 时能按屏各自选到正确的视频。
-            try await cacheMirroringSource(videoURL: videoURL, videoID: sourceID, displayIDs: displayIDs, notify: false)
+            try await cacheMirroringSource(videoURL: videoURL, videoID: sourceID, displayIDs: displayIDs, notify: false, generation: generation)
+        } catch is CancellationError {
+            return
         } catch {
             print("[LockScreenWallpaper] ❌ 本地解码视频缓存失败: \(error.localizedDescription)")
             return
@@ -659,6 +693,8 @@ final class LockScreenWallpaperService: ObservableObject {
     /// 不触碰用户在系统设置里手动选择的显示器实例。
     func clearMirroringSourceCache(notify: Bool = true) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("lock.clearCache", ["notify": notify]); return }
+
+        sourceRequestIDs.removeAll()
 
         guard isAvailable else { return }
 
@@ -789,20 +825,126 @@ final class LockScreenWallpaperService: ObservableObject {
         )
     }
 
-    /// 清理不再需要的旧视频，保留 keepIDs 中的所有视频
-    private func cleanupOldVideos(in directory: URL, keeping keepIDs: Set<String>) {
+    /// 按总量上限淘汰共享容器里的历史视频副本（清理老的、保留新的）。
+    ///
+    /// 为什么不能再用「本次会话设过的 ID」当白名单：`deployedVideoIDs` 只在
+    /// 进程内累积、跨会话不持久化，于是**常驻 App + 自动轮换**的用户每换一张
+    /// 壁纸就多一份真副本（跨卷无法 hard link），上千张壁纸轮换一圈就是几十 G。
+    ///
+    /// 这里改为语义化保护 + 按 mtime 淘汰：
+    /// - `prefs` 引用的路径（当前锁屏/桌面镜像源）**绝不动**，删了扩展立刻黑屏；
+    /// - 显示器实例目录引用的缩略图同理；
+    /// - 其余按总量上限从最旧的开始删，直到落回上限以内。
+    private static func applyAppGroupVideoBudget(
+        in videoDir: URL,
+        prefs: PrefsFile,
+        displayInstances: [DisplayInstance]
+    ) -> Set<String> {
+        let entries = AppGroupCacheBudget.entries(
+            in: videoDir,
+            extensions: ["mp4", "mov", "m4v"]
+        )
+
+        let protected = AppGroupCacheBudget.protectedPaths(
+            legacyVideoPath: prefs.currentVideoPath,
+            legacyImagePath: prefs.currentImagePath,
+            perDisplayVideoPaths: prefs.currentVideoPaths,
+            perDisplayImagePaths: prefs.currentImagePaths,
+            displayThumbnailPaths: displayInstances.compactMap(\.thumbnailPath)
+        )
+        guard !entries.isEmpty else { return protected }
+
+        let plan = AppGroupCacheBudget.plan(
+            entries: entries,
+            protectedPaths: protected,
+            limitBytes: AppGroupCacheBudget.defaultLimitBytes
+        )
+        guard !plan.isEmpty else { return protected }
+
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
-        for file in files {
-            let name = file.deletingPathExtension().lastPathComponent
-            if !keepIDs.contains(name) {
-                try? fm.removeItem(at: file)
-                print("[LockScreenWallpaper] 🗑️ 清理旧视频: \(name)")
+        for entry in plan.evicted {
+            // 二次确认：计划生成与实际删除之间可能刚好被 prefs 引用上。
+            if protected.contains(entry.url.standardizedFileURL.path) { continue }
+            do {
+                try fm.removeItem(at: entry.url)
+                print("[LockScreenWallpaper] 🗑️ 淘汰旧镜像副本: \(entry.url.lastPathComponent) (\(entry.size) bytes)")
+            } catch {
+                print("[LockScreenWallpaper] ⚠️ 淘汰旧镜像副本失败 \(entry.url.lastPathComponent): \(error.localizedDescription)")
             }
         }
+        print("[LockScreenWallpaper] 📦 共享容器视频缓存: \(entries.count) 项 → 淘汰 \(plan.evicted.count) 项，保留 \(plan.keptBytes) bytes（上限 \(AppGroupCacheBudget.defaultLimitBytes)）")
+        return protected
+    }
+
+    /// 按缩略图上限淘汰旧缩略图（清理老的、保留新的）。
+    ///
+    /// `WallpaperCache/thumbnails` 里的文件按 `<videoID>.jpg` 命名，只按 videoID
+    /// 去重 —— 换一张壁纸就是一个新文件名，旧文件永不回收。容器实测 204 张里有
+    /// 198 张属于这一类，是仅次于视频副本的第二个增长点。
+    ///
+    /// 保护集合沿用视频那份（含当前显示器实例的 `thumbnailPath`）：
+    /// 扩展会通过实例目录取 poster，删掉正在用的那张会让锁屏封面失效。
+    private nonisolated static func applyAppGroupThumbnailBudget(in container: URL, protectedPaths: Set<String>) {
+        let thumbDir = container.appendingPathComponent(AppGroupCacheBudget.thumbnailDirectoryName, isDirectory: true)
+        let entries = AppGroupCacheBudget.entries(in: thumbDir, extensions: ["jpg", "jpeg", "png"])
+        guard !entries.isEmpty else { return }
+
+        let plan = AppGroupCacheBudget.plan(
+            entries: entries,
+            protectedPaths: protectedPaths,
+            limitBytes: AppGroupCacheBudget.thumbnailLimitBytes
+        )
+        guard !plan.isEmpty else { return }
+
+        let fm = FileManager.default
+        var removed = 0
+        for entry in plan.evicted {
+            if protectedPaths.contains(entry.url.standardizedFileURL.path) { continue }
+            do {
+                try fm.removeItem(at: entry.url)
+                removed += 1
+            } catch {
+                print("[LockScreenWallpaper] ⚠️ 淘汰旧缩略图失败 \(entry.url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        print("[LockScreenWallpaper] 🖼️ 共享容器缩略图: \(entries.count) 项 → 淘汰 \(removed) 项（上限 \(AppGroupCacheBudget.thumbnailLimitBytes)）")
     }
 
     // MARK: - 纯图像处理（nonisolated：可从后台线程调用，不触碰任何实例状态）
+
+    /// Returns the existing identical cache file or a completed private staging
+    /// file. The caller alone may publish it after checking request ownership.
+    private nonisolated static func stageMirroringVideo(_ source: URL, destination: URL) throws -> URL {
+        let fm = FileManager.default
+        let attributes = try fm.attributesOfItem(atPath: source.path)
+        guard let size = attributes[.size] as? NSNumber, size.int64Value > 0,
+              let modified = attributes[.modificationDate] as? Date else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        if let cached = try? fm.attributesOfItem(atPath: destination.path),
+           cached[.size] as? NSNumber == size,
+           cached[.modificationDate] as? Date == modified {
+            return destination
+        }
+        let directory = destination.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let temporary = directory.appendingPathComponent(".\(UUID().uuidString).partial")
+        do {
+            do { try fm.linkItem(at: source, to: temporary) }
+            catch { try fm.copyItem(at: source, to: temporary) }
+            let copied = try fm.attributesOfItem(atPath: temporary.path)
+            let current = try fm.attributesOfItem(atPath: source.path)
+            guard copied[.size] as? NSNumber == size,
+                  current[.size] as? NSNumber == size,
+                  current[.modificationDate] as? Date == modified else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return temporary
+        } catch {
+            try? fm.removeItem(at: temporary)
+            throw error
+        }
+    }
 
     private nonisolated static let staticImagePixelByteLimit = 32 * 1024 * 1024
     private nonisolated static let staticImageMaximumDimension = 8192

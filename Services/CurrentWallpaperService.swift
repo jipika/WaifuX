@@ -70,6 +70,11 @@ final class CurrentWallpaperService: ObservableObject {
             .sink { [weak self] _ in self?.rebuildActivePaths() }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: DesktopWallpaperSyncManager.registrationDidChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rebuildActivePaths() }
+            .store(in: &cancellables)
+
         // 初始构建
         rebuildActivePaths()
     }
@@ -146,7 +151,8 @@ final class CurrentWallpaperService: ObservableObject {
             }
 
             // 3. 动态锁屏扩展中的静态图。扩展渲染的是副本，使用原始来源反查资料库。
-            if !found, let imageURL = lockScreen.staticImageSourceURL(for: screen) {
+            if !found, videoMgr.shouldPreserveLockScreenWallpaperSelection,
+               let imageURL = lockScreen.staticImageSourceURL(for: screen) {
                 if imageURL.isFileURL {
                     filePaths.insert(imageURL.standardizedFileURL.path)
                 }
@@ -176,8 +182,10 @@ final class CurrentWallpaperService: ObservableObject {
             }
         }
 
-        activeFilePaths = filePaths
-        activeURLStrings = urlStrings
-        activeURLByScreenID = byScreen
+        // Publish only real changes. Repeated video/catalog events must not keep
+        // postponing the screen saver's debounce while the wallpaper is stable.
+        if activeURLByScreenID != byScreen { activeURLByScreenID = byScreen }
+        if activeURLStrings != urlStrings { activeURLStrings = urlStrings }
+        if activeFilePaths != filePaths { activeFilePaths = filePaths }
     }
 }

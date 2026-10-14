@@ -1723,7 +1723,7 @@ enum SceneOfflineBakeService {
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
         guard isUsableBakedVideo(at: videoURL) else { return }
 
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             // 动态锁屏开启：推送烘焙视频到锁屏实例
             guard !displayIDs.isEmpty else { return }
             let videoID = itemID ?? URL(fileURLWithPath: artifact.videoPath).deletingPathExtension().lastPathComponent
@@ -1763,7 +1763,7 @@ enum SceneOfflineBakeService {
         generation: UInt? = nil
     ) async {
         guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             guard !displayIDs.isEmpty else {
                 print("[SceneOfflineBake] static poster skipped (\(reason)): no lock-screen display IDs")
                 return

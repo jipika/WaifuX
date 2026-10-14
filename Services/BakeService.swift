@@ -1432,7 +1432,7 @@ final class BakeService: ObservableObject {
         // 避免覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例。
         let shouldSkipForLockScreen: Bool = {
             if #available(macOS 26.0, *) {
-                return VideoWallpaperManager.shared.isLockScreenEnabled
+                return VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection
             }
             return false
         }()

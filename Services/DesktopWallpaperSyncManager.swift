@@ -14,6 +14,7 @@ import AppKit
 @MainActor
 final class DesktopWallpaperSyncManager {
     static let shared = DesktopWallpaperSyncManager()
+    static let registrationDidChangeNotification = Notification.Name("com.waifux.desktopRegistrationDidChange")
 
     /// 每个屏幕最后通过 WaifuX 设置的静态壁纸 URL（key 为 screenID）
     private var lastSetImageURLByScreen: [String: URL] = [:]
@@ -171,7 +172,7 @@ final class DesktopWallpaperSyncManager {
             return
         }
         if #available(macOS 26.0, *),
-           VideoWallpaperManager.shared.isLockScreenEnabled {
+           VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             print("[DesktopWallpaperSyncManager] 🔒 动态锁屏已启用，跳过静态桌面壁纸注册")
             return
         }
@@ -412,6 +413,9 @@ final class DesktopWallpaperSyncManager {
                   let str = String(data: data, encoding: .utf8) {
             WaifuXPreferences.shared.set(str, forKey: Self.fingerprintStateKey)
         }
+        // Static wallpaper changes have no video/overlay event when system sync
+        // is enabled. Publish after updating the maps so Helper followers see it.
+        NotificationCenter.default.post(name: Self.registrationDidChangeNotification, object: self)
     }
 
     private func loadFingerprintState() {
@@ -523,7 +527,7 @@ final class DesktopWallpaperSyncManager {
         relinkScreenStateForCurrentDisplays()
         let shouldSkipStaticDesktopWrites: Bool = {
             if #available(macOS 26.0, *) {
-                return videoManager.isLockScreenEnabled
+                return videoManager.shouldPreserveLockScreenWallpaperSelection
             }
             return false
         }()

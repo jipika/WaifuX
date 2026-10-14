@@ -3,6 +3,7 @@ import AppKit
 import AVFoundation
 import CryptoKit
 import CoreGraphics
+import ColorSync
 import QuartzCore
 import CoreAudio
 import Vision
@@ -446,6 +447,21 @@ final class VideoWallpaperManager: ObservableObject {
         WaifuXPreferences.shared.object(forKey: "system_wallpaper_sync_enabled") as? Bool ?? true
     }
 
+    /// The toggle prepares extension sources; it does not select the extension
+    /// in System Settings. Preserve selected/unknown choices, but let ordinary
+    /// system wallpaper follow when the store confirms WaifuX is not selected.
+    var shouldPreserveLockScreenWallpaperSelection: Bool {
+        guard isLockScreenEnabled else { return false }
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return true }
+        var displayUUIDs = Set<String>()
+        for screen in NSScreen.screens {
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() else { return true }
+            displayUUIDs.insert(CFUUIDCreateString(nil, uuid) as String)
+        }
+        return WallpaperStoreSelectionProbe.currentSelection(displayUUIDs: displayUUIDs) != .notSelected
+    }
+
     /// 同步给 web daemon（wallpaperengine-cli）的热更新控制文件路径。
     /// daemon 长驻进程读此文件，避免仅依赖启动时 env。
     static let systemWallpaperSyncControlPath = "/tmp/waifux-system-wallpaper-sync.json"
@@ -473,13 +489,10 @@ final class VideoWallpaperManager: ObservableObject {
         FrameInterpolationTargetFPSResolver.targetFPS(for: screen)
     }
 
-    /// 动态锁屏启用后，任何静态 poster 写入都会通过 macOS 桌面壁纸接口覆盖用户手动选择的锁屏实例。
-    /// 因此这里看“用户设置是否启用”，而不是看扩展此刻是否正在锁屏运行。
+    /// 已选择扩展时，静态 poster 写入会覆盖该选择；扩展暂未运行也必须保护。
+    /// 仅开启开关但确认未选择扩展时，仍允许系统墙纸同步。
     private var shouldSkipStaticPosterForDynamicLockScreen: Bool {
-        if #available(macOS 26.0, *) {
-            return isLockScreenEnabled
-        }
-        return false
+        shouldPreserveLockScreenWallpaperSelection
     }
 
     /// 应挂载 MP4 壁纸层的屏幕 ID（`NSScreen.wallpaperScreenIdentifier`）。唤醒 / 分辨率变化时全局 `rebuildWindows()` 只重建这些屏，避免「只设一块屏动态」却给所有显示器都建了视频窗。
@@ -603,8 +616,10 @@ final class VideoWallpaperManager: ObservableObject {
                 Self.revealDesktopWallpaperWindow(entry.window)
                 if let container = entry.window.contentView as? WallpaperVideoContainerView,
                    let player = players[entry.screenID] ?? players[screenID] {
-                    // 再踢一次 layer 绑定，避免菜单栏路径上 AVPlayerLayer 停在旧帧。
-                    if container.playerLayer.player !== player {
+                    // The replacement player can already be warming/fading in
+                    // the incoming layer. Rebinding the outgoing layer here
+                    // destroys the old frame and turns the crossfade into a cut.
+                    if !container.references(player: player) {
                         container.attachPlayer(player)
                     }
                     container.playerLayer.setNeedsDisplay()
@@ -10185,9 +10200,9 @@ private struct VideoLetterboxCrop {
     }
 }
 
-/// 视频切到照片 / Scene / Web 时的提交协调器。
+/// 跨类型壁纸切换及 Scene renderer 替换时的宿主提交协调器。
 ///
-/// 新内容必须先在旧视频后方完成准备。提交时使用旧桌面快照覆盖 teardown 空档，
+/// 新内容必须先完成准备。提交时使用旧桌面快照覆盖 teardown 空档，
 /// 再淡出快照露出新内容，既避免黑场也保留跨类型转场的连续感。
 @MainActor
 final class WallpaperCrossTypeTransitionCoordinator {
@@ -10229,6 +10244,10 @@ final class WallpaperCrossTypeTransitionCoordinator {
         revealPreparedContent: (@MainActor () async -> Void)? = nil,
         teardownOldContent: @MainActor () async -> Void
     ) async {
+        guard BackgroundRuntimeRole.allowsDesktopRendering else {
+            await teardownOldContent()
+            return
+        }
         let transitionStartedAt = Date()
         let uniqueScreens = Dictionary(
             screens.map { ($0.wallpaperScreenIdentifier, $0) },

@@ -41,7 +41,7 @@ enum StaticWallpaperApplyService {
         generation: UInt64
     ) async {
         guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
-              WaifuXPreferences.shared.bool(forKey: "system_wallpaper_sync_enabled") == systemSyncEnabled else {
+              VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled == systemSyncEnabled else {
             return
         }
 
@@ -60,7 +60,7 @@ enum StaticWallpaperApplyService {
                 }
                 await overlay.showPrepared(imageURL: imageURL, for: screen)
                 guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
-                      !WaifuXPreferences.shared.bool(forKey: "system_wallpaper_sync_enabled") else {
+                      !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
                     if overlay.imageURL(for: screen)?.standardizedFileURL == imageURL.standardizedFileURL {
                         overlay.clearState(for: screen)
                     }
@@ -70,6 +70,7 @@ enum StaticWallpaperApplyService {
             return
         }
 
+        guard !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else { return }
         let staticEntries = screens.compactMap { screen -> (NSScreen, URL)? in
             guard let imageURL = overlay.imageURL(for: screen),
                   FileManager.default.fileExists(atPath: imageURL.path) else {
@@ -87,13 +88,15 @@ enum StaticWallpaperApplyService {
 
         for (screen, imageURL) in staticEntries {
             guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
-                  WaifuXPreferences.shared.bool(forKey: "system_wallpaper_sync_enabled") else {
+                  VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+                  !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else {
                 return
             }
 
             let preparedURL = await overlay.preparedSystemWallpaperURL(for: imageURL)
             guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
-                  WaifuXPreferences.shared.bool(forKey: "system_wallpaper_sync_enabled") else {
+                  VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+                  !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else {
                 return
             }
             do {
@@ -174,7 +177,7 @@ enum StaticWallpaperApplyService {
         // 覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例）。锁屏侧把静态图源直接
         // 部署给 WaifuX 显示器实例；桌面侧改走独立静态图 overlay 窗口显示，
         // 保证静态壁纸在每块屏上都真实可见。
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             for screen in screens {
                 guard let displayID = (screen.deviceDescription[
                     NSDeviceDescriptionKey("NSScreenNumber")
@@ -341,7 +344,7 @@ enum StaticWallpaperApplyService {
             // macOS 26+：动态锁屏启用时，不走系统静态壁纸写入（会覆盖用户手动
             // 选择的锁屏实例）。锁屏侧部署给该显示器的 WaifuX 实例；桌面侧走
             // 独立静态图 overlay 显示，保证目标屏真实可见。
-            if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+            if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
                 if let displayID = (targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value {
                     try await LockScreenWallpaperService.shared.cacheStaticImageSource(
                         imageURL: resolvedImageURL,
