@@ -300,6 +300,37 @@ actor NetworkService {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// POST 表单请求并返回字符串（wallsflow 搜索等 DLE 表单端点专用）。
+    ///
+    /// 站点搜索只接受 `application/x-www-form-urlencoded` 的 POST，且对 GET / 多余字段
+    /// 返回 404/405（2026-10-14 浏览器实测）。这里复用 `performRequest` 的重试链，
+    /// 会话按 `bypassSystemProxy` 选择直连会话或系统代理会话。
+    /// - Note: WKWebView 无法携带 HTTPBody（WebKit 已知限制），所以该接口没有 WebView 兜底；
+    ///   调用方（WallsflowService）在失败时应先走一次 WebView GET 取票再重试本方法。
+    func fetchStringPost(
+        from url: URL,
+        formBody: [String: String],
+        headers: [String: String] = [:],
+        bypassSystemProxy: Bool = false
+    ) async throws -> String {
+        var components = URLComponents()
+        components.queryItems = formBody.map { URLQueryItem(name: $0.key, value: $0.value) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if request.value(forHTTPHeaderField: "Content-Type") == nil {
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        }
+
+        let session = bypassSystemProxy ? directSession : self.session
+        let data = try await performRequest(request: request, session: session)
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func fetchImage(
         from url: URL,
         headers: [String: String] = [:],

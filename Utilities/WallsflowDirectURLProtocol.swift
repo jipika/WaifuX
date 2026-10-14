@@ -1,86 +1,74 @@
 import Foundation
 
-/// 让 Kingfisher 发出的 `*.wallsflow.com` 图片请求绕过系统代理（直连）。
-///
-/// 背景：Wallsflow 站点的 Cloudflare 挑战按**出口 IP** 下发——本机全局流量走系统代理
-/// （FastStunnel）时，封面图会拿到 403 挑战页（`cf-mitigated: challenge`），图片全白；
-/// 改直连则放行。Kingfisher 的 `ImageDownloader` 只有全局 `sessionConfiguration`，
-/// 无法按 host 分流代理，因此退到传输层用 URLProtocol 分流：
-/// 只拦截 wallsflow 域名，先直连，失败（含 403/503 挑战）再回退系统代理。
+/// Kingfisher's per-host bridge into the same transport used by Wallsflow videos.
+/// That transport preserves the browser identity and can download through WebKit.
 final class WallsflowDirectURLProtocol: URLProtocol, @unchecked Sendable {
-
-    /// 标记头：避免被自己二次拦截造成无限递归。
     private static let handledHeader = "X-WaifuX-Wallsflow-Direct"
-
-    private static let directSession: URLSession = makeSession(bypassingSystemProxy: true)
-    private static let proxySession: URLSession = makeSession(bypassingSystemProxy: false)
-
-    private static func makeSession(bypassingSystemProxy: Bool) -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 180
-        config.httpCookieStorage = HTTPCookieStorage.shared
-        config.httpCookieAcceptPolicy = .always
-        config.httpShouldSetCookies = true
-        if bypassingSystemProxy {
-            // 空字典 = 不使用任何代理（nil 会继续跟随系统设置）。
-            config.connectionProxyDictionary = [:]
-        }
-        return URLSession(configuration: config)
-    }
-
-    /// 注意：URLProtocol 基类已有 `task`（URLSessionTask?）属性，这里必须换个名字。
-    private var activeTask: URLSessionTask?
+    // stopLoading and asynchronous completions can arrive on different threads.
+    // Recursive locking also permits a client callback to synchronously stop this load.
+    private let stateLock = NSRecursiveLock()
+    private var loadTask: Task<Void, Never>?
+    private var stopped = false
 
     override class func canInit(with request: URLRequest) -> Bool {
-        guard request.value(forHTTPHeaderField: handledHeader) == nil else { return false }
-        guard let host = request.url?.host?.lowercased() else { return false }
-        return host == "wallsflow.com" || host.hasSuffix(".wallsflow.com")
+        guard request.value(forHTTPHeaderField: handledHeader) == nil,
+              let url = request.url else { return false }
+        return WallsflowMediaPolicy.owns(url)
     }
 
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        var request = request
-        request.setValue("1", forHTTPHeaderField: handledHeader)
-        return request
-    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        start(using: Self.directSession, allowProxyFallback: true)
+        stateLock.withLock {
+            guard !stopped, loadTask == nil else { return }
+            var outbound = request
+            outbound.setValue(nil, forHTTPHeaderField: Self.handledHeader)
+            loadTask = Task { @Sendable [weak self, outbound] in
+                do {
+                    guard let url = outbound.url else { throw URLError(.badURL) }
+                    let data = try await WallsflowService.shared.fetchMediaData(
+                        from: url, headers: outbound.allHTTPHeaderFields ?? [:]
+                    )
+                    try Task.checkCancellation()
+                    self?.complete(.success(data))
+                } catch {
+                    self?.complete(.failure(error))
+                }
+            }
+        }
     }
 
     override func stopLoading() {
-        activeTask?.cancel()
-        activeTask = nil
+        stateLock.withLock {
+            stopped = true
+            loadTask?.cancel()
+            loadTask = nil
+        }
     }
 
-    /// - Parameter allowProxyFallback: 直连失败（网络层错误或 403/503 挑战）时是否回退系统代理重试一次。
-    private func start(using session: URLSession, allowProxyFallback: Bool) {
-        let dataTask = session.dataTask(with: request) { [weak self] data, response, error in
-            guard let self else { return }
-
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let hitChallenge = statusCode == 403 || statusCode == 503
-            if allowProxyFallback, error != nil || hitChallenge {
-                // 直连被针对（挑战）或不可达 → 换系统代理再试一次，覆盖「必须靠代理出网」的环境。
-                self.start(using: Self.proxySession, allowProxyFallback: false)
-                return
+    private func complete(_ result: Result<Data, Error>) {
+        stateLock.withLock {
+            guard !stopped else { return }
+            loadTask = nil
+            switch result {
+            case .success(let data):
+                guard let url = request.url,
+                      let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                     headerFields: ["Content-Length": String(data.count)]) else {
+                    client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                    stopped = true
+                    return
+                }
+                // Only validated media reaches this point. Kingfisher owns its image cache.
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                guard !stopped else { return }
+                client?.urlProtocol(self, didLoad: data)
+                guard !stopped else { return }
+                client?.urlProtocolDidFinishLoading(self)
+            case .failure(let error):
+                client?.urlProtocol(self, didFailWithError: error)
             }
-
-            if let error {
-                self.client?.urlProtocol(self, didFailWithError: error)
-                return
-            }
-            guard let response else {
-                self.client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-                return
-            }
-            self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .allowed)
-            if let data, !data.isEmpty {
-                self.client?.urlProtocol(self, didLoad: data)
-            }
-            self.client?.urlProtocolDidFinishLoading(self)
+            stopped = true
         }
-        self.activeTask = dataTask
-        dataTask.resume()
     }
 }

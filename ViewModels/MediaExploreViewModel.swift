@@ -1042,8 +1042,14 @@ final class MediaExploreViewModel: ObservableObject {
         // Wallsflow：列表页已有 video/download 时仍可能缺 poster/标签，
         // 且绝不能走 MotionBG 的 mediaService.fetchDetail(slug:)。
         if WallsflowService.isWallsflowItem(item) {
-            let alreadyHasPlaybackDetail = !item.downloadOptions.isEmpty || item.previewVideoURL != nil
-            if alreadyHasPlaybackDetail, item.posterURL != nil {
+            // ⚠️ 短路条件必须是「已有高清下载源」而不是「downloadOptions 非空」：
+            // 列表态永远满足后者（只有 Preview 预览片），会跳过 enrichListItem，
+            // 导致详情解析的 Original HD（do=download 原片）永远进不了选项池，
+            // 下载静默落成 500K/1MB 预览片（2026-10-14 三层实锤）。
+            // 终止条件：enrichListItem 内部有 detailCache，重复调用不重复打网络。
+            let hasHDSource = item.downloadOptions.contains { $0.qualityRank >= 2 }
+            let alreadyHasPlaybackDetail = hasHDSource && item.posterURL != nil
+            if alreadyHasPlaybackDetail {
                 mediaLibrary.upsert(item)
                 return item
             }
@@ -1566,14 +1572,31 @@ final class MediaExploreViewModel: ObservableObject {
         if let taskID {
             downloadTaskService.updateMediaItem(resolvedItem, id: taskID)
         }
-        guard let downloadOption = preferredOption ?? resolvedItem.downloadOptions.max(by: {
+
+        // 选项升级：调用方传来的 preferredOption 可能来自列表项（Wallsflow 列表只有
+        // Preview 预览片），详情解析后才发现有更高质量的 Original HD。按 qualityRank
+        // 取两者更优（仅在详情选项严格更优时覆盖，平局尊重调用方选择）。
+        // 2026-10-14 修复「下载到 500K/1MB 预览片而非高清原片」：此前 preferredOption
+        // 非空时直接沿用列表 Preview，详情 Original HD 永远不生效。
+        let bestDetailOption = resolvedItem.downloadOptions.max(by: {
             if $0.qualityRank == $1.qualityRank {
                 return $0.fileSizeMegabytes < $1.fileSizeMegabytes
             }
             return $0.qualityRank < $1.qualityRank
-        }) else {
+        })
+        let downloadOption: MediaDownloadOption
+        switch (preferredOption, bestDetailOption) {
+        case (let preferred?, let best?) where best.qualityRank > preferred.qualityRank:
+            print("[MediaExploreViewModel] Download option upgraded: \(preferred.label) -> \(best.label)")
+            downloadOption = best
+        case (let preferred?, _):
+            downloadOption = preferred
+        case (nil, let best?):
+            downloadOption = best
+        case (nil, nil):
             throw NetworkError.invalidResponse
         }
+        print("[MediaExploreViewModel] Download option selected: \(downloadOption.label) url=\(downloadOption.remoteURL.path)")
 
         let fileExtension = downloadOption.remoteURL.pathExtension.isEmpty ? "mp4" : downloadOption.remoteURL.pathExtension
 

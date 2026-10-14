@@ -89,6 +89,18 @@ actor WallsflowService {
 
     private let networkService = NetworkService.shared
     private let baseURL = URL(string: "https://wallsflow.com")!
+    /// WebKit follows the system route, which can differ from the app's custom proxy.
+    /// Reuse that route together with its UA and cookies after a browser request succeeds.
+    private let browserSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.httpCookieStorage = HTTPCookieStorage.shared
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 900
+        configuration.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: configuration)
+    }()
 
     // 简易内存缓存
     private var listCache: [String: WallsflowListPage] = [:]
@@ -135,17 +147,18 @@ actor WallsflowService {
 
     /// `cloud.wallsflow.com` 的 mp4 热链保护：无 Referer 会 302 到首页 HTML。
     nonisolated static func isProtectedMediaURL(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased() else { return false }
-        return host.contains("wallsflow.com")
+        WallsflowMediaPolicy.owns(url)
     }
 
     /// 下载 / AVPlayer / 图片请求 `*.wallsflow.com` 时必须带上的头。
+    ///
+    /// ⚠️ 严禁同时发送 `Origin` 与 `Sec-Fetch-*`（2026-10-14 实测）：单独都 200，
+    /// 组合会被 Cloudflare 当作伪装浏览器的非浏览器客户端直接 403 挑战页
+    /// （与 UA/出口/代理无关，curl 直连与走代理一致复现）。媒体 CDN 零防护，裸头即通。
     nonisolated static func mediaRequestHeaders(for url: URL, pageURL: URL? = nil) -> [String: String]? {
         guard isProtectedMediaURL(url) else { return nil }
         let referer: String = {
-            if let pageURL,
-               let host = pageURL.host?.lowercased(),
-               host.contains("wallsflow.com") {
+            if let pageURL, isProtectedMediaURL(pageURL) {
                 return pageURL.absoluteString
             }
             return siteOrigin
@@ -159,7 +172,6 @@ actor WallsflowService {
                 ? "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
                 : "*/*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Origin": "https://wallsflow.com",
             "Sec-Fetch-Dest": isImage ? "image" : "video",
             "Sec-Fetch-Mode": "no-cors",
             "Sec-Fetch-Site": "same-site",
@@ -219,19 +231,30 @@ actor WallsflowService {
     // MARK: - 搜索
 
     /// 搜索动态壁纸
+    ///
+    /// 站点完整搜索只接受 **5 字段表单 POST** 到 `/index.php`
+    /// （`do=search&subaction=search&search_start=N&full_search=0&story=<词>`，
+    /// 2026-10-14 浏览器实测）：GET 形态与多字段 POST 均被 404/405 拒绝；
+    /// 结果页卡片与列表页同构（`article` + `data-video-src`），分页靠 `search_start` 递增。
     func search(query: String, page: Int = 1) async throws -> WallsflowListPage {
-        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let url = URL(string: "https://wallsflow.com/index.php?do=search&subaction=search&search_start=\(page)&full_search=0&result_from=\(1 + (page - 1) * 10)&story=\(encodedQuery)")!
-
-        let cacheKey = url.absoluteString
+        let cacheKey = "search|\(query)|\(page)"
         if let cached = listCache[cacheKey] {
             return cached
         }
 
-        let html = try await fetchHTML(from: url)
-        let page = try parseListPage(html: html, sourceURL: url)
-        listCache[cacheKey] = page
-        return page
+        let html = try await fetchHTMLPost(
+            from: URL(string: "https://wallsflow.com/index.php")!,
+            formBody: [
+                "do": "search",
+                "subaction": "search",
+                "search_start": "\(page)",
+                "full_search": "0",
+                "story": query,
+            ]
+        )
+        let listPage = try parseListPage(html: html, sourceURL: baseURL)
+        listCache[cacheKey] = listPage
+        return listPage
     }
 
     // MARK: - 详情页获取
@@ -252,9 +275,14 @@ actor WallsflowService {
     }
 
     /// 从列表项补全详情（获取视频 URL、标签等）
+    ///
+    /// ⚠️ 短路条件必须是「已有高清下载源（qualityRank >= 2）」而不是
+    /// 「downloadOptions 非空」：列表项永远带 Preview 预览片选项，若在此短路，
+    /// do=download 高清原片（Original HD）永远进不了选项池，
+    /// 下载会静默落成 500K/1MB 预览片（2026-10-14 第四层闸门实锤）。
     func enrichListItem(_ item: MediaItem) async throws -> MediaItem {
-        // 如果已经有完整数据，直接返回
-        if !item.downloadOptions.isEmpty || item.previewVideoURL != nil {
+        let hasHDSource = item.downloadOptions.contains { $0.qualityRank >= 2 }
+        if hasHDSource {
             return item
         }
         return try await fetchDetail(url: item.pageURL)
@@ -272,11 +300,33 @@ actor WallsflowService {
     /// 3. **`WallsflowWebFetcher`**：离屏 WKWebView 过挑战（非交互挑战 JS 自动
     ///    通过、用户无感），拿到 HTML 的同时把 `cf_clearance` 同步进共享 cookie
     ///    存储，后续请求可复用站点允许的会话；有效期由站点决定。
+    /// 已取得浏览器会话后，页面和媒体优先使用同一 UA、Cookie 和系统代理路由。
     func fetchHTML(from url: URL) async throws -> String {
+        let browserUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
+        var headers = defaultHeaders
+        if let browserUserAgent {
+            headers["User-Agent"] = browserUserAgent
+            for key in Self.clientHintHeaders.keys { headers.removeValue(forKey: key) }
+            var request = URLRequest(url: url)
+            request.allHTTPHeaderFields = headers
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            do {
+                let (data, response) = try await browserSession.data(for: request)
+                try Task.checkCancellation()
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                      http.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() != "challenge" else {
+                    throw WallsflowMediaPolicy.verificationRequired
+                }
+                return String(decoding: data, as: UTF8.self)
+            } catch {
+                try Task.checkCancellation()
+                return try await WallsflowWebFetcher.shared.fetchHTML(from: url)
+            }
+        }
         do {
             return try await networkService.fetchString(
                 from: url,
-                headers: currentHeaders,
+                headers: headers,
                 bypassSystemProxy: true
             )
         } catch is CancellationError {
@@ -286,59 +336,131 @@ actor WallsflowService {
             do {
                 return try await networkService.fetchString(
                     from: url,
-                    headers: currentHeaders,
+                    headers: headers,
                     bypassSystemProxy: false
                 )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 print("[WallsflowService] 系统代理仍失败，走 WebView 过挑战 | url=\(url.absoluteString) error=\(error.localizedDescription)")
-                let html = try await WallsflowWebFetcher.shared.fetchHTML(from: url)
-                // 挑战通过后 cookie 已回灌；对齐 UA 后轻量路径即可自行带票。
-                syncedUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
-                return html
+                return try await WallsflowWebFetcher.shared.fetchHTML(from: url)
             }
         }
     }
 
-    /// 抓取媒体数据（图片 / 视频 CDN 同样按出口挑战，先直连）。
+    /// POST 表单抓取（搜索专用）。
+    ///
+    /// 回退链与 `fetchHTML` 对齐，但 WKWebView 无法携带 HTTPBody（WebKit 已知限制），
+    /// 所以第三级不是「WebView 直接 POST」，而是「WebView GET 任意页面取票
+    /// （把 `cf_clearance` 与 WebView UA 同步进共享 cookie 存储）→ 重试 POST」。
+    func fetchHTMLPost(from url: URL, formBody: [String: String]) async throws -> String {
+        do {
+            return try await postFormAttempt(url: url, formBody: formBody)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            print("[WallsflowService] 直连 POST 失败，回退系统代理 | url=\(url.absoluteString) error=\(error.localizedDescription)")
+            do {
+                return try await postFormAttempt(url: url, formBody: formBody, bypassSystemProxy: false)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("[WallsflowService] 系统代理 POST 仍失败，WebView 取票后重试 | url=\(url.absoluteString) error=\(error.localizedDescription)")
+                _ = try await WallsflowWebFetcher.shared.fetchHTML(from: URL(string: Self.siteOrigin)!)
+                return try await postFormAttempt(url: url, formBody: formBody)
+            }
+        }
+    }
+
+    /// 单次 POST 尝试：直连（`bypassSystemProxy: true`）或系统代理。
+    /// 已有 WebView 取票时用同步的 UA 并去掉 Chrome 专属 Client Hints。
+    private func postFormAttempt(
+        url: URL,
+        formBody: [String: String],
+        bypassSystemProxy: Bool = true
+    ) async throws -> String {
+        let browserUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
+        var headers = defaultHeaders
+        if let browserUserAgent {
+            headers["User-Agent"] = browserUserAgent
+            for key in Self.clientHintHeaders.keys { headers.removeValue(forKey: key) }
+        }
+        // 表单 POST 的真实浏览器指纹是 same-origin 文档导航
+        headers["Sec-Fetch-Site"] = "same-origin"
+        headers.removeValue(forKey: "Sec-Fetch-User")
+        return try await networkService.fetchStringPost(
+            from: url,
+            formBody: formBody,
+            headers: headers,
+            bypassSystemProxy: bypassSystemProxy
+        )
+    }
+
+    /// Images and videos share the browser identity and the same bounded WebKit fallback.
     func fetchMediaData(
         from url: URL,
         headers: [String: String],
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) async throws -> Data {
-        do {
-            return try await networkService.fetchData(
-                from: url,
-                headers: headers,
-                progressHandler: progressHandler,
-                bypassSystemProxy: true
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            print("[WallsflowService] 直连媒体请求失败，回退系统代理 | url=\(url.absoluteString) error=\(error.localizedDescription)")
-            return try await networkService.fetchData(
-                from: url,
-                headers: headers,
-                progressHandler: progressHandler,
-                bypassSystemProxy: false
-            )
-        }
-    }
+        try Task.checkCancellation()
+        guard Self.isProtectedMediaURL(url) else { throw WallsflowError.invalidURL }
+        progressHandler?(0.02)
+        let userAgent = await WallsflowWebFetcher.shared.currentUserAgent
+        var request = URLRequest(url: url)
+        request.allHTTPHeaderFields = headers
+        request = WallsflowMediaPolicy.applyingBrowserIdentity(to: request, userAgent: userAgent)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
-    /// 请求头：默认浏览器头 + （WebFetcher 过挑战成功后）与 cf_clearance 绑定的实际 UA。
-    private var currentHeaders: [String: String] {
-        var headers = defaultHeaders
-        if let synced = syncedUserAgent {
-            headers["User-Agent"] = synced
-            for key in Self.clientHintHeaders.keys { headers.removeValue(forKey: key) }
+        if userAgent != nil {
+            do {
+                let (file, response) = try await browserSession.download(for: request)
+                defer { try? FileManager.default.removeItem(at: file) }
+                try Task.checkCancellation()
+                guard WallsflowMediaPolicy.accepts(response) else {
+                    print("[WallsflowService] 媒体 browserSession 响应被拒 | status=\((response as? HTTPURLResponse)?.statusCode ?? -1) cf-mitigated=\((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "cf-mitigated") ?? "-") host=\(url.host ?? "")")
+                    throw WallsflowMediaPolicy.verificationRequired
+                }
+                let data = try Data(contentsOf: file, options: [.mappedIfSafe])
+                guard WallsflowMediaPolicy.isMedia(data) else {
+                    print("[WallsflowService] 媒体 browserSession 内容非媒体 | head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
+                    throw WallsflowMediaPolicy.verificationRequired
+                }
+                progressHandler?(1)
+                return data
+            } catch {
+                try Task.checkCancellation()
+            }
+        } else {
+            let once = RetryConfiguration(maxRetries: 0, initialDelay: 0, maxDelay: 0,
+                                          delayMultiplier: 1, allowRetryOnCellular: true)
+            for bypassProxy in [true, false] {
+                do {
+                    let data = try await networkService.fetchData(
+                        from: url, headers: request.allHTTPHeaderFields ?? [:],
+                        retryConfig: once, bypassSystemProxy: bypassProxy
+                    )
+                    try Task.checkCancellation()
+                    guard WallsflowMediaPolicy.isMedia(data) else {
+                        print("[WallsflowService] 媒体 URLSession 内容非媒体 | bypass=\(bypassProxy) head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
+                        throw WallsflowMediaPolicy.verificationRequired
+                    }
+                    progressHandler?(1)
+                    return data
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    print("[WallsflowService] 媒体 URLSession 失败 | bypass=\(bypassProxy) host=\(url.host ?? "") error=\(error.localizedDescription)")
+                    try Task.checkCancellation()
+                }
+            }
         }
-        return headers
+        try Task.checkCancellation()
+        print("[WallsflowService] 媒体请求回退 WebKit | host=\(url.host ?? "")")
+        let data = try await WallsflowWebFetcher.shared.fetchMediaData(for: request)
+        try Task.checkCancellation()
+        progressHandler?(1)
+        return data
     }
-
-    /// 由当前 actor 保护，读取页面后同步更新，再向调用者返回。
-    private var syncedUserAgent: String?
 
     // MARK: - 清除缓存
 
@@ -355,7 +477,9 @@ private extension WallsflowService {
     /// 解析列表页 HTML
     func parseListPage(html: String, sourceURL: URL) throws -> WallsflowListPage {
         let document = try SwiftSoup.parse(html)
-        let articleElements = try document.select("article.story")
+        // 列表卡片是 article.story；搜索结果卡片没有 story 类名但同样带 data-video-src
+        // （2026-10-14 实测：搜索结果页 class="story" 计数为 0，不能用它判空）。
+        let articleElements = try document.select("article.story, article[data-video-src]")
         var items: [MediaItem] = []
 
         for article in articleElements {
@@ -476,13 +600,14 @@ private extension WallsflowService {
         let slug = "wf_\(id)"
         let sourceNameValue = t("wallsflow")
 
-        // 从视频 URL 创建下载选项（列表页仅有视频 URL，无文件大小信息）
+        // 列表页仅有预览视频 URL（无高清 do=download 链接）——如实标注为 Preview。
+        // 下载流程 ensureLocalVideoFile 会先 loadDetail 拿到含 Original HD 的完整选项。
         var downloadOptions: [MediaDownloadOption] = []
         if let videoURL {
             let option = MediaDownloadOption(
-                label: "Original",
+                label: "Preview",
                 fileSizeLabel: "",
-                detailText: "Original MP4",
+                detailText: "Preview MP4",
                 remoteURL: videoURL
             )
             downloadOptions = [option]
@@ -536,11 +661,17 @@ private extension WallsflowService {
 
     /// 解析下一页路径
     func parseNextPagePath(document: Document, currentURL: URL) -> String? {
+        // 搜索结果页的分页是 onclick=list_submit(N) 的 JS 桩（href="#"），
+        // 返回 "#" 会让调用方拼出无效 URL，这里统一过滤。
+        func isRealHref(_ href: String?) -> Bool {
+            guard let href, !href.isEmpty, href != "#" else { return false }
+            return href.hasPrefix("/") || href.hasPrefix("http")
+        }
+
         // 1. 优先查找 span.page_next a（存在即表示有下一页）
         if let nextLink = try? document.select("span.page_next a").first(),
-           let href = try? nextLink.attr("href"),
-           !href.isEmpty {
-            return href
+           isRealHref(try? nextLink.attr("href")) {
+            return try? nextLink.attr("href")
         }
 
         // 2. fallback: 通过 pages 判断当前页和最大页
@@ -574,8 +705,8 @@ private extension WallsflowService {
         // 查找下一页链接
         let nextPage = currentPage + 1
         if let nextLink = try? pagesDiv.select("a:contains(\(nextPage))").first(),
-           let href = try? nextLink.attr("href") {
-            return href
+           isRealHref(try? nextLink.attr("href")) {
+            return try? nextLink.attr("href")
         }
 
         return nil
@@ -1028,24 +1159,34 @@ private extension WallsflowService {
         return nil
     }
 
-    /// 构建下载选项：始终优先 `cloud.wallsflow.com` 直链 mp4。
+    /// 构建下载选项：`do=download` 是高清原片直链（2026-10-14 URLSession 实测直接回
+    /// `video/mp4` + `attachment` 文件流：1254 号帖子 10,925,858 字节，匿名可下；
+    /// 而 data-video-src 的 play.wallsflow.com 预览片仅 1,033,333 字节）。
+    /// `videoURL`（预览片）只用于 hover 预览，作下载兜底。
     nonisolated static func makeDownloadOptions(
         videoURL: URL?,
         downloadURL: URL?,
         fileSizeText: String?,
         resolution: String?
     ) -> [MediaDownloadOption] {
-        // download.php 往往回 HTML 页面，不能当媒体文件直链；仅作最后兜底。
-        let preferred = videoURL ?? downloadURL
-        guard let preferred else { return [] }
-        return [
-            MediaDownloadOption(
-                label: "Original",
+        var options: [MediaDownloadOption] = []
+        if let downloadURL {
+            options.append(MediaDownloadOption(
+                label: "Original HD",
                 fileSizeLabel: fileSizeText ?? "",
                 detailText: resolution ?? "Original MP4",
-                remoteURL: preferred
-            )
-        ]
+                remoteURL: downloadURL
+            ))
+        }
+        if let videoURL {
+            options.append(MediaDownloadOption(
+                label: "Preview",
+                fileSizeLabel: "",
+                detailText: "Preview MP4",
+                remoteURL: videoURL
+            ))
+        }
+        return options
     }
 
     /// 从 URL 或 HTML 属性中提取数字 ID
