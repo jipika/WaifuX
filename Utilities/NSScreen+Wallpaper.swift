@@ -22,6 +22,77 @@ enum WallpaperPosterGeometry {
 }
 
 enum WallpaperScreenIdentity {
+    /// Resolution/scale and the main-screen origin can change during wake.
+    /// Keep this normalization scheduler-specific; rendering has separate ownership rules.
+    static func schedulerHardwareKey(_ fingerprint: String) -> String {
+        stableFingerprintPart(fingerprint).replacingOccurrences(
+            of: #":\d+x\d+(?=:|$)"#, with: "", options: .regularExpression
+        )
+    }
+
+    /// Resolve the WHOLE saved topology, including IDs still present but reused.
+    /// Never claim a target merely because its numeric ID survived a reboot.
+    static func schedulerBindings(
+        fingerprints: [String: String],
+        screens: [(id: String, fingerprint: String)],
+        allowRelativeRank: Bool
+    ) -> [String: String] {
+        guard Set(screens.map(\.id)).count == screens.count else { return [:] }
+        let savedGroups = Dictionary(grouping: fingerprints.keys) {
+            schedulerHardwareKey(fingerprints[$0]!)
+        }
+        let liveGroups = Dictionary(grouping: screens) { schedulerHardwareKey($0.fingerprint) }
+        var result: [String: String] = [:]
+        for (hardware, saved) in savedGroups {
+            let live = liveGroups[hardware] ?? []
+            guard saved.count == live.count, !live.isEmpty else { continue }
+            if saved.count == 1 {
+                result[saved[0]] = live[0].id
+                continue
+            }
+            guard allowRelativeRank else { continue }
+            let oldPositions = saved.compactMap { position(fromFingerprint: fingerprints[$0]!) }
+            let newPositions = live.compactMap { position(fromFingerprint: $0.fingerprint) }
+            // Legacy identical screens without positions, or mirrored positions,
+            // have no recoverable ordering. Do not invent one from numeric IDs.
+            guard oldPositions.count == saved.count, newPositions.count == live.count,
+                  Set(oldPositions.map { "\($0.x),\($0.y)" }).count == saved.count,
+                  Set(newPositions.map { "\($0.x),\($0.y)" }).count == live.count else { continue }
+            result.merge(pairByRelativeRank(
+                orphans: saved.map { (id: $0, position: position(fromFingerprint: fingerprints[$0]!)) },
+                screens: live.map { (id: $0.id, position: position(fromFingerprint: $0.fingerprint)!) }
+            )) { first, _ in first }
+        }
+        return result
+    }
+
+    /// Include unresolved records in the transaction. Park disconnected owners
+    /// whose ID has been reused, so a returning/new monitor cannot overwrite them.
+    static func schedulerRelocations(
+        keys: Set<String>, bindings: [String: String], liveIDs: Set<String>
+    ) -> [String: String] {
+        var result = bindings.filter { keys.contains($0.key) }
+        var occupied = keys.union(liveIDs).union(result.values)
+        for key in keys.sorted() where result[key] == nil {
+            if !liveIDs.contains(key), !result.values.contains(key) {
+                result[key] = key
+                continue
+            }
+            var parked = "disconnected:\(key)"
+            while occupied.contains(parked) { parked = "disconnected:\(parked)" }
+            occupied.insert(parked)
+            result[key] = parked
+        }
+        return result
+    }
+
+    /// Read exclusively from the pre-migration snapshot, preserving swaps/cycles.
+    static func relocatingSchedulerValues<Value>(
+        _ values: [String: Value], using relocations: [String: String]
+    ) -> [String: Value] {
+        Dictionary(uniqueKeysWithValues: values.map { (relocations[$0.key] ?? $0.key, $0.value) })
+    }
+
     /// Shared command resolver; topology can be supplied by regression tests.
     static func commandTargetIndex(
         identifier: String?, fingerprint: String,
@@ -193,10 +264,10 @@ extension NSScreen {
         WallpaperScreenIdentity.orderedScreens(NSScreen.screens)
     }
 
-    /// 返回稳定的屏幕标识符，用于跨模块的屏幕级状态字典 key。
+    /// 返回当前枚举中的屏幕路由标识，用于跨模块的屏幕级状态字典 key。
     ///
-    /// 优先使用 `NSScreenNumber`（CGDirectDisplayID 的字符串形式），它在同一物理显示器
-    /// 的同一端口上具有全局唯一性和稳定性。
+    /// 优先使用 `NSScreenNumber`（CGDirectDisplayID 的字符串形式）。休眠/重启后
+    /// 编号可能变化或被另一块屏复用；持久化配置必须同时校验物理指纹，不能只信此 key。
     ///
     /// 当 `NSScreenNumber` 不可用时（某些外接显示器、AirPlay 屏幕等），
     /// 回退到 `localizedName + 原点坐标`，比单纯的 localizedName 更能区分

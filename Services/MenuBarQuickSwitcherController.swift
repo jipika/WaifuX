@@ -721,14 +721,27 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 且每个任务完成都会触发一次 SwiftUI 重排 —— 直接表现为「弹窗一出来就卡」。
     private static let previewWarmupConcurrency = 2
 
+    /// 槽位释放信号：某个预热任务完成后置 true，派发循环消费掉它补位。
+    /// 只在 MainActor 上读写，无锁。
+    private var previewSlotReleased = false
+
     func warmVisiblePreviews() async {
         let itemsToWarm = batchItems.filter { $0.thumbnailURL == nil }
+        var inFlight = 0
         for item in itemsToWarm {
             if Task.isCancelled { return }
             guard previewTasks[item.id] == nil else { continue }
-            while previewTasks.count >= Self.previewWarmupConcurrency {
-                try? await Task.sleep(for: .milliseconds(40))
+            // 并发槽占满时等一个释放信号再派发 —— 完成即补位。等待用短 sleep
+            // 让位 MainActor（完成回调要靠主线程置位），比旧版 40ms 轮询
+            // 「数任务字典」更直接，也不会在等待期独占主线程。
+            while inFlight >= Self.previewWarmupConcurrency {
+                if previewSlotReleased {
+                    previewSlotReleased = false
+                    inFlight -= 1
+                    break
+                }
                 if Task.isCancelled { return }
+                try? await Task.sleep(for: .milliseconds(16))
             }
             previewTasks[item.id] = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -736,7 +749,9 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self.updateThumbnail(thumbnailURL, for: item.id)
                 self.previewTasks[item.id] = nil
+                self.previewSlotReleased = true
             }
+            inFlight += 1
         }
     }
 
@@ -745,6 +760,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             task.cancel()
         }
         previewTasks.removeAll()
+        previewSlotReleased = false
     }
 
     private func replaceBatch(preferredCurrentURL: URL?, avoidPreviousBatch: Bool) {
@@ -1032,12 +1048,20 @@ private final class MenuBarQuickWallpaperRepository {
     }
 
     private func highQualityVideoPreviewURL(for videoURL: URL) async -> URL? {
+        // 弹窗 chip 只有 56px、hero 342pt —— 列表帧（960 上限、2 并发）完全够用。
+        // 不要落进 posterJPEGFileURL：那是 3840×2160 全分辨率 letterbox 扫描、
+        // 全局串行 1 并发，一张外置盘冷读 2.6s 的 4K 会把整条缩略图队列卡死
+        //（2026-10-13 弹窗图片/视频出得慢的主因之一）。
         if let listThumbnail = await VideoThumbnailCache.shared.listThumbnailJPEGFileURL(
             forLocalVideo: videoURL
         ) {
             return listThumbnail
         }
-        return await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL)
+        // 仅当列表帧彻底生成失败时才退到 poster 缓存（只查已存在的，不再触发生成；
+        // 桌面/锁屏 poster 由设壁纸链路自己生成，弹窗只是读取方）。
+        return VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
+            forLocalFile: videoURL
+        )
     }
 
     private func localRasterPreviewURL(for url: URL) async -> URL {

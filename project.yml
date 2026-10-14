@@ -395,6 +395,7 @@ targets:
       - path: Services/LocalizationService.swift
       - path: Services/LockScreenFramePusher.swift
       - path: Services/LockScreenWallpaperService.swift
+      - path: Services/AppGroupCacheBudget.swift
       - path: Services/MediaLibraryService.swift
       - path: Services/MediaService.swift
       - path: Services/MenuBarQuickSwitcherController.swift

@@ -276,26 +276,28 @@ final class BackgroundAgentRuntime {
         // Detail payloads are written by the Helper immediately before this
         // action. Commit them before an existing/new UI consumes the request.
         WaifuXPreferences.shared.synchronize()
-        for connection in observers.values {
-            (connection.remoteObjectProxy as? BackgroundAgentObserver)?.openUI(action.rawValue)
+        if action == .releaseMemory {
+            for connection in observers.values {
+                (connection.remoteObjectProxy as? BackgroundAgentObserver)?.openUI(action.rawValue)
+            }
+            return
         }
-        guard action != .releaseMemory else { return }
 
-        // ⚠️ 不用 `observers.isEmpty` 当闸门：observer 可能已经是一条死连接，XPC 发出去
-        // 石沉大海，用户侧的表现就是「点菜单栏设置完全没反应」（也不会启动主 App）。
-        // 这里改成无条件落一份带时间戳的 pending action，并请求激活主 App —— 两者幂等：
-        //  · UI 未运行 / 连接已死 → 主 App 被拉起，启动时消费 pending 并弹出设置窗口；
-        //  · UI 已在前台 → openApplication 只把它带到前面，pending 会被界面侧按
-        //    「30 秒新鲜度」判定丢弃（见 App/WaifuXApp.swift 的消费逻辑），不会拖到
-        //    下次冷启动才莫名弹一次。
-        WaifuXPreferences.shared.set(
-            ["action": action.rawValue, "at": Date().timeIntervalSince1970],
-            forKey: "background_pending_ui_action"
-        )
-        if action == .library { MainNavigationRequestStore.requestLibraryTab() }
-        if action == .scheduler { WaifuXPreferences.shared.set(true, forKey: "open_scheduler_settings") }
-        WaifuXPreferences.shared.synchronize()
-        NSWorkspace.shared.openApplication(at: WaifuXHostBundle.bundleURL, configuration: NSWorkspace.OpenConfiguration())
+        // A URL event opens exactly the requested UI in both cold and warm
+        // starts. Plain openApplication sends a reopen event, which also opens
+        // the library window. Do not depend on potentially stale XPC observers.
+        let request = WaifuXUIActions.Request(action: action)
+        NSWorkspace.shared.open(
+            [request.url],
+            withApplicationAt: WaifuXHostBundle.bundleURL,
+            configuration: request.openConfiguration()
+        ) { _, error in
+            if let error {
+                AppLogger.error(.general, "Failed to open requested UI", metadata: [
+                    "action": action.rawValue, "error": error.localizedDescription
+                ])
+            }
+        }
     }
 
     func perform(_ bytes: Data) async -> Data {
@@ -908,6 +910,12 @@ final class BackgroundAgentRuntime {
             return [:]
         case "lock.clearRealtime":
             if #available(macOS 26.0, *) { LockScreenWallpaperService.shared.clearRealtimeSourceIfNeeded(notify: a.bool("notify", default: true)) }
+            return [:]
+        case "saver.install":
+            try await ScreenSaverService.shared.install()
+            return [:]
+        case "saver.uninstall":
+            try await ScreenSaverService.shared.uninstall()
             return [:]
         case "saver.sync":
             return ["success": ScreenSaverService.shared.syncFromDesktop(reason: try a.string("reason"), force: a.bool("force"))]

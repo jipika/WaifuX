@@ -22,6 +22,9 @@ struct DisplaySchedulerConfig: Codable, Equatable {
     var folderIDs: [String]?
     /// Web/Scene 壁纸在"播完即换"模式下的切换间隔（秒）。nil = 不启用（仅视频走播完通知）
     var webSceneSwitchSeconds: Int?
+    /// Persist ownership with the folder policy, in the same encoded record.
+    /// CGDirectDisplayID is only a live routing address and may be reused after wake.
+    var displayFingerprint: String? = nil
 
     /// 判断是否为"播完即换"模式
     var isOnEndMode: Bool {
@@ -55,6 +58,7 @@ struct DisplaySchedulerConfig: Codable, Equatable {
         case includeMedia
         case folderIDs
         case webSceneSwitchSeconds
+        case displayFingerprint
     }
 
     init(
@@ -82,6 +86,7 @@ struct DisplaySchedulerConfig: Codable, Equatable {
         order = try container.decode(ScheduleOrder.self, forKey: .order)
         folderIDs = try container.decodeIfPresent([String].self, forKey: .folderIDs)
         webSceneSwitchSeconds = try container.decodeIfPresent(Int.self, forKey: .webSceneSwitchSeconds)
+        displayFingerprint = try container.decodeIfPresent(String.self, forKey: .displayFingerprint)
 
         if let includeWallpapers = try? container.decode(Bool.self, forKey: .includeWallpapers),
            let includeMedia = try? container.decode(Bool.self, forKey: .includeMedia) {
@@ -111,6 +116,7 @@ struct DisplaySchedulerConfig: Codable, Equatable {
         try container.encode(includeMedia, forKey: .includeMedia)
         try container.encodeIfPresent(folderIDs, forKey: .folderIDs)
         try container.encodeIfPresent(webSceneSwitchSeconds, forKey: .webSceneSwitchSeconds)
+        try container.encodeIfPresent(displayFingerprint, forKey: .displayFingerprint)
     }
 }
 

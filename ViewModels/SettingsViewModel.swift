@@ -647,19 +647,40 @@ class SettingsViewModel: ObservableObject {
             return
         }
         let urlCacheURL = cacheURL.appendingPathComponent("WaifuXImageCache")
-        var urlCacheBytes = 0
+        var urlCacheBytes: Int64 = 0
         if let enumerator = FileManager.default.enumerator(at: urlCacheURL, includingPropertiesForKeys: [.fileSizeKey]) {
             while let fileURL = enumerator.nextObject() as? URL {
                 let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                urlCacheBytes += size
+                urlCacheBytes += Int64(size)
             }
         }
 
-        let totalBytes = cacheServiceBytes + urlCacheBytes
-        let mb = Double(totalBytes) / 1_000_000
-        cacheSize = String(format: "%.1f MB", mb)
+        // App Group 共享容器：锁屏镜像副本、静态图、缩略图与扩展日志都落在这里。
+        // 自动轮换会持续写入跨卷复制的视频副本（外置库 → 内置盘无法 hard link），
+        // 是实际占用最大的一块 —— 必须计入，否则用户在设置页看不到真正的用量。
+        let containerBytes = Self.appGroupCacheBytes()
+
+        let totalBytes = Int64(cacheServiceBytes) + urlCacheBytes + containerBytes
+        cacheSize = Self.formattedCacheSize(totalBytes)
         // 计算缓存进度（相对于 500MB 预估最大值）
         cacheProgress = min(Double(totalBytes) / Double(maxCacheSize), 1.0)
+    }
+
+    /// 共享容器缓存占用（不含用户设置与 socket，那些不是可清理对象）。
+    private static func appGroupCacheBytes() -> Int64 {
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
+        ) else { return 0 }
+        return AppGroupCacheBudget.usage(ofContainer: container).total
+    }
+
+    /// 统一格式化：过 G 用 GB，否则 MB，避免「20480.0 MB」这种读不出来的数字。
+    private static func formattedCacheSize(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / 1_000_000_000
+        if gb >= 1 {
+            return String(format: "%.2f GB", gb)
+        }
+        return String(format: "%.1f MB", Double(bytes) / 1_000_000)
     }
 
     func clearCache() async {
@@ -668,6 +689,10 @@ class SettingsViewModel: ObservableObject {
 
         // 清除 MediaService 缓存（包含分页数据）
         await MediaService.shared.clearCache()
+
+        // 清除共享容器缓存（缩略图 + 不再被引用的镜像副本），保留当前正在用的那份：
+        // 锁屏扩展在沙盒里只能读容器，删掉当前源 = 锁屏立刻黑屏。
+        Self.clearAppGroupCache()
 
         // 清除 URLCache 缓存
         guard let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
@@ -678,6 +703,49 @@ class SettingsViewModel: ObservableObject {
         try? FileManager.default.removeItem(at: urlCacheURL)
 
         await updateCacheSize()
+    }
+
+    /// 清理共享容器里可安全重建的部分。
+    ///
+    /// 保守口径：**只删缩略图与未被引用的镜像副本**，不动
+    /// `waifux-wallpaper-prefs.json` / `waifux-display-instances.json` /
+    /// `waifux-wallpaper-state.json`（状态文件）与 `socket/`（IPC 端点）。
+    /// 日志也不在这里删 —— 它是排障证据，由扩展侧自己的轮转负责。
+    private static func clearAppGroupCache() {
+        let fm = FileManager.default
+        guard let container = fm.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
+        ) else { return }
+
+        // 1. 缩略图：全部可重建（换壁纸/重新同步时会重新生成）。
+        let thumbDir = container.appendingPathComponent(AppGroupCacheBudget.thumbnailDirectoryName, isDirectory: true)
+        if let files = try? fm.contentsOfDirectory(at: thumbDir, includingPropertiesForKeys: nil) {
+            for file in files {
+                try? fm.removeItem(at: file)
+            }
+        }
+
+        // 2. 镜像副本：只删不被 prefs 引用的那些，当前锁屏源必须留下。
+        let videoDir = container.appendingPathComponent(AppGroupCacheBudget.videoDirectoryName, isDirectory: true)
+        let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+        var protected = Set<String>()
+        if let data = try? Data(contentsOf: prefsURL),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["currentVideoPath", "currentImagePath"] {
+                if let path = object[key] as? String, !path.isEmpty {
+                    protected.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+                }
+            }
+            for key in ["currentVideoPaths", "currentImagePaths"] {
+                for (_, value) in (object[key] as? [String: String]) ?? [:] where !value.isEmpty {
+                    protected.insert(URL(fileURLWithPath: value).standardizedFileURL.path)
+                }
+            }
+        }
+        for entry in AppGroupCacheBudget.entries(in: videoDir, fileManager: fm, extensions: ["mp4", "mov", "m4v"]) {
+            if protected.contains(entry.url.standardizedFileURL.path) { continue }
+            try? fm.removeItem(at: entry.url)
+        }
     }
 
     /// A reset may remove data only after a bounded, acknowledged Helper stop.

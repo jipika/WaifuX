@@ -444,11 +444,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
     private var settingsViewModel: SettingsViewModel?
     private var settingsWindowController: NSWindowController?
+    private var uiRequestRouter = WaifuXUIActions.RequestRouter()
+    private var mainWindowDataRestored = false
     /// 窗口隐藏后延迟释放视图树的任务，用于回收 IOSurface / CoreAnimation 等系统图形缓存
     private var delayedReleaseTask: Task<Void, Never>?
     /// Sparkle 自动更新控制器（检测 + 内置弹窗 + 自动安装）
     private var updaterController: SPUStandardUpdaterController!
-    /// 更新检查期间暂时隐藏设置窗口，避免其浮动层级遮挡 Sparkle 的状态或结果窗口。
+    /// 更新检查期间暂时隐藏设置窗口，避免遮挡 Sparkle 的状态或结果窗口。
     private var shouldRestoreSettingsWindowAfterUpdateCheck = false
     /// 静态访问器，供 Settings 等外部触发更新检查
     static var shared: AppDelegate?
@@ -458,16 +460,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     /// 设计目的：避免 ContentView 因 @StateObject 响应 ViewModel 的 @Published 变化而重算 body
     /// （会连锁导致下游 5 个 tab 子视图重建 binding/参数 → 全量重算）。
     /// 同时让 ViewModel 不再随主窗口隐藏/重建而销毁，避免数据重新加载。
-    #if DEBUG
-    // Bare-window lifecycle tests must not initialize network feed models.
+    // Settings-only launches and bare-window tests must not initialize feeds.
     lazy var wallpaperViewModel = WallpaperViewModel()
     lazy var mediaViewModel = MediaExploreViewModel()
     lazy var animeViewModel = AnimeViewModel()
-    #else
-    let wallpaperViewModel = WallpaperViewModel()
-    let mediaViewModel = MediaExploreViewModel()
-    let animeViewModel = AnimeViewModel()
-    #endif
 
     // MARK: - 窗口尺寸（唯一真实来源，全局统一）
     /// 最小允许的窗口大小
@@ -517,8 +513,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
         // macOS 26.5 beta 上这个问题更加严格，即使 @AppStorage 属性包装器 init 也会触发
         //
-        // ⚡ 关键优化：先立即显示窗口，所有数据恢复都在下一个 run loop 异步执行
-        // 避免主线程阻塞导致布局计算延迟
+        // 在下一个 run loop 恢复设置，然后按请求创建目标窗口。
 
         // 设置标准菜单栏（包含 Edit 菜单，使 TextField 支持复制粘贴）
         setupMainMenu()
@@ -536,7 +531,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             userDriverDelegate: self
         )
 
-        // 1. 初始化状态栏控制器（轻量级，不阻塞）
+        // 状态栏由 Helper 持有；UI 只接收明确的窗口/操作请求。
         WaifuXUIActions.handler = { [weak self] action in
             switch action {
             case .main: self?.showMainWindow()
@@ -549,8 +544,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                 NotificationCenter.default.post(name: .openCurrentWallpaperDetail, object: nil)
             case .settings: self?.showSettingsWindow(nil)
             case .scheduler:
-                WaifuXPreferences.shared.set(true, forKey: "open_scheduler_settings")
+                WaifuXPreferences.shared.set(true, forKey: "settings.openSchedulerOnNextAppearance")
                 self?.showSettingsWindow(nil)
+                NotificationCenter.default.post(name: .openSchedulerSettings, object: nil)
             case .updates: self?.checkForUpdates()
             case .releaseMemory: self?.releaseForegroundMemoryNow()
             }
@@ -562,83 +558,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 直接读 UserDefaults 是安全的（非 @AppStorage、非 init 读取，与已存在的 line 316/399 一致）。
         ModuleAvailability.shared.refreshFromUserDefaults()
 
-        // 2. 立即创建窗口（使用 defer: false 立即渲染，不等待）
-        let contentView = ContentView(
-            wallpaperViewModel: wallpaperViewModel,
-            mediaViewModel: mediaViewModel,
-            animeViewModel: animeViewModel
-        )
-            .frame(
-                minWidth: Self.minimumWindowSize.width,
-                minHeight: Self.minimumWindowSize.height
-            )
-
-        window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-
-        window?.collectionBehavior = .fullScreenPrimary
-        if let window {
-            WindowSpaceCoordinator.prepare(window)
-        }
-
-        window?.title = "WaifuX"
-        window?.titlebarAppearsTransparent = true
-        window?.titleVisibility = .hidden
-        window?.isOpaque = true
-        window?.backgroundColor = NSColor(Color(hex: "0D0D0D"))
-        if #available(macOS 15.0, *) {
-            window?.titlebarSeparatorStyle = .none
-        }
-
-        // 隐藏系统红绿灯（使用自定义 CustomWindowControls）
-        window?.standardWindowButton(.closeButton)?.isHidden = true
-        window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window?.standardWindowButton(.zoomButton)?.isHidden = true
-
-        // 设置最小窗口大小
-        window?.minSize = Self.minimumWindowSize
-
-        // 设置 contentView
-        let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
-        configureOpaqueHostingView(hostingView)
-        window?.contentView = hostingView
-
-        // 恢复保存的窗口尺寸
-        window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
-
-        // 首次启动时居中显示
-        if !hasSavedWindowFrame() {
-            window?.center()
-        }
-
-        window?.delegate = self
-
-        // 登录恢复由独立 Helper 负责。主程序被打开就应显示界面；保存的
-        // launch_at_login 偏好不能证明这一次 UI 启动来自系统登录。
-        if let window {
-            WindowSpaceCoordinator.show(window)
-        }
-        AppResponsivenessMonitor.noteWindowVisible(true)
-        AppResponsivenessMonitor.noteScenePhase("mainWindowVisible")
-
-        // ⚠️ 关键：让出主线程，让 SwiftUI 完成首次布局渲染
-        // 所有数据恢复在下一个 run loop 异步执行
+        // Restore preferences after launch, then create only the requested UI.
+        // Helper URLs also carry launch arguments, so a late URL event cannot
+        // cause the main window to flash during a settings-only cold start.
         DispatchQueue.main.async { [weak self] in
-            self?.restoreAllDataAsync()
-            if let pending = WaifuXPreferences.shared.dictionary(forKey: "background_pending_ui_action"),
-               let value = pending["action"] as? String,
-               let action = WaifuXUIActions.Action(rawValue: value) {
-                // 无论新鲜与否都清掉，避免陈旧请求（Helper 在线时写入的那份）在下次
-                // 冷启动时莫名其妙弹一次窗口。
-                WaifuXPreferences.shared.removeObject(forKey: "background_pending_ui_action")
-                let at = (pending["at"] as? TimeInterval) ?? 0
-                if Date().timeIntervalSince1970 - at < 30 {
-                    WaifuXUIActions.perform(action)
-                }
+            guard let self else { return }
+            self.restoreAllDataAsync()
+            for action in self.uiRequestRouter.start(arguments: CommandLine.arguments) {
+                WaifuXUIActions.perform(action)
             }
         }
 
@@ -698,18 +625,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         guard shouldRestoreSettingsWindowAfterUpdateCheck else { return }
         shouldRestoreSettingsWindowAfterUpdateCheck = false
         guard let settingsWindow = settingsWindowController?.window else { return }
-        WindowSpaceCoordinator.show(
-            settingsWindow,
-            following: window?.isVisible == true ? window : nil
-        )
+        WindowSpaceCoordinator.show(settingsWindow)
     }
 
-    // MARK: - 异步恢复所有数据（在窗口显示后执行，避免阻塞主线程）
+    // MARK: - 延迟恢复共享 UI 数据；探索页数据在主窗口打开时恢复
     private func restoreAllDataAsync() {
         LocalizationService.shared.restoreSavedSettings()
         ThemeManager.shared.restoreSavedSettings()
-        wallpaperViewModel.restoreExploreSortPreferences()
-        mediaViewModel.restoreExploreSortPreferences()
         WallpaperLibraryService.shared.restoreSavedData()
         MediaLibraryService.shared.restoreSavedData()
         LibraryFolderStore.shared.restoreSavedData()
@@ -720,17 +642,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         WallpaperSourceManager.shared.restoreState()
         WorkshopSourceManager.shared.refreshStoredSteamIdentity()
         WorkshopSourceManager.shared.loadSteamProfileID()
-        let vm = SettingsViewModel()
-        vm.restoreSavedSettings()
-        settingsViewModel = vm
+        if settingsViewModel == nil {
+            let vm = SettingsViewModel()
+            vm.restoreSavedSettings()
+            settingsViewModel = vm
+        }
+    }
+
+    private func restoreMainWindowDataIfNeeded() {
+        guard !mainWindowDataRestored else { return }
+        mainWindowDataRestored = true
+        wallpaperViewModel.restoreExploreSortPreferences()
+        mediaViewModel.restoreExploreSortPreferences()
         wallpaperViewModel.restoreAPIKeyState()
         Task { await WallpaperSourceManager.shared.performStartupSourceSelection() }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let request = WaifuXUIActions.Request(url: url) else { continue }
+            if let action = uiRequestRouter.receive(request) {
+                WaifuXPreferences.shared.synchronize()
+                WaifuXUIActions.perform(action)
+            }
+        }
     }
 
     @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // 当用户点击 Dock 图标时显示主窗口
         showMainWindow()
-        return true
+        return false // The requested window was handled; skip AppKit's default ordering.
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -878,8 +819,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         delayedReleaseTask = nil
 
         updateActivationPolicy(showDockIcon: true)
-        let settingsWindow = settingsWindowController?.window
-        let visibleSettingsWindow = settingsWindow?.isVisible == true ? settingsWindow : nil
+        restoreMainWindowDataIfNeeded()
 
         if window == nil {
             let contentView = ContentView(
@@ -905,6 +845,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             window?.titleVisibility = .hidden
             window?.isOpaque = true
             window?.backgroundColor = NSColor(Color(hex: "0D0D0D"))
+            window?.isReleasedWhenClosed = false
+            if #available(macOS 15.0, *) {
+                window?.titlebarSeparatorStyle = .none
+            }
             window?.minSize = Self.minimumWindowSize
             window?.collectionBehavior = .fullScreenPrimary
             if let window {
@@ -923,6 +867,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
             // 恢复保存的窗口尺寸
             window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
+            if !hasSavedWindowFrame() { window?.center() }
 
             window?.delegate = self
         } else if window?.contentView == nil {
@@ -951,10 +896,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             if #available(macOS 14.0, *) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                     guard let self, let window = self.window else { return }
-                    WindowSpaceCoordinator.show(window, following: visibleSettingsWindow)
+                    WindowSpaceCoordinator.show(window)
                 }
             } else {
-                WindowSpaceCoordinator.show(window, following: visibleSettingsWindow)
+                WindowSpaceCoordinator.show(window)
             }
         }
         AppResponsivenessMonitor.noteWindowVisible(true)
@@ -1158,6 +1103,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "WaifuX")
         appMenu.addItem(NSMenuItem(title: "About WaifuX", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        let settingsItem = NSMenuItem(title: t("settings") + "…", action: #selector(showSettingsWindow(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide WaifuX", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let quitItem = NSMenuItem(title: "Quit WaifuX", action: #selector(quitApplicationFromMainMenu(_:)), keyEquivalent: "q")
@@ -1609,29 +1557,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     // MARK: - 设置窗口
 
     @objc func showSettingsWindow(_ sender: Any?) {
+        updateActivationPolicy(showDockIcon: true)
         // 如果窗口已存在，直接显示（最快路径）
         if let settingsWindow = settingsWindowController?.window {
-            centerWindow(settingsWindow, relativeTo: window)
-            WindowSpaceCoordinator.show(
-                settingsWindow,
-                following: window?.isVisible == true ? window : nil
-            )
+            if settingsWindow.isMiniaturized { settingsWindow.deminiaturize(nil) }
+            WindowSpaceCoordinator.show(settingsWindow)
             return
         }
 
-        // ⚠️ 先异步初始化 ViewModel，再显示窗口
-        Task(priority: .userInitiated) { @MainActor in
-            // 如果 SettingsViewModel 尚未初始化，先创建并恢复
-            if self.settingsViewModel == nil {
-                let vm = SettingsViewModel()
-                // 快速恢复基本设置，耗时操作在后台执行
-                vm.restoreSavedSettings()
-                self.settingsViewModel = vm
-            }
-
-            // 创建并显示窗口
-            self.createAndShowSettingsWindow()
+        // Run on the main actor without scheduling another task: rapid requests
+        // must see the same controller instead of creating multiple windows.
+        if settingsViewModel == nil {
+            let vm = SettingsViewModel()
+            vm.restoreSavedSettings()
+            settingsViewModel = vm
         }
+        createAndShowSettingsWindow()
     }
 
     private func createAndShowSettingsWindow() {
@@ -1641,7 +1582,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             backing: .buffered,
             defer: false
         )
-        settingsWindow.title = "设置"
+        settingsWindow.title = t("settings")
         settingsWindow.titlebarAppearsTransparent = true
         settingsWindow.titleVisibility = .hidden
         settingsWindow.isMovableByWindowBackground = false
@@ -1650,9 +1591,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         settingsWindow.minSize = NSSize(width: 680, height: 520)
         settingsWindow.maxSize = NSSize(width: 680, height: 520)
         settingsWindow.isReleasedWhenClosed = false
-        settingsWindow.level = .floating
+        settingsWindow.level = .normal
         WindowSpaceCoordinator.prepare(settingsWindow)
-        centerWindow(settingsWindow, relativeTo: window)
+        settingsWindow.center()
         settingsWindow.tabbingMode = .disallowed
         // 设置窗口复用 AppDelegate 作为 delegate，windowShouldClose 据此区分处理
         settingsWindow.delegate = self
@@ -1666,25 +1607,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         let windowController = NSWindowController(window: settingsWindow)
         settingsWindowController = windowController
         windowController.showWindow(nil)
-        WindowSpaceCoordinator.show(
-            settingsWindow,
-            following: window?.isVisible == true ? window : nil
-        )
+        WindowSpaceCoordinator.show(settingsWindow)
     }
 
-    private func centerWindow(_ window: NSWindow, relativeTo parentWindow: NSWindow?) {
-        if let parentWindow = parentWindow, parentWindow.isVisible {
-            // 在主窗口中央显示
-            let parentFrame = parentWindow.frame
-            let windowSize = window.frame.size
-            let x = parentFrame.midX - windowSize.width / 2
-            let y = parentFrame.midY - windowSize.height / 2
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        } else {
-            // 屏幕中央显示
-            window.center()
-        }
-    }
 }
 
 #if DEBUG
@@ -1901,6 +1826,13 @@ extension AppDelegate {
             return handleSettingsWindowClose(sender)
         }
         FolderLockService.shared.lockAllFolders()
+        if sender === window,
+           let settingsWindow = settingsWindowController?.window,
+           settingsWindow.isVisible || settingsWindow.isMiniaturized {
+            // Closing the library must not tear down an independent settings UI.
+            hideMainWindow()
+            return false
+        }
         exitInterface()
         return true
     }
@@ -1926,10 +1858,15 @@ extension AppDelegate {
         AppResponsivenessMonitor.noteScenePhase("mainWindowDeminiaturized")
     }
 
-    func windowDidClose(_ notification: Notification) {
+    func windowWillClose(_ notification: Notification) {
         // Wait until AppKit has removed the closed window from visibility/key-window state.
         DispatchQueue.main.async { [weak self] in
-            self?.enterBackgroundModeIfNoForegroundInterface(hideDockIcon: true)
+            guard let self else { return }
+            self.enterBackgroundModeIfNoForegroundInterface(hideDockIcon: self.window?.isMiniaturized != true)
+            if self.settingsWindowController == nil,
+               self.window?.isVisible != true, self.window?.isMiniaturized != true {
+                self.exitInterface()
+            }
         }
     }
 

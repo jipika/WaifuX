@@ -581,6 +581,13 @@ private struct QuickSwitcherImage: View {
             if let url {
                 KFImage(url)
                     .fade(duration: 0.16)
+                    // chip 56px / hero 342pt@2x=684 —— 768 上限足够，避免把外置盘
+                    // 几 MB~几十 MB 的原图全尺寸解码（2026-10-13 弹窗出图慢的
+                    // 静图侧主因）。macOS 无 UIScreen；菜单栏面板 Retina 最高 2x，
+                    // downsampling 按像素吃 768 已覆盖。
+                    .downsampling(size: CGSize(width: 768, height: 768))
+                    .cacheOriginalImage()
+                    .cancelOnDisappear(true)
                     .resizable()
                     .placeholder {
                         placeholder

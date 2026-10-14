@@ -214,6 +214,7 @@ struct SettingsView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openSchedulerSettings)) { _ in
+            WaifuXPreferences.shared.removeObject(forKey: "settings.openSchedulerOnNextAppearance")
             selectedTab = .scheduler
         }
     }
@@ -945,21 +946,30 @@ private struct DownloadSettingsTab: View {
         Task {
             let result = await DirectoryMigrationService.shared.repairBrokenRecords()
             isRepairing = false
+            var messages: [String] = []
             if result.indexedCount == 0
                 && result.repairedCount == 0
                 && result.removedCount == 0
-                && result.migratedCount == 0 {
-                repairResultMessage = t("repairNoIssues")
+                && result.migratedCount == 0
+                && result.orphanedMembershipCount == 0 {
+                messages.append(t("repairNoIssues"))
             } else {
-                repairResultMessage = String(
+                messages.append(String(
                     format: t("repairResult"),
                     result.indexedCount,
                     result.repairedCount,
                     result.migratedCount,
                     result.removedCount,
                     result.healthyCount
-                )
+                ))
             }
+            if result.orphanedMembershipCount > 0 {
+                messages.append(String(format: t("repairOrphanMemberships"), result.orphanedMembershipCount))
+            }
+            if result.orphanedMembershipAborted {
+                messages.append(t("repairOrphanAborted"))
+            }
+            repairResultMessage = messages.joined(separator: "\n")
             NotificationCenter.default.post(name: .downloadPathChanged, object: nil)
         }
     }

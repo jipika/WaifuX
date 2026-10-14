@@ -48,12 +48,12 @@ struct ScreenSaverSettingsTab: View {
                         ProgressView().controlSize(.small)
                     }
                     Button(service.isInstalled ? t("screensaver.reinstall") : t("screensaver.install")) {
-                        perform { try service.install() }
+                        perform { try await service.install() }
                     }
                     .disabled(isWorking)
                     if service.isInstalled {
                         Button(t("screensaver.uninstall")) {
-                            perform { try service.uninstall() }
+                            perform { try await service.uninstall() }
                         }
                         .disabled(isWorking)
                     }
@@ -139,14 +139,19 @@ struct ScreenSaverSettingsTab: View {
 
     // MARK: - 动作
 
-    private func perform(_ action: () throws -> Void) {
+    @MainActor
+    private func perform(_ action: @escaping @MainActor () async throws -> Void) {
+        guard !isWorking else { return }
         isWorking = true
-        defer { isWorking = false }
-        do {
-            try action()
-            service.refreshConfiguredState()
-        } catch {
-            errorMessage = error.localizedDescription
+        Task { @MainActor in
+            defer { isWorking = false }
+            do {
+                try await action()
+                service.refreshConfiguredState()
+            } catch {
+                service.refreshConfiguredState()
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }

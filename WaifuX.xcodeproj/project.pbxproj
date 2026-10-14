@@ -12,6 +12,7 @@
 		006554FF4BCD348417530755 /* GlobalWallpaperSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E83F19134CF8D1D06493D43 /* GlobalWallpaperSyncCoordinator.swift */; };
 		00789A48296E22343CD1FCC3 /* AnimeDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE340CF2EF289C67261EF588 /* AnimeDetailSheet.swift */; };
 		00BCC7E245DBF635281D96F0 /* KonachanAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6A6360B800A996A267E5291 /* KonachanAuthService.swift */; };
+		011A3FFF489E357F50170072 /* AppGroupCacheBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = D14939A9C3DA965DB90E5F22 /* AppGroupCacheBudget.swift */; };
 		011E07588B9A59B72B61F28A /* MediaItem+LocalFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 162DE3A33B89326DEA17F24C /* MediaItem+LocalFiles.swift */; };
 		01B60DB90F73D58721413052 /* DirectoryMigrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71F280593ACA1323B52459B /* DirectoryMigrationService.swift */; };
 		01EDB72C009A8F705495A76E /* WorkshopService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C58CFDFB69A95820165F4F /* WorkshopService.swift */; };
@@ -499,6 +500,7 @@
 		F0448F711A615AC3653D7D60 /* DynamicWallpaperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C8922986259825170C5975 /* DynamicWallpaperService.swift */; };
 		F0CD11A67E854F0FC8892F46 /* AnimeSearchHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F811DCEB4E7240A71F2AFC97 /* AnimeSearchHeuristics.swift */; };
 		F0FD4304E81DF63495497CFE /* CloudSyncConflictResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3772811EA029208208E5520D /* CloudSyncConflictResolver.swift */; };
+		F130DD2907A6B607B8E231A9 /* AppGroupCacheBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = D14939A9C3DA965DB90E5F22 /* AppGroupCacheBudget.swift */; };
 		F14648D0D15753315F4343CF /* LockScreenFramePusher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6054F72B5D7FC378FF8A39 /* LockScreenFramePusher.swift */; };
 		F272A3A79159AB9BE51FC62C /* MediaFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E863AB4B82C85983EF0D89 /* MediaFilters.swift */; };
 		F27BD3289E6FE683B96B5F8E /* KonachanModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E0B8FBA853691DEFB867233 /* KonachanModels.swift */; };
@@ -561,10 +563,10 @@
 		6367CD2B049670AE8262B27D /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = Contents/Helpers;
+			dstPath = "Contents/Resources/Screen Savers";
 			dstSubfolderSpec = 1;
 			files = (
-				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
+				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -593,10 +595,10 @@
 		F68564DF1E026B1AC3471511 /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "Contents/Resources/Screen Savers";
+			dstPath = Contents/Helpers;
 			dstSubfolderSpec = 1;
 			files = (
-				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
+				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -880,6 +882,7 @@
 		CE3727E57F3F09F93DF5B40C /* ContentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentModels.swift; sourceTree = "<group>"; };
 		CF73A88F9609C0F1FFF6C2EE /* GlassSheetShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSheetShell.swift; sourceTree = "<group>"; };
 		CFF7EC2802DEB922E192AE8E /* GitHubHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHosts.swift; sourceTree = "<group>"; };
+		D14939A9C3DA965DB90E5F22 /* AppGroupCacheBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupCacheBudget.swift; sourceTree = "<group>"; };
 		D154DF41056CBDAB804D79D2 /* DesktopIconManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopIconManager.swift; sourceTree = "<group>"; };
 		D2720DE597FBD8AD782F02D2 /* FrameChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameChannel.swift; sourceTree = "<group>"; };
 		D296AB48EF0C960EBDEDC0F0 /* DynamicWallpaperPosterURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicWallpaperPosterURLProtocol.swift; sourceTree = "<group>"; };
@@ -1164,6 +1167,7 @@
 				21A497376B55EB752EAE4F33 /* AnimeVideoEnhancer.swift */,
 				3C03424DD49B5B7369F81671 /* AnimeVideoExtractor.swift */,
 				767CAF3A84C77A18E7DED0F0 /* AnimeWindowManager.swift */,
+				D14939A9C3DA965DB90E5F22 /* AppGroupCacheBudget.swift */,
 				9A81E6BE3D15551B9C61B2F4 /* AppleMusicLyricsService.swift */,
 				9F78B7BE373C7A7F4094E0FE /* AppRelauncher.swift */,
 				A469DAE57B338D9BC55EAD6B /* BakeService.swift */,
@@ -1754,6 +1758,7 @@
 				14E73E906343D6F00EB02D73 /* AnimeProgressStore.swift in Sources */,
 				03DD21AE98AAABAFE407B399 /* AnimeRule.swift in Sources */,
 				A2A6B9CA0D3D492C2FCDE7DA /* AppFluidMotion.swift in Sources */,
+				F130DD2907A6B607B8E231A9 /* AppGroupCacheBudget.swift in Sources */,
 				93C329BB53509CE1C300D770 /* AppLogger.swift in Sources */,
 				D152C42DF0A70E2FB194C05E /* AppleMusicLyricsService.swift in Sources */,
 				D6C5D0F0E261BB6D10E72523 /* ArcBackgroundSettings.swift in Sources */,
@@ -1962,6 +1967,7 @@
 				028A4B3B320CDBDEED28EC8C /* AnimeViewModel.swift in Sources */,
 				0F7695B164B3D415E4E7338A /* AnimeWindowManager.swift in Sources */,
 				186AA69369A725B48BBB9F70 /* AppFluidMotion.swift in Sources */,
+				011A3FFF489E357F50170072 /* AppGroupCacheBudget.swift in Sources */,
 				2A22211725F696E5A70F0874 /* AppLogger.swift in Sources */,
 				DF5859029BC8D2872798FAB3 /* AppRelauncher.swift in Sources */,
 				3DD89BB65FFA167D9DD45A63 /* AppResponsivenessMonitor.swift in Sources */,
