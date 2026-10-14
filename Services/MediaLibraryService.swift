@@ -1,6 +1,29 @@
 import Foundation
 import Combine
 
+/// 只把与记录 ID、已知下载布局匹配的目录视为可整体删除的 Workshop 下载。
+/// 不按任意祖先的 `workshop_` 前缀扩张删除范围（自定义库目录也可能使用该前缀）。
+enum WorkshopDownloadDeletion {
+    static func rootDirectory(for path: String, itemID: String) -> String? {
+        guard path.hasPrefix("/"), itemID.hasPrefix("workshop_") else { return nil }
+        let workshopID = String(itemID.dropFirst("workshop_".count))
+        guard !workshopID.isEmpty,
+              workshopID.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+
+        let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        for index in components.indices.reversed() where components[index] == itemID {
+            let relative = Array(components.dropFirst(index + 1))
+            let legacyContent = ["steamapps", "workshop", "content", "431960", workshopID]
+            // Steam 服务：workshop_<id>/<id>/…；旧 steamcmd：workshop_<id>/steamapps/…/<id>/…。
+            // 记录也可能直接指向外层下载目录。
+            if relative.isEmpty || relative.first == workshopID || relative.starts(with: legacyContent) {
+                return NSString.path(withComponents: Array(components.prefix(index + 1)))
+            }
+        }
+        return nil
+    }
+}
+
 extension Notification.Name {
     /// 本地媒体高清静帧已生成。`object` 为 `String`（itemID），`userInfo["posterURL"]` 为 `URL`。
     static let localMediaPosterDidUpdate = Notification.Name("localMediaPosterDidUpdate")
@@ -956,7 +979,7 @@ final class MediaLibraryService: ObservableObject {
             syncDlIndex()
             downloadRecords = Array(downloadRecords)
             // 删除物理文件
-            deletePhysicalFile(at: filePath)
+            deletePhysicalFile(at: filePath, itemID: record.item.id)
             // 删除对应的烘焙产物
             deleteSceneBakeArtifacts(for: record)
             VideoThumbnailCache.shared.removeSceneBakePoster(
@@ -983,7 +1006,7 @@ final class MediaLibraryService: ObservableObject {
         downloadRecords = Array(downloadRecords)
         // 删除所有对应的物理文件及烘焙产物
         for record in recordsToDelete {
-            deletePhysicalFile(at: record.localFilePath)
+            deletePhysicalFile(at: record.localFilePath, itemID: record.item.id)
             deleteSceneBakeArtifacts(for: record)
             VideoThumbnailCache.shared.removeSceneBakePoster(
                 itemID: record.item.id,
@@ -993,11 +1016,11 @@ final class MediaLibraryService: ObservableObject {
     }
 
     /// 安全删除物理文件
-    private func deletePhysicalFile(at path: String) {
+    private func deletePhysicalFile(at path: String, itemID: String) {
         guard !path.isEmpty else { return }
         let fm = FileManager.default
         // 如果是 Workshop 下载的内容，删除整个 workshop_xxx 文件夹
-        if let workshopRoot = workshopRootDirectory(for: path),
+        if let workshopRoot = WorkshopDownloadDeletion.rootDirectory(for: path, itemID: itemID),
            fm.fileExists(atPath: workshopRoot) {
             do {
                 try fm.removeItem(atPath: workshopRoot)
@@ -1100,20 +1123,6 @@ final class MediaLibraryService: ObservableObject {
             }
             existenceCache.invalidate(atPath: bakeDir.path)
         }
-    }
-
-    /// 检测并返回 Workshop 下载的根文件夹路径
-    private func workshopRootDirectory(for path: String) -> String? {
-        let components = path.components(separatedBy: "/")
-        if let steamappsIndex = components.firstIndex(of: "steamapps"),
-           steamappsIndex > 0 {
-            let workshopRoot = components[0..<steamappsIndex].joined(separator: "/")
-            let folderName = components[steamappsIndex - 1]
-            if folderName.hasPrefix("workshop_") {
-                return workshopRoot
-            }
-        }
-        return nil
     }
 
     /// 批量删除最近播放记录
@@ -1244,6 +1253,50 @@ final class MediaLibraryService: ObservableObject {
             )
         }
         return invalidCount
+    }
+
+    /// 把指向已不存在文件夹的 folderID 归零（移回根目录）。
+    ///
+    /// 仅由用户主动触发（设置 → 修复数据）调用：文件夹定义丢失（清理工具
+    /// 误删 Group Container 偏好）时，挂载在孤儿 folderID 上的记录会被
+    /// 网格的根目录过滤永久隐藏，且 UI 无法再触达它们。此方法是有意设计的
+    /// 一次性修复出口，与启动时只读的 sanitizeFolderMembership 相区分。
+    /// - Parameters:
+    ///   - validFavoriteFolderIDs / validDownloadFolderIDs: 当前仍然存在的文件夹 ID 集合。
+    ///     空集合视为「文件夹定义尚未加载」并中止，避免把全部有效归属清空。
+    /// - Returns: 本次实际归零的记录条数（收藏 + 下载）；中止时返回 -1。
+    @discardableResult
+    func clearOrphanFolderMemberships(
+        validFavoriteFolderIDs: Set<String>,
+        validDownloadFolderIDs: Set<String>
+    ) -> Int {
+        guard BackgroundRuntimeRole.isHelper else { return 0 }
+        guard !validFavoriteFolderIDs.isEmpty || !validDownloadFolderIDs.isEmpty else {
+            print("[MediaLibraryService] clearOrphanFolderMemberships: empty valid folder sets, aborting")
+            return -1
+        }
+
+        var clearedCount = 0
+        for index in favoriteRecords.indices {
+            guard let folderID = favoriteRecords[index].folderID,
+                  !validFavoriteFolderIDs.contains(folderID) else { continue }
+            favoriteRecords[index].folderID = nil
+            clearedCount += 1
+        }
+        for index in downloadRecords.indices {
+            guard let folderID = downloadRecords[index].folderID,
+                  !validDownloadFolderIDs.contains(folderID) else { continue }
+            downloadRecords[index].folderID = nil
+            clearedCount += 1
+        }
+
+        guard clearedCount > 0 else { return 0 }
+        rebuildFavCache()
+        rebuildDlCache()
+        favoriteRecords = Array(favoriteRecords)
+        downloadRecords = Array(downloadRecords)
+        print("[MediaLibraryService] Cleared \(clearedCount) orphaned folder memberships")
+        return clearedCount
     }
 
     /// 清理无效下载记录（文件不存在的记录）
@@ -1990,10 +2043,10 @@ final class WallpaperLibraryService: ObservableObject {
     func removeWallpaperDownloads(withIDs ids: Set<String>) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.wallpaper.removeWallpaperDownloads0", ["ids": try? JSONEncoder().encode(ids)]); return }
 
-        var filesToDelete: [String] = []
+        var recordsToDelete: [WallpaperDownloadRecord] = []
         for (index, record) in downloadRecords.enumerated() {
             if ids.contains(record.wallpaper.id) {
-                filesToDelete.append(record.localFilePath)
+                recordsToDelete.append(record)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
                 saveDlToCache(downloadRecords[index])
             }
@@ -2001,17 +2054,17 @@ final class WallpaperLibraryService: ObservableObject {
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
         // 删除所有对应的物理文件
-        for path in filesToDelete {
-            wallpaperDeletePhysicalFile(at: path)
+        for record in recordsToDelete {
+            wallpaperDeletePhysicalFile(at: record.localFilePath, itemID: record.wallpaper.id)
         }
     }
 
     /// 安全删除壁纸物理文件
-    private func wallpaperDeletePhysicalFile(at path: String) {
+    private func wallpaperDeletePhysicalFile(at path: String, itemID: String) {
         guard !path.isEmpty else { return }
         let fm = FileManager.default
         // 如果是 Workshop 下载的内容，删除整个 workshop_xxx 文件夹
-        if let workshopRoot = wallpaperWorkshopRootDirectory(for: path),
+        if let workshopRoot = WorkshopDownloadDeletion.rootDirectory(for: path, itemID: itemID),
            fm.fileExists(atPath: workshopRoot) {
             do {
                 try fm.removeItem(atPath: workshopRoot)
@@ -2029,20 +2082,6 @@ final class WallpaperLibraryService: ObservableObject {
                 print("[WallpaperLibraryService] ⚠️ Failed to delete file \(path): \(error)")
             }
         }
-    }
-
-    /// 检测并返回 Workshop 下载的根文件夹路径
-    private func wallpaperWorkshopRootDirectory(for path: String) -> String? {
-        let components = path.components(separatedBy: "/")
-        if let steamappsIndex = components.firstIndex(of: "steamapps"),
-           steamappsIndex > 0 {
-            let workshopRoot = components[0..<steamappsIndex].joined(separator: "/")
-            let folderName = components[steamappsIndex - 1]
-            if folderName.hasPrefix("workshop_") {
-                return workshopRoot
-            }
-        }
-        return nil
     }
 
     /// 清理无效下载记录（文件不存在的记录）
@@ -2206,6 +2245,46 @@ final class WallpaperLibraryService: ObservableObject {
             )
         }
         return invalidCount
+    }
+
+    /// 把指向已不存在文件夹的 folderID 归零（移回根目录）。
+    ///
+    /// 仅由用户主动触发（设置 → 修复数据）调用；与启动时只读的
+    /// sanitizeFolderMembership 相区分。空有效集合视为「文件夹定义尚未
+    /// 加载」并中止，避免把全部有效归属清空。
+    /// - Returns: 本次实际归零的记录条数（收藏 + 下载）；中止时返回 -1。
+    @discardableResult
+    func clearOrphanFolderMemberships(
+        validFavoriteFolderIDs: Set<String>,
+        validDownloadFolderIDs: Set<String>
+    ) -> Int {
+        guard BackgroundRuntimeRole.isHelper else { return 0 }
+        guard !validFavoriteFolderIDs.isEmpty || !validDownloadFolderIDs.isEmpty else {
+            print("[WallpaperLibraryService] clearOrphanFolderMemberships: empty valid folder sets, aborting")
+            return -1
+        }
+
+        var clearedCount = 0
+        for index in favoriteRecords.indices {
+            guard let folderID = favoriteRecords[index].folderID,
+                  !validFavoriteFolderIDs.contains(folderID) else { continue }
+            favoriteRecords[index].folderID = nil
+            clearedCount += 1
+        }
+        for index in downloadRecords.indices {
+            guard let folderID = downloadRecords[index].folderID,
+                  !validDownloadFolderIDs.contains(folderID) else { continue }
+            downloadRecords[index].folderID = nil
+            clearedCount += 1
+        }
+
+        guard clearedCount > 0 else { return 0 }
+        rebuildFavCache()
+        rebuildDlCache()
+        favoriteRecords = Array(favoriteRecords)
+        downloadRecords = Array(downloadRecords)
+        print("[WallpaperLibraryService] Cleared \(clearedCount) orphaned folder memberships")
+        return clearedCount
     }
 
     private func loadPersistedState() {

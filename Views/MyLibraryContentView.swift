@@ -241,6 +241,7 @@ struct MyLibraryContentView: View {
     @State private var showRedownloadMediaItemConfirm = false
     @State private var pendingWallpaperDeletion: AnyWallpaperItem?
     @State private var pendingMediaDeletion: AnyMediaItem?
+    @State private var showMediaDeletionError = false
 
     // 添加壁纸到文件夹
     @State private var showAddToFolderSheet = false
@@ -644,32 +645,36 @@ struct MyLibraryContentView: View {
                             pendingRedownloadMediaItem = nil
                         }
                     ])
-        .glassAlert(t("delete"), isPresented: wallpaperDeletionAlertPresented,
-                    message: t("deleteConfirmMessage"),
-                    actions: [
-                        GlassAlertAction(t("delete"), role: .destructive) {
-                            if let item = pendingWallpaperDeletion {
-                                deleteWallpaperItem(item)
-                            }
-                            pendingWallpaperDeletion = nil
-                        },
-                        GlassAlertAction(t("cancel"), role: .cancel) {
-                            pendingWallpaperDeletion = nil
-                        }
-                    ])
-        .glassAlert(t("delete"), isPresented: mediaDeletionAlertPresented,
-                    message: t("deleteConfirmMessage"),
-                    actions: [
-                        GlassAlertAction(t("delete"), role: .destructive) {
-                            if let item = pendingMediaDeletion {
-                                deleteMediaItem(item)
-                            }
-                            pendingMediaDeletion = nil
-                        },
-                        GlassAlertAction(t("cancel"), role: .cancel) {
-                            pendingMediaDeletion = nil
-                        }
-                    ])
+        // AppKit 网格上方使用系统弹窗；按钮持有呈现时的 item，避免关闭 Binding 清空待删对象。
+        .alert(t("delete"), isPresented: wallpaperDeletionAlertPresented,
+               presenting: pendingWallpaperDeletion) { item in
+            Button(t("delete"), role: .destructive) {
+                deleteWallpaperItem(item)
+                pendingWallpaperDeletion = nil
+            }
+            Button(t("cancel"), role: .cancel) {
+                pendingWallpaperDeletion = nil
+            }
+        } message: { _ in
+            Text(t("deleteConfirmMessage"))
+        }
+        .alert(t("delete"), isPresented: mediaDeletionAlertPresented,
+               presenting: pendingMediaDeletion) { item in
+            Button(t("delete"), role: .destructive) {
+                deleteMediaItem(item)
+                pendingMediaDeletion = nil
+            }
+            Button(t("cancel"), role: .cancel) {
+                pendingMediaDeletion = nil
+            }
+        } message: { _ in
+            Text(t("deleteConfirmMessage"))
+        }
+        .alert(t("error"), isPresented: $showMediaDeletionError) {
+            Button(t("ok"), role: .cancel) {}
+        } message: {
+            Text(t("library.delete.itemMissing"))
+        }
         .glassAlert(t("import.completed"), isPresented: $showImportResultAlert,
                     message: importResultMessage,
                     icon: importResultIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
@@ -1277,6 +1282,7 @@ struct MyLibraryContentView: View {
         showRedownloadMediaItemConfirm ||
         pendingWallpaperDeletion != nil ||
         pendingMediaDeletion != nil ||
+        showMediaDeletionError ||
         showSyncProfileSheet ||
         showSyncSelectionSheet ||
         // glassAlert 结果类弹窗（带图标，走自绘玻璃）也要挡住 Esc，避免直接退回上一层
@@ -3670,8 +3676,16 @@ struct MyLibraryContentView: View {
     private func deleteMediaItem(_ item: AnyMediaItem) {
         if selectedSubTab == .favorites {
             mediaViewModel.removeFavorites(withIDs: [item.id])
+        } else if MediaLibraryService.shared.downloadRecord(for: item.id) != nil {
+            // 网格快照与 allLocalMedia 的异步缓存可能暂时不同步，下载记录才是删除依据。
+            MediaLibraryService.shared.removeDownloadRecord(withID: item.id)
+            mediaViewModel.refreshLibraryContent()
         } else if let localItem = mediaViewModel.allLocalMedia.first(where: { $0.id == item.id }) {
             deleteLocalMedias([localItem])
+        } else {
+            mediaViewModel.refreshLibraryContent()
+            showMediaDeletionError = true
+            return
         }
         gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
         updateMediaItems()

@@ -12,6 +12,16 @@ final class LibraryFolderStore: ObservableObject {
     private let defaults = WaifuXPreferences.shared
     private let wallpaperFoldersKey = "library_wallpaper_folders_v1"
     private let mediaFoldersKey = "library_media_folders_v1"
+    // 文件夹定义的冗余副本：与库记录同库（CachePersistence），清理工具误删
+    // Group Container 偏好时仍可从此处恢复文件夹结构。
+    private let wallpaperFoldersCacheCategory = "folders/wallpaper"
+    private let mediaFoldersCacheCategory = "folders/media"
+    private let cache = CachePersistenceService.shared
+
+    /// restoreSavedData() 是否真正执行过。供「修复数据」区分
+    /// 「用户没有任何文件夹」与「文件夹定义尚未加载/加载失败」——
+    /// 后者绝不能把孤儿 folderID 归零（会把有效归属全清掉）。
+    private(set) var didRestoreFromDisk = false
 
     private init() {
         if BackgroundRuntimeRole.isRemoteUI {
@@ -40,16 +50,77 @@ final class LibraryFolderStore: ObservableObject {
     func restoreSavedData() {
         guard BackgroundRuntimeRole.isHelper else { return }
         let decoder = JSONDecoder()
+        var restoredWallpaperFolders: [LibraryFolder]?
+        var restoredMediaFolders: [LibraryFolder]?
+
         if let data = defaults.data(forKey: wallpaperFoldersKey),
            let decoded = try? decoder.decode([LibraryFolder].self, from: data) {
             wallpaperFolders = decoded
+            restoredWallpaperFolders = decoded
         }
         if let data = defaults.data(forKey: mediaFoldersKey),
            let decoded = try? decoder.decode([LibraryFolder].self, from: data) {
             mediaFolders = decoded
+            restoredMediaFolders = decoded
+        }
+        didRestoreFromDisk = true
+
+        // 冗余恢复：偏好里的定义缺失（被清理工具删掉）但 CachePersistence
+        // 副本仍在 → 按副本补回并回写偏好。两边都有时以偏好为准。
+        if restoredWallpaperFolders == nil,
+           let cached: [LibraryFolder] = cache.load([LibraryFolder].self, key: wallpaperFoldersCacheCategory) {
+            wallpaperFolders = mergeCachedFolders(local: cached, restored: nil)
+            persistWallpaperFolders()
+            print("[LibraryFolderStore] Restored \(wallpaperFolders.count) wallpaper folders from cache backup")
+        }
+        if restoredMediaFolders == nil,
+           let cached: [LibraryFolder] = cache.load([LibraryFolder].self, key: mediaFoldersCacheCategory) {
+            mediaFolders = mergeCachedFolders(local: cached, restored: nil)
+            persistMediaFolders()
+            print("[LibraryFolderStore] Restored \(mediaFolders.count) media folders from cache backup")
         }
         // 注意：不要在这里 sanitize。
         // 启动时 MediaLibrary 比 FolderStore 更晚 restore；sanitize 由 App 在库数据都恢复后统一调用。
+    }
+
+    /// 冗余副本与已恢复定义合并：同 id 取 updatedAt 更新者，其余补入。
+    private func mergeCachedFolders(local: [LibraryFolder], restored: [LibraryFolder]?) -> [LibraryFolder] {
+        var byID: [String: LibraryFolder] = Dictionary(
+            (restored ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        for folder in local {
+            if let existing = byID[folder.id] {
+                if folder.updatedAt > existing.updatedAt { byID[folder.id] = folder }
+            } else {
+                byID[folder.id] = folder
+            }
+        }
+        return byID.values.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// 导出当前已加载的有效 folderID 集合（按集合区分，供孤儿归属修复使用）。
+    /// 只在文件夹定义真正从磁盘恢复过后才可信；调用方必须检查 `didRestoreFromDisk`。
+    struct ValidFolderIDs {
+        let wallpaperFavorites: Set<String>
+        let wallpaperDownloads: Set<String>
+        let mediaFavorites: Set<String>
+        let mediaDownloads: Set<String>
+
+        /// 壁纸 + 媒体的收藏与下载集合合并是否为空。
+        var isEmptyForAllCollections: Bool {
+            wallpaperFavorites.isEmpty && wallpaperDownloads.isEmpty
+                && mediaFavorites.isEmpty && mediaDownloads.isEmpty
+        }
+    }
+
+    func exportValidFolderIDs() -> ValidFolderIDs {
+        ValidFolderIDs(
+            wallpaperFavorites: Set(wallpaperFolders.filter { $0.collection == .favorites }.map(\.id)),
+            wallpaperDownloads: Set(wallpaperFolders.filter { $0.collection == .downloads }.map(\.id)),
+            mediaFavorites: Set(mediaFolders.filter { $0.collection == .favorites }.map(\.id)),
+            mediaDownloads: Set(mediaFolders.filter { $0.collection == .downloads }.map(\.id))
+        )
     }
 
     /// 启动时/同步后：审计空字符串、孤儿、跨集合 folderID。
@@ -500,11 +571,18 @@ final class LibraryFolderStore: ObservableObject {
         if let data = try? JSONEncoder().encode(wallpaperFolders) {
             defaults.set(data, forKey: wallpaperFoldersKey)
         }
+        // 冗余副本：与下载记录同库，防 Group Container 被清理工具误删
+        if BackgroundRuntimeRole.isHelper {
+            _ = cache.save(wallpaperFolders, key: wallpaperFoldersCacheCategory)
+        }
     }
 
     private func persistMediaFolders() {
         if let data = try? JSONEncoder().encode(mediaFolders) {
             defaults.set(data, forKey: mediaFoldersKey)
+        }
+        if BackgroundRuntimeRole.isHelper {
+            _ = cache.save(mediaFolders, key: mediaFoldersCacheCategory)
         }
     }
 }
