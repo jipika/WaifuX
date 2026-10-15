@@ -119,14 +119,11 @@ actor WallsflowService {
         "sec-ch-ua-platform": "\"macOS\"",
     ]
 
-    /// 文档类请求（列表 / 搜索 / 详情）的 Sec-Fetch 组合。
-    private static let documentFetchHeaders: [String: String] = [
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-    ]
+    /// ⚠️ 文档请求严禁携带 `Sec-Fetch-*` 与 `Upgrade-Insecure-Requests`（2026-10-15 探针实测）：
+    /// URLSession 直连 + 完整头 = 403 挑战页；删掉 Sec-Fetch 组立即 200（108KB 列表页）。
+    /// 机制与媒体头 Origin 教训同构：CF 对「自称浏览器导航、TLS 指纹却不是浏览器」
+    /// 的请求按伪装特征直接拦。裸头 + Chrome UA/CH 三件套均安全。
+    private static let documentFetchHeaders: [String: String] = [:]
 
     private let userAgent = WallsflowService.browserUserAgent
 
