@@ -1598,7 +1598,13 @@ final class MediaExploreViewModel: ObservableObject {
         }
         print("[MediaExploreViewModel] Download option selected: \(downloadOption.label) url=\(downloadOption.remoteURL.path)")
 
-        let fileExtension = downloadOption.remoteURL.pathExtension.isEmpty ? "mp4" : downloadOption.remoteURL.pathExtension
+        // 扩展名只认 URL path 上的真实媒体扩展名；`index.php?do=download&id=N` 的
+        // pathExtension 是 "php"（CGI 端点名），绝不能当媒体扩展名落盘
+        // （2026-10-15 实锤落成 motionbgs-wf-1272-original-hd.php，内容其实是 9MB 真 mp4）。
+        // 存在性判断（locateMediaFile）与此处同源，改名旧文件即可复用、不触发重下。
+        let pathExtension = downloadOption.remoteURL.pathExtension.lowercased()
+        let mediaExtensions: Set<String> = ["mp4", "webm", "mov", "m4v", "gif", "webp", "png", "jpg", "jpeg", "avif"]
+        let fileExtension = mediaExtensions.contains(pathExtension) ? pathExtension : "mp4"
 
         // 使用 DownloadPathManager 获取文件路径（包含路径检测）
         let fileLocation = downloadPathManager.locateMediaFile(

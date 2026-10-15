@@ -152,7 +152,10 @@ actor VideoPreloaderActor {
         let digest = SHA256.hash(data: Data(remoteURL.absoluteString.utf8))
         let hex = digest.compactMap { String(format: "%02x", $0) }.joined()
         let prefix = String(hex.prefix(24))
-        let ext = remoteURL.pathExtension.isEmpty ? "mp4" : remoteURL.pathExtension
+        // 只认真实媒体扩展名；wallsflow 的预览 URL 是 .mp4 不受影响，
+        // 防 CGI 端点名（index.php?do=download）混进缓存命名
+        let raw = remoteURL.pathExtension.lowercased()
+        let ext = ["mp4", "webm", "mov", "m4v"].contains(raw) ? raw : "mp4"
         return previewCacheDirectory.appendingPathComponent("\(prefix).\(ext)")
     }
 
