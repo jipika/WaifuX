@@ -79,6 +79,12 @@ final class MediaGridCell: ExploreGridItem {
     private var resolvedGIFData: Data?
     /// hover 触发的异步探测 / 取数任务
     private var hoverGIFFetchTask: Task<Void, Never>?
+    /// 已排队的「GIF 探测预热」任务（cell 复用即取消）
+    private var gifProbePreheatTask: Task<Void, Never>?
+    /// 上面任务对应的 item id：重复 configure 同一项时不重置预热计时
+    private var gifProbePreheatItemID: String?
+    /// 预热延迟：给滚动留出时间，避免快速掠过时每张卡片都发一次 Range 请求。
+    private static let gifProbePreheatDelay: UInt64 = 250_000_000
     private var shouldRestoreHoverAfterConfigure = false
 
     override var hoverScaleFactor: CGFloat { 1.02 }
@@ -115,6 +121,9 @@ final class MediaGridCell: ExploreGridItem {
         leadingTagBadge.isHidden = true
         trailingBadge.isHidden = true
         teardownHoverGIFPlayback()
+        gifProbePreheatTask?.cancel()
+        gifProbePreheatTask = nil
+        gifProbePreheatItemID = nil
         resolvedGIFURL = nil
         resolvedGIFItemID = nil
         resolvedGIFData = nil
@@ -167,6 +176,9 @@ final class MediaGridCell: ExploreGridItem {
             shouldRestoreHoverAfterConfigure = false
             hoverStateDidChange(true)
         }
+
+        // 空闲预热「是不是 GIF」的探测结论：首次 hover 因此只剩整包下载。
+        scheduleGIFProbePreheat(for: media)
     }
 
     override func layoutContentFrames() {
@@ -236,6 +248,57 @@ final class MediaGridCell: ExploreGridItem {
             // 停止播放并释放 GIF 原始数据（大 GIF 可达数十 MB，连续 hover 多卡时会累积）；
             // 已探测的 URL 保留，再次 hover 命中 Kingfisher 磁盘缓存，无需重新探测
             teardownHoverGIFPlayback()
+        }
+    }
+
+    /// 空闲预热「候选 URL 到底是不是 GIF」的结论，让首次 hover 省掉那次 Range 探测。
+    ///
+    /// 背景：壁纸引擎（Steam）封面 URL 形如 `…/ugc/<a>/<b>/`，没有扩展名也没有文件名 →
+    /// `urlLooksLikeGIF` 与 `media.isAnimatedImage` 都是 false → hover 时**必然**先探一次
+    /// （本机实测 0.78s）才开始下载，首次出动画要 ≈2s，等不到的用户会以为"不播"。
+    /// 这里只探测（64KB Range）、不下载整包，静态封面不会被浪费流量。
+    /// ⚠️ 三个探测参数必须与 hover 路径逐字一致：`AnimatedImageProbeCache` 的缓存 key
+    /// 由 `(url, maxByteCount, maxPixelCount, maxFrameCount)` 拼成，参数错开就命不中缓存，
+    /// 表现为"预热白做"且不报错。
+    private func scheduleGIFProbePreheat(for media: MediaItem) {
+        // 同一项已有排队中的预热 → 保留原任务：重复 configure（收藏/状态刷新）不该把延迟清零。
+        if gifProbePreheatTask != nil, gifProbePreheatItemID == media.id { return }
+
+        gifProbePreheatTask?.cancel()
+        gifProbePreheatTask = nil
+        gifProbePreheatItemID = nil
+
+        let candidates = preferredImageURLs(for: media)
+        guard let firstCandidate = candidates.first else { return }
+        // 与 hover 路径同一判据：URL 自带 GIF 线索时 hover 本就不探测，无需预热。
+        let needsProbe = candidates.allSatisfy { !Self.urlLooksLikeGIF($0) }
+            && media.isAnimatedImage != true
+        guard needsProbe else { return }
+        // 已有结论（进程内缓存命中）就不必再排队。
+        guard AnimatedImageProbeCache.shared.cachedIsAnimatedGIF(
+            firstCandidate,
+            maxByteCount: Self.maxAnimatedGIFBytes,
+            maxPixelCount: Self.maxAnimatedGIFPixelCount,
+            maxFrameCount: Self.maxAnimatedGIFFrameCount
+        ) == nil else { return }
+
+        let itemID = media.id
+        gifProbePreheatItemID = itemID
+        gifProbePreheatTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.gifProbePreheatDelay)
+            // sleep 被取消时 `try?` 会吞掉 CancellationError，这里必须再确认一次取消状态。
+            guard !Task.isCancelled, let self, self.currentMedia?.id == itemID else { return }
+            for url in candidates {
+                guard !Task.isCancelled else { return }
+                let isGIF = await AnimatedImageProbeCache.shared.isAnimatedGIF(
+                    url,
+                    maxByteCount: Self.maxAnimatedGIFBytes,
+                    maxPixelCount: Self.maxAnimatedGIFPixelCount,
+                    maxFrameCount: Self.maxAnimatedGIFFrameCount
+                )
+                // 命中 GIF：结论已进缓存，hover 时直接进下载分支；否则继续试下一个候选。
+                if isGIF { return }
+            }
         }
     }
 
