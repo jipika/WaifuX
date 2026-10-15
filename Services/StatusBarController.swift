@@ -519,6 +519,20 @@ final class StatusBarController: NSObject {
             }
             .store(in: &cancellables)
 
+        // 设计目标缓存的失效订阅：只挂 `computeWallpaperDesignTarget()` 真正依赖的输入
+        // （WE 是否在控 / 当前渲染类型 / 当前视频），不去蹭上面两条为菜单刷新而生的链
+        // —— 音量、静音、暂停都不影响设计目标，蹭进来会让缓存白做。
+        // `renderStateChangeCount` 承载 `isCurrentWallpaperWeb` / `isCurrentWallpaperScene`
+        // 的变化，而 WE 停止后 `currentWallpaperPathForDesign` 仍会残留旧路径，
+        // 光靠 key 区分不出「刚停」和「没变」。
+        weBridge.$isControllingExternalEngine
+            .combineLatest(weBridge.$renderStateChangeCount, videoWallpaperManager.$currentVideoURL)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _, _ in
+                self?.invalidateDesignTargetCache()
+            }
+            .store(in: &cancellables)
+
         WallpaperSchedulerService.shared.$config
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
@@ -1473,19 +1487,42 @@ final class StatusBarController: NSObject {
     /// 「设计壁纸 / 场景高级设置」两项是否出现，取决于当前壁纸的工程是否可编辑 ——
     /// 而 `hasEditableProperties` 要解析工程的 `project.json`（读盘 + JSON 解码）。
     /// 左键弹窗（`canDesignCurrentWallpaper`）和右键菜单（`refreshMenuState`）**每次**
-    /// 都要问一遍，等于每次点图标都去读一次盘。这里按「当前壁纸路径 + 实时渲染开关」
-    /// 缓存结果：两者没变就直接复用（壁纸换了就自动失效重算）。
+    /// 都要问一遍，等于每次点图标都去读一次盘，所以这里做缓存。
+    ///
+    /// 缓存失效走**两条腿**，不去穷举输入维度：
+    /// 1. **显式作废**（`invalidateDesignTargetCache()`）：WE 是否在控、渲染类型
+    ///    （`renderStateChangeCount`）、当前视频这几个状态一变就清，见 `bindWallpaperState()`。
+    /// 2. **TTL 兜底**：`computeWallpaperDesignTarget()` 的输入不止「路径 + 开关」——
+    ///    `currentSceneDesignWallpaperPath()` 还要读磁盘上的 sidecar JSON，
+    ///    `hasEditableProperties` 读的 `project.json` 本身也可能被下载/烘焙改写。
+    ///    这些都无法廉价地并进 key，所以到点重算，保证任何漏掉的输入变化最迟 30 秒自愈。
+    ///
+    /// 2026-10-15 修的坑：原先只有 key 一条腿（路径 + 实时渲染开关），而 Helper 启动恢复、
+    /// 视频→场景切换时 `lastWallpaperPath` 会残留上一张 WE 壁纸的路径，新旧 key 完全相同，
+    /// 于是把恢复早期 `isControllingExternalEngine` 还没起来时算出的 `nil` 一路钉死 ——
+    /// 表现为「设计壁纸」按钮偶发不出现，得重开 App 或再切一张才恢复。
     private var cachedDesignTarget: WallpaperDesignTarget?
     private var cachedDesignTargetKey: String?
+    private var cachedDesignTargetAt: Date?
+    private static let designTargetCacheLifetime: TimeInterval = 30
+
+    private func invalidateDesignTargetCache() {
+        cachedDesignTargetKey = nil
+        cachedDesignTargetAt = nil
+        cachedDesignTarget = nil
+    }
 
     private func resolvedWallpaperDesignTarget() -> WallpaperDesignTarget? {
         let key = (weBridge.currentWallpaperPathForDesign ?? "<none>")
             + "|" + String(WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled"))
-        if let cachedDesignTargetKey, cachedDesignTargetKey == key {
+        if let cachedDesignTargetKey, cachedDesignTargetKey == key,
+           let cachedDesignTargetAt,
+           Date().timeIntervalSince(cachedDesignTargetAt) < Self.designTargetCacheLifetime {
             return cachedDesignTarget
         }
         let resolved = computeWallpaperDesignTarget()
         cachedDesignTargetKey = key
+        cachedDesignTargetAt = Date()
         cachedDesignTarget = resolved
         return resolved
     }
