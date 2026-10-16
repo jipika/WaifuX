@@ -447,8 +447,19 @@ sign_exported_app() {
           python3 "$PROJECT_DIR/scripts/verify-helper-provisioning.py" --app "$code_path" \
             --prepare-entitlements "$agent_entitlements" --output-entitlements "$agent_sign_entitlements" || return 1
         fi
-        codesign --force --timestamp=none --options runtime --entitlements "$agent_sign_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
-          codesign --force --options runtime --entitlements "$agent_sign_entitlements" -s "$identity" "$code_path"
+        # 注意：CI（release.yml 的 Sign & Notarize）重签内嵌代码时只遍历
+        # Contents/Resources、Contents/Frameworks、Contents/PlugIns，有意不碰 Contents/Helpers
+        # （Helper 的 profile / entitlements / 时间戳统一由本分支负责）。
+        # 因此 secure timestamp 必须在这里保证——Apple 公证对它是硬性要求。
+        # Developer ID 下 TSA 失败就显式报错，不再静默降级成无时间戳签名（那种包公证必挂）。
+        # ad-hoc（identity="-"）仅用于本地验证包，不能加 --timestamp，保持 none。
+        local helper_ts_flag=(--timestamp)
+        [[ "$identity" == "-" ]] && helper_ts_flag=(--timestamp=none)
+        codesign --force --options runtime "${helper_ts_flag[@]}" \
+          --entitlements "$agent_sign_entitlements" -s "$identity" "$code_path" || {
+            echo "  ❌ Helper 签名失败（Developer ID 需能访问 timestamp.apple.com 取安全时间戳）: $code_path" >&2
+            return 1
+          }
         local agent_ent_check
         agent_ent_check=$(codesign -d --entitlements - "$code_path" 2>/dev/null || true)
         if ! echo "$agent_ent_check" | grep -q "com.apple.security.application-groups"; then
