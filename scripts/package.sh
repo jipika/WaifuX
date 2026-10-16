@@ -233,35 +233,33 @@ fi
 
 echo "✅ Archive 成功"
 
-# 创建 exportOptions.plist
-cat > "$BUILD_DIR/exportOptions.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>method</key>
-    <string>mac-application</string>
-</dict>
-</plist>
-EOF
-
-# 导出 App
-echo "📤 正在导出 App..."
-xcodebuild -exportArchive \
-  -archivePath "$BUILD_DIR/$ARCHIVE_NAME" \
-  -exportPath "$BUILD_DIR" \
-  -exportOptionsPlist "$BUILD_DIR/exportOptions.plist" \
-  CODE_SIGN_IDENTITY="-" \
-  CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$BUILD_DIR/export.log"
-
-EXPORT_STATUS=${PIPESTATUS[0]}
-if [ $EXPORT_STATUS -ne 0 ]; then
-    echo "❌ 导出失败"
-    cat "$BUILD_DIR/export.log" | tail -50
+# 从 archive 直接提取 App（不走 -exportArchive）
+# 根因：自 a9488026（10-11 后台职责移交 Helper）起，主 App archive 内嵌套了
+# Contents/Helpers/WaifuXHelper.app —— 它是 type:application 且带 App Group
+# entitlements，而 archive 以 CODE_SIGNING_ALLOWED=NO / CODE_SIGN_IDENTITY=- 构建
+# （无正式签名、无 provisioning）。Xcode 27 的 IDEDistribution 在枚举「该 archive
+# 支持哪些导出方法」时返回空集，报：
+#   exportArchive exportOptionsPlist error for key "method" expected one {} but found mac-application
+# 于是任何 method 值都被拒，-exportArchive 必然失败。09-29 那次同参数、同 Xcode(27A266a)
+# 2 秒「✅ 导出成功」，其 archive 内只有 .appex 与 .saver（bundle 不触发枚举）——
+# 佐证是产物结构而非命令写错。本脚本的 export 本就 CODE_SIGNING_ALLOWED=NO 且不做
+# thinning（archive 已按 ARCHS 出目标架构），产物等价于 archive 内 Products/Applications/
+# WaifuX.app 的纯拷贝；真正签名在下游 sign_exported_app（重签整个 bundle）。
+echo "📤 从 archive 提取 App..."
+ARCHIVE_APP="$BUILD_DIR/$ARCHIVE_NAME/Products/Applications/$APP_NAME"
+if [[ ! -d "$ARCHIVE_APP" ]]; then
+    echo "❌ archive 内未找到 $APP_NAME: $ARCHIVE_APP" >&2
+    ls -R "$BUILD_DIR/$ARCHIVE_NAME/Products" 2>/dev/null | tail -30
     exit 1
 fi
-
-echo "✅ 导出成功"
+rm -rf "$BUILD_DIR/$APP_NAME"
+# 用 ditto 而非 cp -R：保留符号链接（如 Sparkle.framework/Resources）、xattr、资源叉。
+ditto "$ARCHIVE_APP" "$BUILD_DIR/$APP_NAME"
+if [[ $? -ne 0 ]]; then
+    echo "❌ 提取失败：ditto $ARCHIVE_APP" >&2
+    exit 1
+fi
+echo "✅ 提取成功"
 
 # ---- x86_64 包换装渲染器组件（签名前）----
 # folder reference 会把仓库 Resources/ 原样拷进 bundle（含 arm64 组件与带 -x86_64 后缀的
