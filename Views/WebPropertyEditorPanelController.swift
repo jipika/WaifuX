@@ -266,21 +266,50 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func loadHTMLEditorContent() -> String {
-        // Try standard bundle path first (Contents/Resources/)
+    /// 编辑器 HTML 的候选路径。
+    ///
+    /// 这个面板是在 **Helper 进程**里弹出的（`StatusBarController` 属于 `WaifuXHelper`），
+    /// 而 Helper 的 `Bundle.main` 指向 `Contents/Helpers/WaifuXHelper.app` —— 里面没有
+    /// 编辑器 HTML；主 App 的 `Resources` 又是 folder reference（落在
+    /// `Contents/Resources/Resources/`）。只查 `Bundle.main` 时两条路径都落空，
+    /// 会一路掉到 `fallbackHTML`，表现为面板停在「Loading editor…」，
+    /// 也就是「设计壁纸加载不出来」。
+    ///
+    /// 现在先问宿主 App（与 `RendererComponentStore` 读 `renderer-components.json`
+    /// 同一套机制），再退本进程的顶层资源与 folder-reference 嵌套位置；
+    /// 同时 `project.yml` 把 HTML 显式编进 Helper 资源，双保险。
+    private static func editorHTMLCandidates() -> [URL] {
+        var candidates: [URL] = []
+
+        // 1. 宿主 App 资源（Helper 进程 → 主 App；主 App 进程 → 自身）
+        candidates.append(
+            contentsOf: WaifuXHostBundle.resourceCandidates(named: "WallpaperPropertyEditor.html")
+        )
+
+        // 2. 当前进程 bundle 的顶层资源（standalone Helper 或直接编进顶层时命中）
         if let url = Bundle.main.url(forResource: "WallpaperPropertyEditor", withExtension: "html"),
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            return content
+           !candidates.contains(url) {
+            candidates.append(url)
         }
-        // Resources is a folder reference → nested at Contents/Resources/Resources/
+
+        // 3. 当前进程 bundle 的 folder-reference 嵌套位置
         if let resourceURL = Bundle.main.resourceURL {
-            let nested = resourceURL
-                .appendingPathComponent("Resources")
-                .appendingPathComponent("WallpaperPropertyEditor.html")
-            if let content = try? String(contentsOf: nested, encoding: .utf8) {
+            let nested = resourceURL.appendingPathComponent("Resources/WallpaperPropertyEditor.html")
+            if !candidates.contains(nested) {
+                candidates.append(nested)
+            }
+        }
+
+        return candidates
+    }
+
+    private func loadHTMLEditorContent() -> String {
+        for url in Self.editorHTMLCandidates() {
+            if let content = try? String(contentsOf: url, encoding: .utf8) {
                 return content
             }
         }
+        print("[WebPropertyEditor] Editor HTML missing; searched \(Self.editorHTMLCandidates().map(\.path))")
         return Self.fallbackHTML
     }
 
@@ -1018,8 +1047,13 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
     private static let fallbackHTML = """
     <!DOCTYPE html>
     <html><head><meta charset="UTF-8"><style>
-    body { background: transparent; color: #e2e8f0; font-family: system-ui; padding: 20px; }
-    </style></head><body><p>Loading editor...</p></body></html>
+    body { background: transparent; color: #e2e8f0; font-family: system-ui; padding: 20px; font-size: 13px; line-height: 1.6; }
+    h1 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    code { color: #94a3b8; word-break: break-all; }
+    </style></head><body>
+    <h1>编辑器资源缺失</h1>
+    <p>未能加载 <code>WallpaperPropertyEditor.html</code>，请重新构建 App，确保 Helper 资源已随包携带。</p>
+    </body></html>
     """
 }
 

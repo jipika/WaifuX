@@ -803,6 +803,36 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
               return true;
             }
 
+            // WebKit 对「文件不存在」和「文件是 0 字节」都表现为 status=0 + 空响应，
+            // JS 侧无法区分。真实的 skel / atlas / json / 脚本不会是 0 字节，因此把
+            // 空响应视为失败是安全的一侧。
+            // 反例（实测 Wallpaper Engine Spine 壁纸黑屏的根因）：把空响应也规范成
+            // 200，spine-player 的 Downloader 会因 status==200 把空内容当成功，留下
+            // 半初始化的 asset；随后壁纸切换角色时 dispose() → assetManager
+            // .removeAll() → asset.dispose() 抛 TypeError，changeCharacter 的 async
+            // 链路整条中断，新角色永远不加载（画面上只剩背景色）。
+            function wxLocalFileResponseIsEmpty(xhr) {
+              try {
+                var rt = xhr.responseType;
+                if (rt === "arraybuffer") {
+                  return !xhr.response || xhr.response.byteLength === 0;
+                }
+                if (rt === "blob") {
+                  return !xhr.response || xhr.response.size === 0;
+                }
+                if (rt === "json") {
+                  return xhr.response == null;
+                }
+                if (rt === "" || rt === "text") {
+                  var text = xhr.responseText;
+                  return !text || text.length === 0;
+                }
+                return false;
+              } catch (e) {
+                return false;
+              }
+            }
+
             var proto = HTMLImageElement.prototype;
             var srcDesc = Object.getOwnPropertyDescriptor(proto, "src");
             if (srcDesc && srcDesc.set) {
@@ -844,7 +874,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                       if (status === 0
                         && this.__wxLocalFileRequest
                         && this.readyState === XMLHttpRequest.DONE) {
-                        return 200;
+                        // 存在的文件 → 200（兼容只看 status 的 runtime）；
+                        // 空响应 → 保持失败语义，别把缺失文件伪装成成功。
+                        return wxLocalFileResponseIsEmpty(this) ? 404 : 200;
                       }
                     } catch (e) {}
                     return status;
@@ -866,8 +898,12 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                       xhr.open("GET", String(url), true);
                       xhr.responseType = "arraybuffer";
                       xhr.onload = function() {
-                        // file:// 成功时常为 status 0；部分环境也可能给 200
-                        if (xhr.status === 200 || xhr.status === 0) {
+                        // file:// 成功时常为 status 0；部分环境也可能给 200。
+                        // 空 body 必须当失败（见 wxLocalFileResponseIsEmpty 注释），
+                        // 否则依赖 fetch 的 runtime 会把缺失资源当成功。
+                        var loadedBody = xhr.response;
+                        var loadedBodyEmpty = !loadedBody || loadedBody.byteLength === 0;
+                        if ((xhr.status === 200 || xhr.status === 0) && !loadedBodyEmpty) {
                           var headers = new Headers();
                           try {
                             var contentType = xhr.getResponseHeader("Content-Type");
@@ -2838,6 +2874,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     private var finderDesktopWindowIDs: Set<Int> = []
     private var bridgedMouseDownScreen: Int?
     private var loggedFinderHitTestFailure = false
+    /// AX 未授权时的降级只报告一次，避免每次点击刷日志。
+    private var loggedAccessibilityFallback = false
 
     private func startMouseEventBridge(for screen: Int) {
         guard screenStates[screen]?.window != nil, screenStates[screen]?.webView != nil else { return }
@@ -2867,6 +2905,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         globalMouseMonitors.removeAll()
         finderDesktopWindowIDs.removeAll()
         lastGlobalMouseMoveTime = 0
+        loggedFinderHitTestFailure = false
+        loggedAccessibilityFallback = false
     }
 
     private func refreshFinderDesktopWindowIDs() {
@@ -2926,7 +2966,21 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             refreshFinderDesktopWindowIDs()
         }
         guard finderDesktopWindowIDs.contains(target) else { return false }
-        return !requireBlank || isBlankFinderDesktop(at: event)
+        if !requireBlank { return true }
+        // 目标已确认是 Finder 的桌面层窗口（此判定只依赖 CGWindowList，不看 AX）。
+        // 但 `isBlankFinderDesktop` 需要辅助功能授权：daemon 由短命 client 进程 spawn 后
+        // reparent 到 launchd，TCC 不把 App 的授权归给它，实测恒为 AX error=-25211 →
+        // 点击会被全部丢弃，壁纸自身的 click 交互（角色动作 / 语音 / 音效）完全失效。
+        // 降级：仍只在 Finder 桌面窗口上转发，只是不再区分「空白处」与「桌面图标」。
+        // 点到图标时图标本身照常响应（monitor 不吞事件），壁纸只是多播一次动作。
+        if !AXIsProcessTrusted() {
+            if !loggedAccessibilityFallback {
+                loggedAccessibilityFallback = true
+                dlog("[WebRendererBridge] ⚠️ accessibility not granted; forwarding Finder-desktop clicks without blank-area check")
+            }
+            return true
+        }
+        return isBlankFinderDesktop(at: event)
     }
 
     private func cancelBridgedMouseDown() {
@@ -2997,7 +3051,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             DispatchQueue.main.async { [weak webView] in
                 webView?.evaluateJavaScript(script)
             }
-            if type == "mousedown" { bridgedMouseDownScreen = screen }
+            if type == "mousedown" {
+                bridgedMouseDownScreen = screen
+                dlog("[WebRendererBridge] mouse mousedown forwarded screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) ax=\(AXIsProcessTrusted())")
+            }
             if type == "mouseup" { bridgedMouseDownScreen = nil }
             delivered = true
             break
@@ -3966,6 +4023,8 @@ private final class WebRealtimeStreamRecorder: NSObject, SCStreamOutput, SCStrea
     private var videoInput: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var firstPresentationTime: CMTime?
+    /// 首帧记录一次 SCK 交付尺寸，用于判断是否发生了隐式缩放。
+    private var loggedCaptureBufferSize = false
     private var lastPresentationTimeValue: CMTimeValue?
     private var writtenFrameCount = 0
     private var writerBackpressureDropCount = 0
@@ -4058,7 +4117,12 @@ private final class WebRealtimeStreamRecorder: NSObject, SCStreamOutput, SCStrea
                 configuration.showsCursor = false
                 configuration.ignoreShadowsSingleWindow = true
                 configuration.ignoreGlobalClipSingleWindow = true
-                configuration.captureResolution = .nominal
+                // `.nominal` 按内容的「名义分辨率」抓（窗口点尺寸 = 1x），再被
+                // scalesToFit 放大到配置里的 2x 目标尺寸，等于先降采样再插值放大。
+                // 实测同构图对比：实时渲染 lapMean=2.12 / lapVar=171，
+                // 烘焙成片只有 1.08 / 15（边缘能量差一个数量级），成片明显发虚。
+                // `.best` 按原生 backing 像素抓，2x 屏下窗口正好是目标尺寸，无需二次缩放。
+                configuration.captureResolution = .best
 
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
@@ -4119,6 +4183,19 @@ private final class WebRealtimeStreamRecorder: NSObject, SCStreamOutput, SCStrea
 
         let sourceTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard sourceTime.isValid else { return }
+        // 一次性记录 SCK 实际交付的像素尺寸：与 writer 目标尺寸不一致即代表
+        // 中间发生了缩放（.nominal 曾导致 1x 抓取再放大，成片发虚）。
+        if !loggedCaptureBufferSize, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            loggedCaptureBufferSize = true
+            let bw = CVPixelBufferGetWidth(buffer)
+            let bh = CVPixelBufferGetHeight(buffer)
+            let attachments = CVBufferCopyAttachments(buffer, .shouldNotPropagate) as? [String: Any]
+            let cs = attachments.flatMap { $0[kCVImageBufferCGColorSpaceKey as String] }.map { "\($0)" } ?? "none"
+            fputs(
+                "[web-bake] capture buffer=\(bw)x\(bh) target=\(options.width)x\(options.height) colospace=\(cs)\n",
+                stderr
+            )
+        }
         if firstPresentationTime == nil {
             firstPresentationTime = sourceTime
         }
@@ -4541,11 +4618,12 @@ private final class WebOfflineBakeRunner {
     /// their steady animation and BGM several seconds after the document first loads.
     private static let realtimeCaptureWarmup: TimeInterval = 7.0
 
-    /// 4K60 下约 50Mbps（~0.1 bpp），明显优于旧的 width×height×3（~25Mbps）。
+    /// ~0.10 bit/pixel/frame，并按分辨率夹紧，避免 1080p 过低或 5K 失控。
+    /// 实测把系数提高到 0.16（3200x1800 下 ~32Mbps）对锐度没有可测收益
+    /// （lapMean 1.65 → 1.65），瓶颈在窗口合成而不是量化，因此保持原系数。
     private static func averageBitRate(width: Int, height: Int, fps: Double) -> Int {
         let pixels = max(1, width) * max(1, height)
         let safeFPS = max(minimumAutomaticFrameRate, fps)
-        // ~0.10 bit/pixel/frame，并按分辨率夹紧，避免 1080p 过低或 5K 失控。
         let raw = Double(pixels) * safeFPS * 0.10
         return Int(min(max(raw, 8_000_000), 100_000_000))
     }

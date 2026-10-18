@@ -107,6 +107,13 @@ class WallpaperSchedulerService: ObservableObject {
     private var pendingUnlockSwitch = false
     private var shouldStartAfterDisplayRestore = false
     private var unlockRotationTask: Task<Void, Never>?
+    /// 每个进程只记录一次「按精确指纹认领归属」的日志，避免设置页读路径刷屏。
+    private var loggedExactFingerprintOwners: Set<String> = []
+    /// 排布超过采样上限后先放行调度，把配置迁移延后到一次稳定复核。
+    private var pendingSettledScreenReconcile = false
+    private var pendingSettledScreenReconcileAttempts = 0
+    /// 0.9s 一次采样；外接屏协商 / 唤醒风暴实测 8~12 次，取 12 覆盖单轮风暴。
+    private static let maxScreenArrangementSamples = 12
     private var canScheduleForCurrentScreens: Bool {
         !isSystemSleeping && !isScreenArrangementSettling
     }
@@ -771,13 +778,56 @@ class WallpaperSchedulerService: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
             guard let self, self.screenChangeGeneration == generation,
                   !self.isSystemSleeping, !self.isPreparingForProcessTermination else { return }
-            // Never force a migration after N unstable samples. A partial but
-            // stable topology is safe: unresolved owners remain parked intact.
             if !snapshot.isEmpty, Self.screenArrangementSnapshot() == snapshot {
+                self.isScreenArrangementSettling = false
+                self.pendingSettledScreenReconcile = false
+                self.pendingSettledScreenReconcileAttempts = 0
+                self.processSettledScreenChange()
+            } else if attempt >= Self.maxScreenArrangementSamples {
+                // 外接屏协商 / 唤醒风暴实测可持续 8~12 个采样周期。继续递归会让
+                // isScreenArrangementSettling 永久为 true，canScheduleForCurrentScreens
+                // 随之永久为 false，所有轮换 / 解锁切换停摆（2026-10-17 日志：
+                // 13:46 与 16:01 两轮连续 screen parameters changed）。
+                // 这里只解冻调度，配置迁移交给带退避的稳定复核，避免抖动中错配。
+                let current = Self.screenArrangementSnapshot()
+                self.isScreenArrangementSettling = false
+                self.pendingSettledScreenReconcile = true
+                self.pendingSettledScreenReconcileAttempts = 0
+                if self.isRunning { self.scheduleNextChange() }
+                AppLogger.error(.wallpaper, "Screen arrangement unstable past sampling limit; scheduler resumed with deferred reconcile", metadata: [
+                    "attempt": attempt,
+                    "screens": current.joined(separator: " | ")
+                ])
+                self.retryDeferredScreenReconcile(generation: generation, snapshot: current)
+            } else {
+                self.awaitStableScreenArrangementThenProcess(generation: generation, attempt: attempt + 1)
+            }
+        }
+    }
+
+    /// 超限放行后仍要收敛配置：每 5s 复核一次快照，连续一致才执行迁移；最多 3 次。
+    private func retryDeferredScreenReconcile(generation: UInt64, snapshot: [String]) {
+        guard pendingSettledScreenReconcile else { return }
+        guard pendingSettledScreenReconcileAttempts < 3 else {
+            pendingSettledScreenReconcile = false
+            AppLogger.error(.wallpaper, "Deferred screen reconcile abandoned after retries", metadata: [
+                "screens": snapshot.joined(separator: " | ")
+            ])
+            return
+        }
+        pendingSettledScreenReconcileAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.pendingSettledScreenReconcile,
+                  self.screenChangeGeneration == generation,
+                  !self.isSystemSleeping, !self.isPreparingForProcessTermination else { return }
+            let current = Self.screenArrangementSnapshot()
+            if !snapshot.isEmpty, current == snapshot {
+                self.pendingSettledScreenReconcile = false
+                self.pendingSettledScreenReconcileAttempts = 0
                 self.isScreenArrangementSettling = false
                 self.processSettledScreenChange()
             } else {
-                self.awaitStableScreenArrangementThenProcess(generation: generation, attempt: attempt + 1)
+                self.retryDeferredScreenReconcile(generation: generation, snapshot: current)
             }
         }
     }
@@ -871,11 +921,47 @@ class WallpaperSchedulerService: ObservableObject {
         var bindings = WallpaperScreenIdentity.schedulerBindings(
             fingerprints: fingerprints, screens: screens, allowRelativeRank: allowRelativeRank
         )
-        // One-time migration for installations predating physical fingerprints.
-        // A recorded owner always takes precedence over this legacy fallback.
+        // Live screens that still carry their own stored config must resolve even
+        // when the saved topology no longer matches the live one. 9d09cc15 made
+        // schedulerBindings require `saved.count == live.count`; disconnecting any
+        // historical display (cleanupOrphanedScreenState deliberately keeps its
+        // records) then emptied the whole binding map, so every per-display write
+        // was silently dropped by canonicalDisplayConfigScreenID and auto-switch
+        // was blocked by hasUnresolvedSavedOwner.
         for screen in screens where !bindings.values.contains(screen.id) {
-            if config.displayConfigs[screen.id] != nil, fingerprints[screen.id] == nil {
-                bindings[screen.id] = screen.id
+            // Exact fingerprint: a saved record whose fingerprint equals this live
+            // screen belongs to it, even under a reused NSScreenNumber. Duplicate
+            // records for the same physical display ("4"/"5" same serial) resolve
+            // to the smallest key so repeated calls stay deterministic.
+            let exactSavedKeys = fingerprints
+                .filter {
+                    $0.value == screen.fingerprint
+                        && config.displayConfigs[$0.key] != nil
+                        && bindings[$0.key] == nil
+                }
+                .keys.sorted()
+            // Prefer the record that already carries this live ID; only fall back
+            // to the smallest key when the ID itself changed across a reboot.
+            let preferredSavedKey = exactSavedKeys.contains(screen.id) ? screen.id : exactSavedKeys.first
+            if let savedKey = preferredSavedKey {
+                bindings[savedKey] = screen.id
+                if loggedExactFingerprintOwners.insert(screen.id).inserted {
+                    AppLogger.info(.wallpaper, "Scheduler owner accepted by exact fingerprint", metadata: [
+                        "liveID": screen.id,
+                        "savedKey": savedKey,
+                        "fingerprint": screen.fingerprint
+                    ])
+                }
+                continue
+            }
+            // Legacy installs predating physical fingerprints: accept only when
+            // no other record claims the same hardware (reused IDs fail closed).
+            if fingerprints[screen.id] == nil, config.displayConfigs[screen.id] != nil {
+                let hardware = WallpaperScreenIdentity.schedulerHardwareKey(screen.fingerprint)
+                let claimsSameHardware = fingerprints.values.contains {
+                    WallpaperScreenIdentity.schedulerHardwareKey($0) == hardware
+                }
+                if !claimsSameHardware { bindings[screen.id] = screen.id }
             }
         }
         return bindings
@@ -1000,6 +1086,13 @@ class WallpaperSchedulerService: ObservableObject {
     /// 期间覆盖手动选择。成功/失败后的时间状态由 completeManualWallpaperApply 处理。
     @MainActor
     func beginManualWallpaperApply() async {
+        if BackgroundRuntimeRole.isRemoteUI {
+            // UI 进程调用过 begin/complete，但事务门只活在 Helper 里；
+            // 缺这条转发时 Helper 永远不置起 manualWallpaperApplyInFlight，
+            // 定时 tick 有机会在用户手动设置过程中覆盖选择。
+            _ = try? await BackgroundRuntimeBridge.request("scheduler.beginManualApply", [:])
+            return
+        }
         guard BackgroundRuntimeRole.isHelper else { return }
 
         var tasksToDrain: [Task<Void, Never>] = []
@@ -1047,6 +1140,13 @@ class WallpaperSchedulerService: ObservableObject {
     /// 调度器，不把一次失败的手动操作误记成最近一次壁纸切换。
     @MainActor
     func completeManualWallpaperApply(success: Bool, screenIDs: Set<String>) {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.send("scheduler.completeManualApply", [
+                "success": success,
+                "screenIDs": Array(screenIDs)
+            ])
+            return
+        }
         guard BackgroundRuntimeRole.isHelper else { return }
 
         manualWallpaperApplyInFlight = false
@@ -1577,7 +1677,14 @@ class WallpaperSchedulerService: ObservableObject {
               !savedDisplayFingerprints().values.contains(where: {
                   WallpaperScreenIdentity.schedulerHardwareKey($0) == hardware
               }) else {
-            AppLogger.info(.wallpaper, "Scheduler deferred ambiguous display edit", metadata: ["screenID": screenID])
+            AppLogger.error(.wallpaper, "Scheduler rejected display edit: ambiguous owner", metadata: [
+                "screenID": screenID,
+                "hardware": hardware,
+                "hasOwnConfig": config.displayConfigs[screenID] != nil ? "yes" : "no",
+                "sameHardwareSaved": savedDisplayFingerprints().filter {
+                    WallpaperScreenIdentity.schedulerHardwareKey($0.value) == hardware
+                }.keys.sorted().joined(separator: ",")
+            ])
             return nil
         }
         // First configuration of a new hardware group records every sibling,

@@ -702,6 +702,15 @@ final class BackgroundAgentRuntime {
         case "scheduler.suppressAutoSwitchGlobally":
             WallpaperSchedulerService.shared.suppressAutoSwitchGlobally()
             return [:]
+        case "scheduler.beginManualApply":
+            await WallpaperSchedulerService.shared.beginManualWallpaperApply()
+            return [:]
+        case "scheduler.completeManualApply":
+            WallpaperSchedulerService.shared.completeManualWallpaperApply(
+                success: a.bool("success"),
+                screenIDs: Set(a.values["screenIDs"] as? [String] ?? [])
+            )
+            return [:]
         case "scheduler.stop":
             WallpaperSchedulerService.shared.stop()
             return [:]

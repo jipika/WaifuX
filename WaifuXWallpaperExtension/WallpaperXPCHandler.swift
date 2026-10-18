@@ -625,7 +625,10 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
         // 静态图和视频热切换都可能恰好落在 WallpaperAgent 重建 context 的窗口。
         // 静态图必须优先于待处理视频消费，避免旧视频命令在下一次 acquire 时反向覆盖新图片。
-        if let pendingImageURL = WallpaperState.shared.takePendingImage(for: displayID) {
+        // 待处理静态图可能来自旧机器/旧用户的容器路径：校验归属，失效则丢弃
+        // 并继续走 prefs / findImageURL，而不是直接渲染失败退成系统桌面图。
+        if let pending = WallpaperState.shared.takePendingImage(for: displayID),
+           let pendingImageURL = containerOwnedImageURL(pending) {
             extLog("  [Acquire] 📦 应用待处理静态图 display=\(displayID) image=\(pendingImageURL.lastPathComponent)")
             renderStaticImage(
                 imageURL: pendingImageURL,
@@ -779,6 +782,21 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         return url
     }
 
+    /// 持久化/命令里的绝对路径可能来自旧机器或旧用户（例如
+    /// /Users/<other>/Library/Group Containers/group.com.waifux.app/...）。
+    /// 只有落在当前 App Group 容器内、且实际可读的路径才可用；其余交给
+    /// 调用方按 sourceID 在容器里重建，避免整屏回退成系统桌面图。
+    static func containerOwnedImageURL(_ url: URL) -> URL? {
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
+        ) else { return nil }
+        let root = container.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let candidate = url.resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.path.hasPrefix(root),
+              FileManager.default.isReadableFile(atPath: candidate.path) else { return nil }
+        return candidate
+    }
+
     /// 从共享 prefs 读取图片 URL。同 prefsVideoURL(for:)，优先 per-display 路径。
     private static func prefsImageURL(for displayID: UInt32) -> URL? {
         struct MirroringPrefs: Decodable {
@@ -806,11 +824,11 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return nil
         }
         let url = URL(fileURLWithPath: path)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            extLog("[prefsImageURL] ⚠️ 图片路径不存在: display=\(displayID) path=\(path)")
+        guard let owned = containerOwnedImageURL(url) else {
+            extLog("[prefsImageURL] ⚠️ 图片路径不属于当前容器或不可读: display=\(displayID) path=\(path)")
             return nil
         }
-        return url
+        return owned
     }
 
     static func writeSnapshotCacheIfPossible(videoURL: URL, videoID: String, displayID: UInt32, rootLayer: CALayer) {

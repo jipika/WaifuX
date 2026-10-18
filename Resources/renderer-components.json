@@ -1,24 +1,24 @@
 {
   "wgpu": {
-    "version": "1.0.5",
-    "revision": 6,
+    "version": "1.0.6",
+    "revision": 7,
     "sourceSHA256": {
       "dxc": "c4febd2c06b893aaa69c6ef3ef3498108f395aeee572a290dcbdd2a0609216f9",
       "dxc-x86_64": "fe842195bc4ba49b24cd866ddd940e0445208bfa06697eebd79e872777e878d4",
       "lib/libdxcompiler.dylib": "183f7e651bca16e7a05962a13128523ba2d7a10fb2ed988bcc73e0f30cdc2a32",
       "libdxcompiler-x86_64.dylib": "baea7a81192a47e90b8e50b1301b3fe2f6d7cd1032e87f13b13403698760255c",
       "wallpaper-wgpu": "1d183c900b852ac308b2a6326915ef24169bd6a3eaee75ef8cdee6316feb9808",
-      "wallpaper-wgpu-x86_64": "4761a4850091165285b87de576853def5752ba387c82ceffae15a6fa07e7970e"
+      "wallpaper-wgpu-x86_64": "ce7c9435c92290e6930c59f7f0f44877d25985c4309a70d2a0c2dee4ee602cb1"
     }
   },
   "web": {
-    "version": "1.0.4",
-    "revision": 5,
+    "version": "1.0.11",
+    "revision": 12,
     "sourceSHA256": {
       "ffmpeg": "106ece4ba0df8411833c9e78c85698803848dafae6b9411420f25fcf0b648c35",
       "ffmpeg-x86_64": "9e5420d4f5b9fc0150d1818da5e70cfea46b2b44ea49efc794ca305ed0c6903f",
-      "wallpaperengine-cli": "4085aab1b7b4dab9422a94b3b5f0bf821cb46a6e121150139e83dbddc7bf981a",
-      "wallpaperengine-cli-x86_64": "e42fc4f81062699e2dd353a276a1744a044fe0b3bfbe16d7a938b9ccc86f7741"
+      "wallpaperengine-cli": "480746b7e40e0b60938b5ecffd918346d379770578eee7882cdc807a276520be",
+      "wallpaperengine-cli-x86_64": "3ae65f0b675256914793778951974402225bafa294c3d506b65a94c0fe957179"
     }
   },
   "video": {

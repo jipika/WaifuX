@@ -410,6 +410,9 @@ final class WebWallpaperDesignService {
     }
 
     func displayLabel(for property: WebWallpaperProperty) -> String {
+        // `label` 在解析阶段已按壁纸自带 localization 解析过（含中文）。
+        // 只有它为空时才退回通用表/key，避免把已解析的文案又替换成 key。
+        if !property.label.isEmpty { return property.label }
         let stripped = Self.stripHTML(property.rawLabel)
         return WallpaperEnginePropertyLocalizer.label(for: stripped, fallback: property.key)
     }
@@ -437,6 +440,63 @@ final class WebWallpaperDesignService {
         return title.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 读取 `general.localization` 并按当前系统语言合成一张 `key → 文案` 表。
+    ///
+    /// Workshop 壁纸的 `properties[*].text` 往往不是可读文本，而是本地化 key
+    /// （`ui_bgm` / `ui_voicevolume` …），真实文案只存在于 `general.localization`
+    /// 里。此前完全没读这张表，面板只能显示原始 key。
+    private nonisolated static func preferredLocalizationTable(in general: [String: Any]) -> [String: String] {
+        guard let raw = general["localization"] as? [String: Any] else { return [:] }
+        var order: [String] = []
+        for tag in Locale.preferredLanguages {
+            let lower = tag.lowercased()
+            if lower.hasPrefix("zh-hant") || lower.hasPrefix("zh-tw") || lower.hasPrefix("zh-hk") {
+                order.append("zh-cht")
+            } else if lower.hasPrefix("zh") {
+                order.append("zh-chs")
+            } else if lower.hasPrefix("ja") {
+                order.append("ja-jp")
+            } else if lower.hasPrefix("ko") {
+                order.append("ko-kr")
+            } else if lower.hasPrefix("en") {
+                order.append("en-us")
+            }
+        }
+        order += ["zh-chs", "en-us"]
+        var table: [String: String] = [:]
+        // 从低优先级往高优先级合并，让更靠前的系统语言覆盖后面的兜底。
+        for language in order.reversed() {
+            guard let entries = raw[language] as? [String: Any] else { continue }
+            for (key, value) in entries {
+                if let text = value as? String, !text.isEmpty {
+                    table[key] = text
+                }
+            }
+        }
+        return table
+    }
+
+    /// 把属性/选项的 `text` 解析成可读文案：
+    /// 壁纸自带本地化表 → 内置 WE 通用表 → 原始文本（纯 key 形态时退回属性名）。
+    private nonisolated static func resolveLabel(
+        text: String,
+        table: [String: String],
+        fallbackKey: String
+    ) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let localized = table[trimmed] {
+            return localized
+        }
+        let builtin = WallpaperEnginePropertyLocalizer.label(for: trimmed, fallback: "")
+        if !builtin.isEmpty {
+            return builtin
+        }
+        if trimmed.isEmpty || trimmed.hasPrefix("ui_") {
+            return fallbackKey
+        }
+        return trimmed
+    }
+
     /// 从已解析的 JSON 中解析属性列表，不重新读取文件
     private nonisolated static func parseProperties(from json: [String: Any]) throws -> [WebWallpaperProperty] {
         guard let general = json["general"] as? [String: Any],
@@ -446,14 +506,18 @@ final class WebWallpaperDesignService {
         }
 
         var properties: [WebWallpaperProperty] = []
+        let localizationTable = Self.preferredLocalizationTable(in: general)
         for (key, rawValue) in rawProperties {
             guard let rawProperty = rawValue as? [String: Any] else { continue }
             let type = WebWallpaperPropertyType.parse(rawProperty["type"] as? String ?? "")
+            let rawText = rawProperty["text"] as? String ?? ""
             let property = WebWallpaperProperty(
                 key: key,
                 type: type,
-                label: Self.stripHTML(rawProperty["text"] as? String ?? ""),
-                rawLabel: rawProperty["text"] as? String ?? "",
+                label: Self.stripHTML(
+                    Self.resolveLabel(text: rawText, table: localizationTable, fallbackKey: key)
+                ),
+                rawLabel: rawText,
                 fileType: rawProperty["fileType"] as? String,
                 defaultValue: WebWallpaperPropertyValue.from(any: rawProperty["value"] as Any),
                 minValue: Self.doubleValue(rawProperty["min"]),
@@ -461,7 +525,7 @@ final class WebWallpaperDesignService {
                 stepValue: Self.doubleValue(rawProperty["step"]),
                 order: Self.intValue(rawProperty["order"]) ?? Int.max,
                 condition: rawProperty["condition"] as? String,
-                options: Self.parseOptions(rawProperty["options"]),
+                options: Self.parseOptions(rawProperty["options"], table: localizationTable),
                 isFraction: (rawProperty["fraction"] as? Bool) ?? false,
                 precision: Self.intValue(rawProperty["precision"])
             )
@@ -537,7 +601,10 @@ final class WebWallpaperDesignService {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private nonisolated static func parseOptions(_ rawValue: Any?) -> [WebWallpaperPropertyOption] {
+    private nonisolated static func parseOptions(
+        _ rawValue: Any?,
+        table: [String: String] = [:]
+    ) -> [WebWallpaperPropertyOption] {
         guard let array = rawValue as? [Any] else { return [] }
         return array.compactMap { element in
             guard let option = element as? [String: Any],
@@ -545,7 +612,10 @@ final class WebWallpaperDesignService {
                   let value = WebWallpaperPropertyValue.from(any: option["value"] as Any) else {
                 return nil
             }
-            return WebWallpaperPropertyOption(value: value, label: stripHTML(label))
+            return WebWallpaperPropertyOption(
+                value: value,
+                label: stripHTML(resolveLabel(text: label, table: table, fallbackKey: label))
+            )
         }
     }
 

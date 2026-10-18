@@ -441,6 +441,7 @@
 		CFF0E5F948CE5A59467B7434 /* AnimeVideoEnhancer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21A497376B55EB752EAE4F33 /* AnimeVideoEnhancer.swift */; };
 		D152C42DF0A70E2FB194C05E /* AppleMusicLyricsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A81E6BE3D15551B9C61B2F4 /* AppleMusicLyricsService.swift */; };
 		D1CB4193D7B4328A3DF46D49 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C38AB81E85D322815D6995A0 /* Assets.xcassets */; };
+		3752217096239CACF01196D3 /* WallpaperPropertyEditor.html in Resources */ = {isa = PBXBuildFile; fileRef = 59A47C8C6588ABBA3395B14E /* WallpaperPropertyEditor.html */; };
 		D273450E2C0CA247F58DA1C2 /* MediaExploreContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229CDC52631E90C60BE30BEE /* MediaExploreContentView.swift */; };
 		D2C0FC62A6C7A69B63385733 /* DynamicWallpaperPosterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AACCD0EB740DB35E41BE513 /* DynamicWallpaperPosterService.swift */; };
 		D35A0942D440550F4240FCE8 /* LiquidGlassModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB8B239A357D0A8869892193 /* LiquidGlassModifier.swift */; };
@@ -865,6 +866,7 @@
 		C0D92ABFFA9F5E05DBC00891 /* WorkshopWallpaper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopWallpaper.swift; sourceTree = "<group>"; };
 		C29FB33BEC37A4DFE4E3B207 /* FileIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileIO.swift; sourceTree = "<group>"; };
 		C38AB81E85D322815D6995A0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		59A47C8C6588ABBA3395B14E /* WallpaperPropertyEditor.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = WallpaperPropertyEditor.html; sourceTree = "<group>"; };
 		C4316F2C0312F0FB5F9322E7 /* ContentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentService.swift; sourceTree = "<group>"; };
 		C50A2C1E05CEFE851FCCE28B /* WallpaperPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperPrefs.swift; sourceTree = "<group>"; };
 		C5A6FAAE3D996B466B7354FC /* LiquidGlassDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassDesignSystem.swift; sourceTree = "<group>"; };
@@ -1314,6 +1316,14 @@
 			path = WaifuXWallpaperExtension;
 			sourceTree = "<group>";
 		};
+		7FB9863A9F7951C68CA8EBC3 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				59A47C8C6588ABBA3395B14E /* WallpaperPropertyEditor.html */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 		A555AFD4DFB8E300E93B99B4 /* Views */ = {
 			isa = PBXGroup;
 			children = (
@@ -1427,6 +1437,7 @@
 				0938ADD8D18007409F613228 /* DesignSystem */,
 				1EE83ECA069707C970EB8CE5 /* Metal */,
 				F58AC47A8A86E7F8CACFB332 /* Models */,
+				7FB9863A9F7951C68CA8EBC3 /* Resources */,
 				541662FB08D299686744D90A /* Services */,
 				02DFB6F0BBFB387E0D4FFBE1 /* Utilities */,
 				023C6822799346F0CD0D8F8A /* ViewModels */,
@@ -1641,6 +1652,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D1CB4193D7B4328A3DF46D49 /* Assets.xcassets in Resources */,
+				3752217096239CACF01196D3 /* WallpaperPropertyEditor.html in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

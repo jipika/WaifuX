@@ -64,9 +64,19 @@ swiftc -parse-as-library \
 # strip 调试与本地符号，进一步减小体积（与仓库已提交的优化版对齐）
 strip -x -S "$OUT_CLI" 2>/dev/null || true
 
+# arm64 要求有效代码签名才能执行；linker-signed 的弱签名在替换 strip 后可能失效，
+# 表现为进程刚启动就被 SIGKILL（Killed: 9）。这里必须显式重签并验证，
+# 不能让失败被静默吞掉——否则产物看起来正常、运行时却起不来。
 if command -v codesign >/dev/null 2>&1; then
   echo "[build-wallpaperengine-cli] codesign (ad hoc)..."
-  codesign --force -s - "$OUT_CLI" 2>/dev/null || true
+  if ! codesign --force -s - "$OUT_CLI"; then
+    echo "error: codesign failed for $OUT_CLI" >&2
+    exit 1
+  fi
+  if ! codesign --verify --strict "$OUT_CLI"; then
+    echo "error: codesign verify failed for $OUT_CLI" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$TARGET_ARCH" == "arm64" ]]; then

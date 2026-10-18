@@ -5455,6 +5455,13 @@ final class VideoWallpaperManager: ObservableObject {
         // 切到 web/scene 时必须一并拆除，否则会出现「web 已切上、视频层还在渲染」。
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
+        // 记录调用前的归属信号：正常 no-op（该屏本来没有视频层）与
+        //「状态已被别处清掉、窗口仍残留」必须能在日志里区分，否则整份
+        // 日志里 2000+ 条 teardownKey=none 无法判断哪条是真问题。
+        let targetHadOwnedLayer = windows[screenID] != nil
+            || players[screenID] != nil
+            || videoTargetScreenIDs.contains(screenID)
+            || videoTargetScreenFingerprints.contains(screenFingerprint)
         nativePausedScreenIDs.remove(screenID)
         nativePausedScreenFingerprints.remove(screenFingerprint)
 
@@ -5634,12 +5641,31 @@ final class VideoWallpaperManager: ObservableObject {
         }
         wallpaperChangeCount &+= 1
         syncCurrentVideoURL()
-        AppLogger.error(.wallpaper, "stopNativeVideoWallpaperOnly done", metadata: [
+        let survivingHostScreens = windows.keys.sorted().compactMap { key -> String? in
+            guard let window = windows[key] else { return nil }
+            guard let host = window.screen else { return "\(key)=nil" }
+            return "\(key)=\(host.wallpaperScreenIdentifier)"
+        }.joined(separator: ",")
+        // 状态已被别处清掉、但窗口仍贴在不属于任何在线屏上：这是降级到
+        // debug 会漏掉的唯一一类真残留，必须继续按 error 记。
+        let unownedResidualWindow = windows.values.contains { window in
+            guard let host = window.screen else { return true }
+            return !NSScreen.screens.contains { $0.wallpaperScreenIdentifier == host.wallpaperScreenIdentifier }
+        }
+        let teardownMetadata: [String: Any] = [
             "screenID": screenID,
             "teardownKey": teardownKey ?? "none",
+            "targetHadOwnedLayer": targetHadOwnedLayer,
+            "survivingHostScreens": survivingHostScreens,
             "remainingWindows": windows.count,
             "remainingPlayers": players.count
-        ])
+        ]
+        if teardownKey != nil || targetHadOwnedLayer || unownedResidualWindow {
+            AppLogger.error(.wallpaper, "stopNativeVideoWallpaperOnly done", metadata: teardownMetadata)
+        } else {
+            // 该屏本来就没有视频层：apply 前的例行 stop 不必进诊断导出。
+            AppLogger.debug(.wallpaper, "stopNativeVideoWallpaperOnly no-op", metadata: teardownMetadata)
+        }
     }
 
     private func retainPlayersTemporarily(_ retainedPlayers: [AVQueuePlayer]) {
