@@ -163,6 +163,7 @@
 		445A8A281790BE1B93E9F766 /* ExtensionCropSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1389F0298F3722D15EA40A /* ExtensionCropSupport.swift */; };
 		4490DB8509ED6250E793CCD4 /* SettingsSharedComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515C4AEC66B49CF22219FE39 /* SettingsSharedComponents.swift */; };
 		4508C38C3DFB92C204A588E1 /* LocalImageThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F948918BA6DB2648E3E883A8 /* LocalImageThumbnailCache.swift */; };
+		402F6CFF5C3790B10D80B00B /* LibraryCoverBackfillService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB5488FEE1EEB8C0BCB8359D /* LibraryCoverBackfillService.swift */; };
 		45533A338ED3A58847FBAAC1 /* WallpaperExploreContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E780D56A3F7FC9E4FB665ECC /* WallpaperExploreContentView.swift */; };
 		487DC7405DB8DC60342B9147 /* AnimeExploreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCA535A536F34A83E3D67D5E /* AnimeExploreView.swift */; };
 		4894085FD849F567471BB5D4 /* SleepPreventer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0536692A0BF2778A553D8E82 /* SleepPreventer.swift */; };
@@ -949,6 +950,7 @@
 		F8A2EDD64DA363D5234CE77B /* LiquidGlassClockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassClockView.swift; sourceTree = "<group>"; };
 		F8F5AC79AF32CB408870B4A5 /* WaifuX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WaifuX.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F948918BA6DB2648E3E883A8 /* LocalImageThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalImageThumbnailCache.swift; sourceTree = "<group>"; };
+		DB5488FEE1EEB8C0BCB8359D /* LibraryCoverBackfillService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryCoverBackfillService.swift; sourceTree = "<group>"; };
 		F951D243F05FA45D5EDB4F60 /* CloudSyncSettingsRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncSettingsRegistry.swift; sourceTree = "<group>"; };
 		FB3C0713026606E42DCCE8F9 /* UnixSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnixSocketClient.swift; sourceTree = "<group>"; };
 		FC5EF18290E78CAC93FAF3FA /* HTMLParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLParser.swift; sourceTree = "<group>"; };
@@ -1203,6 +1205,7 @@
 				25E12659F1FE1871F19A9D9E /* KazumiRuleLoader.swift */,
 				A6A6360B800A996A267E5291 /* KonachanAuthService.swift */,
 				1823EAC90BA4264646D4E1D3 /* KonachanService.swift */,
+				DB5488FEE1EEB8C0BCB8359D /* LibraryCoverBackfillService.swift */,
 				6CA001EDF005B2FC12DC4043 /* LibraryFolderStore.swift */,
 				7161F6D026FC623EB6D42B01 /* LiquidGlassClockOverlayManager.swift */,
 				F948918BA6DB2648E3E883A8 /* LocalImageThumbnailCache.swift */,
@@ -2134,6 +2137,7 @@
 				193E625232EB81113BB0B244 /* MenuBarQuickWallpaperItem.swift in Sources */,
 				2B3DCCC8D22D833DC8EA4E02 /* MessagesContentView.swift in Sources */,
 				ABDBB0CB8253528AA412E7B9 /* ModuleAvailability.swift in Sources */,
+				402F6CFF5C3790B10D80B00B /* LibraryCoverBackfillService.swift in Sources */,
 				9C99399DC5F0B0993EC7DE28 /* MyLibraryContentView.swift in Sources */,
 				5D061DCB0B36E5F24F9E19D5 /* NSScreen+Wallpaper.swift in Sources */,
 				CE10A5CA697B738B1BE66B59 /* NativeVideoPlayer.swift in Sources */,

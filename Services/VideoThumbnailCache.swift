@@ -176,29 +176,65 @@ final class VideoThumbnailCache {
         return poster
     }
 
+    /// `scene_realtime_*` 目录快照索引：itemID.md5 → 修改时间最新的一张。
+    ///
+    /// 「我的库」构建列表时会为**每个**媒体条目调用一次
+    /// `latestSceneRealtimePosterFileURLIfExists`；旧实现每次 `contentsOfDirectory`
+    /// 全量枚举缓存目录（条目数 × 目录项数）。索引之后每个条目只剩一次字典查找。
+    /// 失效由写入点显式触发，TTL 只作兜底（其他进程写入/清理）。
+    private static var realtimePosterIndex: [String: URL] = [:]
+    private static var realtimePosterIndexBuiltAt: Date = .distantPast
+    private static let realtimePosterIndexTTL: TimeInterval = 10
+
     /// 自动烘焙关闭时实时渲染抽帧的 item 级最新静帧（`scene_realtime_<itemID>_*.jpg`）。
     /// 供详情页等没有 variantKey 上下文的调用方回退：不区分目标尺寸，取修改时间最新的一张。
     func latestSceneRealtimePosterFileURLIfExists(itemID: String) -> URL? {
-        let prefix = "scene_realtime_\(itemID.md5)_"
+        refreshRealtimePosterIndexIfNeeded()
+        return Self.realtimePosterIndex[itemID.md5]
+    }
+
+    /// 重建目录快照；10 秒内直接命中。
+    private func refreshRealtimePosterIndexIfNeeded() {
+        let now = Date()
+        guard now.timeIntervalSince(Self.realtimePosterIndexBuiltAt) > Self.realtimePosterIndexTTL else {
+            return
+        }
+        Self.realtimePosterIndexBuiltAt = now
+
         guard let files = try? fileManager.contentsOfDirectory(
             at: cacheDirectory,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
-        ) else { return nil }
+        ) else {
+            Self.realtimePosterIndex = [:]
+            return
+        }
 
-        var latest: (url: URL, date: Date)?
-        for file in files
-        where file.lastPathComponent.hasPrefix(prefix)
-            && file.pathExtension.lowercased() == "jpg" {
+        let prefix = "scene_realtime_"
+        var latestByItem: [String: (url: URL, date: Date)] = [:]
+        for file in files {
+            let name = file.lastPathComponent
+            guard name.hasPrefix(prefix),
+                  file.pathExtension.lowercased() == "jpg" else { continue }
+            // 文件名形如 scene_realtime_<itemID.md5>_<variantKey.md5>.jpg
+            let body = name.dropFirst(prefix.count)
+            guard let separator = body.firstIndex(of: "_") else { continue }
+            let itemKey = String(body[body.startIndex..<separator])
+            guard !itemKey.isEmpty else { continue }
+
             guard isUsableCachedImage(at: file),
                   let date = (try? fileManager.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
                 continue
             }
-            if latest == nil || date > latest!.date {
-                latest = (file, date)
-            }
+            if let existing = latestByItem[itemKey], existing.date >= date { continue }
+            latestByItem[itemKey] = (file, date)
         }
-        return latest?.url
+        Self.realtimePosterIndex = latestByItem.mapValues(\.url)
+    }
+
+    /// 实时封面写入/删除后必须调用，否则同一进程内列表会继续命中旧目录快照。
+    private func invalidateRealtimePosterIndex() {
+        Self.realtimePosterIndexBuiltAt = .distantPast
     }
 
     /// 仅返回已缓存的**高清**动态壁纸 poster，不触发 AVFoundation 抽帧。
@@ -367,6 +403,7 @@ final class VideoThumbnailCache {
         }
 
         try? fileManager.removeItem(at: outURL)
+        invalidateRealtimePosterIndex()
         return await generatePosterJPEGFile(
             from: URL(fileURLWithPath: pathKey),
             outputURL: outURL,
@@ -405,6 +442,7 @@ final class VideoThumbnailCache {
         }
 
         try? fileManager.removeItem(at: outURL)
+        invalidateRealtimePosterIndex()
         return await generatePosterJPEGFile(
             fromImageFile: imageURL,
             outputURL: outURL,
@@ -460,6 +498,7 @@ final class VideoThumbnailCache {
             try? fileManager.removeItem(at: posterCacheURL(forPathKey: videoURL.standardizedFileURL.path))
             removeListThumbnail(forLocalVideo: videoURL)
         }
+        invalidateRealtimePosterIndex()
     }
 
     /// 删除视频对应的列表小图磁盘缓存 + 内存缓存（重新烘焙后必须调用，否则 path 不变会继续命中旧帧）。

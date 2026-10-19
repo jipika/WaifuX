@@ -823,13 +823,26 @@ final class DynamicWallpaperAutoPauseManager {
     /// 切换到电池供电：自动暂停壁纸（如果正在播放）
     private func handleBatterySwitchedToBattery() {
         batteryPauseRequested = true
+        // 扩展自己读电源状态；这里 force 通知只用于立即唤醒它重算，避免等 30s 轮询。
+        syncPauseOnBatteryToExtension(forceNotify: true)
         applyGlobalPauseIfNeeded()
     }
 
     /// 切换回 AC 电源：如果之前是电池自动暂停的，恢复播放
     private func handleBatterySwitchedToAC() {
         batteryPauseRequested = false
+        syncPauseOnBatteryToExtension(forceNotify: true)
         resumeFromGlobalPauseIfPossible()
+    }
+
+    /// 把「使用电池时暂停」开关镜像给系统壁纸扩展。
+    ///
+    /// 只同步开关值：扩展的 PowerMonitor 自己检测电池/低功耗状态并决定何时暂停，
+    /// 因此不依赖本类在电源切换瞬间是否在线，插电后也能自愈。
+    /// `forceNotify` 仅用于电源切换时唤醒扩展立即重算。
+    private func syncPauseOnBatteryToExtension(forceNotify: Bool = false) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        LockScreenWallpaperService.shared.setPauseOnBattery(pauseOnBatteryPower, forceNotify: forceNotify)
     }
 
     // MARK: - 前台应用检测（按屏幕）
@@ -1704,6 +1717,9 @@ final class DynamicWallpaperAutoPauseManager {
         } else {
             PowerSourceMonitor.shared.stopMonitoring()
         }
+
+        // 同步开关给系统壁纸扩展（覆盖启动、设置变更、策略重算等所有入口）。
+        syncPauseOnBatteryToExtension()
 
         guard pauseOnBatteryPower else {
             batteryPauseRequested = false

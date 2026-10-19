@@ -216,6 +216,11 @@ struct MyLibraryContentView: View {
     @State private var lastAnimePrefetchBucket: Int?
     @State private var updateWallpaperDebounce: DispatchWorkItem?
     @State private var updateMediaDebounce: DispatchWorkItem?
+    /// 封面后台预热的防抖任务：目录切换/搜索/收藏变化会连续重建网格，只跑最后一次。
+    @State private var coverBackfillDebounce: Task<Void, Never>?
+    /// 首次进入库页时的加载占位：数据快照（由 Helper 异步推送）与本地索引就绪前显示骨架，
+    /// 避免「还没有数据」被误渲染成「没有下载」。只在进程内第一次进入时为 true。
+    @State private var libraryFirstLoadPlaceholderVisible = true
     private let wallpaperPrefetchNamespace = "library.wallpapers"
     private let mediaPrefetchNamespace = "library.media"
     private let animePrefetchNamespace = "library.anime"
@@ -345,6 +350,33 @@ struct MyLibraryContentView: View {
         !trimmedLibrarySearchQuery.isEmpty
     }
 
+    /// 首屏加载占位的结束条件：当前页已有内容，或库记录快照已经到达。
+    /// 只用「记录非空」判断会把「当前子页确实为空」误判成加载中，所以两者取或。
+    private var libraryFirstLoadIsReady: Bool {
+        libraryHasAnyVisibleContent || libraryDataSourceHasAnyRecords
+    }
+
+    /// 库记录快照是否已经到达（UI 进程由 Helper 异步推送；空库时一直为 false，
+    /// 由调用方的超时兜底结束占位）。
+    private var libraryDataSourceHasAnyRecords: Bool {
+        !WallpaperLibraryService.shared.downloadRecords.isEmpty
+            || !WallpaperLibraryService.shared.favoriteRecords.isEmpty
+            || !MediaLibraryService.shared.downloadRecords.isEmpty
+            || !MediaLibraryService.shared.favoriteRecords.isEmpty
+    }
+
+    /// 当前内容类型下是否已有可显示条目（文件夹也算）。
+    private var libraryHasAnyVisibleContent: Bool {
+        switch selectedContentType {
+        case .wallpaper:
+            return !wallpaperItems.isEmpty || !currentWallpaperFolders.isEmpty
+        case .video:
+            return !mediaItems.isEmpty || !currentMediaFolders.isEmpty
+        case .anime:
+            return !currentAnimeItems.isEmpty
+        }
+    }
+
     var body: some View {
         // 性能测量：开启 PERF_TRACE 编译标记后，会在控制台打印触发本 body 的属性来源
         #if PERF_TRACE
@@ -424,7 +456,11 @@ struct MyLibraryContentView: View {
 
             // 引导加载只跑一次：详情往返的 re-appear 跳过全量 update 与
             // initialLoad，避免返回时封面整网格重载。
-            guard !didBootstrapLibraryGrid else { return }
+            guard !didBootstrapLibraryGrid else {
+                // 兜底：任何路径都不让首屏骨架留在屏幕上。
+                libraryFirstLoadPlaceholderVisible = false
+                return
+            }
             didBootstrapLibraryGrid = true
 
             updateWallpaperItems()
@@ -433,6 +469,31 @@ struct MyLibraryContentView: View {
 
             async let initialLoad: Void = viewModel.initialLoad()
             async let animeFavoritesLoad: Void = loadAnimeFavorites()
+
+            // 首屏加载占位：库记录由 Helper 异步推送，可能晚于首轮构建到达。
+            // 数据到位（当前页已有内容或记录快照已到达）即撤；最多等 1.2s；
+            // defer 兜底保证取消 / 提前返回时不会把骨架留在屏幕上。
+            // 参考实测：indexMS≈169、itemsMS≈0，正常路径约 200ms 内撤掉。
+            defer { libraryFirstLoadPlaceholderVisible = false }
+            let placeholderDeadline = Date().addingTimeInterval(1.2)
+            while !libraryFirstLoadIsReady, Date() < placeholderDeadline {
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    break
+                }
+            }
+            let minimumVisible: TimeInterval = 0.18
+            let elapsed = Date().timeIntervalSince(loadStart)
+            if elapsed < minimumVisible {
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64((minimumVisible - elapsed) * 1_000_000_000)
+                    )
+                } catch {}
+            }
+            libraryFirstLoadPlaceholderVisible = false
+
             _ = await (initialLoad, animeFavoritesLoad)
 
             // 分段耗时：定位「我的库加载慢」到底卡在索引、条目构建还是 initialLoad。
@@ -452,12 +513,17 @@ struct MyLibraryContentView: View {
             registerFolderBackSwipeHandler()
             registerFolderBackKeyboardHandler()
             syncActiveWallpaperSnapshot()
+            // 详情往返/切回库页：继续上次未补完的封面预热（服务内去重）。
+            scheduleLibraryCoverBackfillIfNeeded()
         }
         .onDisappear {
             unregisterFolderBackSwipeHandler()
             unregisterFolderBackKeyboardHandler()
             librarySearchDebounce?.cancel()
             librarySearchTask?.cancel()
+            coverBackfillDebounce?.cancel()
+            coverBackfillDebounce = nil
+            LibraryCoverBackfillService.shared.cancel(reason: "library-disappear")
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
@@ -978,7 +1044,9 @@ struct MyLibraryContentView: View {
                 onAdd: { showAddToFolderSheet = true }
             )
 
-            if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
+            if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
+                libraryGridLoadingPlaceholder(config: config)
+            } else if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
                 emptyMediaSurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads")),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint")),
@@ -1619,6 +1687,7 @@ struct MyLibraryContentView: View {
         gridReloadToken &+= 1
         refreshWallpaperFolderDisplay()
         syncSelectionWithVisibleItems()
+        scheduleLibraryCoverBackfillIfNeeded()
     }
 
     private var orderedWallpaperGridItems: [LibraryGridEntry<AnyWallpaperItem>] {
@@ -1744,6 +1813,7 @@ struct MyLibraryContentView: View {
         gridReloadToken &+= 1
         refreshMediaFolderDisplay()
         syncSelectionWithVisibleItems()
+        scheduleLibraryCoverBackfillIfNeeded()
     }
 
     private var orderedMediaGridItems: [LibraryGridEntry<AnyMediaItem>] {
@@ -1783,7 +1853,9 @@ struct MyLibraryContentView: View {
                 onAdd: { showAddToFolderSheet = true }
             )
 
-            if mediaItems.isEmpty && currentMediaFolders.isEmpty {
+            if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
+                libraryGridLoadingPlaceholder(config: config)
+            } else if mediaItems.isEmpty && currentMediaFolders.isEmpty {
                 emptyMediaSurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads")),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint")),
@@ -2245,6 +2317,45 @@ struct MyLibraryContentView: View {
             guard let id = libraryScrollRuntimeState.lastAnimeItemID,
                   let index = animeIDIndexCache[id] else { return }
             preloadNearbyAnime(at: index)
+        }
+    }
+
+    // MARK: - 封面后台预热
+
+    /// 把当前列表里缺封面的条目交给 `LibraryCoverBackfillService` 后台补齐。
+    ///
+    /// 数据层（列表构建）只读已有缓存；真正缺封面时由这里一次性、限速地补，
+    /// 而不是让每个 cell 在滚停后各自现场抽帧。服务内做去重、滚动门控与轮次上限。
+    private func scheduleLibraryCoverBackfillIfNeeded() {
+        coverBackfillDebounce?.cancel()
+        coverBackfillDebounce = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 1_200_000_000)
+            } catch {
+                return
+            }
+            guard isVisible else { return }
+
+            let wallpapers = wallpaperItems.map {
+                LibraryCoverBackfillService.Candidate(
+                    id: $0.id,
+                    kind: .wallpaper,
+                    localFileURL: $0.localFileURL
+                )
+            }
+            let media = mediaItems.map {
+                LibraryCoverBackfillService.Candidate(
+                    id: $0.id,
+                    kind: .media,
+                    localFileURL: $0.localFileURL,
+                    mediaItem: $0.mediaItem
+                )
+            }
+            // 当前停留的网格优先：先补齐用户马上会看到的封面。
+            let candidates = selectedContentType == .video
+                ? media + wallpapers
+                : wallpapers + media
+            LibraryCoverBackfillService.shared.schedule(candidates, reason: "library-grid")
         }
     }
 
@@ -3473,6 +3584,24 @@ struct MyLibraryContentView: View {
             }
             .padding(.horizontal, 4)
         }
+    }
+
+    // MARK: - 首屏加载占位
+
+    /// 与真实网格同列数、同卡片比例的骨架；数据到位替换成网格时不跳版。
+    private func libraryGridLoadingPlaceholder(config: LibraryGridConfig) -> some View {
+        let cardHeight = config.cardWidth
+            / LibraryGridCellMetrics.cardAspectRatio(columnWidth: config.cardWidth)
+        return LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
+            ForEach(0..<(config.columnCount * 3), id: \.self) { _ in
+                SkeletonCard(
+                    width: config.cardWidth,
+                    height: cardHeight,
+                    cornerRadius: LibraryGridCellMetrics.cornerRadius
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Empty State

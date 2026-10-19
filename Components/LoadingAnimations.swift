@@ -31,7 +31,8 @@ final class MainWindowVisibility: ObservableObject {
         }
         guard allowContinuousAnimation != anyVisible else { return }
         allowContinuousAnimation = anyVisible
-        AppLogger.error(.general, "[AnimTracker] continuous animation \(anyVisible ? "resumed" : "paused") (no visible ordinary window)")
+        AppLogger.throttled(.error, .general, key: "anim.continuous", interval: 10,
+                            "[AnimTracker] continuous animation \(anyVisible ? "resumed" : "paused") (no visible ordinary window)")
     }
 }
 

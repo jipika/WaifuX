@@ -93,7 +93,8 @@ enum AppResponsivenessMonitor {
             lastForegroundActivationTime = Date()
             flushSnapshotIfNeeded(trigger: "foregroundActivation", force: true)
         }
-        AppLogger.debug(.ui, "Foreground activation noted", metadata: [
+        AppLogger.throttled(.debug, .ui, key: "ui.foregroundActivation", interval: 60,
+                            "Foreground activation noted", metadata: [
             "reason": reason
         ])
     }
@@ -169,7 +170,11 @@ enum AppResponsivenessMonitor {
     /// 没有这一步，「卡在哪」只能靠猜（stat 外置卷 / 同步写壁纸 / body 重算
     /// 的日志特征完全相同）；有了栈帧，一次导出即可定案根因。
     /// 采样期间主线程若已恢复，栈顶会显示 idle 等待——同样是有价值的证据。
+    ///
+    /// 每次采样都会 spawn 一个 `/usr/bin/sample` 子进程并抓 1 秒栈，连续卡顿时
+    /// 会放大负载。这里 10 分钟最多采一次；其余卡顿仍由 `logSnapshot` 记录。
     private static func captureMainThreadSample(stallMS: Double) {
+        guard AppLogger.shouldThrottle(key: "ui.stallSample", interval: 600) else { return }
         let samplePath = "/tmp/waifux-stall-sample-\(Int(Date().timeIntervalSince1970)).txt"
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/sample")

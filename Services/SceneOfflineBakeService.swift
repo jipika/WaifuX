@@ -2639,10 +2639,38 @@ enum SceneOfflineBakeService {
             let logHandle: FileHandle?
 
             init() {
+                // 每次烘焙都会生成一个 UUID 日志；失败时错误信息会引用它的路径用于排障，
+                // 所以不能删本次文件，改为按数量保留最近 10 个，避免 /tmp 无限累积。
+                Self.pruneOldLogs(keep: 10)
                 logURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("waifux-wallpaper-wgpu-bake-\(UUID().uuidString).log")
                 FileManager.default.createFile(atPath: logURL.path, contents: nil)
                 logHandle = try? FileHandle(forWritingTo: logURL)
+            }
+
+            private static func pruneOldLogs(keep: Int) {
+                let fm = FileManager.default
+                let dir = fm.temporaryDirectory
+                guard let files = try? fm.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                ) else { return }
+                let logs = files
+                    .filter {
+                        $0.lastPathComponent.hasPrefix("waifux-wallpaper-wgpu-bake-")
+                            && $0.pathExtension == "log"
+                    }
+                    .sorted { lhs, rhs in
+                        let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                            .contentModificationDate ?? .distantPast
+                        let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                            .contentModificationDate ?? .distantPast
+                        return left > right
+                    }
+                for url in logs.dropFirst(keep) {
+                    try? fm.removeItem(at: url)
+                }
             }
 
             func append(_ data: Data) {

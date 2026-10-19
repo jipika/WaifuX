@@ -45,6 +45,11 @@ final class StaticImageWallpaperOverlayManager {
     private var presentationRequests: [String: UUID] = [:]
     private var imageLetterboxAnalysisTokens: [String: UUID] = [:]
     private var imageLetterboxCropCache: [String: UnitRect] = [:]
+    /// `refreshWindows()` 的日志去重状态。该方法由屏幕参数变化/Space 切换/唤醒
+    /// 三条路径调用，通知风暴下会每秒被触发数十次，而绝大多数调用前后屏幕集合
+    /// 与已挂载窗口完全相同——那些调用只需执行，不需要各写一条 ERROR。
+    private var lastLoggedRefreshSignature: String?
+    private var lastLoggedRefreshAt = Date.distantPast
     private var imageLetterboxNoCropCache = Set<String>()
 
     private var cancellables = Set<AnyCancellable>()
@@ -554,11 +559,26 @@ final class StaticImageWallpaperOverlayManager {
         for screenID in Array(presentationRequests.keys) where !currentScreenIDs.contains(screenID) {
             invalidatePresentation(for: screenID)
         }
-        AppLogger.error(.wallpaper, "Static overlay refresh windows", metadata: [
-            "currentScreens": currentScreenIDs.joined(separator: ","),
-            "windowScreens": imageWindows.keys.sorted().joined(separator: ","),
-            "imageScreens": imageByScreen.keys.sorted().joined(separator: ",")
-        ])
+        // 签名 = 当前屏｜已挂载窗口屏｜已记录图片屏，三者都没变说明这次刷新没有
+        // 实际动作要做；连续重复时降级为 debug（与 ExternalDisplay 同口径）。
+        let currentScreenList = currentScreenIDs.sorted().joined(separator: ",")
+        let windowScreenList = imageWindows.keys.sorted().joined(separator: ",")
+        let imageScreenList = imageByScreen.keys.sorted().joined(separator: ",")
+        let refreshSignature = [currentScreenList, windowScreenList, imageScreenList]
+            .joined(separator: "|")
+        let refreshMetadata: [String: Any] = [
+            "currentScreens": currentScreenList,
+            "windowScreens": windowScreenList,
+            "imageScreens": imageScreenList
+        ]
+        if refreshSignature == lastLoggedRefreshSignature,
+           Date().timeIntervalSince(lastLoggedRefreshAt) < 15 {
+            AppLogger.debug(.wallpaper, "Static overlay refresh windows (重复刷新已合并)", metadata: refreshMetadata)
+        } else {
+            lastLoggedRefreshSignature = refreshSignature
+            lastLoggedRefreshAt = Date()
+            AppLogger.error(.wallpaper, "Static overlay refresh windows", metadata: refreshMetadata)
+        }
         // 移除已断开屏幕的窗口；screenID 级映射可清，fingerprint 级保留供重插恢复
         for (screenID, window) in Array(imageWindows) {
             if !currentScreenIDs.contains(screenID) {

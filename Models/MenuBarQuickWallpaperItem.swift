@@ -8,6 +8,9 @@ struct MenuBarQuickWallpaperItem: Identifiable {
     enum Source {
         case wallpaper(Wallpaper)
         case media(MediaItem)
+        /// 当前屏正在使用、但库里没有对应下载记录的文件（例如从 Finder 直接设的图）。
+        /// 只能展示与重新设置，没有详情页与收藏入口。
+        case external
     }
 
     let id: String
@@ -19,6 +22,15 @@ struct MenuBarQuickWallpaperItem: Identifiable {
     let source: Source
     let sceneBakeItemID: String?
     let bakedVideoPath: String?
+    /// 所属下载文件夹；nil = 未归档（我的库根）。
+    /// 文件夹筛选，以及「当前壁纸是否落在所选文件夹内」，都依赖这个字段。
+    let folderID: String?
+
+    /// external 项没有库记录，详情/收藏等库操作不可用。
+    var isLibraryItem: Bool {
+        if case .external = source { return false }
+        return true
+    }
 
     func replacingThumbnail(with thumbnailURL: URL?) -> Self {
         MenuBarQuickWallpaperItem(
@@ -30,7 +42,8 @@ struct MenuBarQuickWallpaperItem: Identifiable {
             downloadedAt: downloadedAt,
             source: source,
             sceneBakeItemID: sceneBakeItemID,
-            bakedVideoPath: bakedVideoPath
+            bakedVideoPath: bakedVideoPath,
+            folderID: folderID
         )
     }
 }

@@ -104,6 +104,52 @@ final class AppLogger: @unchecked Sendable {
         shared.log(.error, module, message(), metadata)
     }
 
+    /// 节流日志：同一 `key` 在 `interval` 秒内只写一次。
+    ///
+    /// 用于「状态型 / 高频」打点（动画进出、窗口遮挡、前台激活、卡顿采样等）：
+    /// 保留首条与语义，避免同一状态每秒刷一行。`key` 必须是固定枚举式字符串，
+    /// 不要把路径/ID 等动态值拼进去，否则节流表会被撑爆。
+    static func throttled(_ level: AppLogLevel = .debug,
+                          _ module: AppLogModule = .general,
+                          key: String,
+                          interval: TimeInterval = 30,
+                          _ message: @autoclosure () -> String,
+                          metadata: [String: Any]? = nil) {
+        guard shared.shouldWriteThrottled(key: key, interval: interval) else { return }
+        shared.log(level, module, message(), metadata)
+    }
+
+    /// 判断某个固定 key 是否已过节流窗口；用于「先节流再执行昂贵操作」的场景
+    /// （例如主线程卡顿采样会 spawn `/usr/bin/sample`，不能每次卡顿都跑）。
+    static func shouldThrottle(key: String, interval: TimeInterval) -> Bool {
+        shared.shouldWriteThrottled(key: key, interval: interval)
+    }
+
+    // MARK: - 节流表
+
+    private let throttleLock = NSLock()
+    private var throttleLastWrite: [String: Date] = [:]
+
+    private func shouldWriteThrottled(key: String, interval: TimeInterval) -> Bool {
+        let now = Date()
+        throttleLock.lock()
+        defer { throttleLock.unlock() }
+        if let last = throttleLastWrite[key], now.timeIntervalSince(last) < interval {
+            return false
+        }
+        if throttleLastWrite.count >= 256 {
+            // 先清过期项（5 分钟未再触发），仍超出则只保留最近 64 个 key。
+            let cutoff = now.addingTimeInterval(-300)
+            throttleLastWrite = throttleLastWrite.filter { $0.value > cutoff }
+            if throttleLastWrite.count >= 256 {
+                let newest = throttleLastWrite.sorted { $0.value < $1.value }.suffix(64)
+                throttleLastWrite = Dictionary(uniqueKeysWithValues: newest.map { ($0.key, $0.value) })
+            }
+        }
+        throttleLastWrite[key] = now
+        return true
+    }
+
     /// 记录耗时操作（自动计算 duration）
     static func timing<T>(_ module: AppLogModule = .general,
                           _ label: String,
@@ -188,12 +234,29 @@ final class AppLogger: @unchecked Sendable {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                let size = attrs[.size] as? UInt64, size > self.maxLogFileSize {
                 do {
-                    // 读取后半部分（保留最近日志）
-                    let currentData = try Data(contentsOf: url)
-                    let keepRange = currentData.count / 2  // 保留后半段
-                    let truncatedData = currentData.subdata(in: keepRange..<currentData.count)
+                    // 读取后半部分（保留最近日志）。
+                    // 截断点必须回退到换行之后，否则会在文件头留下半个 UTF-8 汉字 /
+                    // 半行，之后任何文本工具读取都会报非法字节。
+                    var currentData = try Data(contentsOf: url)
+                    if currentData.count > 3, currentData.prefix(3) == Data([0xEF, 0xBB, 0xBF]) {
+                        currentData = currentData.dropFirst(3)
+                    }
+                    let keepRange = currentData.count / 2
+                    var tail = currentData.subdata(in: keepRange..<currentData.count)
+                    if let firstNewline = tail.firstIndex(of: 0x0A) {
+                        tail = tail.subdata(in: tail.index(after: firstNewline)..<tail.endIndex)
+                    }
+                    // 保险：若切完仍不是合法 UTF-8，逐个换行往后找（最多 4 次）。
+                    var attempts = 0
+                    while !tail.isEmpty,
+                          String(data: tail, encoding: .utf8) == nil,
+                          attempts < 4 {
+                        guard let next = tail.firstIndex(of: 0x0A) else { break }
+                        tail = tail.subdata(in: tail.index(after: next)..<tail.endIndex)
+                        attempts += 1
+                    }
                     let headerStr = "--- LOG TRUNCATED at \(ISO8601DateFormatter().string(from: Date())) ---\n"
-                    let headerData = (headerStr.data(using: .utf8) ?? Data()) + truncatedData
+                    let headerData = (headerStr.data(using: .utf8) ?? Data()) + tail
                     try headerData.write(to: url, options: .atomic)
                 } catch {
                     // 截断失败则直接清空重建
@@ -260,66 +323,218 @@ final class AppLogger: @unchecked Sendable {
 
     // MARK: - 导出日志到桌面
 
-    /// 把运行日志复制到桌面（带时间戳文件名），返回导出文件 URL；无日志文件时返回 nil，复制失败抛错。
-    /// 供设置页「导出日志」使用：用户把导出的文件发给开发者排查问题。
+    /// 把全部诊断日志聚合到桌面一个文件（App 运行日志、扩展、退出诊断、CLI、
+    /// 扩展守护、烘焙失败现场），渲染器日志单独打一个 zip。
+    ///
+    /// 契约：任一来源缺失/不可读/为空时写入一行「[跳过] 原因」并继续，
+    /// 绝不因为某一段缺失让整个导出失败。每段只保留尾部 N KiB。
+    /// 无任何可读日志时返回 nil。
     static func exportLogToDesktop() throws -> URL? {
-        guard let sourceURL = shared.logFileURL,
-              FileManager.default.fileExists(atPath: sourceURL.path) else {
-            return nil
-        }
-        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        let fm = FileManager.default
+        let desktop = fm.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: Date())
-        var destination = desktop.appendingPathComponent("WaifuX-Log-\(stamp).log")
-        // 同一秒内重复导出时追加序号，避免覆盖
+
+        var destination = desktop.appendingPathComponent("WaifuX-AllLogs-\(stamp).log")
         var sequence = 1
-        while FileManager.default.fileExists(atPath: destination.path) {
-            destination = desktop.appendingPathComponent("WaifuX-Log-\(stamp)-\(sequence).log")
+        while fm.fileExists(atPath: destination.path) {
+            destination = desktop.appendingPathComponent("WaifuX-AllLogs-\(stamp)-\(sequence).log")
             sequence += 1
         }
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
+
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        var header = "WaifuX 诊断日志\n"
+        header += "导出时间: \(Date())\n"
+        header += "版本: \(version)\n"
+        header += "系统: \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
+        header += "说明: 以下为各日志来源的尾部片段；渲染器日志另存桌面 zip。\n"
+        try header.write(to: destination, atomically: true, encoding: .utf8)
+
+        var readableSegments = 0
+
+        if let sourceURL = shared.logFileURL {
+            readableSegments += appendLogSegment(
+                "APP RUNTIME LOG", from: sourceURL, maxBytes: 1024 * 1024, to: destination
+            )
+        } else {
+            appendSkipped("APP RUNTIME LOG", reason: "日志路径不可用", to: destination)
+        }
+
         // 锁屏视频由独立的 Wallpaper Extension 播放。主 App 的日志没有
         // reader 循环、解码失败和 WallpaperAgent update，诊断时需要同一份导出。
-        if let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
+        if let container = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+            readableSegments += appendLogSegment(
+                "WALLPAPER EXTENSION LOG",
+                from: container.appendingPathComponent("waifux-extension.log"),
+                maxBytes: 1024 * 1024,
+                to: destination
+            )
+        } else {
+            appendSkipped("WALLPAPER EXTENSION LOG", reason: "App Group 容器不可用", to: destination)
+        }
+        readableSegments += appendLogSegment(
+            "WALLPAPER EXTENSION LOG (fallback)",
+            from: URL(fileURLWithPath: "/tmp/waifux-extension.log"),
+            maxBytes: 512 * 1024,
+            to: destination
+        )
+
+        // 退出/信号诊断（崩溃、异常退出时才有内容）
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        readableSegments += appendLogSegment(
+            "EXIT DIAGNOSTICS",
+            from: appSupport?.appendingPathComponent("WaifuX/waifux-exit.log"),
+            maxBytes: 256 * 1024,
+            to: destination
+        )
+
+        // Web 壁纸 daemon（主 App 未启用沙盒，/tmp 可直接读取）
+        readableSegments += appendLogSegment(
+            "WEB RENDERER DAEMON",
+            from: URL(fileURLWithPath: "/tmp/wallpaperengine-cli-debug.log"),
+            maxBytes: 512 * 1024,
+            to: destination
+        )
+        readableSegments += appendLogSegment(
+            "WEB RENDERER DAEMON OUTPUT",
+            from: URL(fileURLWithPath: "/tmp/wallpaperengine-cli-daemon.log"),
+            maxBytes: 256 * 1024,
+            to: destination
+        )
+        readableSegments += appendLogSegment(
+            "WALLPAPER EXTENSION KEEPER",
+            from: fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/WaifuXKeeper.log"),
+            maxBytes: 256 * 1024,
+            to: destination
+        )
+
+        // 最近的烘焙失败现场（按修改时间取前 3 份）
+        if let tmpFiles = try? fm.contentsOfDirectory(
+            at: fm.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
         ) {
-            let extensionLog = container.appendingPathComponent("waifux-extension.log")
-            if let input = try? FileHandle(forReadingFrom: extensionLog) {
-                defer { try? input.close() }
-                let end = input.seekToEndOfFile()
-                let maxBytes: UInt64 = 2 * 1024 * 1024
-                input.seek(toFileOffset: end > maxBytes ? end - maxBytes : 0)
-                let data = input.readData(ofLength: Int(min(end, maxBytes)))
-                if !data.isEmpty,
-                   let output = try? FileHandle(forWritingTo: destination) {
-                    defer { try? output.close() }
-                    output.seekToEndOfFile()
-                    let header = "\n--- WALLPAPER EXTENSION LOG (last 2 MiB) ---\n"
-                    output.write(Data(header.utf8))
-                    output.write(Data(String(decoding: data, as: UTF8.self).utf8))
+            let bakeLogs = tmpFiles
+                .filter {
+                    $0.lastPathComponent.hasPrefix("waifux-wallpaper-wgpu-bake-")
+                        && $0.pathExtension == "log"
                 }
+                .sorted { lhs, rhs in
+                    let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantPast
+                    let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantPast
+                    return left > right
+                }
+                .prefix(3)
+            for (index, url) in bakeLogs.enumerated() {
+                readableSegments += appendLogSegment(
+                    "SCENE BAKE #\(index + 1) (\(url.lastPathComponent))",
+                    from: url,
+                    maxBytes: 256 * 1024,
+                    to: destination
+                )
             }
         }
+
         // wgpu 渲染器自身的 stdout/stderr 落在 Caches/com.waifux.wallpaperengine/renderer-logs
-        // （每屏一个文件，GPU init 失败/panic/事件循环异常只在这里）。一并 zip 到桌面，
-        // wgpu 内部问题才能随「导出日志」送达，否则排查渲染器只能看到宿主侧观测。
-        if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let rendererLogs = caches.appendingPathComponent(
+        // （每屏一个文件，GPU init 失败/panic/事件循环异常只在这里）。逐屏并入主文件，
+        // 保证「全部日志」一次导出就是单个产物；wgpu 内部问题才能随导出送达。
+        // 最多取 6 个文件（常见 1–3 屏，留出历史屏位），避免多屏时把导出文件撑大。
+        // 测试钩子：WAIFUX_RENDERER_LOG_DIR 可把目录指到 fixture，生产环境不设置时走 Caches。
+        let rendererLogs: URL?
+        if let overridePath = getenv("WAIFUX_RENDERER_LOG_DIR"), strlen(overridePath) > 0 {
+            rendererLogs = URL(fileURLWithPath: String(cString: overridePath), isDirectory: true)
+        } else if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            rendererLogs = caches.appendingPathComponent(
                 "com.waifux.wallpaperengine/renderer-logs", isDirectory: true)
-            if FileManager.default.fileExists(atPath: rendererLogs.path) {
-                let zipDestination = desktop.appendingPathComponent("WaifuX-RendererLogs-\(stamp).zip")
-                try? FileManager.default.removeItem(at: zipDestination)
-                let zipTask = Process()
-                zipTask.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-                zipTask.arguments = ["-c", "-k", "--keepParent", rendererLogs.path, zipDestination.path]
-                try? zipTask.run()
-                zipTask.waitUntilExit()
+        } else {
+            rendererLogs = nil
+        }
+        if let rendererLogs,
+           fm.fileExists(atPath: rendererLogs.path),
+           let rendererFiles = try? fm.contentsOfDirectory(
+               at: rendererLogs,
+               includingPropertiesForKeys: nil,
+               options: [.skipsHiddenFiles]
+           ) {
+            let logs = rendererFiles
+                .filter { $0.pathExtension == "log" }
+                // 优先取最近写过的屏（诊断价值最高）；同一时间戳再按 screen 数字稳定排序，
+                // 避免字典序把 screen-10 排到 screen-2 前面。
+                .sorted { lhs, rhs in
+                    let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantPast
+                    let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantPast
+                    if left != right { return left > right }
+                    return lhs.lastPathComponent.compare(rhs.lastPathComponent, options: .numeric) == .orderedAscending
+                }
+                .prefix(6)
+            for url in logs {
+                readableSegments += appendLogSegment(
+                    "RENDERER \(url.lastPathComponent)",
+                    from: url,
+                    maxBytes: 512 * 1024,
+                    to: destination
+                )
             }
         }
-        AppLogger.info(.general, "日志已导出到桌面", metadata: ["path": destination.path])
+
+        guard readableSegments > 0 else {
+            try? fm.removeItem(at: destination)
+            return nil
+        }
+        AppLogger.info(.general, "全部日志已导出到桌面", metadata: [
+            "path": destination.path,
+            "segments": String(readableSegments)
+        ])
         return destination
+    }
+
+    /// 追加一段日志尾部；返回是否读取到内容。
+    @discardableResult
+    private static func appendLogSegment(_ title: String, from url: URL?, maxBytes: UInt64, to destination: URL) -> Int {
+        guard let url else {
+            appendSkipped(title, reason: "路径不可用", to: destination)
+            return 0
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            appendSkipped(title, reason: "文件不存在", to: destination)
+            return 0
+        }
+        guard let input = try? FileHandle(forReadingFrom: url) else {
+            appendSkipped(title, reason: "不可读", to: destination)
+            return 0
+        }
+        defer { try? input.close() }
+        let end = input.seekToEndOfFile()
+        guard end > 0 else {
+            appendSkipped(title, reason: "空文件", to: destination)
+            return 0
+        }
+        input.seek(toFileOffset: end > maxBytes ? end - maxBytes : 0)
+        let data = input.readData(ofLength: Int(min(end, maxBytes)))
+        guard !data.isEmpty, let output = try? FileHandle(forWritingTo: destination) else {
+            appendSkipped(title, reason: "读取失败", to: destination)
+            return 0
+        }
+        defer { try? output.close() }
+        output.seekToEndOfFile()
+        let segmentHeader = "\n--- \(title) (last \(maxBytes / 1024) KiB) ---\n来源: \(url.path)\n"
+        output.write(Data(segmentHeader.utf8))
+        output.write(Data(String(decoding: data, as: UTF8.self).utf8))
+        return 1
+    }
+
+    private static func appendSkipped(_ title: String, reason: String, to destination: URL) {
+        guard let output = try? FileHandle(forWritingTo: destination) else { return }
+        defer { try? output.close() }
+        output.seekToEndOfFile()
+        output.write(Data("\n--- \(title) ---\n[跳过] \(reason)\n".utf8))
     }
 }
 
@@ -341,7 +556,10 @@ final class RepeatForeverAnimationTracker: @unchecked Sendable {
         alive[tag, default: 0] += 1
         let count = alive[tag] ?? 0
         lock.unlock()
-        AppLogger.error(.general, "[AnimTracker] enter \(tag) | alive=\(count)")
+        // 动画进出是高频状态信号（骨架屏每次进出都会触发，实测成对刷了两千多行）。
+        // 保留 error 级（Release 也落文件，崩溃/振荡排查需要），但按 tag 节流。
+        AppLogger.throttled(.error, .general, key: "anim.enter.\(tag)", interval: 5,
+                            "[AnimTracker] enter \(tag) | alive=\(count)")
     }
 
     func exit(_ tag: String) {
@@ -349,7 +567,8 @@ final class RepeatForeverAnimationTracker: @unchecked Sendable {
         let count = max(0, (alive[tag] ?? 1) - 1)
         if count == 0 { alive[tag] = nil } else { alive[tag] = count }
         lock.unlock()
-        AppLogger.error(.general, "[AnimTracker] exit \(tag) | alive=\(count)")
+        AppLogger.throttled(.error, .general, key: "anim.exit.\(tag)", interval: 5,
+                            "[AnimTracker] exit \(tag) | alive=\(count)")
     }
 
     func startHeartbeat() {

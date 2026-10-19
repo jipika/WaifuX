@@ -10,6 +10,7 @@ import CryptoKit
 import ScreenCaptureKit
 import WebKit
 import ApplicationServices
+import os
 
 // MARK: - NSScreen Extension
 extension NSScreen {
@@ -92,18 +93,67 @@ private func isSystemWallpaperSyncEnabledForCurrentLaunch() -> Bool {
     return rawValue == "1" || rawValue == "true" || rawValue == "yes"
 }
 
+/// CLI 调试日志：追加到 `/tmp/wallpaperengine-cli-debug.log`。
+///
+/// daemon 会长期运行，这里保留 1MB 上限并在超限时截尾，避免日志无限增长。
+/// 单进程写（daemon 独占），用 O_APPEND 原子追加 + 计数触发 fstat，避免热路径反复 syscall。
+private let DEBUG_LOG_MAX_BYTES: Int64 = 1_000_000
+private let DEBUG_LOG_KEEP_BYTES: Int64 = 256 * 1024
+private let dlogWriteCounter = OSAllocatedUnfairLock(initialState: UInt64(0))
+
 private func dlog(_ msg: String) {
     let line = "[\(Date())] \(msg)\n"
-    if let data = line.data(using: .utf8) {
-        if FileManager.default.fileExists(atPath: DEBUG_LOG_PATH) {
-            if let fh = FileHandle(forWritingAtPath: DEBUG_LOG_PATH) {
-                _ = try? fh.seekToEnd()
-                fh.write(data)
-                try? fh.close()
-            }
-        } else {
-            try? data.write(to: URL(fileURLWithPath: DEBUG_LOG_PATH), options: .atomic)
-        }
+    guard let data = line.data(using: .utf8) else { return }
+
+    let fd = open(DEBUG_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+
+    let count = dlogWriteCounter.withLock { value -> UInt64 in
+        value &+= 1
+        return value
+    }
+    if count % 64 == 0 {
+        trimDebugLogIfNeeded(fd: fd)
+    }
+    data.withUnsafeBytes { raw in
+        _ = write(fd, raw.baseAddress, data.count)
+    }
+}
+
+private func trimDebugLogIfNeeded(fd: Int32) {
+    var info = stat()
+    guard fstat(fd, &info) == 0, info.st_size > DEBUG_LOG_MAX_BYTES else { return }
+    guard flock(fd, LOCK_EX) == 0 else { return }
+    defer { flock(fd, LOCK_UN) }
+    guard fstat(fd, &info) == 0, info.st_size > DEBUG_LOG_MAX_BYTES else { return }
+
+    let readStart = Int64(info.st_size) - DEBUG_LOG_KEEP_BYTES
+    let readFD = open(DEBUG_LOG_PATH, O_RDONLY)
+    guard readFD >= 0 else { return }
+    defer { close(readFD) }
+    guard lseek(readFD, readStart, SEEK_SET) >= 0 else { return }
+
+    var tail = Data()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while tail.count < Int(DEBUG_LOG_KEEP_BYTES) {
+        let n = read(readFD, &buffer, buffer.count)
+        guard n > 0 else { break }
+        tail.append(contentsOf: buffer[0..<n])
+    }
+
+    // 回退到换行之后，避免截出半个 UTF-8 字符。
+    guard var start = tail.firstIndex(of: 0x0A) else { return }
+    start = tail.index(after: start)
+    guard start < tail.endIndex else { return }
+
+    let header = "\n--- LOG TRUNCATED \(ISO8601DateFormatter().string(from: Date())) ---\n"
+    var output = Data(header.utf8)
+    output.append(contentsOf: tail[start...])
+
+    guard ftruncate(fd, 0) == 0 else { return }
+    output.withUnsafeBytes { raw in
+        _ = write(fd, raw.baseAddress, output.count)
     }
 }
 
@@ -2125,6 +2175,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         height: Int,
         screen: Int? = nil,
         offscreen: Bool = false,
+        /// 是否允许桌面窗口接收鼠标事件。默认 false = 点击穿透，避免盖住
+        /// Finder 桌面背景窗口的点击（详见窗口创建处注释）。
+        allowsMouseInput: Bool = false,
         fps: Int = 60,
         renderScalePercent: Int = 100,
         userPropertiesJSON: String? = nil,
@@ -2215,6 +2268,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             return
         }
         // 创建无边框窗口
+        // 离屏/烘焙窗口永远穿透，不允许被偏好开关放行。
+        let effectiveAllowsMouseInput = allowsMouseInput && !offscreen
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: .borderless,
@@ -2283,8 +2338,23 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             // 懒采样能跟随 poster 更新。
             w.setFrame(targetScreen.frame, display: true)
         }
-        w.acceptsMouseMovedEvents = true
-        w.ignoresMouseEvents = offscreen
+        // 桌面点击穿透。
+        //
+        // 本窗口位于 kCGDesktopWindowLevel（见上面 `w.level`），但同一层级上
+        // Finder 的桌面背景窗口负责接收「点击桌面空白处」——不取消图标选中、
+        // 弹右键菜单、点中新图标。窗口一旦接收鼠标事件就叠在它上面，把桌面
+        // 点击整片吃掉，用户看到的现象就是「壁纸设置了，点桌面没任何反应」。
+        //
+        // App 内其它所有桌面级窗口都是 ignoresMouseEvents = true：
+        // VideoWallpaperManager、StaticImageWallpaperOverlayManager、
+        // LiquidGlassClockOverlayManager、StaticWallpaperGrainManager、
+        // NotchOverlayManager。这里必须与之保持一致；烘焙窗口（offscreen）
+        // 本来就该穿透。
+        //
+        // 少数依赖 hover/点击的网页壁纸需要例外，由 `--mouse-input` 显式放行
+        // （App 侧按偏好 web_wallpaper_mouse_input 传入，默认关闭）。
+        w.acceptsMouseMovedEvents = effectiveAllowsMouseInput
+        w.ignoresMouseEvents = !effectiveAllowsMouseInput
         w.isReleasedWhenClosed = false
 
         guard let contentView = w.contentView else {
@@ -4123,6 +4193,14 @@ private final class WebRealtimeStreamRecorder: NSObject, SCStreamOutput, SCStrea
                 // 烘焙成片只有 1.08 / 15（边缘能量差一个数量级），成片明显发虚。
                 // `.best` 按原生 backing 像素抓，2x 屏下窗口正好是目标尺寸，无需二次缩放。
                 configuration.captureResolution = .best
+                // 显示器是 Display P3 时，SCK 默认按显示器色彩空间交付像素；成片不带
+                // 色域标记，播放端按 BT.709 解释 → P3 数值被当 709 显示，彩色内容
+                // （人物肤色、发丝、裙摆高光）整体掉饱和度。
+                // 实测同构图平均饱和度：实时 0.1777 / 烘焙 0.1372（低 23%）；
+                // 而把同一张实时截图走一遍 H.264 4:2:0 编码只损失 1.7%（0.1747），
+                // 说明降饱和来自采集色域而不是编码压缩。
+                // 网页内容本身是 sRGB，这里让 SCK 直接交付 sRGB，与编码端的 709 假设对齐。
+                configuration.colorSpaceName = CGColorSpace.sRGB
 
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)

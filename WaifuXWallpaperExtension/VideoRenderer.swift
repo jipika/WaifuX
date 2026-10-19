@@ -86,7 +86,8 @@ final class VideoRenderer: @unchecked Sendable {
             let bounds = rootLayer.bounds
             let layout = Self.aspectFillLayout(videoSize: videoSize, in: bounds)
 
-            extLog("[VideoRenderer] video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(layout.scale)")
+            extLogAggregated(key: "renderer.layout", interval: 60,
+                             "[VideoRenderer] video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(layout.scale)")
 
             let displayLayer = AVSampleBufferDisplayLayer()
             displayLayer.videoGravity = .resizeAspectFill

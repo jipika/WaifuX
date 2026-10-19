@@ -48,7 +48,9 @@ enum PlaybackPolicy: Int, Sendable, Comparable {
         isOnBattery: Bool,
         batteryLevel: Int,
         isGameModeActive: Bool = false,
-        displayBrightness: Float = 1.0
+        displayBrightness: Float = 1.0,
+        isLowPowerMode: Bool = false,
+        pauseOnBattery: Bool = false
     ) -> PlaybackPolicy {
         var worst: PlaybackPolicy = .full
 
@@ -59,6 +61,9 @@ enum PlaybackPolicy: Int, Sendable, Comparable {
         if activityState.contains("suspended") { worst = max(worst, .paused) }
         if presentationMode == "idle" { worst = max(worst, .paused) }
         if isGameModeActive { worst = max(worst, .paused) }
+        // 用户主动开启「使用电池时暂停」后，电池供电与系统低功耗模式都直接暂停。
+        // 这是用户已经打开的省电开关的语义，扩展此前只做 .reduced（且没有实际降帧）。
+        if pauseOnBattery, isOnBattery || isLowPowerMode { worst = max(worst, .paused) }
         // 用户将背光调到 ~0。显示器技术上仍"唤醒"所以 screensDidSleep 不会触发，
         // WallpaperAgent 也不会切换到 "idle"，但用户看不到任何画面。
         if displayBrightness < PowerMonitor.PowerState.brightnessPauseThreshold {
@@ -105,7 +110,8 @@ enum PlaybackPolicy: Int, Sendable, Comparable {
         alwaysPauseDesktop: Bool,
         pauseWhenOccluded: Bool,
         desktopOccluded: Bool,
-        powerState: PowerMonitor.PowerState
+        powerState: PowerMonitor.PowerState,
+        pauseOnBattery: Bool = false
     ) -> PlaybackPolicy {
         compute(
             presentationMode: presentationMode,
@@ -118,7 +124,9 @@ enum PlaybackPolicy: Int, Sendable, Comparable {
             isOnBattery: powerState.isOnBattery,
             batteryLevel: powerState.batteryLevel,
             isGameModeActive: powerState.isGameModeActive,
-            displayBrightness: powerState.displayBrightness
+            displayBrightness: powerState.displayBrightness,
+            isLowPowerMode: powerState.isLowPowerMode,
+            pauseOnBattery: pauseOnBattery
         )
     }
 }

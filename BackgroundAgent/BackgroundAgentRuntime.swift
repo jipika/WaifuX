@@ -899,6 +899,13 @@ final class BackgroundAgentRuntime {
         case "lock.desktopPaused":
             if #available(macOS 26.0, *) { LockScreenWallpaperService.shared.setAlwaysPauseDesktop(a.bool("paused")) }
             return [:]
+        case "lock.pauseOnBattery":
+            // 电池暂停开关镜像：扩展自己检测电源/低功耗状态，这里只同步用户开关。
+            LockScreenWallpaperService.shared.setPauseOnBattery(
+                a.bool("enabled"),
+                forceNotify: a.bool("forceNotify", default: false)
+            )
+            return [:]
         case "lock.displayPause":
             if #available(macOS 26.0, *) { LockScreenWallpaperService.shared.setDisplayPaused(a.bool("paused"), forDisplayID: UInt32(a.integer("display"))) }
             return [:]

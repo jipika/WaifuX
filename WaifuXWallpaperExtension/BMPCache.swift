@@ -84,7 +84,9 @@ private func writeBMPSnapshot(_ request: BMPSnapshotRequest) async -> Bool {
     let displayPixelHeight = request.displayPixelHeight
     let cacheDir = request.cacheDirectory
     guard WallpaperState.shared.cacheDirectoryURL == cacheDir else {
-        extLog("  [BMPCache] 无 cacheDirectoryURL，跳过")
+        // 这是稳定的环境条件（每个请求都会命中），不是偶发错误：只记录一次。
+        extLogThrottled(key: "bmpcache.noDirectory", interval: 3600,
+                        "  [BMPCache] 无 cacheDirectoryURL，跳过")
         return false
     }
 

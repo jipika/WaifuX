@@ -118,12 +118,15 @@ final class VideoLibrary: Sendable {
                     )
                 }
                 lock.withLock { $0 = entries }
-                extLog("[VideoLibrary] 通过 Socket 获取到 \(entries.count) 个视频")
+                // 每次 prefs/commands 扫描都会走这里，结果稳定时无需重复记录。
+                extLogThrottled(key: "videolib.socketScan", interval: 60,
+                                "[VideoLibrary] 通过 Socket 获取到 \(entries.count) 个视频")
                 return
             }
 
             // Socket 不可用（App 未运行等），回退文件扫描
-            extLog("[VideoLibrary] Socket 不可用，回退文件扫描")
+            extLogThrottled(key: "videolib.socketUnavailable", interval: 600,
+                            "[VideoLibrary] Socket 不可用，回退文件扫描")
             scanFiles()
         }
     }

@@ -654,6 +654,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         wallpaperSwitchGeneration &+= 1
         let switchGeneration = wallpaperSwitchGeneration
         var ownsSettingFlag = true
+        /// 是否走完了正常出口（scene 的「完成」/ web 分支的 return）。仅供 defer 区分
+        /// 「被顶掉/早退」与「正常结束」，不影响任何业务分支。
+        var didReachCompletion = false
         func releaseSettingFlag() {
             guard ownsSettingFlag else { return }
             ownsSettingFlag = false
@@ -661,6 +664,20 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         defer {
             releaseSettingFlag()
+            // 静默出口追踪：本函数有十余处 `guard wallpaperSwitchGeneration ==
+            // switchGeneration else { return }`（被更新请求顶掉）以及 Web 分支的
+            // 早 return。它们都不打任何日志，用户报「点了没反应」时日志里只剩
+            // 一条「setWallpaper 开始」，无法区分是顶掉、Web 早退还是卡住。
+            // 这里只在「没有走到完成标记」时补一条痕迹，正常路径零额外输出。
+            if !didReachCompletion {
+                AppLogger.error(.wallpaper, "setWallpaper 未走到完成标记即退出", metadata: [
+                    "path": path,
+                    "switchGeneration": switchGeneration,
+                    "currentGeneration": wallpaperSwitchGeneration,
+                    "superseded": wallpaperSwitchGeneration != switchGeneration,
+                    "settingFlagReleased": !isSettingWallpaper
+                ])
+            }
             print("[WallpaperEngineXBridge] <<< setWallpaper END")
         }
 
@@ -891,6 +908,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             // poster 的桌面写入/菜单栏采样必须晚于旧视频交接结束；否则会在
             // crossfade 中间触发一次 WindowServer 重合成。
             scheduleWebPosterCapture(path: resolvedPath, targetScreens: effectiveScreens)
+            didReachCompletion = true
             return
         }
         // 切到非 web 壁纸：根据其它屏剩余 web 壁纸重新评估是否仍需音频中继
@@ -1422,6 +1440,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             "screenProcesses": screenProcesses.count,
             "screenRenderStates": screenRenderStates.keys.sorted().joined(separator: ",")
         ])
+        didReachCompletion = true
         ensureRendererHealthLoop()
         for screen in effectiveScreens {
             applyPersistedCrop(for: screen)
@@ -1783,6 +1802,23 @@ final class WallpaperEngineXBridge: ObservableObject {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenPause", ["id": screenID]); return }
 
         guard isControllingExternalEngine else { return }
+
+        // 幂等闸（只针对 scene 进程）：
+        // 自动暂停的 3s 轮询每一轮都会对同一批屏再走一次这里，而重复 kill(SIGSTOP)
+        // 不改变任何状态，却要额外做一次 kill(pid, 0) 探活并写一条 ERROR —— 单个
+        // 渲染器启动后 3 分钟内能刷 60+ 条，通知风暴时一秒可达 300+ 条（实测
+        // 2026-10-17T05:51:32 一秒 359 条）。
+        //
+        // 判据必须用「进程真的处于 T 状态」而不是只信 perScreenPausedScreenIDs：
+        // 登记表与真实状态会短暂不一致（setWallpaper 里会先 SIGCONT 让进程能读
+        // 热切换文件），只信登记表会把「登记了但进程还在跑」误判成已暂停而永不重试。
+        //
+        // web 屏没有 screenProcesses 条目，落不到这段，因此不会漏发下面的 IPC pause。
+        if perScreenPausedScreenIDs.contains(screenID),
+           let running = screenProcesses[screenID],
+           Self.isProcessStopped(pid: running.pid) {
+            return
+        }
 
         // scene：有独立 wallpaper-wgpu 进程，按屏 SIGSTOP
         if let info = screenProcesses[screenID] {
@@ -2757,6 +2793,15 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // wallpaperengine-cli 的 set 命令一次只处理一个屏幕索引。必须逐屏发送，
         // 否则全局多屏轮换会让副屏被记录为已管理、实际却没有 WebView。
+        //
+        // 此前这条路径只有 print()，而 print 不进 waifux.log —— Web 壁纸失败时
+        // 用户侧日志里只剩一条「setWallpaper 开始」和两次 teardown，完全没有
+        // 任何可归因的痕迹。这里补齐关键节点（入口 / 每屏结果 / 失败原因）。
+        AppLogger.error(.wallpaper, "setWebWallpaper 开始", metadata: [
+            "path": path,
+            "screens": screens.map(\.wallpaperScreenIdentifier).sorted().joined(separator: ","),
+            "targetIndexes": targetIndexes.map(String.init).joined(separator: ",")
+        ])
         print("[WallpaperEngineXBridge] 使用旧 wallpaperengine-cli 设置 Web 壁纸: \(path) screenIdx=\(targetIndexes)")
         // 清理旧的 legacy 路径和 per-screen 路径（CLI daemon 写入 per-screen 路径）
         try? FileManager.default.removeItem(atPath: legacyCLIWebCapturePath)
@@ -2790,10 +2835,22 @@ final class WallpaperEngineXBridge: ObservableObject {
             ])
             guard result.status == 0 else {
                 let detail = result.output.isEmpty ? "" : ": \(result.output)"
+                AppLogger.error(.wallpaper, "setWebWallpaper 单屏失败", metadata: [
+                    "path": path,
+                    "screenIndex": initialCrop.screenIndex,
+                    "exit": result.status,
+                    "output": result.output
+                ])
                 throw WallpaperEngineError.executionFailed(
                     "wallpaperengine-cli set 失败 (screen=\(initialCrop.screenIndex), exit=\(result.status))\(detail)"
                 )
             }
+            AppLogger.error(.wallpaper, "setWebWallpaper 单屏完成", metadata: [
+                "path": path,
+                "screenIndex": initialCrop.screenIndex,
+                "fps": effectiveFPS,
+                "renderScale": renderScalePercent
+            ])
 
         }
 

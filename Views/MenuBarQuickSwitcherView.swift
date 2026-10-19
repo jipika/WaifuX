@@ -173,11 +173,14 @@ struct MenuBarQuickSwitcherView: View {
                         }
                     }
 
-                    heroActionButton(
-                        systemName: "arrow.up.right.square",
-                        help: t("statusbar.openCurrentWallpaper")
-                    ) {
-                        viewModel.openDetail()
+                    // external 项（库里没有记录）没有详情页可开，按钮直接隐藏。
+                    if viewModel.canOpenSelectedDetail {
+                        heroActionButton(
+                            systemName: "arrow.up.right.square",
+                            help: t("statusbar.openCurrentWallpaper")
+                        ) {
+                            viewModel.openDetail()
+                        }
                     }
                 }
                 .padding(10)
@@ -226,7 +229,13 @@ struct MenuBarQuickSwitcherView: View {
     }
 
     private var thumbnailRail: some View {
-        NativeHorizontalThumbnailRail {
+        NativeHorizontalThumbnailRail(
+            selectedIndex: viewModel.batchItems.firstIndex {
+                $0.id == viewModel.selectedItem?.id
+            },
+            itemStride: thumbnailSize + thumbnailSpacing,
+            contentSignature: railContentSignature
+        ) {
             HStack(spacing: thumbnailSpacing) {
                 ForEach(viewModel.batchItems) { item in
                     let isSelected = item.id == viewModel.selectedItem?.id
@@ -239,11 +248,27 @@ struct MenuBarQuickSwitcherView: View {
         .frame(height: thumbnailSize + 4)
     }
 
+    /// 轨道内容签名：chip 列表、缩略图、标题、选中项与禁用态。
+    /// 弹窗里每次选中/预热回调都会触发 body 求值；无条件 `rootView = content` +
+    /// `layoutSubtreeIfNeeded()` 会让「点缩略图切换」一顿一顿的。
+    private var railContentSignature: Int {
+        var hasher = Hasher()
+        for item in viewModel.batchItems {
+            hasher.combine(item.id)
+            hasher.combine(item.thumbnailURL?.absoluteString)
+            hasher.combine(item.title)
+        }
+        hasher.combine(viewModel.selectedItem?.id)
+        hasher.combine(viewModel.isApplying)
+        return hasher.finalize()
+    }
+
     private func thumbnailChip(item: MenuBarQuickWallpaperItem, isSelected: Bool) -> some View {
         Button {
-            withAnimation(selectionSpring) {
-                viewModel.select(item)
-            }
+            // 不要用 withAnimation 包住 select：那会把整棵弹窗树（hero + 轨道 + footer）
+            // 都卷进同一次 spring 事务里逐帧重排。选中态动画由 chip 自己的
+            // `.animation(value: isSelected)` 与 hero 的 crossfade 各自负责。
+            viewModel.select(item)
         } label: {
             Color.black.opacity(0.08)
                 .overlay {
@@ -405,9 +430,23 @@ private struct QuickSwitcherPressButtonStyle: ButtonStyle {
 @MainActor
 private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable {
     let content: Content
+    /// 当前选中项在候选数组里的下标；变化时把它滚进可视区。
+    let selectedIndex: Int?
+    /// 单个 chip 的横向步进（宽 + 间距），用于按下标算滚动目标。
+    let itemStride: CGFloat
+    /// 轨道显示依赖的签名：相同就不重赋 rootView、不重排（切换选中不再整条重排）。
+    let contentSignature: Int
 
-    init(@ViewBuilder content: () -> Content) {
+    init(
+        selectedIndex: Int?,
+        itemStride: CGFloat,
+        contentSignature: Int,
+        @ViewBuilder content: () -> Content
+    ) {
         self.content = content()
+        self.selectedIndex = selectedIndex
+        self.itemStride = itemStride
+        self.contentSignature = contentSignature
     }
 
     func makeCoordinator() -> Coordinator {
@@ -427,25 +466,58 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
 
     func updateNSView(_ scrollView: VerticalWheelHorizontalScrollView, context: Context) {
         let hostingView = context.coordinator.hostingView
-        hostingView.rootView = content
+        let updateStart = Date()
+        let signatureChanged = context.coordinator.lastContentSignature != contentSignature
+        if signatureChanged {
+            context.coordinator.lastContentSignature = contentSignature
+            hostingView.rootView = content
+        }
+
+        // 打开弹窗时默认选中的是「当前壁纸」，它可能落在轨道可视区之外
+        // （例如在所属文件夹内被随机排到中段），这里只在选中项变化时补一次滚动。
+        var shouldRevealSelectedItem = false
+        if let selectedIndex, context.coordinator.lastRevealedIndex != selectedIndex {
+            context.coordinator.lastRevealedIndex = selectedIndex
+            shouldRevealSelectedItem = true
+        }
+        guard signatureChanged || shouldRevealSelectedItem else { return }
+        let revealIndex = shouldRevealSelectedItem ? selectedIndex : nil
+        let stride = itemStride
+        let updateNumber = context.coordinator.updateCount
 
         DispatchQueue.main.async {
             guard scrollView.documentView === hostingView else { return }
-            hostingView.layoutSubtreeIfNeeded()
-            let fittingSize = hostingView.fittingSize
-            let size = NSSize(
-                width: max(fittingSize.width, scrollView.contentSize.width),
-                height: max(fittingSize.height, scrollView.contentSize.height)
-            )
-            if hostingView.frame.size != size {
-                hostingView.setFrameSize(size)
+            if signatureChanged {
+                hostingView.layoutSubtreeIfNeeded()
+                let fittingSize = hostingView.fittingSize
+                let size = NSSize(
+                    width: max(fittingSize.width, scrollView.contentSize.width),
+                    height: max(fittingSize.height, scrollView.contentSize.height)
+                )
+                if hostingView.frame.size != size {
+                    hostingView.setFrameSize(size)
+                }
             }
+            if let revealIndex {
+                scrollView.revealItem(at: revealIndex, stride: stride)
+            }
+            // 切换选中/换批时量一次「body 求值 → 轨道布局完成」的主线程耗时。
+            AppLogger.debug(.general, "菜单栏轨道更新耗时", metadata: [
+                "layoutMS": String(Int(Date().timeIntervalSince(updateStart) * 1000)),
+                "changed": signatureChanged ? "1" : "0",
+                "count": String(updateNumber),
+            ])
         }
+        context.coordinator.updateCount += 1
     }
 
     @MainActor
     final class Coordinator {
         let hostingView: NSHostingView<Content>
+        /// 上一次已经滚动到过的选中下标，避免每次 body 更新都强制滚动。
+        var lastRevealedIndex: Int?
+        var lastContentSignature: Int?
+        var updateCount = 0
 
         init(rootView: Content) {
             hostingView = NSHostingView(rootView: rootView)
@@ -566,6 +638,24 @@ private final class VerticalWheelHorizontalScrollView: NSScrollView {
         var origin = contentView.bounds.origin
         origin.x = min(max(requestedOffset, 0), maxOffset)
         contentView.scroll(to: origin)
+        reflectScrolledClipView(contentView)
+    }
+
+    /// 把某个 chip 滚进可视区（尽量居中）。已经在可视区内时不动，
+    /// 避免用户手动滚动后被抢回。
+    func revealItem(at index: Int, stride: CGFloat) {
+        guard let documentView, stride > 0 else { return }
+        let viewportWidth = contentView.bounds.width
+        let maxOffset = max(0, documentView.frame.width - viewportWidth)
+        let itemCenter = CGFloat(index) * stride + stride / 2
+        let currentOffset = contentView.bounds.origin.x
+        // 露出半格以上就算可见。
+        guard itemCenter < currentOffset + stride / 2
+                || itemCenter > currentOffset + viewportWidth - stride / 2 else {
+            return
+        }
+        let targetOffset = min(max(itemCenter - viewportWidth / 2, 0), maxOffset)
+        contentView.scroll(to: NSPoint(x: targetOffset, y: contentView.bounds.origin.y))
         reflectScrolledClipView(contentView)
     }
 }

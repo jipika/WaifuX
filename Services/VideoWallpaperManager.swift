@@ -922,6 +922,13 @@ final class VideoWallpaperManager: ObservableObject {
     /// 上一次收到屏幕参数通知时的完整屏幕布局。仅当布局真的发生变化时，
     /// 才把热插拔视为原生视频解码管线边界，避免普通 AppKit 通知触发重建。
     private var lastObservedScreenConfigurations: Set<ScreenConfigurationSignature> = []
+    /// 屏幕参数通知的日志去重状态。`didChangeScreenParametersNotification` 在唤醒/
+    /// 显示器热插拔时会被系统在 1 秒内连发几十次，通知风暴下配合屏幕级联回调可达
+    /// 每秒数百次。日志本身不是问题根源，但每次都要拼 metadata 并写盘，实测曾把
+    /// 一天的量刷到近万条、把真错误淹掉，因此同签名的连续通知降级为 debug。
+    /// 与 ExternalDisplayConnectionCoordinator 的同名处理保持一致（15s 窗口）。
+    private var lastLoggedScreenSignature: String?
+    private var lastLoggedScreenSignatureAt = Date.distantPast
     /// 独立于 screenParametersChanged 的唤醒重建 work item，防止唤醒时序竞争
     private var pendingWakeRebuildWorkItem: DispatchWorkItem?
     private var externalWakeRecoveryTask: Task<Void, Never>?
@@ -6661,13 +6668,27 @@ final class VideoWallpaperManager: ObservableObject {
             let displayConfigurationChanged =
                 currentScreenConfigurations != self.lastObservedScreenConfigurations
             self.lastObservedScreenConfigurations = currentScreenConfigurations
-            AppLogger.error(.wallpaper, "Video wallpaper screen parameters changed", metadata: [
+            // 同签名连续通知降级为 debug：布局没变时不再写 ERROR（见成员变量注释）。
+            // 这里已在主队列上（函数开头 dispatch 到 main），无并发访问。
+            let screenSignature = NSScreen.screens
+                .map(\.wallpaperScreenIdentifier)
+                .joined(separator: ",")
+            let isRepeatedLog = screenSignature == self.lastLoggedScreenSignature
+                && Date().timeIntervalSince(self.lastLoggedScreenSignatureAt) < 15
+            let screenParametersMetadata: [String: Any] = [
                 "active": self.hasActiveVideoWallpaper,
                 "windows": self.windows.keys.sorted().joined(separator: ","),
                 "targetIDs": self.videoTargetScreenIDs.sorted().joined(separator: ","),
-                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
+                "currentScreens": screenSignature,
                 "displayConfigurationChanged": displayConfigurationChanged
-            ])
+            ]
+            if isRepeatedLog {
+                AppLogger.debug(.wallpaper, "Video wallpaper screen parameters changed (重复通知已合并)", metadata: screenParametersMetadata)
+            } else {
+                self.lastLoggedScreenSignature = screenSignature
+                self.lastLoggedScreenSignatureAt = Date()
+                AppLogger.error(.wallpaper, "Video wallpaper screen parameters changed", metadata: screenParametersMetadata)
+            }
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
             }

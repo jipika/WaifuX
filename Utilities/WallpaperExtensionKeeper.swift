@@ -65,6 +65,9 @@ enum WallpaperExtensionKeeper {
         signal(SIGTERM, { _ in exit(0) })
         signal(SIGINT, { _ in exit(0) })
 
+        // launchd 用 StandardOutPath 追加写这个文件，句柄在 launchd 手里；
+        // 这里用同 inode 截断（不 rename），避免把 launchd 的 fd 变成孤儿。
+        trimKeeperLogIfNeeded()
         keeperLog("keeper started pid=\(getpid())")
         // 宽限期：登录风暴中 Index.plist / 扩展拉载都可能未就绪，先观察
         sleep(startupGraceSeconds)
@@ -240,6 +243,45 @@ enum WallpaperExtensionKeeper {
     static var keeperLogFileURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/WaifuXKeeper.log")
+    }
+
+    /// keeper 日志上限（256KB）
+    private static let keeperLogMaxBytes = 256 * 1024
+
+    /// 启动时按上限截尾。日志由 launchd 的 StandardOutPath 持有并追加，
+    /// 必须同 inode 截断（不能 rename），否则 launchd 会继续写到孤儿 inode。
+    private static func trimKeeperLogIfNeeded() {
+        let url = keeperLogFileURL
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? UInt64,
+              size > UInt64(keeperLogMaxBytes) else { return }
+        let fd = Darwin.open(url.path, O_RDWR)
+        guard fd >= 0 else { return }
+        defer { Darwin.close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { return }
+        defer { flock(fd, LOCK_UN) }
+
+        let readFD = Darwin.open(url.path, O_RDONLY)
+        guard readFD >= 0 else { return }
+        defer { Darwin.close(readFD) }
+        let keep = Int64(keeperLogMaxBytes / 2)
+        guard lseek(readFD, max(0, Int64(size) - keep), SEEK_SET) >= 0 else { return }
+
+        var tail = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while tail.count < Int(keep) {
+            let n = read(readFD, &buffer, buffer.count)
+            guard n > 0 else { break }
+            tail.append(contentsOf: buffer[0..<n])
+        }
+        guard var start = tail.firstIndex(of: 0x0A) else { return }
+        start = tail.index(after: start)
+        guard start < tail.endIndex else { return }
+        guard ftruncate(fd, 0) == 0 else { return }
+        let kept = Data(tail[start...])
+        kept.withUnsafeBytes { raw in
+            _ = write(fd, raw.baseAddress, kept.count)
+        }
     }
 
     static func isLaunchAgentInstalled() -> Bool {

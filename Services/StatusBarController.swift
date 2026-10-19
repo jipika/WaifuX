@@ -449,11 +449,24 @@ final class StatusBarController: NSObject {
 
         if showQuickSwitcher {
             let targetScreen = sender.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+            // 打开前的参数准备（按屏查当前壁纸 / 解析设计目标）也可能是慢点，
+            // 单独打点才能区分「点击到弹窗出现」到底耗在哪一段。
+            let urlStart = Date()
+            let currentURL = targetScreen.flatMap { currentWallpaperURL(for: $0) }
+            let urlDone = Date()
+            let designTarget = resolvedWallpaperDesignTarget()
+            let designDone = Date()
+            AppLogger.debug(.general, "状态栏左键参数准备耗时", metadata: [
+                "urlMS": String(Int(urlDone.timeIntervalSince(urlStart) * 1000)),
+                "designMS": String(Int(designDone.timeIntervalSince(urlDone) * 1000)),
+                "hasURL": currentURL == nil ? "0" : "1",
+                "design": designTarget == nil ? "0" : "1",
+            ])
             quickSwitcherController.toggle(
                 relativeTo: sender,
                 targetScreen: targetScreen,
-                currentWallpaperURL: targetScreen.flatMap { currentWallpaperURL(for: $0) },
-                canDesignCurrentWallpaper: resolvedWallpaperDesignTarget() != nil,
+                currentWallpaperURL: currentURL,
+                canDesignCurrentWallpaper: designTarget != nil,
                 onOpenSettings: { [weak self] in
                     self?.openAppSettingsPanel()
                 },

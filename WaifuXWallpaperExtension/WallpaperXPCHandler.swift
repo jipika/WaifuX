@@ -1015,7 +1015,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             alwaysPauseDesktop: prefs.effectiveAlwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
-            powerState: power
+            powerState: power,
+            pauseOnBattery: prefs.pauseOnBattery
         )
 
         let modeChanged = effectivePresentationMode != previousPresentationMode
@@ -1102,7 +1103,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     /// 在 agentProxy 设置后调用。
     func startObservingPrefs() {
         WallpaperPrefsChangeObserver.shared.register(self)
-        extLog("[XPCHandler] 已注册 prefs 变化监听")
+        extLogThrottled(key: "xpc.registerPrefsObserver", interval: 600,
+                        "[XPCHandler] 已注册 prefs 变化监听")
     }
 
     func stopObservingPrefs() {
@@ -1115,7 +1117,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
     /// prefs 变化时：通知系统刷新壁纸设置，促使系统选中最新部署的视频
     fileprivate func handlePrefsChanged() {
-        extLog("[XPCHandler] prefs 已变化，通知系统刷新壁纸设置...")
+        // 这条通知链在 Set wallpaper / 状态同步时会连续触发（实测 13 万行日志来自这里）。
+        // 入口不再单独打点，只在真正通知成功/失败时记录，避免同一事件写两三行。
 
         // 先清除缓存，确保证 SettingsProvider 扫描到最新文件
         WallpaperState.shared.clearCaches()
@@ -1154,7 +1157,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             // 从而看到最新部署的视频。
             do {
                 try await unsafeProxy.updateSettingsViewModels(viewModels)
-                extLog("[XPCHandler] ✅ 已通知系统刷新壁纸设置")
+                extLogThrottled(key: "xpc.prefsRefresh", interval: 10,
+                                "[XPCHandler] ✅ 已通知系统刷新壁纸设置")
             } catch {
                 extLog("[XPCHandler] ❌ updateSettingsViewModels 失败: \(error)")
             }

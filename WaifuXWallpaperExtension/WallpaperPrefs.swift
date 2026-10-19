@@ -13,6 +13,10 @@ final class WallpaperPrefs: @unchecked Sendable {
 
     private struct PrefsFile: Codable, Equatable {
         var userPaused: Bool = false
+        /// 宿主「使用电池时暂停动态壁纸」开关的镜像。扩展自己检测电源/低功耗模式，
+        /// 所以这里只表示开关是否开启，不表示当前是否应该暂停。
+        /// optional：旧 App 不写该键时必须能正常解码。
+        var pauseOnBattery: Bool? = nil
         var alwaysPauseDesktop: Bool = true
         var pauseWhenOccluded: Bool = false
         var desktopOccluded: Bool = false
@@ -43,6 +47,8 @@ final class WallpaperPrefs: @unchecked Sendable {
     /// App 退出后扩展继续存活时，临时解除“仅锁屏播放”限制。
     /// 这是进程内状态，不写回共享 prefs；App 下次启动并刷新 prefs 后自动清除。
     private let appHostTerminatedLock = OSAllocatedUnfairLock(initialState: false)
+    /// 上次已写入日志的 videoID，用于 `updateCurrentVideo` 只记录真实变化。
+    private let lastLoggedVideoIDLock = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     private static var sharedContainerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")
@@ -61,6 +67,9 @@ final class WallpaperPrefs: @unchecked Sendable {
     // MARK: - Public (Prefs — app → extension)
 
     var userPaused: Bool { lock.withLock { $0.userPaused } }
+    /// 用户是否开启「使用电池时暂停动态壁纸」。真正的暂停判断在 `PlaybackPolicy`
+    /// 里结合 `PowerMonitor` 的实时电源/低功耗状态完成。
+    var pauseOnBattery: Bool { lock.withLock { ($0.pauseOnBattery ?? false) } }
     var alwaysPauseDesktop: Bool { lock.withLock { $0.alwaysPauseDesktop } }
     var effectiveAlwaysPauseDesktop: Bool {
         guard !appHostTerminatedLock.withLock({ $0 }) else { return false }
@@ -101,7 +110,16 @@ final class WallpaperPrefs: @unchecked Sendable {
         let videoID = WallpaperState.shared.currentVideoID
         let contexts = buildContextStates()
         writeState(StateFile(isActive: true, currentVideoID: videoID, currentVideoName: nil, contexts: contexts))
-        extLog("[WallpaperPrefs] updateCurrentVideo(\(videoID ?? "nil"))")
+        // 只有 videoID 真正变化才记录：这个入口在同步/刷新时会被反复调用，
+        // 无条件打点曾贡献两万多行重复日志。
+        let changed = lastLoggedVideoIDLock.withLock { last -> Bool in
+            guard last != videoID else { return false }
+            last = videoID
+            return true
+        }
+        if changed {
+            extLog("[WallpaperPrefs] updateCurrentVideo(\(videoID ?? "nil"))")
+        }
     }
 
     /// 渲染/切换失败时附加 lastError 写入 state；宿主读到后落日志。
@@ -188,6 +206,16 @@ final class WallpaperPrefs: @unchecked Sendable {
 
     private var previousDesktopOccluded = false
 
+    /// 宿主 prefs 变化后的即时重算入口。
+    ///
+    /// `reload()` 在内容未变时会跳过 `applyPauseState()`；电池暂停开关与电源切换
+    /// 共用同一条 Darwin 通知，因此这里额外刷新一次电源状态并重算策略，避免
+    /// 用户刚打开「使用电池时暂停」后仍要等 30s 兜底轮询才生效。
+    func refreshPlaybackPolicy() {
+        PowerMonitor.shared.refreshNow()
+        WaifuXWallpaperExtension.recomputeAndApplyPolicy()
+    }
+
     /// 重新计算播放策略并应用到所有活跃渲染器
     private func applyPauseState() {
         let state = WallpaperState.shared
@@ -216,7 +244,8 @@ final class WallpaperPrefs: @unchecked Sendable {
                 alwaysPauseDesktop: effectiveAlwaysPauseDesktop,
                 pauseWhenOccluded: pauseWhenOccluded,
                 desktopOccluded: desktopOccluded,
-                powerState: power
+                powerState: power,
+                pauseOnBattery: pauseOnBattery
             )
             state.forEachRenderer { renderer in
                 renderer.applyPolicy(policy, animated: animated)
@@ -231,7 +260,8 @@ final class WallpaperPrefs: @unchecked Sendable {
                     alwaysPauseDesktop: effectiveAlwaysPauseDesktop,
                     pauseWhenOccluded: pauseWhenOccluded,
                     desktopOccluded: desktopOccluded,
-                    powerState: power
+                    powerState: power,
+                    pauseOnBattery: pauseOnBattery
                 )
                 state.forRenderers(displayID: displayID) { renderer in
                     renderer.applyPolicy(policy, animated: animated)

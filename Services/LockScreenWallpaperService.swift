@@ -706,9 +706,13 @@ final class LockScreenWallpaperService: ObservableObject {
         let imageDir = container.appendingPathComponent(imageDirName, isDirectory: true)
         try? FileManager.default.removeItem(at: imageDir)
 
-        // 更新偏好设置
-        let prefs = PrefsFile(userPaused: false, alwaysPauseDesktop: false, currentVideoPath: nil, currentImagePath: nil, currentRealtimeSourceKind: nil)
+        // 更新偏好设置。
+        // 保留 pauseOnBattery：它是用户开关的镜像，不属于锁屏实例状态，
+        // 全量重建时丢弃会让扩展在后续电池供电时继续满帧播放。
         let prefsURL = container.appendingPathComponent(prefsFileName)
+        let previousPauseOnBattery = (try? JSONDecoder().decode(PrefsFile.self, from: Data(contentsOf: prefsURL)))?.pauseOnBattery
+        var prefs = PrefsFile(userPaused: false, alwaysPauseDesktop: false, currentVideoPath: nil, currentImagePath: nil, currentRealtimeSourceKind: nil)
+        prefs.pauseOnBattery = previousPauseOnBattery
         if let data = try? JSONEncoder().encode(prefs) {
             try? data.write(to: prefsURL, options: .atomic)
         }
@@ -741,6 +745,35 @@ final class LockScreenWallpaperService: ObservableObject {
         if let data = try? JSONEncoder().encode(prefs) {
             try? data.write(to: prefsURL, options: .atomic)
         }
+        notifyExtensionPrefsChanged()
+    }
+
+    /// 同步「使用电池时暂停动态壁纸」开关给壁纸扩展。
+    ///
+    /// 只镜像用户开关，不写电池状态：扩展侧的 `PowerMonitor` 自己读取电源与低功耗模式，
+    /// 因此 Helper 不在电源切换瞬间时也不会留下 stale 暂停，插电后由扩展自愈。
+    /// `forceNotify` 用于电源切换时即使开关值未变也唤醒扩展重算策略。
+    func setPauseOnBattery(_ enabled: Bool, forceNotify: Bool = false) {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.send("lock.pauseOnBattery", ["enabled": enabled, "forceNotify": forceNotify])
+            return
+        }
+        guard let container = sharedContainerURL else { return }
+
+        let prefsURL = container.appendingPathComponent(prefsFileName)
+        // 共享 prefs 不存在时说明扩展还没有被配置过：此时不要创建一份缺字段的文件，
+        // 否则会用 App 侧默认值覆盖扩展侧的默认行为（例如 alwaysPauseDesktop）。
+        guard FileManager.default.fileExists(atPath: prefsURL.path) else { return }
+        var prefs = (try? JSONDecoder().decode(PrefsFile.self, from: Data(contentsOf: prefsURL))) ?? PrefsFile()
+        let changed = (prefs.pauseOnBattery ?? false) != enabled
+        if changed {
+            prefs.pauseOnBattery = enabled
+            if let data = try? JSONEncoder().encode(prefs) {
+                try? data.write(to: prefsURL, options: .atomic)
+            }
+        }
+        guard changed || forceNotify else { return }
         notifyExtensionPrefsChanged()
     }
 
@@ -1466,6 +1499,10 @@ final class LockScreenWallpaperService: ObservableObject {
 
     private struct PrefsFile: Codable {
         var userPaused: Bool = false
+        /// 用户「使用电池时暂停动态壁纸」开关的镜像。
+        /// 扩展自己读取电源与低功耗模式，这里只同步开关，避免 Helper 不在电源切换
+        /// 瞬间时产生 stale 暂停。optional 保证旧扩展/旧 prefs 文件解码兼容。
+        var pauseOnBattery: Bool? = nil
         var alwaysPauseDesktop: Bool = false
         /// Legacy global video path — kept for backward compat with older extensions.
         /// Extension reads per-display paths first, falls back to this.

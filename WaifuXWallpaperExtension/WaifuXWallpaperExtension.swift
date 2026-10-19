@@ -734,7 +734,9 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                 // clearCaches() + 共享容器目录扫描会即时反映。
                 WallpaperState.shared.clearCaches()
                 WallpaperXPCHandler.refreshActiveCropLayouts()
-                extLog("[Extension] prefsChanged — caches cleared")
+                // 电池暂停开关与电源切换共用这条通知；即使 prefs 内容未变（forceNotify），
+                // 也要刷新电源状态并重算策略，否则要等 30s 兜底轮询才生效。
+                WallpaperPrefs.shared.refreshPlaybackPolicy()
                 // 与 commandsChanged 路径共用同一串行后台队列，避免并发 drain 竞争，
                 // 且不阻塞主线程。
                 wallpaperCommandQueue.async {
@@ -779,7 +781,8 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             alwaysPauseDesktop: prefs.effectiveAlwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
-            powerState: power
+            powerState: power,
+            pauseOnBattery: prefs.pauseOnBattery
         )
 
         // Per-display policy：检查每个显示器是否有独立的暂停设置
@@ -810,9 +813,148 @@ private var extLogFileURL: URL {
     return URL(fileURLWithPath: "/tmp/waifux-extension.log")
 }
 
-/// 串行化日志文件 IO，避免多线程同时 seek/write/close 导致日志错乱。
-/// 模块级 `let`：Darwin 通知 C 函数指针不能捕获 dynamic Self，模块级常量不属于捕获。
-private let extLogFileLock = OSAllocatedUnfairLock(initialState: ())
+/// 扩展日志文件存储：O_APPEND 原子追加 + 大小上限 + 同 inode 保尾截断。
+///
+/// 为什么不用 `FileHandle` + rename 轮转：扩展可能同时有多个实例写同一文件，
+/// rename 会让其它实例持有的 fd 指向已 unlink 的孤儿 inode，日志整段丢失。
+/// 这里始终 open→write→close，截断用 `flock` 互斥 + `ftruncate` 原地保尾，
+/// 最坏情况只是尾部少量行交错，不会静默丢掉整个进程的日志。
+private enum ExtensionLogStore {
+    /// 超过该大小触发截断（1MB）
+    static let maxBytes: Int64 = 1_000_000
+    /// 截断时保留尾部字节数（256KB）
+    static let keepBytes: Int64 = 256 * 1024
+    /// 每 N 次追加才 fstat 一次，避免高频日志在热路径上反复 syscall
+    static let checkEvery: UInt64 = 64
+
+    static let writeCounter = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+    static func append(_ message: String) {
+        let path = extLogFileURL.path
+        let line = "[\(Date())] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+
+        let count = writeCounter.withLock { value -> UInt64 in
+            value &+= 1
+            return value
+        }
+        if count % checkEvery == 0 {
+            trimIfNeeded(fd: fd, path: path)
+        }
+        data.withUnsafeBytes { raw in
+            _ = write(fd, raw.baseAddress, data.count)
+        }
+    }
+
+    private static func trimIfNeeded(fd: Int32, path: String) {
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_size > maxBytes else { return }
+
+        // 跨进程互斥：只锁截断窗口，追加仍由 O_APPEND 保证原子性。
+        guard flock(fd, LOCK_EX) == 0 else { return }
+        defer { flock(fd, LOCK_UN) }
+
+        guard fstat(fd, &info) == 0, info.st_size > maxBytes else { return }
+        let readStart = Int64(info.st_size) - keepBytes
+
+        let readFD = open(path, O_RDONLY)
+        guard readFD >= 0 else { return }
+        defer { close(readFD) }
+        guard lseek(readFD, readStart, SEEK_SET) >= 0 else { return }
+
+        var tail = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while tail.count < Int(keepBytes) {
+            let n = read(readFD, &buffer, buffer.count)
+            guard n > 0 else { break }
+            tail.append(contentsOf: buffer[0..<n])
+        }
+
+        // 从最近的换行之后开始保留：避免截出半个 UTF-8 汉字或半行。
+        guard var start = tail.firstIndex(of: 0x0A) else { return }
+        start = tail.index(after: start)
+        var attempts = 0
+        while start < tail.endIndex,
+              String(data: Data(tail[start...]), encoding: .utf8) == nil,
+              attempts < 4 {
+            guard let next = tail[start...].firstIndex(of: 0x0A) else { return }
+            start = tail.index(after: next)
+            attempts += 1
+        }
+        guard start < tail.endIndex else { return }
+
+        let header = "\n--- LOG TRUNCATED \(ISO8601DateFormatter().string(from: Date())) ---\n"
+        var output = Data(header.utf8)
+        output.append(contentsOf: tail[start...])
+
+        guard ftruncate(fd, 0) == 0 else { return }
+        output.withUnsafeBytes { raw in
+            _ = write(fd, raw.baseAddress, output.count)
+        }
+    }
+}
+
+/// 节流表：固定 key（枚举式）在时间窗内只输出一次。
+/// 超过容量时先清理 5 分钟前的过期项，仍超出则只保留最近 64 个 key，
+/// 避免动态 key 把表撑爆；节流只影响日志频率，不影响功能状态。
+private let extLogThrottleLock = OSAllocatedUnfairLock(initialState: [String: Date]())
+
+func extLogThrottled(key: String, interval: TimeInterval, _ message: @autoclosure () -> String) {
+    let now = Date()
+    let shouldLog = extLogThrottleLock.withLock { table -> Bool in
+        if let last = table[key], now.timeIntervalSince(last) < interval {
+            return false
+        }
+        if table.count >= 256 {
+            let cutoff = now.addingTimeInterval(-300)
+            table = table.filter { $0.value > cutoff }
+            if table.count >= 256 {
+                let newest = table.sorted { $0.value < $1.value }.suffix(64)
+                table = Dictionary(uniqueKeysWithValues: newest.map { ($0.key, $0.value) })
+            }
+        }
+        table[key] = now
+        return true
+    }
+    guard shouldLog else { return }
+    extLog(message())
+}
+
+private struct ExtLogAggregate {
+    var windowStart: Date
+    var count: Int
+    var lastMessage: String
+}
+
+private let extLogAggregateLock = OSAllocatedUnfairLock(initialState: [String: ExtLogAggregate]())
+
+/// 窗口聚合：高频状态日志按窗口计数，到期后输出「×N + 最近一条」。
+/// 用于 layout updated / updateCurrentVideo 这类可能振荡的信号：既能观察频率，
+/// 又不会每条都写文件。
+func extLogAggregated(key: String, interval: TimeInterval = 60, _ message: @autoclosure () -> String) {
+    let now = Date()
+    let text = message()
+    let flush: String? = extLogAggregateLock.withLock { table -> String? in
+        if var entry = table[key] {
+            entry.count += 1
+            entry.lastMessage = text
+            if now.timeIntervalSince(entry.windowStart) >= interval {
+                let elapsed = Int(now.timeIntervalSince(entry.windowStart))
+                table[key] = ExtLogAggregate(windowStart: now, count: 0, lastMessage: text)
+                return "\(key) ×\(entry.count) in \(elapsed)s | last: \(text)"
+            }
+            table[key] = entry
+            return nil
+        }
+        table[key] = ExtLogAggregate(windowStart: now, count: 0, lastMessage: text)
+        return text
+    }
+    if let flush { extLog(flush) }
+}
 
 func extLog(_ message: String) {
     if #available(macOS 11.0, *) {
@@ -820,17 +962,5 @@ func extLog(_ message: String) {
     } else {
         print("[WaifuXExt] \(message)")
     }
-    // 也写入文件便于调试
-    let line = "[\(Date())] \(message)\n"
-    extLogFileLock.withLock { _ in
-        if let handle = try? FileHandle(forWritingTo: extLogFileURL) {
-            handle.seekToEndOfFile()
-            if let data = line.data(using: .utf8) {
-                handle.write(data)
-            }
-            try? handle.close()
-        } else {
-            try? line.write(to: extLogFileURL, atomically: true, encoding: .utf8)
-        }
-    }
+    ExtensionLogStore.append(message)
 }

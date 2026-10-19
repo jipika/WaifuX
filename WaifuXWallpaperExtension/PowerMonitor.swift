@@ -19,12 +19,18 @@ final class PowerMonitor: Sendable {
     private let state = OSAllocatedUnfairLock(initialState: PowerState())
     private let continuations = OSAllocatedUnfairLock(initialState: [UUID: AsyncStream<PowerState>.Continuation]())
     nonisolated(unsafe) private var _batteryScheduler: NSBackgroundActivityScheduler?
+    /// IOKit 电源变化通知源：30s 轮询兜底之外的即时通道。
+    /// 挂主 runloop，不依赖渲染/喂帧循环，因此 `.paused` 停掉解码后仍然有效。
+    nonisolated(unsafe) private var _powerSourceRunLoopSource: CFRunLoopSource?
+    nonisolated(unsafe) private var _lowPowerModeObserver: NSObjectProtocol?
 
     struct PowerState: Sendable, Equatable {
         var thermalState: ProcessInfo.ThermalState = .nominal
         var isOnBattery = false
         var batteryLevel: Int = 100
         var isGameModeActive: Bool = false
+        /// 系统「低功耗模式」是否开启。与电池状态独立，插电时也可能开启。
+        var isLowPowerMode = false
         /// 内建显示屏背光亮度，0.0–1.0。无法读取时默认为 1.0（外接显示器、无头 Mac 等）。
         var displayBrightness: Float = 1.0
 
@@ -82,6 +88,26 @@ final class PowerMonitor: Sendable {
             self?.handleThermalChange()
         }
 
+        // 电源来源 — IOKit 通知驱动，插拔电源即时重算策略；
+        // 30s 轮询（下方 scheduler）仍然保留作为兜底。
+        let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        let callback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
+            guard let context else { return }
+            Unmanaged<PowerMonitor>.fromOpaque(context).takeUnretainedValue().handlePowerSourceNotification()
+        }
+        if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            _powerSourceRunLoopSource = source
+        }
+
+        // 系统低功耗模式 — 与电池状态独立（插电也可能开启）。
+        _lowPowerModeObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.handleLowPowerModeChange()
+        }
+
         // 电池 + 亮度 — OS 管理的定期轮询。
         // 亮度需要轮询因为 IODisplay 在用户拖动滑块时不会广播通知，
         // 且手动将亮度拖到零时 screensDidSleep 不会触发。
@@ -117,9 +143,29 @@ final class PowerMonitor: Sendable {
     func refreshNow() {
         updateBatteryState()
         updateBrightnessState()
+        updateLowPowerModeState()
     }
 
     // MARK: - Private
+
+    /// IOKit 电源变化（C 回调，主 runloop）。
+    private func handlePowerSourceNotification() {
+        updateBatteryState()
+    }
+
+    private func handleLowPowerModeChange() {
+        updateLowPowerModeState()
+    }
+
+    private func updateLowPowerModeState() {
+        let isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        let previous = state.withLock { $0 }
+        state.withLock { $0.isLowPowerMode = isLowPowerMode }
+        let current = state.withLock { $0 }
+        guard previous != current else { return }
+        extLog("[PowerMonitor] 低功耗模式 → \(isLowPowerMode)")
+        yieldToSubscribers(current)
+    }
 
     private func handleThermalChange() {
         let previous = state.withLock { $0 }

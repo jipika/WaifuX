@@ -142,8 +142,29 @@ enum AppExitDiagnostics {
         #endif
         let dirURL = supportURL.appendingPathComponent("WaifuX", isDirectory: true)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        // 退出日志按进程生命周期累积（每次退出写几行），长期会到几百 KB。
+        // 打开前按上限截尾，避免无限增长；用 O_TRUNC 原地重写保持 inode。
         let path = dirURL.appendingPathComponent("waifux-exit.log").path
+        trimExitLogIfNeeded(path: path)
         fd = Darwin.open(path, O_CREAT | O_WRONLY | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+    }
+
+    /// 退出日志上限（256KB）；超限保留尾部一半并回退到换行边界。
+    private static let exitLogMaxBytes = 256 * 1024
+
+    private static func trimExitLogIfNeeded(path: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64,
+              size > UInt64(exitLogMaxBytes) else { return }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let firstNewline = data.dropFirst(data.count / 2).firstIndex(of: 0x0A) else { return }
+        let tail = data.subdata(in: data.index(after: firstNewline)..<data.endIndex)
+        let out = Darwin.open(path, O_WRONLY | O_TRUNC)
+        guard out >= 0 else { return }
+        defer { Darwin.close(out) }
+        tail.withUnsafeBytes { raw in
+            _ = Darwin.write(out, raw.baseAddress, tail.count)
+        }
     }
 
     private static func write(_ line: String) {
@@ -506,7 +527,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             guard let win = note.object as? NSWindow else { return }
             let state = win.occlusionState.contains(.visible) ? "visible" : "occluded"
             let name = win.title.isEmpty ? (win.identifier?.rawValue ?? "?") : win.title
-            AppLogger.error(.general, "[AnimTracker] occlusion \(name) -> \(state)")
+            // 窗口遮挡变化一次焦点切换就会触发多轮；保留 error 级但按窗口节流。
+            AppLogger.throttled(.error, .general, key: "window.occlusion.\(name)", interval: 10,
+                                "[AnimTracker] occlusion \(name) -> \(state)")
         }
         // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
         // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
