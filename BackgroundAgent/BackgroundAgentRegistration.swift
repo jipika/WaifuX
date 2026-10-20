@@ -14,6 +14,10 @@ enum BackgroundAgentRegistrationError: LocalizedError {
     case approvalRequired
     case missingComponent(String)
     case unavailable(Int)
+    /// 注册记录已落库，但 launchd 里启动不起来或 mach service 连不上。
+    /// 与 `.unavailable` 区分：这里 BTM 状态可能已是「已启用」，旧校验会把它
+    /// 当成正常，实际客户端一连就 4099。
+    case launchdJobNotReady(String)
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +27,8 @@ enum BackgroundAgentRegistrationError: LocalizedError {
             return "WaifuX 后台服务组件缺失或无效，请重新安装应用：\(path)"
         case .unavailable(let status):
             return "WaifuX 后台服务注册失败（状态 \(status)），请重试或重新安装应用"
+        case .launchdJobNotReady(let detail):
+            return "WaifuX 后台服务已注册但未能启动（\(detail)）。请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务；仍失败请重装应用"
         }
     }
 }
@@ -76,15 +82,80 @@ enum BackgroundAgentRegistration {
     /// mach service 会以 `NSCocoaErrorDomain` 4099（找不到帮助程序）失败，
     /// `backgroundtaskmanagementd` 自己也报 `copyJobWithLabel … error 113`。
     /// 唯一可靠的恢复是注销再注册一次，让 BTM 把 job 重新下发给 launchd。
-    static func repairLaunchdRegistration(_ service: some BackgroundAgentServiceRegistration) async throws {
-        try? await service.unregister()
-        // 注销/注册经由 smd 异步落地，等状态与 launchd 域稳定后再继续。
-        try? await Task.sleep(for: .milliseconds(600))
+    ///
+    /// 2026-10-19 用户机日志复核：旧实现用固定 600ms 等待 + 只看 `status == .enabled`
+    /// 收尾，会「报成功」而 launchd 里其实仍不可达；`try?` 还把注销失败吞掉，
+    /// 此时 `ensureEnabled` 看到旧的 `.enabled` 直接 return，整轮 repair 等于空转。
+    /// 现在每一步都改真轮询，并且必须由 `probe` 证明 mach service 真能连。
+    ///
+    /// - Parameter probe: 真实可达性探针（通常是一次短超时 XPC `hello`）。
+    ///   为 nil 时只校验到 BTM 状态，供不做 XPC 的回归测试使用。
+    static func repairLaunchdRegistration(
+        _ service: some BackgroundAgentServiceRegistration,
+        probe: (@MainActor () async -> Bool)? = nil
+    ) async throws {
+        // 1. 注销，并等到 BTM 记录真的离开 .enabled。
+        //    unregister 经 smd 异步落地；不等它落地，后面的 ensureEnabled 会看到
+        //    旧状态直接 return，把「没修」当成「已修」。
+        do {
+            try await service.unregister()
+        } catch {
+            // 注销失败但状态已经不在 .enabled，说明脱节已解除，继续走注册。
+            if service.status == .enabled { throw error }
+        }
+        try await waitForStatus(service, leaving: .enabled, attempts: 10,
+                                failure: { "注销后仍为已启用（状态 \($0)）" })
+
+        // 2. 重新注册，并等到 BTM 真的记回 .enabled。
         try ensureEnabled(service)
-        // register 返回时 launchd 可能还没加载完 job 与 mach service 端口。
-        try? await Task.sleep(for: .milliseconds(600))
-        guard service.status == .enabled else {
-            throw BackgroundAgentRegistrationError.unavailable(service.status.rawValue)
+        try await waitForStatus(service, equals: .enabled, attempts: 10,
+                                failure: { "注册后状态为 \($0)" })
+
+        // 3. BTM 说 enabled 不等于 launchd 里端口可连 —— 旧实现缺的就是这一步。
+        guard let probe else { return }
+        for _ in 0..<8 {
+            try Task.checkCancellation()
+            if await probe() { return }
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        try Task.checkCancellation()
+        if await probe() { return }
+        throw BackgroundAgentRegistrationError.launchdJobNotReady("mach service 不可达")
+    }
+
+    /// 轮询等待状态变化。用 `try await Task.sleep`（不是 `try?`）让调用方的
+    /// 取消能真正打断等待 —— 否则被取消的那一轮会继续往下跑完注销/注册。
+    private static func waitForStatus(
+        _ service: some BackgroundAgentServiceRegistration,
+        equals target: SMAppService.Status,
+        attempts: Int,
+        failure: (Int) -> String
+    ) async throws {
+        for _ in 0..<attempts {
+            try Task.checkCancellation()
+            if service.status == target { return }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try Task.checkCancellation()
+        guard service.status == target else {
+            throw BackgroundAgentRegistrationError.launchdJobNotReady(failure(service.status.rawValue))
+        }
+    }
+
+    private static func waitForStatus(
+        _ service: some BackgroundAgentServiceRegistration,
+        leaving unwanted: SMAppService.Status,
+        attempts: Int,
+        failure: (Int) -> String
+    ) async throws {
+        for _ in 0..<attempts {
+            try Task.checkCancellation()
+            if service.status != unwanted { return }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try Task.checkCancellation()
+        guard service.status != unwanted else {
+            throw BackgroundAgentRegistrationError.launchdJobNotReady(failure(service.status.rawValue))
         }
     }
 }

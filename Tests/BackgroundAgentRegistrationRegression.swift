@@ -48,6 +48,26 @@ private enum RegistrationRegression {
         try await BackgroundAgentRegistration.repairLaunchdRegistration(repair)
         check(repair.unregistrations == 1 && repair.registrations == 1 && repair.status == .enabled,
               "service missing from launchd is repaired by re-registering")
+        // BTM 记回 .enabled 但 mach service 仍不可达：必须报错，不能像旧实现那样
+        // 只看 status 就「报告修好了」，让下一轮 bootstrap 立刻又 4099。
+        let unreachable = TestService(.enabled)
+        do {
+            try await BackgroundAgentRegistration.repairLaunchdRegistration(unreachable) { false }
+            preconditionFailure("expected launchd job not ready")
+        } catch {
+            if case .launchdJobNotReady? = error as? BackgroundAgentRegistrationError {
+                check(unreachable.registrations == 1,
+                      "repair refuses to report success when the probe cannot reach the service")
+            } else { preconditionFailure("launchd job not ready error") }
+        }
+        let recovered = TestService(.enabled)
+        var probes = 0
+        try await BackgroundAgentRegistration.repairLaunchdRegistration(recovered) {
+            probes += 1
+            return probes >= 2
+        }
+        check(probes == 2 && recovered.status == .enabled,
+              "repair succeeds once the probe reaches the service")
         let repairDenied = TestService(.enabled)
         repairDenied.result = .requiresApproval
         do {

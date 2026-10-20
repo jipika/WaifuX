@@ -13,14 +13,30 @@ final class MainWindowVisibility: ObservableObject {
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            // 桌面壁纸/时钟窗口的遮挡状态本来就不稳定（issue #119 里
+            // `occlusion ? -> visible/occluded` 就是它们），不应触发全窗口遍历。
+            guard let window = note.object as? NSWindow, window.level >= .normal else { return }
             MainActor.assumeIsolated {
-                self?.refresh()
+                self?.scheduleRefresh()
             }
         }
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated { self?.refresh() }
         }
+    }
+
+    private var refreshWorkItem: DispatchWorkItem?
+
+    /// 一次焦点切换会连发多条遮挡通知，300ms 内合并成一次刷新；
+    /// 每次通知都会重置计时，最后一次仍会执行，不会丢最终状态。
+    private func scheduleRefresh() {
+        refreshWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        refreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
     func refresh() {

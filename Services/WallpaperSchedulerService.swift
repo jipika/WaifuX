@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AppKit
+import IOKit.ps
 
 @MainActor
 class WallpaperSchedulerService: ObservableObject {
@@ -195,6 +196,80 @@ class WallpaperSchedulerService: ObservableObject {
             name: LockScreenWallpaperService.playbackStateNotification,
             object: nil
         )
+        // issue #119：电池供电 + 用户开启「电池时暂停自动轮换」时，轮换必须停，
+        // 否则到点重新加载视频壁纸会把刚暂停的渲染重新激活。
+        setupBatteryMonitoring()
+    }
+
+    // MARK: - 电池轮换暂停
+
+    private var powerRunLoopSource: CFRunLoopSource?
+    private var isOnBatteryPower = false
+
+    /// 电池供电 + 用户开启「电池时暂停自动轮换」时挂起定时轮换。
+    ///
+    /// 与 `pause_on_battery_power`（暂停播放）分开：用户可能希望电池下继续换
+    /// 静态壁纸，只是不重新播放动态壁纸。默认开启（与 issue 期望一致）。
+    private var isBatteryRotationSuspended: Bool {
+        guard BackgroundRuntimeRole.isHelper else { return false }
+        let pauseRotation = WaifuXPreferences.shared
+            .object(forKey: "pause_rotation_on_battery") as? Bool ?? true
+        // 只在用户本来就想在电池下暂停动态壁纸时才接管轮换；没开电池暂停的人
+        // 不应因为升级而被静默停掉轮换。
+        let pausePlayback = DynamicWallpaperAutoPauseManager.shared.pauseOnBatteryPower
+        return pauseRotation && pausePlayback && isOnBatteryPower
+    }
+
+    /// 设置变更或电源切换后调用（由 Helper 命令路由 / IOKit 通知驱动）。
+    func reevaluateBatterySuspension() {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        updateBatteryState()
+        if isBatteryRotationSuspended {
+            cancelDispatchTimer()
+            cancelTimedRotation()
+            print("\(logTag) Battery rotation pause active, suspending rotation")
+        } else if isRunning {
+            scheduleNextChange()
+            print("\(logTag) Battery rotation pause released, resuming rotation")
+        }
+    }
+
+    private func setupBatteryMonitoring() {
+        updateBatteryState()
+        let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        let callback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { ctx in
+            guard let ctx else { return }
+            // IOKit 回调在主 runloop；同步断言主 actor 后直接驱动轮换挂起/恢复。
+            MainActor.assumeIsolated {
+                Unmanaged<WallpaperSchedulerService>.fromOpaque(ctx)
+                    .takeUnretainedValue()
+                    .handlePowerSourceChanged()
+            }
+        }
+        if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            powerRunLoopSource = source
+        }
+        // 冷启动时若已经在电池上，先按当前状态挂起。
+        reevaluateBatterySuspension()
+    }
+
+    private func updateBatteryState() {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] else {
+            return
+        }
+        for source in sources {
+            guard let info = IOPSGetPowerSourceDescription(snapshot, source)?
+                    .takeUnretainedValue() as? [String: Any],
+                  let state = info[kIOPSPowerSourceStateKey] as? String else { continue }
+            isOnBatteryPower = (state == kIOPSBatteryPowerValue)
+            return
+        }
+    }
+
+    private func handlePowerSourceChanged() {
+        reevaluateBatterySuspension()
     }
 
     @objc private func handleVideoPlaybackEnded(_ notification: Notification) {
@@ -2068,7 +2143,8 @@ class WallpaperSchedulerService: ObservableObject {
     /// - Parameter earliestDelay: Optional floor on delay (e.g. empty-library poll backoff).
     private func scheduleNextChange(earliestDelay: TimeInterval = 0) {
         cancelDispatchTimer()
-        guard isRunning, !isScreenLocked, canScheduleForCurrentScreens else { return }
+        guard isRunning, !isScreenLocked, canScheduleForCurrentScreens,
+              !isBatteryRotationSuspended else { return }
 
         let now = Date()
         guard let nextFire = nextTimerFireDate(from: now) else {
@@ -2106,7 +2182,7 @@ class WallpaperSchedulerService: ObservableObject {
     ///   the batch re-arms on completion).
     @discardableResult
     private func changeWallpaperIfNeeded() -> Bool {
-        guard canScheduleForCurrentScreens else { return false }
+        guard canScheduleForCurrentScreens, !isBatteryRotationSuspended else { return false }
         if isScreenLocked {
             clearStuckScreenLockIfNeeded(source: "timer")
         }

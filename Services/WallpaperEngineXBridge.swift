@@ -1226,6 +1226,18 @@ final class WallpaperEngineXBridge: ObservableObject {
             if isExternalPaused { perScreenArgs += ["--paused"] }
 
             // ⭐ 壁纸控制文件（热切换入口，必传）
+            // 渲染器每 50ms stat 一次这个文件；冷启动若只传路径而不落文件，renderer
+            // 从启动第 4 秒起就会持续报「读取壁纸控制文件元数据失败」（错误日志 5 秒
+            // 节流），实测单会话 1 小时刷 750 条 WARN、约占日志 43%，而渲染器日志只在
+            // 启动时截断，长时间运行会无限增长。这里先写一个空对象占位（渲染器对空
+            // dict 的 setWallpaper/setProperties/upscaling 全为 None，走无操作分支），
+            // 之后热切换/属性更新再覆写。
+            _ = writeWallpaperControl(
+                url: wallpaperControlURL,
+                setWallpaper: nil,
+                assets: nil,
+                setProperties: nil
+            )
             perScreenArgs += ["--wallpaper-control", wallpaperControlURL.path]
 
             if let effectiveUserProperties, !effectiveUserProperties.isEmpty {

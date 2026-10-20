@@ -212,6 +212,24 @@ final class VideoWallpaperManager: ObservableObject {
     /// 手动暂停或自动暂停很快失效。
     private var nativePausedScreenIDs = Set<String>()
     private var nativePausedScreenFingerprints = Set<String>()
+
+    // MARK: - 唤醒后播放推进校验
+    //
+    // 唤醒重建窗口 ≠ 画面恢复推进：AVPlayer 在系统休眠后常见 rate=1 但
+    // currentTime 不再前进（解码器/音频会话被系统压制）。此时 Release 日志里
+    // 只剩「窗口已重建」，用户看到的却是静止画面——2026-10-20 用户日志就是
+    // 这个形态（内建屏视频窗 6 秒后重建，没有任何播放状态证据，最终靠退出
+    // 重开 App 恢复）。这里在唤醒恢复后做一次时间轴采样，对独占解码管线且
+    // 确实停滞的屏重建一次管线，并把结论写成 error 级日志（Release 可见）。
+    private static let wakePlaybackWatchdogDelay: TimeInterval = 2.5
+    private static let wakePlaybackSampleWindow: TimeInterval = 0.8
+    private static let wakePlaybackMinimumAdvance: Double = 0.02
+    private var wakePlaybackWatchdogTask: Task<Void, Never>?
+    private var wakePlaybackWatchdogGeneration: UInt64 = 0
+    /// 本轮唤醒周期内已尝试过管线重建的屏；同一视频只重建一次，防死循环。
+    private var wakePlaybackRecoveredScreenIDs = Set<String>()
+    /// 唤醒后锁屏标记残留的对账任务（合盖唤醒常丢失 screenIsUnlocked 通知）。
+    private var staleScreenLockReconcileTask: Task<Void, Never>?
     @Published private(set) var volume: Double = 1.0
     /// 最近一次进入菜单的主视频速度。实际保存和应用均按视频路径进行。
     @Published private(set) var playbackRate: Double = 1.0
@@ -4931,28 +4949,36 @@ final class VideoWallpaperManager: ObservableObject {
                     reconfigureDisplays: false
                 )
             }
-            // 解锁时恢复播放（如果不是手动暂停）
-            guard !self.isPaused else {
-                // 即便全局手动暂停，也要让 AutoPause 重新对齐追踪状态
-                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
-                return
-            }
-            if self.externalRenderingActive {
-                // helper 会按 systemPlaybackPaused + global/manual pause 合并恢复；
-                // 这里再 resumeAll 会错误清掉单屏暂停。
-                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
-                return
-            }
-            for (screenID, player) in self.players {
-                if self.shouldPlayNativeVideo(for: screenID) {
-                    self.playWallpaperPlayer(player, screenID: screenID)
-                    self.hidePosterImage(for: screenID)
-                }
-            }
-            // 解锁后会先全量 play；立刻把仍有效的覆盖/前台/全屏暂停重新施加，
-            // 避免窗口列表尚未恢复时 AutoPause 误以为桌面已可见。
-            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            self.resumeNativePlayersAfterUnlock(source: "screenUnlocked")
+            self.scheduleWakePlaybackWatchdog(reason: "screenUnlocked")
         }
+    }
+
+    /// 解锁 / 锁屏标记复位后的统一恢复入口。
+    /// 只负责把「没有被任何暂停原因压住」的屏重新播起来，随后交给
+    /// AutoPause 重新施加仍有效的遮挡 / 前台 / 全屏暂停。
+    private func resumeNativePlayersAfterUnlock(source: String) {
+        AppLogger.debug(.wallpaper, "视频播放恢复入口", metadata: ["source": source])
+        guard !isPaused else {
+            // 即便全局手动暂停，也要让 AutoPause 重新对齐追踪状态
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            return
+        }
+        if externalRenderingActive {
+            // helper 会按 systemPlaybackPaused + global/manual pause 合并恢复；
+            // 这里再 resumeAll 会错误清掉单屏暂停。
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            return
+        }
+        for (screenID, player) in players {
+            if shouldPlayNativeVideo(for: screenID) {
+                playWallpaperPlayer(player, screenID: screenID)
+                hidePosterImage(for: screenID)
+            }
+        }
+        // 解锁后会先全量 play；立刻把仍有效的覆盖/前台/全屏暂停重新施加，
+        // 避免窗口列表尚未恢复时 AutoPause 误以为桌面已可见。
+        DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
     }
 
     func stopWallpaper(for targetScreen: NSScreen? = nil) {
@@ -6911,6 +6937,17 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSWorkspace 通知可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // 合盖唤醒常丢失 com.apple.screenIsUnlocked，isScreenLocked 会残留 true
+            // 把播放器永久压在 rate=0；用会话状态做单向对账复位。
+            self.scheduleStaleScreenLockReconcile(source: "screensWake")
+            AppLogger.error(.wallpaper, "视频唤醒恢复开始", metadata: [
+                "source": "screensWake",
+                "screens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
+                "windows": self.windows.keys.sorted().joined(separator: ","),
+                "active": self.hasActiveVideoWallpaper,
+                "paused": self.isPaused,
+                "locked": self.isScreenLocked
+            ])
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
                 LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
@@ -6981,10 +7018,14 @@ final class VideoWallpaperManager: ObservableObject {
                             try? self.rebuildWindows(targetScreen: screen)
                         }
                         if !retryScreens.isEmpty {
-                            NSLog("[VideoWallpaperManager] Retry rebuild for \\(retryScreens.count) late-appearing screen(s) after screensWake")
+                            AppLogger.error(.wallpaper, "视频唤醒后显示器晚到，已补重建", metadata: [
+                                "source": "screensWake",
+                                "screens": retryScreens.count
+                            ])
                         }
                     }
                 }
+                self.scheduleWakePlaybackWatchdog(reason: "screensWake")
             }
             self.pendingWakeRebuildWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
@@ -7013,6 +7054,15 @@ final class VideoWallpaperManager: ObservableObject {
         // 系统唤醒后防抖重建并恢复播放
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.scheduleStaleScreenLockReconcile(source: "systemWake")
+            AppLogger.error(.wallpaper, "视频唤醒恢复开始", metadata: [
+                "source": "systemWake",
+                "screens": NSScreen.screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
+                "windows": self.windows.keys.sorted().joined(separator: ","),
+                "active": self.hasActiveVideoWallpaper,
+                "paused": self.isPaused,
+                "locked": self.isScreenLocked
+            ])
             if #available(macOS 26.0, *) {
                 LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
                 LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
@@ -7073,13 +7123,202 @@ final class VideoWallpaperManager: ObservableObject {
                             try? self.rebuildWindows(targetScreen: screen)
                         }
                         if !retryScreens.isEmpty {
-                            NSLog("[VideoWallpaperManager] Retry rebuild for \\(retryScreens.count) late-appearing screen(s) after systemWake")
+                            AppLogger.error(.wallpaper, "视频唤醒后显示器晚到，已补重建", metadata: [
+                                "source": "systemWake",
+                                "screens": retryScreens.count
+                            ])
                         }
                     }
                 }
+                self.scheduleWakePlaybackWatchdog(reason: "systemWake")
             }
             self.pendingWakeRebuildWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        }
+    }
+
+    // MARK: - 唤醒恢复：锁屏标记对账 + 播放推进校验
+
+    /// 合盖唤醒后 `com.apple.screenIsUnlocked` 可能丢失，`isScreenLocked` 会残留 true，
+    /// 播放器被锁屏时的 pause 永久压住。这里用会话字典做**单向**对账：只有
+    /// 「本地标记锁屏、会话明确未锁屏」才复位；反方向不碰，避免解锁瞬间会话
+    /// 字典仍报旧值时被误判回锁屏（与 LockScreenWallpaperService 同一套口径）。
+    private func scheduleStaleScreenLockReconcile(source: String) {
+        guard isScreenLocked, !externalRenderingActive, !isTerminating else { return }
+        staleScreenLockReconcileTask?.cancel()
+        staleScreenLockReconcileTask = Task { @MainActor [weak self] in
+            let delays: [UInt64] = [300_000_000, 900_000_000, 1_800_000_000]
+            for delay in delays {
+                try? await Task.sleep(nanoseconds: delay)
+                guard let self, !Task.isCancelled else { return }
+                guard self.isScreenLocked else { return }
+                if self.clearStaleScreenLockIfSessionUnlocked(source: source) { return }
+            }
+            self?.staleScreenLockReconcileTask = nil
+        }
+    }
+
+    @discardableResult
+    private func clearStaleScreenLockIfSessionUnlocked(source: String) -> Bool {
+        guard isScreenLocked, !externalRenderingActive, !isTerminating else { return false }
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let sessionScreenLocked = session["CGSSessionScreenIsLocked"] as? Bool,
+              !sessionScreenLocked else {
+            return false
+        }
+        AppLogger.error(.wallpaper, "唤醒后锁屏标记残留，按会话状态复位", metadata: [
+            "source": source
+        ])
+        isScreenLocked = false
+        if #available(macOS 26.0, *) {
+            reconcileExtensionStateAfterUnlock()
+            LockScreenWallpaperService.shared.reconcilePlaybackStateAfterWake(
+                source: "videoManagerStaleLockReconcile"
+            )
+        }
+        resumeNativePlayersAfterUnlock(source: "staleLockReconcile")
+        return true
+    }
+
+    /// 唤醒重建成功不等于画面恢复推进。延迟 2.5s 后对「应当正在播放」的屏
+    /// 采样一次 `currentTime`，0.8s 内推进不足半帧即判定停滞并重建一次管线。
+    private func scheduleWakePlaybackWatchdog(reason: String) {
+        guard !externalRenderingActive, hasActiveVideoWallpaper, !isTerminating else { return }
+        wakePlaybackWatchdogGeneration &+= 1
+        let generation = wakePlaybackWatchdogGeneration
+        wakePlaybackRecoveredScreenIDs.removeAll()
+        wakePlaybackWatchdogTask?.cancel()
+        wakePlaybackWatchdogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.wakePlaybackWatchdogDelay * 1_000_000_000)
+            )
+            guard let self, !Task.isCancelled,
+                  self.wakePlaybackWatchdogGeneration == generation else { return }
+            await self.runWakePlaybackWatchdog(reason: reason, generation: generation)
+        }
+    }
+
+    private func runWakePlaybackWatchdog(reason: String, generation: UInt64) async {
+        guard !externalRenderingActive, !isTerminating, hasActiveVideoWallpaper else { return }
+        guard !isScreenLocked else {
+            AppLogger.debug(.wallpaper, "唤醒播放校验跳过：仍处于锁屏", metadata: ["reason": reason])
+            return
+        }
+        // 自动暂停残留只诊断不硬清：真正的恢复由 AutoPause 的 reevaluate 决定，
+        // 直接改 isPaused 会误放行本该暂停的屏。
+        if isPaused, !userRequestedPause {
+            AppLogger.error(.wallpaper, "唤醒后发现全局暂停闸门残留", metadata: [
+                "reason": reason
+            ])
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+        }
+
+        var candidates: [(screenID: String, player: AVQueuePlayer, seconds: Double)] = []
+        for screen in screensForVideoWallpaperTargets() {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard let player = players[screenID], windows[screenID] != nil else { continue }
+            guard shouldPlayNativeVideo(for: screenID), player.rate > 0 else { continue }
+            candidates.append((screenID, player, player.currentTime().seconds))
+        }
+        guard !candidates.isEmpty else { return }
+
+        do {
+            try await Task.sleep(
+                nanoseconds: UInt64(Self.wakePlaybackSampleWindow * 1_000_000_000)
+            )
+        } catch {
+            return
+        }
+        guard !Task.isCancelled, wakePlaybackWatchdogGeneration == generation else { return }
+
+        var stalledScreenIDs: [String] = []
+        var timeline: [String] = []
+        for candidate in candidates {
+            // 采样窗口内可能发生重建/换片；引用变了就跳过，避免误判。
+            guard players[candidate.screenID] === candidate.player else { continue }
+            guard shouldPlayNativeVideo(for: candidate.screenID),
+                  candidate.player.rate > 0 else { continue }
+            let after = candidate.player.currentTime().seconds
+            let advanced = candidate.seconds.isFinite && after.isFinite
+                && (after - candidate.seconds) >= Self.wakePlaybackMinimumAdvance
+            if !advanced {
+                stalledScreenIDs.append(candidate.screenID)
+                timeline.append(
+                    "\(candidate.screenID):\(String(format: "%.2f", candidate.seconds))→\(String(format: "%.2f", after))"
+                )
+            }
+        }
+        guard !stalledScreenIDs.isEmpty else { return }
+
+        AppLogger.error(.wallpaper, "唤醒后视频时间轴未推进", metadata: [
+            "reason": reason,
+            "screens": stalledScreenIDs.sorted().joined(separator: ","),
+            "timeline": timeline.joined(separator: " "),
+            "paused": isPaused,
+            "locked": isScreenLocked
+        ])
+        guard !isScreenLocked, !externalRenderingActive else { return }
+        for screenID in stalledScreenIDs.sorted() {
+            rebuildStalledVideoPipeline(screenID: screenID, reason: reason)
+        }
+    }
+
+    /// 拆掉停滞屏的窗口并重建解码管线。共享解码管线时绝不为了单屏重建拆整条
+    /// 管线（会让引用同一 player 的其它屏一起黑屏），只记日志留给下次设置壁纸。
+    private func rebuildStalledVideoPipeline(screenID: String, reason: String) {
+        guard !wakePlaybackRecoveredScreenIDs.contains(screenID) else { return }
+        guard windows[screenID] != nil, let player = players[screenID] else { return }
+        let ownerCount = screenIDsReferencingPlayer(player).count
+        guard ownerCount <= 1 else {
+            AppLogger.error(.wallpaper, "唤醒停滞屏使用共享解码管线，跳过重建", metadata: [
+                "screenID": screenID,
+                "owners": ownerCount,
+                "reason": reason
+            ])
+            return
+        }
+        wakePlaybackRecoveredScreenIDs.insert(screenID)
+        AppLogger.error(.wallpaper, "重建唤醒停滞屏的解码管线", metadata: [
+            "screenID": screenID,
+            "reason": reason
+        ])
+        teardownWindow(for: screenID)
+        rebuildStalledVideoPipelineAsync(screenID: screenID, reason: reason)
+    }
+
+    private func rebuildStalledVideoPipelineAsync(screenID: String, reason: String) {
+        Task { @MainActor [weak self] in
+            for attempt in 0..<3 {
+                guard let self, !Task.isCancelled, !self.isTerminating else { return }
+                if attempt > 0 {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    guard !Task.isCancelled else { return }
+                }
+                guard self.hasActiveVideoWallpaper, self.windows[screenID] == nil else { return }
+                guard let screen = NSScreen.screens.first(where: {
+                    $0.wallpaperScreenIdentifier == screenID
+                }) else {
+                    AppLogger.error(.wallpaper, "唤醒停滞屏已离线，放弃重建", metadata: [
+                        "screenID": screenID,
+                        "reason": reason
+                    ])
+                    return
+                }
+                do {
+                    try self.rebuildWindows(targetScreen: screen)
+                } catch {
+                    AppLogger.error(.wallpaper, "唤醒停滞屏重建失败", metadata: [
+                        "screenID": screenID,
+                        "attempt": attempt + 1,
+                        "error": error.localizedDescription
+                    ])
+                }
+                if self.windows[screenID] != nil { return }
+            }
+            AppLogger.error(.wallpaper, "唤醒停滞屏三次重建后仍无窗口", metadata: [
+                "screenID": screenID,
+                "reason": reason
+            ])
         }
     }
 
@@ -7293,7 +7532,12 @@ final class VideoWallpaperManager: ObservableObject {
         teardownOrphanedVideoWindowsPreservingRestoreState()
         let targetScreens = screensForVideoWallpaperTargets()
         guard !targetScreens.isEmpty else {
-            NSLog("[VideoWallpaperManager] Native video pipeline rebuild skipped: no target screens (\(reason))")
+            AppLogger.error(.wallpaper, "视频管线重建跳过：没有可用目标屏", metadata: [
+                "reason": reason,
+                "currentScreens": NSScreen.screens.map(\.wallpaperScreenIdentifier)
+                    .joined(separator: ","),
+                "windows": windows.keys.sorted().joined(separator: ",")
+            ])
             return
         }
 
@@ -7305,7 +7549,10 @@ final class VideoWallpaperManager: ObservableObject {
         do {
             try rebuildWindows()
         } catch {
-            NSLog("[VideoWallpaperManager] Failed to rebuild native video pipeline after \(reason): \(error.localizedDescription)")
+            AppLogger.error(.wallpaper, "视频管线重建失败", metadata: [
+                "reason": reason,
+                "error": error.localizedDescription
+            ])
             return
         }
 
@@ -7320,7 +7567,13 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
-        NSLog("[VideoWallpaperManager] Rebuilt native video pipeline after \(reason) for \(targetScreens.count) screen(s)")
+        AppLogger.error(.wallpaper, "视频管线重建完成", metadata: [
+            "reason": reason,
+            "screens": String(targetScreens.count),
+            "windows": windows.keys.sorted().joined(separator: ","),
+            "players": String(players.count),
+            "wasPaused": wasPaused
+        ])
     }
 
     /// Rebinds the child renderer after a display reconnect or a resolution

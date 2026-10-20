@@ -780,6 +780,9 @@ final class BackgroundAgentRuntime {
         case "policy.reevaluate":
             DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
             return [:]
+        case "scheduler.reevaluateBattery":
+            WallpaperSchedulerService.shared.reevaluateBatterySuspension()
+            return [:]
         case "policy.suppressForegroundPauseForMainWindowHide":
             DynamicWallpaperAutoPauseManager.shared.suppressForegroundPauseForMainWindowHide(duration: a.double("duration", default: 1))
             return [:]

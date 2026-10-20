@@ -519,6 +519,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
         // [AnimTracker] 后台 CPU 诊断：动画存活心跳 + 主窗口遮挡状态
         RepeatForeverAnimationTracker.shared.startHeartbeat()
+        #if DEBUG
+        // 遮挡日志只是诊断手段，Release 下由 MainWindowVisibility 的节流日志覆盖，
+        // 这里不再为每条通知构造字符串（issue #119 的空转来源之一）。
         NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
@@ -527,10 +530,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             guard let win = note.object as? NSWindow else { return }
             let state = win.occlusionState.contains(.visible) ? "visible" : "occluded"
             let name = win.title.isEmpty ? (win.identifier?.rawValue ?? "?") : win.title
-            // 窗口遮挡变化一次焦点切换就会触发多轮；保留 error 级但按窗口节流。
             AppLogger.throttled(.error, .general, key: "window.occlusion.\(name)", interval: 10,
                                 "[AnimTracker] occlusion \(name) -> \(state)")
         }
+        #endif
         // ⚠️ ⚠️ 关键：所有 UserDefaults 读取都必须在 applicationDidFinishLaunching 中延迟恢复！
         // 绝对不能在任何单例 init() 中读 UserDefaults，macOS 26+ 会触发 _CFXPreferences
         // 隐式递归导致主线程栈溢出崩溃（EXC_BAD_ACCESS SIGSEGV, 174K 层递归）
@@ -826,13 +829,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         helperExitTask?.cancel()
         helperExitTask = nil
         helperExitInProgress = false
+        // 本次失败的判别要在复位前取走：exitsInterfaceOnly 只描述「刚发起的这次退出」，
+        // 不能渗漏到下一次退出（否则关窗口失败一次后，Cmd+Q 会被误判成关窗口）。
+        let wasInterfaceOnly = exitsInterfaceOnly
+        exitsInterfaceOnly = false
         interfaceRelaunchURL = nil
         BackgroundAgentClient.shared.applicationQuitFailed(error)
-        AppLogger.error(.general, "Application quit failed; UI retained", metadata: ["error": error.localizedDescription])
-        applicationQuitDidFail()
+        AppLogger.error(.general, "Application quit failed; UI retained", metadata: [
+            "error": error.localizedDescription,
+            "scope": wasInterfaceOnly ? "interface" : "application",
+        ])
+        applicationQuitDidFail(interfaceOnly: wasInterfaceOnly)
     }
 
-    func applicationQuitDidFail() {
+    /// 退出失败的收尾。完整退出失败时把主窗口弹回，让用户看到「没退成」；
+    /// 关窗口失败不弹回——用户意图就是收起窗口，进程与横幅保留，
+    /// 连接恢复后待存设置由 `BackgroundAgentClient` 自动回放，无需打断用户。
+    func applicationQuitDidFail(interfaceOnly: Bool) {
+        guard !interfaceOnly else { return }
         showMainWindow()
     }
 
@@ -1826,7 +1840,7 @@ private final class HelperUIExitProbeDelegate: AppDelegate {
         fflush(stdout)
     }
 
-    override func applicationQuitDidFail() {
+    override func applicationQuitDidFail(interfaceOnly: Bool) {
         guard ProcessInfo.processInfo.environment["WAIFUX_UI_QUIT_PROBE_RETRY"] == "1" else {
             fputs("UI_QUIT_PROBE_FAILED unexpected quit failure\n", stderr)
             exit(5)

@@ -182,12 +182,19 @@ final class AppLogger: @unchecked Sendable {
         os_log("%{public}@", log: Self.oslog, type: level.osLogType(), line)
 #endif
 
-        // 3. 文件持久化：Release 模式下只保留 error 级别，用于排查用户问题
+        // 3. 文件持久化：Release 模式下只保留 error 级别，用于排查用户问题。
+        //    例外是 `releasePersistedModules`：`.startup` 整条链全项目只有 4 处
+        //    调用（启动/注册/修复），它的 info 正是「后台服务起不来」的唯一线索。
+        //    2026-10-19 的 4099 故障里，registration status 与 bootstrap 各步骤
+        //    全被这条规则砍掉，只剩 5 条 4099，无法判断 repair 走到哪一步。
         #if !DEBUG
-        guard level == .error else { return }
+        guard level == .error || Self.releasePersistedModules.contains(module) else { return }
         #endif
         writeToFile(line)
     }
+
+    /// Release 构建里除 `.error` 之外仍然落盘的模块（低频关键链路）。
+    private static let releasePersistedModules: Set<AppLogModule> = [.startup]
 
     // MARK: - 格式化元数据
 

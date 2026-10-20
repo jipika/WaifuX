@@ -57,6 +57,15 @@ class SettingsViewModel: ObservableObject {
     @Published var pauseInactiveDisplays = false { didSet { WaifuXPreferences.shared.set(pauseInactiveDisplays, forKey: "pause_inactive_displays") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { WaifuXPreferences.shared.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
     @Published var pauseOnBatteryPower = false { didSet { WaifuXPreferences.shared.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
+    /// 电池供电时暂停自动轮换（默认开启）。与「暂停播放」分开：
+    /// 轮换会重新加载视频壁纸、把电池策略刚暂停的渲染重新激活（issue #119）。
+    @Published var pauseRotationOnBattery = true {
+        didSet {
+            guard !isBatchUpdating else { return }
+            WaifuXPreferences.shared.set(pauseRotationOnBattery, forKey: "pause_rotation_on_battery")
+            BackgroundRuntimeBridge.send("scheduler.reevaluateBattery", [:])
+        }
+    }
     /// 电池供电时播放策略（继续播放 / 暂停），落到 DynamicWallpaperAutoPauseManager 持久化
     @Published var batteryPlaybackPolicy: WallpaperPlaybackTriggerPolicy = .keepRunning {
         didSet {
@@ -490,6 +499,7 @@ class SettingsViewModel: ObservableObject {
             pauseInactiveDisplays = defaults.bool(forKey: "pause_inactive_displays")
             pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
             pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
+            pauseRotationOnBattery = defaults.object(forKey: "pause_rotation_on_battery") as? Bool ?? true
             // 策略值从 AutoPauseManager 读取（内含旧布尔开关的一次性迁移）
             batteryPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.batteryPolicy
             displaySleepPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.displaySleepPolicy

@@ -76,6 +76,10 @@ final class BackgroundAgentClient: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var isClosing = false
     private var isBootstrapping = false
+    /// launchd 脱节修复的互斥位：同一时刻只允许一轮 unregister/register。
+    /// 连点重试会 cancel 旧 bootstrapTask，但 SMAppService 的注销/注册不响应
+    /// 取消，两轮交错会互相把刚注册的 job 注销掉。
+    private var isRepairingRegistration = false
     private var isQuittingApplication = false
     private var observedHelperStop = false
     private var knownHelperPID: Int32?
@@ -117,11 +121,33 @@ final class BackgroundAgentClient: ObservableObject {
                 // BTM 没把 job 重新下发），mach service 查不到、连接直接以
                 // NSCocoaErrorDomain 4099 失败。这种状态只能靠重新注册恢复。
                 guard Self.indicatesMissingLaunchdJob(error) else { throw error }
+                // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
+                // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
+                // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
+                guard !isRepairingRegistration else {
+                    AppLogger.error(.startup, "Helper repair already in flight, skipping",
+                                    metadata: ["code": (error as NSError).code])
+                    throw CancellationError()
+                }
+                isRepairingRegistration = true
+                defer { isRepairingRegistration = false }
                 AppLogger.error(.startup, "Helper service missing from launchd, repairing registration",
                                 metadata: ["code": (error as NSError).code])
                 try Task.checkCancellation()
                 let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
-                try await BackgroundAgentRegistration.repairLaunchdRegistration(service)
+                do {
+                    try await BackgroundAgentRegistration.repairLaunchdRegistration(service) { [weak self] in
+                        guard let self else { return false }
+                        return await self.probeHelperReachable()
+                    }
+                    AppLogger.error(.startup, "Helper registration repaired",
+                                    metadata: ["status": service.status.rawValue])
+                } catch {
+                    AppLogger.error(.startup, "Helper registration repair failed",
+                                    metadata: ["status": service.status.rawValue,
+                                               "error": error.localizedDescription])
+                    throw error
+                }
                 try Task.checkCancellation()
                 try await runBootstrap()
             }
@@ -130,7 +156,14 @@ final class BackgroundAgentClient: ObservableObject {
         Task {
             do { try await startedTask?.value }
             catch {
-                guard generation == bootstrapGeneration else { return }
+                // 连点「重试」会推进 generation。旧代际的失败仍要留痕，否则
+                // 日志里只剩 4099、看不到真正抛错的那一轮（2026-10-19 排查踩点）。
+                guard generation == bootstrapGeneration else {
+                    AppLogger.error(.startup, "Helper startup failed (superseded)",
+                                    metadata: ["generation": generation,
+                                               "error": error.localizedDescription])
+                    return
+                }
                 lastError = error.localizedDescription
                 if case BackgroundAgentRegistrationError.approvalRequired = error { requiresApproval = true }
                 isConnected = false
@@ -385,11 +418,7 @@ final class BackgroundAgentClient: ObservableObject {
         try Task.checkCancellation()
         let url = WaifuXHostBundle.bundleURL.appendingPathComponent("Contents/Helpers/WaifuXHelper.app/Contents/MacOS/WaifuXHelper")
         guard let expected = BackgroundAgentBuildIdentity.executable(url) else { throw CocoaError(.executableNotLoadable) }
-        func hello() async throws -> BackgroundAgentHello {
-            let data = try await exchange { proxy, gate in proxy.hello { gate.finish(.success($0 as Data)) } }
-            return try JSONDecoder().decode(BackgroundAgentHello.self, from: data)
-        }
-        var status = try await hello()
+        var status = try await helloReply()
         try Task.checkCancellation()
         guard status.bundleIdentifier == BackgroundAgentWire.bundleIdentifier else { throw CocoaError(.executableLoad) }
         if status.buildIdentity != expected {
@@ -401,7 +430,7 @@ final class BackgroundAgentClient: ObservableObject {
                 try await Task.sleep(for: .milliseconds(500))
                 try Task.checkCancellation()
                 connect()
-                if let next = try? await hello(), next.buildIdentity == expected { status = next; break }
+                if let next = try? await helloReply(), next.buildIdentity == expected { status = next; break }
                 try Task.checkCancellation()
             }
         }
@@ -410,6 +439,31 @@ final class BackgroundAgentClient: ObservableObject {
         }
         knownHelperPID = status.processIdentifier
         observedHelperStop = false
+    }
+
+    /// 发一次 `hello` 并解码。超时可调：启动校验用默认 120s，
+    /// 注册修复后的探活用 2s（4099 会立刻回调，慢的只会是 job 还没就绪）。
+    private func helloReply(timeoutSeconds: Double = 120) async throws -> BackgroundAgentHello {
+        let data = try await exchange(timeoutSeconds: timeoutSeconds) { proxy, gate in
+            proxy.hello { gate.finish(.success($0 as Data)) }
+        }
+        return try JSONDecoder().decode(BackgroundAgentHello.self, from: data)
+    }
+
+    /// repair 后的真实可达性探针。
+    ///
+    /// `SMAppService.status == .enabled` 只代表 BTM 记录：launchd 里 job 没起来、
+    /// 或端口还没就绪时它照样是 enabled，所以必须真发一次 `hello` 才算验证
+    /// （2026-10-19 用户机日志：旧实现只在 `.enabled` 上收尾，repair 后立刻又 4099）。
+    /// 这里新建连接：repair 期间旧连接已被 invalidate。
+    private func probeHelperReachable() async -> Bool {
+        connect()
+        do {
+            let hello = try await helloReply(timeoutSeconds: 2)
+            return hello.bundleIdentifier == BackgroundAgentWire.bundleIdentifier
+        } catch {
+            return false
+        }
     }
 
     func observe(_ handler: @escaping ([String: Any]) -> Void) {
@@ -506,7 +560,17 @@ final class BackgroundAgentClient: ObservableObject {
         // Finish admitted startup before stopping its shared XPC connection.
         _ = try? await bootstrapTask?.value
         try Task.checkCancellation()
-        _ = try? await commandTail?.value
+        // Give unrelated in-flight commands (Steam, cloud, …) only a short grace
+        // period: a slow command must not stall window-close into the 6s quit
+        // watchdog. Preference durability is enforced by the replay below.
+        if let tail = commandTail {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { try? await tail.value }
+                group.addTask { try? await Task.sleep(for: .seconds(2)) }
+                _ = await group.next()
+                group.cancelAll()
+            }
+        }
         try Task.checkCancellation()
         // A failed RPC leaves its UI overlay pending even when commandTail has
         // completed. Its failure cannot be treated as a successful write drain.

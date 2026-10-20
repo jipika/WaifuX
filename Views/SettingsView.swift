@@ -536,6 +536,14 @@ private struct GeneralSettingsTab: View {
                     ))
                 }
 
+                MacSettingsRow(
+                    title: t("pauseRotationOnBattery"),
+                    subtitle: t("pauseRotationOnBatteryDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.pauseRotationOnBattery)
+                }
+
                 // 壁纸扩展守护：App 退出后 pkd 清杀扩展时自动重新拉载
                 MacSettingsRow(
                     title: t("wallpaperExtensionKeeper"),

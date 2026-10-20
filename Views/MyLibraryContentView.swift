@@ -221,6 +221,9 @@ struct MyLibraryContentView: View {
     /// 首次进入库页时的加载占位：数据快照（由 Helper 异步推送）与本地索引就绪前显示骨架，
     /// 避免「还没有数据」被误渲染成「没有下载」。只在进程内第一次进入时为 true。
     @State private var libraryFirstLoadPlaceholderVisible = true
+    /// 后台服务连接状态。库记录只由 Helper 异步推送，断连时列表必然为空 ——
+    /// 必须观察它，才能在空列表时把「服务没连上」和「确实没有内容」区分开。
+    @ObservedObject private var helper = BackgroundAgentClient.shared
     private let wallpaperPrefetchNamespace = "library.wallpapers"
     private let mediaPrefetchNamespace = "library.media"
     private let animePrefetchNamespace = "library.anime"
@@ -374,6 +377,36 @@ struct MyLibraryContentView: View {
             return !mediaItems.isEmpty || !currentMediaFolders.isEmpty
         case .anime:
             return !currentAnimeItems.isEmpty
+        }
+    }
+
+    /// 列表为空时，先判断是不是「后台服务没连上」。
+    ///
+    /// 库记录全部经 `BackgroundRuntimeBridge.observeLibrary` 由 Helper 推送，
+    /// Helper 断开时列表必然是空的。此时若照常渲染「还没有下载媒体」，用户
+    /// 会以为数据丢了（2026-10-19 用户反馈的正是这个读感），而真实动作是
+    /// 恢复后台服务、不是重新下载。
+    private var libraryBackendUnavailable: Bool {
+        !helper.isConnected && (helper.lastError != nil || helper.requiresApproval)
+    }
+
+    /// 空态入口：断连时替换文案，连接正常时保持原有语义。
+    @ViewBuilder
+    private func libraryEmptySurface(
+        title: String,
+        subtitle: String,
+        icon: String,
+        accent: Color
+    ) -> some View {
+        if libraryBackendUnavailable {
+            emptyMediaSurface(
+                title: t("library.backend.unavailable.title"),
+                subtitle: t("library.backend.unavailable.hint"),
+                icon: "bolt.slash",
+                accent: accent
+            )
+        } else {
+            emptyMediaSurface(title: title, subtitle: subtitle, icon: icon, accent: accent)
         }
     }
 
@@ -1047,7 +1080,7 @@ struct MyLibraryContentView: View {
             if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
                 libraryGridLoadingPlaceholder(config: config)
             } else if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
-                emptyMediaSurface(
+                libraryEmptySurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads")),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint")),
                     icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
@@ -1856,7 +1889,7 @@ struct MyLibraryContentView: View {
             if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
                 libraryGridLoadingPlaceholder(config: config)
             } else if mediaItems.isEmpty && currentMediaFolders.isEmpty {
-                emptyMediaSurface(
+                libraryEmptySurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads")),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint")),
                     icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
@@ -2771,7 +2804,7 @@ struct MyLibraryContentView: View {
     private func animeSection(config: AnimeGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if currentAnimeItems.isEmpty {
-                emptyMediaSurface(
+                libraryEmptySurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : t("no.anime.favorites"),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : t("no.anime.favorites.hint"),
                     icon: hasActiveLibrarySearch ? "magnifyingglass" : "heart.slash",
