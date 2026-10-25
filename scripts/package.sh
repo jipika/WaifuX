@@ -353,6 +353,61 @@ if [[ "$PKG_ARCH" == "universal" ]]; then
         "$APP_RES/wallpaperengine-cli-x86_64"
 fi
 
+# ---- 渲染器一致性断言：包内渲染器必须与本次构建的源件同 UUID ----
+# 拆架构发布后 x86_64 包换装的是 Resources/wallpaper-wgpu-x86_64。只复制不校验时，
+# 用旧 archive / 旧 Resources 出的包会静默带上过时渲染器（曾导致 Intel 用户仍跑
+# 修复前二进制、持续报 TEXTURE_COMPRESSION_ETC2）。LC_UUID 不受签名影响，是这里
+# 唯一稳定的同一性判据。
+renderer_uuid() {
+  otool -l "$1" 2>/dev/null | awk '/LC_UUID/{getline; print $2; exit}'
+}
+
+assert_renderer_matches() { # embedded source label
+  local embedded="$1" source="$2" label="$3"
+  local a b
+  a="$(renderer_uuid "$embedded")"
+  b="$(renderer_uuid "$source")"
+  if [[ -z "$a" || "$a" != "$b" ]]; then
+    echo "❌ $label 渲染器与源件不一致：embedded=${a:-<none>} source=${b:-<none>}（疑似打进了旧构建）" >&2
+    exit 1
+  fi
+  echo "  ✅ $label 渲染器 UUID 匹配: $a"
+}
+
+APP_RES="$BUILD_DIR/$APP_NAME/Contents/Resources"
+NESTED_RES="$APP_RES/Resources"
+case "$PKG_ARCH" in
+  x86_64)
+    assert_renderer_matches "$APP_RES/wallpaper-wgpu" \
+      "$PROJECT_DIR/Resources/wallpaper-wgpu-x86_64" "x86_64"
+    ;;
+  arm64)
+    assert_renderer_matches "$APP_RES/wallpaper-wgpu" \
+      "$PROJECT_DIR/Resources/wallpaper-wgpu" "arm64"
+    ;;
+  universal)
+    VERIFY_DIR="$(mktemp -d)"
+    if [[ -f "$NESTED_RES/wallpaper-wgpu" ]]; then
+      VERIFY_TARGET="$NESTED_RES/wallpaper-wgpu"
+    else
+      VERIFY_TARGET="$APP_RES/wallpaper-wgpu"
+    fi
+    lipo "$VERIFY_TARGET" -thin arm64 -output "$VERIFY_DIR/arm64" 2>/dev/null \
+      || cp "$VERIFY_TARGET" "$VERIFY_DIR/arm64"
+    assert_renderer_matches "$VERIFY_DIR/arm64" \
+      "$PROJECT_DIR/Resources/wallpaper-wgpu" "universal/arm64"
+    if lipo "$VERIFY_TARGET" -thin x86_64 -output "$VERIFY_DIR/x86_64" 2>/dev/null; then
+      assert_renderer_matches "$VERIFY_DIR/x86_64" \
+        "$PROJECT_DIR/Resources/wallpaper-wgpu-x86_64" "universal/x86_64"
+    else
+      echo "❌ universal 包内渲染器缺少 x86_64 切片" >&2
+      rm -rf "$VERIFY_DIR"
+      exit 1
+    fi
+    rm -rf "$VERIFY_DIR"
+    ;;
+esac
+
 # ---- SteamService：只保留本架构（本地增量构建会残留另一架构的拷贝）----
 # build-steam-service.sh 的 prebuilt 分支不清理 DEST_ROOT，多次不同架构构建后
 # archive 产物可能同时挂着 arm64/ 与 x86_64/，这里按包架构收敛（universal 包保留两套）。
@@ -372,8 +427,14 @@ find_codesign_identity() {
     return 0
   fi
 
+  # 过滤已吊销的证书：launchd/Gatekeeper 做完整信任评估会拒绝吊销证书签出的
+  # 二进制（EX_CONFIG / 拒运行），而 codesign 本身不查吊销、能"成功"签出废件。
+  # `security find-identity -v` 对吊销条目会追加 CSSMERR_TP_* 标记（2026-10-24
+  # 本机三张同名 Apple Development 证书、一张吊销被 Xcode 自动选中导致 Helper
+  # spawn failed 24516 次的事故）。
   local identity
   identity="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -v 'CSSMERR_TP_CERT_REVOKED' \
     | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
     | head -n 1)"
   if [[ -n "$identity" ]]; then
@@ -382,11 +443,19 @@ find_codesign_identity() {
   fi
 
   identity="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -v 'CSSMERR_TP_CERT_REVOKED' \
     | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' \
     | head -n 1)"
   if [[ -n "$identity" ]]; then
     echo "$identity"
     return 0
+  fi
+
+  # 有证书但全部吊销时明确报警，而不是静默回落 ad-hoc
+  if security find-identity -v -p codesigning 2>/dev/null \
+      | grep -q 'CSSMERR_TP_CERT_REVOKED'; then
+    echo "⚠️ 检测到已吊销的签名证书（CSSMERR_TP_CERT_REVOKED），且无有效证书可用。" >&2
+    echo "⚠️ 请从钥匙串删除吊销证书后重试；继续将以 ad-hoc 签名，产物不可分发。" >&2
   fi
 
   echo "-"

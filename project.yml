@@ -363,6 +363,7 @@ targets:
       - path: Services/AppleMusicLyricsService.swift
       - path: Services/AnimeFavoriteStore.swift
       - path: Services/AnimeProgressStore.swift
+      - path: Services/AnimeDownloadStore.swift
       - path: Services/PlaybackProgressCache.swift
       - path: Services/Sync
       - path: Services/BakeService.swift

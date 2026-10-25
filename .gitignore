@@ -45,6 +45,10 @@ COPILOT.md
 # Cursor 本地规则与索引（勿入库）
 .cursor/
 
+# DSH 项目级技能与本地配置（仅本机使用，不提交）
+# 锚定仓库根：不锚定会连带忽略未来子目录里的同名 .dsh 目录
+/.dsh/
+
 # Editor
 .1code/
 .claude/
