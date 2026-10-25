@@ -358,8 +358,10 @@ fi
 # 用旧 archive / 旧 Resources 出的包会静默带上过时渲染器（曾导致 Intel 用户仍跑
 # 修复前二进制、持续报 TEXTURE_COMPRESSION_ETC2）。LC_UUID 不受签名影响，是这里
 # 唯一稳定的同一性判据。
+# LC_UUID 块是三行（cmd / cmdsize / uuid）：必须匹配到 $1=="uuid" 的那一行取值。
+# 旧实现 getline 一次拿到的是 "cmdsize 24" 的 24，两边恒等导致校验形同虚设。
 renderer_uuid() {
-  otool -l "$1" 2>/dev/null | awk '/LC_UUID/{getline; print $2; exit}'
+  otool -l "$1" 2>/dev/null | awk '$1=="uuid"{print $2; exit}'
 }
 
 assert_renderer_matches() { # embedded source label
@@ -382,7 +384,14 @@ case "$PKG_ARCH" in
       "$PROJECT_DIR/Resources/wallpaper-wgpu-x86_64" "x86_64"
     ;;
   arm64)
-    assert_renderer_matches "$APP_RES/wallpaper-wgpu" \
+    # type: folder 让渲染器落位在嵌套 Resources/Resources/（folder reference）；
+    # 顶层只有 x86 分支的换装步骤会写。运行时 XBridge 两级路径都会查找。
+    if [[ ! -f "$NESTED_RES/wallpaper-wgpu" ]]; then
+      echo "❌ arm64 archive 内嵌套 Resources 缺 wallpaper-wgpu：" >&2
+      ls "$NESTED_RES" 2>/dev/null | head -20 >&2
+      exit 1
+    fi
+    assert_renderer_matches "$NESTED_RES/wallpaper-wgpu" \
       "$PROJECT_DIR/Resources/wallpaper-wgpu" "arm64"
     ;;
   universal)
