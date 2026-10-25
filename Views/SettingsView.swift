@@ -219,6 +219,22 @@ struct SettingsView: View {
         }
     }
 
+    /// tab → 引导锚点（设置总览导览逐步高亮左侧分类）。
+    private static func settingsGuideAnchor(for tab: SettingsTab) -> GuideAnchorID {
+        switch tab {
+        case .general: return .settingsTabGeneral
+        case .modules: return .settingsTabModules
+        case .download: return .settingsTabDownload
+        case .wallhaven: return .settingsTabWallhaven
+        case .workshop: return .settingsTabWorkshop
+        case .pixiv: return .settingsTabPixiv
+        case .konachan: return .settingsTabKonachan
+        case .scheduler: return .settingsTabScheduler
+        case .sync: return .settingsTabSync
+        case .about: return .settingsTabAbout
+        }
+    }
+
     // MARK: 左侧导航栏
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -232,6 +248,7 @@ struct SettingsView: View {
                         }
                     }
                 )
+                .guideAnchor(Self.settingsGuideAnchor(for: tab))
             }
 
             Spacer()
@@ -247,6 +264,10 @@ struct SettingsView: View {
                     .allowsHitTesting(false)
             }
         )
+        .onAppear {
+            // 打开设置页首次播放总览导览（WaifuX GuideKit）
+            GuideEngine.shared.noteSheetOpened(GuideTours.settingsOverview)
+        }
     }
 }
 

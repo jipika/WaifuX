@@ -40,6 +40,17 @@ enum GuideAnchorID: Hashable {
     // 设置页·动态锁屏区块
     case lockscreenToggle
     case lockscreenStatusRow
+    // 设置页·左侧导航十个分类
+    case settingsTabGeneral
+    case settingsTabModules
+    case settingsTabDownload
+    case settingsTabWallhaven
+    case settingsTabWorkshop
+    case settingsTabPixiv
+    case settingsTabKonachan
+    case settingsTabScheduler
+    case settingsTabSync
+    case settingsTabAbout
     case detailActionRow
     /// 详情「更多选项」popover 内容（独立 NSWindow，遮罩层级会自适应抬高）
     case detailMorePopover

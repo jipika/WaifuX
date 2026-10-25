@@ -81,6 +81,39 @@ enum GuideTours {
         ]
     )
 
+    /// 设置页总览：打开设置窗首次播（左栏分类逐个高亮）。
+    static let settingsOverview = GuideTour(
+        id: "settingsOverview",
+        contentVersion: 1,
+        steps: [
+            GuideStep(
+                anchor: nil,
+                titleKey: "guide.settings.welcome.title",
+                bodyKey: "guide.settings.welcome.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabGeneral,
+                titleKey: "guide.settings.general.title",
+                bodyKey: "guide.settings.general.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabWallhaven,
+                titleKey: "guide.settings.sources.title",
+                bodyKey: "guide.settings.sources.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabScheduler,
+                titleKey: "guide.settings.scheduler.title",
+                bodyKey: "guide.settings.scheduler.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabAbout,
+                titleKey: "guide.settings.about.title",
+                bodyKey: "guide.settings.about.body"
+            )
+        ]
+    )
+
     /// 作者滑出面板：打开即播（noteSheetOpened；主窗口内 overlay）。
     static let authorSheet = GuideTour(
         id: "authorSheet",
