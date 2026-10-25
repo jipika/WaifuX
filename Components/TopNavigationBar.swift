@@ -55,8 +55,20 @@ struct TopNavigationBar: View {
                     TopBarCircleButton(icon: "questionmark", size: controlHeight) {
                         showHelpPopover.toggle()
                     }
+                    .guideAnchor(.topBarHelp)
                     .popover(isPresented: $showHelpPopover, arrowEdge: .bottom) {
-                        HelpPopoverView(isPresented: $showHelpPopover)
+                        HelpPopoverView(
+                            isPresented: $showHelpPopover,
+                            onPlayTour: {
+                                showHelpPopover = false
+                                let tab = selectedTab
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                    MainActor.assumeIsolated {
+                                        GuideEngine.shared.replayTour(for: tab)
+                                    }
+                                }
+                            }
+                        )
                     }
 
                     // 设置按钮
@@ -414,6 +426,7 @@ private func topBarGlassTint(isHovered: Bool) -> Color {
 
 struct HelpPopoverView: View {
     @Binding var isPresented: Bool
+    let onPlayTour: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -444,6 +457,28 @@ struct HelpPopoverView: View {
 
             Divider()
                 .background(Color.white.opacity(0.08))
+
+            // 功能导览入口（WaifuX GuideKit）：重新播放当前页面的聚光灯导览
+            Button {
+                onPlayTour()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(t("guide.playTour"))
+                        .font(.system(size: 12.5, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.accentColor.opacity(0.85))
+                )
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {

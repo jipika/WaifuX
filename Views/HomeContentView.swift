@@ -512,6 +512,7 @@ struct HomeContentView: View {
         .onTapGesture {
             isHomeChromeHidden.toggle()
         }
+        .guideAnchor(.homeHero)
         .simultaneousGesture(
             heroCarouselDragGesture(width: width)
         )
@@ -1113,6 +1114,7 @@ private struct HeroCaptionPanel: View {
                 }
             }
             .glassContainer(spacing: 12)
+            .guideAnchor(.homeHeroActions)
         }
     }
 

@@ -40,6 +40,8 @@ private final class MainContentNavigationState: ObservableObject {
 
     private var mouseMovementMonitor: Any?
     private var mouseRevealOrigin: NSPoint?
+    /// 鼠标移动节流时间戳。声明为非隔离：事件线程上的闸门要在进入 `@MainActor` 之前读它。
+    private nonisolated(unsafe) static var lastMouseMoveDispatch: CFAbsoluteTime = 0
 
     func binding<Value>(for keyPath: ReferenceWritableKeyPath<MainContentNavigationState, Value>) -> Binding<Value> {
         Binding(
@@ -65,6 +67,15 @@ private final class MainContentNavigationState: ObservableObject {
     func startMouseMovementMonitoring() {
         guard mouseMovementMonitor == nil else { return }
         mouseMovementMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            // `.mouseMoved` 按指针刷新率触发（60–120Hz），原实现每个事件都起一个
+            // `Task { @MainActor }`。这里在进入 actor 之前先做 50ms 节流：普通移动
+            // 期间最多 20 次/秒，指针静止时直接不产生 Task。
+            // 用非隔离的单调时间戳做闸门，不碰任何 @MainActor 状态，避免在事件线程上
+            // 读隔离属性（那才是必须起 Task 的原因）。
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - Self.lastMouseMoveDispatch >= 0.05 else { return event }
+            Self.lastMouseMoveDispatch = now
+
             let location = event.locationInWindow
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -361,6 +372,10 @@ struct ContentView: View {
         }
         .onChange(of: detailPath.count) { _, depth in
             AppResponsivenessMonitor.noteDetailDepth(depth)
+            // 详情页功能导览（WaifuX GuideKit）
+            if depth > 0 {
+                GuideEngine.shared.noteDetailOpened()
+            }
         }
         // 必须位于详情页 NavigationStack 的外层，已有详情页显示时也要能收到替换请求。
         .onReceive(NotificationCenter.default.publisher(for: .openCurrentWallpaperDetail)) { _ in
@@ -531,6 +546,11 @@ struct ContentView: View {
             }
             .onAppear {
                 consumePendingLibraryTabRequest()
+                // 首启/版本更新后的功能导览自动播放（WaifuX GuideKit）
+                GuideEngine.shared.noteTabActivated(navigationState.selectedTab, isInitial: true)
+            }
+            .onChange(of: navigationState.selectedTab) { _, tab in
+                GuideEngine.shared.noteTabActivated(tab)
             }
             .onReceive(NotificationCenter.default.publisher(for: .switchToLibraryTab)) { _ in
                 MainNavigationRequestStore.clearLibraryTabRequest()

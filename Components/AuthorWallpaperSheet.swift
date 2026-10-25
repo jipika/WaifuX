@@ -43,6 +43,7 @@ struct AuthorWallpaperSheet: View {
                     // 顶部留出右上角关闭按钮的避让空间
                     .padding(.top, 18)
                     .padding(.bottom, 14)
+                    .guideAnchor(.authorSheetHeader)
 
                 dividerLine
                     .padding(.horizontal, 20)
@@ -96,6 +97,8 @@ struct AuthorWallpaperSheet: View {
             withAnimation(.spring(response: 0.40, dampingFraction: 0.85, blendDuration: 0)) {
                 isVisible = true
             }
+            // 二级弹层打开即提示（WaifuX GuideKit）
+            GuideEngine.shared.noteSheetOpened(GuideTours.authorSheet)
         }
     }
 
