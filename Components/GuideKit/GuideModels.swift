@@ -37,6 +37,9 @@ enum GuideAnchorID: Hashable {
     case detailHeroInfo
     case libraryImportButton
     case libraryMoreMenuButton
+    // 设置页·动态锁屏区块
+    case lockscreenToggle
+    case lockscreenStatusRow
     case detailActionRow
     /// 详情「更多选项」popover 内容（独立 NSWindow，遮罩层级会自适应抬高）
     case detailMorePopover
@@ -148,7 +151,9 @@ struct GuideAnchorModifier: ViewModifier {
         let key = NSApp.keyWindow
         let main = NSApp.mainWindow
         let window: NSWindow?
-        if let key, key != main, key.level > (main?.level ?? .normal) {
+        if let key, key != main {
+            // key ≠ main 一律视为锚点在独立窗口（popover、设置窗等）——
+            // 设置窗与主窗同为 normal level，不能再用 level 比较。
             window = key
         } else {
             window = main ?? key

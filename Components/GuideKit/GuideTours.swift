@@ -63,6 +63,24 @@ enum GuideTours {
         ]
     )
 
+    /// 动态锁屏：设置页滚到该区块首次可见时播（noteSheetOpened；设置窗为独立 NSWindow）。
+    static let lockscreen = GuideTour(
+        id: "lockscreen",
+        contentVersion: 1,
+        steps: [
+            GuideStep(
+                anchor: .lockscreenToggle,
+                titleKey: "guide.lockscreen.toggle.title",
+                bodyKey: "guide.lockscreen.toggle.body"
+            ),
+            GuideStep(
+                anchor: .lockscreenStatusRow,
+                titleKey: "guide.lockscreen.status.title",
+                bodyKey: "guide.lockscreen.status.body"
+            )
+        ]
+    )
+
     /// 作者滑出面板：打开即播（noteSheetOpened；主窗口内 overlay）。
     static let authorSheet = GuideTour(
         id: "authorSheet",
@@ -206,11 +224,17 @@ enum GuideTours {
                 titleKey: "guide.library.edit.title",
                 bodyKey: "guide.library.edit.body"
             ),
-            // 手势/右键菜单无固定单点目标：居中卡说明
+            // 右键菜单（内容卡与文件夹卡菜单不同）无固定单点目标：居中卡说明
             GuideStep(
                 anchor: nil,
-                titleKey: "guide.library.gestures.title",
-                bodyKey: "guide.library.gestures.body"
+                titleKey: "guide.library.menu.title",
+                bodyKey: "guide.library.menu.body"
+            ),
+            // 拖拽（拖入文件夹/编辑态整组拖/排序）
+            GuideStep(
+                anchor: nil,
+                titleKey: "guide.library.drag.title",
+                bodyKey: "guide.library.drag.body"
             ),
             GuideStep(
                 anchor: .librarySearchControl,

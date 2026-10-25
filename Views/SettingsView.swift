@@ -665,6 +665,7 @@ private struct GeneralSettingsTab: View {
                     ) {
                         MacToggle(isOn: $viewModel.dynamicLockScreenEnabled)
                     }
+                    .guideAnchor(.lockscreenToggle)
 
                     MacSettingsRow(
                         title: t("lockScreenSelectionStatus"),
@@ -675,7 +676,12 @@ private struct GeneralSettingsTab: View {
                             .fill(lockScreenSelectionColor)
                             .frame(width: 8, height: 8)
                     }
-                    .onAppear { viewModel.refreshLockScreenSelectionStatus() }
+                    .guideAnchor(.lockscreenStatusRow)
+                    .onAppear {
+                        viewModel.refreshLockScreenSelectionStatus()
+                        // 滚动到动态锁屏区块首次可见时播放教程（WaifuX GuideKit）
+                        GuideEngine.shared.noteSheetOpened(GuideTours.lockscreen)
+                    }
 
                     MacSettingsRow(
                         title: t("clearLockScreenInstances"),
