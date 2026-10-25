@@ -66,6 +66,8 @@ struct WallpaperDetailSheet: View {
     /// 分享面板相对定位用（与分享按钮同几何的锚定 `NSView`）
     @State private var sharePickerAnchorView: NSView?
     @State private var showCopyLinkToast = false
+    /// 本次复制动作的 toast 文案（复制链接 / 复制图片共用同一 toast 位）
+    @State private var copyToastMessage = ""
     @State private var showDSHBackgroundToast = false
     @State private var showMoreOptionsPopover = false
 
@@ -269,7 +271,7 @@ struct WallpaperDetailSheet: View {
             }
             .overlay(alignment: .bottom) {
                 if showCopyLinkToast {
-                    Text(t("wallpaperDetail.linkCopied"))
+                    Text(copyToastMessage.isEmpty ? t("wallpaperDetail.linkCopied") : copyToastMessage)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
@@ -589,6 +591,7 @@ struct WallpaperDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+                .guideAnchor(.detailHeroInfo)
 
                 Button {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
@@ -838,6 +841,26 @@ struct WallpaperDetailSheet: View {
             }
 
             Button {
+                showMoreOptionsPopover = false
+                copyWallpaperImageToPasteboard()
+            } label: {
+                HStack {
+                    Image(systemName: "photo.on.rectangle")
+                    Text(t("wallpaperDetail.copyImage"))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .background(
+                Rectangle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(height: 1),
+                alignment: .bottom
+            )
+
+            Button {
                 guard let link = copyableSourceLinkString else {
                     NSSound.beep()
                     return
@@ -845,6 +868,7 @@ struct WallpaperDetailSheet: View {
                 showMoreOptionsPopover = false
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(link, forType: .string)
+                copyToastMessage = t("wallpaperDetail.linkCopied")
                 showCopyLinkToast = true
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -884,6 +908,34 @@ struct WallpaperDetailSheet: View {
 
     private var hasCopyableSourceLink: Bool {
         copyableSourceLinkString != nil
+    }
+
+    /// 复制壁纸图片本体到剪贴板：本地/已下载文件直取，未下载则下载原图到临时目录
+    private func copyWallpaperImageToPasteboard() {
+        Task { @MainActor in
+            do {
+                let imageURL = try await getWallpaperImageURL()
+                guard let image = NSImage(contentsOf: imageURL) else {
+                    NSSound.beep()
+                    AppLogger.error(.wallpaper, "复制图片失败：无法读取文件",
+                                    metadata: ["path": imageURL.path])
+                    return
+                }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects([image])
+                copyToastMessage = t("wallpaperDetail.imageCopied")
+                showCopyLinkToast = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    showCopyLinkToast = false
+                }
+                print("[WallpaperDetailSheet] ✅ 已复制壁纸图片到剪贴板: \(imageURL.lastPathComponent)")
+            } catch {
+                NSSound.beep()
+                AppLogger.error(.wallpaper, "复制图片失败",
+                                metadata: ["error": error.localizedDescription])
+            }
+        }
     }
 
     // 横线分隔符

@@ -945,6 +945,7 @@ struct MediaDetailSheet: View {
                     .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
+                .guideAnchor(.detailHeroInfo)
 
                 Button {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.85, blendDuration: 0)) {
@@ -1837,6 +1838,11 @@ struct MediaDetailSheet: View {
                 )
                 .popover(isPresented: $showMoreOptionsPopover, arrowEdge: .bottom) {
                     morePopoverMenuContent
+                        .guideAnchor(.detailMorePopover)
+                        .onAppear {
+                            // 二级弹层打开即提示（WaifuX GuideKit）
+                            GuideEngine.shared.noteSheetOpened(GuideTours.detailMoreOptions)
+                        }
                 }
 
                 dividerLine
@@ -1846,6 +1852,7 @@ struct MediaDetailSheet: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 12)
         .glassContainer(spacing: 16)
+        .guideAnchor(.detailActionRow)
     }
 
     private var dividerLine: some View {
@@ -3813,6 +3820,23 @@ struct MediaDetailSheet: View {
     /// 复制当前壁纸的静态图片到剪贴板
     private func copyStaticImageToPasteboard() {
         Task { @MainActor in
+            // 0. 详情项正被桌面播放时优先抓「背景当前帧」：
+            // 烘焙帧 / poster / Workshop 预览图都是开头帧或静态预览，不是背景正在显示的画面。
+            if let source = liveDesktopFrameSourceForDetailItem(),
+               let frame = captureLiveDesktopFrameForDetailItem(from: source) {
+                let image = NSImage(cgImage: frame, size: NSSize(width: frame.width, height: frame.height))
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects([image])
+                copyToastMessage = "已复制背景当前帧"
+                showCopyLinkToast = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    showCopyLinkToast = false
+                }
+                print("[MediaDetailSheet] ✅ 已复制背景当前帧到剪贴板（source=\(source)）")
+                return
+            }
+
             var imageURL: URL?
             let imageExtensions: Set<String> = [
                 "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tiff", "tif"
@@ -3957,6 +3981,69 @@ struct MediaDetailSheet: View {
             } else {
                 print("[MediaDetailSheet] ⚠️ 无法读取图片文件: \(imageURL.path)")
             }
+        }
+    }
+
+    // MARK: - 背景当前帧（复制静态图片优先来源）
+
+    private enum LiveDesktopFrameSource: CustomStringConvertible {
+        /// scene 渲染进程 / web daemon 窗口
+        case externalRenderer
+        /// Helper 内置 AVPlayer 桌面视频窗口
+        case helperVideo
+
+        var description: String {
+            switch self {
+            case .externalRenderer: return "externalRenderer"
+            case .helperVideo: return "helperVideo"
+            }
+        }
+    }
+
+    /// 判定详情项当前是否正被桌面播放，并给出抓帧来源。
+    /// 匹配口径与 `stopPlayingWallpaperIfNeeded` 一致：workshop 项按 workshopID contains；
+    /// 非 workshop 项用下载记录本地文件（归一化视频实体后）与当前播放视频比对。
+    private func liveDesktopFrameSourceForDetailItem() -> LiveDesktopFrameSource? {
+        let item = resolvedItem
+        let bridge = WallpaperEngineXBridge.shared
+
+        if bridge.isControllingExternalEngine,
+           let livePath = bridge.currentWallpaperPathForDesign,
+           pathMatchesDetailItem(livePath, item: item) {
+            return .externalRenderer
+        }
+
+        if let liveVideo = VideoWallpaperManager.shared.currentVideoURL,
+           pathMatchesDetailItem(liveVideo.path, item: item) {
+            return .helperVideo
+        }
+        return nil
+    }
+
+    private func pathMatchesDetailItem(_ path: String, item: MediaItem) -> Bool {
+        guard !path.isEmpty else { return false }
+        if path.contains(item.id) { return true }
+        if item.id.hasPrefix("workshop_") {
+            return path.contains(String(item.id.dropFirst("workshop_".count)))
+        }
+        guard let recordURL = currentDownloadRecord?.localFileURL else { return false }
+        let resolved = MediaItem.resolveLocalVideoFile(from: recordURL) ?? recordURL
+        if resolved.standardizedFileURL.path == URL(fileURLWithPath: path).standardizedFileURL.path {
+            return true
+        }
+        // 渲染/播放路径位于详情项目的目录下（本地导入工程目录）
+        let container = resolved.deletingLastPathComponent().standardizedFileURL.path
+        return URL(fileURLWithPath: path).standardizedFileURL.path.hasPrefix(container)
+    }
+
+    /// 按来源抓取桌面壁纸窗口当前帧；kind 收敛抓取对象，避免多屏异壁纸时抓错屏。
+    private func captureLiveDesktopFrameForDetailItem(from source: LiveDesktopFrameSource) -> CGImage? {
+        let bridge = WallpaperEngineXBridge.shared
+        switch source {
+        case .externalRenderer:
+            return bridge.captureExternalRendererFrameForCopy()
+        case .helperVideo:
+            return bridge.captureHelperVideoWindowFrameForCopy()
         }
     }
 

@@ -143,6 +143,17 @@ private struct ScreenProcessInfo {
     /// Helper 冷启动首次解压内嵌 assets 发生在 spawn 之前（可能 5~8s），
     /// 首帧死线必须从 spawn 之后起算，否则重场景加载会被解压时间挤爆预算。
     let sceneBudgetStartedAt: Date
+    /// `--first-frame-file`：渲染器首帧真正 present 后写出的就绪文件。
+    /// 只有带了它才说明本进程走「延迟显示（--defer-show）」链路：窗口在收到
+    /// `show:true` 之前必须保持隐藏，宿主先落桌面 poster、确认系统生效后再显示。
+    var firstFrameURL: URL? = nil
+    /// `--poster-output`：渲染器首帧 readback 出的桌面 poster 路径。
+    /// 供宿主在显示渲染器之前写入系统桌面，实现「静态底图 → 动态渲染」的无感接管。
+    var posterOutputURL: URL? = nil
+    /// 是否仍在等待宿主下发显示指令。true 时窗口不可见：
+    /// Space 可见性守护（reassert / visibility guard）必须跳过该进程，否则会把
+    /// 尚未显示的窗口提前 AXRaise 到桌面。
+    var presentationDeferred: Bool = false
 }
 
 private struct RendererAudioControlState: Codable {
@@ -368,6 +379,39 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var displaySleepPausedScreenIDs: Set<String> = []
     private var isDisplayAsleep = false
 
+    // MARK: - Scene 渲染器自愈
+
+    /// 渲染器终止意图。切换壁纸、退出、断屏、暂停这些主动路径，以及内存看门狗的
+    /// 自毁，都不该被当成"意外死亡"去重建；只有崩溃、被外部 kill、Metal surface
+    /// 死亡这类事件才进自愈队列。
+    private enum RendererTerminationIntent {
+        case userInitiated
+        case memoryWatchdog
+    }
+
+    /// 已主动发出 SIGTERM 的渲染进程，`terminationHandler` 消费事件时据此判定。
+    private var intentionallyTerminatedPIDs: Set<pid_t> = []
+    /// 被内存看门狗判定超限而终止的渲染进程，用于把这次自毁按错误级别留痕。
+    private var watchdogTerminatedPIDs: Set<pid_t> = []
+
+    /// 一次待自愈的 scene 屏记录。
+    private struct PendingSceneRecovery {
+        var path: String
+        var userProperties: String?
+        var attempts: Int
+        var windowStart: Date
+        var nextAttemptAt: Date
+    }
+
+    /// 意外退出的 scene 渲染器（key = screenID）。由 10s 健康巡检按退避重建。
+    private var pendingSceneRecoveries: [String: PendingSceneRecovery] = [:]
+    /// 正在执行的重建任务。`setWallpaper` 会被 `wallpaperSwitchGeneration` 顶掉，
+    /// 多屏并发重建会互相取消，因此所有重建串行排队在这一个 Task 里。
+    private var sceneRecoveryTask: Task<Void, Never>?
+    /// 退避序列 30s → 120s → 300s；1 小时窗口内最多 3 次，避免坏壁纸被无限重启。
+    private let sceneRecoveryBackoff: [TimeInterval] = [30, 120, 300]
+    private let sceneRecoveryWindow: TimeInterval = 3600
+
     // MARK: - 初始化
 
     private var remoteScreens: [String: [String: Any]] = [:]
@@ -542,6 +586,88 @@ final class WallpaperEngineXBridge: ObservableObject {
     var isCurrentWallpaperScene: Bool {
         if BackgroundRuntimeRole.isRemoteUI { return remoteIsScene }
         return isControllingExternalEngine && activeRenderKind == .scene
+    }
+
+    // MARK: - 复制当前帧（媒体详情「复制静态图片」）
+
+    /// 抓取外部渲染引擎（scene 渲染进程 / web daemon）桌面壁纸窗口的当前画面。
+    /// 仅在已授予屏幕录制权限且能找到渲染窗口时返回帧；拿不到返回 nil（调用方回退静态封面）。
+    /// 调用方须先确认详情项命中的是外部渲染壁纸，避免与内置视频并存时抓错屏。
+    func captureExternalRendererFrameForCopy() -> CGImage? {
+        guard isControllingExternalEngine else { return nil }
+        guard CGPreflightScreenCaptureAccess() else { return nil }
+
+        var pids: [pid_t] = []
+        if activeRenderKind == .scene {
+            pids = screenProcesses.values
+                .filter { kill($0.pid, 0) == 0 }
+                .map(\.pid)
+        } else if activeRenderKind == .web, let daemonPID = Self.webDaemonPIDIfRunning {
+            pids = [daemonPID]
+        }
+        guard !pids.isEmpty else { return nil }
+
+        return Self.captureLargestWindowFrame(ownedBy: pids, ownerNames: [])
+    }
+
+    /// 抓取 Helper 进程桌面视频窗口的当前画面（内置 AVPlayer 视频壁纸）。
+    /// Helper 是后台 agent，可能不在 runningApplications；窗口 ownerName 作兜底匹配。
+    func captureHelperVideoWindowFrameForCopy() -> CGImage? {
+        guard CGPreflightScreenCaptureAccess() else { return nil }
+        var pids: [pid_t] = []
+        if let helperApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == "com.waifux.app.helper"
+        }), helperApp.processIdentifier > 0 {
+            pids.append(pid_t(helperApp.processIdentifier))
+        }
+        return Self.captureLargestWindowFrame(ownedBy: pids, ownerNames: ["WaifuXHelper"])
+    }
+
+    /// daemon 启动时写 `/tmp/wallpaperengine-cli.pid`（wallpaperengine-cli.swift 写入点），退出清理。
+    private static var webDaemonPIDIfRunning: pid_t? {
+        guard let text = try? String(contentsOfFile: "/tmp/wallpaperengine-cli.pid", encoding: .utf8),
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0, kill(pid, 0) == 0 else { return nil }
+        return pid
+    }
+
+    /// 候选进程（pid 命中；pid 集为空时按 ownerName 兜底）中 bounds 面积最大的桌面壁纸窗口，抓当前帧。
+    /// `.nominalResolution`：winit/Metal 窗口在 Retina 下用 bestResolution 会得到只填充
+    /// 1/4 的画布（同 BakeService.captureWindowFrameWithCoreGraphics 的成熟参数）。
+    private static func captureLargestWindowFrame(ownedBy pids: [pid_t], ownerNames: [String]) -> CGImage? {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let pidSet = Set(pids.map(Int.init))
+        var bestWindowID: CGWindowID?
+        var bestArea: Double = 0
+        for window in list {
+            if !pidSet.isEmpty {
+                guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
+                      pidSet.contains(ownerPID) else { continue }
+            } else {
+                let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+                guard ownerNames.contains(owner) else { continue }
+            }
+            guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let width = (bounds["Width"] as? NSNumber)?.doubleValue,
+                  let height = (bounds["Height"] as? NSNumber)?.doubleValue else { continue }
+            // 排除时钟挂件、托盘等小窗口
+            guard width >= 400, height >= 300 else { continue }
+            let area = width * height
+            if area > bestArea,
+               let number = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value {
+                bestArea = area
+                bestWindowID = number
+            }
+        }
+        guard let windowID = bestWindowID else { return nil }
+        return CGWindowListCreateImage(
+            .infinite,
+            .optionIncludingWindow,
+            windowID,
+            [.boundsIgnoreFraming, .nominalResolution]
+        )
     }
 
     func prepareForNonExternalWallpaperSwitch(on screens: [NSScreen], reason: String) {
@@ -747,11 +873,20 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 完成后由 scheduleBakedCoverSync 统一写入。没有旧视频时仍可提前提交高清 poster。
         let preservesNativeVideoUntilReady = VideoWallpaperManager.shared
             .hasNativeVideoWallpaper(on: effectiveScreens)
+        // 桌面底图准备（读烘焙封面 / 生成 poster）与渲染器预渲染并行：
+        // 渲染器 --defer-show 本来就不出窗口，先把进程拉起来加载场景，
+        // 等两边都就绪后再一次性 show，避免串行叠加两段耗时。
+        var preappliedDesktopPosterTask: Task<URL?, Never>?
         if !preservesNativeVideoUntilReady {
-            await commitExistingBakedCoverBeforeRendererStart(
-                path: resolvedPath,
-                targetScreens: effectiveScreens
-            )
+            let pathForPoster = resolvedPath
+            let screensForPoster = effectiveScreens
+            preappliedDesktopPosterTask = Task { @MainActor [weak self] in
+                guard let self else { return nil }
+                return await self.commitExistingBakedCoverBeforeRendererStart(
+                    path: pathForPoster,
+                    targetScreens: screensForPoster
+                )
+            }
         }
         guard wallpaperSwitchGeneration == switchGeneration else { return }
 	
@@ -978,9 +1113,11 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         for screen in effectiveScreens {
             guard wallpaperSwitchGeneration == switchGeneration else { return }
-            // 全屏覆盖（含菜单栏条带下方）。wgpu 窗口 setOpaque=false +
-            // alpha=0.99999 常驻近乎不透明（Rust 侧），壁纸层不被挂起，菜单栏
-            // backdrop 懒采样能跟随 poster 更新。
+            // 全屏覆盖（含菜单栏条带下方）。Scene 窗口在预热期完全不创建，
+            // 宿主确认桌面 poster 生效后才 show；窗口以不透明方式创建
+            // （setOpaque=true + alpha=1.0），不再使用 alpha=0.99999 半透明合成
+            // （用户实测半透明常驻有性能开销）。代价是壁纸层会被系统挂起，
+            // 菜单栏 backdrop 不再跟随场景壁纸重采样。
             let f = screen.frame
             let scale = screen.backingScaleFactor
             let screenX = Int(f.origin.x.rounded())
@@ -1240,6 +1377,25 @@ final class WallpaperEngineXBridge: ObservableObject {
             )
             perScreenArgs += ["--wallpaper-control", wallpaperControlURL.path]
 
+            // ── 延迟显示（先桌面、后渲染器）─────────────────────────────
+            // 渲染器先加载场景并渲染首帧，但窗口保持隐藏；宿主拿到首帧 readback
+            // 的 poster、写入系统桌面并确认生效后，才通过控制文件下发 show。
+            // 旧版渲染器不认这些参数，能力探测失败时保持原有「启动即显示」。
+            var firstFrameURL: URL?
+            var posterOutputURL: URL?
+            let supportsDeferredPresentation = Self.rendererSupportsDeferredPresentation(cliURL)
+            if supportsDeferredPresentation {
+                let ffURL = createFirstFrameURL(screenID: screenID)
+                let posterURL = createSceneLivePosterURL(screenID: screenID, path: resolvedPath)
+                firstFrameURL = ffURL
+                posterOutputURL = posterURL
+                perScreenArgs += [
+                    "--defer-show",
+                    "--first-frame-file", ffURL.path,
+                    "--poster-output", posterURL.path
+                ]
+            }
+
             if let effectiveUserProperties, !effectiveUserProperties.isEmpty {
                 perScreenArgs += ["--user-properties", effectiveUserProperties]
             }
@@ -1266,7 +1422,10 @@ final class WallpaperEngineXBridge: ObservableObject {
                     wallpaperControlURL: wallpaperControlURL,
                     launchedScreenWidth: screenW,
                     launchedScreenHeight: screenH,
-                    sceneBudgetStartedAt: Date()
+                    sceneBudgetStartedAt: Date(),
+                    firstFrameURL: firstFrameURL,
+                    posterOutputURL: posterOutputURL,
+                    presentationDeferred: firstFrameURL != nil
                 )
                 screenRenderStates[screenID] = ScreenRenderState(
                     screenID: screenID,
@@ -1279,8 +1438,12 @@ final class WallpaperEngineXBridge: ObservableObject {
                 _deinitPIDs.insert(launchedPID)
                 sceneFreshLaunchBudgetStarts[screenID] = Date()
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) wallpaper-wgpu 已启动 (pid=\(launchedPID))")
-                // macOS 27：新进程的桌面窗口可能落在非当前 Space，延迟分拍拉回
-                scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
+                // macOS 27：新进程的桌面窗口可能落在非当前 Space，延迟分拍拉回。
+                // 延迟显示链路（--defer-show）下窗口此刻必须保持隐藏，等宿主下发
+                // show 之后再启动可见性守护（否则会把未显示的窗口提前 AXRaise）。
+                if firstFrameURL == nil {
+                    scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
+                }
                 AppLogger.error(.wallpaper, "wallpaper-wgpu 进程已启动", metadata: ["screenID": screenID, "pid": launchedPID, "renderKind": renderKind.rawValue, "screenProcesses": screenProcesses.count])
 
                 // 异步等待 canvas_size 就绪后重算 crop
@@ -1384,6 +1547,23 @@ final class WallpaperEngineXBridge: ObservableObject {
         if !preservesExistingRendererUntilReady {
             releaseSettingFlag()
         }
+        guard wallpaperSwitchGeneration == switchGeneration else {
+            if preservesExistingRendererUntilReady {
+                await discardPreparedRenderersPreservingOld(preservedRenderers)
+                releaseSettingFlag()
+            }
+            return
+        }
+
+        // 延迟显示链路在这里收口：等首帧 → （无旧内容时）写桌面 poster 并等系统
+        // 生效回调 → 下发 show。必须在拆旧内容（commit）之前执行，否则会露出桌面。
+        await revealDeferredSceneRenderers(
+            path: resolvedPath,
+            screens: effectiveScreens,
+            generation: switchGeneration,
+            preappliedDesktopTask: preappliedDesktopPosterTask,
+            holdOldWallpaper: preservesOldWallpaperUntilReady || preservesExistingRendererUntilReady
+        )
         guard wallpaperSwitchGeneration == switchGeneration else {
             if preservesExistingRendererUntilReady {
                 await discardPreparedRenderersPreservingOld(preservedRenderers)
@@ -1616,6 +1796,9 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func auditRendererHealth() {
+        // 先补意外死亡的 scene 渲染器：这一步和下面的活进程巡检互不重叠，
+        // 死进程早就从 screenProcesses 里被清掉，只能靠自愈队列找回来。
+        attemptPendingSceneRecoveries()
         let screenLocked = VideoWallpaperManager.shared.isScreenLocked
         for (screenID, info) in screenProcesses {
             guard screenRenderStates[screenID]?.renderKind == .scene else { continue }
@@ -1649,6 +1832,149 @@ final class WallpaperEngineXBridge: ObservableObject {
         if let last = rendererHealthLogAt[key], Date().timeIntervalSince(last) < 60 { return }
         rendererHealthLogAt[key] = Date()
         AppLogger.error(.wallpaper, message, metadata: metadata)
+    }
+
+    // MARK: - Scene 渲染器自愈
+
+    /// 把一次意外退出排进自愈队列。同一块屏在退避窗口内复用同一条记录，
+    /// 避免"崩溃 → 重建 → 再崩溃"把进程表刷爆。
+    private func enqueueSceneRecovery(screenID: String, state: ScreenRenderState, cause: String) {
+        let now = Date()
+        var record: PendingSceneRecovery
+        if var existing = pendingSceneRecoveries[screenID] {
+            existing.path = state.path
+            existing.userProperties = state.userProperties
+            if now.timeIntervalSince(existing.windowStart) >= sceneRecoveryWindow {
+                existing.attempts = 0
+                existing.windowStart = now
+                existing.nextAttemptAt = now.addingTimeInterval(sceneRecoveryBackoff[0])
+            }
+            record = existing
+        } else {
+            record = PendingSceneRecovery(
+                path: state.path,
+                userProperties: state.userProperties,
+                attempts: 0,
+                windowStart: now,
+                nextAttemptAt: now.addingTimeInterval(sceneRecoveryBackoff[0])
+            )
+        }
+        pendingSceneRecoveries[screenID] = record
+        AppLogger.error(.wallpaper, "Scene 渲染器意外退出，已排队自愈重建", metadata: [
+            "screenID": screenID,
+            "cause": cause,
+            "path": state.path,
+            "attemptsThisWindow": record.attempts,
+            "retryAfterSeconds": Int(max(0, record.nextAttemptAt.timeIntervalSince(now)))
+        ])
+    }
+
+    /// 由 10s 健康巡检驱动：把到期的自愈记录重建成新的渲染进程。
+    ///
+    /// 重建必须串行。`setWallpaper` 会用 `wallpaperSwitchGeneration` 顶掉前一次调用，
+    /// 多屏同时重建时并发 Task 会互相取消，所以统一交给 `sceneRecoveryTask` 排队。
+    private func attemptPendingSceneRecoveries() {
+        guard !pendingSceneRecoveries.isEmpty, sceneRecoveryTask == nil else { return }
+        guard !isSettingWallpaper, !isTerminating else { return }
+        guard !VideoWallpaperManager.shared.isScreenLocked else { return }
+        let now = Date()
+
+        var dueScreens: [String] = []
+        for (screenID, record) in pendingSceneRecoveries {
+            // 已有新进程接替 → 记录作废。
+            guard screenProcesses[screenID] == nil, screenRenderStates[screenID] == nil else {
+                pendingSceneRecoveries.removeValue(forKey: screenID)
+                continue
+            }
+            // 用户主动暂停的屏不拉起来：暂停期间进程死掉属于预期内，拉起会违背暂停意图。
+            guard !isExternalPaused,
+                  !perScreenPausedScreenIDs.contains(screenID),
+                  !displaySleepPausedScreenIDs.contains(screenID) else {
+                pendingSceneRecoveries.removeValue(forKey: screenID)
+                continue
+            }
+            var updated = record
+            if now.timeIntervalSince(record.windowStart) >= sceneRecoveryWindow {
+                updated.attempts = 0
+                updated.windowStart = now
+                updated.nextAttemptAt = now.addingTimeInterval(sceneRecoveryBackoff[0])
+                pendingSceneRecoveries[screenID] = updated
+            }
+            guard updated.attempts < sceneRecoveryBackoff.count else {
+                // 本窗口内已重建 3 次仍然死，停手等下一个窗口，避免坏壁纸无限重启。
+                updated.nextAttemptAt = updated.windowStart.addingTimeInterval(sceneRecoveryWindow)
+                pendingSceneRecoveries[screenID] = updated
+                continue
+            }
+            guard now >= updated.nextAttemptAt else { continue }
+            guard NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+                // 屏不在线（合盖 / 外接拔掉），等它回来再重建。
+                continue
+            }
+            updated.attempts += 1
+            updated.nextAttemptAt = now.addingTimeInterval(
+                sceneRecoveryBackoff[min(updated.attempts, sceneRecoveryBackoff.count) - 1]
+            )
+            pendingSceneRecoveries[screenID] = updated
+            dueScreens.append(screenID)
+        }
+
+        guard !dueScreens.isEmpty else { return }
+        sceneRecoveryTask = Task { @MainActor [weak self] in
+            defer { self?.sceneRecoveryTask = nil }
+            for screenID in dueScreens {
+                guard let self, !self.isTerminating else { return }
+                guard let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+                    continue
+                }
+                await self.performSceneRecovery(screenID: screenID, screen: screen)
+            }
+        }
+    }
+
+    /// 重建一屏 scene 渲染器。参数口径与唤醒恢复保持一致，避免两条路径行为分叉。
+    private func performSceneRecovery(screenID: String, screen: NSScreen) async {
+        guard !isSettingWallpaper, !isTerminating else { return }
+        guard let record = pendingSceneRecoveries[screenID] else { return }
+        guard FileManager.default.fileExists(atPath: record.path) else {
+            AppLogger.error(.wallpaper, "Scene 渲染器自愈跳过：壁纸路径不可读", metadata: [
+                "screenID": screenID,
+                "path": record.path,
+                "attemptsThisWindow": record.attempts
+            ])
+            return
+        }
+        let userProperties = Self.mergeSceneConfigOverrides(
+            record.userProperties ?? SceneWallpaperPropertiesService.propertiesOverrideJSON(for: record.path),
+            wallpaperPath: record.path
+        )
+        AppLogger.error(.wallpaper, "Scene 渲染器自愈重建开始", metadata: [
+            "screenID": screenID,
+            "attemptsThisWindow": record.attempts,
+            "path": record.path
+        ])
+        do {
+            try await setWallpaper(
+                path: record.path,
+                targetScreens: [screen],
+                userProperties: userProperties,
+                forceRestart: true,
+                preserveAutoPauseState: true
+            )
+            pendingSceneRecoveries.removeValue(forKey: screenID)
+            AppLogger.error(.wallpaper, "Scene 渲染器自愈重建完成", metadata: [
+                "screenID": screenID,
+                "attemptsThisWindow": record.attempts
+            ])
+        } catch is CancellationError {
+            return
+        } catch {
+            AppLogger.error(.wallpaper, "Scene 渲染器自愈重建失败", metadata: [
+                "screenID": screenID,
+                "attemptsThisWindow": record.attempts,
+                "error": error.localizedDescription
+            ])
+        }
     }
 
     /// 进程是否处于 SIGSTOP（T）状态。p_stat: SSTOP = 4。
@@ -3529,7 +3855,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.killAllAudioChildren(pid: pid)
-                    self.terminateRenderer(pid: pid)
+                    self.terminateRenderer(pid: pid, intent: .memoryWatchdog)
                     let workItem = DispatchWorkItem {
                         if kill(pid, 0) == 0 {
                             print("[WallpaperEngineXBridge] 渲染进程未响应内存看门狗 terminate，发送 SIGKILL (pid=\(pid))")
@@ -3553,7 +3879,26 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     // MARK: - 进程生命周期管理
 
-    private func terminateRenderer(pid: pid_t) {
+    /// 终止渲染进程。
+    ///
+    /// `intent` 决定这次终止是否算"意外死亡"：只有两条路径都不登记时（崩溃、被外部
+    /// kill、Metal surface 死亡），`processPendingTermination` 才会把它排进自愈队列。
+    /// 内存看门狗单独走 `.memoryWatchdog`，这样它既能触发自愈，又能在日志里被归因为
+    /// 自毁而不是"正常终止"。
+    private func terminateRenderer(pid: pid_t, intent: RendererTerminationIntent = .userInitiated) {
+        switch intent {
+        case .userInitiated:
+            intentionallyTerminatedPIDs.insert(pid)
+            watchdogTerminatedPIDs.remove(pid)
+        case .memoryWatchdog:
+            intentionallyTerminatedPIDs.remove(pid)
+            watchdogTerminatedPIDs.insert(pid)
+        }
+        // 主动停止/超限终止说明这一屏在当前意图下不该再跑，顺手清掉可能残留的自愈
+        // 记录，否则下一个健康巡检周期会把刚停掉的渲染器又拉起来。
+        if let screenID = screenProcesses.first(where: { $0.value.pid == pid })?.key {
+            pendingSceneRecoveries.removeValue(forKey: screenID)
+        }
         // SIGTERM sent to a SIGSTOP'ed renderer remains pending and its desktop
         // window stays visible. SIGCONT is harmless for a running process and makes
         // termination deterministic for auto-paused Scene wallpapers.
@@ -3665,6 +4010,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 终止所有渲染进程
     private func stopRenderProcess(waitForExit: Bool = false) {
+        // 主动停止即用户/系统的明确意图，自愈队列一律作废，避免巡检把刚停掉的拉起来。
+        pendingSceneRecoveries.removeAll()
         // 先处理已堆积的终止事件，避免与新进程状态混淆
         processPendingTermination()
 
@@ -3842,6 +4189,10 @@ final class WallpaperEngineXBridge: ObservableObject {
         }()
 
         for event in events {
+            // 主动停止（切换/退出/断屏/暂停）和内存看门狗自毁都会在发信号前登记 pid，
+            // 两者都没命中才说明是崩溃、被外部 kill 或 surface 死亡 —— 这类才进自愈队列。
+            let intentionalTermination = intentionallyTerminatedPIDs.remove(event.pid) != nil
+            let watchdogTermination = watchdogTerminatedPIDs.remove(event.pid) != nil
             // 找到对应屏幕的进程，检查 generation 是否匹配
             guard let screenEntry = screenProcesses.first(where: { $0.value.pid == event.pid }) else {
                 // 进程已不在 screenProcesses 中（已被 stopScreenProcess 清理），跳过
@@ -3852,10 +4203,12 @@ final class WallpaperEngineXBridge: ObservableObject {
             try? screenEntry.value.logFile?.close()
             let expectedGen = screenEntry.value.generation
             guard event.generation == expectedGen else { continue }
+            // 清理前抓一份状态：意外死亡时它是自愈重建的唯一依据。
+            let terminatedScreenState = screenRenderStates[screenID]
 
             // 捕获并输出完整的退出原因
-            let reasonDesc: String
-            let isError: Bool
+            var reasonDesc: String
+            var isError: Bool
             switch event.reason {
             case .exit:
                 if event.status == 0 {
@@ -3877,6 +4230,14 @@ final class WallpaperEngineXBridge: ObservableObject {
             @unknown default:
                 reasonDesc = "未知终止原因 (reason=\(event.reason), status=\(event.status))"
                 isError = true
+            }
+            // 看门狗杀进程是我们自己的决定，但对用户表现为壁纸定格。不在这里改判，
+            // SIGTERM 会被当成"正常终止"而完全静默，正是上一轮排障丢掉现场的原因。
+            if watchdogTermination {
+                reasonDesc += "〔内存看门狗强制终止〕"
+                isError = true
+            } else if intentionalTermination {
+                reasonDesc += "〔主动停止〕"
             }
 
             let icon = isError ? "❌" : "✅"
@@ -3902,6 +4263,18 @@ final class WallpaperEngineXBridge: ObservableObject {
             removeScreenProcess(screenID)
             screenRenderStates.removeValue(forKey: screenID)
             _deinitPIDs.remove(event.pid)
+
+            // 意外死亡的 scene 屏进自愈队列。主动停止、正在退出 App、web 屏都不排队。
+            if !intentionalTermination,
+               !isTerminating,
+               let terminatedScreenState,
+               terminatedScreenState.renderKind == .scene {
+                enqueueSceneRecovery(
+                    screenID: screenID,
+                    state: terminatedScreenState,
+                    cause: watchdogTermination ? "内存看门狗强制终止" : reasonDesc
+                )
+            }
         }
 
         if !events.isEmpty {
@@ -4358,6 +4731,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         if let wallpaperControlURL = info.wallpaperControlURL {
             try? FileManager.default.removeItem(at: wallpaperControlURL)
+        }
+        if let firstFrameURL = info.firstFrameURL {
+            try? FileManager.default.removeItem(at: firstFrameURL)
         }
     }
 
@@ -5253,6 +5629,9 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 27.2 公开的多屏桌面层回归集中在后者，所以只在窗口确实不在当前 Space 时记下这个开关。
         let separateSpaces = WaifuXPreferences.shared.bool(forKey: "spans-displays") == false
         for info in screenProcesses.values {
+            // 延迟显示中的进程窗口本来就不该出现：这里跳过，避免 Space 切换 /
+            // 唤醒恢复把它提前 AXRaise（显示时机由 revealDeferredSceneRenderers 决定）。
+            if info.presentationDeferred { continue }
             let visible = Self.rendererProcessHasOnscreenWindow(pid: info.pid)
             if !visible {
                 AppLogger.error(.wallpaper, "Renderer reassert on space change", metadata: [
@@ -5340,7 +5719,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                 for: path,
                 targetScreens: targetScreens,
                 updateGeneration: generation
-            ) {
+            ) != nil {
                 print("[WallpaperEngineXBridge] ✅ 已使用烘焙静态资源: \(existing.lastPathComponent)")
             }
         }
@@ -5348,22 +5727,31 @@ final class WallpaperEngineXBridge: ObservableObject {
 
     /// 在外部 renderer 启动前同步写入已有的高清烘焙封面。没有可用 poster 时不阻塞
     /// Scene/Web 的实时渲染，后续仍由异步抽帧完成通知接管。
+    /// - Returns: 已写入系统桌面的图片 URL；宿主可用它在显示渲染器前等待系统生效。
+    @discardableResult
     private func commitExistingBakedCoverBeforeRendererStart(
         path: String,
         targetScreens: [NSScreen]
-    ) async {
-        guard !targetScreens.isEmpty else { return }
+    ) async -> URL? {
+        guard !targetScreens.isEmpty else { return nil }
         guard let existing = await existingBakedCoverURL(forScenePath: path) else {
-            return
+            return nil
         }
-        if applyBakedStaticImage(
+        // 暗场封面（例如抽帧抽到渐入黑帧）宁可继续用当前系统桌面，也不要把桌面刷黑。
+        if let luma = scenePosterMeanLuma(existing), luma < Self.minimumDesktopPosterLuma {
+            print("[WallpaperEngineXBridge] ⚠️ renderer 启动前烘焙封面过暗 (meanLuma=\(String(format: "%.1f", luma)))，跳过桌面写入")
+            return nil
+        }
+        if let applied = applyBakedStaticImage(
             existing,
             for: path,
             targetScreens: targetScreens,
             updateGeneration: nil
         ) {
             print("[WallpaperEngineXBridge] ✅ renderer 启动前已提交烘焙静态底图: \(existing.lastPathComponent)")
+            return applied
         }
+        return nil
     }
 
     /// 读取已有烘焙静态资源。Scene 只有在存在真实烘焙产物时才使用通用
@@ -5403,20 +5791,23 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     /// 把已有烘焙封面设为系统桌面壁纸。
+    /// - Returns: 真正写入系统桌面的图片 URL；nil 表示本次没有写系统桌面
+    ///   （动态锁屏接管 / 系统壁纸同步关闭 / 文件缺失 / generation 已失效）。
+    ///   调用方可用返回值配合 `waitForDesktopImageApplied` 等待系统生效后再显示渲染器。
     private func applyBakedStaticImage(
         _ imageURL: URL,
         for path: String,
         targetScreens: [NSScreen]?,
         updateGeneration: UInt64?
-    ) -> Bool {
+    ) -> URL? {
         if let updateGeneration, bakedStaticUpdateGeneration != updateGeneration {
-            return false
+            return nil
         }
-        guard FileManager.default.fileExists(atPath: imageURL.path) else { return false }
+        guard FileManager.default.fileExists(atPath: imageURL.path) else { return nil }
 
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过烘焙封面的系统桌面写入")
-            return true
+            return nil
         }
 
         let cacheKey = Self.bakedStaticCacheKey(for: path)
@@ -5425,7 +5816,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 系统壁纸同步关闭时：动态 scene 仍由 wgpu 渲染，但不得写系统桌面静态图。
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
             print("[WallpaperEngineXBridge] 🧊 系统壁纸同步已关闭，跳过烘焙封面写入")
-            return true
+            return nil
         }
 
         let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
@@ -5447,7 +5838,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         let applyURL = FileManager.default.fileExists(atPath: slotURL.path) ? slotURL : imageURL
 
-        var didApply = false
+        var appliedURL: URL?
         let screens: [NSScreen]
         if let targetScreens, !targetScreens.isEmpty {
             screens = targetScreens
@@ -5460,18 +5851,390 @@ final class WallpaperEngineXBridge: ObservableObject {
                 try NSWorkspace.shared.setDesktopImageURLForAllSpaces(applyURL, for: screen, options: fillOptions)
                 DesktopWallpaperSyncManager.shared.registerWallpaperSet(applyURL, for: screen, options: fillOptions)
                 print("[WallpaperEngineXBridge] ✅ 烘焙封面壁纸已设置 (screen: \(screen.localizedName)) source=\(applyURL.lastPathComponent)")
-                didApply = true
+                appliedURL = applyURL
             } catch {
                 print("[WallpaperEngineXBridge] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
             }
         }
-        if didApply {
-            // Scene/Web 的 poster 已写入系统壁纸：wgpu / engine-cli 窗口
-            // 常驻近乎不透明（alpha=0.99999，各自进程内设置），壁纸层不被挂起，
-            // 菜单栏 backdrop 懒采样（~10s）自动采到新 poster。
+        if appliedURL != nil {
+            // poster 已写入系统壁纸。Scene 窗口由渲染器在 show 时以不透明方式
+            // 创建（不再走 alpha=0.99999 半透明契约）；Web/视频端仍各自保持既有行为。
         }
-        return didApply
+        return appliedURL
     }
+
+    // MARK: - Scene 展示时序（先桌面、后渲染器）
+
+    /// 渲染器是否支持 `--defer-show` 延迟显示链路。
+    /// 用二进制里的参数名字符串做一次能力探测并缓存：旧版渲染器忽略未知参数，
+    /// 若不探测就会白等首帧文件，把每次首次设置都拖慢一个超时。
+    private static var deferredPresentationCapabilityCache: [String: Bool] = [:]
+
+    private static func rendererSupportsDeferredPresentation(_ cliURL: URL) -> Bool {
+        let key = cliURL.path
+        if let cached = deferredPresentationCapabilityCache[key] { return cached }
+        guard let data = try? Data(contentsOf: cliURL, options: .alwaysMapped) else {
+            deferredPresentationCapabilityCache[key] = false
+            return false
+        }
+        let supported = data.range(of: Data("--defer-show".utf8)) != nil
+        deferredPresentationCapabilityCache[key] = supported
+        if !supported {
+            print("[WallpaperEngineXBridge] ⚠️ 渲染器不支持 --defer-show，沿用启动即显示链路: \(key)")
+        }
+        return supported
+    }
+
+    private static func presentationCacheDirectory() -> URL {
+        let dir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Caches/com.waifux.wallpaperengine/scene-live-posters", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func sanitizedScreenID(_ screenID: String) -> String {
+        String(screenID.map { ch -> Character in
+            ch.isLetter || ch.isNumber || ch == "-" || ch == "_" ? ch : "_"
+        })
+    }
+
+    /// 稳定的短摘要（FNV-1a 64）。不能用 `String.hashValue`：它每个进程启动都随机化，
+    /// 用它命名的缓存文件跨启动就失联。
+    private static func stablePresentationDigest(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 16)
+    }
+
+    /// 首帧就绪信号文件（每次启动独立 UUID，避免同名旧文件被误判为新渲染器已就绪）。
+    private func createFirstFrameURL(screenID: String) -> URL {
+        Self.presentationCacheDirectory()
+            .appendingPathComponent("first-frame-\(Self.sanitizedScreenID(screenID))-\(UUID().uuidString).json")
+    }
+
+    /// 渲染器首帧 poster 输出路径。放在稳定缓存目录（不是 /tmp），后续可用于快速复显。
+    /// 每次设置用新 UUID；同屏同壁纸的旧文件先清掉，避免缓存目录无限增长。
+    private func createSceneLivePosterURL(screenID: String, path: String) -> URL {
+        let dir = Self.presentationCacheDirectory()
+        let digest = Self.stablePresentationDigest(path)
+        let safeScreenID = Self.sanitizedScreenID(screenID)
+        let prefix = "scene-live-\(digest)-\(safeScreenID)-"
+        if let old = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for url in old where url.lastPathComponent.hasPrefix(prefix) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return dir.appendingPathComponent("\(prefix)\(UUID().uuidString).jpg")
+    }
+
+    /// 向渲染器下发显示指令：只写 `show` 字段，不携带 setWallpaper，
+    /// 渲染器轮询到后只做 orderFront，不会重新加载场景。
+    @discardableResult
+    private func writePresentationShowControl(url: URL) -> Bool {
+        let dict: [String: Any] = ["show": true]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict, options: [])
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            print("[WallpaperEngineXBridge] ⚠️ 写入渲染器显示指令失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// 等待所有目标屏首帧就绪；返回已就绪的 screenID 集合。
+    /// `generation` 传入时一旦被更新请求顶掉就立即返回，避免旧交接空转 12s。
+    private func waitForSceneFirstFrames(
+        _ urls: [String: URL],
+        timeout: TimeInterval,
+        generation: UInt64? = nil
+    ) async -> Set<String> {
+        guard !urls.isEmpty else { return [] }
+        let deadline = Date().addingTimeInterval(timeout)
+        var ready: Set<String> = []
+        while Date() < deadline {
+            if let generation, wallpaperSwitchGeneration != generation { return ready }
+            for (screenID, url) in urls where !ready.contains(screenID) {
+                if (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil {
+                    ready.insert(screenID)
+                }
+            }
+            if ready.count == urls.count { return ready }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return ready
+    }
+
+    /// 等待系统桌面真正切换到目标图片。
+    /// AppKit 没有公开的「桌面图已生效」通知（NSWorkspace 只有 activeSpace/wake 等），
+    /// 所以这里用系统状态读回 + 合成节拍做确认：轮询 `desktopImageURL(for:)` 直到
+    /// 目标 URL 在所有屏上一致，再留一个 120ms 让 WindowServer 完成重合成。
+    /// 超时返回 false（调用方仍会显示渲染器，绝不把壁纸卡在隐藏状态）。
+    private func waitForDesktopImageApplied(
+        _ url: URL,
+        on screens: [NSScreen],
+        timeout: TimeInterval = 1.5
+    ) async -> Bool {
+        guard !screens.isEmpty else { return true }
+        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let deadline = Date().addingTimeInterval(timeout)
+        var allMatch = false
+        var pollCount = 0
+        while Date() < deadline {
+            allMatch = screens.allSatisfy { screen in
+                guard let current = NSWorkspace.shared.desktopImageURL(for: screen) else { return false }
+                return current.resolvingSymlinksInPath().standardizedFileURL.path == target
+            }
+            if allMatch { break }
+            pollCount += 1
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard allMatch else { return false }
+        // 系统状态已一致：再等一个合成节拍，让 WindowServer 把静态底图真正画出来，
+        // 然后才显示渲染器（避免「渲染器先到、桌面后到」的闪动）。
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        print("[WallpaperEngineXBridge] ✅ 桌面 poster 已确认生效 (\(pollCount) 次轮询): \(url.lastPathComponent)")
+        return true
+    }
+
+    /// 把「预渲染完成」的渲染器真正显示到桌面。
+    ///
+    /// 时序（用户要求）：先桌面静态 poster → 等系统生效 → 再显示实时渲染器；
+    /// 若已有旧视频/旧 renderer 占据桌面（跨类型或替换交接），旧内容本身就是
+    /// 可见底图，跳过桌面等待，直接「先显示新渲染器 → 再拆旧内容」避免黑场。
+    /// 任何等待失败都只记日志并继续显示，绝不让渲染器永远停在隐藏态。
+    private func revealDeferredSceneRenderers(
+        path: String,
+        screens: [NSScreen],
+        generation: UInt64,
+        preappliedDesktopTask: Task<URL?, Never>?,
+        holdOldWallpaper: Bool
+    ) async {
+        let deferredScreens = screens.filter { screen in
+            screenProcesses[screen.wallpaperScreenIdentifier]?.presentationDeferred == true
+        }
+        guard !deferredScreens.isEmpty else { return }
+        let revealStartedAt = Date()
+        // 桌面底图任务与渲染器预渲染是并行启动的；这里取结果（通常已就绪），
+        // 用它决定 show 前要等待哪个桌面 URL 生效。
+        let preappliedDesktopURL = await preappliedDesktopTask?.value
+
+        // 1. 等首帧真正 present。预算与 waitForScenePresentationReady 一致（从进程
+        //    spawn 起算 12s），避免重场景被二次计时拖死。
+        var firstFrameURLs: [String: URL] = [:]
+        for screen in deferredScreens {
+            let screenID = screen.wallpaperScreenIdentifier
+            if let url = screenProcesses[screenID]?.firstFrameURL {
+                firstFrameURLs[screenID] = url
+            }
+        }
+        let spawnDates = deferredScreens.compactMap {
+            screenProcesses[$0.wallpaperScreenIdentifier]?.sceneBudgetStartedAt
+        }
+        let elapsed = spawnDates.map { Date().timeIntervalSince($0) }.max() ?? 0
+        let firstFrameTimeout = max(2.5, 12 - elapsed)
+        let readyScreens = await waitForSceneFirstFrames(
+            firstFrameURLs,
+            timeout: firstFrameTimeout,
+            generation: generation
+        )
+        let firstFrameWaitMs = Int(Date().timeIntervalSince(revealStartedAt) * 1000)
+        let startupToFirstFrameMs = spawnDates.isEmpty
+            ? firstFrameWaitMs
+            : Int(spawnDates.map { Date().timeIntervalSince($0) }.max()! * 1000)
+        if readyScreens.count < firstFrameURLs.count {
+            AppLogger.error(.wallpaper, "Scene 首帧就绪文件缺失，继续显示渲染器", metadata: [
+                "ready": readyScreens.sorted().joined(separator: ","),
+                "missing": firstFrameURLs.keys.filter { !readyScreens.contains($0) }.sorted().joined(separator: ","),
+                "timeoutSeconds": String(format: "%.1f", firstFrameTimeout)
+            ])
+        }
+        guard wallpaperSwitchGeneration == generation else { return }
+
+        // 2. 先落系统桌面 poster。没有旧内容遮蔽时才做；否则旧视频/旧 renderer
+        //    就是当前可见底图，先显示新渲染器再拆旧内容更安全。
+        var desktopConfirmed = false
+        var desktopPosterSource = "none"
+        if !holdOldWallpaper {
+            var posterURLs: [String: URL] = [:]
+            for screen in deferredScreens {
+                let screenID = screen.wallpaperScreenIdentifier
+                if let url = screenProcesses[screenID]?.posterOutputURL {
+                    posterURLs[screenID] = url
+                }
+            }
+            var posterWait: TimeInterval = 0
+            if !posterURLs.isEmpty {
+                // 首帧已 present 后 readback 只差几十毫秒；1.2s 足够，失败就降级。
+                posterWait = 1.2
+                _ = await waitForSceneFirstFrames(posterURLs, timeout: posterWait)
+            }
+            var appliedAny: URL?
+            var posterWasTooDark = false
+            // 优先复用「渲染器启动前就已经写下去」的旧封面：桌面只切一次，
+            // 避免启动前后两次 setDesktopImageURL 各触发一次系统切换动画。
+            // 没有旧封面时才用渲染器首帧 readback 的 poster。
+            if let preappliedDesktopURL {
+                desktopConfirmed = await waitForDesktopImageApplied(preappliedDesktopURL, on: deferredScreens)
+                if desktopConfirmed {
+                    desktopPosterSource = "existing-baked-cover"
+                    appliedAny = preappliedDesktopURL
+                }
+            }
+            if !desktopConfirmed {
+                // 多屏共用同一张 poster：`applyBakedStaticImage` 内部会交替 slot 路径，
+                // 逐屏调用会让每块屏指向不同文件，系统状态读回就永远无法「全部一致」。
+                // 渲染器首帧后立即落盘第一张（可能还是渐入暗帧），之后持续更新更亮版本。
+                // 这里最多等 1.2s：出现达标亮度的立即用；一直不达标就用「有内容」的
+                // 最后一张，保证桌面一定会变（只有纯黑 meanLuma<1 才放弃）。
+                let posterSelectionStartedAt = Date()
+                var selectedPoster: URL?
+                var selectedLuma: Double = -1
+                var firstPosterMs = -1
+                if !posterURLs.isEmpty {
+                    let deadline = Date().addingTimeInterval(1.2)
+                    while Date() < deadline {
+                        var latest: (url: URL, luma: Double)?
+                        for screen in deferredScreens {
+                            let screenID = screen.wallpaperScreenIdentifier
+                            guard let poster = posterURLs[screenID],
+                                  let attrs = try? FileManager.default.attributesOfItem(atPath: poster.path),
+                                  let size = attrs[.size] as? Int,
+                                  size > 1024,
+                                  let luma = scenePosterMeanLuma(poster) else { continue }
+                            if firstPosterMs < 0 {
+                                firstPosterMs = Int(Date().timeIntervalSince(revealStartedAt) * 1000)
+                            }
+                            if latest == nil || luma > latest!.luma { latest = (poster, luma) }
+                        }
+                        if let latest {
+                            selectedPoster = latest.url
+                            selectedLuma = latest.luma
+                            if selectedLuma >= Self.minimumDesktopPosterLuma { break }
+                        }
+                        try? await Task.sleep(nanoseconds: 80_000_000)
+                    }
+                }
+                if let poster = selectedPoster {
+                    print("[WallpaperEngineXBridge] poster 选择: firstMs=\(firstPosterMs) selectionMs=\(Int(Date().timeIntervalSince(posterSelectionStartedAt) * 1000)) luma=\(String(format: "%.1f", selectedLuma))")
+                    if selectedLuma < 1 {
+                        posterWasTooDark = true
+                        print("[WallpaperEngineXBridge] ⚠️ 首帧 poster 纯黑 (meanLuma=\(String(format: "%.1f", selectedLuma)))，跳过桌面写入: \(poster.lastPathComponent)")
+                    } else if let applied = applyBakedStaticImage(
+                        poster,
+                        for: path,
+                        targetScreens: deferredScreens,
+                        updateGeneration: nil
+                    ) {
+                        appliedAny = applied
+                        desktopPosterSource = "renderer-first-frame"
+                        desktopConfirmed = await waitForDesktopImageApplied(applied, on: deferredScreens)
+                    }
+                }
+            }
+            if appliedAny == nil {
+                if posterWasTooDark {
+                    desktopPosterSource = "poster-too-dark"
+                } else if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
+                    desktopPosterSource = "system-sync-disabled"
+                } else if #available(macOS 26.0, *),
+                          VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
+                    desktopPosterSource = "lock-screen-preserved"
+                } else {
+                    desktopPosterSource = "poster-unavailable"
+                }
+            }
+        } else {
+            desktopPosterSource = "old-wallpaper-visible"
+        }
+        guard wallpaperSwitchGeneration == generation else { return }
+
+        // 桌面确认后再留一个短合成节拍：系统桌面壁纸生效会触发菜单栏毛玻璃重新采样，
+        // 先让采样吃到新的 poster，再显示渲染器（用户要求的「等采样好再出现」）。
+        var desktopSettleMs = 0
+        if desktopConfirmed && !holdOldWallpaper {
+            let settleStartedAt = Date()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            desktopSettleMs = Int(Date().timeIntervalSince(settleStartedAt) * 1000)
+        }
+        guard wallpaperSwitchGeneration == generation else { return }
+
+        // 3. 无条件显示（超时/失败兜底也走这里）。
+        var shown: [String] = []
+        for screen in deferredScreens {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard var info = screenProcesses[screenID], info.presentationDeferred else { continue }
+            if let controlURL = info.wallpaperControlURL {
+                _ = writePresentationShowControl(url: controlURL)
+            }
+            info.presentationDeferred = false
+            screenProcesses[screenID] = info
+            shown.append(screenID)
+            scheduleRendererWindowVisibilityGuard(pid: info.pid, screenID: screenID)
+        }
+        AppLogger.error(.wallpaper, "Scene 展示时序完成（先桌面、后渲染器）", metadata: [
+            "path": URL(fileURLWithPath: path).lastPathComponent,
+            "screens": shown.sorted().joined(separator: ","),
+            "firstFrameReady": readyScreens.sorted().joined(separator: ","),
+            "desktopPosterSource": desktopPosterSource,
+            "desktopConfirmed": String(desktopConfirmed),
+            "holdOldWallpaper": String(holdOldWallpaper),
+            "startupToFirstFrameMS": String(startupToFirstFrameMs),
+            "desktopSettleMS": String(desktopSettleMs),
+            "revealTotalMS": String(Int(Date().timeIntervalSince(revealStartedAt) * 1000))
+        ])
+        if !desktopConfirmed && !holdOldWallpaper {
+            print("[WallpaperEngineXBridge] ⚠️ 桌面 poster 未确认生效（source=\(desktopPosterSource)），已继续显示渲染器，随后由伴生抽帧更新桌面")
+        }
+    }
+
+    /// 读取图片平均亮度（0~255）。用于拒绝把「首帧还是黑的」poster 写成桌面底图：
+    /// 渲染器抓帧可能落在场景渐入的暗场（实测某壁纸首帧 meanLuma≈2.8），
+    /// 写到桌面就是先黑屏再出渲染器，比直接切过去更糟。
+    private func scenePosterMeanLuma(_ url: URL) -> Double? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 160,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary),
+              image.width > 0, image.height > 0 else { return nil }
+        let width = image.width
+        let height = image.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let didRender = pixels.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let context = CGContext(
+                      data: baseAddress,
+                      width: width,
+                      height: height,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bytesPerRow,
+                      space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue
+                  ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard didRender else { return nil }
+        var lumaTotal = 0.0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            lumaTotal += 0.299 * Double(pixels[index])
+                + 0.587 * Double(pixels[index + 1])
+                + 0.114 * Double(pixels[index + 2])
+        }
+        return lumaTotal / Double(width * height)
+    }
+
+    /// 桌面底图最低可接受亮度。低于这个值的 poster 视为「渐入黑场帧」，不写桌面。
+    private static let minimumDesktopPosterLuma: Double = 6
 
     // MARK: - 辅助方法
 

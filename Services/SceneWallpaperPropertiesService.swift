@@ -143,11 +143,21 @@ enum WallpaperEnginePropertyLocalizer {
     }
 
     private static func loadBundledChineseLabels() -> [String: String] {
-        guard let resourceURL = Bundle.main.resourceURL else { return [:] }
-        let candidates = [
-            resourceURL.appendingPathComponent("WallpaperEngineLocale.zh-Hans.json"),
-            resourceURL.appendingPathComponent("Resources/WallpaperEngineLocale.zh-Hans.json"),
-        ]
+        var candidates: [URL] = []
+
+        // 宿主 App 优先。属性面板（`WebPropertyEditorPanelController`）在 Helper 进程里弹，
+        // 那里的 `Bundle.main` 是 `WaifuXHelper.app`，Resources 里没有这份 248KB 的完整表；
+        // 只查 `Bundle.main` 会让整张表退化成空，只剩下面几十条兜底文案，
+        // 表现就是 `ui_editor_effect_chromatic_abberation_title` 这类 WE 内置 key 原样显示。
+        // 该查找机制与编辑器 HTML 相同（见 `editorHTMLCandidates()`）。
+        candidates.append(
+            contentsOf: WaifuXHostBundle.resourceCandidates(named: "WallpaperEngineLocale.zh-Hans.json")
+        )
+
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appendingPathComponent("WallpaperEngineLocale.zh-Hans.json"))
+            candidates.append(resourceURL.appendingPathComponent("Resources/WallpaperEngineLocale.zh-Hans.json"))
+        }
 
         for url in candidates {
             guard let data = try? Data(contentsOf: url),

@@ -580,11 +580,16 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
             currentValues[key] = overrideValues[key] ?? defaultValue
 
             let normalizedType = normalizeType(rawType)
+            let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayTextSource = (trimmedText?.isEmpty == false ? trimmedText : nil) ?? key
 
             let item = PropertyEditorItem(
                 key: key,
                 type: normalizedType,
-                text: text.map { WallpaperEnginePropertyLocalizer.label(for: $0) },
+                // 作者不填 `text`（或留空）时 JS 会退回 `prop.key`（`prop.text || prop.key`），
+                // 所以这里对 key 也过一遍内置表：`newproperty17` 这类直接拿 WE 内置
+                // key 当属性名的写法，否则面板上就会原样显示 `ui_editor_*`。
+                text: WallpaperEnginePropertyLocalizer.label(for: displayTextSource),
                 defaultValue: defaultValue,
                 options: options,
                 min: min,
