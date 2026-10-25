@@ -34,18 +34,21 @@ enum AppResponsivenessMonitor {
                 state.heartbeat &+= 1
                 let token = state.heartbeat
 
-                // A hidden accessory app can be throttled or have its main run
-                // loop parked by the system. Do not turn that expected state
-                // into an ever-growing "main thread stall".
-                if state.windowVisible || state.appActive {
+                // 先判定，再决定回执还是重设基线：顺序不能反，否则「活跃期已经开始、
+                // 随后才失活」的卡顿会在重设基线时被洗掉。
+                evaluateStall()
+
+                // 只有应用真正活跃时，主队列回执迟到才算主线程卡顿。
+                // 失活/后台状态下系统会节流应用或让主 runloop 停在嵌套事件循环里，
+                // 回执迟到是预期行为：实测 244 条 stall 记录里 204 条处于 appActive=false，
+                // 栈样本 846 帧全部停在 mach_msg2_trap（等事件，不是在算）。
+                if isStallSamplingEligible {
                     DispatchQueue.main.async {
                         acknowledgeHeartbeat(token)
                     }
                 } else {
                     resetHeartbeatBaseline(token: token)
                 }
-
-                evaluateStall()
             }
             self.timer = timer
             timer.resume()
@@ -71,9 +74,11 @@ enum AppResponsivenessMonitor {
     static func noteWindowVisible(_ visible: Bool) {
         queue.async {
             state.windowVisible = visible
-            if !visible, !state.appActive {
-                resetHeartbeatBaseline()
+            if !visible {
+                // 隐窗前最后判一次，避免把「隐窗后主队列不再被排空」的等待算成卡顿。
+                evaluateStall()
             }
+            resetHeartbeatBaseline()
             flushSnapshotIfNeeded(trigger: "windowVisible", force: true)
         }
     }
@@ -81,9 +86,13 @@ enum AppResponsivenessMonitor {
     static func noteAppActive(_ active: Bool) {
         queue.async {
             state.appActive = active
-            if !active, !state.windowVisible {
-                resetHeartbeatBaseline()
+            if !active {
+                // 失活前最后判一次：活跃期已开始的卡顿不能被基线重设洗掉。
+                evaluateStall()
             }
+            // 恢复活跃时也重设：清掉失活期间累积的差值，避免整段后台时间
+            // 在回到前台后被算成一次「卡顿」。
+            resetHeartbeatBaseline()
             flushSnapshotIfNeeded(trigger: "appActive", force: true)
         }
     }
@@ -110,6 +119,15 @@ enum AppResponsivenessMonitor {
             try? await Task.sleep(nanoseconds: 60_000_000)
             guard !Task.isCancelled else { return }
         }
+    }
+
+    /// 是否允许把「主队列回执迟到」判定为主线程卡顿。
+    ///
+    /// 失活/后台时（`didResignActive`、窗口不在前台），系统会节流应用或把主 runloop
+    /// 停在嵌套事件循环里，主队列回执迟到是预期行为而非卡顿。只有应用活跃、
+    /// 且不处于失活瞬间时才采样。
+    private static var isStallSamplingEligible: Bool {
+        state.appActive && state.scenePhase != "didResignActive"
     }
 
     static func noteScenePhase(_ phase: String) {

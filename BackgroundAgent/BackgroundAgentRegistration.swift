@@ -18,6 +18,12 @@ enum BackgroundAgentRegistrationError: LocalizedError {
     /// 与 `.unavailable` 区分：这里 BTM 状态可能已是「已启用」，旧校验会把它
     /// 当成正常，实际客户端一连就 4099。
     case launchdJobNotReady(String)
+    /// 连接成功，但对方是旧构建或协议版本落后。
+    ///
+    /// 用户用新包替换旧版本后，launchd 的 KeepAlive 可能仍持有旧 helper 进程；
+    /// 原地升级（`prepareForUpgrade`）失败时只能注销重注册，让 launchd 从当前
+    /// bundle 重新拉起。没有这条，界面只会停在「版本不匹配，请重试连接」。
+    case helperOutdated(String)
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +35,8 @@ enum BackgroundAgentRegistrationError: LocalizedError {
             return "WaifuX 后台服务注册失败（状态 \(status)），请重试或重新安装应用"
         case .launchdJobNotReady(let detail):
             return "WaifuX 后台服务已注册但未能启动（\(detail)）。请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务；仍失败请重装应用"
+        case .helperOutdated(let detail):
+            return "WaifuX 后台服务仍是旧版本（\(detail)），正在重新注册后台服务；若反复出现请重新安装应用"
         }
     }
 }

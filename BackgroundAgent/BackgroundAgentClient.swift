@@ -81,6 +81,9 @@ final class BackgroundAgentClient: ObservableObject {
     /// 取消，两轮交错会互相把刚注册的 job 注销掉。
     private var isRepairingRegistration = false
     private var isQuittingApplication = false
+    /// Helper 已确认 `runtime.stop`：此刻它正在不可逆地收尾，失败后不能再
+    /// 自动重连（会把正在退出的后台服务重新拉起）。
+    private var helperStopRequested = false
     private var observedHelperStop = false
     private var knownHelperPID: Int32?
     var onApplicationQuitRequested: (() -> Void)?
@@ -117,10 +120,20 @@ final class BackgroundAgentClient: ObservableObject {
             do {
                 try await runBootstrap()
             } catch {
-                // BTM 记录与 launchd 域脱节时（job 被 bootout 过，或应用重建后
-                // BTM 没把 job 重新下发），mach service 查不到、连接直接以
-                // NSCocoaErrorDomain 4099 失败。这种状态只能靠重新注册恢复。
-                guard Self.indicatesMissingLaunchdJob(error) else { throw error }
+                // 三类可自愈的失败：
+                // ① BTM 记录与 launchd 域脱节（job 被 bootout 过，或应用重建后
+                //    BTM 没把 job 重新下发），连接以 NSCocoaErrorDomain 4099 失败；
+                // ② 用户用新包替换旧版本后，launchd 的 KeepAlive 仍持有旧 helper、
+                //    原地升级又失败 —— hello 成功但身份/协议不符。
+                // ③ job 在 launchd 里存在、mach service 端口能连上（所以不是 4099），
+                //    但 bootstrap 阶段 hello/首波 RPC 120s 无响应 —— launchd spawn
+                //    循环失败（EX_CONFIG 类约束拒绝）或 Helper 起来后卡死都是这个
+                //    形态（2026-10-24 本机实测：job spawn failed 24516 次，
+                //    status=1 却只报「后台服务响应超时」，repair 永远不触发）。
+                // 三者都只能靠注销重注册恢复。
+                let staleHelper = Self.indicatesStaleHelper(error)
+                let unresponsive = Self.indicatesUnresponsiveHelper(error)
+                guard staleHelper || unresponsive || Self.indicatesMissingLaunchdJob(error) else { throw error }
                 // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
                 // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
                 // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
@@ -131,8 +144,14 @@ final class BackgroundAgentClient: ObservableObject {
                 }
                 isRepairingRegistration = true
                 defer { isRepairingRegistration = false }
-                AppLogger.error(.startup, "Helper service missing from launchd, repairing registration",
-                                metadata: ["code": (error as NSError).code])
+                AppLogger.error(.startup,
+                                staleHelper
+                                    ? "Helper outdated after replacement, repairing registration"
+                                    : unresponsive
+                                        ? "Helper unresponsive during bootstrap (120s no reply), repairing registration"
+                                        : "Helper service missing from launchd, repairing registration",
+                                metadata: ["code": (error as NSError).code,
+                                           "detail": error.localizedDescription])
                 try Task.checkCancellation()
                 let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
                 do {
@@ -186,6 +205,27 @@ final class BackgroundAgentClient: ObservableObject {
         return false
     }
 
+    /// bootstrap 阶段的响应超时：`exchange` 的 gate 计时器到期抛出
+    /// domain `WaifuXHelper` code 3。job 在 launchd 里存在、mach service 端口
+    /// 能连上（所以 `indicatesMissingLaunchdJob` 的 4099 不会触发），但 Helper
+    /// 120s 不回话 —— launchd spawn 循环失败（EX_CONFIG 类约束拒绝）或进程
+    /// 起来后卡死都是这个形态。只用 domain+code 判断，不匹配文案。
+    private static func indicatesUnresponsiveHelper(_ error: Error) -> Bool {
+        let failure = error as NSError
+        return failure.domain == "WaifuXHelper" && failure.code == 3
+    }
+
+    /// `hello` 成功、但对方是旧构建（或协议落后）。
+    ///
+    /// 只在身份**已被读到并明确不一致**时抛出的错误类型，用于把「换包后连上旧
+    /// helper」接进同一套注销重注册流程；瞬时的读不到/超时不会走这里，避免误杀
+    /// 正在渲染壁纸的健康 helper。
+    private static func indicatesStaleHelper(_ error: Error) -> Bool {
+        guard let registrationError = error as? BackgroundAgentRegistrationError else { return false }
+        if case .helperOutdated = registrationError { return true }
+        return false
+    }
+
     private func runBootstrap() async throws {
         try Task.checkCancellation()
         try BackgroundAgentRegistration.validateBundle(WaifuXHostBundle.bundleURL)
@@ -218,10 +258,10 @@ final class BackgroundAgentClient: ObservableObject {
         try Task.checkCancellation()
     }
 
-    private func replayPendingPreferences() async throws {
+    private func replayPendingPreferences(timeoutSeconds: Double? = nil) async throws {
         for mutation in try WaifuXPreferences.shared.pendingMutationData() {
             try Task.checkCancellation()
-            _ = try await perform("preferences.set", ["mutation": mutation])
+            _ = try await perform("preferences.set", ["mutation": mutation], timeoutSeconds: timeoutSeconds)
             try Task.checkCancellation()
         }
     }
@@ -435,7 +475,14 @@ final class BackgroundAgentClient: ObservableObject {
             }
         }
         guard status.buildIdentity == expected, status.protocolVersion == BackgroundAgentWire.protocolVersion else {
-            throw NSError(domain: "WaifuXHelper", code: 7, userInfo: [NSLocalizedDescriptionKey: "后台服务版本不匹配，请重试连接"])
+            // 连接成功、身份却对不上：launchd 里跑的是旧构建。上面的原地升级
+            // （prepareForUpgrade + 12s 重连窗口）没能把它换掉，说明旧 helper
+            // 不认这个命令，或者 job 仍绑在另一个副本的 bundle 上。
+            // 抛专门的错误，让 bootstrap 走注销重注册，而不是让用户无限「重试连接」。
+            throw BackgroundAgentRegistrationError.helperOutdated(
+                "identity=\(status.buildIdentity ?? "nil") expected=\(expected) "
+                + "protocol=\(status.protocolVersion)/\(BackgroundAgentWire.protocolVersion)"
+            )
         }
         knownHelperPID = status.processIdentifier
         observedHelperStop = false
@@ -554,8 +601,19 @@ final class BackgroundAgentClient: ObservableObject {
         for id in commands.keys.sorted() { sendImmediately("crop.update", commands[id]!) }
     }
 
-    func drainForUIExit() async throws {
+    /// - Parameter interfaceOnly: 关窗口/换界面时 Helper 会继续运行，待存设置
+    ///   已经持久化在 pending 队列里，连接恢复后自动回放；所以这里只需要一次
+    ///   有界的尝试，不能被无响应的 Helper 拖到退出看门狗。完整退出仍要求
+    ///   Helper 明确 ack 每一笔写入。
+    func drainForUIExit(interfaceOnly: Bool = false) async throws {
         flushCropCommands()
+        if interfaceOnly {
+            // 单一 2s 窗口同时覆盖 in-flight 命令与 pending 重放。分成两段
+            // 2s 串行会和随后的 cloud sync（再 2s）一起撞上 6s 退出看门狗。
+            await boundedExitFlush()
+            try Task.checkCancellation()
+            return
+        }
         // Startup owns direct migration/bootstrap RPCs outside commandTail.
         // Finish admitted startup before stopping its shared XPC connection.
         _ = try? await bootstrapTask?.value
@@ -578,8 +636,11 @@ final class BackgroundAgentClient: ObservableObject {
         // all preferences are durable.
         guard try !WaifuXPreferences.shared.pendingMutationData().isEmpty else { return }
         guard connection != nil else {
-            throw NSError(domain: "WaifuXHelper", code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "后台连接不可用，最后的设置尚未保存，请恢复连接后重试"])
+            // 完整退出 + 连接不可用：保留 UI 也无法让写入发生（退出期间重连
+            // 已被冻结）。pending 队列本身是持久化的，下次连接自动回放，
+            // 不能再用这一条把退出卡成「UI retained」横幅死锁。
+            warnPendingMutationsForQuit()
+            return
         }
         try await replayPendingPreferences()
         try Task.checkCancellation()
@@ -589,12 +650,28 @@ final class BackgroundAgentClient: ObservableObject {
         }
     }
 
+    /// 界面退出只要求「把已持久化的设置尽力发出去」。这里只重放 pending
+    /// 队列（与 commandTail 里的偏好写是同一批、幂等），并给 2s 上限：
+    /// `await commandTail.value` 不响应取消，无响应的 Helper 会让它挂到
+    /// 120s XPC 超时，反而把界面退出拖进 6s 看门狗。
+    private func boundedExitFlush() async {
+        let pending = (try? WaifuXPreferences.shared.pendingMutationData()) ?? []
+        guard !pending.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { _ = try? await self.replayPendingPreferences(timeoutSeconds: 2) }
+            group.addTask { try? await Task.sleep(for: .seconds(2)) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
     /// Freeze new work before draining previously accepted writes. Explicit
     /// quit must not reconnect or enqueue a bootstrap after the Helper stops.
     func beginApplicationQuit() {
         guard !isQuittingApplication else { return }
         flushCropCommands()
         isQuittingApplication = true
+        helperStopRequested = false
         isClosing = true
         reconnectGeneration &+= 1
         reconnectTask?.cancel()
@@ -604,67 +681,231 @@ final class BackgroundAgentClient: ObservableObject {
     func stopForApplicationQuit() async throws {
         beginApplicationQuit()
         if observedHelperStop {
-            if let pid = knownHelperPID { try await waitForHelperExit(pid) }
+            if let pid = knownHelperPID {
+                do { try await waitForHelperExit(pid) }
+                catch {
+                    guard !isIsolatedProbeEnvironment else { throw error }
+                    await escalateStopForFullQuit(reason: "helper-exit-wait-timeout")
+                }
+            }
             return
         }
         if connection == nil {
-            var isolated = false
-            #if DEBUG
-            isolated = isolatedProbeService != nil
-            #endif
-            if !isolated {
-                let status = SMAppService.agent(plistName: BackgroundAgentWire.plistName).status
-                if status != .enabled {
-                    if let pid = knownHelperPID, !(kill(pid, 0) != 0 && errno == ESRCH) {
-                        throw NSError(domain: "WaifuXHelper", code: 4,
-                                      userInfo: [NSLocalizedDescriptionKey: "后台服务仍在运行，但登录项不可用，请允许后台服务后重试退出"])
-                    }
-                    guard try WaifuXPreferences.shared.pendingMutationData().isEmpty else {
-                        throw NSError(domain: "WaifuXHelper", code: 4,
-                                      userInfo: [NSLocalizedDescriptionKey: "后台服务不可用，最后的设置尚未保存，请恢复后台服务后重试退出"])
-                    }
-                    observedHelperStop = true
-                    return
-                }
+            if !isIsolatedProbeEnvironment, let pid = knownHelperPID, helperProcessGone(pid) {
+                // 记录的 Helper 已经退出：不要再用 BTM 状态否决这次退出。
+                warnPendingMutationsForQuit()
+                helperStopRequested = true
+                observedHelperStop = true
+                return
             }
+            // BTM 记录可能指向别的 App 副本、或 Helper 正在退出。先走真实连接：
+            // 连上了就能按正常链路停服务，连不上再按真实进程状态归因。
             connect()
         }
-        let data = try await exchange(timeoutSeconds: 2) { proxy, gate in
-            proxy.hello { gate.finish(.success($0 as Data)) }
+        do {
+            switch try await helloForApplicationQuit() {
+            case .stopped:
+                helperStopRequested = true
+                observedHelperStop = true
+            case .helper(let helper):
+                knownHelperPID = helper.processIdentifier
+                // 退出阶段的偏好重放尽力而为：失败交给 runtime.stop 与升级
+                // 路径兜底，不再让一条慢命令把完整退出卡成「UI retained」。
+                for mutation in (try? WaifuXPreferences.shared.pendingMutationData()) ?? [] {
+                    _ = try? await perform("preferences.set", ["mutation": mutation], timeoutSeconds: 2)
+                }
+                _ = try? await perform("runtime.stop", [:], timeoutSeconds: 2)
+                helperStopRequested = true
+                disconnect()
+                do { try await waitForHelperExit(helper.processIdentifier) }
+                catch {
+                    guard !isIsolatedProbeEnvironment else { throw error }
+                    await escalateStopForFullQuit(reason: "helper-stop-ack-timeout")
+                }
+                observedHelperStop = true
+            }
+        } catch {
+            // Hello 不通（超时 / 连接失效 / 登录项不可用）：完整退出的意图明确，
+            // 不再把 UI 留在「无法与帮助程序通信」横幅上等一个无响应的服务。
+            // 升级为按进程表直接终止 Helper 与 worker——这是真的停止，不是
+            // 「断开连接冒充成功」。
+            guard !isIsolatedProbeEnvironment else { throw error }
+            AppLogger.error(.general, "Helper unreachable during full quit; escalating to process termination", metadata: [
+                "error": error.localizedDescription,
+            ])
+            warnPendingMutationsForQuit()
+            await escalateStopForFullQuit(reason: error.localizedDescription)
+            helperStopRequested = true
+            observedHelperStop = true
         }
-        let helper = try JSONDecoder().decode(BackgroundAgentHello.self, from: data)
-        guard helper.bundleIdentifier == BackgroundAgentWire.bundleIdentifier,
-              helper.processIdentifier > 0, helper.processIdentifier != getpid() else {
-            throw CocoaError(.executableLoad)
+    }
+
+    private var isIsolatedProbeEnvironment: Bool {
+        #if DEBUG
+        isolatedProbeService != nil
+        #else
+        false
+        #endif
+    }
+
+    /// 退出时有设置尚未写入后台（Helper 不可用）。pending 队列持久化、
+    /// 下次连接自动回放，这里只记日志，不再阻断完整退出。
+    private func warnPendingMutationsForQuit() {
+        let pending = (try? WaifuXPreferences.shared.pendingMutationData()) ?? []
+        guard !pending.isEmpty else { return }
+        AppLogger.error(.general, "后台服务不可用，退出时有设置尚未写入后台；已保留待下次连接回放", metadata: [
+            "count": pending.count,
+        ])
+    }
+
+    // MARK: - Full-quit escalation
+
+    /// Helper 无响应时完整退出的最后手段：按进程表终止**本 App 副本**的
+    /// Helper 与它名下的 worker。匹配是「可执行文件路径前缀 == 宿主 bundle
+    /// 路径」与「basename ∈ 已知名单」的双条件——绝不只按进程名匹配，也
+    /// 绝不盲杀已知 pid（pid 复用会把无关进程牵连进来），扫描结果是唯一
+    /// 权威。SIGTERM 给渲染器留出清理窗口（释放 owned 桌面窗口/音频），
+    /// 超时再 SIGKILL。
+    private func escalateStopForFullQuit(reason: String) async {
+        let processes = Self.hostOwnedBackgroundProcesses()
+        guard !processes.isEmpty else {
+            AppLogger.error(.general, "Full-quit escalation: no helper/worker process found (already gone)", metadata: [
+                "reason": reason,
+            ])
+            return
         }
-        knownHelperPID = helper.processIdentifier
-        for mutation in try WaifuXPreferences.shared.pendingMutationData() {
-            _ = try await perform("preferences.set", ["mutation": mutation], timeoutSeconds: 2)
+        let pidList = processes.map { String($0.pid) }.joined(separator: ",")
+        AppLogger.error(.general, "Full-quit escalation: terminating unresponsive helper and workers", metadata: [
+            "reason": reason, "pids": pidList,
+        ])
+        for process in processes { kill(process.pid, SIGTERM) }
+        if await Self.waitProcessesExit(processes, iterations: 30) { return }
+        let survivors = processes.filter { !helperProcessGone($0.pid) }
+        for process in survivors { kill(process.pid, SIGKILL) }
+        _ = await Self.waitProcessesExit(survivors, iterations: 20)
+        if !survivors.allSatisfy({ helperProcessGone($0.pid) }) {
+            AppLogger.error(.general, "Full-quit escalation: processes survived SIGKILL", metadata: [
+                "pids": survivors.filter { !helperProcessGone($0.pid) }.map { String($0.pid) }.joined(separator: ","),
+            ])
         }
-        _ = try await perform("runtime.stop", [:], timeoutSeconds: 2)
-        disconnect()
-        try await waitForHelperExit(helper.processIdentifier)
-        observedHelperStop = true
+    }
+
+    private static func waitProcessesExit(_ processes: [(pid: Int32, name: String)], iterations: Int) async -> Bool {
+        for _ in 0..<iterations {
+            let gone = { (pid: Int32) -> Bool in kill(pid, 0) != 0 && errno == ESRCH }
+            if processes.allSatisfy({ gone($0.pid) }) { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
+    /// 宿主 bundle 名下仍在运行的后台进程（Helper / 场景渲染器 / web daemon）。
+    private static func hostOwnedBackgroundProcesses() -> [(pid: Int32, name: String)] {
+        let terminationBasenames: Set<String> = ["WaifuXHelper", "wallpaper-wgpu", "wallpaperengine-cli"]
+        let hostPrefix = WaifuXHostBundle.bundleURL.resolvingSymlinksInPath().path + "/"
+        var pidBuffer = [Int32](repeating: 0, count: 8192)
+        let count = proc_listallpids(&pidBuffer, Int32(pidBuffer.count))
+        guard count > 0 else { return [] }
+        var result: [(pid: Int32, name: String)] = []
+        for pid in pidBuffer[..<Int(count)] where pid > 0 && pid != getpid() {
+            var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            guard proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 else { continue }
+            let url = URL(fileURLWithPath: String(cString: pathBuffer)).resolvingSymlinksInPath()
+            guard url.path.hasPrefix(hostPrefix),
+                  terminationBasenames.contains(url.lastPathComponent) else { continue }
+            result.append((pid: pid, name: url.lastPathComponent))
+        }
+        return result
     }
 
     private func waitForHelperExit(_ pid: Int32) async throws {
         // A new Mach-service probe can relaunch a successfully stopped job.
         // Observe only the acknowledged process while waiting for its exit.
-        for _ in 0..<35 {
-            if kill(pid, 0) != 0 && errno == ESRCH { return }
+        //
+        // Helper 收到 runtime.stop 后还要收尾渲染器与子进程（动态壁纸渲染中
+        // 可达数秒，见 BackgroundAgentRuntime.stopAll）。3.5s 会把「正在正常
+        // 退出」误判成失败，并让第二次尝试落到 BTM 状态分支上。
+        for _ in 0..<100 {
+            if helperProcessGone(pid) { return }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw NSError(domain: "WaifuXHelper", code: 4,
-                      userInfo: [NSLocalizedDescriptionKey: "后台服务尚未退出，请重试退出 WaifuX"])
+                      userInfo: [NSLocalizedDescriptionKey: "后台服务仍在退出，请重试退出 WaifuX"])
+    }
+
+    private func helperProcessGone(_ pid: Int32) -> Bool {
+        kill(pid, 0) != 0 && errno == ESRCH
+    }
+
+    private enum HelperQuitProbe {
+        case alreadyStopped
+        case failure(Error)
+    }
+
+    /// 退出阶段连不上 Helper 时按**真实进程状态**归因，而不是只看 BTM 记录：
+    /// 进程已经不在就是干净退出；进程还在但登录项不可用时才给可操作错误。
+    private func classifyHelperQuitFailure(_ fallback: Error) -> HelperQuitProbe {
+        #if DEBUG
+        let isolated = isolatedProbeService != nil
+        #else
+        let isolated = false
+        #endif
+        guard !isolated else { return .failure(fallback) }
+        let status = SMAppService.agent(plistName: BackgroundAgentWire.plistName).status
+        if let pid = knownHelperPID {
+            if helperProcessGone(pid) { return .alreadyStopped }
+            if status != .enabled {
+                return .failure(NSError(domain: "WaifuXHelper", code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "后台服务仍在运行，但登录项不可用，请允许后台服务后重试退出"]))
+            }
+            return .failure(fallback)
+        }
+        // 没有已知 Helper PID：BTM 记录也没启用时，原始实现就直接放行退出。
+        if status != .enabled { return .alreadyStopped }
+        return .failure(fallback)
+    }
+
+    private enum HelperQuitHello {
+        case helper(BackgroundAgentHello)
+        case stopped
+    }
+
+    private func helloForApplicationQuit() async throws -> HelperQuitHello {
+        do {
+            let data = try await exchange(timeoutSeconds: 3) { proxy, gate in
+                proxy.hello { gate.finish(.success($0 as Data)) }
+            }
+            let helper = try JSONDecoder().decode(BackgroundAgentHello.self, from: data)
+            guard helper.bundleIdentifier == BackgroundAgentWire.bundleIdentifier,
+                  helper.processIdentifier > 0, helper.processIdentifier != getpid() else {
+                throw CocoaError(.executableLoad)
+            }
+            return .helper(helper)
+        } catch {
+            switch classifyHelperQuitFailure(error) {
+            case .alreadyStopped:
+                warnPendingMutationsForQuit()
+                return .stopped
+            case .failure(let mapped):
+                throw mapped
+            }
+        }
     }
 
     func applicationQuitFailed(_ error: Error) {
-        disconnect()
+        // 失败不等于连接已坏：保留连接，下一次重试可以直接复用，
+        // 不必从零重连（否则很容易再次撞上 BTM 状态分支）。
         bootstrapTask?.cancel()
         bootstrapTask = nil
         bootstrapGeneration &+= 1
         isBootstrapping = false
         isQuittingApplication = false
+        if !helperStopRequested {
+            // 还没让 Helper 停：只是保存/连接问题，恢复 UI 的正常通信。
+            isClosing = false
+        }
+        // helperStopRequested 时保持 isClosing：Helper 正在不可逆地退出，
+        // 自动重连只会把正在退出的后台服务重新拉起。
         lastError = "退出未完成，WaifuX 界面已保留：\(error.localizedDescription)"
     }
 
@@ -673,19 +914,38 @@ final class BackgroundAgentClient: ObservableObject {
         return try BackgroundPropertyList.decode(await enqueue(operation, arguments).value)
     }
 
-    private func enqueue(_ operation: String, _ arguments: [String: Any]) -> Task<Data, Error> {
-        guard !isQuittingApplication else { return Task { throw CocoaError(.userCancelled) } }
-        if bootstrapTask == nil { start() }
-        let admittedBootstrap = bootstrapTask
-        let previous = commandTail
+    /// 退出路径专用的有界请求：调用方不关心结果，也不能被无响应的 Helper
+    /// 无界拖住（关窗口的 2s fallback / 6s 退出看门狗）。
+    func requestBounded(_ operation: String, timeoutSeconds: Double) async {
+        // 超时必须下沉到 enqueue 内部的 RPC：等待方被取消不会取消那个 Task，
+        // 否则无响应的 Helper 会把这里挂到 120s XPC 超时。跳过 commandTail，
+        // 否则会排在退出时那条卡住的偏好写后面。
+        let task = enqueue(operation, [:], timeoutSeconds: timeoutSeconds,
+                           skipCommandTail: true, skipBootstrap: true)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { _ = try? await task.value }
+            group.addTask { try? await Task.sleep(for: .seconds(timeoutSeconds)) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func enqueue(_ operation: String, _ arguments: [String: Any] = [:],
+                         timeoutSeconds: Double? = nil,
+                         skipCommandTail: Bool = false,
+                         skipBootstrap: Bool = false) -> Task<Data, Error> {
+        guard !isQuittingApplication || skipCommandTail else { return Task { throw CocoaError(.userCancelled) } }
+        if bootstrapTask == nil && !skipBootstrap { start() }
+        let admittedBootstrap = skipBootstrap ? nil : bootstrapTask
+        let previous = skipCommandTail ? nil : commandTail
         let task = Task { @MainActor in
             _ = try? await previous?.value
             try Task.checkCancellation()
             try await admittedBootstrap?.value
             try Task.checkCancellation()
-            return try BackgroundPropertyList.encode(await perform(operation, arguments))
+            return try BackgroundPropertyList.encode(await perform(operation, arguments, timeoutSeconds: timeoutSeconds))
         }
-        if !operation.hasSuffix(".wait") { commandTail = task }
+        if !skipCommandTail, !operation.hasSuffix(".wait") { commandTail = task }
         return task
     }
 

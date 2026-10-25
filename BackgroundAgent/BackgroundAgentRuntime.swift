@@ -155,7 +155,8 @@ final class BackgroundAgentRuntime {
                 // The old keeper runs the UI binary. Retire it before taking ownership.
                 WallpaperExtensionKeeper.syncLaunchAgentWithEnabledFlag(false)
                 ExternalDisplayConnectionCoordinator.shared.start()
-                WallpaperSystemCacheJanitor.shared.noteAppLaunch()
+                // 系统壁纸缓存清理已移交主 App（授权对象必须是隐私面板里可见的 WaifuX，
+                // Helper 在 Contents/Helpers/ 下用户无法授权），此处不再调用 noteAppLaunch。
                 if #available(macOS 26.0, *) {
                     WallpaperExtensionSocketServer.shared.start()
                     LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()

@@ -17,6 +17,8 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
         }
     }
     func prepareForUpgrade(_ reply: @escaping @Sendable (NSData) -> Void) {
+        let identity = ObjectIdentifier(connection)
+        Task { @MainActor in UIClientExitMonitor.shared.markAnnouncedExit(identity) }
         Task { @MainActor in
             await BackgroundAgentRuntime.shared.prepareForUpgrade()
             reply(NSData())
@@ -28,6 +30,15 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
     }
     func perform(_ command: NSData, reply: @escaping @Sendable (NSData) -> Void) {
         let bytes = command as Data
+        // UI 的「告别」命令到达即记帐（与回复无关，mach 消息在发送者退出
+        // 后仍会投递）：界面退出（cloud.syncOnUIExit）与完整退出
+        // （runtime.stop）都不算「意外消失」。
+        if let dictionary = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+           let operation = dictionary["operation"] as? String,
+           operation == "cloud.syncOnUIExit" || operation == "runtime.stop" {
+            let identity = ObjectIdentifier(connection)
+            Task { @MainActor in UIClientExitMonitor.shared.markAnnouncedExit(identity) }
+        }
         Task { @MainActor in
             let result = await BackgroundAgentRuntime.shared.perform(bytes)
             reply(result as NSData)
@@ -42,6 +53,67 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
     }
 }
 
+/// UI 主进程是否仍在运行。Helper 用它区分「UI 临时断连（会重连）」与
+/// 「UI 进程已经消失（强退 / 崩溃）」——只有后者才触发 Helper 收尾自退。
+@MainActor
+private enum HostUIProcessProbe {
+    static func hostUIProcessIsRunning() -> Bool {
+        let executable = WaifuXHostBundle.bundleURL
+            .appendingPathComponent("Contents/MacOS/WaifuX")
+            .resolvingSymlinksInPath()
+        var pidBuffer = [Int32](repeating: 0, count: 8192)
+        let count = proc_listallpids(&pidBuffer, Int32(pidBuffer.count))
+        guard count > 0 else { return false }
+        for pid in pidBuffer[..<Int(count)] where pid > 0 && pid != getpid() {
+            var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            guard proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 else { continue }
+            if URL(fileURLWithPath: String(cString: pathBuffer)).resolvingSymlinksInPath() == executable {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+/// UI 客户端「未告别即消失」监测。UI 正常退出都会先发告别命令：
+/// 关窗口/界面退出 = `cloud.syncOnUIExit`，完整退出 = `runtime.stop`，
+/// 升级 = `prepareForUpgrade`。没有告别而连接失效，且 UI 主进程确实
+/// 不在进程表里（强退 / 崩溃），Helper 就收尾 worker 并退出——不能让
+/// 渲染器与后台服务在用户强退主程序后继续留在桌面上。
+@MainActor
+private final class UIClientExitMonitor {
+    static let shared = UIClientExitMonitor()
+    /// connection identity → 是否已收到告别命令。
+    private var announcedExits: [ObjectIdentifier: Bool] = [:]
+    private var exitCheckTask: Task<Void, Never>?
+
+    func connectionAccepted(_ identity: ObjectIdentifier) {
+        announcedExits[identity] = false
+        // 新连接取消挂起的自退检查（UI 退出后立刻重启的场景）。
+        exitCheckTask?.cancel()
+        exitCheckTask = nil
+    }
+
+    func markAnnouncedExit(_ identity: ObjectIdentifier) {
+        if announcedExits[identity] != nil { announcedExits[identity] = true }
+    }
+
+    func connectionInvalidated(_ identity: ObjectIdentifier) {
+        let announced = announcedExits.removeValue(forKey: identity) ?? false
+        guard !BackgroundRuntimeRole.isIsolatedTest, !announced, announcedExits.isEmpty else { return }
+        exitCheckTask?.cancel()
+        exitCheckTask = Task { @MainActor in
+            // 缓冲窗口：覆盖「连接刚失效、UI 立刻重连」与进程表抖动。
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, announcedExits.isEmpty else { return }
+            // UI 进程还活着 = 只是断连（重连/修复中），保持现有语义。
+            guard !HostUIProcessProbe.hostUIProcessIsRunning() else { return }
+            AppLogger.error(.general, "UI 进程未告别即消失（强退/崩溃），Helper 收尾 worker 并退出", metadata: [:])
+            await BackgroundAgentRuntime.shared.stopAll()
+        }
+    }
+}
+
 private final class AgentConnectionListener: NSObject, NSXPCListenerDelegate {
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         guard connection.effectiveUserIdentifier == getuid(), trustedClient(connection) else { return false }
@@ -49,8 +121,12 @@ private final class AgentConnectionListener: NSObject, NSXPCListenerDelegate {
         connection.remoteObjectInterface = NSXPCInterface(with: BackgroundAgentObserver.self)
         connection.exportedObject = AgentEndpoint(connection: connection)
         let identity = ObjectIdentifier(connection)
+        Task { @MainActor in UIClientExitMonitor.shared.connectionAccepted(identity) }
         connection.invalidationHandler = { @Sendable in
-            Task { @MainActor in BackgroundAgentRuntime.shared.unsubscribe(identity) }
+            Task { @MainActor in
+                BackgroundAgentRuntime.shared.unsubscribe(identity)
+                UIClientExitMonitor.shared.connectionInvalidated(identity)
+            }
         }
         connection.resume()
         return true
