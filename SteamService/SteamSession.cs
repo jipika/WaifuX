@@ -22,6 +22,7 @@ internal sealed class SteamSession : IAsyncDisposable
     private const uint WorkshopSubscriptionListType = 1;
 
     private readonly ProtocolWriter writer;
+    private readonly SteamConfiguration configuration;
     private readonly SteamClient client;
     private readonly CallbackManager callbacks;
     private readonly SteamUser user;
@@ -56,6 +57,7 @@ internal sealed class SteamSession : IAsyncDisposable
     private CancellationTokenSource? recoveryCancellation;
     private Task? recoveryTask;
     private bool shuttingDown;
+    private bool serverListPrepared;
 
     public bool IsLoggedIn { get; private set; }
     public string AccountName { get; private set; } = "";
@@ -68,7 +70,9 @@ internal sealed class SteamSession : IAsyncDisposable
     public SteamSession(ProtocolWriter writer)
     {
         this.writer = writer;
-        var configuration = SteamConfiguration.Create(builder => builder.WithHttpClientFactory(_ =>
+        var configuration = SteamConfiguration.Create(builder => builder
+            .WithConnectionTimeout(TimeSpan.FromSeconds(6))
+            .WithHttpClientFactory(_ =>
         {
             var sockets = new SocketsHttpHandler
             {
@@ -83,6 +87,7 @@ internal sealed class SteamSession : IAsyncDisposable
             httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"SteamKit/{version}");
             return httpClient;
         }));
+        this.configuration = configuration;
         client = new SteamClient(configuration);
         callbacks = new CallbackManager(client);
         user = client.GetHandler<SteamUser>()!;
@@ -792,14 +797,56 @@ internal sealed class SteamSession : IAsyncDisposable
         return error is ServiceException { Code: "AUTH_FAILED" };
     }
 
+    /// <summary>
+    /// 按「443 端口优先」重排 CM 候选。
+    /// Steam 的 ISteamDirectory/GetCMListForConnect 会把大量 27015-27025 端点排在
+    /// 443 前面（香港 cell 下前 39 条全是 270xx），而 SteamKit2 的
+    /// SmartCMServerList.GetNextServerCandidate 严格按列表顺序取候选，失败后
+    /// 逐个 TryMark(Bad) 再取下一个 —— 代理环境下 270xx 抖动，登录就被拖成
+    /// 「尝试多个 270xx 端口并超时」。官方客户端固定走 443 + WebSocket，
+    /// 这里对齐同样的行为：把 443 提到最前，其余保持原序作为兜底。
+    /// </summary>
+    private async Task PrepareServerListAsync(CancellationToken cancellationToken)
+    {
+        if (serverListPrepared) return;
+        try
+        {
+            var records = await SteamDirectory.LoadAsync(configuration, cancellationToken).ConfigureAwait(false);
+            if (records.Count == 0) return;
+
+            var ordered = records
+                .OrderBy(static record => record.GetPort() == 443 ? 0 : 1)
+                .ToArray();
+
+            configuration.ServerList.ReplaceList(ordered);
+            serverListPrepared = true;
+            var httpsCount = ordered.Count(static record => record.GetPort() == 443);
+            Console.Error.WriteLine(
+                $"[SteamService] CM 候选已重排：{httpsCount}/{ordered.Length} 个 443 端点优先，" +
+                $"首个候选 {ordered[0].GetHost()}:{ordered[0].GetPort()}");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // 目录拉取失败不致命：退回 SteamKit2 内置解析（它自己会再试一次目录，
+            // 再退到 DefaultServerWebsocket/DefaultServerNetfilter）。
+            Console.Error.WriteLine($"[SteamService] CM 候选重排失败，回退内置逻辑：{error.Message}");
+        }
+    }
+
     private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
     {
         if (client.IsConnected) return;
+        await PrepareServerListAsync(cancellationToken).ConfigureAwait(false);
         Exception? lastError = null;
         for (var attempt = 0; attempt < 4; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             connectedSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var started = DateTime.UtcNow;
             try
             {
                 client.Connect();
@@ -810,6 +857,11 @@ internal sealed class SteamSession : IAsyncDisposable
             catch (Exception error)
             {
                 lastError = error;
+                var elapsed = (DateTime.UtcNow - started).TotalMilliseconds;
+                Console.Error.WriteLine(
+                    $"[SteamService] CM 连接失败 attempt={attempt + 1} elapsed={elapsed:F0}ms " +
+                    $"endpoint={client.Configuration.ServerList.GetAllEndPoints().FirstOrDefault()?.GetHost() ?? "-"} " +
+                    $"reason={error.Message}");
                 connectedSource = null;
                 try { client.Disconnect(); } catch { }
                 if (attempt < 3)
