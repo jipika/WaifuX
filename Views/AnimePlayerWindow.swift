@@ -22,12 +22,14 @@ struct AnimePlayerWindow: View {
     @State private var isPlayerFullscreen = false
 
     enum Tab: String, CaseIterable {
+        case local = "本地"
         case sources = "选集"
         case danmaku = "弹幕"
         case enhancement = "设置"
 
         var title: String {
             switch self {
+            case .local: return t("player.local")
             case .sources: return t("player.episodes")
             case .danmaku: return t("danmaku.title")
             case .enhancement: return t("player.settings")
@@ -749,6 +751,8 @@ private struct RightPanel: View {
             // 内容区域
             Group {
                 switch selectedTab {
+                case .local:
+                    LocalEpisodesView(viewModel: viewModel)
                 case .sources:
                     SourcesContentView(viewModel: viewModel, sources: activeSources)
                 case .danmaku:
@@ -992,6 +996,200 @@ private struct BilibiliStyleTabBar: View {
             )
             .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
             .matchedGeometryEffect(id: "playerTabSelection", in: selectionNamespace)
+    }
+}
+
+// MARK: - 本地缓存剧集列表（右栏「本地」tab）
+
+private struct LocalEpisodesView: View {
+    @ObservedObject var viewModel: AnimeDetailViewModel
+    @ObservedObject private var downloadStore = AnimeDownloadStore.shared
+    @ObservedObject private var downloadEngine = AnimeDownloadEngine.shared
+
+    private var records: [AnimeDownloadRecord] {
+        downloadStore.records(forAnime: viewModel.anime.id)
+    }
+
+    private var activeTasks: [AnimeDownloadEngine.TaskState] {
+        downloadEngine.tasks.values
+            .filter { $0.animeId == viewModel.anime.id && !$0.isCompleted && $0.errorMessage == nil }
+            .sorted { $0.episodeNumber < $1.episodeNumber }
+    }
+
+    var body: some View {
+        ScrollView(showsIndicators: true) {
+            LazyVStack(spacing: 0) {
+                Color.clear.frame(height: 12)
+
+                if records.isEmpty && activeTasks.isEmpty {
+                    VStack(spacing: 14) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(.white.opacity(0.3))
+                        Text(t("anime.download.empty"))
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white.opacity(0.55))
+                        Text(t("anime.download.empty.hint"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.top, 80)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(records) { record in
+                        LocalEpisodeRow(
+                            record: record,
+                            viewModel: viewModel,
+                            isPlaying: viewModel.currentEpisode?.id == record.episodeId
+                        )
+                    }
+
+                    ForEach(activeTasks) { task in
+                        DownloadingTaskRow(task: task)
+                    }
+                }
+            }
+            .padding(.bottom, 16)
+        }
+        .contentMargins(0, for: .scrollContent)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - 本地剧集行
+
+private struct LocalEpisodeRow: View {
+    let record: AnimeDownloadRecord
+    @ObservedObject var viewModel: AnimeDetailViewModel
+    let isPlaying: Bool
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            viewModel.playLocalEpisode(record)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: isPlaying ? "play.circle.fill" : "play.circle")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(isPlaying ? Color(hex: "00AEEC") : .white.opacity(0.6))
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("第 \(record.episodeNumber) 集")
+                        .font(.system(size: 14, weight: isPlaying ? .semibold : .regular))
+                        .foregroundStyle(isPlaying ? Color(hex: "00AEEC") : .white.opacity(0.85))
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text(record.sourceName)
+                        Text("·")
+                        Text(ByteCountFormatter.string(fromByteCount: record.fileSizeBytes, countStyle: .file))
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .lineLimit(1)
+                }
+
+                Spacer()
+
+                // 删除缓存
+                if isHovered {
+                    Button {
+                        AnimeDownloadStore.shared.removeRecord(id: record.id, deleteFile: true)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(width: 24, height: 24)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(t("anime.download.deleteCache"))
+                }
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.2)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - 下载中任务行
+
+private struct DownloadingTaskRow: View {
+    let task: AnimeDownloadEngine.TaskState
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ProgressView(value: max(0.02, task.progress))
+                .progressViewStyle(.circular)
+                .scaleEffect(0.55)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(task.episodeName ?? "第 \(task.episodeNumber) 集")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.1))
+                        Capsule()
+                            .fill(Color(hex: "00AEEC"))
+                            .frame(width: max(2, geometry.size.width * task.progress))
+                    }
+                }
+                .frame(height: 3)
+
+                Text("\(Int(task.progress * 100))%")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+
+            Spacer()
+
+            if isHovered {
+                Button {
+                    AnimeDownloadEngine.shared.cancelByRecordID(task.id)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help(t("cancel"))
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.2)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 
@@ -1246,6 +1444,7 @@ private struct SourceDetailView: View {
 
                     EpisodeListView(
                         episodes: episodes,
+                        sourceId: source.rule.id,
                         viewModel: viewModel,
                         onSelect: { episode in
                             Task {
@@ -1346,6 +1545,7 @@ private struct LoadingStateView: View {
 // MARK: - 剧集列表视图（B站风格垂直列表）
 private struct EpisodeListView: View {
     let episodes: [AnimeDetail.AnimeEpisodeItem]
+    let sourceId: String
     let viewModel: AnimeDetailViewModel
     let onSelect: (AnimeDetail.AnimeEpisodeItem) -> Void
 
@@ -1361,6 +1561,7 @@ private struct EpisodeListView: View {
                         episode: episode,
                         index: index,
                         isLast: index == episodes.count - 1,
+                        sourceId: sourceId,
                         viewModel: viewModel,
                         onSelect: { onSelect(episode) }
                     )
@@ -1379,13 +1580,26 @@ private struct EpisodeRow: View {
     let episode: AnimeDetail.AnimeEpisodeItem
     let index: Int
     let isLast: Bool
+    let sourceId: String
     @ObservedObject var viewModel: AnimeDetailViewModel
     let onSelect: () -> Void
     @State private var isHovered = false
+    @ObservedObject private var downloadEngine = AnimeDownloadEngine.shared
+    @ObservedObject private var downloadStore = AnimeDownloadStore.shared
 
     /// 是否正在播放当前剧集
     private var isPlaying: Bool {
         viewModel.currentEpisode?.id == episode.id
+    }
+
+    /// 已缓存（记录存在且文件可用）
+    private var isCached: Bool {
+        downloadStore.isDownloaded(episodeId: episode.id, sourceId: sourceId)
+    }
+
+    /// 下载任务状态（排队/下载中/完成/失败）
+    private var downloadState: AnimeDownloadEngine.TaskState? {
+        downloadEngine.task(for: episode.id, sourceId: sourceId)
     }
 
     /// 获取显示标题（优先 Bangumi，其次源数据）
@@ -1435,6 +1649,32 @@ private struct EpisodeRow: View {
 
                 Spacer()
 
+                // 下载状态 / 缓存标记 / 下载按钮
+                if let state = downloadState {
+                    if state.isCompleted {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(hex: "34D399"))
+                    } else if let error = state.errorMessage {
+                        Image(systemName: "exclamationmark.circle")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(hex: "FF6B6B"))
+                            .help(error)
+                    } else {
+                        // 进度环
+                        ProgressView(value: max(0.02, state.progress))
+                            .progressViewStyle(.circular)
+                            .scaleEffect(0.55)
+                            .frame(width: 18, height: 18)
+                            .help("\(Int(state.progress * 100))%")
+                    }
+                } else if isCached {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color(hex: "34D399"))
+                        .help(t("anime.download.cached"))
+                }
+
                 // 播放状态
                 if isPlaying {
                     HStack(spacing: 6) {
@@ -1468,6 +1708,26 @@ private struct EpisodeRow: View {
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.2)) {
                 isHovered = hovering
+            }
+        }
+        .overlay(alignment: .trailing) {
+            // hover 时显示的下载按钮（叠加在行尾右侧，不嵌套进播放 Button）
+            if isHovered, downloadState == nil, !isCached {
+                Button {
+                    guard let index = viewModel.sourceResults.firstIndex(where: { $0.id == sourceId }) else { return }
+                    Task {
+                        await viewModel.downloadEpisode(episode, from: index)
+                    }
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 26, height: 26)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help(t("anime.download.download"))
+                .padding(.trailing, 10)
             }
         }
     }

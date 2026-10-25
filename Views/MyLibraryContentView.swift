@@ -136,6 +136,7 @@ struct MyLibraryContentView: View {
     private let gridOrderStore = LibraryGridOrderStore.shared
     private let workshopSourceManager = WorkshopSourceManager.shared
     private let animeFavoriteStore = AnimeFavoriteStore.shared
+    @ObservedObject private var animeDownloadStore = AnimeDownloadStore.shared
     @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
 
     // 分类筛选
@@ -366,6 +367,7 @@ struct MyLibraryContentView: View {
             || !WallpaperLibraryService.shared.favoriteRecords.isEmpty
             || !MediaLibraryService.shared.downloadRecords.isEmpty
             || !MediaLibraryService.shared.favoriteRecords.isEmpty
+            || !AnimeDownloadStore.shared.records.isEmpty
     }
 
     /// 当前内容类型下是否已有可显示条目（文件夹也算）。
@@ -376,7 +378,11 @@ struct MyLibraryContentView: View {
         case .video:
             return !mediaItems.isEmpty || !currentMediaFolders.isEmpty
         case .anime:
-            return !currentAnimeItems.isEmpty
+            if selectedSubTab == .favorites {
+                return !currentAnimeItems.isEmpty
+            } else {
+                return !animeDownloadStore.records.isEmpty
+            }
         }
     }
 
@@ -615,6 +621,9 @@ struct MyLibraryContentView: View {
             gridScrollToTopToken &+= 1
             updateWallpaperItems()
             updateMediaItems()
+            if selectedContentType == .anime {
+                gridReloadToken &+= 1
+            }
         }
         .onChange(of: wallpaperRatioFilter) { _, _ in
             debouncedUpdateWallpaperItems()
@@ -1010,7 +1019,11 @@ struct MyLibraryContentView: View {
                 return (mediaViewModel.allLocalMedia.count, "arrow.down.circle.fill", LiquidGlassColors.accentCyan, "item.downloads")
             }
         case .anime:
-            return (animeFavorites.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
+            if selectedSubTab == .favorites {
+                return (animeFavorites.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
+            } else {
+                return (animeDownloadStore.records.count, "arrow.down.circle.fill", LiquidGlassColors.accentCyan, "item.downloads")
+            }
         }
     }
 
@@ -1033,9 +1046,8 @@ struct MyLibraryContentView: View {
                 ContentTypePicker(selected: $selectedContentType)
                 librarySearchControl
 
-                if selectedContentType != .anime {
-                    subTabDropdown
-                }
+                // 动漫也有收藏/下载两个子页
+                subTabDropdown
             }
 
             Spacer(minLength: 0)
@@ -1688,11 +1700,13 @@ struct MyLibraryContentView: View {
             let allLocal = viewModel.allLocalWallpapers
             let folderID = WallpaperLibraryService.normalizedFolderID(currentWallpaperFolderID)
             let filtered = allLocal.filter { unified in
-                if let record = unified.downloadRecord {
+                // 实时查活跃记录：cachedAllLocalWallpapers 里的 downloadRecord 是上次重建的旧拷贝，
+                // 移动/删除后的同步刷新会读到旧 folderID / 旧存活状态，表现为「要操作两次才生效」。
+                // downloadRecord(for:) 的索引只含 isActive 记录：软删 / 不存在 → 剔除。
+                if let record = WallpaperLibraryService.shared.downloadRecord(for: unified.id) {
                     return WallpaperLibraryService.normalizedFolderID(record.folderID) == folderID
                 }
-                // 扫描到的本地文件只在根目录显示
-                return folderID == nil
+                return false
             }
             baseItems = filtered.map { AnyWallpaperItem(unified: $0) }
         }
@@ -1737,7 +1751,7 @@ struct MyLibraryContentView: View {
         case .video:
             return mediaItems.count + currentMediaFolders.count
         case .anime:
-            return currentAnimeItems.count
+            return selectedSubTab == .downloads ? currentAnimeDownloadItems.count : currentAnimeItems.count
         }
     }
 
@@ -1822,11 +1836,12 @@ struct MyLibraryContentView: View {
             let allLocal = mediaViewModel.allLocalMedia
             let folderID = MediaLibraryService.normalizedFolderID(currentMediaFolderID)
             let filtered = allLocal.filter { unified in
-                if let record = unified.downloadRecord {
+                // 同 updateWallpaperItems：实时查活跃记录，避免读旧快照导致「操作两次才生效」。
+                // downloadRecord(for:) 的索引只含 isActive 记录：软删 / 不存在 → 剔除。
+                if let record = MediaLibraryService.shared.downloadRecord(for: unified.id) {
                     return MediaLibraryService.normalizedFolderID(record.folderID) == folderID
                 }
-                // 扫描到的本地文件只在根目录显示
-                return folderID == nil
+                return false
             }
             baseItems = filtered.map { AnyMediaItem(unified: $0) }
         }
@@ -2803,7 +2818,9 @@ struct MyLibraryContentView: View {
     // MARK: - Anime Section
     private func animeSection(config: AnimeGridConfig) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            if currentAnimeItems.isEmpty {
+            if selectedSubTab == .downloads {
+                animeDownloadsSection(config: config)
+            } else if currentAnimeItems.isEmpty {
                 libraryEmptySurface(
                     title: hasActiveLibrarySearch ? t("error.empty.title") : t("no.anime.favorites"),
                     subtitle: hasActiveLibrarySearch ? t("error.empty.message") : t("no.anime.favorites.hint"),
@@ -2815,6 +2832,75 @@ struct MyLibraryContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
+    }
+
+    /// 动漫下载缓存列表（按番剧聚合：一行一部番 + 已缓存集数）
+    private func animeDownloadsSection(config: AnimeGridConfig) -> some View {
+        let items = currentAnimeDownloadItems
+
+        return Group {
+            if items.isEmpty {
+                libraryEmptySurface(
+                    title: hasActiveLibrarySearch ? t("error.empty.title") : t("no.anime.downloads"),
+                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : t("no.anime.downloads.hint"),
+                    icon: hasActiveLibrarySearch ? "magnifyingglass" : "arrow.down.circle",
+                    accent: LiquidGlassColors.accentCyan
+                )
+            } else {
+                animeDownloadGridContainer(items: items, config: config)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    private func animeDownloadGridContainer(items: [AnimeDownloadGroupItem], config: AnimeGridConfig) -> some View {
+        let editing = isEditing
+        let selection = selectedItems
+
+        return ExploreGridContainer(
+            itemCount: { items.count },
+            aspectRatio: { _ in
+                LibraryGridCellMetrics.animeAspectRatio(columnWidth: config.cardWidth)
+            },
+            configureCell: { cell, idx in
+                guard let animeCell = cell as? LibraryAnimeGridCell, idx < items.count else { return }
+                animeCell.configure(
+                    with: LibraryAnimeCellModel(
+                        anime: items[idx].searchResult,
+                        isEditing: editing,
+                        isSelected: selection.contains(items[idx].id),
+                        accent: LibraryGridAccent.violet,
+                        badgeText: "\(items[idx].downloadedCount) 集"
+                    ),
+                    isFavorite: false
+                )
+            },
+            cellClass: LibraryAnimeGridCell.self,
+            gridSpacing: 12,
+            onSelect: { idx in
+                guard idx < items.count else { return }
+                handleAnimeTap(items[idx].searchResult)
+            },
+            onVisibleItemsChange: { _ in },
+            onScrollOffsetChange: { offset in
+                handleLibraryScroll(offset)
+            },
+            onReachBottom: {},
+            scrollToTopToken: gridScrollToTopToken,
+            restoreScrollToken: libraryScrollRestoreToken,
+            restoreScrollOffset: savedLibraryScrollOffset,
+            reloadToken: gridReloadToken,
+            layoutRefreshToken: gridLayoutRefreshToken,
+            allowsScrolling: true,
+            isVisible: isVisible,
+            layoutWidth: config.contentWidth,
+            gridColumnCount: config.columnCount,
+            hoverExpansionAllowance: 0,
+            contentInsets: NSEdgeInsets(top: 0, left: 0, bottom: 80, right: 0),
+            pasteboardWriterForItem: nil,
+            onValidateReorderDrop: nil,
+            onPerformReorderDrop: nil
+        )
     }
 
     /// 动漫网格（NSCollectionView cell 复用，编辑多选 + 观看进度）
@@ -2890,6 +2976,14 @@ struct MyLibraryContentView: View {
         guard hasActiveLibrarySearch else { return animeFavorites }
         let query = trimmedLibrarySearchQuery
         return animeFavorites.filter { matchesLibrarySearch(for: $0, query: query) }
+    }
+
+    /// 下载 tab：按番剧聚合的缓存组
+    private var currentAnimeDownloadItems: [AnimeDownloadGroupItem] {
+        let groups = AnimeDownloadStore.shared.animeGroups
+        guard hasActiveLibrarySearch else { return groups }
+        let query = trimmedLibrarySearchQuery
+        return groups.filter { matchesLibrarySearch(for: $0.searchResult, query: query) }
     }
 
     // MARK: - Section Header
@@ -3286,6 +3380,7 @@ struct MyLibraryContentView: View {
         .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
         .clipped()
         .animation(.easeInOut(duration: 0.25), value: isLibrarySearchExpanded)
+        .guideAnchor(.librarySearchControl)
         .onChange(of: isLibrarySearchFocused) { _, focused in
             if !focused {
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -3361,6 +3456,7 @@ struct MyLibraryContentView: View {
                     selectedItems.removeAll()
                 }
             }
+            .guideAnchor(.libraryEditButton)
 
             if selectedContentType != .anime {
                 toolbarCapsuleButton(
@@ -3753,7 +3849,7 @@ struct MyLibraryContentView: View {
         case .video:
             return orderedMediaGridItems.map(\.id)
         case .anime:
-            return currentAnimeItems.map(\.id)
+            return selectedSubTab == .downloads ? currentAnimeDownloadItems.map(\.id) : currentAnimeItems.map(\.id)
         }
     }
 
@@ -3809,11 +3905,22 @@ struct MyLibraryContentView: View {
             }
 
         case .anime:
-            for id in itemIDs {
-                AnimeFavoriteStore.shared.removeFavorite(animeId: id)
-            }
-            Task {
-                await loadAnimeFavorites()
+            if selectedSubTab == .downloads {
+                // 删除整部番的缓存（含文件）
+                for group in currentAnimeDownloadItems where itemIDs.contains(group.id) {
+                    for recordID in group.recordIDs {
+                        AnimeDownloadStore.shared.removeRecord(id: recordID, deleteFile: true)
+                    }
+                }
+                // 组数据已变：强制网格重载，否则 NSCollectionView 容器不知道要刷新
+                gridReloadToken &+= 1
+            } else {
+                for id in itemIDs {
+                    AnimeFavoriteStore.shared.removeFavorite(animeId: id)
+                }
+                Task {
+                    await loadAnimeFavorites()
+                }
             }
         }
         if selectedContentType != .anime {

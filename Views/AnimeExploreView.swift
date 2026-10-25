@@ -70,8 +70,6 @@ struct AnimeExploreView: View {
     @State private var isFirstAppearance = true
     @State private var loadMoreFailed = false
     @State private var searchTask: Task<Void, Never>?
-    @State private var isTagSearchActive = false
-    @State private var suppressNextSearchChange = false
     @State private var lastSyncedFirstAnimeID: String?
     @State private var loadMoreTask: Task<Void, Never>?
     /// loadMore 冷却期，防止 contentSize 增长 → isNearBottom 翻转 → 立即重试的无限级联。
@@ -157,7 +155,11 @@ struct AnimeExploreView: View {
                 syncAtmosphereIfNeeded()
             }
         }
-        .onChange(of: searchText) { _, newValue in handleSearchChange(newValue) }
+        // 与壁纸/媒体一致：输入阶段只同步文本，不联网；搜索由回车提交
+        // （ExploreSearchBar.onSubmit → performSearch）触发。
+        .onChange(of: searchText) { _, newValue in
+            viewModel.searchText = newValue
+        }
         .onChange(of: viewModel.animeItems.count) { _, _ in
             syncAtmosphereIfNeeded()
         }
@@ -220,6 +222,7 @@ struct AnimeExploreView: View {
                     ScrollToTopButton {
                         outerScrollToTopToken &+= 1
                     }
+                    .guideAnchor(.animeScrollToTop)
                     .padding(.trailing, 8)
                     .padding(.bottom, 112)
                     .transition(.scale.combined(with: .opacity))
@@ -281,11 +284,13 @@ struct AnimeExploreView: View {
                 ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainAnime) {
                     randomizeAtmosphere()
                 }
+                .guideAnchor(.animeBackgroundPanel)
             }
 
             ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
                 resetAllFilters(reloadData: true)
             }
+            .guideAnchor(.animeResetFilters)
         }
     }
 
@@ -624,7 +629,6 @@ struct AnimeExploreView: View {
         selectedHotTag = nil
         selectedCategory = .all
         selectedSort = .newest
-        isTagSearchActive = false
         lastSyncedFirstAnimeID = nil
         loadMoreFailed = false
         viewModel.searchText = ""
@@ -671,14 +675,8 @@ struct AnimeExploreView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             selectedCategory = category
             selectedHotTag = nil
-            isTagSearchActive = true
-            searchTask?.cancel()
             searchText = ""
             viewModel.searchText = ""
-        }
-        // 确保 isTagSearchActive 被清理，防止 onChange(of: searchText) 未触发时标志位泄漏
-        DispatchQueue.main.async { [self] in
-            isTagSearchActive = false
         }
         Task {
             await viewModel.fetchByCategory(category)
@@ -695,14 +693,8 @@ struct AnimeExploreView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             selectedHotTag = tag
             selectedCategory = .all
-            isTagSearchActive = true
-            searchTask?.cancel()
             searchText = ""
             viewModel.searchText = ""
-        }
-        // 确保 isTagSearchActive 被清理，防止 onChange(of: searchText) 未触发时标志位泄漏
-        DispatchQueue.main.async { [self] in
-            isTagSearchActive = false
         }
         Task {
             await viewModel.searchByTagName(tag.displayName)
@@ -712,43 +704,12 @@ struct AnimeExploreView: View {
         }
     }
 
-    private func handleSearchChange(_ newValue: String) {
-        viewModel.searchText = newValue
-
-        if suppressNextSearchChange {
-            suppressNextSearchChange = false
-            return
-        }
-
-        if isTagSearchActive {
-            isTagSearchActive = false
-            return
-        }
-
-        searchTask?.cancel()
-
-        if newValue.isEmpty {
-            prepareForFeedReplacement()
-            Task {
-                await viewModel.fetchPopular()
-            }
-            return
-        }
-
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                prepareForFeedReplacement(cancelSearchTask: false)
-            }
-            await viewModel.search()
-        }
-    }
-
+    /// 回车 / 提交式搜索（与壁纸、媒体一致）：输入过程中不联网，提交时才替换列表。
     private func performSearch() {
+        viewModel.searchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         prepareForFeedReplacement()
         searchTask?.cancel()
-        Task {
+        searchTask = Task {
             await viewModel.search()
         }
     }
@@ -826,7 +787,6 @@ struct AnimeExploreView: View {
         selectedHotTag = nil
         selectedCategory = .all
         selectedSort = .newest
-        isTagSearchActive = false
         lastSyncedFirstAnimeID = nil
         loadMoreFailed = false
         viewModel.searchText = ""
@@ -867,7 +827,6 @@ struct AnimeExploreView: View {
     private func setSearchTextSilently(_ value: String) {
         viewModel.searchText = value
         guard searchText != value else { return }
-        suppressNextSearchChange = true
         searchText = value
     }
 

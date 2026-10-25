@@ -777,6 +777,106 @@ class AnimeDetailViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 本地缓存（下载）
+
+    /// 该集是否有可用本地缓存
+    func hasLocalCache(for episodeId: String, sourceId: String) -> Bool {
+        AnimeDownloadStore.shared.isDownloaded(episodeId: episodeId, sourceId: sourceId)
+    }
+
+    /// 播放本地缓存的剧集（「本地」tab 与选集列表缓存标记共用）
+    func playLocalEpisode(_ record: AnimeDownloadRecord) {
+        guard FileManager.default.fileExists(atPath: record.localFilePath) else {
+            // 缓存文件被外部清理：移除失效记录并提示
+            AnimeDownloadStore.shared.removeRecord(id: record.id, deleteFile: false)
+            videoError = "本地缓存文件已失效，请重新下载"
+            return
+        }
+
+        stopPlayback()
+
+        // 构造与在线播放等价的 episode 项，让进度跟踪/弹幕/下一集逻辑正常工作
+        let episode = AnimeDetail.AnimeEpisodeItem(
+            id: record.episodeId,
+            name: record.episodeName,
+            episodeNumber: record.episodeNumber,
+            url: record.originalURL ?? "",
+            thumbnailURL: nil
+        )
+        currentEpisode = episode
+        isLoadingVideo = false
+        videoError = nil
+        videoSources = [VideoSource(quality: "Local", url: record.localFilePath, type: "mp4", label: record.sourceName)]
+
+        // 恢复播放进度（进度键与在线播放一致：sourceId_episodeId）
+        var startTime: TimeInterval = 0
+        if let saved = PlaybackProgressCache.shared.getProgress(
+            sourceId: record.sourceId,
+            episodeId: record.episodeId
+        ), saved.currentTime > 10,
+           saved.currentTime < (saved.duration > 0 ? saved.duration * 0.9 : .infinity) {
+            startTime = saved.currentTime
+        }
+
+        currentStartTime = startTime
+        currentPlayURL = record.localFileURL
+        isPlaying = true
+        isBuffering = false
+
+        PlaybackProgressCache.shared.startTracking(
+            animeId: anime.id,
+            animeTitle: anime.title,
+            episode: episode,
+            sourceId: record.sourceId,
+            sourceName: record.sourceName,
+            coverURL: anime.coverURL
+        )
+
+        loadDanmaku(for: episode)
+    }
+
+    /// 解析某集的视频直链并发起下载（选集列表下载按钮入口）
+    func downloadEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int) async {
+        guard sourceIndex < sourceResults.count else { return }
+        let rule = sourceResults[sourceIndex].rule
+
+        // 已缓存则不重复下载
+        guard !AnimeDownloadStore.shared.isDownloaded(episodeId: episode.id, sourceId: rule.id) else { return }
+
+        // 已在队列/下载中则忽略
+        guard !AnimeDownloadEngine.shared.isDownloading(episodeId: episode.id, sourceId: rule.id) else { return }
+
+        // 解析直链（复用播放链路的提取器）
+        let result = await AnimeVideoExtractor.shared.extractVideoSources(
+            from: episode.url,
+            rule: rule
+        )
+
+        switch result {
+        case .success(let sources):
+            guard let first = sources.first, let url = URL(string: first.url) else {
+                videoError = "无法解析视频地址，下载失败"
+                return
+            }
+            // HLS 判定优先取 extractor 给的 type，URL 形态只作兜底
+            let isHLS = first.type.lowercased().contains("m3u8")
+                || AnimeDownloadEngine.isHLSURL(url)
+            AnimeDownloadEngine.shared.enqueue(
+                anime: anime,
+                source: rule,
+                episode: episode,
+                videoURL: url,
+                isHLS: isHLS
+            )
+        case .error(let message):
+            videoError = "下载解析失败：\(message)"
+        case .captcha:
+            presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
+        case .timeout:
+            videoError = "下载解析超时，请重试"
+        }
+    }
+
     /// 设置播放器并恢复进度
     /// 清理播放器但不重置 currentEpisode（用于切换剧集时）
     private func cleanupPlayerOnly() {

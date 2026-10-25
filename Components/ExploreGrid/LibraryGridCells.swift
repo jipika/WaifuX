@@ -236,6 +236,8 @@ struct LibraryAnimeCellModel {
     let isEditing: Bool
     let isSelected: Bool
     let accent: NSColor
+    /// 底部进度文案的替代（如「3 集已缓存」）；nil 时走观看进度/最新集数渲染
+    var badgeText: String? = nil
 }
 
 // MARK: - 共享子视图
@@ -2424,7 +2426,11 @@ final class LibraryAnimeGridCell: ExploreGridItem {
         // 进度（对齐 AnimeLibraryCard.loadProgress）
         var progressText: String?
         var progressValue: Double?
-        if let summary = AnimeProgressStore.shared.animeSummaries[model.anime.id] {
+        // 下载组的徽标文案优先（如「3 集已缓存」）
+        if let badge = model.badgeText {
+            progressText = badge
+        }
+        if progressText == nil, let summary = AnimeProgressStore.shared.animeSummaries[model.anime.id] {
             if summary.watchedEpisodes > 0 {
                 progressText = summary.continueWatchingText
             } else {
