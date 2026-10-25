@@ -2590,6 +2590,12 @@ enum SceneOfflineBakeService {
         // 自动检测周期时不需要传 --duration，让 bake 自己检测
         if durationSeconds > 0 {
             args += ["--duration", String(Int(durationSeconds))]
+            // 短时长 = 临时抽帧封面：只取一帧亮图，不做无缝循环分析
+            //（实测该项占抽帧 bake 约 3s / 一半 wall time）。
+            // 注：旧版渲染器也认此 flag，只是 duration 仍会被抬到 3s，不报错。
+            if durationSeconds <= 1 {
+                args += ["--no-loop-analyze"]
+            }
         }
 
         guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {

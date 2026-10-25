@@ -56,6 +56,16 @@ class WorkshopSourceManager: ObservableObject {
             }
         }
 
+        /// 是否支持中文（CJK）关键词搜索——不支持时纯中文查询直接提示，不发无效请求
+        var supportsChineseSearch: Bool {
+            switch self {
+            case .motionBG: return false          // 站点内容为英文
+            case .wallpaperEngine: return true    // Steam Workshop 支持中文
+            case .dongtai: return true            // 中文数据源
+            case .wallsflow: return false         // 站点内容为英文/俄文
+            }
+        }
+
         /// 是否支持分类浏览
         var supportsCategories: Bool {
             switch self {

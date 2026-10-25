@@ -99,6 +99,16 @@ class WallpaperSourceManager: ObservableObject {
             }
         }
 
+        /// 是否支持中文（CJK）关键词搜索——不支持时纯中文查询直接提示，不发无效请求
+        var supportsChineseSearch: Bool {
+            switch self {
+            case .wallhaven: return false         // 标签库为英文
+            case .fourKWallpapers: return false   // 站点关键词为英文
+            case .konachan: return false          // 标签为罗马字/英文
+            case .pixiv: return true              // 原生支持中日文搜索
+            }
+        }
+
         /// 用于设置页分段控件的颜色标识
         var accentColor: String {
             switch self {

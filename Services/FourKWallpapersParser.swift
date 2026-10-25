@@ -156,9 +156,24 @@ enum FourKWallpapersParserError: Error, LocalizedError {
     case invalidHTML
     case parsingFailed(String)
     case elementNotFound(String)
+    /// 响应是 Cloudflare 挑战页（需要代理，不是解析问题）
+    case cloudflareBlocked
 
     var errorDescription: String? {
-        t("error.parse.failed")
+        switch self {
+        case .cloudflareBlocked:
+            return NetworkError.cloudflareBlockedMessage
+        case .invalidHTML, .parsingFailed, .elementNotFound:
+            return t("error.parse.failed")
+        }
+    }
+
+    /// 判断 HTML 是否为 Cloudflare 挑战页（200 状态也可能返回挑战内容）
+    static func looksLikeChallengePage(_ html: String) -> Bool {
+        html.contains("Just a moment")
+            || html.contains("challenges.cloudflare")
+            || html.contains("cf-chl-bypass")
+            || html.contains("cf-challenge")
     }
 }
 
@@ -244,6 +259,12 @@ final class FourKWallpapersParser {
 
     /// 解析壁纸列表页面（自动识别 #pics-list / #packs-list）
     func parseWallpaperList(html: String, url: String? = nil) throws -> Wallpaper4KList {
+        // Cloudflare 挑战页先于一切解析：200 状态也可能返回挑战内容，
+        // 否则会被误报成「页面解析失败」
+        if FourKWallpapersParserError.looksLikeChallengePage(html) {
+            throw FourKWallpapersParserError.cloudflareBlocked
+        }
+
         let document = try SwiftSoup.parse(html)
 
         // 判断页面类型
@@ -260,6 +281,23 @@ final class FourKWallpapersParser {
         }
 
         guard let container = try document.select(containerSelector).first() else {
+            // 搜索页没有列表容器 = 该关键词没有结果。
+            // 2026-10-25 实测：4kwallpapers 搜索无结果时返回正常的"Search results for"页面，
+            // 页面上没有 #pics-list 容器（https://4kwallpapers.com/search/?q=… 200 OK）。
+            // 仅 search 路由做此回退；浏览页缺容器仍视为站点结构变化（真解析失败）。
+            if pageType == .search {
+                print("[FourKWallpapersParser] 搜索页无结果（容器 \(containerSelector) 缺失，html=\(html.count)B）→ 视为空结果")
+                return Wallpaper4KList(
+                    wallpapers: [],
+                    currentPage: 1,
+                    totalPages: 1,
+                    hasNextPage: false,
+                    hasPreviousPage: false,
+                    pageType: .search,
+                    category: nil,
+                    searchQuery: extractSearchQuery(from: document)
+                )
+            }
             throw FourKWallpapersParserError.elementNotFound(containerSelector)
         }
 

@@ -12,6 +12,8 @@ class WallpaperViewModel: ObservableObject {
     @Published var availableTags: [APITag] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// errorMessage 的分类：决定空态面板用哪种类型渲染（无结果/不支持中文/网络/解析失败…）
+    @Published var errorKind: ExploreErrorKind = .network
     @Published var currentPage = 1
     @Published var hasMorePages = true
     @Published var searchQuery = ""
@@ -898,6 +900,7 @@ class WallpaperViewModel: ObservableObject {
 
         isLoading = true
         errorMessage = nil
+        errorKind = .network
         currentPage = 1
         currentRandomSeed = nil
 
@@ -911,6 +914,23 @@ class WallpaperViewModel: ObservableObject {
         // 重置预加载状态
         preloadTask?.cancel()
         preloadedResponse = nil
+
+        // 纯 CJK 关键词 + 当前源不支持中文搜索：直接给提示，不发注定为空的请求。
+        // 混有英文词的查询（如「碧蓝航线 azur lane」）仍正常走网络。
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty,
+           trimmedQuery.isCJKOnlyQuery,
+           !sourceManager.activeSource.supportsChineseSearch {
+            wallpapers = []
+            hasMorePages = false
+            errorKind = .chineseUnsupported
+            errorMessage = String(
+                format: t("source.chineseSearchUnsupported"),
+                sourceManager.activeSource.displayName
+            )
+            isLoading = false
+            return
+        }
 
         // 创建新的搜索任务
         searchTask = Task {
@@ -934,6 +954,7 @@ class WallpaperViewModel: ObservableObject {
                 hasMorePages = 1 < results.meta.lastPage
 
                 if results.data.isEmpty {
+                    errorKind = .noResults
                     errorMessage = t("explore.noResults")
                 } else {
                     // 只预取极少量首屏图片；可见 cell 自身负责其余图片的懒加载。
@@ -946,6 +967,7 @@ class WallpaperViewModel: ObservableObject {
                 isLoading = false
                 return
             } catch {
+                errorKind = ExploreErrorClassifier.kind(for: error)
                 errorMessage = error.localizedDescription
             }
 
@@ -1141,6 +1163,7 @@ class WallpaperViewModel: ObservableObject {
             } catch let error as URLError where error.code == .cancelled {
                 return
             } catch {
+                errorKind = ExploreErrorClassifier.kind(for: error)
                 errorMessage = error.localizedDescription
             }
         }

@@ -7,6 +7,8 @@ enum ErrorDisplayType {
     case server
     case offline
     case apiLimited
+    /// 页面结构变化导致的解析失败（不是网络问题，不显示 VPN 排查提示）
+    case parse
     case unknown
 
     var icon: String {
@@ -21,6 +23,8 @@ enum ErrorDisplayType {
             return "wifi.slash"
         case .apiLimited:
             return "key.slash"
+        case .parse:
+            return "doc.text.magnifyingglass"
         case .unknown:
             return "exclamationmark.triangle"
         }
@@ -38,6 +42,8 @@ enum ErrorDisplayType {
             return t("error.offline.title")
         case .apiLimited:
             return t("error.apiLimited.title")
+        case .parse:
+            return t("error.parse.failed")
         case .unknown:
             return t("error.unknown.title")
         }
@@ -55,8 +61,38 @@ enum ErrorDisplayType {
             return t("error.offline.message")
         case .apiLimited:
             return t("error.apiLimited.message")
+        case .parse:
+            return t("error.parse.failed")
         case .unknown:
             return t("error.unknown.message")
+        }
+    }
+
+    /// 是否显示「请检查网络连接/VPN」排查提示——只有真网络类错误才显示
+    var showsNetworkTroubleshoot: Bool {
+        switch self {
+        case .network, .offline, .server:
+            return true
+        case .empty, .parse, .unknown, .apiLimited:
+            return false
+        }
+    }
+}
+
+// 探索页错误分类 → 错误面板类型映射
+extension ExploreErrorKind {
+    var errorDisplayType: ErrorDisplayType {
+        switch self {
+        case .noResults, .chineseUnsupported:
+            return .empty
+        case .network, .blocked:
+            return .network
+        case .server:
+            return .server
+        case .parse:
+            return .parse
+        case .unknown:
+            return .unknown
         }
     }
 }
@@ -100,8 +136,8 @@ struct ErrorStateView: View {
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
 
-            // 网络排查提示（非空状态才显示）
-            if type != .empty {
+            // 网络排查提示（只有真网络类错误才显示）
+            if type.showsNetworkTroubleshoot {
                 Text(t("error.networkTroubleshoot"))
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(.tertiary)
@@ -154,7 +190,7 @@ struct ErrorStateView: View {
             return .secondary
         case .server:
             return .red
-        case .unknown:
+        case .parse, .unknown:
             return .yellow
         }
     }
@@ -167,7 +203,7 @@ struct ErrorStateView: View {
             return .secondary
         case .server:
             return .red.opacity(0.8)
-        case .unknown:
+        case .parse, .unknown:
             return .orange
         }
     }

@@ -750,6 +750,7 @@ struct MediaExploreContentView: View {
                     }
                 }
                 .offset(y: 1.5)
+                .guideAnchor(.mediaSourceMenu)
                 .background {
                     SourceHintIcon()
                         .fixedSize()
@@ -781,19 +782,22 @@ struct MediaExploreContentView: View {
                 } : nil
             )
 
-            WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
-                showWorkshopURLSheet = true
-            }
+            HStack(spacing: 12) {
+                WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
+                    showWorkshopURLSheet = true
+                }
 
-            if !arcSettings.compactMode {
-                ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainMedia) {
-                    randomizeAtmosphere()
+                if !arcSettings.compactMode {
+                    ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainMedia) {
+                        randomizeAtmosphere()
+                    }
+                }
+
+                ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
+                    resetAllFilters(reloadData: true)
                 }
             }
-
-            ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
-                resetAllFilters(reloadData: true)
-            }
+            .guideAnchor(.mediaActionCircles)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -939,6 +943,7 @@ struct MediaExploreContentView: View {
                         }
                     }
                 }
+                .guideAnchor(.mediaContentChips)
             }
         }
     }
@@ -983,6 +988,7 @@ struct MediaExploreContentView: View {
         .fixedSize(horizontal: true, vertical: false)
         .offset(y: 1)
         .frame(height: 34)
+        .guideAnchor(.mediaResolutionMenu)
     }
 
     private var visibleWorkshopContentLevels: [WorkshopSourceManager.WorkshopContentLevel] {
@@ -1454,8 +1460,16 @@ struct MediaExploreContentView: View {
     private var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
+                // 按错误分类选面板：无结果/不支持中文用空态样式，
+                // 只有真网络类错误才渲染连接错误面板与 VPN 排查提示
+                let displayType: ErrorDisplayType = viewModel.networkStatus.connectionState == .offline
+                    ? .offline
+                    : viewModel.errorKind.errorDisplayType
+                let noResultsStyle = viewModel.errorKind == .noResults
+                    || viewModel.errorKind == .chineseUnsupported
                 ErrorStateView(
-                    type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
+                    type: displayType,
+                    title: noResultsStyle ? t("explore.search.noResults.title") : nil,
                     message: errorMessage,
                     retryAction: { Task { await smartRetry() } }
                 )

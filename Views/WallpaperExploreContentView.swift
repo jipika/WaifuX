@@ -610,6 +610,7 @@ struct WallpaperExploreContentView: View {
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
+        .guideAnchor(.exploreHeader)
     }
 
     /// 随网格滚动 1:1 上移挤出的 header。
@@ -672,6 +673,7 @@ struct WallpaperExploreContentView: View {
                         gridScrollToTopToken &+= 1
                         showScrollToTop = false
                     }
+                    .guideAnchor(.exploreScrollToTop)
                     .padding(.trailing, 8)
                     .padding(.bottom, 112)
                     .transition(.scale.combined(with: .opacity))
@@ -899,6 +901,7 @@ struct WallpaperExploreContentView: View {
                     }
                 }
                 .offset(y: 1.5)
+                .guideAnchor(.exploreSourceMenu)
                 .background {
                     SourceHintIcon()
                         .fixedSize()
@@ -947,19 +950,22 @@ struct WallpaperExploreContentView: View {
                 )
             }
 
-            WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
-                showWallpaperURLSheet = true
-            }
+            HStack(spacing: 12) {
+                WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
+                    showWallpaperURLSheet = true
+                }
 
-            if !arcSettings.compactMode {
-                ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainWallpaper) {
-                    randomizeAtmosphere()
+                if !arcSettings.compactMode {
+                    ArcBackgroundPanelButton(tint: exploreAtmosphere.tint.primary, grainIntensity: $arcSettings.exploreGrainWallpaper) {
+                        randomizeAtmosphere()
+                    }
+                }
+
+                ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
+                    resetAllFilters(reloadData: true)
                 }
             }
-
-            ResetFiltersButton(tint: exploreAtmosphere.tint.secondary) {
-                resetAllFilters(reloadData: true)
-            }
+            .guideAnchor(.exploreActionCircles)
         }
     }
 
@@ -1390,8 +1396,16 @@ struct WallpaperExploreContentView: View {
     private var emptyState: some View {
         Group {
             if let errorMessage = viewModel.errorMessage {
+                // 按错误分类选面板：无结果/不支持中文用空态样式，
+                // 只有真网络类错误才渲染连接错误面板与 VPN 排查提示
+                let displayType: ErrorDisplayType = viewModel.networkStatus.connectionState == .offline
+                    ? .offline
+                    : viewModel.errorKind.errorDisplayType
+                let noResultsStyle = viewModel.errorKind == .noResults
+                    || viewModel.errorKind == .chineseUnsupported
                 ErrorStateView(
-                    type: viewModel.networkStatus.connectionState == .offline ? .offline : .network,
+                    type: displayType,
+                    title: noResultsStyle ? t("explore.search.noResults.title") : nil,
                     message: errorMessage,
                     retryAction: reloadData
                 )
@@ -1475,6 +1489,7 @@ struct WallpaperExploreContentView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .guideAnchor(.exploreRatioMenu)
     }
 
     // MARK: - Actions

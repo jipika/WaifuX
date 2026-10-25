@@ -10,6 +10,8 @@ final class MediaExploreViewModel: ObservableObject {
     @Published var isLoading = false
     @Published private(set) var isLoadingMore = false
     @Published var errorMessage: String?
+    /// errorMessage 的分类：决定空态面板用哪种类型渲染（无结果/不支持中文/网络/解析失败…）
+    @Published private(set) var errorKind: ExploreErrorKind = .network
     @Published private(set) var hasMorePages = true
     @Published private(set) var currentQuery = ""
 
@@ -603,6 +605,7 @@ final class MediaExploreViewModel: ObservableObject {
             print("[MediaExploreViewModel] load completed successfully")
         } catch {
             print("[MediaExploreViewModel] load failed with error: \(error)")
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
         }
     }
@@ -671,6 +674,7 @@ final class MediaExploreViewModel: ObservableObject {
                 triggerMotionBGPreload()
             }
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
         }
     }
@@ -951,6 +955,7 @@ final class MediaExploreViewModel: ObservableObject {
             print("[MediaExploreViewModel] loadTagFeed completed: \(items.count) items")
         } catch {
             print("[MediaExploreViewModel] loadTagFeed failed: \(error)")
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
         }
     }
@@ -998,9 +1003,11 @@ final class MediaExploreViewModel: ObservableObject {
             if hasMorePages {
                 triggerMotionBGPreload()
             }
+            applyEmptyResultHintIfCJK(query: trimmedQuery)
             print("[MediaExploreViewModel] search completed: \(items.count) items")
         } catch {
             print("[MediaExploreViewModel] search failed: \(error)")
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
         }
     }
@@ -1150,6 +1157,7 @@ final class MediaExploreViewModel: ObservableObject {
         do {
             return try await loadDetail(for: item)
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
             return item
         }
@@ -1932,12 +1940,43 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 搜索当前源。新增数据源只需在 `switch` 中添加分支。
     func searchFeed(query: String) async {
+        // 纯 CJK 关键词 + 当前源不支持中文搜索：直接给提示，不发注定为空的请求。
+        // 混有英文词的查询（如「碧蓝航线 azur lane」）仍正常走网络。
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty,
+           trimmedQuery.isCJKOnlyQuery,
+           !workshopSourceManager.activeSource.supportsChineseSearch {
+            invalidatePreservedExploreFeed()
+            cancelPreload()
+            items = []
+            hasMorePages = false
+            currentTitle = "搜索: \(trimmedQuery)"
+            errorKind = .chineseUnsupported
+            errorMessage = String(
+                format: t("source.chineseSearchUnsupported"),
+                workshopSourceManager.activeSource.displayName
+            )
+            return
+        }
         switch workshopSourceManager.activeSource {
         case .wallpaperEngine: await searchWorkshop(query: query)
         case .dongtai:         await searchDongTai(query: query)
         case .wallsflow:       await searchWallsflow(query: query)
         default:               await search(query: query)
         }
+    }
+
+    /// 搜索成功但 0 条时：若关键词是纯 CJK 且当前源不支持中文，补一条「不支持中文」提示。
+    /// 混合词查询不会走到这里（searchFeed 已放行），返回空就是真的没搜到。
+    private func applyEmptyResultHintIfCJK(query: String) {
+        guard items.isEmpty,
+              query.isCJKOnlyQuery,
+              !workshopSourceManager.activeSource.supportsChineseSearch else { return }
+        errorKind = .chineseUnsupported
+        errorMessage = String(
+            format: t("source.chineseSearchUnsupported"),
+            workshopSourceManager.activeSource.displayName
+        )
     }
 
     // MARK: - Workshop 数据加载
@@ -2190,6 +2229,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
             print("[MediaExploreViewModel] loadWorkshopFeedInternal completed: \(items.count) items, sort=\(workshopSortBy.rawValue), days=\(workshopDays.map(String.init) ?? "all")")
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadWorkshopFeedInternal failed: \(error)")
         }
@@ -2243,6 +2283,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
             print("[MediaExploreViewModel] loadMoreWorkshop completed: +\(newItems.count) items, total: \(items.count)")
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadMoreWorkshop failed: \(error)")
         }
@@ -2471,6 +2512,7 @@ final class MediaExploreViewModel: ObservableObject {
         if !dynamicWallpaperService.isDataReady {
             let loaded = await dynamicWallpaperService.loadData()
             guard loaded else {
+                errorKind = .unknown
                 errorMessage = dynamicWallpaperService.errorMessage ?? "动态桌面数据加载失败"
                 return
             }
@@ -2688,6 +2730,9 @@ final class MediaExploreViewModel: ObservableObject {
             // 源一致性检查：如果切换了源，丢弃这个过期结果
             guard workshopSourceManager.activeSource == .wallsflow else { return }
             items = page.items
+            if let q = query {
+                applyEmptyResultHintIfCJK(query: q)
+            }
             wallsflowHasMore = page.nextPagePath != nil
             hasMorePages = page.nextPagePath != nil
             if wallsflowHasMore {
@@ -2695,6 +2740,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
             print("[MediaExploreViewModel] loadWallsflowFeedInternal completed: \(items.count) items")
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadWallsflowFeedInternal failed: \(error)")
         }
@@ -2745,6 +2791,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
             print("[MediaExploreViewModel] loadMoreWallsflow completed: +\(newItems.count) items, total: \(items.count)")
         } catch {
+            errorKind = ExploreErrorClassifier.kind(for: error)
             errorMessage = error.localizedDescription
             print("[MediaExploreViewModel] loadMoreWallsflow failed: \(error)")
         }
