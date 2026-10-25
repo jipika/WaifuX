@@ -5,14 +5,22 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      include_universal:
+        description: '同时构建 universal 包（默认只打 arm64 + x86_64 测试包）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
-    outputs:
-        version: ${{ steps.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ (github.event_name == 'push' || inputs.include_universal == true) && fromJSON('["arm64","x86_64","universal"]') || fromJSON('["arm64","x86_64"]') }}
     runs-on: xcode-27
 
     steps:
@@ -80,13 +88,6 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('**/project.yml') }}
           restore-keys: |
             ${{ runner.os }}-spm-
-
-      - name: Read Version
-        id: version
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
 
       # macOS 26: .appex 必须用 xcodebuild 签名，手动 codesign 可能丢 entitlements
       - name: Setup Certificate & Sign Extension
@@ -258,17 +259,10 @@ jobs:
           WAIFUX_SKIP_DMG: "1"
         run: |
           chmod +x ./scripts/package.sh
-          # 每次发版固定三个包：
-          #   arm64     —— Apple Silicon 专用（含场景渲染器全家桶）
-          #   x86_64    —— Intel 专用（换装 x86 渲染器组件 + 静态 ffmpeg）
-          #   universal —— 双架构全量包，同时作为旧版客户端升级通道（appcast default item）
-          ARCH_LIST="arm64 x86_64 universal"
-          for ARCH in $ARCH_LIST; do
-            echo "🔨 构建 $ARCH 包..."
-            WAIFUX_ARCH=$ARCH ./scripts/package.sh
-            mv build/WaifuX.app "build/WaifuX-$ARCH.app"
-            lipo -info "build/WaifuX-$ARCH.app/Contents/MacOS/WaifuX"
-          done
+          # 每个 job 只构建一个架构；三包由 matrix 并行，DMG 创建与公证都在本 job 内完成。
+          echo "🔨 构建 ${{ matrix.arch }} 包..."
+          WAIFUX_ARCH=${{ matrix.arch }} ./scripts/package.sh
+          lipo -info build/WaifuX.app/Contents/MacOS/WaifuX
           ls -lh build/
 
       - name: Sign & Notarize
@@ -279,20 +273,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          ARCH: ${{ matrix.arch }}
         run: |
           # keychain 已在 Sign Extension 步骤中设置
           KEYCHAIN_PATH="$RUNNER_TEMP/sign.keychain-db"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # 每次发版固定三个包：
-          #   arm64     —— Apple Silicon 专用（含场景渲染器全家桶）
-          #   x86_64    —— Intel 专用（换装 x86 渲染器组件 + 静态 ffmpeg）
-          #   universal —— 双架构全量包，同时作为旧版客户端升级通道（appcast default item）
-          ARCH_LIST="arm64 x86_64 universal"
-          for ARCH in $ARCH_LIST; do
           echo "===== Sign & Notarize ($ARCH) ====="
-          rm -rf build/WaifuX.app
-          cp -R "build/WaifuX-$ARCH.app" build/WaifuX.app
 
           echo "Signing embedded binaries..."
           strip_unsupported_slices() {
@@ -513,9 +500,48 @@ jobs:
             mv build/WaifuX.dmg "build/WaifuX-$ARCH.dmg"
             echo "✅ $ARCH DMG 就绪: build/WaifuX-$ARCH.dmg"
           fi
-          done
 
           ls -lh build/WaifuX*.dmg
+
+      # 测试构建（workflow_dispatch）由此把 DMG 交给用户下载；
+      # tag 发版时 publish job 也通过这个 artifact 汇总三包。
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaifuX-${{ matrix.arch }}-${{ github.sha }}
+          path: build/WaifuX*.dmg
+          retention-days: 3
+
+      # 提交更新后的 appcast.xml 到 GitHub Pages
+
+  publish:
+    needs: build
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: xcode-27
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download DMG artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: WaifuX-*-${{ github.sha }}
+          path: build
+          merge-multiple: true
+
+      - name: Read Version
+        id: version
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
+      - name: List downloaded DMGs
+        run: ls -lh build/WaifuX*.dmg
 
       - name: Setup Sparkle tools
         run: |
@@ -589,7 +615,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # workflow_dispatch 测试构建时，上传 DMG 到 Actions Artifacts（不会发布给用户）
       # 生成带 Sparkle 真实签名的 appcast.xml（拆架构：default / arm64 / x86_64 三个 item），
       # 上传为本次 release 资产。部署由 deploy-pages job 负责。
       # 不提交回仓库：main 有分支保护（需 PR + 审批，无 bypass 白名单），GITHUB_TOKEN 无法 push。
@@ -636,20 +661,11 @@ jobs:
           gh release upload "v$VERSION" "${ASSETS[@]}" --clobber
           echo "✅ appcast 已上传为 release 资产：${ASSETS[*]}"
 
-      - name: Upload DMG as Artifact (test build)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: WaifuX-test-${{ github.sha }}
-          path: build/WaifuX*.dmg
-          retention-days: 3
-
-      # 提交更新后的 appcast.xml 到 GitHub Pages
 
   deploy-pages:
     # 把本次 release 的签名 appcast 部署到 GitHub Pages（Sparkle 的 SUFeedURL 指向此处）。
     # 独立 job 是为了使用 github-pages environment（actions/deploy-pages 的要求）。
-    needs: build
+    needs: publish
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
@@ -668,7 +684,7 @@ jobs:
 
       - name: Use this release's signed appcast
         run: |
-          TAG="v${{ needs.build.outputs.version }}"
+          TAG="v${{ needs.publish.outputs.version }}"
           curl -fsSL "https://github.com/jipika/WaifuX/releases/download/${TAG}/appcast.xml" -o Docs/appcast.xml
           curl -fsSL "https://github.com/jipika/WaifuX/releases/download/${TAG}/appcast-default-item.xml" \
             -o Docs/appcast-default-item.xml || true
