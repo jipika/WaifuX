@@ -1541,7 +1541,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "externalDisplay.autoSwitchOnConnect": "Auto-switch when this display connects",
         "externalDisplay.autoSwitchOnConnectDesc": "When this external display connects, randomly pick one wallpaper from its own auto-switch range.",
         // Source switch hint
-        "sourceSwitchHint": "Click to switch between different data sources",
+        "sourceSwitchHint": "Click to switch data sources; if a source fails to load, check whether a VPN / proxy is required",
         // Error network troubleshoot
         "error.networkTroubleshoot": "Please check your network connection, make sure VPN is enabled, or try switching to a different node.",
         // GuideKit (feature tour)
@@ -1561,7 +1561,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "guide.home.menubar.title": "Quick Controls in the Menu Bar",
         "guide.home.menubar.body": "Find the WaifuX icon at the right end of the macOS menu bar: switch wallpapers, pause playback and adjust volume without opening the main window.",
         "guide.explore.source.title": "Switch Data Sources",
-        "guide.explore.source.body": "This pill next to the greeting switches the wallpaper provider (Wallhaven / 4K Wallpapers). The small ? beside it explains what each source serves.",
+        "guide.explore.source.body": "The pill next to the greeting switches the wallpaper provider (Wallhaven / 4K Wallpapers). The small ? beside it explains each source; if a page fails to load, check your VPN first.",
         "guide.explore.scroll.title": "Two-Stage Scrolling",
         "guide.explore.scroll.body": "Scroll anywhere over the header: it collapses first, then the grid takes over — the filters never steal your scroll.",
         "guide.explore.ratio.title": "Filter by Aspect Ratio",
@@ -3156,7 +3156,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "externalDisplay.autoSwitchOnConnect": "此显示器连接后自动切换",
         "externalDisplay.autoSwitchOnConnectDesc": "这块外接屏接入时，从它自己的自动更换范围里随机挑选一张。",
         // Source switch hint
-        "sourceSwitchHint": "点击切换不同的数据源",
+        "sourceSwitchHint": "点击切换数据源；某个源加载不出来时，先检查是否需要科学上网（VPN）",
         // Error network troubleshoot
         "error.networkTroubleshoot": "请检查网络连接是否正常，是否正确开启 VPN，或尝试切换其他节点。",
         // GuideKit (feature tour)
@@ -3176,7 +3176,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "guide.home.menubar.title": "菜单栏里的快捷控制",
         "guide.home.menubar.body": "在 macOS 菜单栏右侧找到 WaifuX 图标：不开主窗口也能快速切换壁纸、暂停播放和调节音量。",
         "guide.explore.source.title": "切换数据源",
-        "guide.explore.source.body": "问候语旁边的胶囊按钮切换壁纸提供源（Wallhaven / 4K 壁纸）；旁边的小问号有各来源的说明。",
+        "guide.explore.source.body": "问候语旁边的胶囊按钮切换壁纸提供源（Wallhaven / 4K 壁纸）；旁边的小问号有各来源的说明。页面加载不出来时，先检查是否需要科学上网（VPN）。",
         "guide.explore.scroll.title": "两阶段滚动",
         "guide.explore.scroll.body": "在筛选区上直接滚动：工具栏先整体收起，网格再继续滚动——筛选区永远不会「偷走」你的滚动。",
         "guide.explore.ratio.title": "按比例筛选",
@@ -4771,7 +4771,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "externalDisplay.autoSwitchOnConnect": "このディスプレイ接続時に自動切替",
         "externalDisplay.autoSwitchOnConnectDesc": "この外部ディスプレイが接続されたとき、専用の自動切替範囲からランダムに選択します。",
         // Source switch hint
-        "sourceSwitchHint": "クリックしてデータソースを切り替えます",
+        "sourceSwitchHint": "クリックでデータソースを切替。読み込めない場合は VPN（プロキシ）の要否を確認してください",
         // Error network troubleshoot
         "error.networkTroubleshoot": "ネットワーク接続を確認し、VPNが有効になっているか、または別のノードに切り替えてみてください。",
         // GuideKit (feature tour)
@@ -4791,7 +4791,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "guide.home.menubar.title": "メニューバーのクイック操作",
         "guide.home.menubar.body": "macOS メニューバー右端の WaifuX アイコンから、メイン画面を開かずに壁紙の切替・一時停止・音量調整ができます。",
         "guide.explore.source.title": "データソースの切替",
-        "guide.explore.source.body": "挨拶の横のカプセルで壁紙ソース（Wallhaven / 4K壁紙）を切り替えられます。隣の「?」に各ソースの説明があります。",
+        "guide.explore.source.body": "挨拶の横のカプセルで壁紙ソース（Wallhaven / 4K壁紙）を切り替えられます。隣の「?」に各ソースの説明。読み込めない場合はまず VPN を確認してください。",
         "guide.explore.scroll.title": "2段スクロール",
         "guide.explore.scroll.body": "ヘッダー上でスクロールすると、まずツールバーが収縮し、その後にグリッドがスクロールします。フィルターがスクロールを奪うことはありません。",
         "guide.explore.ratio.title": "アスペクト比で絞り込み",

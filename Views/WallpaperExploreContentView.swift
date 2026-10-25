@@ -902,6 +902,7 @@ struct WallpaperExploreContentView: View {
                 }
                 .offset(y: 1.5)
                 .guideAnchor(.exploreSourceMenu)
+                .sourceSwitchTooltip(key: "sourceSwitchHintShown.v1", message: t("sourceSwitchHint"))
                 .background {
                     SourceHintIcon()
                         .fixedSize()

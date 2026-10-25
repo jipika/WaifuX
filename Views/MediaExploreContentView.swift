@@ -751,6 +751,7 @@ struct MediaExploreContentView: View {
                 }
                 .offset(y: 1.5)
                 .guideAnchor(.mediaSourceMenu)
+                .sourceSwitchTooltip(key: "sourceSwitchHintShown.v1", message: t("sourceSwitchHint"))
                 .background {
                     SourceHintIcon()
                         .fixedSize()
