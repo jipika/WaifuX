@@ -687,6 +687,14 @@ private struct GeneralSettingsTab: View {
                         MacToggle(isOn: $viewModel.dynamicLockScreenEnabled)
                     }
                     .guideAnchor(.lockscreenToggle)
+                    .onChange(of: viewModel.dynamicLockScreenEnabled) { _, enabled in
+                        // 第一次打开开关时播教程：目标行必然可见，
+                        // 也不会和设置总览抢播放令牌（WaifuX GuideKit）。
+                        if enabled {
+                            viewModel.refreshLockScreenSelectionStatus()
+                            GuideEngine.shared.noteSheetOpened(GuideTours.lockscreen)
+                        }
+                    }
 
                     MacSettingsRow(
                         title: t("lockScreenSelectionStatus"),
@@ -700,8 +708,6 @@ private struct GeneralSettingsTab: View {
                     .guideAnchor(.lockscreenStatusRow)
                     .onAppear {
                         viewModel.refreshLockScreenSelectionStatus()
-                        // 滚动到动态锁屏区块首次可见时播放教程（WaifuX GuideKit）
-                        GuideEngine.shared.noteSheetOpened(GuideTours.lockscreen)
                     }
 
                     MacSettingsRow(
