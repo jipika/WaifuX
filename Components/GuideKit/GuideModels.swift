@@ -35,6 +35,8 @@ enum GuideAnchorID: Hashable {
     case librarySearchControl
     // 详情页（Media / Wallpaper 两个 sheet 共用）
     case detailHeroInfo
+    case libraryImportButton
+    case libraryMoreMenuButton
     case detailActionRow
     /// 详情「更多选项」popover 内容（独立 NSWindow，遮罩层级会自适应抬高）
     case detailMorePopover

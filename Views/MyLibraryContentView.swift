@@ -3478,6 +3478,7 @@ struct MyLibraryContentView: View {
                     ) {
                         startImport()
                     }
+                    .guideAnchor(.libraryImportButton)
                 }
             }
 
@@ -3585,6 +3586,7 @@ struct MyLibraryContentView: View {
                             .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
                     )
             }
+            .guideAnchor(.libraryMoreMenuButton)
             .menuStyle(.borderlessButton)
             .pointingHandCursor()
         }

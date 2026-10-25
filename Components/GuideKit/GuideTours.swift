@@ -216,6 +216,16 @@ enum GuideTours {
                 anchor: .librarySearchControl,
                 titleKey: "guide.library.search.title",
                 bodyKey: "guide.library.search.body"
+            ),
+            GuideStep(
+                anchor: .libraryImportButton,
+                titleKey: "guide.library.import.title",
+                bodyKey: "guide.library.import.body"
+            ),
+            GuideStep(
+                anchor: .libraryMoreMenuButton,
+                titleKey: "guide.library.more.title",
+                bodyKey: "guide.library.more.body"
             )
         ]
     )
