@@ -803,6 +803,11 @@ struct WallpaperDetailSheet: View {
                 )
                 .popover(isPresented: $showMoreOptionsPopover, arrowEdge: .bottom) {
                     morePopoverMenuContent
+                        .guideAnchor(.detailMorePopover)
+                        .onAppear {
+                            // 二级弹层打开即提示（WaifuX GuideKit）
+                            GuideEngine.shared.noteSheetOpened(GuideTours.detailMoreOptions)
+                        }
                 }
 
                 dividerLine
@@ -812,6 +817,7 @@ struct WallpaperDetailSheet: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 12)
         .glassContainer(spacing: 16)
+        .guideAnchor(.detailActionRow)
     }
 
     // MARK: - 液态玻璃更多菜单
