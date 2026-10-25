@@ -144,7 +144,8 @@ enum WakeDisplayRelinkRegression {
         check(!service.contains("Set(config.displayConfigs.keys).subtracting(currentScreenIDs)"), "relink cannot be restricted to vanished IDs")
         check(!service.contains("|| attempt >= 4"), "unstable topology never forces migration on timeout")
         check(service.contains("NSWorkspace.willSleepNotification") && service.contains("NSWorkspace.didWakeNotification"), "sleep and wake gate rotations")
-        check(service.contains("guard canScheduleForCurrentScreens else { return false }"), "timed rotation waits for ownership")
+        check(service.contains("guard canScheduleForCurrentScreens else {"), "timed rotation waits for ownership")
+        check(service.contains("guard BackgroundRuntimeRole.isHelper, canScheduleForCurrentScreens else { return }"), "relink waits for ownership and Helper role only")
         check(service.contains("self.screenChangeGeneration == generation else { return }"), "late unlock applies cannot commit old state")
         check(service.contains("currentScreenIDs.formUnion(config.displayConfigs.keys)"), "offline config retains rotation history")
         for name in ["lastChangedItemIDs", "lastChangeTimes", "usedItemIDs", "failedApplyRetryAfter", "onEndSwitchCooldownUntilByScreen"] {

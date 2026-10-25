@@ -54,6 +54,11 @@ enum ExploreErrorKind: Equatable {
     case unknown
 }
 
+/// 解析类失败的标记协议：具体错误枚举在各自 Service 文件里遵守，
+/// 让 ExploreErrorClassifier 不必引用具体类型——Models 层（NetworkError.swift）
+/// 必须能脱离 Services 独立编译（test-helper-network-proxy.py 按单文件清单编译）。
+protocol ParseFailureError: Error {}
+
 enum ExploreErrorClassifier {
     /// 把任意错误映射为探索列表的错误分类
     static func kind(for error: Error) -> ExploreErrorKind {
@@ -72,9 +77,7 @@ enum ExploreErrorClassifier {
         case is URLError:
             // .cancelled 已被调用方提前拦截；其余 URLError 都按网络问题处理
             return .network
-        case is FourKWallpapersParserError:
-            return .parse
-        case is WallsflowError:
+        case is ParseFailureError:
             return .parse
         default:
             return .unknown

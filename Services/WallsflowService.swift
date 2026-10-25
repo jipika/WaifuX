@@ -1236,7 +1236,7 @@ private extension WallsflowService {
 
 // MARK: - 错误类型
 
-enum WallsflowError: LocalizedError {
+enum WallsflowError: LocalizedError, ParseFailureError {
     case parseFailed(String)
     case invalidURL
     case notFound
