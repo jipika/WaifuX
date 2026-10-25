@@ -590,6 +590,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.restoreAllDataAsync()
+            // 系统壁纸缓存清理只在这里激活：执行者刻意是主 App，因为要清理的目标在
+            // wallpaper agent 的容器里、受 TCC 保护，而授权对象必须是隐私面板里可见的 WaifuX
+            // （Helper 藏在 Contents/Helpers/ 下，用户既找不到也拖不进去）。
+            // noteAppLaunch 内部自带 90 秒错峰 + 10 分钟节流 + 24h 兜底，不阻塞启动。
+            WallpaperSystemCacheJanitor.shared.noteAppLaunch()
             for action in self.uiRequestRouter.start(arguments: CommandLine.arguments) {
                 WaifuXUIActions.perform(action)
             }
@@ -662,6 +667,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         MediaLibraryService.shared.restoreSavedData()
         LibraryFolderStore.shared.restoreSavedData()
         AnimeFavoriteStore.shared.restoreSavedData()
+        AnimeDownloadStore.shared.restoreSavedData()
         AnimeProgressStore.shared.restoreSavedData()
         PlaybackProgressCache.shared.restoreSavedData()
         DownloadTaskService.shared.restoreSavedTasks()
@@ -723,6 +729,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     private var helperExitInProgress = false
     private var helperExitApproved = false
     private var exitsInterfaceOnly = false
+    /// 退出链已进入「Helper 确认停止、等它真正退出」的阶段。这个阶段
+    /// 不该再受 6s 应用级看门狗约束（见 applicationShouldTerminate 的计时分解）。
+    private var helperStopPhaseStarted = false
     private var interfaceRelaunchURL: URL?
     private var helperExitGeneration: UInt = 0
     private var helperExitTask: Task<Void, Never>?
@@ -779,6 +788,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         helperExitInProgress = true
         helperExitGeneration &+= 1
         let generation = helperExitGeneration
+        helperStopPhaseStarted = false
         if !exitsInterfaceOnly { BackgroundAgentClient.shared.beginApplicationQuit() }
         let frontmost = NSWorkspace.shared.frontmostApplication
         let metadata: [String: Any] = [
@@ -798,14 +808,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // a main-queue/concurrency callback can then block both drain and timeout.
         helperExitTask = Task {
             do {
-                try await BackgroundAgentClient.shared.drainForUIExit()
+                try await BackgroundAgentClient.shared.drainForUIExit(interfaceOnly: exitsInterfaceOnly)
+                AppExitDiagnostics.record("quitDrainCompleted")
                 guard generation == helperExitGeneration, !Task.isCancelled else { return }
                 if exitsInterfaceOnly {
                     // The Helper can finish this sync after the UI process exits.
-                    _ = try? await BackgroundAgentClient.shared.request("cloud.syncOnUIExit")
+                    // An unresponsive Helper must not hold the UI past the bounded
+                    // close fallback: the window close intent already preserves it.
+                    await BackgroundAgentClient.shared.requestBounded("cloud.syncOnUIExit", timeoutSeconds: 2)
+                    AppExitDiagnostics.record("quitCloudSyncBounded")
                 }
                 guard generation == helperExitGeneration, !Task.isCancelled else { return }
                 if !exitsInterfaceOnly {
+                    // Helper 已收到停止请求后的等待不再受 6s 应用级看门狗约束：
+                    // 它还要收尾渲染器/子进程，动态壁纸渲染中可达数秒。
+                    helperStopPhaseStarted = true
                     try await BackgroundAgentClient.shared.stopForApplicationQuit()
                 }
                 guard generation == helperExitGeneration, !Task.isCancelled else { return }
@@ -813,8 +830,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             } catch { failApplicationQuit(error, generation: generation) }
         }
         Task {
+            // 计时分解（同时满足两条验收判据）：
+            // · drain 阶段 6s：unresponsive Helper 在这里由待存设置的 2s 重放
+            //   超时先失败，或 6s 看门狗直接失败 —— 都不会进入 stop 阶段，
+            //   所以仍是「6s 内失败并保留 UI」。
+            // · stop 阶段再给 12s（合计 18s）：Helper 已应答 runtime.stop，
+            //   正在收尾渲染器/子进程；正常路径秒退，full-quit 探针 15s
+            //   deadline 之前完成。
             try? await Task.sleep(for: .seconds(6))
             guard generation == helperExitGeneration, !helperExitApproved else { return }
+            if helperStopPhaseStarted {
+                try? await Task.sleep(for: .seconds(12))
+                guard generation == helperExitGeneration, !helperExitApproved else { return }
+                failApplicationQuit(NSError(domain: "WaifuXHelper", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "后台服务停止超时，请重试退出 WaifuX"]), generation: generation)
+                return
+            }
             failApplicationQuit(NSError(domain: "WaifuXHelper", code: 3,
                 userInfo: [NSLocalizedDescriptionKey: exitsInterfaceOnly
                     ? "后台保存设置超时，界面尚未退出"
@@ -829,6 +860,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         helperExitTask?.cancel()
         helperExitTask = nil
         helperExitInProgress = false
+        helperStopPhaseStarted = false
         // 本次失败的判别要在复位前取走：exitsInterfaceOnly 只描述「刚发起的这次退出」，
         // 不能渗漏到下一次退出（否则关窗口失败一次后，Cmd+Q 会被误判成关窗口）。
         let wasInterfaceOnly = exitsInterfaceOnly

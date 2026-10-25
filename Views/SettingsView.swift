@@ -357,6 +357,11 @@ private struct GeneralSettingsTab: View {
         NSWorkspace.shared.open(url)
     }
 
+    private func openFullDiskAccessSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     var body: some View {
         MacSettingsForm {
             // 语言设置组
@@ -471,6 +476,7 @@ private struct GeneralSettingsTab: View {
                 ) {
                     MacToggle(isOn: $viewModel.systemWallpaperSyncEnabled)
                 }
+                .onAppear { viewModel.refreshWallpaperCacheAccessStatus() }
 
                 MacSettingsRow(
                     title: t("externalVideoRenderer"),
@@ -551,6 +557,31 @@ private struct GeneralSettingsTab: View {
                     showDivider: true
                 ) {
                     MacToggle(isOn: $viewModel.wallpaperExtensionKeeperEnabled)
+                }
+
+                // 系统壁纸缓存授权提示：清理器改由主 App 执行后，「能不能读到缓存目录」
+                // 直接决定磁盘会不会无限增长，所以必须在用户可见处给出出口。
+                // 只在「同步开着（确实会产出这份缓存）且读不到」时才提示：
+                // 关掉同步的用户不产生该缓存，提示他们授权只是噪音；
+                // 这与 scheduleRun 在同步关闭时直接早退的逻辑保持一致。
+                if viewModel.systemWallpaperSyncEnabled,
+                   viewModel.wallpaperCacheInaccessibleRootCount > 0 {
+                    MacSettingsRow(
+                        title: t("wallpaperCacheAccessRequired"),
+                        subtitle: t("wallpaperCacheAccessRequiredDesc"),
+                        showDivider: true
+                    ) {
+                        Button {
+                            openFullDiskAccessSettings()
+                        } label: {
+                            Image(systemName: "arrow.up.forward.app")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color(hex: "0A84FF"))
+                                .frame(width: 28, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .help(t("openFullDiskAccessSettings"))
+                    }
                 }
 
                 MacSettingsRow(

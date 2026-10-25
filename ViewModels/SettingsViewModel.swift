@@ -255,6 +255,19 @@ class SettingsViewModel: ObservableObject {
         lockScreenSelectionStatus = WallpaperStoreSelectionProbe.currentSelection()
     }
 
+    /// 系统壁纸缓存是否「读不到」（主 App 缺完全磁盘访问权限时为非空）。
+    /// 清理已改由主 App 执行，而目标在 wallpaper agent 的容器里、受 TCC 保护；
+    /// 没有这行提示，用户永远看不到「为什么磁盘一直在涨」。
+    @Published var wallpaperCacheInaccessibleRootCount = 0
+
+    /// 同步探测：每个缓存根只做一次目录级 readdir（不递归、不看文件内容）。
+    /// 实测代价：无权限时 25.8ms、有权限时 35.4ms（launchd 与 Terminal 两种上下文各跑一次），
+    /// 所以放在设置页 onAppear 里不绕后台线程——顺带说明：Swift 6 下把 self 带进
+    /// `Task.detached` 会直接报 sending 数据竞争诊断，这里也没必要为了 30ms 去跟它较劲。
+    func refreshWallpaperCacheAccessStatus() {
+        wallpaperCacheInaccessibleRootCount = WallpaperSystemCacheJanitor.inaccessibleRootsNow().count
+    }
+
     /// 壁纸扩展守护（keeper）开关。默认开启：App 退出后由 LaunchAgent 常驻守卫，
     /// 扩展被 pkd 清杀时自动重新注册拉载（详见 WallpaperExtensionKeeper 顶部注释）。
     @Published var wallpaperExtensionKeeperEnabled = true {
