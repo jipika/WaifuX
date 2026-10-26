@@ -215,11 +215,6 @@ enum GuideTours {
                 bodyKey: "guide.media.source.body"
             ),
             GuideStep(
-                anchor: .mediaContentChips,
-                titleKey: "guide.media.chips.title",
-                bodyKey: "guide.media.chips.body"
-            ),
-            GuideStep(
                 anchor: .mediaResolutionMenu,
                 titleKey: "guide.media.res.title",
                 bodyKey: "guide.media.res.body"

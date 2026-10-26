@@ -332,29 +332,61 @@ final class GuideEngine: ObservableObject {
 
 struct GuideProgressStore {
     private let defaults: UserDefaults
-    private let key = "guide.progress.v1"
+    private let key = "guide.progress.v2"
+    private let legacyKey = "guide.progress.v1"
+    /// 每 3 个补丁版本（VERSION 最后一段）重播一次。
+    private static let replayVersionGap = 3
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
 
-    private func load() -> [String: Int] {
-        guard let data = defaults.data(forKey: key) else { return [:] }
-        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
+    /// 当前 App 版本（CFBundleShortVersionString，如 38.0.153）。
+    private static var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 
-    private func save(_ map: [String: Int]) {
+    /// 距离上次观看是否已跨过 3 个补丁版本（跨大版本同样重播）。
+    private static func gapReached(from seen: String, to current: String) -> Bool {
+        let a = seen.split(separator: ".").compactMap { Int($0) }
+        let b = current.split(separator: ".").compactMap { Int($0) }
+        guard a.count >= 2, b.count >= 2 else { return true }
+        if a[0] != b[0] || a[1] != b[1] { return true }
+        let seenPatch = a.count >= 3 ? a[2] : 0
+        let currentPatch = b.count >= 3 ? b[2] : 0
+        return currentPatch - seenPatch >= replayVersionGap
+    }
+
+    private func load() -> [String: String] {
+        if let data = defaults.data(forKey: key),
+           let map = try? JSONDecoder().decode([String: String].self, from: data) {
+            return map
+        }
+        // 迁移 v1（值是 contentVersion Int）：有记录即视为已在当前版本看过，
+        // 之后每 3 个补丁版本再弹。
+        guard let legacy = defaults.data(forKey: legacyKey),
+              let old = try? JSONDecoder().decode([String: Int].self, from: legacy) else { return [:] }
+        var migrated: [String: String] = [:]
+        for (tourID, version) in old where version >= 0 {
+            migrated[tourID] = Self.currentVersion
+        }
+        save(migrated)
+        return migrated
+    }
+
+    private func save(_ map: [String: String]) {
         guard let data = try? JSONEncoder().encode(map) else { return }
         defaults.set(data, forKey: key)
     }
 
     func needsAutoplay(_ tour: GuideTour) -> Bool {
-        (load()[tour.id] ?? -1) < tour.contentVersion
+        guard let seen = load()[tour.id] else { return true }
+        return Self.gapReached(from: seen, to: Self.currentVersion)
     }
 
     func markCompleted(_ tour: GuideTour) {
         var map = load()
-        map[tour.id] = max(map[tour.id] ?? 0, tour.contentVersion)
+        map[tour.id] = Self.currentVersion
         save(map)
     }
 
