@@ -612,7 +612,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 reason: "menu-bar-quick-switch"
             )
 
-            AppLogger.info(.wallpaper, "菜单栏快速设置壁纸", metadata: [
+            AppLogger.error(.wallpaper, "菜单栏快速设置壁纸", metadata: [
                 "item": selectedItem.id,
                 "path": applyURL.path,
                 "screens": screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
@@ -624,7 +624,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             )
             // 分段耗时：定位「点设壁纸后要等」到底卡在 prepare（工程解析/dependency）
             // 还是 apply 本体（渲染切换）。
-            AppLogger.debug(.wallpaper, "菜单栏设置壁纸分段耗时", metadata: [
+            AppLogger.error(.wallpaper, "菜单栏设置壁纸分段耗时", metadata: [
                 "item": selectedItem.id,
                 "prepareMS": Int(prepareDone.timeIntervalSince(prepareStart) * 1000),
                 "applyMS": Int(Date().timeIntervalSince(prepareDone) * 1000),

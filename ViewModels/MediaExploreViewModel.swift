@@ -341,6 +341,18 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 确保本地媒体索引可供库页面使用。
     /// 缓存失效时会合并并发请求，避免多个视图重复从持久化记录重建同一份快照。
+    /// 本地媒体缓存是否仍在等重建。语义与 `WallpaperViewModel.isLibraryCachePending`
+    /// 一致：媒体库 220 个工程目录的重建比快照晚一步。
+    var isLibraryCachePending: Bool { rebuildLocalMediaCacheTask != nil }
+
+    /// 等待在飞的媒体缓存重建结束。语义同 `WallpaperViewModel.awaitLocalLibraryCacheReady()`。
+    func awaitLocalMediaCacheReady() async {
+        let deadline = Date().addingTimeInterval(3)
+        while let task = rebuildLocalMediaCacheTask, Date() < deadline {
+            await task.value
+        }
+    }
+
     func ensureLocalMediaIndex() async {
         guard localMediaCacheNeedsRestore else { return }
         if let task = rebuildLocalMediaCacheTask {

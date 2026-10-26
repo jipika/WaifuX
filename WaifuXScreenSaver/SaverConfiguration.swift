@@ -34,6 +34,9 @@ struct SaverConfiguration {
     let defaultCropDisplayKey: String?
     /// 内容指纹：变化才重载。
     let identity: Data
+    /// 按屏壁纸表（key = "display-<displayID>"）。多屏异壁纸时每块屏的屏保进程
+    /// 各取自己的条目；顶层字段保留为主屏条目，兼容尚未刷新的旧版屏保组件。
+    let wallpaperEntries: [String: SaverWallpaperEntry]
 
     // MARK: - 加载
 
@@ -61,6 +64,7 @@ struct SaverConfiguration {
         guard FileManager.default.fileExists(atPath: renderURL.path) else { return nil }
 
         let cropSnapshot = Self.decodeCropSnapshot(object["cropByDisplay"] as? [String: Any] ?? [:])
+        let wallpaperEntries = Self.decodeWallpaperEntries(object["wallpaperByDisplay"] as? [String: Any] ?? [:])
         let rawRate = (object["playbackRate"] as? NSNumber)?.floatValue ?? 1
         let playbackRate = rawRate.isFinite && rawRate > 0 ? rawRate : 1
 
@@ -76,7 +80,8 @@ struct SaverConfiguration {
             language: object["language"] as? String ?? Locale.preferredLanguages.first ?? "en",
             cropSnapshot: cropSnapshot,
             defaultCropDisplayKey: object["defaultCropDisplayKey"] as? String,
-            identity: identity(of: object)
+            identity: identity(of: object),
+            wallpaperEntries: wallpaperEntries
         )
     }
 
@@ -95,6 +100,50 @@ struct SaverConfiguration {
             return snapshot
         }
         return .default
+    }
+
+    // MARK: - 按屏壁纸
+
+    /// 解析当前屏应播放的壁纸条目：本屏条目 → 主屏条目 → 键名排序的其余条目
+    /// → 顶层旧字段。条目渲染文件不存在（暂存被清 / 卷未挂载）时跳过继续回退；
+    /// 顶层字段是主屏条目的旧式快照，load() 已校验其文件存在，永远兜底。
+    func wallpaperEntry(forDisplayKey key: String?) -> SaverWallpaperEntry? {
+        var ordered: [SaverWallpaperEntry] = []
+        if let key, let entry = wallpaperEntries[key] { ordered.append(entry) }
+        if let defaultCropDisplayKey, let entry = wallpaperEntries[defaultCropDisplayKey] { ordered.append(entry) }
+        ordered.append(contentsOf: wallpaperEntries.sorted { $0.key < $1.key }.map(\.value))
+        ordered.append(SaverWallpaperEntry(
+            kind: kind, title: title, renderURL: renderURL, sourcePath: sourcePath, identity: nil
+        ))
+        return ordered.first { FileManager.default.fileExists(atPath: $0.renderURL.path) }
+    }
+
+    /// 当前屏实际播放内容的指纹（含回退结果）。屏保逐屏比较，变化才重载，
+    /// 别的屏换壁纸不会牵连本屏重放。
+    func playbackFingerprint(forDisplayKey key: String?) -> String? {
+        guard let entry = wallpaperEntry(forDisplayKey: key) else { return nil }
+        return entry.identity ?? identity.base64EncodedString()
+    }
+
+    /// 逐条容错解码：单屏条目损坏只跳过该屏（由取值链回退），不影响整份配置。
+    private static func decodeWallpaperEntries(_ raw: [String: Any]) -> [String: SaverWallpaperEntry] {
+        var entries: [String: SaverWallpaperEntry] = [:]
+        for (key, value) in raw {
+            guard let object = value as? [String: Any],
+                  let kindRaw = object["kind"] as? String,
+                  let kind = Kind(rawValue: kindRaw),
+                  let renderPath = object["renderPath"] as? String else {
+                continue
+            }
+            entries[key] = SaverWallpaperEntry(
+                kind: kind,
+                title: object["title"] as? String ?? "WaifuX",
+                renderURL: URL(fileURLWithPath: renderPath),
+                sourcePath: object["sourcePath"] as? String,
+                identity: object["identity"] as? String
+            )
+        }
+        return entries
     }
 
     /// 指纹 = 去掉易变字段后的配置内容。`configuredAt` 只是写入时间戳，
@@ -123,6 +172,21 @@ struct SaverConfiguration {
         }
         return decoded
     }
+}
+
+// MARK: - 按屏壁纸条目
+
+/// `wallpaperByDisplay` 的值。多屏异壁纸时每块屏的屏保进程各自解析自己的条目；
+/// 顶层字段始终保留为主屏条目，旧版屏保组件只读顶层，行为不变。
+struct SaverWallpaperEntry {
+    let kind: SaverConfiguration.Kind
+    let title: String
+    /// 实际参与渲染的文件（视频或静图）。
+    let renderURL: URL
+    /// 源文件 / 工程目录，仅用于日志。
+    let sourcePath: String?
+    /// App 侧写入的条目指纹；缺失时屏保退回整份配置指纹。
+    let identity: String?
 }
 
 // MARK: - 屏保内文案

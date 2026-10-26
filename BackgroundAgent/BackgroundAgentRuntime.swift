@@ -66,6 +66,18 @@ final class BackgroundAgentRuntime {
     private var replyOrder: [String] = []
     private var migrationProgress: MigrationProgress?
     private var libraryRevision: UInt64 = 0
+    /// Helper 侧库记录是否已从磁盘恢复完（收藏/下载/文件夹三套都齐）。
+    ///
+    /// 这是 `library.snapshot` 快速读通道的闸门：没恢复完就读会返回空或半量
+    /// 快照，UI 侧据此判「已到达」会把假空态换个理由复现（2026-10-26 复核指出）。
+    /// 只有置 true 之后的读才被允许提前返回。
+    private(set) var libraryRecordsAreRestored = false
+    /// Helper 队列里在飞的库写操作数量（含已排队未执行）。
+    ///
+    /// 快速读通道只在它为 0 时越队：若队里还有一条删除/移动没跑，越队的读
+    /// 会返回「还没有这次写」的快照，UI 整体覆盖后表现为已删记录复活、
+    /// 刚建文件夹消失。
+    private var pendingLibraryMutations = 0
     private var optimizationAliases: [UUID: UUID] = [:]
     private var preferenceSequences: [String: UInt64] = [:]
     private var wallpaperDownloader: WallpaperViewModel?
@@ -128,7 +140,13 @@ final class BackgroundAgentRuntime {
             ThemeManager.shared.restoreSavedSettings()
             await applyNetworkPreferences()
             guard !Task.isCancelled, !stopping, !upgrading else { return }
-            if BackgroundRuntimeRole.isIsolatedTest { bindState(); return }
+            if BackgroundRuntimeRole.isIsolatedTest {
+                // 隔离测试不跑下面的恢复序列，快照闸门必须同样打开，
+                // 否则回归脚本里的 `library.snapshot` RPC 会被新 guard 拒掉。
+                libraryRecordsAreRestored = true
+                bindState()
+                return
+            }
             WaifuXPreferences.shared.set(currentSession, forKey: sessionKey)
             WaifuXPreferences.shared.synchronize()
             LocalizationService.shared.restoreSavedSettings()
@@ -136,6 +154,9 @@ final class BackgroundAgentRuntime {
             MediaLibraryService.shared.restoreSavedData()
             LibraryFolderStore.shared.restoreSavedData()
             LibraryFolderStore.shared.sanitizeLibraryFolderMemberships()
+            // 三套库状态齐了：从这里开始 `library.snapshot` 可以提前应答，
+            // 不必等 startRuntime 尾部（渲染器/屏保恢复要几十秒，UI 白等）。
+            libraryRecordsAreRestored = true
             libraryRecoveryTask = Task(priority: .utility) {
                 await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
                 guard !Task.isCancelled else { return }
@@ -310,8 +331,16 @@ final class BackgroundAgentRuntime {
         guard !upgrading else {
             return encodeReply(BackgroundAgentReply(requestID: command.requestID, result: nil, error: "后台服务正在更新，请稍后重试"))
         }
-        let previous = commandTail
+        // 库快照是纯读：允许越过队首那条 `bootstrap`（它会等整个 startRuntime，
+        // 实测几十秒）。越过的前提是恢复已完成（见 execute 的闸门）且本进程内
+        // 没有待提交的库写操作（UI 侧已按此条件选择是否走快速通道）。
+        let isLibraryWrite = command.operation.hasPrefix("library.") && command.operation != "library.snapshot"
+        if isLibraryWrite { pendingLibraryMutations += 1 }
+        let isLibrarySnapshotRead = command.operation == "library.snapshot"
+            && libraryRecordsAreRestored && pendingLibraryMutations == 0
+        let previous = isLibrarySnapshotRead ? nil : commandTail
         let task = Task { @MainActor in
+            defer { if isLibraryWrite { pendingLibraryMutations -= 1 } }
             _ = await previous?.value
             if let reply = cachedReplies[command.requestID] { return reply }
             let reply: BackgroundAgentReply
@@ -337,7 +366,7 @@ final class BackgroundAgentRuntime {
             schedulePublish()
             return data
         }
-        if !command.operation.hasSuffix(".wait") { commandTail = task }
+        if !command.operation.hasSuffix(".wait"), !isLibrarySnapshotRead { commandTail = task }
         inFlightReplies[command.requestID] = task
         let result = await task.value
         inFlightReplies.removeValue(forKey: command.requestID)
@@ -1178,6 +1207,13 @@ final class BackgroundAgentRuntime {
             try LibraryFolderStore.shared.syncImportMediaFolders(try a.decode("folders", as: [LibraryFolder].self))
             return [:]
         case "library.snapshot":
+            guard libraryRecordsAreRestored else {
+                // 恢复未完成就应答会返回空/半量快照，UI 侧据此判「已到达」
+                // 反而把假空态换个理由复现。让这次读明确失败，由调用方按拍重试。
+                throw CocoaError(.featureUnsupported, userInfo: [
+                    NSLocalizedDescriptionKey: "库记录尚未恢复完成"
+                ])
+            }
             return ["media": MediaLibraryService.shared.backgroundLibrarySnapshot(), "wallpaper": WallpaperLibraryService.shared.backgroundLibrarySnapshot(), "mediaFolders": try JSONEncoder().encode(LibraryFolderStore.shared.mediaFolders), "wallpaperFolders": try JSONEncoder().encode(LibraryFolderStore.shared.wallpaperFolders)]
         case "steam.start":
             try SteamServiceManager.shared.start()

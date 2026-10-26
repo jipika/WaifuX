@@ -27,8 +27,11 @@ import Kingfisher
 enum LibraryCoverImageCache {
     static let imageCache: ImageCache = {
         let cache = ImageCache(name: "library-covers")
-        cache.memoryStorage.config.totalCostLimit = 96 * 1024 * 1024 // 96MB
-        cache.memoryStorage.config.countLimit = 400
+        // 中间帧出图已降至 512px（≈1MB/张）：160MB 内存可驻留约一整屏以上，
+        // 滚动往返不再必然驱逐重载。处理器 identifier 含尺寸，旧 1024px 条目
+        // 自然过期淘汰，无需迁移。
+        cache.memoryStorage.config.totalCostLimit = 160 * 1024 * 1024 // 160MB
+        cache.memoryStorage.config.countLimit = 600
         cache.memoryStorage.config.expiration = .seconds(30 * 60)    // 30 min
         cache.memoryStorage.config.cleanInterval = 60
         // 磁盘独立小缓存：512 降采样 JPEG 体积很小；远程 thumb 首次迁移会重下一次。
@@ -1101,7 +1104,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
         // 否则 30 分钟内存过期前会一直命中旧帧。
         let caches = [KingfisherManager.shared.cache, LibraryCoverImageCache.imageCache]
         let processorIdentifier = GIFAwareMiddleFrameImageProcessor(
-            targetSize: CGSize(width: 512, height: 512),
+            targetSize: CGSize(width: 256, height: 256),
             scaleFactor: 2
         ).identifier
         let cacheKeys = [
@@ -1289,6 +1292,16 @@ final class LibraryMediaGridCell: ExploreGridItem {
             guard let url, !rawCandidates.contains(url) else { continue }
             rawCandidates.append(url)
         }
+        // 本地 GIF / Workshop preview.gif 兜底：纯 GIF 卡片没有任何静态抽帧时，
+        // 静态封面用中间帧（GIFAwareMiddleFrameImageProcessor），不再是空白卡。
+        // 存在性走 FileExistenceCache 正负缓存——列表构建时 libraryGridThumbnailURL
+        // 已对同一文件 stat 过，此处命中缓存，滚动热路径不新增磁盘 IO。
+        if let local = model.localFileURL, local.isFileURL,
+           FileExistenceCache.shared.fileExists(atPath: local.path),
+           LocalImageThumbnailCache.isGIFFile(local),
+           !rawCandidates.contains(local) {
+            rawCandidates.append(local)
+        }
         // 静态抽帧 / 普通 poster 始终优先。GIF 只能在没有静态候选或所有静态候选
         // 加载失败时接手，避免滚动期间看到 GIF 的中间帧替代正式封面。
         let candidates = rawCandidates.filter { !Self.isGIFStaticFallback($0, model: model) }
@@ -1360,7 +1373,10 @@ final class LibraryMediaGridCell: ExploreGridItem {
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.itemID)
         }
         let url = candidates[index]
-        let target = CGSize(width: 512, height: 512)
+        // 512pt@2x 的中间帧出图 1024×1024 ≈ 4MB/张，24 张就挤爆 96MB 内存缓存，
+        // 滚动回来必 miss 重载。降到 256pt@2x = 512px（≈1MB/张）配合 160MB 限额，
+        // 网格卡片物理尺寸远小于 512px，视觉无损。
+        let target = CGSize(width: 256, height: 256)
         // 处理器会按数据格式分流，普通图片仍走 Downsampling；GIF 不论 URL
         // 是否带 .gif 后缀都取中间帧，保证默认静态封面不是首帧黑图。
         let processor: ImageProcessor = GIFAwareMiddleFrameImageProcessor(
@@ -1567,7 +1583,10 @@ final class LibraryMediaGridCell: ExploreGridItem {
     private func applyResolvedThumbnail(_ url: URL) {
         guard let model = currentModel, resolvedThumbnailURL != url else { return }
         if Self.isGIFStaticFallback(url, model: model),
-           hasStaticCoverCandidate(model: model) {
+           hasStaticCoverCandidate(model: model),
+           !Self.hasLocalGIFSource(model) {
+            // 本地确有 GIF 时不再让「不确定的远程无扩展名候选」拦住本地中间帧——
+            // 纯 GIF 卡片此前因此默认空白。
             return
         }
         resolvedThumbnailURL = url
@@ -1578,6 +1597,23 @@ final class LibraryMediaGridCell: ExploreGridItem {
         [resolvedThumbnailURL, model.initialThumbnailURL, model.mediaItem.coverImageURL]
             .compactMap { $0 }
             .contains { !Self.isGIFStaticFallback($0, model: model) }
+    }
+
+    /// 无扩展名的远程 URL（如 Steam preview_url，实为目录形式）内容不确定——
+    /// 可能是 GIF 甚至是 MP4。只有确认静态（显式图片扩展名 / 已生成的列表缓存 /
+    /// 非 GIF 元数据）才算静态候选；此类 URL 不再阻止本地 GIF 中间帧上封面。
+    /// 仅当本地确有 GIF 文件时才需要这个放宽，避免影响纯远程卡片的兜底语义。
+    private static func hasLocalGIFSource(_ model: LibraryMediaCellModel) -> Bool {
+        guard let local = model.localFileURL, local.isFileURL else { return false }
+        if LocalImageThumbnailCache.isGIFFile(local) {
+            return true
+        }
+        // Workshop 目录内的 preview.gif
+        if FileExistenceCache.shared.isDirectory(atPath: local.path),
+           let preview = MediaItem.resolveLocalWorkshopPreviewGIF(from: local) {
+            return LocalImageThumbnailCache.isGIFFile(preview)
+        }
+        return false
     }
 
     private func refreshListThumbnailSource(model: LibraryMediaCellModel) {

@@ -6,16 +6,19 @@ private final class TestService: BackgroundAgentServiceRegistration {
     var status: SMAppService.Status
     var registrations = 0
     var unregistrations = 0
+    var sequence: [String] = []
     var result: SMAppService.Status = .enabled
     var failure: Error?
     init(_ status: SMAppService.Status) { self.status = status }
     func register() throws {
         registrations += 1
+        sequence.append("register")
         status = result
         if let failure { throw failure }
     }
     func unregister() async throws {
         unregistrations += 1
+        sequence.append("unregister")
         status = .notRegistered
     }
 }
@@ -48,11 +51,26 @@ private enum RegistrationRegression {
         try await BackgroundAgentRegistration.repairLaunchdRegistration(repair)
         check(repair.unregistrations == 1 && repair.registrations == 1 && repair.status == .enabled,
               "service missing from launchd is repaired by re-registering")
+        // 签名类别变化（正式包 Developer ID ↔ Xcode 构建 Apple Development）时，
+        // launchd 会拿缓存里的旧启动约束把新 Helper SIGKILL 掉（退出码 78 EX_CONFIG）。
+        // 丢弃 job 必须落在注销之后（BTM 记录已删，smd 不会再把旧 job 下发回来）、
+        // 注册之前（register 才会按当前二进制重算约束）。
+        let ordered = TestService(.enabled)
+        try await BackgroundAgentRegistration.repairLaunchdRegistration(
+            ordered,
+            bootout: { ordered.sequence.append("bootout") },
+            probe: {
+                ordered.sequence.append("probe")
+                return true
+            }
+        )
+        check(ordered.sequence == ["unregister", "bootout", "register", "probe"],
+              "repair discards the cached launchd job between unregister and re-register")
         // BTM 记回 .enabled 但 mach service 仍不可达：必须报错，不能像旧实现那样
         // 只看 status 就「报告修好了」，让下一轮 bootstrap 立刻又 4099。
         let unreachable = TestService(.enabled)
         do {
-            try await BackgroundAgentRegistration.repairLaunchdRegistration(unreachable) { false }
+            try await BackgroundAgentRegistration.repairLaunchdRegistration(unreachable, probe: { false })
             preconditionFailure("expected launchd job not ready")
         } catch {
             if case .launchdJobNotReady? = error as? BackgroundAgentRegistrationError {
@@ -62,10 +80,10 @@ private enum RegistrationRegression {
         }
         let recovered = TestService(.enabled)
         var probes = 0
-        try await BackgroundAgentRegistration.repairLaunchdRegistration(recovered) {
+        try await BackgroundAgentRegistration.repairLaunchdRegistration(recovered, probe: {
             probes += 1
             return probes >= 2
-        }
+        })
         check(probes == 2 && recovered.status == .enabled,
               "repair succeeds once the probe reaches the service")
         let repairDenied = TestService(.enabled)

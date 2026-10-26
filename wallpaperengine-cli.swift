@@ -2410,6 +2410,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         web.autoresizingMask = []
         web.navigationDelegate = self
         web.wantsLayer = true
+        // 消除帧提交间隙的 WebKit 默认白底（详情页 WebWallpaperPreviewView 同款做法；
+        // 页面自身有背景色，透明底不影响观感，但能避免合成空帧露出白色）。
+        // KVC 键存在性保护：drawsBackground 非 API 属性，键不存在时裸 setValue 会抛
+        // NSUnknownKeyException 且 Swift 捕不住，直接崩掉 daemon。
+        if web.responds(to: NSSelectorFromString("drawsBackground")) {
+            web.setValue(false, forKey: "drawsBackground")
+        }
         web.layer?.backgroundColor = NSColor.clear.cgColor
         web.layer?.contentsScale = targetScreen.backingScaleFactor
 
@@ -2518,8 +2525,41 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             if self.screenStates[s]?.isOffscreen != true {
                 self.startMouseEventBridge(for: s)
             }
+            // 诊断（纯观测，不改任何窗口）：枚举本进程全部 NSWindow，
+            // 记录 WebKit 可能为 WebGL/离屏 surface 创建的宿主窗口。
+            // 背景：实测 daemon 名下存在一个 500×500 停在屏幕左下角 (0,580)
+            // 的 layer 0 窗口（非本代码创建），帧交换间隙会闪现——
+            // 用户报告的「web 壁纸左下角白色疯狂闪」。先收集真实清单再决定处置。
+            self.logOwnedWindowsOnce(reason: "didFinish screen=\(s)")
+            // WebGL 首帧提交晚于 didFinish；2s 后再枚举一次，抓 surface 窗成型后的形态。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.logOwnedWindowsOnce(reason: "didFinish+2s screen=\(s)")
+            }
         }
         NSApp.setActivationPolicy(.prohibited)
+    }
+
+    /// 纯观测：打印本进程所有 NSWindow 的关键属性（类名/windowNumber/标题/frame/
+    /// alpha/可见性/层级）。绝不做任何修改；供白闪问题的窗口归属取证。
+    private func logOwnedWindowsOnce(reason: String) {
+        let windows = NSApp.windows
+        var lines: [String] = []
+        lines.reserveCapacity(windows.count + 1)
+        lines.append("count=\(windows.count)")
+        for (i, w) in windows.enumerated() {
+            let f = w.frame
+            lines.append(
+                "[\(i)] class=\(String(describing: type(of: w)))"
+                + " num=\(w.windowNumber)"
+                + " title=\"\(w.title)\""
+                + String(format: " frame=(%.0f,%.0f,%.0f×%.0f)", f.origin.x, f.origin.y, f.width, f.height)
+                + String(format: " alpha=%.3f", w.alphaValue)
+                + " visible=\(w.isVisible)"
+                + " level=\(w.level.rawValue)"
+                + " opaque=\(w.isOpaque)"
+            )
+        }
+        dlog("[WebRendererBridge] ownedWindows \(reason): " + lines.joined(separator: " | "))
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

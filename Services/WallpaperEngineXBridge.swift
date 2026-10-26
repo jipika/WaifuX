@@ -110,6 +110,7 @@ private struct WebDaemonMediaLyricsLineMessage: Codable {
 /// 进程终止事件（线程安全，通过 os_unfair_lock 传递到 @MainActor）
 private struct TerminationEvent: @unchecked Sendable {
     let pid: pid_t
+    let screenID: String
     let generation: UInt64
     let status: Int32
     let reason: Process.TerminationReason
@@ -290,6 +291,18 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var screenWatchdogs: [pid_t: DispatchWorkItem] = [:]
     /// crop 等待 Task（key = screenID），新的 setWallpaper 开始前先 cancel 旧的
     private var cropWaitTasks: [String: Task<Void, Never>] = [:]
+    /// 延迟显示兜底 Task（key = screenID）。`--defer-show` 渲染器已登记但
+    /// `revealDeferredSceneRenderers` 因全局代次被顶替而提前返回时，show 指令
+    /// 永远不会下发：进程保持隐藏、离屏空烧 GPU，桌面留在上一层的静止内容上。
+    /// 该兜底按 pid 校验所有权，只在"登记它的那次请求没走完 reveal"时补发 show。
+    private var deferredRevealGuardTasks: [String: Task<Void, Never>] = [:]
+    /// 兜底 Task 的归属令牌（key = screenID）：只有当前令牌等于自己的令牌时
+    /// 才允许清理表项，避免被新一轮注册作废的旧 Task 误删新 Task 的句柄。
+    private var deferredRevealGuardTokens: [String: UInt64] = [:]
+    private var deferredRevealGuardTokenSeed: UInt64 = 0
+    /// 兜底等待时长：必须长于 reveal 的正常预算（首帧最多 12s + poster 1.2s
+    /// + 桌面确认 1.5s + 合成节拍 0.3s），否则会与正在收尾的正常 reveal 抢跑。
+    private static let deferredRevealGuardSeconds: TimeInterval = 20
     /// Scene 路径 → orthogonalprojection 尺寸；nil 表示读过但没有。
     private var sceneCanvasSizeCache: [String: CGSize?] = [:]
     /// 每屏最近一次读到的 scene canvas 尺寸。热切换会删 canvas-size 文件，新文件没写出前用它重算 crop。
@@ -862,6 +875,28 @@ final class WallpaperEngineXBridge: ObservableObject {
 		let resolvedPath = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path)).path
 		let renderKind: RenderKind = isWebWallpaper(path: resolvedPath) ? .web : .scene
 
+        // 静态图误入渲染通道守卫。本桥只认 Workshop 工程目录（scene / web）；
+        // 一张 .heic/.jpg 之类被送到这里，说明上层分流错了（2026-10-25 实证：
+        // `.heic` 因白名单缺 heic 掉进 `case .unknown`，走到这里被判成 .scene，
+        // wallpaper-wgpu 报 `VFS open failed`，而 App 侧仍打 `setWallpaper 完成`
+        // 判成功 → 用户看到「设了没反应」）。这里在**任何持久化写入之前**诚实失败，
+        // 让上层把错误显示出来。正常 scene/web 传的是目录，不会命中。
+        var isDirectoryLike: ObjCBool = false
+        FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDirectoryLike)
+        let staticImageExt = URL(fileURLWithPath: resolvedPath).pathExtension.lowercased()
+        if !isDirectoryLike.boolValue,
+           LocalWallpaperApplyService.staticImageClassificationExts.contains(staticImageExt) {
+            AppLogger.error(.wallpaper, "静态图被误送进渲染桥，已拒绝（应按静态壁纸路径应用）", metadata: [
+                "path": path,
+                "resolvedPath": resolvedPath,
+                "ext": staticImageExt,
+                "wouldBeRenderKind": renderKind.rawValue
+            ])
+            throw WallpaperEngineError.executionFailed(
+                "这是一张静态图片（.\(staticImageExt)），不能交给动态壁纸渲染器处理：\(URL(fileURLWithPath: path).lastPathComponent)"
+            )
+        }
+
         // 启动恢复、显示器重连等路径会直接调用本桥，不能只依赖详情页/调度器入口
         // 取消上一张 Scene 的伴生任务，避免旧壁纸继续生成并写回自己的静帧。
         SceneOfflineBakeService.cancelRealtimeCompanionBake(
@@ -1307,12 +1342,15 @@ final class WallpaperEngineXBridge: ObservableObject {
             var perScreenArgs = baseArgs
             perScreenArgs += ["--screen", "\(screenX),\(screenY),\(screenW),\(screenH),\(scale)"]
 
-            // 渲染帧率
+            // 渲染帧率。渲染器默认 perf-mode=balanced（30fps）会把 --fps 覆盖为 30，
+            // 这里按用户设置映射对应档位：<60 → power（30fps+effectRT 减半）、
+            // 60 → balanced（30fps）、>60 → high（60fps，跟随 --fps）。
             let userFPS = WaifuXPreferences.shared.double(forKey: "wallpaper_engine_fps")
             let userFPSClamped = userFPS.isFinite ? max(60, min(240, userFPS)) : 60
             let screenMaxFPS = screen.maxRefreshRate
             let effectiveFPS = min(Int(userFPSClamped), screenMaxFPS)
             perScreenArgs += ["--fps", String(effectiveFPS)]
+            perScreenArgs += ["--perf-mode", userFPSClamped > 60 ? "high" : "balanced"]
 
             // 控制文件路径（首次启动就创建，后续热切换复用）
             let cropControlURL = createCropControlURL(screenID: screenID)
@@ -1443,6 +1481,13 @@ final class WallpaperEngineXBridge: ObservableObject {
                 // show 之后再启动可见性守护（否则会把未显示的窗口提前 AXRaise）。
                 if firstFrameURL == nil {
                     scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
+                } else {
+                    scheduleDeferredRevealGuard(
+                        screenID: screenID,
+                        pid: launchedPID,
+                        expectedPath: resolvedPath,
+                        expectedGeneration: switchGeneration
+                    )
                 }
                 AppLogger.error(.wallpaper, "wallpaper-wgpu 进程已启动", metadata: ["screenID": screenID, "pid": launchedPID, "renderKind": renderKind.rawValue, "screenProcesses": screenProcesses.count])
 
@@ -1790,16 +1835,31 @@ final class WallpaperEngineXBridge: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
                 guard let self, !Task.isCancelled else { return }
-                self.auditRendererHealth()
-            }
+                await self.auditRendererHealth()            }
         }
     }
 
-    private func auditRendererHealth() {
+    private func auditRendererHealth() async {
         // 先补意外死亡的 scene 渲染器：这一步和下面的活进程巡检互不重叠，
         // 死进程早就从 screenProcesses 里被清掉，只能靠自愈队列找回来。
         attemptPendingSceneRecoveries()
         let screenLocked = VideoWallpaperManager.shared.isScreenLocked
+
+        // 孤儿渲染器最后一道网：revealDeferredSceneRenderers 的兜底任务有三条
+        // 「未介入」放弃分支（代次未变 + 在飞设置持续挡住）。超硬时限 90s 仍
+        // presentationDeferred 的进程是纯空转（离屏 30-60fps 烧 GPU，桌面无变化），
+        // 这里直接按首帧状态补 show 或回收——所有权校验沿用 applyDeferredRevealFallback
+        // 的 pid/path/deferred 三重检查，误伤面收窄到「登记者仍是它自己」。
+        for (screenID, info) in screenProcesses where info.presentationDeferred {
+            guard Date().timeIntervalSince(info.sceneBudgetStartedAt) >= 90 else { continue }
+            _ = await applyDeferredRevealFallback(
+                screenID: screenID,
+                pid: info.pid,
+                expectedPath: screenRenderStates[screenID]?.path ?? "",
+                token: deferredRevealGuardTokens[screenID] ?? 0
+            )
+        }
+
         for (screenID, info) in screenProcesses {
             guard screenRenderStates[screenID]?.renderKind == .scene else { continue }
             guard kill(info.pid, 0) == 0 else { continue }
@@ -3798,6 +3858,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         process.terminationHandler = { [weak self] process in
             let event = TerminationEvent(
                 pid: process.processIdentifier,
+                screenID: screenID,
                 generation: generation,
                 status: process.terminationStatus,
                 reason: process.terminationReason
@@ -4193,20 +4254,10 @@ final class WallpaperEngineXBridge: ObservableObject {
             // 两者都没命中才说明是崩溃、被外部 kill 或 surface 死亡 —— 这类才进自愈队列。
             let intentionalTermination = intentionallyTerminatedPIDs.remove(event.pid) != nil
             let watchdogTermination = watchdogTerminatedPIDs.remove(event.pid) != nil
-            // 找到对应屏幕的进程，检查 generation 是否匹配
-            guard let screenEntry = screenProcesses.first(where: { $0.value.pid == event.pid }) else {
-                // 进程已不在 screenProcesses 中（已被 stopScreenProcess 清理），跳过
-                _deinitPIDs.remove(event.pid)
-                continue
-            }
-            let screenID = screenEntry.key
-            try? screenEntry.value.logFile?.close()
-            let expectedGen = screenEntry.value.generation
-            guard event.generation == expectedGen else { continue }
-            // 清理前抓一份状态：意外死亡时它是自愈重建的唯一依据。
-            let terminatedScreenState = screenRenderStates[screenID]
-
-            // 捕获并输出完整的退出原因
+            // 先形成退出事实，再检查管理表。stopScreenProcess 会先移除表项，
+            // 若先查表 continue，主动停止的 SIGTERM 就永远不会进入 waifux.log。
+            let screenEntry = screenProcesses.first(where: { $0.value.pid == event.pid })
+            let screenID = screenEntry?.key ?? event.screenID
             var reasonDesc: String
             var isError: Bool
             switch event.reason {
@@ -4242,9 +4293,25 @@ final class WallpaperEngineXBridge: ObservableObject {
 
             let icon = isError ? "❌" : "✅"
             print("[WallpaperEngineXBridge] \(icon) wallpaper-wgpu 进程已退出 屏幕 \(screenID) (pid=\(event.pid), 退出原因: \(reasonDesc))")
-            if isError {
-                AppLogger.error(.wallpaper, "wallpaper-wgpu 进程异常退出", metadata: ["screenID": screenID, "pid": event.pid, "reason": reasonDesc])
+            // 全量落 waifux.log：此前正常退出只有 print（error 级导出里完全隐形），
+            // 排障时无法区分「没崩」和「崩了没记录」。
+            AppLogger.error(.wallpaper, "wallpaper-wgpu 进程已退出", metadata: [
+                "screenID": screenID,
+                "pid": String(event.pid),
+                "reason": reasonDesc,
+                "isError": isError ? "1" : "0",
+                "expected": intentionalTermination && !watchdogTermination ? "1" : "0",
+                "tracked": screenEntry != nil ? "1" : "0"
+            ])
+
+            guard let screenEntry else {
+                _deinitPIDs.remove(event.pid)
+                continue
             }
+            try? screenEntry.value.logFile?.close()
+            guard event.generation == screenEntry.value.generation else { continue }
+            // 清理前抓一份状态：意外死亡时它是自愈重建的唯一依据。
+            let terminatedScreenState = screenRenderStates[screenID]
 
             // 异常退出时回读渲染器日志尾部内容，输出到主日志方便排障
             if isError {
@@ -4744,6 +4811,9 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     private func removeScreenProcess(_ screenID: String) {
+        deferredRevealGuardTasks[screenID]?.cancel()
+        deferredRevealGuardTasks.removeValue(forKey: screenID)
+        deferredRevealGuardTokens.removeValue(forKey: screenID)
         if let info = screenProcesses.removeValue(forKey: screenID) {
             cleanupRendererResources(info)
         }
@@ -5943,6 +6013,188 @@ final class WallpaperEngineXBridge: ObservableObject {
             print("[WallpaperEngineXBridge] ⚠️ 写入渲染器显示指令失败: \(error.localizedDescription)")
             return false
         }
+    }
+
+    /// 延迟显示兜底。`revealDeferredSceneRenderers` 里有三处按**全局**
+    /// `wallpaperSwitchGeneration` 判定的提前返回；副屏轮换只要调用一次
+    /// `prepareForNonExternalWallpaperSwitch`（它无条件递增该代次），本屏刚登记、
+    /// 正等 show 的渲染器就永远收不到显示指令：进程存活但从不建窗、离屏空烧 GPU，
+    /// 桌面因此停在上一层内容（常见为已播完的视频最后一帧）上不动。
+    ///
+    /// 这里只补"显示/回收"这一步，不改代次语义、不自造拆窗逻辑。
+    /// 幂等：正常 reveal 已清 `presentationDeferred`，或该屏已被新进程接管
+    /// （pid 不匹配）时本兜底直接作废。
+    private func scheduleDeferredRevealGuard(
+        screenID: String,
+        pid: pid_t,
+        expectedPath: String,
+        expectedGeneration: UInt64
+    ) {
+        deferredRevealGuardTasks[screenID]?.cancel()
+        deferredRevealGuardTokenSeed &+= 1
+        let token = deferredRevealGuardTokenSeed
+        deferredRevealGuardTokens[screenID] = token
+        deferredRevealGuardTasks[screenID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runDeferredRevealGuard(
+                screenID: screenID,
+                pid: pid,
+                expectedPath: expectedPath,
+                expectedGeneration: expectedGeneration,
+                token: token
+            )
+        }
+    }
+
+    private func cancelDeferredRevealGuard(screenID: String) {
+        deferredRevealGuardTasks[screenID]?.cancel()
+        deferredRevealGuardTasks.removeValue(forKey: screenID)
+        deferredRevealGuardTokens.removeValue(forKey: screenID)
+    }
+
+    /// 轮询主体。只在两种情况下介入，避免抢在正常 reveal 的
+    /// 「先落桌面 poster → 确认系统生效 → 再下发 show」时序前面（那个顺序是刻意的，
+    /// 跳过会让用户先看见旧桌面再看见新渲染器）：
+    /// ① 登记它的那次设置已被更新的请求顶替，且当前没有别的设置在飞行 ——
+    ///    正常 reveal 必然已在某个代次守卫处返回，show 永远不会再下发；
+    /// ② 已超过硬时限（远大于 reveal 自身最大预算），说明 reveal 卡死。
+    /// 介入后：首帧已写出就补发 show；始终没写出就回收这个只会离屏空烧的隐藏
+    /// 渲染器（进程一旦真正退出，既有的自愈/回收通道就能接手它）。
+    private func runDeferredRevealGuard(
+        screenID: String,
+        pid: pid_t,
+        expectedPath: String,
+        expectedGeneration: UInt64,
+        token: UInt64
+    ) async {
+        while true {
+            if Task.isCancelled { return }
+            guard deferredRevealGuardTokens[screenID] == token else { return }
+            // 该屏已经没有这个进程（下一次设置重启/回收了它），或已正常显示
+            // → 本兜底永久作废。同进程热切换时 pid 不变、flag 仍为 true，
+            // 新请求自己的 reveal 会接手，因此下面还要用 path/代次再判所有权。
+            guard let info = screenProcesses[screenID], info.pid == pid,
+                  info.presentationDeferred else {
+                cancelDeferredRevealGuard(screenID: screenID)
+                return
+            }
+            let superseded = wallpaperSwitchGeneration != expectedGeneration
+            let elapsed = Date().timeIntervalSince(info.sceneBudgetStartedAt)
+            let firstFrameReady = info.firstFrameURL.map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? false
+            let overDue = elapsed >= Self.deferredRevealGuardSeconds
+            // 介入条件刻意分成两条，确保绝不与正常 reveal 抢序：
+            // · 补发 show 只在「代次已被顶替」时做。代次一变，reveal 必然在
+            //   第一个代次守卫处返回、永远不会下发 show，此时接管才没有竞态；
+            //   代次未变但超时（reveal 仍卡在 poster/桌面确认 await 里）时不动它，
+            //   让它自己走完「先落桌面 poster → 确认生效 → 再 show」的刻意时序。
+            // · 回收只在「超过硬时限且首帧始终没出」时做，此时不存在可显示内容。
+            // 两条都要求当前没有设置在飞，避免抢在同一条请求中间下手。
+            // 残留风险（可接受）：同进程热切到**同一个** path 且它自己的 reveal
+            // 正在飞行时，本兜底可能提前几十毫秒下发 show，让窗口比"先落桌面
+            // poster"早露一下。path 不同的新请求会改写 screenRenderStates，
+            // 下面的所有权校验会直接让位，因此只有"内容相同"这一种情形。
+            let canReveal = superseded && firstFrameReady && !isSettingWallpaper
+            let canReclaim = overDue && !firstFrameReady && !isSettingWallpaper
+
+            if canReveal || canReclaim {
+                if await applyDeferredRevealFallback(
+                    screenID: screenID,
+                    pid: pid,
+                    expectedPath: expectedPath,
+                    token: token
+                ) { return }
+            }
+            // 绝对放弃线：连续三条判据都被在飞设置挡住时不能永远轮询下去。
+            // 这种情况（首帧已就绪但代次未变，或始终有设置在飞）留给日志暴露，
+            // 由人工按 `未介入` 痕迹排查。
+            if elapsed >= Self.deferredRevealGuardSeconds * 3 {
+                AppLogger.error(.wallpaper, "Scene 延迟显示兜底：未介入，交回正常路径", metadata: [
+                    "screenID": screenID,
+                    "pid": pid,
+                    "superseded": String(superseded),
+                    "firstFrameReady": String(firstFrameReady),
+                    "isSettingWallpaper": String(isSettingWallpaper),
+                    "elapsedSeconds": String(Int(elapsed))
+                ])
+                cancelDeferredRevealGuard(screenID: screenID)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    /// 兜底真正执行体。所有权在这里复查一遍：登记该进程的那次设置可能已被本屏
+    /// 或别屏的新请求取代，误显示/误回收都会破坏用户刚设置好的内容。
+    /// - Returns: `true` 表示已处理并作废本兜底；`false` 表示本次让位，
+    ///   调用方继续轮询重试（不能因为一次让位就永久放弃）。
+    @discardableResult
+    private func applyDeferredRevealFallback(
+        screenID: String,
+        pid: pid_t,
+        expectedPath: String,
+        token: UInt64
+    ) async -> Bool {
+        guard deferredRevealGuardTokens[screenID] == token else { return true }
+        guard let info = screenProcesses[screenID], info.pid == pid else {
+            cancelDeferredRevealGuard(screenID: screenID)
+            return true
+        }
+        guard info.presentationDeferred else {
+            cancelDeferredRevealGuard(screenID: screenID)
+            return true
+        }
+        guard kill(pid, 0) == 0, !Self.isProcessStopped(pid: pid) else { return false }
+        // 该屏当前的渲染状态必须仍是登记它的那个场景；被别的内容接管时状态会被
+        // 重写或移除，此时兜底必须让位。
+        guard screenRenderStates[screenID]?.path == expectedPath else {
+            cancelDeferredRevealGuard(screenID: screenID)
+            return true
+        }
+        guard !isSettingWallpaper else { return false }
+
+        let firstFrameReady = info.firstFrameURL.map {
+            FileManager.default.fileExists(atPath: $0.path)
+        } ?? false
+
+        if firstFrameReady, let controlURL = info.wallpaperControlURL,
+           writePresentationShowControl(url: controlURL) {
+            cancelDeferredRevealGuard(screenID: screenID)
+            var mutableInfo = info
+            mutableInfo.presentationDeferred = false
+            screenProcesses[screenID] = mutableInfo
+            scheduleRendererWindowVisibilityGuard(pid: pid, screenID: screenID)
+            AppLogger.error(.wallpaper, "Scene 延迟显示兜底：补发显示指令", metadata: [
+                "screenID": screenID,
+                "pid": pid,
+                "path": URL(fileURLWithPath: expectedPath).lastPathComponent,
+                "reason": "reveal 被顶替后未下发 show"
+            ])
+            // 顶替同样跳过了 commit：这层屏上可能还留着上一次设置的旧内容，
+            // 它比刚显示的渲染器更靠前，用户看到的就是那一层静止画面。
+            // 走与正常 reveal 成功路径同一个提交通道（内部自带 token 作废、
+            // 快照遮罩与拆窗前置校验），不自造拆窗逻辑。await 期间所有权可能
+            // 再变，先复查一次。
+            guard let screen = NSScreen.screens.first(where: {
+                $0.wallpaperScreenIdentifier == screenID
+            }), screenProcesses[screenID]?.pid == pid,
+               screenProcesses[screenID]?.presentationDeferred == false,
+               screenRenderStates[screenID]?.path == expectedPath else { return true }
+            await commitPreparedRendererOverNativeVideo(on: [screen])
+            return true
+        }
+
+        AppLogger.error(.wallpaper, "Scene 延迟显示兜底：回收隐藏渲染器", metadata: [
+            "screenID": screenID,
+            "pid": pid,
+            "path": URL(fileURLWithPath: expectedPath).lastPathComponent,
+            "firstFrameReady": String(firstFrameReady),
+            "reason": firstFrameReady ? "显示指令写入失败" : "首帧始终未就绪"
+        ])
+        cancelDeferredRevealGuard(screenID: screenID)
+        await stopScreenProcess(screenID)
+        return true
     }
 
     /// 等待所有目标屏首帧就绪；返回已就绪的 screenID 集合。

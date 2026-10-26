@@ -11,11 +11,22 @@ enum DisplayCropStateReconciler {
         let fingerprint: String
     }
 
-    /// 去掉无序列号显示器指纹中的 `:position:` 后缀，得到位置无关的稳定部分。
-    /// 有硬件序列号的指纹不含该后缀，原样返回。
+    /// 去掉无序列号显示器指纹中的 `:position:` 后缀与本地化屏幕名段，得到
+    /// 位置与进程语言无关的稳定部分。有硬件序列号的指纹原样返回（剥名守卫
+    /// 只认 `cg:v:m:noserial:<name>:<rest>` 形态）。
+    ///
+    /// 屏幕名段跟随读取进程的本地化（主 App zh / Helper en 对同一块内建屏
+    /// 读出两个名字），参与匹配会把同一块屏误判成「已变化」。
     static func stableFingerprintPart(_ fp: String) -> String {
-        guard let range = fp.range(of: ":position:") else { return fp }
-        return String(fp[..<range.lowerBound])
+        var result: Substring = fp[...]
+        if let range = fp.range(of: ":position:") {
+            result = fp[..<range.lowerBound][...]
+        }
+        let fields = result.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count > 5, fields[0] == "cg", fields[3] == "noserial" else {
+            return String(result)
+        }
+        return (fields[0...3] + fields[5...]).joined(separator: ":")
     }
 
     /// 指纹匹配：精确相等，或仅桌面位置变化（稳定部分一致）。

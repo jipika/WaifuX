@@ -32,6 +32,39 @@ enum FrameInterpolationTargetFPSResolver {
     }
 }
 
+/// 播放进度记忆的纯规则；不依赖 AVPlayer，可由独立测试从本文件提取运行。
+enum VideoPlaybackResumePolicy {
+    static func validPosition(_ seconds: Double?) -> Double? {
+        guard let seconds, seconds.isFinite, seconds > 1 else { return nil }
+        return seconds
+    }
+
+    /// 循环末端前 1 秒不再作为续播点，避免启动先闪片尾再循环。
+    static func isNearEnd(_ position: Double, duration: Double?) -> Bool {
+        guard let duration, duration.isFinite, duration > 2 else { return false }
+        return position >= max(1, duration - 1)
+    }
+
+    static func clampedPosition(_ position: Double, duration: Double?) -> Double {
+        guard let valid = validPosition(position) else { return 0 }
+        guard let duration, duration.isFinite, duration > 2 else { return valid }
+        return isNearEnd(valid, duration: duration) ? 0 : min(valid, duration - 1)
+    }
+
+    static func isPlaybackActive(onEndModeScreens: Set<String>, screenIDs: [String]) -> Bool {
+        !screenIDs.isEmpty && screenIDs.allSatisfy { !onEndModeScreens.contains($0) }
+    }
+
+    static func pruning(
+        _ positions: [String: Double],
+        activePaths: Set<String>,
+        limit: Int = 64
+    ) -> [String: Double] {
+        guard positions.count > max(0, limit) else { return positions }
+        return positions.filter { activePaths.contains($0.key) }
+    }
+}
+
 enum VideoWallpaperDisplayRecoveryPolicy {
     static func shouldRebuildNativePipeline(
         afterDisplayWake: Bool,
@@ -527,6 +560,18 @@ final class VideoWallpaperManager: ObservableObject {
     private let defaults = WaifuXPreferences.shared
     private let stateKey = "video_wallpaper_state_v1"
     private let playbackRateByPathKey = "video_wallpaper_playback_rate_by_path_v1"
+    /// 各视频文件的有效播放位置；Helper 重启恢复时定位，避免「启动即从头重放」。
+    /// 与 stateKey 同存于 WaifuXPreferences.shared。
+    private let resumePositionsKey = "video_wallpaper_resume_positions_v1"
+    private var resumePositions: [String: Double] = [:]
+    private var resumePositionsLoaded = false
+    private var resumePositionTimer: Timer?
+    private struct PendingPlaybackResume {
+        let token: UUID
+        let path: String
+        var task: Task<Void, Never>?
+    }
+    private var pendingPlaybackResumes: [ObjectIdentifier: PendingPlaybackResume] = [:]
     static let minPlaybackRate: Double = 0.5
     static let maxPlaybackRate: Double = 2.0
     private let originalWallpaperKey = "video_wallpaper_original_desktop_v2"  // 旧版原始壁纸快照 key，仅用于清理遗留数据
@@ -3577,6 +3622,9 @@ final class VideoWallpaperManager: ObservableObject {
     /// route through this helper so a remembered speed survives pause/rebuild.
     private func playWallpaperPlayer(_ player: AVQueuePlayer, screenID: String? = nil) {
         guard !isTerminating else { return }
+        // 定位中的旧任务若与后续 resume/preroll 重叠，以定位任务收尾为准，
+        // 不允许它先按 0 位置起播。
+        guard pendingPlaybackResumes[ObjectIdentifier(player)] == nil else { return }
         let resolvedScreenID = screenID
             ?? screenIDsReferencingPlayer(player).sorted().first
         let rate = resolvedScreenID.map(playbackRate(forScreenID:)) ?? 1.0
@@ -3607,6 +3655,7 @@ final class VideoWallpaperManager: ObservableObject {
         if persistAsUserRequest {
             userRequestedPause = true
         }
+        capturePlaybackPositions()
         if externalRenderingActive {
             if let targetScreen,
                externalPendingCommitScreenIDs.contains(targetScreen.wallpaperScreenIdentifier) {
@@ -4893,13 +4942,19 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func shouldPlayNativeVideo(for screenID: String) -> Bool {
-        !isPaused && !isNativeScreenPaused(screenID)
+        let isAwaitingResume = players[screenID].map {
+            pendingPlaybackResumes[ObjectIdentifier($0)] != nil
+        } ?? false
+        return !isAwaitingResume && !isPaused && !isNativeScreenPaused(screenID)
     }
 
     private func shouldPlayNativePlayer(_ player: AVQueuePlayer) -> Bool {
-        !isPaused && screenIDsReferencingPlayer(player).contains {
-            !isNativeScreenPaused($0)
-        }
+        // 恢复定位尚未完成时，预热/preroll 不得先从 0 放出音频。
+        pendingPlaybackResumes[ObjectIdentifier(player)] == nil
+            && !isPaused
+            && screenIDsReferencingPlayer(player).contains {
+                !isNativeScreenPaused($0)
+            }
     }
 
     // MARK: - 锁屏处理
@@ -4964,6 +5019,10 @@ final class VideoWallpaperManager: ObservableObject {
             DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
             return
         }
+        // 启动恢复仍在 seek 时不得绕过闸门从 0 起播。
+        guard !players.values.contains(where: {
+            pendingPlaybackResumes[ObjectIdentifier($0)] != nil
+        }) else { return }
         if externalRenderingActive {
             // helper 会按 systemPlaybackPaused + global/manual pause 合并恢复；
             // 这里再 resumeAll 会错误清掉单屏暂停。
@@ -5210,6 +5269,9 @@ final class VideoWallpaperManager: ObservableObject {
     func prepareForAppTermination() {
         guard BackgroundRuntimeRole.isHelper else { return }
         isTerminating = true
+        capturePlaybackPositions()
+        invalidateResumePositionTimer()
+        cancelSavedPlaybackPositionRestore()
         globalTransitionGeneration &+= 1
         externalTransitionGeneration &+= 1
         cancelPendingGlobalVideoTransition(reason: "processTermination")
@@ -5221,6 +5283,7 @@ final class VideoWallpaperManager: ObservableObject {
         guard hasActiveVideoWallpaper else { return }
 
         // 子进程渲染路径：停止子进程并保留持久化状态
+        invalidateResumePositionTimer()
         if externalRenderingActive {
             externalTransitionGeneration &+= 1
             cancelExternalRendererRestart()
@@ -5915,6 +5978,12 @@ final class VideoWallpaperManager: ObservableObject {
             "hasPlaybackEndObserver": playbackEndObservers[screenID] != nil
         ])
 
+        // 拆窗前采样：保留每个源文件最后的有效位置供下次启动恢复。
+        capturePlaybackPositions()
+        if let player = players[screenID] {
+            cancelSavedPlaybackPositionRestore(for: player)
+        }
+
         playerItemObservers[screenID]?.invalidate()
         playerItemObservers.removeValue(forKey: screenID)
         playerItemObserverTokens.removeValue(forKey: screenID)
@@ -6408,6 +6477,7 @@ final class VideoWallpaperManager: ObservableObject {
 
     func restoreIfNeeded() async {
         guard BackgroundRuntimeRole.isHelper else { return }
+        ensureResumePositionsLoaded()
 
         guard
             let data = defaults.data(forKey: stateKey),
@@ -6628,6 +6698,7 @@ final class VideoWallpaperManager: ObservableObject {
                     syncAllDisplayVideosToExtension()
                 }
             }
+            applySavedPlaybackPositions()
             AppLogger.error(.wallpaper, "Video restore completed", metadata: [
                 "windows": String(windows.count),
                 "players": String(players.count)
@@ -8134,6 +8205,22 @@ final class VideoWallpaperManager: ObservableObject {
     private func rebuildWindows(targetScreen: NSScreen? = nil, animatedTransition: Bool = false) throws {
         guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
         guard hasActiveVideoWallpaper else { return }
+        capturePlaybackPositions()
+        if let targetScreen {
+            let targetID = targetScreen.wallpaperScreenIdentifier
+            if let player = players[targetID] {
+                cancelSavedPlaybackPositionRestore(for: player)
+                // 本屏还有同文件的共享 owner 时，不能把那次恢复的进度删掉；
+                // 只有最后一个引用者离开才让后续启动使用最后的有效采样。
+                if screenIDsReferencingPlayer(player).filter({ $0 != targetID }).isEmpty {
+                    if let path = anchoredVideoPath(for: player) {
+                        resumePositions.removeValue(forKey: path)
+                    }
+                }
+            }
+        } else {
+            cancelSavedPlaybackPositionRestore()
+        }
 
         // 如果正在重建，跳过此次请求
         // 注意：@MainActor 保证串行执行，无需额外加锁
@@ -9664,7 +9751,7 @@ final class VideoWallpaperManager: ObservableObject {
 
     /// 判断视频文件是否位于外置卷宗（如 USB HDD/SSD、NAS 等）。
     /// 用于决定播放缓冲策略：外置盘 IO 带宽受限，需要更大的前向缓冲。
-    private static func isExternalVolume(_ url: URL) -> Bool {
+    static func isExternalVolume(_ url: URL) -> Bool {
         let values = try? url.resourceValues(forKeys: [.volumeIsInternalKey])
         // volumeIsInternal 为 nil（无法读取）时保守按内置处理，避免误判
         return values?.volumeIsInternal == false
@@ -10078,6 +10165,8 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func teardownAllWindows(preserveDisplaySwitchGate: Bool = false) {
+        capturePlaybackPositions()
+        cancelSavedPlaybackPositionRestore()
         cancelPendingGlobalVideoTransition(reason: "teardownAllWindows")
         // 0. 取消上一次未执行的延迟释放，避免快速切换时多组 AVPlayer 并发驻留
         pendingPlayerCleanups.cancelAll()
@@ -10189,8 +10278,202 @@ final class VideoWallpaperManager: ObservableObject {
         lastAppliedScreenConfigurations.removeAll()
     }
 
+    // MARK: - 播放进度记忆（App/Helper 重启后从上次进度继续，而不是从 0 重放）
+
+
+    /// 懒加载历史进度。不得在 init 读 UserDefaults（macOS 26 _CFXPreferences 崩溃），统一走这里。
+    private func ensureResumePositionsLoaded() {
+        guard !resumePositionsLoaded else { return }
+        resumePositionsLoaded = true
+        resumePositions = defaults.dictionary(forKey: resumePositionsKey) as? [String: Double] ?? [:]
+    }
+
+    /// 采样所有在播播放器的时间轴，按文件路径合并进进度表；有变化才写盘。
+    /// players 已全部拆除时只停表不写盘（最终值已在 teardown 前采过），避免空表覆盖历史。
+    private func capturePlaybackPositions() {
+        ensureResumePositionsLoaded()
+        guard !players.isEmpty else {
+            invalidateResumePositionTimer()
+            return
+        }
+        var changed = false
+        for (_, player) in players {
+            // 文件锚点不受 Looper 的 currentItem 空窗影响；多屏共享只采一次。
+            guard let path = anchoredVideoPath(for: player),
+                  VideoPlaybackResumePolicy.isPlaybackActive(
+                    onEndModeScreens: onEndModeScreens,
+                    screenIDs: screenIDsReferencingPlayer(player)
+                  ) else { continue }
+            let seconds = player.currentTime().seconds
+            guard let position = VideoPlaybackResumePolicy.validPosition(seconds) else { continue }
+            let key = path
+            if abs((resumePositions[key] ?? -1) - seconds) > 0.1 {
+                resumePositions[key] = position
+                changed = true
+            }
+        }
+        if resumePositions.count > 64 {
+            // 防止历史文件无限堆积：只保留当前目标视频的进度。
+            let activePaths = Set(
+                (Array(videoURLByScreen.values)
+                    + Array(videoURLByScreenFingerprint.values)
+                    + [currentVideoURL].compactMap { $0 })
+                    .map { $0.standardizedFileURL.path }
+            )
+            resumePositions = VideoPlaybackResumePolicy.pruning(
+                resumePositions,
+                activePaths: activePaths
+            )
+            changed = true
+        }
+        if changed {
+            defaults.set(resumePositions, forKey: resumePositionsKey)
+        }
+    }
+
+    private func ensureResumePositionTimer() {
+        guard resumePositionTimer == nil, !isTerminating else { return }
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.capturePlaybackPositions()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        resumePositionTimer = timer
+    }
+
+    private func invalidateResumePositionTimer() {
+        resumePositionTimer?.invalidate()
+        resumePositionTimer = nil
+    }
+
+    /// 启动恢复：各视频管线定位到上次退出时的有效位置。
+    /// 仅本函数调用；手动重选、轮换和渲染后端切换不擅自改变起始位置。
+    /// 外置视频/wgpu 没有对应 seek 通道，本次只覆盖 Helper 内置 AVQueuePlayer。
+    private func applySavedPlaybackPositions() {
+        guard !externalRenderingActive, !isTerminating, !Task.isCancelled else { return }
+        ensureResumePositionsLoaded()
+        guard !resumePositions.isEmpty else { return }
+        var seenPlayerIDs = Set<ObjectIdentifier>()
+        for (screenID, player) in players {
+            let playerID = ObjectIdentifier(player)
+            guard seenPlayerIDs.insert(playerID).inserted else { continue }
+            cancelSavedPlaybackPositionRestore(for: player)
+            guard let path = anchoredVideoPath(for: player),
+                  let saved = VideoPlaybackResumePolicy.validPosition(resumePositions[path]) else { continue }
+            // 已处于首帧/循环末端的位置不应在下次启动时先跳回片尾再重循环。
+            if VideoPlaybackResumePolicy.isNearEnd(
+                saved,
+                duration: (player.currentItem ?? player.items().first)?.asset.duration.seconds
+            ) {
+                continue
+            }
+            let owners = screenIDsReferencingPlayer(player).sorted()
+            guard VideoPlaybackResumePolicy.isPlaybackActive(
+                onEndModeScreens: onEndModeScreens,
+                screenIDs: owners
+            ) else { continue }
+            let token = UUID()
+            pendingPlaybackResumes[playerID] = PendingPlaybackResume(token: token, path: path)
+            let task = Task { @MainActor [weak self, weak player] in
+                defer {
+                    if let self {
+                        self.finishSavedPlaybackPositionRestore(for: player, token: token)
+                    }
+                }
+                guard let self, let player else { return }
+                let isCurrent = {
+                    self.players[screenID] === player
+                        && self.anchoredVideoPath(for: player) == path
+                        && self.pendingPlaybackResumes[playerID]?.token == token
+                        && !Task.isCancelled
+                }
+                guard isCurrent() else { return }
+                // Looper 可能晚一拍才把副本放进队列。此期间预热由 pending 状态
+                // 保持静音暂停，不能先播 0 再 seek。超时让位并留下可排障日志。
+                let itemDeadline = Date().addingTimeInterval(12)
+                while player.currentItem == nil, player.items().isEmpty,
+                      Date() < itemDeadline {
+                    guard isCurrent() else { return }
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+                guard isCurrent(), let item = player.currentItem ?? player.items().first else {
+                    AppLogger.error(.wallpaper, "视频恢复定位跳过：等待播放项超时", metadata: [
+                        "video": URL(fileURLWithPath: path).lastPathComponent
+                    ])
+                    return
+                }
+                var target = saved
+                if let duration = try? await item.asset.load(.duration).seconds {
+                    guard isCurrent() else { return }
+                    // 时长不可信时仍使用有限秒数；不能将 indefinite/NaN 交给 clamp/seek。
+                    target = VideoPlaybackResumePolicy.clampedPosition(saved, duration: duration)
+                }
+                guard isCurrent() else { return }
+                if target <= 1 {
+                    AppLogger.error(.wallpaper, "视频已到循环末端，重启后从头播放", metadata: [
+                        "video": URL(fileURLWithPath: path).lastPathComponent
+                    ])
+                    return
+                }
+                player.pause()
+                player.rate = 0
+                let finished = await player.seek(
+                    to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                guard isCurrent() else { return }
+                guard finished else {
+                    AppLogger.error(.wallpaper, "视频恢复定位未完成", metadata: [
+                        "video": URL(fileURLWithPath: path).lastPathComponent
+                    ])
+                    return
+                }
+                // 只写恢复成功后的值，避免尚未定位时预热回调又把 0 写成进度。
+                self.resumePositions[path] = target
+                self.defaults.set(self.resumePositions, forKey: self.resumePositionsKey)
+                AppLogger.error(.wallpaper, "视频恢复定位到上次播放进度", metadata: [
+                    "screenID": screenID,
+                    "owners": owners.joined(separator: ","),
+                    "video": URL(fileURLWithPath: path).lastPathComponent,
+                    "positionSeconds": String(format: "%.2f", target)
+                ])
+                // defer 统一解除恢复闸门，并按此刻的暂停原因决定是否继续播放。
+            }
+            pendingPlaybackResumes[playerID]?.task = task
+        }
+    }
+
+    private func finishSavedPlaybackPositionRestore(for player: AVQueuePlayer?, token: UUID) {
+        guard let player else { return }
+        let playerID = ObjectIdentifier(player)
+        guard pendingPlaybackResumes[playerID]?.token == token else { return }
+        pendingPlaybackResumes.removeValue(forKey: playerID)
+        // seek 失败/等待超时也必须回到正常预热后的播放状态，不能永远停在 poster。
+        // 取消任务时已先删除 token，因此这里不会误恢复被换掉的旧播放器。
+        let owners = screenIDsReferencingPlayer(player)
+        guard let playableOwner = owners.first(where: shouldPlayNativeVideo(for:)) else { return }
+        playWallpaperPlayer(player, screenID: playableOwner)
+        for owner in owners where shouldPlayNativeVideo(for: owner) {
+            hidePosterImage(for: owner)
+        }
+    }
+
+    private func cancelSavedPlaybackPositionRestore(for player: AVQueuePlayer) {
+        let playerID = ObjectIdentifier(player)
+        pendingPlaybackResumes.removeValue(forKey: playerID)?.task?.cancel()
+    }
+
+    private func cancelSavedPlaybackPositionRestore() {
+        let tasks = pendingPlaybackResumes.values.compactMap(\.task)
+        pendingPlaybackResumes.removeAll()
+        tasks.forEach { $0.cancel() }
+    }
+
     private func persistState() {
         guard hasActiveVideoWallpaper else { return }
+        ensureResumePositionTimer()
 
         let globalFileURL = currentVideoURL?.absoluteString
             ?? videoURLByScreen.values.first?.absoluteString

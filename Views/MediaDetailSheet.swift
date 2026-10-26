@@ -5870,6 +5870,10 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
         nsView.navigationDelegate = nil
         nsView.configuration.userContentController.removeAllUserScripts()
         nsView.loadHTMLString("", baseURL: nil)
+        // 显式脱离视图树：WKWebView 残留在 superview 时，WebKit 可能保留
+        // 离屏 surface 宿主窗口（实测主进程出现过 500×500 停在屏幕左下角的原生窗口），
+        // 与壁纸左下角白色闪现同源。移除后宿主窗口随视图销毁回收。
+        nsView.removeFromSuperview()
     }
 
     func makeCoordinator() -> Coordinator {

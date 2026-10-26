@@ -38,7 +38,17 @@ enum VideoRendererScreenRouting {
         return nil
     }
 
+    /// Strips the `:position:` suffix and the process-localized screen name
+    /// embedded in no-serial fingerprints
+    /// (`cg:<v>:<m>:noserial:<localizedName>:<rest>`). The App bundle (zh) and
+    /// the Helper sub-bundle (en) read different names for the same display,
+    /// so the name must not participate in physical recovery matching.
     private static func stablePart(_ fingerprint: String) -> String {
-        fingerprint.components(separatedBy: ":position:").first ?? fingerprint
+        var result = fingerprint.components(separatedBy: ":position:").first ?? fingerprint
+        let fields = result.split(separator: ":", omittingEmptySubsequences: false)
+        if fields.count > 5, fields[0] == "cg", fields[3] == "noserial" {
+            result = (fields[0...3] + fields[5...]).joined(separator: ":")
+        }
+        return result
     }
 }

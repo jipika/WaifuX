@@ -1352,7 +1352,7 @@ final class StatusBarController: NSObject {
         }
 
         let globalSync = WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled
-        AppLogger.debug(.wallpaper, "菜单每屏开启壁纸点击", metadata: [
+        AppLogger.error(.wallpaper, "菜单每屏开启壁纸点击", metadata: [
             "screen": screen.localizedName,
             "kind": entry.isVideoWallpaper ? "video" : "sceneOrWeb",
             "globalSync": String(globalSync),
@@ -1377,7 +1377,7 @@ final class StatusBarController: NSObject {
                         forceRestart: true
                     )
                 }
-                AppLogger.debug(.wallpaper, "菜单每屏开启壁纸完成", metadata: [
+                AppLogger.error(.wallpaper, "菜单每屏开启壁纸完成", metadata: [
                     "screen": screen.localizedName
                 ])
             } catch {

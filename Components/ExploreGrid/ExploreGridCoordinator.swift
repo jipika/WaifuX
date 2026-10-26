@@ -48,17 +48,6 @@ private final class ExploreGridScrollView: NSScrollView {
         super.scrollWheel(with: event)
     }
 
-    override func tile() {
-        super.tile()
-        // tile 后系统可能又挂回 scroller；强制关掉并清掉占用宽度。
-        hasVerticalScroller = false
-        hasHorizontalScroller = false
-        verticalScroller?.isHidden = true
-        horizontalScroller?.isHidden = true
-        verticalScroller?.alphaValue = 0
-        horizontalScroller?.alphaValue = 0
-    }
-
     override func layout() {
         super.layout()
         reportViewportIfNeeded()
@@ -763,7 +752,9 @@ final class ExploreGridCoordinator: NSObject {
         guard let scrollView = scrollView as? ExploreGridScrollView else { return }
         scrollView.allowsGridScrolling = allowsScrolling
         self.scrollView.verticalScrollElasticity = allowsScrolling ? .allowed : .none
-        // 无论是否允许滚动，都隐藏滚动条（探索页不需要可见 scroller）。
+        // Scroller 只在初始化/此配置入口修改，绝不在 tile()/layout() 里改。
+        // AppKit 的 NSCollectionView resize-to-fit 会嵌套触发 tile；在 tile 内
+        // 改 scroller 会再次调整 clipView bounds，形成主线程栈溢出。
         self.scrollView.hasVerticalScroller = false
         self.scrollView.hasHorizontalScroller = false
         self.scrollView.verticalScroller = nil

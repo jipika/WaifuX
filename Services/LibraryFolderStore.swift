@@ -640,7 +640,9 @@ final class LibraryGridOrderStore: ObservableObject {
         let available = Set(ids)
         let saved = orders[scope.storageKey] ?? []
         let orderedSaved = saved.filter { available.contains($0) }
-        let newIDs = ids.filter { !orderedSaved.contains($0) }
+        // Set 查找替代数组 contains：新条目多时旧写法是 O(K×S)，最坏 O(N²)
+        let orderedSavedSet = Set(orderedSaved)
+        let newIDs = ids.filter { !orderedSavedSet.contains($0) }
         let newFolderIDs = newIDs.filter { $0.hasPrefix("folder_") }
         let newItemIDs = newIDs.filter { !$0.hasPrefix("folder_") }
 

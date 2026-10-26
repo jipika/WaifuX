@@ -25,6 +25,42 @@ import Foundation
         check(WallpaperScreenIdentity.commandTargetIndex(identifier: "old", fingerprint: identical[0].fingerprint, screens: [moved[0]]) == 0, "Helper recovers unique moved no-serial monitor")
         check(WallpaperScreenIdentity.commandTargetIndex(identifier: "1", fingerprint: "serial-A", screens: [serials[0], serials[0]]) == nil, "Helper rejects duplicate target identities")
 
+        // 2026-10-26 x86 用户日志实锤：同一块无序列号内建屏，主 App（zh）记下
+        // 中文名指纹，Helper（en）枚举出英文名指纹。比较层必须剥掉本地化屏幕名。
+        let zhBuiltin = "cg:1552:41028:noserial:内建视网膜显示器:3584x2240:builtin:position:0x0"
+        let enBuiltin = "cg:1552:41028:noserial:Built-in Retina Display:3584x2240:builtin:position:0x0"
+        check(WallpaperScreenIdentity.nameTolerantPart(zhBuiltin) == WallpaperScreenIdentity.nameTolerantPart(enBuiltin), "name-tolerant part erases localized screen name")
+        check(zhBuiltin != enBuiltin, "sanity: raw fingerprints really differ by name")
+        check(WallpaperScreenIdentity.fingerprintsMatch(zhBuiltin, enBuiltin), "fingerprints match across zh/en names")
+        check(!WallpaperScreenIdentity.fingerprintsMatch("cg:1:2:3:4:5", "cg:1:2:9:4:5"), "serial-numbered fingerprints never erase fields")
+        check(WallpaperScreenIdentity.nameTolerantPart("fallback:内建视网膜显示器") == "fallback:内建视网膜显示器", "fallback fingerprints are untouched")
+        check(
+            WallpaperScreenIdentity.commandTargetIndex(identifier: nil, fingerprint: zhBuiltin, screens: [(id: "69734662", fingerprint: enBuiltin)]) == 0,
+            "Helper recovers rebuilt-in display across localized names after ID change"
+        )
+        let zhPair = [
+            (id: "1", fingerprint: "cg:1552:41028:noserial:内建视网膜显示器:3584x2240:builtin:position:0x0"),
+            (id: "2", fingerprint: "cg:1552:41028:noserial:内建视网膜显示器:3584x2240:builtin:position:1920x0")
+        ]
+        let enPair = [
+            (id: "1", fingerprint: "cg:1552:41028:noserial:Built-in Retina Display:3584x2240:builtin:position:0x0"),
+            (id: "2", fingerprint: "cg:1552:41028:noserial:Built-in Retina Display:3584x2240:builtin:position:1920x0")
+        ]
+        check(WallpaperScreenIdentity.commandTargetIndex(identifier: "1", fingerprint: zhPair[0].fingerprint, screens: enPair) == 0, "identical monitors stay position-pinned across localized names")
+        check(WallpaperScreenIdentity.commandTargetIndex(identifier: nil, fingerprint: zhPair[0].fingerprint, screens: enPair) == nil, "ambiguous no-position fallback still rejected across localized names")
+        check(
+            WallpaperScreenIdentity.schedulerHardwareKey(zhBuiltin) == WallpaperScreenIdentity.schedulerHardwareKey(enBuiltin),
+            "scheduler hardware grouping ignores localized screen names"
+        )
+        check(
+            WallpaperScreenIdentity.schedulerBindings(
+                fingerprints: ["old": zhBuiltin],
+                screens: [(id: "69734662", fingerprint: enBuiltin)],
+                allowRelativeRank: true
+            ) == ["old": "69734662"],
+            "scheduler relinks built-in display across localized names"
+        )
+
         typealias Screen = VideoRendererScreenRouting.Screen
         let old = [Screen(identifier: "1", fingerprint: "serial-A"), Screen(identifier: "2", fingerprint: "serial-B")]
         let current = [Screen(identifier: "1", fingerprint: "serial-B"), Screen(identifier: "3", fingerprint: "serial-A")]
@@ -43,6 +79,8 @@ import Foundation
         check(VideoRendererScreenRouting.resolvedIndex(stableID: "1", screens: noSerialNew, previousScreens: noSerialOld) == 0, "renderer recovers unique physical target after desktop position changes")
         let noSerialAmbiguous = noSerialNew + [Screen(identifier: "1", fingerprint: "noserial:position:1920x0")]
         check(VideoRendererScreenRouting.resolvedIndex(stableID: "1", screens: noSerialAmbiguous, previousScreens: noSerialOld) == nil, "renderer rejects ambiguous no-serial target even with reused ID")
+        let zhNamedOld = [Screen(identifier: "2077748985", fingerprint: zhBuiltin)]
+        check(VideoRendererScreenRouting.resolvedIndex(stableID: "2077748985", screens: [(identifier: "69734662", fingerprint: enBuiltin)].map { Screen(identifier: $0.identifier, fingerprint: $0.fingerprint) }, previousScreens: zhNamedOld) == 0, "renderer recovers owned display across localized names after reboot ID change")
 
         let ranks = WallpaperScreenIdentity.pairByRelativeRank(
             orphans: [("left", CGPoint(x: 0, y: 0)), ("right", CGPoint(x: 1920, y: 0))],

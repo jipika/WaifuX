@@ -19,6 +19,24 @@ enum LocalWallpaperApplyService {
         }
     }
 
+    /// 「可作为壁纸应用的静态图」分类集（`apply` 的直接文件判定与工程 background
+    /// 类型推断共用）。含 heic/heif/avif：库里 `MediaItem+LocalFiles.swift` 已把它们
+    /// 认作图片，应用侧却漏了 → `.heic` 直接文件掉进 `case .unknown`，被当成 Workshop
+    /// 目录交给 wallpaper-wgpu（`renderKind = .scene`），渲染器报
+    /// `VFS open failed` 而 App 侧仍判成功（2026-10-25 用户日志实证）。
+    /// macOS 桌面通道原生支持 HEIC（系统默认桌面即 heic）；AVIF 需 macOS 13+，
+    /// 本工程部署目标 14.4，满足。
+    static let staticImageClassificationExts: Set<String> = [
+        "jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff",
+        "heic", "heif", "avif"
+    ]
+
+    /// `findImageFile` 的搜索集。刻意**不含** tga/tif/tiff —— 该处原有口径就是这 6 个，
+    /// 合并进来会静默扩大目录内可搜到的格式范围，不属于本次修复。只补 heic/heif/avif。
+    static let staticImageSearchExts: Set<String> = [
+        "jpg", "jpeg", "png", "bmp", "gif", "webp", "heic", "heif", "avif"
+    ]
+
     struct Options: Codable {
         /// 所有用户可见的壁纸切换默认启用首帧预热过渡；恢复/回滚路径可显式关闭。
         var animatedTransition: Bool = true
@@ -111,7 +129,7 @@ enum LocalWallpaperApplyService {
         print("[LocalWallpaperApply] apply 入口 path=\(localURL.lastPathComponent) ext=\(ext) isDir=\(isDirectory.boolValue) screens=\(screens.count) reason=\(options.reason)")
 
         let videoExts: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv", "avi", "flv"]
-        let imageExts: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
+        let imageExts = Self.staticImageClassificationExts
 
         // 1) 直接视频文件
         if !isDirectory.boolValue, videoExts.contains(ext) {
@@ -509,7 +527,7 @@ enum LocalWallpaperApplyService {
             let bgPath = contentDir.appendingPathComponent(background).path
             if fm.fileExists(atPath: bgPath) {
                 let ext = (background as NSString).pathExtension.lowercased()
-                if ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"].contains(ext) {
+                if Self.staticImageClassificationExts.contains(ext) {
                     return .image
                 }
                 if ["mp4", "mov", "webm"].contains(ext) {
@@ -562,7 +580,7 @@ enum LocalWallpaperApplyService {
     }
 
     private static func findImageFile(in directory: URL) -> URL? {
-        let imageExts: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp"]
+        let imageExts = Self.staticImageSearchExts
         let projectURL = directory.appendingPathComponent("project.json")
         if let data = try? Data(contentsOf: projectURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

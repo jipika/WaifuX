@@ -57,6 +57,12 @@ final class WaifuXScreenSaverView: ScreenSaverView {
     private var mediaSize: CGSize = .zero
     /// 上一次实际应用过的裁剪，用于按秒检测 App 侧改动。
     private var appliedCrop: SaverCropSettings?
+    /// 当前实际加载内容的按屏指纹与 displayKey；变化才重载。
+    private var loadedPlaybackFingerprint: String?
+    private var loadedForDisplayKey: String?
+    /// 已排队的上下文重载目标：0.2s debounce 生效前不再重复排队，
+    /// 否则每秒 tick 会不断取消并重排，重载永远落不了地。
+    private var pendingContextReload: (displayKey: String?, fingerprint: String?)?
     // MARK: - 生命周期
 
     override init?(frame: NSRect, isPreview: Bool) {
@@ -160,6 +166,7 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         // 裁剪是用户在 App 里随手拖的，改完不一定触发配置通知；
         // 屏保计时器每秒触发一次；视频帧由 AVPlayerLayer 独立驱动。
         refreshCropIfNeeded()
+        reloadIfPlaybackContextChanged()
         syncPlaybackPhaseIfNeeded()
     }
 
@@ -194,11 +201,20 @@ final class WaifuXScreenSaverView: ScreenSaverView {
             showMessage(localized("noConfiguration"))
             return
         }
+        // 多屏异壁纸：每块屏的屏保进程各取自己 displayKey 的条目；
+        // 取不到（设置页预览 / 起屏早期 window.screen 为 nil）回退主屏条目。
+        guard let entry = configuration.wallpaperEntry(forDisplayKey: currentDisplayKey) else {
+            showMessage(localized("noConfiguration"))
+            return
+        }
         self.configuration = configuration
-        Self.logger.info("Loading wallpaper title=\(configuration.title) kind=\(configuration.kind.rawValue) path=\(configuration.renderURL.path)")
-        switch configuration.kind {
-        case .video: loadVideo(configuration)
-        case .image: loadImage(configuration)
+        loadedForDisplayKey = currentDisplayKey
+        loadedPlaybackFingerprint = configuration.playbackFingerprint(forDisplayKey: currentDisplayKey)
+        pendingContextReload = nil
+        Self.logger.info("Loading wallpaper title=\(entry.title) kind=\(entry.kind.rawValue) path=\(entry.renderURL.path) display=\(self.loadedForDisplayKey ?? "nil")")
+        switch entry.kind {
+        case .video: loadVideo(entry)
+        case .image: loadImage(entry)
         }
         // loadWallpaper 之前可能已经跑过一次 layout（那时还没有配置，只能用默认裁剪），
         // 这里立刻按真实配置重排一次，避免要等下一次 layout / 动画回调才生效。
@@ -233,8 +249,13 @@ final class WaifuXScreenSaverView: ScreenSaverView {
                     self.showMessage(self.localized("noConfiguration"))
                     return
                 }
-                // 同一张壁纸、同样的设置：保持正在播放的画面，不做无谓重载。
-                if value.identity == self.configuration?.identity { return }
+                // 按屏比较：本屏条目没变的屏保持正在播放的画面，不因别屏换壁纸而重载。
+                let displayKey = self.currentDisplayKey
+                if value.playbackFingerprint(forDisplayKey: displayKey) == self.loadedPlaybackFingerprint,
+                   displayKey == self.loadedForDisplayKey {
+                    self.pendingContextReload = nil
+                    return
+                }
                 self.releaseWallpaper()
                 self.loadWallpaper(value)
             }
@@ -245,9 +266,10 @@ final class WaifuXScreenSaverView: ScreenSaverView {
 
     // MARK: - 视频
 
-    private func loadVideo(_ configuration: SaverConfiguration) {
+    private func loadVideo(_ entry: SaverWallpaperEntry) {
         teardownMedia()
-        let item = AVPlayerItem(url: configuration.renderURL)
+        guard let configuration = self.configuration else { return }
+        let item = AVPlayerItem(url: entry.renderURL)
         let player = AVQueuePlayer()
         player.automaticallyWaitsToMinimizeStalling = true
         player.isMuted = configuration.muted
@@ -388,9 +410,9 @@ final class WaifuXScreenSaverView: ScreenSaverView {
 
     // MARK: - 静图
 
-    private func loadImage(_ configuration: SaverConfiguration) {
+    private func loadImage(_ entry: SaverWallpaperEntry) {
         teardownMedia()
-        guard let image = NSImage(contentsOf: configuration.renderURL),
+        guard let image = NSImage(contentsOf: entry.renderURL),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             showMessage(localized("missingMedia"))
             return
@@ -425,6 +447,20 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         let crop = configuration?.cropSettings(forDisplayKey: currentDisplayKey) ?? .default
         guard crop != appliedCrop else { return }
         applyGeometry()
+    }
+
+    /// 每秒核对播放上下文：配置被重写而通知丢失、或本屏 displayKey 变化
+    /// （起屏早期先按主屏条目播，key 解析出来后切到本屏条目）时重载。
+    /// pendingContextReload 闸门防止 debounce 窗口内反复取消重排；
+    /// 实际重载由 reloadConfiguration 异步执行，不在渲染回调栈里直接改层。
+    private func reloadIfPlaybackContextChanged() {
+        guard let configuration else { return }
+        let key = currentDisplayKey
+        let fingerprint = configuration.playbackFingerprint(forDisplayKey: key)
+        guard key != loadedForDisplayKey || fingerprint != loadedPlaybackFingerprint else { return }
+        if let pending = pendingContextReload, pending.displayKey == key, pending.fingerprint == fingerprint { return }
+        pendingContextReload = (displayKey: key, fingerprint: fingerprint)
+        reloadConfiguration()
     }
 
     private func apply(layout: SaverCropLayout) {
@@ -497,6 +533,9 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         hideMessage()
         configuration = nil
         didLoadWallpaper = false
+        loadedPlaybackFingerprint = nil
+        loadedForDisplayKey = nil
+        pendingContextReload = nil
     }
 
     // MARK: - 布局兜底

@@ -98,8 +98,43 @@ enum BackgroundAgentRegistration {
     ///
     /// - Parameter probe: 真实可达性探针（通常是一次短超时 XPC `hello`）。
     ///   为 nil 时只校验到 BTM 状态，供不做 XPC 的回归测试使用。
+    /// 丢弃 launchd 域里缓存的 job，让下一次 register 重新导入并按当前二进制重算启动约束。
+    ///
+    /// `SMAppService` 的注销/注册走 smd → BTM，**不会**让 launchd 丢掉已经算好的
+    /// 启动约束（LWCR）。当可执行文件的签名类别变了 —— 典型场景是 Developer ID
+    /// 签的正式包与 Apple Development 签的 Xcode 构建在同一台开发机上交替运行 ——
+    /// launchd 会拿旧约束校验新二进制，判 `Launch Constraint Violation` 后直接
+    /// SIGKILL：进程活不到一秒、退出码 78（EX_CONFIG），而 BTM 状态始终显示
+    /// enabled，整轮 repair 要走到最后 probe 才失败（2026-10-26 本机取证：
+    /// DiagnosticReports 里 `termination.namespace = CODESIGNING`）。
+    ///
+    /// 必须在注销**之后**调用：BTM 记录还在时 smd 会把 job 重新下发，bootout 反而
+    /// 立刻触发一次用旧约束的 spawn。bootout 到不存在的 job 返回非零属正常（幂等）。
+    static func bootoutCachedJob() async {
+        let label = BackgroundAgentWire.bundleIdentifier
+        await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+            // 丢了输出就不会有管道写满挂起的风险。
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return }
+            // Process 没有内建超时，卡住会把这个 detached 任务永久挂起。
+            let deadline = Date().addingTimeInterval(5)
+            while process.isRunning, Date() < deadline {
+                usleep(50_000)
+            }
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+        }.value
+    }
+
+    /// - Parameter bootout: 注销之后、注册之前丢弃 launchd 里缓存的 job。
+    ///   为 nil 时跳过，供不接触真实 launchd 的回归测试使用。
     static func repairLaunchdRegistration(
         _ service: some BackgroundAgentServiceRegistration,
+        bootout: (@MainActor () async -> Void)? = nil,
         probe: (@MainActor () async -> Bool)? = nil
     ) async throws {
         // 1. 注销，并等到 BTM 记录真的离开 .enabled。
@@ -114,7 +149,13 @@ enum BackgroundAgentRegistration {
         try await waitForStatus(service, leaving: .enabled, attempts: 10,
                                 failure: { "注销后仍为已启用（状态 \($0)）" })
 
-        // 2. 重新注册，并等到 BTM 真的记回 .enabled。
+        // 2. 丢掉 launchd 侧残留的 job。BTM 记录已在第 1 步删除，smd 不会再把
+        //    它下发回来，所以这里只清 launchd 缓存；第 3 步的 register 会重新导入
+        //    job 并按当前二进制的签名类别重算约束。跳过这一步时，注销/注册会复用
+        //    旧约束，新二进制被判 Launch Constraint Violation 后 SIGKILL（退出码 78）。
+        if let bootout { await bootout() }
+
+        // 3. 重新注册，并等到 BTM 真的记回 .enabled。
         try ensureEnabled(service)
         try await waitForStatus(service, equals: .enabled, attempts: 10,
                                 failure: { "注册后状态为 \($0)" })

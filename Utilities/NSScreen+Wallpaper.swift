@@ -25,9 +25,29 @@ enum WallpaperScreenIdentity {
     /// Resolution/scale and the main-screen origin can change during wake.
     /// Keep this normalization scheduler-specific; rendering has separate ownership rules.
     static func schedulerHardwareKey(_ fingerprint: String) -> String {
-        stableFingerprintPart(fingerprint).replacingOccurrences(
+        nameTolerantPart(stableFingerprintPart(fingerprint)).replacingOccurrences(
             of: #":\d+x\d+(?=:|$)"#, with: "", options: .regularExpression
         )
+    }
+
+    /// 剥掉无序列号指纹里内嵌的本地化屏幕名段。
+    ///
+    /// `cg:<vendor>:<model>:noserial:<localizedName>:<其余字段>` 的 `<localizedName>`
+    /// 跟随**读取进程**的本地化解析：主 App（CFBundleDevelopmentRegion=zh，带 lproj）
+    /// 对内建屏读出「内建视网膜显示器」，Helper 子包（=en、无 lproj）对同一块屏
+    /// 读出「Built-in Retina Display」（2026-10-26 x86 用户日志实锤，调度器恢复
+    /// 日志里同屏两名）。指纹掺名后，跨进程命令解析与调度器重链都会把同一块
+    /// 屏误判成「已变化」。vendor/model 已锁定硬件，同型号无序列号多屏本来就靠
+    /// position 后缀与组内相对次序区分，屏幕名不提供判别力。
+    /// 只用于比较层；生成侧保留原名段，持久化键形态不变，旧记录无需迁移。
+    static func nameTolerantPart(_ fingerprint: String) -> String {
+        let fields = fingerprint.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count > 5, fields[0] == "cg", fields[3] == "noserial" else {
+            return fingerprint
+        }
+        var normalized = Array(fields[0...3])
+        normalized.append(contentsOf: fields[5...])
+        return normalized.joined(separator: ":")
     }
 
     /// Resolve the WHOLE saved topology, including IDs still present but reused.
@@ -100,10 +120,12 @@ enum WallpaperScreenIdentity {
     ) -> Int? {
         let direct = screens.indices.filter { screens[$0].id == identifier }
         guard direct.count <= 1 else { return nil }
-        // A current ID + exact fingerprint is authoritative. Position-tolerant
-        // recovery of stale commands must also be unique across the topology:
-        // an ID can be reused for another identical no-serial monitor.
-        if let index = direct.first, screens[index].fingerprint == fingerprint { return index }
+        // A current ID + name-tolerant (position/resolution still strict)
+        // fingerprint is authoritative. The App and Helper bundles may read
+        // different localized names for the same no-serial display within one
+        // boot session, so the direct path must not demand name equality.
+        if let index = direct.first,
+           nameTolerantPart(screens[index].fingerprint) == nameTolerantPart(fingerprint) { return index }
         let matches = screens.indices.filter { fingerprintsMatch(screens[$0].fingerprint, fingerprint) }
         return matches.count == 1 ? matches[0] : nil
     }
@@ -177,14 +199,16 @@ enum WallpaperScreenIdentity {
     }
 
     /// Matches a physical display fingerprint while tolerating a changed
-    /// desktop position. Callers that have multiple identical no-serial
-    /// displays must still require a unique candidate before using this match.
+    /// desktop position and a process-localized screen name. Callers that have
+    /// multiple identical no-serial displays must still require a unique
+    /// candidate before using this match.
     static func fingerprintsMatch(_ lhs: String, _ rhs: String) -> Bool {
-        lhs == rhs || stableFingerprintPart(lhs) == stableFingerprintPart(rhs)
+        lhs == rhs || nameTolerantPart(stableFingerprintPart(lhs)) == nameTolerantPart(stableFingerprintPart(rhs))
     }
 
-    /// Resolve a fingerprint-keyed value. Exact matches win; position-tolerant
-    /// matching is accepted only when there is one unambiguous candidate.
+    /// Resolve a fingerprint-keyed value. Exact matches win; position- and
+    /// name-tolerant matching is accepted only when there is one unambiguous
+    /// candidate.
     static func value<Value>(
         in values: [String: Value],
         forFingerprint fingerprint: String
@@ -201,8 +225,8 @@ enum WallpaperScreenIdentity {
         return matches.first?.value
     }
 
-    /// Whether a fingerprint set contains an exact or unique position-tolerant
-    /// match for the current display.
+    /// Whether a fingerprint set contains an exact or uniquely unambiguous
+    /// position/name-tolerant match for the current display.
     static func containsFingerprint(
         _ fingerprints: Set<String>,
         matching fingerprint: String

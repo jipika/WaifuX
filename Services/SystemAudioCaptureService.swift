@@ -129,6 +129,9 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
     /// UI 更新节流（~30fps）
     nonisolated(unsafe) fileprivate static var lastUIUpdateTime: UInt64 = 0
     nonisolated private static let uiUpdateIntervalNs: UInt64 = 33_000_000 // ~30fps
+    /// 上一轮派发是否整段静音。FFT 队列串行访问；静音→静音期间跳过主线程派发，
+    /// 由 relay 的静音判定（读 averageEnergy=0）自然维持在静音分支。
+    nonisolated(unsafe) fileprivate static var fftStreamWasSilent: Bool = false
 
     private override init() {
         super.init()
@@ -212,6 +215,8 @@ public final class SystemAudioCaptureService: NSObject, ObservableObject {
         spectrum32Publisher.send(spectrum32)
         spectrum64Publisher.send(spectrum64)
         averageEnergy = 0
+        // 会话重建后重新以「有声」起步，确保新会话第一帧正常派发。
+        Self.fftStreamWasSilent = false
     }
 
     // MARK: - CoreAudio Tap 启停（macOS 14.4+）
@@ -570,6 +575,19 @@ extension SystemAudioCaptureService {
         let new32 = downsamplePtr(fftDb, srcCount: half, targetCount: 32)
         let new64 = downsamplePtr(fftDb, srcCount: half, targetCount: 64)
 
+        let streamSilent = Self.isStreamSilent(new16)
+        let wasSilent = fftStreamWasSilent
+        fftStreamWasSilent = streamSilent
+        // 静音→静音：跳过主线程派发与 publisher 推送（CPU 空转大头）。
+        // 首帧静音（有声→静音）仍派发一次，把全零收尾帧推给 UI/relay；
+        // 声音回来第一帧必然非静音，正常派发，无唤醒延迟。
+        if streamSilent, wasSilent {
+            // averageEnergy 是 @MainActor 属性；FFT 队列不能直写。
+            // 上一轮首帧静音派发已把主线程侧的 spectrum/averageEnergy 归零，
+            // 这里无需再碰 —— relay 读到 0 自然维持在静音分支。
+            return
+        }
+
         DispatchQueue.main.async {
             guard let svc = sharedRef, svc.isRunning else { return }
             smoothInPlace(into: &svc.spectrum16, from: new16, factor: smoothFactor)
@@ -603,6 +621,14 @@ extension SystemAudioCaptureService {
             result[i] = sum * invBin
         }
         return result
+    }
+
+    /// 判定整段频谱是否静音（与 WallpaperWebAudioRelay 的 0.01 阈值同源）。
+    nonisolated fileprivate static func isStreamSilent(_ bands: [Float]) -> Bool {
+        for v in bands where v > 0.01 {
+            return false
+        }
+        return true
     }
 
     /// 原地平滑 `into[i] = into[i] + (from[i] - into[i]) * factor`

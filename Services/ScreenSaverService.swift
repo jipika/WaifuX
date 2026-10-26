@@ -106,7 +106,8 @@ final class ScreenSaverService: ObservableObject {
     private let fm = FileManager.default
     private var cancellables = Set<AnyCancellable>()
     private var syncTask: Task<Void, Never>?
-    private var pendingCandidate: Candidate?
+    /// 本轮待写入的逐屏候选（key = "display-<displayID>"）。
+    private var pendingCandidates: [String: Candidate]?
     private var syncGeneration = UUID()
 
     private init() {
@@ -152,44 +153,45 @@ final class ScreenSaverService: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// 把屏保配置同步为当前桌面壁纸。桌面壁纸变化、烘焙产物落库、App 启动、组件安装时调用。
-    /// 当前壁纸不可用作屏保（Scene/Web 未烘焙、文件丢失）时保留上一个可用配置，屏保不至于黑屏。
+    /// 把屏保配置同步为各屏当前桌面壁纸。桌面壁纸变化、烘焙产物落库、App 启动、组件安装时调用。
+    /// 某屏当前壁纸不可用作屏保（Scene/Web 未烘焙、文件丢失）时保留该屏上一份条目，屏保不至于黑屏。
     @discardableResult
     func syncFromDesktop(reason: String, force: Bool = false) -> Bool {
         guard !BackgroundRuntimeRole.isIsolatedTest else { return false }
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("saver.sync", ["reason": reason, "force": force]); return false }
 
-        guard let candidate = desktopCandidate() else {
+        guard let candidates = desktopCandidatesByDisplayKey() else {
             syncTask?.cancel()
             syncTask = nil
-            pendingCandidate = nil
+            pendingCandidates = nil
             syncGeneration = UUID()
             print("[ScreenSaverService] 当前没有可用作屏保的桌面壁纸 (\(reason))，保留现有配置")
             return false
         }
-        if !force, isConfigured(as: candidate) {
+        if !force, isConfigured(as: candidates) {
             syncTask?.cancel()
             syncTask = nil
-            pendingCandidate = nil
+            pendingCandidates = nil
             syncGeneration = UUID()
             return true
         }
-        if !force, pendingCandidate == candidate { return true }
+        if !force, pendingCandidates == candidates { return true }
         syncTask?.cancel()
-        pendingCandidate = candidate
+        pendingCandidates = candidates
         let generation = UUID()
         syncGeneration = generation
         syncTask = Task { [weak self] in
             guard let self else { return }
             defer {
                 if syncGeneration == generation {
-                    pendingCandidate = nil
+                    pendingCandidates = nil
                     syncTask = nil
                 }
             }
             do {
-                try await apply(candidate, generation: generation)
-                print("[ScreenSaverService] 屏保已跟随桌面壁纸 (\(reason)): \(candidate.title)")
+                try await apply(candidates, generation: generation)
+                let titles = candidates.values.map(\.title).sorted().joined(separator: " / ")
+                print("[ScreenSaverService] 屏保已逐屏跟随桌面壁纸 (\(reason)): \(titles)")
             } catch is CancellationError {
                 // 桌面壁纸已经再次变化；新任务负责写入最终配置。
             } catch {
@@ -204,18 +206,18 @@ final class ScreenSaverService: ObservableObject {
         guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
         if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("saver.syncNow"); return }
 
-        guard let candidate = desktopCandidate() else {
+        guard let candidates = desktopCandidatesByDisplayKey() else {
             throw ScreenSaverError.noDesktopWallpaper
         }
         syncTask?.cancel()
         syncTask = nil
-        pendingCandidate = candidate
+        pendingCandidates = candidates
         let generation = UUID()
         syncGeneration = generation
         defer {
-            if syncGeneration == generation { pendingCandidate = nil }
+            if syncGeneration == generation { pendingCandidates = nil }
         }
-        try await apply(candidate, generation: generation)
+        try await apply(candidates, generation: generation)
     }
 
     /// 当前桌面壁纸 → 屏保候选。主屏优先，其次任意活跃屏。
@@ -235,6 +237,23 @@ final class ScreenSaverService: ObservableObject {
             if let candidate = resolveCandidate(fromDesktopPath: path) { return candidate }
         }
         return nil
+    }
+
+    /// 每块屏的桌面壁纸 → 屏保候选（key = "display-<displayID>"）。
+    /// fallback 格式屏幕标识（屏保宿主读不到，与 cropPayload 同口径）和解析不出
+    /// 候选的屏直接跳过，由 apply 保留这些屏的上一份条目。
+    /// 逐屏聚合为空时退回单候选挂到主屏，保持旧行为兜底。
+    private func desktopCandidatesByDisplayKey() -> [String: Candidate]? {
+        var byKey: [String: Candidate] = [:]
+        for (screenID, url) in CurrentWallpaperService.shared.activeURLByScreenID {
+            guard let displayID = UInt32(screenID), displayID != 0 else { continue }
+            guard let candidate = resolveCandidate(fromDesktopPath: url.path) else { continue }
+            byKey["display-\(displayID)"] = candidate
+        }
+        if byKey.isEmpty, let candidate = desktopCandidate(), let mainKey = Self.mainDisplayCropKey() {
+            byKey[mainKey] = candidate
+        }
+        return byKey.isEmpty ? nil : byKey
     }
 
     /// 桌面活跃路径 → Candidate：
@@ -265,18 +284,21 @@ final class ScreenSaverService: ObservableObject {
                          kind: kind, renderURL: url, sourceURL: url)
     }
 
-    /// 已写入的配置是否就是这张。命中则跳过重写，避免每次壁纸信号都打断屏保。
-    private func isConfigured(as candidate: Candidate) -> Bool {
-        guard let data = try? Data(contentsOf: configurationURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// 已写入的逐屏配置是否与候选完全一致。命中则跳过重写，避免每次壁纸信号都打断屏保。
+    private func isConfigured(as candidates: [String: Candidate]) -> Bool {
+        guard let object = readConfigurationObject(),
               (object["version"] as? Int) == Self.configurationVersion,
-              let stagedURL = try? ScreenSaverMediaCache.stagedURL(
-                for: candidate.renderURL, in: mediaCacheURL
-              ) else { return false }
-        return (object["itemID"] as? String) == candidate.id
-            && (object["renderSourcePath"] as? String) == candidate.renderURL.path
-            && (object["renderPath"] as? String) == stagedURL.path
-            && fm.fileExists(atPath: stagedURL.path)
+              let entries = object["wallpaperByDisplay"] as? [String: Any] else { return false }
+        for (key, candidate) in candidates {
+            guard let entry = entries[key] as? [String: Any],
+                  (entry["itemID"] as? String) == candidate.id,
+                  (entry["renderSourcePath"] as? String) == candidate.renderURL.path,
+                  let stagedPath = entry["renderPath"] as? String,
+                  let expectedStaged = try? ScreenSaverMediaCache.stagedURL(for: candidate.renderURL, in: mediaCacheURL),
+                  stagedPath == expectedStaged.path,
+                  fm.fileExists(atPath: stagedPath) else { return false }
+        }
+        return true
     }
 
     // MARK: - 路径
@@ -424,39 +446,53 @@ final class ScreenSaverService: ObservableObject {
 
     // MARK: - 配置
 
-    /// 把一张壁纸写成屏保配置。屏保立即热重载；未安装组件时也会写，
-    /// 用户之后安装组件即生效。
-    private func apply(_ candidate: Candidate, generation: UUID) async throws {
+    /// 把每块屏的桌面壁纸写成按屏条目。本屏候选不可用（未烘焙 / 媒体丢失）时
+    /// 保留该屏上一份条目，宁旧勿黑；顶层字段保留为主屏条目，兼容尚未刷新的
+    /// 旧版屏保组件（它们只读顶层）。屏保立即热重载；未安装组件时也会写。
+    private func apply(_ candidates: [String: Candidate], generation: UUID) async throws {
         guard !BackgroundRuntimeRole.isIsolatedTest else { throw CancellationError() }
-        guard fm.fileExists(atPath: candidate.renderURL.path) else {
-            throw ScreenSaverError.mediaMissing(candidate.title)
-        }
-        // macOS 27 的 legacyScreenSaver 可以读配置，却可能无权让 AVPlayer 打开
-        // /Volumes 下的原视频（NSCocoaErrorDomain 257）。复制到配置旁的可读目录。
-        // 大视频的复制放后台，避免换壁纸时卡住 App 主线程。
+        let previousObject = readConfigurationObject()
+        var entries: [String: Any] = (previousObject?["wallpaperByDisplay"] as? [String: Any]) ?? [:]
+        // 旧配置引用的暂存文件全部保留一代：正在运行的屏保重载完成前文件不能消失。
+        var keeping: [URL] = Self.renderPaths(in: previousObject).map { URL(fileURLWithPath: $0) }
+
         let cacheURL = mediaCacheURL
-        let sourceURL = candidate.renderURL
-        let stagedURL = try await Task.detached(priority: .utility) {
-            try ScreenSaverMediaCache.stage(sourceURL, in: cacheURL)
-        }.value
-        try Task.checkCancellation()
-        guard syncGeneration == generation else { throw CancellationError() }
-        let previousRenderURL: URL? = {
-            guard let data = try? Data(contentsOf: configurationURL),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let path = object["renderPath"] as? String else { return nil }
-            return URL(fileURLWithPath: path)
-        }()
+        var writtenKeys: Set<String> = []
+        for key in candidates.keys.sorted() {
+            guard let candidate = candidates[key] else { continue }
+            guard fm.fileExists(atPath: candidate.renderURL.path) else {
+                print("[ScreenSaverService] \(key) 的屏保候选媒体丢失，保留现有条目: \(candidate.title)")
+                continue
+            }
+            // macOS 27 的 legacyScreenSaver 可以读配置，却可能无权让 AVPlayer 打开
+            // /Volumes 下的原视频（NSCocoaErrorDomain 257）。复制到配置旁的可读目录。
+            // 大视频的复制放后台，避免换壁纸时卡住 App 主线程；同一源文件天然命中缓存。
+            let stagedURL = try await Task.detached(priority: .utility) { [candidate, cacheURL] in
+                try ScreenSaverMediaCache.stage(candidate.renderURL, in: cacheURL)
+            }.value
+            try Task.checkCancellation()
+            guard syncGeneration == generation else { throw CancellationError() }
+            entries[key] = Self.entryObject(for: candidate, stagedURL: stagedURL)
+            keeping.append(stagedURL)
+            writtenKeys.insert(key)
+        }
+        // 这一轮没有任何屏写出新条目（媒体全部丢失）：整体保留现有配置。
+        guard let primaryKey = Self.primaryKey(in: candidates, writtenKeys: writtenKeys),
+              let primary = candidates[primaryKey],
+              let primaryEntry = entries[primaryKey] as? [String: Any],
+              let primaryStagedPath = primaryEntry["renderPath"] as? String else {
+            throw ScreenSaverError.noDesktopWallpaper
+        }
         var object: [String: Any] = [
             "version": Self.configurationVersion,
             "configuredAt": Date().timeIntervalSince1970,
-            "itemID": candidate.id,
-            "title": candidate.title,
-            "kind": candidate.kind.isStillImage ? "image" : "video",
-            "sourceKind": candidate.kind.rawValue,
-            "sourcePath": candidate.sourceURL.path,
-            "renderSourcePath": candidate.renderURL.path,
-            "renderPath": stagedURL.path,
+            "itemID": primary.id,
+            "title": primary.title,
+            "kind": primary.kind.isStillImage ? "image" : "video",
+            "sourceKind": primary.kind.rawValue,
+            "sourcePath": primary.sourceURL.path,
+            "renderSourcePath": primary.renderURL.path,
+            "renderPath": primaryStagedPath,
             "fps": Self.animationFrameRate,
             "muted": true,
             "playbackRate": 1.0,
@@ -467,6 +503,7 @@ final class ScreenSaverService: ObservableObject {
         if let defaultKey = Self.mainDisplayCropKey() {
             object["defaultCropDisplayKey"] = defaultKey
         }
+        object["wallpaperByDisplay"] = entries
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) else {
             throw ScreenSaverError.installationVerificationFailed
@@ -475,7 +512,52 @@ final class ScreenSaverService: ObservableObject {
         try data.write(to: configurationURL, options: .atomic)
         refreshConfiguredState()
         notifyConfigurationChanged()
-        ScreenSaverMediaCache.removeUnusedFiles(in: cacheURL, keeping: [stagedURL, previousRenderURL].compactMap { $0 })
+        ScreenSaverMediaCache.removeUnusedFiles(in: cacheURL, keeping: keeping)
+    }
+
+    /// 顶层旧字段跟随哪块屏：优先主屏，其次键名最小的已写出屏。
+    private static func primaryKey(in candidates: [String: Candidate], writtenKeys: Set<String>) -> String? {
+        if let mainKey = mainDisplayCropKey(), writtenKeys.contains(mainKey) { return mainKey }
+        return writtenKeys.sorted().first
+    }
+
+    private func readConfigurationObject() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: configurationURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object
+    }
+
+    /// 配置对象引用的全部暂存渲染文件路径（逐屏条目 + 顶层旧字段）。
+    private static func renderPaths(in object: [String: Any]?) -> [String] {
+        guard let object else { return [] }
+        var paths: [String] = []
+        if let path = object["renderPath"] as? String { paths.append(path) }
+        if let entries = object["wallpaperByDisplay"] as? [String: Any] {
+            for case let entry as [String: Any] in entries.values {
+                if let path = entry["renderPath"] as? String { paths.append(path) }
+            }
+        }
+        return paths
+    }
+
+    private static func entryObject(for candidate: Candidate, stagedURL: URL) -> [String: Any] {
+        [
+            "itemID": candidate.id,
+            "title": candidate.title,
+            "kind": candidate.kind.isStillImage ? "image" : "video",
+            "sourceKind": candidate.kind.rawValue,
+            "sourcePath": candidate.sourceURL.path,
+            "renderSourcePath": candidate.renderURL.path,
+            "renderPath": stagedURL.path,
+            "identity": entryIdentity(candidate: candidate, stagedPath: stagedURL.path)
+        ]
+    }
+
+    /// 条目指纹：暂存文件名由源路径+大小+mtime 派生，内容变化必然换文件名；
+    /// 摘要判重所需的最小字段，屏保端逐屏比较，改一块屏不牵连别的屏重载。
+    private static func entryIdentity(candidate: Candidate, stagedPath: String) -> String {
+        let payload = ["v1", candidate.id, candidate.kind.rawValue, candidate.renderURL.path, stagedPath].joined(separator: "\n")
+        return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// 实时裁剪由 App Group 的 waifux-crop-prefs.json 承担（屏保按秒轮询），
@@ -596,7 +678,15 @@ final class ScreenSaverService: ObservableObject {
     }
 
     private static let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "webm", "avi", "mkv"]
-    private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
+    /// 含 heic/heif/avif，与 `LocalWallpaperApplyService.staticImageClassificationExts`
+    /// 同一口径：能设为桌面壁纸的静态图，屏保必须能跟随，否则同一张 heic 桌面能用、
+    /// 屏保却报「不支持该类型」。屏保渲染走 `NSImage(contentsOf:)` +
+    /// `cgImage(forProposedRect:)`（见 WaifuXScreenSaverView.loadImage），
+    /// 已用真实 HEIC 验证可解出 4096×2160 CGImage，能直接作为 CALayer.contents。
+    private static let imageExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff",
+        "heic", "heif", "avif"
+    ]
 
     private static func projectType(at contentRoot: URL) -> String? {
         let projectURL = contentRoot.appendingPathComponent("project.json")

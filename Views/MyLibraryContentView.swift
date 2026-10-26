@@ -217,6 +217,10 @@ struct MyLibraryContentView: View {
     @State private var lastAnimePrefetchBucket: Int?
     @State private var updateWallpaperDebounce: DispatchWorkItem?
     @State private var updateMediaDebounce: DispatchWorkItem?
+    /// 懒构建标记：非当前类型的列表被外部修订时只标脏，切过去/回可见时才重建。
+    /// 避免隐藏媒体库变化推动当前壁纸页做全量派生并重配可见 cell（反之亦然）。
+    @State private var wallpaperItemsStale = false
+    @State private var mediaItemsStale = false
     /// 封面后台预热的防抖任务：目录切换/搜索/收藏变化会连续重建网格，只跑最后一次。
     @State private var coverBackfillDebounce: Task<Void, Never>?
     /// 首次进入库页时的加载占位：数据快照（由 Helper 异步推送）与本地索引就绪前显示骨架，
@@ -225,6 +229,20 @@ struct MyLibraryContentView: View {
     /// 后台服务连接状态。库记录只由 Helper 异步推送，断连时列表必然为空 ——
     /// 必须观察它，才能在空列表时把「服务没连上」和「确实没有内容」区分开。
     @ObservedObject private var helper = BackgroundAgentClient.shared
+    /// 等库快照的兜底位：Helper 连着但迟迟不交付快照（或压根没连上）时置 true，
+    /// 让骨架收摊并显示「后台服务未连接」，而不是无限骨架。
+    /// 注意这不是「加载完成」信号：超时后仍没有快照时，列表为空**不能**判成
+    /// 「没有下载」，只有 `librarySnapshotIsArrived` 才允许显示真的空态。
+    @State private var librarySnapshotWaitTimedOut = false
+    @State private var librarySnapshotWatchdog: Task<Void, Never>?
+    /// 拉取任务的世代号：被取消的旧任务结束时不能把新任务的句柄抹掉。
+    @State private var librarySnapshotFetchGeneration: UInt64 = 0
+    /// 快照到达后「等缓存重建 → 构建列表」的任务句柄（重复到达只保最后一次）。
+    @State private var librarySnapshotRebuildTask: Task<Void, Never>?
+    /// 当前内容页（类型 + 子标签 + 目录）是否已经真正构建过一次。
+    /// 快照到达 ≠ 网格有数据：列表由 ViewModel 的 revision 去抖重建，比快照晚一步。
+    /// 骨架必须等「到达 + 已构建」，否则撤下瞬间仍是空列表。
+    @State private var libraryCurrentPageIsBuilt = false
     private let wallpaperPrefetchNamespace = "library.wallpapers"
     private let mediaPrefetchNamespace = "library.media"
     private let animePrefetchNamespace = "library.anime"
@@ -354,20 +372,33 @@ struct MyLibraryContentView: View {
         !trimmedLibrarySearchQuery.isEmpty
     }
 
-    /// 首屏加载占位的结束条件：当前页已有内容，或库记录快照已经到达。
-    /// 只用「记录非空」判断会把「当前子页确实为空」误判成加载中，所以两者取或。
-    private var libraryFirstLoadIsReady: Bool {
-        libraryHasAnyVisibleContent || libraryDataSourceHasAnyRecords
+    /// 当前内容类型的数据是否「可信」——可信才允许显示空态，否则显示骨架。
+    ///
+    /// 判据必须是「快照到没到」，不能是「列表空不空」：库记录由 Helper 异步推送，
+    /// 首帧晚到时用空列表判空，会把「还没加载」渲染成「还没有下载壁纸」的假空态
+    /// （2026-10-26 用户截图：库里 995 条壁纸，界面说没有下载）。
+    /// 旧实现用「任意库类型有记录」+ 1.2s 超时兜底，两个洞都在：别的类型先到达
+    /// 就摘掉当前页骨架；Helper 首帧 publish 要等 startRuntime 尾部（实测远超 1.2s），
+    /// 超时一到照样塌成假空态。
+    private var libraryHelperLooksDown: Bool {
+        !helper.isConnected && (helper.lastError != nil || helper.requiresApproval)
     }
 
-    /// 库记录快照是否已经到达（UI 进程由 Helper 异步推送；空库时一直为 false，
-    /// 由调用方的超时兜底结束占位）。
-    private var libraryDataSourceHasAnyRecords: Bool {
-        !WallpaperLibraryService.shared.downloadRecords.isEmpty
-            || !WallpaperLibraryService.shared.favoriteRecords.isEmpty
-            || !MediaLibraryService.shared.downloadRecords.isEmpty
-            || !MediaLibraryService.shared.favoriteRecords.isEmpty
-            || !AnimeDownloadStore.shared.records.isEmpty
+    /// 当前内容类型的数据是否可信（可信才允许显示空态，否则显示骨架）。
+    /// 快照是一份原子载荷（壁纸 + 媒体 + 两套文件夹），一个到达位覆盖两类内容。
+    private var libraryCurrentTypeIsLoaded: Bool {
+        // 当前页已经有内容就放行：Helper 短暂重连（换包 / repair）时快照位会
+        // 回落，但屏幕上的列表仍然有效，不该被骨架盖回去。
+        if libraryHasAnyVisibleContent { return true }
+        switch selectedContentType {
+        case .wallpaper, .video:
+            return libraryHelperLooksDown
+                || librarySnapshotWaitTimedOut
+                || (helper.librarySnapshotIsArrived && libraryCurrentPageIsBuilt)
+        case .anime:
+            // 动漫记录在 UI 进程本地磁盘，不经 Helper 快照，无「晚到」问题。
+            return true
+        }
     }
 
     /// 当前内容类型下是否已有可显示条目（文件夹也算）。
@@ -378,12 +409,18 @@ struct MyLibraryContentView: View {
         case .video:
             return !mediaItems.isEmpty || !currentMediaFolders.isEmpty
         case .anime:
-            if selectedSubTab == .favorites {
-                return !currentAnimeItems.isEmpty
-            } else {
-                return !animeDownloadStore.records.isEmpty
-            }
+            return selectedSubTab == .favorites
+                ? !currentAnimeItems.isEmpty
+                : !animeDownloadStore.records.isEmpty
         }
+    }
+
+    /// 骨架显隐：一次性首屏引导，加上「当前类型数据仍不可信」。
+    /// 搜索态不参与（命中 0 条要直接显示搜索结果空态）。
+    private var libraryGridPlaceholderVisible: Bool {
+        guard !hasActiveLibrarySearch else { return false }
+        if libraryFirstLoadPlaceholderVisible { return true }
+        return !libraryCurrentTypeIsLoaded
     }
 
     /// 列表为空时，先判断是不是「后台服务没连上」。
@@ -393,7 +430,10 @@ struct MyLibraryContentView: View {
     /// 会以为数据丢了（2026-10-19 用户反馈的正是这个读感），而真实动作是
     /// 恢复后台服务、不是重新下载。
     private var libraryBackendUnavailable: Bool {
-        !helper.isConnected && (helper.lastError != nil || helper.requiresApproval)
+        return libraryHelperLooksDown
+            // 连接名义上正常、但看门狗到点仍没有快照：按「后台不可用」处理，
+            // 比显示「还没有下载壁纸」诚实。
+            || (librarySnapshotWaitTimedOut && !helper.librarySnapshotIsArrived)
     }
 
     /// 空态入口：断连时替换文案，连接正常时保持原有语义。
@@ -481,6 +521,85 @@ struct MyLibraryContentView: View {
         .environmentObject(CurrentWallpaperService.shared)
     }
 
+    /// 等本地库缓存重建结束后再构建当前页列表。
+    ///
+    /// 快照到达 ≠ 缓存已反映快照：VM 的缓存在记录写入后还要重建一会儿，
+    /// 直接重建会读到旧的空缓存，出现「撤骨架 → 空态闪现 → 内容」三段跳
+    /// （用户说的「占位提前消失」）。重复触发只保最后一次。
+    private func rebuildCurrentListsAfterCacheReady(reason: String) {
+        librarySnapshotRebuildTask?.cancel()
+        librarySnapshotRebuildTask = Task { @MainActor in
+            await viewModel.awaitLocalLibraryCacheReady()
+            await mediaViewModel.awaitLocalMediaCacheReady()
+            // 沉降窗口：VM 的重建是「先起 Task 再 sleep 100ms」，只 await 在飞任务
+            // 仍可能早于下一次重建。多等一拍，让「快照到达 → 缓存重建 → 列表构建」
+            // 收敛成一次干净的交接，而不是骨架撤下后闪一下空态。
+            // 后续若真漏了一拍，重建完成会推 libraryContentRevision → debouncedUpdate
+            // → 重新判定 built，所以这里只需吸收常态延迟，不必穷尽时序。
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            rebuildCurrentLibraryLists(reason: reason)
+            librarySnapshotRebuildTask = nil
+        }
+    }
+
+    /// 主动拉库快照（有限次重试），直到快照到达或看门狗到点。
+    ///
+    /// 不等 Helper 的 publish：Helper 首次 publish 排在 `startRuntime()` 尾部
+    /// （渲染器/屏保恢复之后），实测远超旧版 1.2s 兜底，被动等会把骨架塌成
+    /// 假空态。Helper 未就绪时这次读明确失败，下一拍再试；到点仍无快照则转
+    /// 「后台服务未连接」文案，不把骨架钉死。
+    ///
+    /// 首屏 `.task` 和每次 `onAppear` 都要调：`.task` 的引导分支只跑一次，
+    /// 而离开库页会取消本任务 —— 少了这一处，再进库页就没人再拉快照了。
+    private func startLibrarySnapshotFetchIfPending() {
+        guard !helper.librarySnapshotIsArrived else { return }
+        guard librarySnapshotWatchdog == nil else { return }
+        if librarySnapshotWaitTimedOut { librarySnapshotWaitTimedOut = false }
+        librarySnapshotFetchGeneration &+= 1
+        let generation = librarySnapshotFetchGeneration
+        librarySnapshotWatchdog = Task { @MainActor in
+            let retryNanoseconds: UInt64 = 700_000_000
+            let deadline = Date().addingTimeInterval(15)
+            var attempts = 0
+            // 无论成功、取消还是到点都要让出句柄（否则「断连后重新拉取」会被
+            // 顶部的 guard 挡掉，骨架再也没人推进）；只在自己的世代仍是当前
+            // 世代时清，避免被取消的旧任务抹掉新任务的句柄。
+            defer {
+                if generation == librarySnapshotFetchGeneration {
+                    librarySnapshotWatchdog = nil
+                }
+            }
+            while !Task.isCancelled, Date() < deadline {
+                if helper.librarySnapshotIsArrived { return }
+                attempts += 1
+                do {
+                    try await BackgroundAgentClient.shared.refreshLibrarySnapshot()
+                } catch {
+                    // 只记第一次失败：Helper 未就绪时这条必然失败，逐次刷屏
+                    // 没有信息量，最终结论由超时日志给出。
+                    if attempts == 1 {
+                        AppLogger.debug(.general, "[LibraryLoad] 主动拉取库快照失败", metadata: [
+                            "attempt": "\(attempts)",
+                            "error": error.localizedDescription,
+                        ])
+                    }
+                }
+                if helper.librarySnapshotIsArrived { return }
+                try? await Task.sleep(nanoseconds: retryNanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            if !helper.librarySnapshotIsArrived {
+                librarySnapshotWaitTimedOut = true
+                AppLogger.debug(.general, "[LibraryLoad] 等待库快照超时", metadata: [
+                    "attempts": "\(attempts)",
+                    "connected": helper.isConnected ? "1" : "0",
+                    "lastError": helper.lastError ?? "nil",
+                ])
+            }
+        }
+    }
+
     /// 生命周期 / 数据源 / 状态监听（从 body 拆出，降低类型检查开销）
     private func libraryEventObservers(_ content: some View) -> some View {
         content
@@ -502,26 +621,20 @@ struct MyLibraryContentView: View {
             }
             didBootstrapLibraryGrid = true
 
-            updateWallpaperItems()
-            updateMediaItems()
+            // 只构建当前内容类型；另一套标脏，切过去时重建。
+            // 避免媒体库 250 条（220 个 WE 目录）与壁纸 995 条同时做全量派生。
+            rebuildCurrentLibraryLists(reason: "initial-bootstrap")
             let itemsReady = Date()
 
             async let initialLoad: Void = viewModel.initialLoad()
             async let animeFavoritesLoad: Void = loadAnimeFavorites()
 
-            // 首屏加载占位：库记录由 Helper 异步推送，可能晚于首轮构建到达。
-            // 数据到位（当前页已有内容或记录快照已到达）即撤；最多等 1.2s；
-            // defer 兜底保证取消 / 提前返回时不会把骨架留在屏幕上。
-            // 参考实测：indexMS≈169、itemsMS≈0，正常路径约 200ms 内撤掉。
+            startLibrarySnapshotFetchIfPending()
+
+            // 一次性引导的结束不再靠固定超时：骨架的持续显隐由
+            // libraryCurrentTypeIsLoaded 决定，快照晚到时仍显示骨架而不是塌成假空态。
+            // 这里只保证最短展示防闪，并在快照已到位时同步重建一次当前页列表。
             defer { libraryFirstLoadPlaceholderVisible = false }
-            let placeholderDeadline = Date().addingTimeInterval(1.2)
-            while !libraryFirstLoadIsReady, Date() < placeholderDeadline {
-                do {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                } catch {
-                    break
-                }
-            }
             let minimumVisible: TimeInterval = 0.18
             let elapsed = Date().timeIntervalSince(loadStart)
             if elapsed < minimumVisible {
@@ -531,18 +644,29 @@ struct MyLibraryContentView: View {
                     )
                 } catch {}
             }
-            libraryFirstLoadPlaceholderVisible = false
+            if helper.librarySnapshotIsArrived {
+                rebuildCurrentListsAfterCacheReady(reason: "bootstrap-snapshot-ready")
+            }
 
             _ = await (initialLoad, animeFavoritesLoad)
 
-            // 分段耗时：定位「我的库加载慢」到底卡在索引、条目构建还是 initialLoad。
+            // 分段耗时：定位「我的库加载慢」到底卡在索引、条目构建还是快照到达。
+            // snapshotArrived / counts 用来证明骨架撤下时数据是否真在（假空态取证）。
             AppLogger.debug(.general, "[LibraryLoad] 我的库加载分段耗时", metadata: [
                 "indexMS": Int(indexReady.timeIntervalSince(loadStart) * 1000),
                 "itemsMS": Int(itemsReady.timeIntervalSince(indexReady) * 1000),
                 "loadMS": Int(Date().timeIntervalSince(itemsReady) * 1000),
+                "snapshotMS": Int(Date().timeIntervalSince(loadStart) * 1000),
+                "snapshotArrived": helper.librarySnapshotIsArrived ? "1" : "0",
+                "helperConnected": helper.isConnected ? "1" : "0",
+                "content": selectedContentType == .wallpaper ? "wallpaper"
+                    : (selectedContentType == .video ? "video" : "anime"),
+                "counts": "\(wallpaperItems.count)/\(mediaItems.count)",
+                "records": "\(WallpaperLibraryService.shared.downloadRecords.count)/\(MediaLibraryService.shared.downloadRecords.count)",
             ])
         }
         .onAppear {
+            startLibrarySnapshotFetchIfPending()
             restoreLastLibraryPageIfNeeded()
             // ✅ 从详情返回时触发 ScrollView 滚动位置恢复
             if savedLibraryScrollOffset > 0 {
@@ -556,6 +680,10 @@ struct MyLibraryContentView: View {
             scheduleLibraryCoverBackfillIfNeeded()
         }
         .onDisappear {
+            librarySnapshotWatchdog?.cancel()
+            librarySnapshotWatchdog = nil
+            librarySnapshotRebuildTask?.cancel()
+            librarySnapshotRebuildTask = nil
             unregisterFolderBackSwipeHandler()
             unregisterFolderBackKeyboardHandler()
             librarySearchDebounce?.cancel()
@@ -584,6 +712,8 @@ struct MyLibraryContentView: View {
                 restoreLastLibraryPageIfNeeded()
                 // 回到库页时同步一次当前壁纸快照（可能在其他页被切换）
                 syncActiveWallpaperSnapshot()
+                // 库页重新可见：被标脏的另一套列表此时补齐
+                rebuildStaleLibraryListsIfNeeded()
                 // tab 切回时让 AppKit 网格主动补一次布局
                 gridLayoutRefreshToken &+= 1
             }
@@ -603,10 +733,39 @@ struct MyLibraryContentView: View {
         }
         // ViewModel 不再 @ObservedObject：用 publisher 只听库内容 revision
         .onReceive(viewModel.$libraryContentRevision) { _ in
-            debouncedUpdateWallpaperItems()
+            if selectedContentType == .wallpaper || selectedContentType == .anime {
+                debouncedUpdateWallpaperItems()
+            } else {
+                wallpaperItemsStale = true
+            }
         }
         .onReceive(mediaViewModel.$libraryContentRevision) { _ in
-            debouncedUpdateMediaItems()
+            if selectedContentType == .video || selectedContentType == .anime {
+                debouncedUpdateMediaItems()
+            } else {
+                mediaItemsStale = true
+            }
+        }
+        .onChange(of: helper.librarySnapshotIsArrived) { _, arrived in
+            guard arrived else {
+                // 断连/换 Helper：上一帧快照不再可信，回到「未构建」，并重新起
+                // 拉取（当前页此刻仍空，否则骨架会一直钉到用户离开再进来）。
+                libraryCurrentPageIsBuilt = false
+                startLibrarySnapshotFetchIfPending()
+                return
+            }
+            libraryCurrentPageIsBuilt = false
+            librarySnapshotWaitTimedOut = false
+            librarySnapshotWatchdog?.cancel()
+            librarySnapshotWatchdog = nil
+            // 快照到达：先重建当前页列表再放行渲染。顺序反了会出现三段跳
+            // （骨架撤下 → 空态闪现 → 内容），正是用户看到的「占位提前消失」。
+            rebuildCurrentListsAfterCacheReady(reason: "snapshot-arrived")
+            AppLogger.debug(.general, "[LibraryLoad] 库快照到达并重建列表", metadata: [
+                "content": selectedContentType == .wallpaper ? "wallpaper"
+                    : (selectedContentType == .video ? "video" : "anime"),
+                "counts": "\(wallpaperItems.count)/\(mediaItems.count)",
+            ])
         }
         .onChange(of: selectedSubTab) { _, _ in
             persistLastLibraryPage()
@@ -619,8 +778,7 @@ struct MyLibraryContentView: View {
             isEditing = false
             selectedItems.removeAll()
             gridScrollToTopToken &+= 1
-            updateWallpaperItems()
-            updateMediaItems()
+            rebuildCurrentLibraryLists(reason: "subtab-switch")
             if selectedContentType == .anime {
                 gridReloadToken &+= 1
             }
@@ -672,8 +830,7 @@ struct MyLibraryContentView: View {
             wallpaperFolderStack.removeAll()
             mediaFolderStack.removeAll()
             gridScrollToTopToken &+= 1
-            debouncedUpdateWallpaperItems()
-            debouncedUpdateMediaItems()
+            rebuildCurrentLibraryLists(reason: "content-type-switch")
         }
     }
 
@@ -692,8 +849,7 @@ struct MyLibraryContentView: View {
                     folderStore.createFolder(name: name, contentType: contentType, parentID: parentID, collection: collection)
                     newFolderName = ""
                     showNewFolderSheet = false
-                    updateWallpaperItems()
-                    updateMediaItems()
+                    rebuildCurrentLibraryLists(reason: "folder-mutation")
                 },
                 onCancel: {
                     newFolderName = ""
@@ -712,8 +868,7 @@ struct MyLibraryContentView: View {
                     folderStore.renameFolder(id: folder.id, contentType: folder.contentType, newName: name)
                     renameFolderName = ""
                     renamingFolder = nil
-                    updateWallpaperItems()
-                    updateMediaItems()
+                    rebuildCurrentLibraryLists(reason: "folder-mutation")
                 },
                 onCancel: {
                     renameFolderName = ""
@@ -918,8 +1073,7 @@ struct MyLibraryContentView: View {
             mediaFolderStack.removeAll()
             isEditing = false
             selectedItems.removeAll()
-            updateWallpaperItems()
-            updateMediaItems()
+            rebuildCurrentLibraryLists(reason: "library-reset")
         }
     }
 
@@ -928,6 +1082,9 @@ struct MyLibraryContentView: View {
     }
 
     private func releaseForegroundMemory() {
+        // 列表被清空：数据不再可信，骨架重新接管，避免下一次进库页闪「没有下载」。
+        libraryCurrentPageIsBuilt = false
+        librarySnapshotWaitTimedOut = false
         viewModel.releaseForegroundMemory()
         mediaViewModel.releaseForegroundMemory()
 
@@ -1089,7 +1246,7 @@ struct MyLibraryContentView: View {
                 onAdd: { showAddToFolderSheet = true }
             )
 
-            if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
+            if libraryGridPlaceholderVisible {
                 libraryGridLoadingPlaceholder(config: config)
             } else if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
                 libraryEmptySurface(
@@ -1526,6 +1683,37 @@ struct MyLibraryContentView: View {
         updateWallpaperItems()
     }
 
+    /// 只重建当前内容类型的列表；另一套只标脏（切过去/库页回可见时才重建）。
+    /// 壁纸+媒体两套全量派生（filter/map + 搜索文本 + ID 字典 + 文件夹统计 +
+    /// 封面 URL 解析）不再每次同时执行。
+    private func rebuildCurrentLibraryLists(reason: String) {
+        // 换页/重建前先判「本页数据不可信」，由 update 成功构建后再翻回可信。
+        libraryCurrentPageIsBuilt = false
+        switch selectedContentType {
+        case .wallpaper:
+            updateWallpaperItems()
+            mediaItemsStale = true
+        case .video:
+            updateMediaItems()
+            wallpaperItemsStale = true
+        case .anime:
+            // 动漫列表走自己的 store，无需重建壁纸/媒体
+            break
+        }
+    }
+
+    /// 库页回可见时把标脏的另一套补齐。
+    private func rebuildStaleLibraryListsIfNeeded() {
+        if wallpaperItemsStale {
+            wallpaperItemsStale = false
+            updateWallpaperItems()
+        }
+        if mediaItemsStale {
+            mediaItemsStale = false
+            updateMediaItems()
+        }
+    }
+
     private func debouncedUpdateWallpaperItems() {
         updateWallpaperDebounce?.cancel()
         let work = DispatchWorkItem { [self] in
@@ -1733,6 +1921,8 @@ struct MyLibraryContentView: View {
         wallpaperIDIndexCache = idMap
         gridReloadToken &+= 1
         refreshWallpaperFolderDisplay()
+        libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
+            && !viewModel.isLibraryCachePending
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
     }
@@ -1860,6 +2050,8 @@ struct MyLibraryContentView: View {
         mediaIDIndexCache = idMap
         gridReloadToken &+= 1
         refreshMediaFolderDisplay()
+        libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
+            && !mediaViewModel.isLibraryCachePending
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
     }
@@ -1901,7 +2093,7 @@ struct MyLibraryContentView: View {
                 onAdd: { showAddToFolderSheet = true }
             )
 
-            if libraryFirstLoadPlaceholderVisible && !hasActiveLibrarySearch {
+            if libraryGridPlaceholderVisible {
                 libraryGridLoadingPlaceholder(config: config)
             } else if mediaItems.isEmpty && currentMediaFolders.isEmpty {
                 libraryEmptySurface(
@@ -2318,8 +2510,7 @@ struct MyLibraryContentView: View {
                 availableIDs: orderedItemIDs,
                 scope: currentGridOrderScope
             )
-            updateWallpaperItems()
-            updateMediaItems()
+            rebuildCurrentLibraryLists(reason: "library-reset")
             hoveredInsertionID = nil
         }
         return true
@@ -2468,7 +2659,9 @@ struct MyLibraryContentView: View {
         guard lastMediaPrefetchBucket != bucket else { return }
         lastMediaPrefetchBucket = bucket
 
-        let targetSize = CGSize(width: 512, height: 512)
+        // 与 LibraryMediaGridCell.loadCoverCandidate 同尺寸（256pt@2x = 512px）：
+        // 预热与正式加载的 processor identifier 必须逐字一致，否则预热产物不命中。
+        let targetSize = CGSize(width: 256, height: 256)
         let range = prefetchRange(around: index, totalCount: entries.count)
         let urls = range
             .filter { $0 != index }
@@ -3930,8 +4123,7 @@ struct MyLibraryContentView: View {
         }
         selectedItems.removeAll()
         isEditing = false
-        updateWallpaperItems()
-        updateMediaItems()
+        rebuildCurrentLibraryLists(reason: "bulk-action")
     }
 
     private func deleteWallpaperItem(_ item: AnyWallpaperItem) {
@@ -4011,8 +4203,7 @@ struct MyLibraryContentView: View {
         // 删除文件夹本身
         folderStore.deleteFolder(id: folderID, contentType: contentType)
         gridOrderStore.removeIDs(["folder_\(folderID)"], from: currentGridOrderScope)
-        updateWallpaperItems()
-        updateMediaItems()
+        rebuildCurrentLibraryLists(reason: "bulk-action")
     }
 
     /// 将视频文件夹中的现有下载先登记到下载任务列表，再删除旧文件并重新下载。

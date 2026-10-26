@@ -60,6 +60,22 @@ final class BackgroundAgentClient: ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var lastError: String?
     @Published private(set) var requiresApproval = false
+    /// 是否真的应用过一帧 Helper 库快照（`library.snapshot` 的返回）。
+    ///
+    /// 库记录全部由 Helper 异步推送，UI 侧「记录数组为空」有两种含义：库里确实
+    /// 没有内容，与「快照还没到」。只看数组会把后者渲染成「还没有下载壁纸」，
+    /// 而骨架占位又会因为等不到数据被超时撤掉（2026-10-26 用户截图：库里 995
+    /// 条壁纸，界面显示「还没有下载壁纸」）。消费方一律读这个位来区分两态。
+    /// 快照是一份原子载荷（壁纸 + 媒体 + 两套文件夹），所以一个位足够覆盖全部
+    /// 内容类型，不需要按类型拆。
+    @Published private(set) var librarySnapshotIsArrived = false
+    /// UI 侧是否发出过库写操作（`library.*`）。
+    ///
+    /// 只有从未写过时，才允许把 `library.snapshot` 的读越过本地队尾：UI 的
+    /// 乐观更新（建文件夹/移动/删除）会先改本地再 send，此时插队的读可能把
+    /// 「还没有这次写」的旧快照盖回去，表现为已删记录复活或刚建的文件夹消失。
+    /// 一旦写过就永久走正常排队路径 —— 启动提速只发生在真正的首屏，不影响语义。
+    private var hasSentLibraryMutation = false
     private var connection: NSXPCConnection?
     private var connectionGeneration: UInt64 = 0
     private var bootstrapGeneration: UInt64 = 0
@@ -155,7 +171,14 @@ final class BackgroundAgentClient: ObservableObject {
                 try Task.checkCancellation()
                 let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
                 do {
-                    try await BackgroundAgentRegistration.repairLaunchdRegistration(service) { [weak self] in
+                    // 注销之后丢弃 launchd 里缓存的 job：正式包（Developer ID）与
+                    // Xcode 构建（Apple Development）交替运行时，签名类别变了，
+                    // 但只做注销/注册会复用旧启动约束，新 Helper 一启动就被
+                    // SIGKILL（退出码 78，BTM 却一直显示 enabled）。
+                    try await BackgroundAgentRegistration.repairLaunchdRegistration(
+                        service,
+                        bootout: { await BackgroundAgentRegistration.bootoutCachedJob() }
+                    ) { [weak self] in
                         guard let self else { return false }
                         return await self.probeHelperReachable()
                     }
@@ -413,6 +436,53 @@ final class BackgroundAgentClient: ObservableObject {
         libraryFetchTask?.cancel()
         libraryFetchTask = nil
         libraryRevision = nil
+        // 断连 = 上一帧快照不再可信（重连后可能是另一个 Helper 实例）。
+        // 回到「未到达」，让库页重新显示骨架而不是「还没有下载」。
+        latestLibrary = [:]
+        librarySnapshotIsArrived = false
+    }
+
+    /// 应用一帧库快照：缓存 + 广播 + 置「已到达」。
+    ///
+    /// `latestLibrary = [:]` 时 `observeLibrary` 的补发分支（`if !latestLibrary.isEmpty`）
+    /// 不会触发，所以空载荷绝不会被记成已到达 —— 否则空库会被误判成「快照到了但没内容」
+    /// 的反向错误。
+    private func applyLibrarySnapshot(_ values: [String: Any]) {
+        guard !values.isEmpty else { return }
+        latestLibrary = values
+        librarySnapshotIsArrived = true
+        for handler in libraryHandlers { handler(values) }
+    }
+
+    /// 主动拉一次库快照，不等 Helper 的 `libraryRevision` 变更通知。
+    ///
+    /// Helper 在 `startRuntime()` 末尾才 `bindState()` + 首次 `publish()`，前面还排着
+    /// 会 await 整个启动过程的 `bootstrap`；UI 在此期间进库页时，被动等通知会一直
+    /// 等到骨架超时。所以这里直接请求。
+    /// 单次快照读的超时：库页的重试阶梯按拍推进，不能让一次挂死的 RPC
+    /// 把整轮等待拖过自己的看门狗窗口（默认 120s 显然太长）。
+    private let librarySnapshotTimeoutSeconds: Double = 5
+
+    func refreshLibrarySnapshot() async throws {
+        let values: [String: Any]
+        if hasSentLibraryMutation {
+            values = try await requestWithTimeout("library.snapshot", timeoutSeconds: librarySnapshotTimeoutSeconds)
+        } else {
+            // 首屏专用快速通道：既不排本地队尾（队首通常是那个会 await 整个
+            // Helper 启动的 `bootstrap`），也不等 bootstrapTask —— 只确保连接
+            // 已发起。未连接/未就绪时这次读会快速失败，由调用方按拍重试。
+            // 提前应答的安全性由两侧闸门保证：UI 侧一旦发过库写操作就永久走
+            // 正常排队路径；Helper 侧库记录没恢复完、或队里还有库写操作未跑，
+            // 都不允许这次读越队。
+            if bootstrapTask == nil { start() }
+            values = try BackgroundPropertyList.decode(
+                await enqueue("library.snapshot", [:],
+                              timeoutSeconds: librarySnapshotTimeoutSeconds,
+                              skipCommandTail: true, skipBootstrap: true).value
+            )
+        }
+        guard !isClosing else { return }
+        applyLibrarySnapshot(values)
     }
 
     private func connectionLost(generation: UInt64) {
@@ -557,8 +627,7 @@ final class BackgroundAgentClient: ObservableObject {
                             fetchedRevision = libraryRevision
                             let values = try await request("library.snapshot")
                             try Task.checkCancellation()
-                            latestLibrary = values
-                            for handler in libraryHandlers { handler(values) }
+                            applyLibrarySnapshot(values)
                         } while fetchedRevision != libraryRevision
                     } catch { if !Task.isCancelled { lastError = error.localizedDescription } }
                 }
@@ -914,6 +983,12 @@ final class BackgroundAgentClient: ObservableObject {
         return try BackgroundPropertyList.decode(await enqueue(operation, arguments).value)
     }
 
+    /// 带显式超时的请求（仍保持正常排队语义）。`request` 的默认超时按操作类型
+    /// 推断（120s / 86400s），读类短超时会让重试阶梯失准。
+    private func requestWithTimeout(_ operation: String, timeoutSeconds: Double) async throws -> [String: Any] {
+        try BackgroundPropertyList.decode(await enqueue(operation, [:], timeoutSeconds: timeoutSeconds).value)
+    }
+
     /// 退出路径专用的有界请求：调用方不关心结果，也不能被无响应的 Helper
     /// 无界拖住（关窗口的 2s fallback / 6s 退出看门狗）。
     func requestBounded(_ operation: String, timeoutSeconds: Double) async {
@@ -935,6 +1010,12 @@ final class BackgroundAgentClient: ObservableObject {
                          skipCommandTail: Bool = false,
                          skipBootstrap: Bool = false) -> Task<Data, Error> {
         guard !isQuittingApplication || skipCommandTail else { return Task { throw CocoaError(.userCancelled) } }
+        // 在入队（同步）时就关闭首屏快速读通道，不能等到任务体执行：队里还
+        // 没跑的库写操作同样是「待提交变更」，插队的快照读会盖掉乐观更新
+        // （已删记录复活 / 刚建文件夹消失）。
+        if operation.hasPrefix("library."), operation != "library.snapshot" {
+            hasSentLibraryMutation = true
+        }
         if bootstrapTask == nil && !skipBootstrap { start() }
         let admittedBootstrap = skipBootstrap ? nil : bootstrapTask
         let previous = skipCommandTail ? nil : commandTail
@@ -996,8 +1077,7 @@ final class BackgroundAgentClient: ObservableObject {
                 let library = try await perform("library.snapshot", [:])
                 try Task.checkCancellation()
                 if refreshGeneration == connectionGeneration {
-                    latestLibrary = library
-                    for handler in libraryHandlers { handler(library) }
+                    applyLibrarySnapshot(library)
                 }
             }
         }

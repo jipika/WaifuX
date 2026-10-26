@@ -19,6 +19,11 @@ class WallpaperSchedulerService: ObservableObject {
     private var usedItemIDs: [String: Set<String>] = [:]
     /// Per-screen in-flight set for "播完即换" — blocks concurrent applies.
     private var onEndSwitchInFlightScreens = Set<String>()
+    /// 「播完即换但没有秒级兜底」这一状态的**签名去重**记录（key = screenID）。
+    /// 该状态本身是刻意语义（`webSceneSwitchSeconds == nil` = 只等播完通知），
+    /// 但一旦播完事件链断掉，该屏就永久静止且日志里零痕迹。这里在**签名变化时**
+    /// 打一条 notice，既能定位又不刷屏（不按时间限流：状态切换的那一刻不能被吞）。
+    private var onEndIdleLogSignatures: [String: String] = [:]
     /// Cancellable tasks for independent-screen on-end applies. The task must
     /// be drained before a manual apply starts, otherwise its awaited renderer
     /// work can finish later and overwrite the user's selection.
@@ -2001,6 +2006,46 @@ class WallpaperSchedulerService: ObservableObject {
         return TimeInterval(displayConfig.intervalMinutes * 60)
     }
 
+    /// 记录「该屏不参与定时轮换」的原因，仅在签名变化时打一条，避免刷屏。
+    /// `timedIntervalSeconds` 返回 nil 有四种成因，只有"播完即换 + 无秒级兜底"
+    /// 这一种会让该屏完全依赖播完事件 —— 一旦那条链断掉，画面永久静止且日志里
+    /// 没有任何痕迹（2026-10-25 用户日志：主屏 40 分钟零调度事件）。
+    private func logOnEndIdleIfNeeded(
+        screen: NSScreen,
+        screenID: String,
+        config: DisplaySchedulerConfig
+    ) {
+        guard config.isEnabled, !config.isOnUnlockMode, config.isOnEndMode else {
+            // 未启用 / 解锁即换 / 普通定时：都是常规态，清掉签名即可。
+            onEndIdleLogSignatures.removeValue(forKey: screenID)
+            return
+        }
+        let video = VideoWallpaperManager.shared
+        let hasVideo = video.hasActiveWallpaper(on: screen)
+        let playing = video.playingScreenIDs.contains(screenID)
+        // isPaused 在没有 player 时返回 true，直接用会把「该屏没有视频」误标成
+        // 「已暂停」，两个完全不同的排障方向。先判有无，再判是否暂停。
+        let paused = hasVideo && video.isPaused(on: screen)
+        let videoState: String
+        switch (hasVideo, playing, paused) {
+        case (false, _, _): videoState = "none(无本机视频)"
+        case (_, true, _): videoState = "playing"
+        case (_, _, true): videoState = "paused(暂停或播完冻结)"
+        default: videoState = "stopped-but-window-lives(窗在但不在输出帧)"
+        }
+        let signature = "onEnd=1,seconds=nil,video=\(videoState)"
+        guard onEndIdleLogSignatures[screenID] != signature else { return }
+        onEndIdleLogSignatures[screenID] = signature
+        AppLogger.warn(.wallpaper, "该屏处于「播完即换」但未设秒级兜底，不参与定时轮换", metadata: [
+            "screenID": screenID,
+            "screen": screen.localizedName,
+            "isOnEndMode": "true",
+            "webSceneSwitchSeconds": "nil(仅等播完事件)",
+            "videoState": videoState,
+            "hint": "若 videoState 为 paused/stopped 且画面静止，说明播完通知链没把它推进下一张"
+        ])
+    }
+
     /// Earliest wall-clock time this state key is eligible for a timed switch.
     private func dueDate(
         forStateKey stateKey: String,
@@ -2122,7 +2167,15 @@ class WallpaperSchedulerService: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.wallpaperScreenIdentifier
             let displayConfig = resolvedDisplayConfig(for: screen)
-            guard let interval = timedIntervalSeconds(for: displayConfig) else { continue }
+            guard let interval = timedIntervalSeconds(for: displayConfig) else {
+                // 这里才是本案的真实盲区：一旦所有屏都走这条 continue，
+                // hasTimedDisplay 保持 false → nextTimerFireDate 返回 nil →
+                // 定时器根本不会被 arm，于是 `changeWallpaperIfNeeded` 永远不跑、
+                // 连 tick 都没有，任何依赖 tick 的诊断都不会出现。所以打点必须
+                // 落在本处（触发时机是 refresh/reconfigure，不是每 tick，噪声可控）。
+                logOnEndIdleIfNeeded(screen: screen, screenID: screenID, config: displayConfig)
+                continue
+            }
             hasTimedDisplay = true
             if displayConfig.isOnEndMode,
                VideoWallpaperManager.shared.hasActiveWallpaper(on: screen) {
@@ -2221,7 +2274,10 @@ class WallpaperSchedulerService: ObservableObject {
                 print("\(logTag) Skipping screen \(screenID): suppressed by manual stop")
                 continue
             }
-            guard let interval = timedIntervalSeconds(for: displayConfig) else { continue }
+            guard let interval = timedIntervalSeconds(for: displayConfig) else {
+                logOnEndIdleIfNeeded(screen: screen, screenID: screenID, config: displayConfig)
+                continue
+            }
 
             // "播完即换"模式设置了秒级兜底时，Web/Scene/静态图都由定时器继续轮换。
             // 本机视频仍必须等播放完成通知，不能被秒级定时器中途切走。

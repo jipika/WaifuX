@@ -404,6 +404,25 @@ class WallpaperViewModel: ObservableObject {
         cachedAllLocalWallpapers
     }
 
+    /// 本地壁纸缓存是否仍在等重建（重建任务在飞 = 缓存还代表不了最新记录）。
+    ///
+    /// 「我的库」首屏用它区分两种空：快照刚到但缓存还没跟上（仍显示骨架），
+    /// 与记录真的为空（显示空态）。少了这一维，「快照已到达」会被当成终态，
+    /// 撤骨架的瞬间仍然读到旧缓存里的空列表。
+    var isLibraryCachePending: Bool { rebuildLocalWallpaperCacheTask != nil }
+
+    /// 等待在飞的缓存重建结束（没有则立即返回）。
+    ///
+    /// 快照到达 ≠ 缓存已反映快照：记录写入后重建任务还要跑一会儿，此时读
+    /// `allLocalWallpapers` 拿到的是旧的空缓存。库页用它把「重建当前列表」
+    /// 排到缓存之后，避免撤下骨架的瞬间仍是空列表。
+    func awaitLocalLibraryCacheReady() async {
+        let deadline = Date().addingTimeInterval(3)
+        while let task = rebuildLocalWallpaperCacheTask, Date() < deadline {
+            await task.value
+        }
+    }
+
     /// 确保本地壁纸索引可供库页面使用。
     /// 缓存失效时会合并并发请求，避免多个视图重复从持久化记录重建同一份快照。
     func ensureLocalWallpaperIndex() async {
