@@ -40,7 +40,13 @@ enum GuideTours {
                 titleKey: "guide.detail.overlay.title",
                 bodyKey: "guide.detail.overlay.body"
             ),
-            // ③ 键盘快捷键（无锚点居中卡：Space / ↑↓ / Esc 分层关闭）
+            // ③ 信息行的作者胶囊：点开作者面板（Media/Wallpaper 三处作者按钮共用锚点）
+            GuideStep(
+                anchor: .detailAuthorLink,
+                titleKey: "guide.detail.author.title",
+                bodyKey: "guide.detail.author.body"
+            ),
+            // ④ 键盘快捷键（无锚点居中卡：Space / ↑↓ / Esc 分层关闭）
             GuideStep(
                 anchor: nil,
                 titleKey: "guide.detail.keyboard.title",

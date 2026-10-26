@@ -1082,6 +1082,7 @@ struct MediaDetailSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .guideAnchor(.detailAuthorLink)
                 .onHover { hovering in
                     if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
@@ -2500,6 +2501,7 @@ struct MediaDetailSheet: View {
                                 compactFact(label: t("author"), value: author, isInteractive: true)
                             }
                             .buttonStyle(.plain)
+                            .guideAnchor(.detailAuthorLink)
                             .onHover { hovering in
                                 if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                             }
@@ -4305,7 +4307,8 @@ struct MediaDetailSheet: View {
             let bgPath = contentDir.appendingPathComponent(background).path
             if fm.fileExists(atPath: bgPath) {
                 let ext = (background as NSString).pathExtension.lowercased()
-                if ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"].contains(ext) {
+                if ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff",
+                    "heic", "heif", "avif"].contains(ext) {
                     return .image
                 }
                 if ["mp4", "mov", "webm"].contains(ext) {

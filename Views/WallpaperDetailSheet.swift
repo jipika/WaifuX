@@ -1352,6 +1352,7 @@ struct WallpaperDetailSheet: View {
                 )
             }
             .buttonStyle(.plain)
+            .guideAnchor(.detailAuthorLink)
             .onHover { hovering in
                 if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
