@@ -144,6 +144,12 @@ enum GuideTours {
                 titleKey: "guide.home.welcome.title",
                 bodyKey: "guide.home.welcome.body"
             ),
+            // 顶部标签栏：五个页面各是什么（静态/动态壁纸的区别在这里讲清）
+            GuideStep(
+                anchor: .homeTabBar,
+                titleKey: "guide.home.tabs.title",
+                bodyKey: "guide.home.tabs.body"
+            ),
             GuideStep(
                 anchor: .topBarHelp,
                 titleKey: "guide.home.help.title",

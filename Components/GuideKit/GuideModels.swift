@@ -39,6 +39,8 @@ enum GuideAnchorID: Hashable {
     case libraryMoreMenuButton
     // 详情页·信息行的作者胶囊（点开作者面板）
     case detailAuthorLink
+    // 顶部标签栏（首页/壁纸/媒体/动漫/我的）
+    case homeTabBar
     // 设置页·动态锁屏区块
     case lockscreenToggle
     case lockscreenStatusRow

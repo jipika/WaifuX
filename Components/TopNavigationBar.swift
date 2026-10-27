@@ -677,6 +677,7 @@ private struct TopBarSegmentedControl: View {
         .padding(.vertical, 4)
         .liquidGlassSurface(.prominent, tint: Color.black.opacity(0.18), in: Capsule(style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .guideAnchor(.homeTabBar)
     }
 
     private func itemWidth(for tab: MainTab) -> CGFloat {
