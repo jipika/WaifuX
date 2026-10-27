@@ -137,14 +137,26 @@ final class GuideAnchorRegistry {
 // MARK: - .guideAnchor() 修饰符
 struct GuideAnchorModifier: ViewModifier {
     let id: GuideAnchorID
+    /// 最近一次布局帧（可逃逸的纯值，供延迟重报使用）。
+    @State private var lastFrame: CGRect = .zero
 
     func body(content: Content) -> some View {
         content.background(
             GeometryReader { geo in
                 Color.clear
-                    .onAppear { report(geo) }
-                    .onChange(of: geo.frame(in: .global)) { _, _ in
-                        report(geo)
+                    .onAppear {
+                        lastFrame = geo.frame(in: .global)
+                        reportIfPossible()
+                        scheduleLateRetries()
+                    }
+                    .onChange(of: geo.frame(in: .global)) { _, new in
+                        lastFrame = new
+                        reportIfPossible()
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+                        // 顶栏等启动最早期渲染的视图，onAppear 时主窗口还不是 key，
+                        // 首次上报会被 guard 掉；窗口就绪后补报一次。
+                        reportIfPossible()
                     }
                     .onDisappear {
                         // 条件视图（回顶部按钮、详情浮层按钮等）隐藏时注销，
@@ -155,8 +167,18 @@ struct GuideAnchorModifier: ViewModifier {
         )
     }
 
-    private func report(_ geo: GeometryProxy) {
-        let frame = geo.frame(in: .global)
+    /// 启动早期窗口尚未建立时，稍后补报几次（顶栏锚点曾因此永久缺失）。
+    private func scheduleLateRetries() {
+        Task { @MainActor in
+            for delay in [0.25, 0.8, 2.0] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                reportIfPossible()
+            }
+        }
+    }
+
+    private func reportIfPossible() {
+        let frame = lastFrame
         guard frame.width > 0, frame.height > 0 else { return }
         // tour 播放期间不再刷新登记帧：registry 保留开播前的正确宿主与矩形
         //（此时遮罩窗是 keyWindow，用它换算会拿到错误宿主）。
