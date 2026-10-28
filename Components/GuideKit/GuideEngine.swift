@@ -98,6 +98,12 @@ final class GuideEngine: ObservableObject {
         }
     }
 
+    /// 设置页底部「功能导览」按钮等入口：手动重播指定 tour（不写完成状态）。
+    func replay(_ tour: GuideTour) {
+        guard !isTourActive else { return }
+        start(tour, recordProgress: false)
+    }
+
     /// 「?」帮助弹窗等入口手动重播（不写完成状态）。
     func replayTour(for tab: MainTab) {
         guard !isTourActive else { return }

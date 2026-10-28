@@ -252,6 +252,26 @@ struct SettingsView: View {
             }
 
             Spacer()
+
+            // 底部「功能导览」：手动重播分类总览（不写完成状态，不受版本节流）
+            Button {
+                GuideEngine.shared.replay(GuideTours.settingsOverview)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(t("guide.settings.replay"))
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(t("guide.settings.replay"))
+            .padding(.bottom, 14)
         }
         .padding(.top, 42)
         .padding(.horizontal, 10)
@@ -2072,6 +2092,15 @@ private struct WorkshopSettingsTab: View {
                                 .accessibilityLabel(t("workshop.fps"))
                                 .frame(width: 120)
                             }
+                        }
+                        MacSettingsRow(title: t("workshop.perfMode"), subtitle: t("workshop.perfModeDesc"), showDivider: false) {
+                            Picker("", selection: $viewModel.wallpaperPerfMode) {
+                                Text(t("workshop.perfModeHigh")).tag("high")
+                                Text(t("workshop.perfModeBalanced")).tag("balanced")
+                                Text(t("workshop.perfModePower")).tag("power")
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 180)
                         }
                         MacSettingsRow(title: t("workshop.webRenderScale"), subtitle: t("workshop.webRenderScaleDesc"), showDivider: false) {
                             HStack(spacing: 8) {

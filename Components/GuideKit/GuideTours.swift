@@ -103,9 +103,34 @@ enum GuideTours {
                 bodyKey: "guide.settings.general.body"
             ),
             GuideStep(
+                anchor: .settingsTabModules,
+                titleKey: "guide.settings.modules.title",
+                bodyKey: "guide.settings.modules.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabDownload,
+                titleKey: "guide.settings.download.title",
+                bodyKey: "guide.settings.download.body"
+            ),
+            GuideStep(
                 anchor: .settingsTabWallhaven,
-                titleKey: "guide.settings.sources.title",
-                bodyKey: "guide.settings.sources.body"
+                titleKey: "guide.settings.wallhaven.title",
+                bodyKey: "guide.settings.wallhaven.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabWorkshop,
+                titleKey: "guide.settings.workshop.title",
+                bodyKey: "guide.settings.workshop.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabPixiv,
+                titleKey: "guide.settings.pixiv.title",
+                bodyKey: "guide.settings.pixiv.body"
+            ),
+            GuideStep(
+                anchor: .settingsTabKonachan,
+                titleKey: "guide.settings.konachan.title",
+                bodyKey: "guide.settings.konachan.body"
             ),
             GuideStep(
                 anchor: .settingsTabScheduler,
