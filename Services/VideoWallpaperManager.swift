@@ -3732,6 +3732,9 @@ final class VideoWallpaperManager: ObservableObject {
                 player.rate = 0
             }
         }
+        // 单屏暂停只改 nativePausedScreenIDs（非 @Published），不主动通知的话
+        // 观察者（菜单栏弹窗、状态栏）看不到暂停态变化，图标会停在旧样子。
+        objectWillChange.send()
         persistState()
     }
 
@@ -3810,6 +3813,8 @@ final class VideoWallpaperManager: ObservableObject {
                 hidePosterImage(for: screenID)
             }
         }
+        // 同 pauseWallpaper：单屏恢复清 nativePausedScreenIDs 不发通知，这里补上。
+        objectWillChange.send()
         persistState()
     }
 

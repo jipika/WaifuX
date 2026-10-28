@@ -496,8 +496,29 @@ private final class ScenePreviewProcessController {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
-        process.environment = SceneOfflineBakeService.rendererLaunchEnvironment(for: executableURL)
+        var env = SceneOfflineBakeService.rendererLaunchEnvironment(for: executableURL)
+        // 预览黑屏取证：显式 INFO 级（App 内 spawn 时 RUST_LOG 继承自宿主环境，
+        // Xcode 运行时常为空 → 渲染器默认 warn，启动日志全被吞）。
+        env["RUST_LOG"] = env["RUST_LOG"] ?? "info"
+        process.environment = env
+        // stderr 落盘：渲染器 log 全走 stderr，App 内 spawn 时混入宿主控制台不可读。
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        process.standardOutput = Pipe()
+        let stderrBox = PreviewLogBox()
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderrBox.append(data)
+            }
+        }
         process.terminationHandler = { [weak self] _ in
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            let logPath = NSTemporaryDirectory() + "waifux-scene-preview-\(process.processIdentifier).log"
+            try? stderrBox.data.write(to: URL(fileURLWithPath: logPath), options: .atomic)
+            print("[SceneOfflineBake] 预览进程退出 pid=\(process.processIdentifier) status=\(process.terminationStatus) reason=\(process.terminationReason) log=\(logPath)")
             Task { @MainActor in
                 guard let self else { return }
                 if self.process?.processIdentifier == process.processIdentifier {
@@ -509,9 +530,26 @@ private final class ScenePreviewProcessController {
             }
         }
         try process.run()
+        print("[SceneOfflineBake] 预览进程已启动 pid=\(process.processIdentifier) exe=\(executableURL.path) args=\(arguments.joined(separator: " "))")
         self.process = process
         self.renderer = renderer
         startMemoryWatchdog(pid: process.processIdentifier)
+    }
+
+    /// 线程安全的预览 stderr 缓冲（readabilityHandler 在任意队列回调）。
+    private final class PreviewLogBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage = Data()
+        var data: Data {
+            lock.lock(); defer { lock.unlock() }
+            return storage
+        }
+        func append(_ d: Data) {
+            lock.lock()
+            // 1MB 上限防 runaway（报错集中在启动阶段，足够）。
+            if storage.count < 1_048_576 { storage.append(d) }
+            lock.unlock()
+        }
     }
 
     /// 预览子进程内存看门狗：phys_footprint 超过 1.5GB 视为 runaway，
@@ -776,6 +814,249 @@ enum SceneOfflineBakeService {
                     startingAt: URL(fileURLWithPath: record.localFilePath)
                 ).path == resolvedPath
         }
+    }
+
+    /// 先把桌面静态壁纸设好（必要时现场抽帧），供 `setWallpaper` 在**启动渲染器之前**
+    /// 串行等待。语义要求（用户 2026-10-28）：桌面静态图必须先真正出现，渲染器才允许
+    /// 启动；渲染器预渲染/延迟显示那套并行预热会让人看到长时间卡住，已废弃。
+    ///
+    /// 顺序：
+    /// 1. 已有可用烘焙产物 → 取它的 poster；
+    /// 2. 有实时抽帧缓存 → 直接用；
+    /// 3. 都没有 → 现场烘焙 1s 抽帧（这一步会慢，但必须等它完成）。
+    /// 拿到 poster 后写系统桌面并等待系统状态读回一致。
+    ///
+    /// - Returns: 已写入系统桌面的 poster URL；nil 表示没写（同步关闭 / 锁屏接管 / 失败）。
+    @MainActor
+    static func prepareDesktopStaticWallpaper(
+        path: String,
+        targetScreens: [NSScreen],
+        reason: String
+    ) async -> URL? {
+        guard BackgroundRuntimeRole.isHelper else { return nil }
+        guard !targetScreens.isEmpty else { return nil }
+        guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
+            print("[ScenePosterDiag] 前置静态底图跳过(\(reason)): 系统壁纸同步关闭")
+            return nil
+        }
+        if #available(macOS 26.0, *),
+           VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
+            print("[ScenePosterDiag] 前置静态底图跳过(\(reason)): 动态锁屏接管")
+            return nil
+        }
+
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: URL(fileURLWithPath: path)
+        )
+        guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
+            print("[ScenePosterDiag] 前置静态底图跳过(\(reason)): 非 scene 工程 \(contentRoot.path)")
+            return nil
+        }
+
+        let targets = realtimePosterTargets(for: targetScreens)
+        guard !targets.isEmpty else {
+            print("[ScenePosterDiag] 前置静态底图跳过(\(reason)): 无有效显示器几何")
+            return nil
+        }
+
+        let startedAt = Date()
+        let generation = companionBakeGeneration
+        let record = await MainActor.run { downloadedRecord(forResolvedContentRoot: contentRoot) }
+        let itemID = record?.item.id
+        let posterCacheID = itemID ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
+
+        // 1. 已有烘焙产物：直接用它的 poster。
+        if let itemID, let artifact = usableArtifact(from: record) {
+            let bakedVideoURL = URL(fileURLWithPath: artifact.videoPath)
+            if let poster = await ensureSceneBakePosterAndNotify(itemID: itemID, videoURL: bakedVideoURL) {
+                if let applied = await applyPreparedDesktopPoster(
+                    poster,
+                    targets: targets,
+                    reason: "\(reason), baked artifact"
+                ) {
+                    AppLogger.error(.wallpaper, "前置静态底图已就绪（烘焙产物）", metadata: [
+                        "reason": reason,
+                        "poster": poster.lastPathComponent,
+                        "elapsedMS": String(Int(Date().timeIntervalSince(startedAt) * 1000))
+                    ])
+                    return applied
+                }
+            }
+        }
+
+        // 2/3. 抽帧（优先命中缓存，未命中则现场烘焙 1s）。
+        let eligibility: SceneBakeEligibilitySnapshot
+        if let existing = record?.sceneBakeEligibility,
+           SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, contentRoot.path) {
+            eligibility = existing
+        } else {
+            do {
+                guard let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) else {
+                    print("[ScenePosterDiag] 前置静态底图跳过(\(reason)): 内存不足无法分析")
+                    return nil
+                }
+                eligibility = analyzed
+                if let itemID {
+                    MediaLibraryService.shared.attachSceneBakeEligibility(
+                        itemID: itemID,
+                        snapshot: analyzed,
+                        triggerAutoBake: false
+                    )
+                }
+            } catch {
+                print("[ScenePosterDiag] 前置静态底图分析失败(\(reason)): \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        let groupedTargets = Dictionary(grouping: targets, by: \.size)
+        let orderedSizes = groupedTargets.keys.sorted {
+            if $0.width != $1.width { return $0.width < $1.width }
+            return $0.height < $1.height
+        }
+        var firstApplied: URL?
+        var missingSizes: [WallpaperPosterPixelSize] = []
+
+        for size in orderedSizes {
+            let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
+            if let cachedPoster = VideoThumbnailCache.shared
+                .cachedSceneRealtimePosterFileURLIfExists(itemID: posterCacheID, variantKey: variantKey) {
+                print("[ScenePosterDiag] 前置底图缓存命中 size=\(size.width)x\(size.height): \(cachedPoster.lastPathComponent)")
+                if let applied = await applyPreparedDesktopPoster(
+                    cachedPoster,
+                    targets: groupedTargets[size, default: []],
+                    reason: "\(reason), cached \(size.width)x\(size.height)"
+                ), firstApplied == nil {
+                    firstApplied = applied
+                }
+            } else {
+                missingSizes.append(size)
+            }
+        }
+
+        if !missingSizes.isEmpty {
+            let userProperties = SceneConfigOverrideService.mergedPropertiesJSON(
+                userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(
+                    for: contentRoot.path
+                ),
+                for: contentRoot.path
+            )
+            let jobID = UUID()
+            print("[ScenePosterDiag] 前置底图等待离线烘焙串行队列 job=\(jobID.uuidString.prefix(8))")
+            await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
+            for size in missingSizes {
+                guard generation == companionBakeGeneration else {
+                    print("[ScenePosterDiag] 前置底图中止(stale): 被新应用取代")
+                    await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+                    return firstApplied
+                }
+                let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
+                if let cachedPoster = VideoThumbnailCache.shared
+                    .cachedSceneRealtimePosterFileURLIfExists(itemID: posterCacheID, variantKey: variantKey),
+                   let applied = await applyPreparedDesktopPoster(
+                    cachedPoster,
+                    targets: groupedTargets[size, default: []],
+                    reason: "\(reason), shared \(size.width)x\(size.height)"
+                   ), firstApplied == nil {
+                    firstApplied = applied
+                    continue
+                }
+                guard let posterURL = await bakeTransientRealtimePoster(
+                    contentRoot: contentRoot,
+                    eligibility: eligibility,
+                    posterCacheID: posterCacheID,
+                    variantKey: variantKey,
+                    size: size,
+                    userProperties: userProperties,
+                    reason: reason,
+                    generation: generation
+                ) else {
+                    print("[ScenePosterDiag] 前置底图抽帧失败 size=\(size.width)x\(size.height)")
+                    continue
+                }
+                if let applied = await applyPreparedDesktopPoster(
+                    posterURL,
+                    targets: groupedTargets[size, default: []],
+                    reason: "\(reason), fresh 1s bake \(size.width)x\(size.height)"
+                ), firstApplied == nil {
+                    firstApplied = applied
+                }
+            }
+            await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+        }
+
+        if let firstApplied {
+            AppLogger.error(.wallpaper, "前置静态底图已就绪（抽帧）", metadata: [
+                "reason": reason,
+                "poster": firstApplied.lastPathComponent,
+                "elapsedMS": String(Int(Date().timeIntervalSince(startedAt) * 1000))
+            ])
+        } else {
+            print("[ScenePosterDiag] ⚠️ 前置静态底图未取得可用 poster(\(reason))，桌面保持原样")
+        }
+        return firstApplied
+    }
+
+    /// 写系统桌面并等待状态读回一致。与 `syncRealtimeStaticPoster` 的差别：
+    /// 不做锁屏/开关的分支判断（调用方已判过），且**返回前确认系统真的切过去**。
+    @MainActor
+    private static func applyPreparedDesktopPoster(
+        _ posterURL: URL,
+        targets: [RealtimePosterTarget],
+        reason: String
+    ) async -> URL? {
+        let displayIDs = Set(targets.map(\.displayID))
+        let screens = NSScreen.screens.filter { screen in
+            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return displayIDs.contains(n.uint32Value)
+        }
+        let targetScreens = screens.isEmpty ? NSScreen.screens : screens
+        guard !targetScreens.isEmpty else { return nil }
+
+        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+            .allowClipping: true
+        ]
+        var applied = false
+        for screen in targetScreens {
+            do {
+                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(
+                    posterURL,
+                    for: screen,
+                    options: fillOptions
+                )
+                DesktopWallpaperSyncManager.shared.registerWallpaperSet(
+                    posterURL,
+                    for: screen,
+                    options: fillOptions
+                )
+                applied = true
+            } catch {
+                print("[ScenePosterDiag] 前置底图写桌面失败(\(reason)) \(screen.localizedName): \(error.localizedDescription)")
+            }
+        }
+        guard applied else { return nil }
+
+        // 等系统状态读回一致：桌面壁纸真正切过去才算「设置完成」。
+        let expected = posterURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            let allMatch = targetScreens.allSatisfy { screen in
+                guard let current = NSWorkspace.shared.desktopImageURL(for: screen) else { return false }
+                return current.resolvingSymlinksInPath().standardizedFileURL.path == expected
+            }
+            if allMatch {
+                // 再等一个合成节拍，让 WindowServer 真正画出来。
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                print("[ScenePosterDiag] 前置底图已确认生效(\(reason)): \(posterURL.lastPathComponent)")
+                return posterURL
+            }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        print("[ScenePosterDiag] ⚠️ 前置底图写入后状态未确认(\(reason)): \(posterURL.lastPathComponent)")
+        return nil
     }
 
     /// 实时渲染桌面后配套生成离线 MP4。
@@ -2136,11 +2417,11 @@ enum SceneOfflineBakeService {
 
     static func rendererLaunchEnvironment(for executableURL: URL) -> [String: String] {
         let rendererDirectory = executableURL.deletingLastPathComponent()
-        var env = ProcessInfo.processInfo.environment
+        // 先白名单过滤宿主环境（杜绝 Xcode/宿主图形调试键继承），再重建路径。
+        var env = WallpaperEngineXBridge.sanitizedRendererEnvironment(ProcessInfo.processInfo.environment)
         let searchPaths = [
             rendererDirectory.path,
-            rendererDirectory.deletingLastPathComponent().path,
-            env["PATH"] ?? ""
+            rendererDirectory.deletingLastPathComponent().path
         ].filter { !$0.isEmpty }
         env["PATH"] = searchPaths.joined(separator: ":")
 
@@ -2148,11 +2429,12 @@ enum SceneOfflineBakeService {
             rendererDirectory.appendingPathComponent("lib").path,
             rendererDirectory.deletingLastPathComponent().appendingPathComponent("lib").path,
             rendererDirectory.appendingPathComponent("Resources").appendingPathComponent("lib").path,
-            rendererDirectory.deletingLastPathComponent().appendingPathComponent("Resources/lib").path,
-            env["DYLD_LIBRARY_PATH"] ?? ""
+            rendererDirectory.deletingLastPathComponent().appendingPathComponent("Resources/lib").path
         ].filter { !$0.isEmpty }
         env["DYLD_LIBRARY_PATH"] = libraryPaths.joined(separator: ":")
-        return env
+        // 剥离 Xcode 调试注入（MTL_DEBUG_LAYER/GPUTOOLS_*/DYLD_INSERT_LIBRARIES 等），
+        // 否则预览/bake 子进程继承 Metal 验证层 + GPU 帧捕获，渲染循环被拖到近停摆（黑屏）。
+        return WallpaperEngineXBridge.sanitizedRendererEnvironment(env)
     }
 
     /// 无媒体库记录时（例如仅能从 Steam 目录解析到工程）用于缓存目录名的稳定 ID。

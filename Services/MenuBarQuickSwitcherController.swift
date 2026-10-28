@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -228,6 +229,20 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// Enough candidates for a real horizontal scroll; ~5 remain visible in the rail.
     static let batchSize = 16
 
+    /// 播放控制条依赖的一份状态快照。
+    /// 这些值分属三个单例（视频管理器、WE 桥、调度器），弹窗只观察本 ViewModel，
+    /// 所以统一折算成快照后由下面订阅转发——值不变就不触发重绘。
+    struct PlaybackSnapshot: Equatable {
+        var hasLivePlayback = false
+        var isPaused = false
+        var canGoPrevious = false
+        var canGoNext = false
+        var volume: Double = 1.0
+        var rate: Double?
+
+        static let empty = PlaybackSnapshot()
+    }
+
     @Published private(set) var batchItems: [MenuBarQuickWallpaperItem] = []
     @Published private(set) var selectedItem: MenuBarQuickWallpaperItem?
     @Published private(set) var isApplying = false
@@ -236,6 +251,16 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     @Published private(set) var canDesignCurrentWallpaper = false
     /// nil = 我的库（全部本地项目）；非空数组 = 选中的下载文件夹。
     @Published private(set) var selectedFolderIDs: [String]?
+
+    /// 播放控制条读的这些值都住在别的单例里（VideoWallpaperManager /
+    /// WallpaperEngineXBridge / WallpaperSchedulerService）。视图只观察本
+    /// ViewModel，所以必须把它们的变更转发进来，否则暂停后图标不会变、
+    /// 「上一张」可用性也不会刷新——这正是「按了暂停还显示暂停图标」的成因。
+    /// 这里用 CombineLatest 合成一份快照，值相等就丢弃，避免三个服务各报一次
+    /// 变更导致弹窗重复重绘。
+    @Published private(set) var playbackSnapshot = PlaybackSnapshot.empty
+    private var playbackObservers: Set<AnyCancellable> = []
+    private var playbackRefreshWorkItem: DispatchWorkItem?
 
     var onOpenSettings: (() -> Void)?
     var onOpenDesignWallpaper: (() -> Void)?
@@ -276,6 +301,32 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// external 项（库里没有记录）没有详情页可开。
     var canOpenSelectedDetail: Bool {
         selectedItem?.isLibraryItem ?? false
+    }
+
+    /// 弹窗项目 → 调度器候选池的 itemID（`wp_dl_*` / `media_dl_*`）。
+    /// 两边 ID 是两套体系：弹窗用 `wallpaper.<recordID>` / `media.<recordID>`，
+    /// 调度器用下载记录 ID。手动设为壁纸时要把这个 ID 记进轮换历史，
+    /// 否则「上一张」永远判定为无历史而保持灰色。
+    static func schedulerItemID(for item: MenuBarQuickWallpaperItem) -> String? {
+        switch item.source {
+        case .wallpaper(let wallpaper):
+            guard let record = WallpaperLibraryService.shared.downloadRecord(
+                forLocalFilePath: item.localURL.path
+            ) ?? WallpaperLibraryService.shared.downloadRecords.first(where: {
+                $0.isActive && $0.wallpaper.id == wallpaper.id
+            }) else { return nil }
+            return "wp_dl_\(record.id)"
+        case .media(let mediaItem):
+            guard let record = MediaLibraryService.shared.downloadRecord(
+                forLocalFilePath: item.localURL.path
+            ) ?? MediaLibraryService.shared.downloadRecords.first(where: {
+                $0.isActive && $0.item.id == mediaItem.id
+            }) else { return nil }
+            return "media_dl_\(record.id)"
+        case .external:
+            // 库里没有记录的文件不在候选池里，没有对应 itemID。
+            return nil
+        }
     }
 
     func openDetail() {
@@ -333,6 +384,9 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         lastCurrentLookupMS = repository.lastCurrentLookupMS
         lastRepositoryCacheHit = repository.lastAllItemsCacheHit
         lastRepositoryBuildMS = repository.lastBuildDurationMS
+
+        startObservingPlaybackState()
+        refreshPlaybackSnapshot()
     }
 
     func item(at index: Int) -> MenuBarQuickWallpaperItem? {
@@ -456,6 +510,196 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     func openSettings() {
         onOpenSettings?()
+    }
+
+    // MARK: - 每屏播放控制（与状态栏右键菜单同一套能力）
+
+    /// 弹窗所在屏（prepare 时记录）；拿不到时回退主屏。
+    private var playbackTargetScreen: NSScreen? {
+        resolvedTargetScreen() ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// 该屏是否有活跃动态壁纸（视频 / WE scene/web），决定暂停/音量/速度是否可用。
+    var hasLivePlayback: Bool { readPlaybackSnapshot().hasLivePlayback }
+
+    /// 音量键是否显示：锁屏扩展模式的壁纸跑在扩展进程里，宿主侧只有
+    /// per-display 静音/暂停 prefs、没有连续音量接口（与右键菜单
+    /// `if !isExtensionMode` 跳过音量滑块同一约束），此时隐藏音量键。
+    /// scene/web/本机视频都可用：WE 的 setVolume 热推渲染器 audioControl
+    /// 文件 + web daemon IPC，视频写 per-screen 存储。
+    var showsVolumeControl: Bool {
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenMirroringActive {
+            return false
+        }
+        return hasLivePlayback
+    }
+
+    /// 该屏当前是否暂停（视频按屏查；WE 只有全局暂停态）。
+    var isPlaybackPaused: Bool { readPlaybackSnapshot().isPaused }
+
+    /// 该屏音量（视频按屏独立；WE 走 VideoWallpaperManager 的每屏音量）。
+    var playbackVolume: Double { readPlaybackSnapshot().volume }
+
+    /// 该屏播放速度（只对本机视频有效；WE/静态壁纸返回 nil → 面板隐藏）。
+    var playbackRate: Double? { readPlaybackSnapshot().rate }
+
+    /// 是否可以切上一张/下一张（有可轮换的调度项）。
+    var canSwitchWallpaper: Bool { readPlaybackSnapshot().canGoNext }
+
+    /// 是否有可回退的上一张。
+    var canGoPrevious: Bool { readPlaybackSnapshot().canGoPrevious }
+
+    /// 从各服务现算一份快照（真值来源）。视图只认 `playbackSnapshot`，
+    /// 这里用于订阅回调与首次求值。
+    func readPlaybackSnapshot() -> PlaybackSnapshot {
+        guard let screen = playbackTargetScreen else { return .empty }
+        let videoManager = VideoWallpaperManager.shared
+        let bridge = WallpaperEngineXBridge.shared
+        let scheduler = WallpaperSchedulerService.shared
+        let screenID = screen.wallpaperScreenIdentifier
+
+        var snapshot = PlaybackSnapshot()
+        snapshot.hasLivePlayback = videoManager.hasActiveWallpaper(on: screen)
+            || bridge.hasLivePresentation(on: screen)
+
+        if bridge.isControllingExternalEngine {
+            snapshot.isPaused = bridge.isExternalPaused
+        } else if #available(macOS 26.0, *), videoManager.isLockScreenMirroringActive {
+            snapshot.isPaused = videoManager.isPaused
+        } else {
+            snapshot.isPaused = videoManager.isPaused(on: screen)
+        }
+
+        snapshot.volume = videoManager.volume(for: screen)
+        if videoManager.assignedVideoURL(for: screen) != nil {
+            snapshot.rate = videoManager.playbackRate(for: screen)
+        } else {
+            snapshot.rate = nil
+        }
+        snapshot.canGoNext = scheduler.hasSchedulableItems(for: screenID)
+        snapshot.canGoPrevious = scheduler.hasWallpaperHistory(for: screenID)
+        return snapshot
+    }
+
+    /// 把快照推给视图；值没变就不发布，避免三个服务各报一次变更造成的重复重绘。
+    func refreshPlaybackSnapshot() {
+        let next = readPlaybackSnapshot()
+        guard next != playbackSnapshot else { return }
+        playbackSnapshot = next
+    }
+
+    /// 订阅三个单例的发布：它们各自的暂停/音量/切换历史变化都要反映到弹窗。
+    /// 合并窗口 30ms，一次用户操作里多个服务连环发通知只重绘一次。
+    func startObservingPlaybackState() {
+        guard playbackObservers.isEmpty else { return }
+        let merged = Publishers.MergeMany(
+            VideoWallpaperManager.shared.objectWillChange.map { _ in () }
+                .eraseToAnyPublisher(),
+            WallpaperEngineXBridge.shared.objectWillChange.map { _ in () }
+                .eraseToAnyPublisher(),
+            WallpaperSchedulerService.shared.objectWillChange.map { _ in () }
+                .eraseToAnyPublisher()
+        )
+        .receive(on: DispatchQueue.main)
+
+        merged
+            .sink { [weak self] in
+                guard let self else { return }
+                self.playbackRefreshWorkItem?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    self?.refreshPlaybackSnapshot()
+                }
+                self.playbackRefreshWorkItem = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: item)
+            }
+            .store(in: &playbackObservers)
+    }
+
+    func togglePlaybackForTargetScreen() {
+        guard let screen = playbackTargetScreen else { return }
+        let videoManager = VideoWallpaperManager.shared
+        let bridge = WallpaperEngineXBridge.shared
+
+        if WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled {
+            if bridge.isControllingExternalEngine {
+                if bridge.isExternalPaused {
+                    bridge.resumeWallpaper()
+                    DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+                } else {
+                    bridge.pauseWallpaper()
+                }
+            } else if videoManager.isPaused {
+                videoManager.resumeWallpaper()
+                DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+            } else {
+                videoManager.pauseWallpaper()
+            }
+            return
+        }
+
+        if bridge.isControllingExternalEngine {
+            // CLI 壁纸（scene/web）不支持单屏暂停，走全局
+            if bridge.isExternalPaused {
+                bridge.resumeWallpaper()
+            } else {
+                bridge.pauseWallpaper()
+            }
+            return
+        }
+
+        if #available(macOS 26.0, *), videoManager.isLockScreenMirroringActive {
+            if let displayID = Self.cgDisplayID(for: screen) {
+                let isPaused = LockScreenWallpaperService.shared.isDisplayPaused(displayID)
+                LockScreenWallpaperService.shared.setDisplayPaused(!isPaused, forDisplayID: displayID)
+            }
+            return
+        }
+
+        if videoManager.isPaused(on: screen) {
+            videoManager.resumeWallpaper(for: screen)
+            DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+        } else {
+            videoManager.pauseWallpaper(for: screen)
+        }
+    }
+
+    func nextWallpaperForTargetScreen() {
+        guard let screen = playbackTargetScreen else { return }
+        let scheduler = WallpaperSchedulerService.shared
+        guard scheduler.hasSchedulableItems(for: screen.wallpaperScreenIdentifier) else { return }
+        if scheduler.isGlobalDisplaySyncEnabled {
+            scheduler.triggerNextGlobalWallpaperNow()
+        } else {
+            scheduler.triggerNextWallpaperNow(for: screen.wallpaperScreenIdentifier)
+        }
+        VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: [screen])
+    }
+
+    func previousWallpaperForTargetScreen() {
+        guard let screen = playbackTargetScreen else { return }
+        let scheduler = WallpaperSchedulerService.shared
+        guard scheduler.hasSchedulableItems(for: screen.wallpaperScreenIdentifier) else { return }
+        scheduler.triggerPreviousWallpaperNow(for: screen.wallpaperScreenIdentifier)
+        VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: [screen])
+    }
+
+    /// 只调该屏音量，不碰其它屏和全局静音（与右键菜单音量滑块同语义）。
+    func setPlaybackVolume(_ volume: Double) {
+        guard let screen = playbackTargetScreen else { return }
+        let clamped = min(1.0, max(0.0, volume))
+        VideoWallpaperManager.shared.setVolume(clamped, for: screen)
+        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
+            WallpaperEngineXBridge.shared.setVolume(clamped, for: screen)
+        }
+    }
+
+    func setPlaybackRate(_ rate: Double) {
+        guard let screen = playbackTargetScreen else { return }
+        VideoWallpaperManager.shared.setPlaybackRate(rate, for: screen)
+    }
+
+    private static func cgDisplayID(for screen: NSScreen) -> UInt32? {
+        screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
     }
 
     func quitApplication() {
@@ -641,9 +885,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                 screenID: globallySynced || screens.count != 1
                     ? nil
-                    : screens.first?.wallpaperScreenIdentifier
+                    : screens.first?.wallpaperScreenIdentifier,
+                itemID: Self.schedulerItemID(for: selectedItem)
             )
             isApplying = false
+            refreshPlaybackSnapshot()
             onApplied?()
         } catch {
             AppLogger.error(.wallpaper, "菜单栏快速设置壁纸失败", metadata: [

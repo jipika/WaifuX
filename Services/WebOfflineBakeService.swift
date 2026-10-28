@@ -525,7 +525,8 @@ enum WebOfflineBakeService {
         process.executableURL = executableURL
         process.currentDirectoryURL = executableURL.deletingLastPathComponent()
         process.arguments = arguments
-        process.environment = ProcessInfo.processInfo.environment
+        // web bake 跑 wallpaperengine-cli（WKWebView/Metal 合成）——同样剥离 Xcode 调试注入。
+        process.environment = WallpaperEngineXBridge.sanitizedRendererEnvironment(ProcessInfo.processInfo.environment)
 
         let stderrPipe = Pipe()
         process.standardError = stderrPipe

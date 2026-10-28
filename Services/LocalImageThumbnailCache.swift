@@ -56,7 +56,7 @@ private actor LocalImageThumbnailGenerationCoordinator {
 /// 「我的库」静图列表缩略图缓存。
 ///
 /// 外置卡/U 盘上的原图常为数 MB～数十 MB；若卡片直接 `KFImage(localFullFile)`，
-/// Kingfisher 的 Downsampling 仍要从慢卷完整读入才能缩放到 512。
+/// Kingfisher 的 Downsampling 仍要从慢卷完整读入才能缩放。
 /// 本缓存把列表封面落到本机 SSD（Caches/WaifuX/LocalImageThumbnails），列表只读小 JPEG。
 @MainActor
 final class LocalImageThumbnailCache {
@@ -67,10 +67,14 @@ final class LocalImageThumbnailCache {
     /// 同步存在性缓存：key = path_md5，value = 缓存文件是否可用
     private let existenceCache = NSCache<NSString, NSNumber>()
 
-    /// 列表封面目标边长（与 LibraryCard Downsampling 一致）
-    private let maxPixelSize: CGFloat = 512
+    /// 列表封面目标边长。512px 在 Retina 网格卡上实测偏糊（用户 2026-10-27 反馈），
+    /// 提到 768 对齐 GIF 中间帧链；尺寸编进缓存文件名，旧 512px 产物自然失效。
+    private let maxPixelSize: CGFloat = 768
     private let jpegQuality: CGFloat = 0.82
     private let minUsableBytes = 400
+
+    /// 缓存文件名尺寸段：格式变更 = 旧产物整体失效重生成。
+    private let sizeToken = "768"
 
     /// 可生成静态列表 JPEG 的扩展（**不含 gif**：动图必须保留原文件给 hover 播放）。
     nonisolated private static let rasterExtensions: Set<String> = [
@@ -182,7 +186,7 @@ final class LocalImageThumbnailCache {
     // MARK: - Private
 
     private func cacheFileURL(forPathKey pathKey: String) -> URL {
-        cacheDirectory.appendingPathComponent("img_\(pathKey.md5).jpg")
+        cacheDirectory.appendingPathComponent("img_\(pathKey.md5)_\(sizeToken).jpg")
     }
 
     private func isUsableCachedImage(at url: URL) -> Bool {

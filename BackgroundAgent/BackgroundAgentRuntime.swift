@@ -745,7 +745,10 @@ final class BackgroundAgentRuntime {
             WallpaperSchedulerService.shared.stop()
             return [:]
         case "scheduler.notifyManualWallpaperChange":
-            WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: a.optionalString("screenID"))
+            WallpaperSchedulerService.shared.notifyManualWallpaperChange(
+                screenID: a.optionalString("screenID"),
+                itemID: a.optionalString("itemID")
+            )
             return [:]
         case "scheduler.updateConfig":
             try WallpaperSchedulerService.shared.updateConfig(try a.decode("newConfig", as: SchedulerConfig.self))

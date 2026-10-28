@@ -191,12 +191,30 @@ class SettingsViewModel: ObservableObject {
     /// 性能模式（--effect-reduction）：压缩次级采样等 effect 中间 RT 精度
     /// 仅在超分模式启用时生效；默认关闭以避免静默损失 effect 精度
     @Published var effectReductionEnabled = false {
-        didSet { WaifuXPreferences.shared.set(effectReductionEnabled, forKey: "effect_reduction_enabled") }
+        didSet {
+            WaifuXPreferences.shared.set(effectReductionEnabled, forKey: "effect_reduction_enabled")
+            // 与 perfMode 同通道：effect 压缩变化即时热推给运行中的渲染器。
+            WallpaperEngineXBridge.shared.applyPerfModeChange(wallpaperPerfMode)
+        }
     }
 
     /// 壁纸引擎实时渲染帧率上限 (60 ~ 显示器最大刷新率)
     @Published var wallpaperEngineFPS: Double = 60 {
         didSet { WaifuXPreferences.shared.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
+    }
+
+    /// 渲染性能模式：只影响 effect RT 精度，不影响帧率（帧率由 wallpaperEngineFPS 单独控制）。
+    /// high/balanced = effectRT 全尺寸（等价），power = effectRT 宽高减半（省 GPU）。
+    @Published var wallpaperPerfMode: String = "balanced" {
+        didSet {
+            let allowed = ["high", "balanced", "power"]
+            let value = allowed.contains(wallpaperPerfMode) ? wallpaperPerfMode : "balanced"
+            if value != wallpaperPerfMode { wallpaperPerfMode = value; return }
+            WaifuXPreferences.shared.set(value, forKey: "wallpaper_engine_perf_mode")
+            if oldValue != value {
+                WallpaperEngineXBridge.shared.applyPerfModeChange(value)
+            }
+        }
     }
 
     /// Web 壁纸画布分辨率比例；100% 保持原画质，降低后减少 WebGL 像素占用。
@@ -548,6 +566,8 @@ class SettingsViewModel: ObservableObject {
             let savedWallpaperFPS = defaults.object(forKey: "wallpaper_engine_fps") as? Double ?? 60.0
             wallpaperEngineFPS = savedWallpaperFPS.isFinite
                 ? max(60, min(240, savedWallpaperFPS)) : 60.0
+            let savedPerfMode = defaults.object(forKey: "wallpaper_engine_perf_mode") as? String ?? "balanced"
+            wallpaperPerfMode = ["high", "balanced", "power"].contains(savedPerfMode) ? savedPerfMode : "balanced"
             webWallpaperRenderScalePercent = defaults.object(forKey: "web_wallpaper_render_scale_percent") as? Double ?? 100.0
             sceneBakeFPS = defaults.object(forKey: "scene_bake_fps") as? Double ?? 30.0
             sceneBakeDuration = defaults.object(forKey: "scene_bake_duration") as? Double ?? 15

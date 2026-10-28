@@ -1,14 +1,14 @@
 {
   "wgpu": {
-    "version": "1.0.27",
-    "revision": 28,
+    "version": "1.0.35",
+    "revision": 36,
     "sourceSHA256": {
       "dxc": "c4febd2c06b893aaa69c6ef3ef3498108f395aeee572a290dcbdd2a0609216f9",
       "dxc-x86_64": "fe842195bc4ba49b24cd866ddd940e0445208bfa06697eebd79e872777e878d4",
       "lib/libdxcompiler.dylib": "183f7e651bca16e7a05962a13128523ba2d7a10fb2ed988bcc73e0f30cdc2a32",
       "libdxcompiler-x86_64.dylib": "baea7a81192a47e90b8e50b1301b3fe2f6d7cd1032e87f13b13403698760255c",
-      "wallpaper-wgpu": "758f44642cb7c562e142ba334fa3c1abe506f3c507e1d2b378484fddaf18e65a",
-      "wallpaper-wgpu-x86_64": "a7d842e1440a14b6601255f378d887824035d35a7632c150d2c845b426ddfdb6"
+      "wallpaper-wgpu": "c448a3a7e5d757f1369d679da0c38298fde53d9fc0e378e89afcfca5020e3217",
+      "wallpaper-wgpu-x86_64": "49c8b13f38be2f880977620e0a9973b107b2936e77f4d0f651c8c359fb0f5079"
     }
   },
   "web": {

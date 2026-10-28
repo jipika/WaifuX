@@ -318,7 +318,7 @@ final class VideoRendererProcessController {
             "--socket", socketPath,
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
         ]
-        proc.environment = ProcessInfo.processInfo.environment
+        proc.environment = WallpaperEngineXBridge.sanitizedRendererEnvironment(ProcessInfo.processInfo.environment)
         proc.environment?["WAIFUX_VIDEO_RENDERER_PID_PATH"] = pidPath
         proc.environment?["LSUIElement"] = "1"  // 无 Dock 图标
         if let lockStateURL = LockScreenWallpaperService.shared.playbackStateURL {

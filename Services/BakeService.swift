@@ -1674,10 +1674,13 @@ final class BakeService: ObservableObject {
             bundleResourceDirectory.appendingPathComponent("lib").path,
             environment["DYLD_LIBRARY_PATH"] ?? ""
         ].filter { !$0.isEmpty }.joined(separator: ":")
+        // 剥离 Xcode 调试注入（MTL_DEBUG_LAYER/GPUTOOLS_*/DYLD_INSERT_LIBRARIES 等），
+        // 避免 wallpaper-wgpu bake 继承 Metal 验证层 + GPU 帧捕获被拖到近停摆。
+        let sanitizedEnvironment = WallpaperEngineXBridge.sanitizedRendererEnvironment(environment)
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.arguments = arguments
-        configuration.environment = environment
+        configuration.environment = sanitizedEnvironment
         configuration.activates = false
         configuration.createsNewApplicationInstance = true
 

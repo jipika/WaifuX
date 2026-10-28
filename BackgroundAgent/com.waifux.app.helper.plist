@@ -7,6 +7,13 @@
     <key>MachServices</key>
     <dict><key>com.waifux.app.helper.control</key><true/></dict>
     <key>RunAtLoad</key><true/>
+    <!-- 渲染器由本 Helper spawn，子进程初始 QoS class（qos_class_main）继承
+         Helper 的调度上下文。launchd 默认给 daemon 类作业 utility 档，导致
+         wallpaper-wgpu 的 22 个工作线程全部 PRI 20 被节流（实测 Helper spawn
+         35fps vs 终端 spawn 60fps，同二进制同参数同桌面窗口）。
+         ProcessType=Interactive 让作业获得前台级调度，子进程继承 0x21
+         user-interactive 天花板，实时桌面渲染才能拿满刷新率。 -->
+    <key>ProcessType</key><string>Interactive</string>
     <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
     <key>LimitLoadToSessionType</key><string>Aqua</string>
 </dict>

@@ -27,11 +27,11 @@ import Kingfisher
 enum LibraryCoverImageCache {
     static let imageCache: ImageCache = {
         let cache = ImageCache(name: "library-covers")
-        // 中间帧出图已降至 512px（≈1MB/张）：160MB 内存可驻留约一整屏以上，
-        // 滚动往返不再必然驱逐重载。处理器 identifier 含尺寸，旧 1024px 条目
-        // 自然过期淘汰，无需迁移。
-        cache.memoryStorage.config.totalCostLimit = 160 * 1024 * 1024 // 160MB
-        cache.memoryStorage.config.countLimit = 600
+        // 中间帧出图 768px（384pt@2x，≈2.3MB/张）：512px 在 Retina 网格卡上实测偏糊。
+        // 256MB 可驻约 108 张（滚动往返不驱逐重载）。处理器 identifier 含尺寸，
+        // 旧尺寸条目自然失效，无需迁移。
+        cache.memoryStorage.config.totalCostLimit = 256 * 1024 * 1024 // 256MB
+        cache.memoryStorage.config.countLimit = 800
         cache.memoryStorage.config.expiration = .seconds(30 * 60)    // 30 min
         cache.memoryStorage.config.cleanInterval = 60
         // 磁盘独立小缓存：512 降采样 JPEG 体积很小；远程 thumb 首次迁移会重下一次。
@@ -44,8 +44,8 @@ enum LibraryCoverImageCache {
     /// 表示我们依赖 NSCache 的内部锁而不是编译器保护。
     private nonisolated(unsafe) static let snapshotCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 600
-        cache.totalCostLimit = 160 * 1024 * 1024
+        cache.countLimit = 800
+        cache.totalCostLimit = 256 * 1024 * 1024
         return cache
     }()
 
@@ -716,10 +716,11 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
     // MARK: 封面
 
     /// 封面加载选项：与旧 WallpaperEditCard 的 KFImage 同源
-    /// （512 固定降采样、disk 缓存），但走库封面专用缓存 `LibraryCoverImageCache`：
+    /// （768px 降采样、disk 缓存，对齐 LocalImageThumbnailCache 的 SSD 缩略图），
+    /// 但走库封面专用缓存 `LibraryCoverImageCache`：
     /// 30 分钟内存过期，且与详情页大图隔离。不走基类 loadImage 管线。
     private static let coverImageOptions: KingfisherOptionsInfo = [
-        .processor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512))),
+        .processor(DownsamplingImageProcessor(size: CGSize(width: 384, height: 384))),
         .targetCache(LibraryCoverImageCache.imageCache),
         .backgroundDecode,
         .keepCurrentImageWhileLoading,
@@ -1104,7 +1105,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
         // 否则 30 分钟内存过期前会一直命中旧帧。
         let caches = [KingfisherManager.shared.cache, LibraryCoverImageCache.imageCache]
         let processorIdentifier = GIFAwareMiddleFrameImageProcessor(
-            targetSize: CGSize(width: 256, height: 256),
+            targetSize: CGSize(width: 384, height: 384),
             scaleFactor: 2
         ).identifier
         let cacheKeys = [
@@ -1373,10 +1374,9 @@ final class LibraryMediaGridCell: ExploreGridItem {
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.itemID)
         }
         let url = candidates[index]
-        // 512pt@2x 的中间帧出图 1024×1024 ≈ 4MB/张，24 张就挤爆 96MB 内存缓存，
-        // 滚动回来必 miss 重载。降到 256pt@2x = 512px（≈1MB/张）配合 160MB 限额，
-        // 网格卡片物理尺寸远小于 512px，视觉无损。
-        let target = CGSize(width: 256, height: 256)
+        // 512pt@2x 的中间帧出图 1024×1024 ≈ 4MB/张会挤爆内存缓存；512px 又实测
+        // 偏糊。768px（384pt@2x ≈ 2.3MB/张）配合 256MB 限额，滚动往返不重载。
+        let target = CGSize(width: 384, height: 384)
         // 处理器会按数据格式分流，普通图片仍走 Downsampling；GIF 不论 URL
         // 是否带 .gif 后缀都取中间帧，保证默认静态封面不是首帧黑图。
         let processor: ImageProcessor = GIFAwareMiddleFrameImageProcessor(

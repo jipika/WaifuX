@@ -13,6 +13,9 @@ class WallpaperSchedulerService: ObservableObject {
 
     /// Tracks last-applied item ID per screen to avoid immediate repeats.
     private var lastChangedItemIDs: [String: String] = [:]
+    /// 每个调度状态键的轮换历史（itemID，按应用顺序追加，末尾最新）。
+    /// 仅存活于本次运行，用于「上一张」手动回退；重启后历史为空即禁用。
+    private var rotationHistoryByStateKey: [String: [String]] = [:]
     /// Tracks last change time per screen to honor per-display intervals.
     private var lastChangeTimes: [String: Date] = [:]
     /// Tracks already-used item IDs per screen in the current random round to avoid duplicates within a full cycle.
@@ -315,6 +318,148 @@ class WallpaperSchedulerService: ObservableObject {
         applyNextWallpaper(for: screenID, requiredMode: nil, preferImmediatePresentation: true)
     }
 
+    /// 手动回到上一张：从该状态键的轮换历史里取「当前的上一个」直接应用。
+    /// 全局同步走全局历史；单屏走该屏历史。历史为空（App 刚启动）时 no-op 并返回 false。
+    @discardableResult
+    func triggerPreviousWallpaperNow(for screenID: String) -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.triggerPreviousWallpaperNow", ["screenID": screenID]); return false }
+
+        let stateKey = config.isGlobalDisplaySyncEnabled
+            ? globalSchedulerStateKey
+            : screenID
+        guard let previousID = previousItemID(forStateKey: stateKey) else {
+            print("\(logTag) Previous wallpaper unavailable for \(stateKey): no history")
+            return false
+        }
+        print("\(logTag) Manual previous wallpaper requested for \(stateKey) -> \(previousID)")
+        if config.isGlobalDisplaySyncEnabled {
+            applyHistoryItemGlobally(itemID: previousID)
+            return true
+        }
+        applyHistoryItem(itemID: previousID, toScreenID: screenID)
+        return true
+    }
+
+    /// 历史里是否有可回退的上一张（当前项之前至少还有一个有效条目）。
+    func hasWallpaperHistory(for screenID: String) -> Bool {
+        let stateKey = config.isGlobalDisplaySyncEnabled
+            ? globalSchedulerStateKey
+            : screenID
+        return previousItemID(forStateKey: stateKey) != nil
+    }
+
+    /// 取状态键的「上一个」itemID：历史末尾是当前项（由应用成功后记录），
+    /// 弹出末尾后的新末尾即上一张。历史不足两条时视为无历史。
+    private func previousItemID(forStateKey stateKey: String) -> String? {
+        guard var history = rotationHistoryByStateKey[stateKey], history.count >= 2 else { return nil }
+        let currentID = lastChangedItemIDs[stateKey]
+        if let tail = history.last, tail == currentID {
+            history.removeLast()
+        }
+        return history.last
+    }
+
+    /// 应用成功后把 itemID 记入该状态键的历史（相邻重复折叠，封顶 32 条）。
+    private func recordRotationHistory(itemID: String, stateKey: String) {
+        var history = rotationHistoryByStateKey[stateKey] ?? []
+        if history.last == itemID { return }
+        history.append(itemID)
+        if history.count > 32 {
+            history.removeFirst(history.count - 32)
+        }
+        rotationHistoryByStateKey[stateKey] = history
+    }
+
+    /// 「上一张」的物化应用（单屏）：与手动下一张同链路（applyItem + 强制合帧）。
+    /// 任务句柄复用 onEndSwitchTasks，先取消同屏在途任务，避免互相覆盖。
+    private func applyHistoryItem(itemID: String, toScreenID screenID: String) {
+        guard let liveScreen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else {
+            print("\(logTag) Previous wallpaper: screen \(screenID) not found")
+            return
+        }
+        onEndSwitchTasks[screenID]?.cancel()
+        let displayConfig = resolvedDisplayConfig(for: liveScreen)
+        let items = getSchedulableItems(for: displayConfig)
+        guard let item = items.first(where: { $0.id == itemID }) else {
+            print("\(logTag) Previous wallpaper item \(itemID) no longer schedulable for \(screenID)")
+            return
+        }
+        let generation = onEndSwitchGeneration
+        let task = Task { @MainActor in
+            defer {
+                if self.onEndSwitchGeneration == generation {
+                    self.onEndSwitchTasks.removeValue(forKey: screenID)
+                }
+            }
+            print("\(logTag) Applying previous wallpaper '\(item.title)' to screen \(screenID)")
+            let success = await self.applyItem(item, toScreenID: screenID, preferImmediatePresentation: true)
+            guard !Task.isCancelled,
+                  self.onEndSwitchGeneration == generation else { return }
+            if success {
+                self.lastChangeTimes[screenID] = Date()
+                self.lastChangedItemIDs[screenID] = item.id
+                self.recordRotationHistory(itemID: item.id, stateKey: screenID)
+                self.persistSchedulerState()
+                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: [liveScreen])
+            } else {
+                print("\(logTag) Failed to apply previous wallpaper '\(item.title)' to screen \(screenID)")
+            }
+        }
+        onEndSwitchTasks[screenID] = task
+    }
+
+    /// 「上一张」的物化应用（全局同步）：复用 globalRotationTask 门，
+    /// in-flight 时直接拒绝（与 changeGlobalWallpaperIfNeeded 的 coalescing 同语义）。
+    private func applyHistoryItemGlobally(itemID: String) {
+        guard globalRotationTask == nil else {
+            print("\(logTag) Global rotation already in flight; previous skipped")
+            return
+        }
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        let items = getSchedulableItems(for: config.globalDisplayConfig)
+        guard let item = items.first(where: { $0.id == itemID }) else {
+            print("\(logTag) Previous wallpaper item \(itemID) no longer schedulable globally")
+            return
+        }
+        let generation = globalRotationGeneration
+        activeGlobalRotationIsManual = true
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.globalRotationGeneration == generation {
+                    self.globalRotationTask = nil
+                    self.activeGlobalRotationIsManual = false
+                    if self.isRunning { self.scheduleNextChange() }
+                }
+            }
+            let success = await self.applyItemGlobally(item, to: screens, preferImmediatePresentation: true)
+            guard !Task.isCancelled,
+                  self.globalRotationGeneration == generation,
+                  self.config.isGlobalDisplaySyncEnabled else {
+                return
+            }
+            if success {
+                self.failedApplyRetryAfter.removeValue(forKey: self.globalSchedulerStateKey)
+                self.lastChangeTimes[self.globalSchedulerStateKey] = Date()
+                self.lastChangedItemIDs[self.globalSchedulerStateKey] = item.id
+                self.recordRotationHistory(itemID: item.id, stateKey: self.globalSchedulerStateKey)
+                self.persistSchedulerState()
+                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
+            } else {
+                print("\(self.logTag) Failed to apply previous wallpaper '\(item.title)' globally")
+            }
+        }
+        globalRotationTask = task
+    }
+
+    /// 调度器应用成功后的统一落账：更新当前项 + 追加轮换历史。
+    /// 各调度路径在原来写 `lastChangedItemIDs[key] = item.id` 的地方改调这个。
+    private func noteApplied(itemID: String, stateKey: String) {
+        lastChangedItemIDs[stateKey] = itemID
+        recordRotationHistory(itemID: itemID, stateKey: stateKey)
+    }
+
     func triggerNextGlobalWallpaperNow() {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.triggerNextGlobalWallpaperNow", [:]); return }
 
@@ -514,7 +659,7 @@ class WallpaperSchedulerService: ObservableObject {
             if success {
                 didApply = true
                 self.lastChangeTimes[screenID] = Date()
-                self.lastChangedItemIDs[screenID] = item.id
+                self.noteApplied(itemID: item.id, stateKey: screenID)
                 self.persistSchedulerState()
                 print("\(logTag) Applied next wallpaper '\(item.title)' to screen \(screenID)")
             } else {
@@ -542,7 +687,7 @@ class WallpaperSchedulerService: ObservableObject {
                     if retrySuccess {
                         didApply = true
                         self.lastChangeTimes[screenID] = Date()
-                        self.lastChangedItemIDs[screenID] = retryItem.id
+                        self.noteApplied(itemID: retryItem.id, stateKey: screenID)
                         self.persistSchedulerState()
                         print("\(logTag) Retry applied next wallpaper '\(retryItem.title)' to screen \(screenID)")
                         return
@@ -699,7 +844,7 @@ class WallpaperSchedulerService: ObservableObject {
 
             self.failedApplyRetryAfter.removeValue(forKey: self.globalSchedulerStateKey)
             self.lastChangeTimes[self.globalSchedulerStateKey] = Date()
-            self.lastChangedItemIDs[self.globalSchedulerStateKey] = item.id
+            self.noteApplied(itemID: item.id, stateKey: self.globalSchedulerStateKey)
             if case .onEnd? = requiredMode {
                 self.globalOnEndSwitchCooldownUntil = Date().addingTimeInterval(self.onEndSwitchCooldown)
             }
@@ -1398,9 +1543,17 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     /// 手动设置壁纸后调用：重置该屏幕的调度计时器，避免刚设置完就被自动切换覆盖。
-    /// - Parameter screenID: 被手动设置壁纸的屏幕标识符；nil 表示重置所有屏幕。
-    func notifyManualWallpaperChange(screenID: String? = nil) {
-        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("scheduler.notifyManualWallpaperChange", ["screenID": screenID]); return }
+    /// - Parameters:
+    ///   - screenID: 被手动设置壁纸的屏幕标识符；nil 表示重置所有屏幕。
+    ///   - itemID: 刚应用的调度项 ID（`wp_dl_*` / `media_dl_*`）。给了就记进轮换历史，
+    ///     否则「上一张」只认得调度器自动切过的项，手动换的壁纸永远回不去。
+    func notifyManualWallpaperChange(screenID: String? = nil, itemID: String? = nil) {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var payload: [String: Any] = ["screenID": screenID]
+            if let itemID { payload["itemID"] = itemID }
+            BackgroundRuntimeBridge.send("scheduler.notifyManualWallpaperChange", payload)
+            return
+        }
 
         manualWallpaperApplyInFlight = false
         cancelTimedRotation()
@@ -1408,14 +1561,17 @@ class WallpaperSchedulerService: ObservableObject {
         if config.isGlobalDisplaySyncEnabled {
             lastChangeTimes[globalSchedulerStateKey] = now
             failedApplyRetryAfter.removeValue(forKey: globalSchedulerStateKey)
+            if let itemID { noteApplied(itemID: itemID, stateKey: globalSchedulerStateKey) }
         } else if let screenID = screenID {
             lastChangeTimes[screenID] = now
             failedApplyRetryAfter.removeValue(forKey: screenID)
+            if let itemID { noteApplied(itemID: itemID, stateKey: screenID) }
         } else {
-            for screen in NSScreen.screens {
-                let id = screen.wallpaperScreenIdentifier
+            let screenIDs = NSScreen.screens.map(\.wallpaperScreenIdentifier)
+            for id in screenIDs {
                 lastChangeTimes[id] = now
                 failedApplyRetryAfter.removeValue(forKey: id)
+                if let itemID { noteApplied(itemID: itemID, stateKey: id) }
             }
         }
         persistSchedulerState()
@@ -1423,6 +1579,7 @@ class WallpaperSchedulerService: ObservableObject {
         if isRunning {
             scheduleNextChange()
         }
+        objectWillChange.send()
         print("\(logTag) Manual wallpaper change notified, timer reset")
     }
 
@@ -1600,7 +1757,7 @@ class WallpaperSchedulerService: ObservableObject {
                   !config.isGlobalDisplaySyncEnabled else { return }
             if success {
                 lastChangeTimes[screenID] = Date()
-                lastChangedItemIDs[screenID] = item.id
+                noteApplied(itemID: item.id, stateKey: screenID)
                 failedApplyRetryAfter.removeValue(forKey: screenID)
                 print("\(logTag) Activated independent scheduler for \(screen.localizedName): \(item.title)")
             } else {
@@ -2345,7 +2502,7 @@ class WallpaperSchedulerService: ObservableObject {
                 if success {
                     self.failedApplyRetryAfter.removeValue(forKey: screenID)
                     self.lastChangeTimes[screenID] = Date()
-                    self.lastChangedItemIDs[screenID] = item.id
+                    self.noteApplied(itemID: item.id, stateKey: screenID)
                     self.persistSchedulerState()
                     print("\(logTag) Successfully applied '\(item.title)' to screen \(screenID)")
                 } else {
@@ -2429,7 +2586,7 @@ class WallpaperSchedulerService: ObservableObject {
                 guard !Task.isCancelled, self.screenChangeGeneration == generation else { return }
                 if success {
                     self.lastChangeTimes[screenID] = now
-                    self.lastChangedItemIDs[screenID] = item.id
+                    self.noteApplied(itemID: item.id, stateKey: screenID)
                     self.persistSchedulerState()
                     print("\(logTag) Unlock successfully applied '\(item.title)' to screen \(screenID)")
                 } else {

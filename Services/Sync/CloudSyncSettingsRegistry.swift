@@ -88,6 +88,7 @@ enum CloudSyncSettingsRegistry {
             .init(key: "upscaling_percent", category: .wallpaperEngine, valueType: .double),
             .init(key: "effect_reduction_enabled", category: .wallpaperEngine, valueType: .bool),
             .init(key: "wallpaper_engine_fps", category: .wallpaperEngine, valueType: .double),
+            .init(key: "wallpaper_engine_perf_mode", category: .wallpaperEngine, valueType: .string),
             .init(key: "web_wallpaper_render_scale_percent", category: .wallpaperEngine, valueType: .double),
             .init(key: "scene_bake_fps", category: .wallpaperEngine, valueType: .double),
             .init(key: "scene_bake_duration", category: .wallpaperEngine, valueType: .double),

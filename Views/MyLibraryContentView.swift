@@ -2608,7 +2608,9 @@ struct MyLibraryContentView: View {
         guard lastWallpaperPrefetchBucket != bucket else { return }
         lastWallpaperPrefetchBucket = bucket
 
-        let targetSize = CGSize(width: 512, height: 512)
+        // 与 LibraryWallpaperGridCell.coverImageOptions 同尺寸（384pt@2x = 768px），
+        // 预热产物 processor identifier 必须与正式加载逐字一致才命中。
+        let targetSize = CGSize(width: 384, height: 384)
         let range = prefetchRange(around: index, totalCount: entries.count)
         // 优先本机 SSD 列表缩略图 / 站点 thumb，绝不 prefetch 外置原图路径
         let urls = range
@@ -2659,9 +2661,9 @@ struct MyLibraryContentView: View {
         guard lastMediaPrefetchBucket != bucket else { return }
         lastMediaPrefetchBucket = bucket
 
-        // 与 LibraryMediaGridCell.loadCoverCandidate 同尺寸（256pt@2x = 512px）：
+        // 与 LibraryMediaGridCell.loadCoverCandidate 同尺寸（384pt@2x = 768px）：
         // 预热与正式加载的 processor identifier 必须逐字一致，否则预热产物不命中。
-        let targetSize = CGSize(width: 256, height: 256)
+        let targetSize = CGSize(width: 384, height: 384)
         let range = prefetchRange(around: index, totalCount: entries.count)
         let urls = range
             .filter { $0 != index }
@@ -2693,7 +2695,8 @@ struct MyLibraryContentView: View {
         guard lastAnimePrefetchBucket != bucket else { return }
         lastAnimePrefetchBucket = bucket
 
-        let targetSize = CGSize(width: 512, height: 512)
+        // 384pt@2x = 768px，与库内其余封面管线同档（Retina 上 512px 偏糊）。
+        let targetSize = CGSize(width: 384, height: 384)
         let range = prefetchRange(around: index, totalCount: currentAnimeItems.count)
         let urls = range
             .filter { $0 != index }
@@ -4749,7 +4752,7 @@ struct AnimeLibraryCard: View {
                 // 图片区域
                 ZStack {
                     KFImage(URL(string: anime.coverURL ?? ""))
-                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
+                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 384, height: 384)))
                         .cacheMemoryOnly(false)
                         .fade(duration: 0.3)
                         .placeholder { _ in

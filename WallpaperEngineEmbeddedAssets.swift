@@ -209,7 +209,33 @@ enum WallpaperEngineEmbeddedAssets {
     static func materializedAssetsRootIfPresent() -> String? {
         lock.lock()
         defer { lock.unlock() }
-        return cachedRoot
+        if let cachedRoot {
+            return cachedRoot
+        }
+        // 同步兜底：Helper 侧已解压过的话磁盘上有产物（caches/com.waifux.wallpaperengine/
+        // embedded-assets/<sha256>/assets + .extracted 标记）。key 是 Helper 内嵌 zip 的
+        // SHA256，UI 进程算不出（无 payload），直接扫目录取 mtime 最新的有效项。
+        // 纯只读探测，无解压副作用。修「重新烘焙预览黑屏」：preview() 同步取 assets，
+        // 之前 cachedRoot=nil 时不传 --assets → 渲染器报「未找到 assets 目录」→ 空场景黑屏。
+        let cacheBase = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let root = cacheBase
+            .appendingPathComponent("com.waifux.wallpaperengine", isDirectory: true)
+            .appendingPathComponent("embedded-assets", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return nil }
+        let valid = entries.filter { entry in
+            FileManager.default.fileExists(atPath: entry.appendingPathComponent("assets").path)
+                && FileManager.default.fileExists(atPath: entry.appendingPathComponent(".extracted").path)
+        }
+        guard let latest = valid.sorted(by: {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return a > b
+        }).first else { return nil }
+        let resolved = latest.appendingPathComponent("assets").path
+        cachedRoot = resolved
+        return resolved
     }
     static func prepareAssetsInBackground() {
         Task { _ = await awaitAssetsReady() }
