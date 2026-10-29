@@ -3110,24 +3110,32 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             finder, Float(point.x), Float(point.y), &hit
         )
         guard error == .success, let hit else {
+            // 目标窗口已由 CGWindowList 确认是 Finder 桌面层，AX 只用来区分图标。
+            // AX 失败（如 -25204 超时）时与未授权分支同样降级放行，不再整批丢点击。
             lastFinderHitDetail = "ax-error=\(error.rawValue)"
             if !loggedFinderHitTestFailure {
-                dlog("[WebRendererBridge] Finder desktop hit test unavailable (AX error=\(error.rawValue)); desktop clicks will not be forwarded")
+                dlog("[WebRendererBridge] Finder desktop hit test unavailable (AX error=\(error.rawValue)); forwarding desktop clicks without blank-area check")
                 loggedFinderHitTestFailure = true
             }
-            return false
+            return true
         }
-        var subrole: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(hit, kAXSubroleAttribute as CFString, &subrole) == .success
-        else {
-            lastFinderHitDetail = "no-subrole"
-            return false
-        }
-        let role = (subrole as? String) ?? "nil"
-        lastFinderHitDetail = "subrole=\(role)"
-        // Finder icons are AXImage; only the empty AXDesktop group is interactive wallpaper.
-        return role == "AXDesktop"
+        var roleValue: CFTypeRef?
+        var subroleValue: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(hit, kAXRoleAttribute as CFString, &roleValue)
+        _ = AXUIElementCopyAttributeValue(hit, kAXSubroleAttribute as CFString, &subroleValue)
+        let role = (roleValue as? String) ?? "nil"
+        let subrole = (subroleValue as? String) ?? "nil"
+        lastFinderHitDetail = "role=\(role) subrole=\(subrole)"
+        if subrole == "AXDesktop" { return true }
+        // 只排除桌面图标及其标签。旧逻辑要求 subrole == AXDesktop，
+        // macOS 26.x 上空白桌面命中的元素没有 subrole，导致所有点击被当成点在图标上丢弃。
+        return !Self.finderDesktopIconRoles.contains(role)
     }
+
+    /// Finder 桌面图标（AXImage）与图标名（AXTextField / AXStaticText）等可交互元素。
+    private static let finderDesktopIconRoles: Set<String> = [
+        "AXImage", "AXTextField", "AXStaticText", "AXButton"
+    ]
 
     /// 返回 (命中, 原因, targetWindow)。原因供点击丢弃日志归因，调用方热路径外只打 click 类型。
     private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool) -> (Bool, String, Int) {

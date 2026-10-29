@@ -586,7 +586,16 @@ final class VideoWallpaperManager: ObservableObject {
     /// 超过此数时为新屏创建独立 player，避免单 player 驱动多块高刷屏时 VSync 对齐压力导致卡顿。
     /// 显式全局同步（usesSharedVideoDecoder）路径不受此限制，尊重用户主动选择。
     private let maxOpportunisticShareScreenCount = 2
-    private let automaticSwitchTransitionDuration: TimeInterval = 0.28
+    /// 视频→视频同窗交叉淡入时长（新层首帧真正推进后才开始）。
+    private let automaticSwitchTransitionDuration: TimeInterval = 0.45
+    /// 交叉淡入期间窗口保持非不透明（与 Web 同一契约），桌面层不被挂起，
+    /// 菜单栏 backdrop 能在 poster 落桌面后懒采样（~10s 节拍）；读回确认后再保持这么久才转不透明。
+    private let videoSamplingHoldAfterDesktopWrite: UInt64 = 15_000_000_000
+    private let videoDesktopReadbackTimeout: TimeInterval = 2
+    /// 采样期窗口 alpha：肉眼与 1 无差别，但不会触发「不透明覆盖 → 挂起壁纸层」。
+    private static let videoSamplingWindowAlpha: CGFloat = 0.99999
+    /// 每屏采样保持令牌；新一次 apply 或过时任务据此放弃转不透明。
+    private var videoSamplingHoldTokens: [String: UUID] = [:]
     private let automaticSwitchReadyTimeout: TimeInterval = 1.2
     /// 自动切换时 poster 写入系统桌面的短延迟。
     /// 视频窗已覆盖桌面，无需等 2s；过长会让「动态壁纸静帧」体感极慢。
@@ -604,19 +613,27 @@ final class VideoWallpaperManager: ObservableObject {
 
     /// 立刻把桌面壁纸窗提到可见态（无 animator），并强制 flush 合成。
     private static func revealDesktopWallpaperWindow(_ window: NSWindow) {
-        // 不透明窗口 + 短淡入：桌面已写好静态帧并完成菜单栏采样，
-        // 新视频窗从 alpha=0 淡入到 1，与底下的静态帧自然衔接。
-        window.isOpaque = true
-        window.alphaValue = 0.0
+        // 幂等：只有「还没显示出来」的窗口（硬切新建窗 alpha=0）才做不透明 + 淡入。
+        // 已可见的窗口（同窗交叉淡入刚结束 / 菜单栏 forceCommit 重复提交 / 采样保持期）
+        // 不能再把 alpha 打回 0，否则会整窗再闪一次，也会提前结束采样保持。
+        let needsFadeIn = !window.isVisible || window.alphaValue < 0.01
+        if needsFadeIn {
+            // 不透明窗口 + 短淡入：桌面已写好静态帧并完成菜单栏采样，
+            // 新视频窗从 alpha=0 淡入到 1，与底下的静态帧自然衔接。
+            window.isOpaque = true
+            window.alphaValue = 0.0
+        }
         window.orderFrontRegardless()
         window.orderBack(nil)
         window.displayIfNeeded()
-        NSAnimationContext.runAnimationGroup { context in
-            // 350ms：静态帧与视频首帧内容一致，稍长的淡入让「静→动」更像一个动作。
-            context.duration = 0.35
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
-            context.allowsImplicitAnimation = true
-            window.animator().alphaValue = 1.0
+        if needsFadeIn {
+            NSAnimationContext.runAnimationGroup { context in
+                // 350ms：静态帧与视频首帧内容一致，稍长的淡入让「静→动」更像一个动作。
+                context.duration = 0.35
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+                context.allowsImplicitAnimation = true
+                window.animator().alphaValue = 1.0
+            }
         }
         if let view = window.contentView {
             view.needsDisplay = true
@@ -2094,8 +2111,17 @@ final class VideoWallpaperManager: ObservableObject {
             "video": localFileURL.lastPathComponent,
             "targetScreen": targetScreen?.localizedName ?? "nil(全部)"
         ])
-        // 统一硬切 + 桌面采样：忽略调用方传入的 animatedTransition，与 Scene 交接同一策略。
-        let animatedTransition = false
+        // 只有「本屏已有可见的原生视频窗」的视频→视频切换才走同窗交叉淡入（淡入期窗口
+        // 非不透明 + poster 落桌面读回后保持 15s，菜单栏照样能采样）。首次建窗、
+        // Scene/Web/静态图 → 视频、外置渲染器仍走硬切 + 桌面采样窗口期。
+        let requestedAnimatedTransition = animatedTransition
+        let animatedTransition = requestedAnimatedTransition
+            && canCrossfadeVideoInPlace(targetScreen: targetScreen, sharedDecoder: usesSharedVideoDecoder)
+        AppLogger.error(.wallpaper, "[VideoTransition] 切换方式", metadata: [
+            "video": localFileURL.lastPathComponent,
+            "requested": requestedAnimatedTransition ? "1" : "0",
+            "crossfade": animatedTransition ? "1" : "0"
+        ])
         guard localFileURL.isFileURL else {
             throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: "动态壁纸必须使用本地视频文件。"])
         }
@@ -2144,6 +2170,14 @@ final class VideoWallpaperManager: ObservableObject {
             captureScreens = [targetScreen]
         } else {
             captureScreens = NSScreen.screens
+        }
+        // 上一次交叉淡入的采样保持一律在新 apply 开头结束：硬切会拆窗不受影响，
+        // 复用窗（early-return / 非动画替换）不会再经过 reveal 的不透明分支，必须在这里收口。
+        for screen in captureScreens {
+            if let entry = existingVideoWindowEntry(for: screen) {
+                endVideoSamplingHold(screenID: entry.screenID)
+            }
+            videoSamplingHoldTokens.removeValue(forKey: screen.wallpaperScreenIdentifier)
         }
         // 先收敛贴在目标屏上、键已失配的旧窗口（睡眠唤醒重编号残留），
         // 否则 frame 兜底 miss 时 createWindow 会在同一块屏再建一层，
@@ -2320,6 +2354,8 @@ final class VideoWallpaperManager: ObservableObject {
 
         // 如果有预览图，设置为桌面壁纸（锁屏默认会沿用桌面 poster 作静态兜底）。
         // 动态锁屏启用时必须跳过；否则 setDesktopImageURLForAllSpaces 会覆盖用户选择的锁屏实例。
+        // 系统桌面实际指向的是交替槽位副本，不是 posterURL 本身；读回必须比对这个副本。
+        var writtenDesktopPosterURL: URL?
         if shouldSkipStaticPosterForDynamicLockScreen {
             print("[VideoWallpaperManager] 🔒 动态锁屏已启用，跳过设置静态桌面 poster")
         } else if let posterURL = posterURL {
@@ -2338,7 +2374,7 @@ final class VideoWallpaperManager: ObservableObject {
             } else if posterURL.isFileURL {
                 // 与直接设置静态图保持相同顺序：先提交系统桌面底图并发出
                 // com.apple.desktop 刷新，再创建/显示 desktop-level 视频窗口。
-                applyPosterAsDesktopWallpaperSync(posterURL, targetScreen: targetScreen)
+                writtenDesktopPosterURL = applyPosterAsDesktopWallpaperSync(posterURL, targetScreen: targetScreen)
             } else {
                 setPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
             }
@@ -2381,7 +2417,7 @@ final class VideoWallpaperManager: ObservableObject {
             let samplingStarted = Date()
             teardownAllWindows()
             // 先确认系统桌面真的切到了新 poster（写入是异步的，不读回会偶发采不到）。
-            let expectedPath = posterURL!.standardizedFileURL.path
+            let expectedPath = (writtenDesktopPosterURL ?? posterURL!).standardizedFileURL.path
             let readbackDeadline = Date().addingTimeInterval(2.0)
             var readbackOK = false
             while Date() < readbackDeadline {
@@ -6142,29 +6178,128 @@ final class VideoWallpaperManager: ObservableObject {
         let targets: [(screenID: String, fingerprint: String)] = (targetScreen.map { [$0] } ?? NSScreen.screens)
             .map { ($0.wallpaperScreenIdentifier, $0.wallpaperScreenFingerprint) }
 
+        // 与 applyPosterAsDesktopWallpaper 内的闸门一致：不会写桌面就不进采样保持，窗口保持不透明。
+        let willWriteDesktop = isSystemWallpaperSyncEnabled && !shouldSkipStaticPosterForDynamicLockScreen
+
         for target in targets {
             posterTasks[target.screenID]?.cancel()
+            let holdToken: UUID? = willWriteDesktop ? beginVideoSamplingHold(screenID: target.screenID) : nil
             posterTasks[target.screenID] = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: delayNanoseconds)
                 guard let self else { return }
-                defer { self.posterTasks.removeValue(forKey: target.screenID) }
-                guard !Task.isCancelled else { return }
-                guard let currentScreen = NSScreen.screens.first(where: { screen in
-                    screen.wallpaperScreenIdentifier == target.screenID ||
-                    screen.wallpaperScreenFingerprint == target.fingerprint
-                }) else {
-                    return
+                var writtenURL: URL?
+                var resolvedScreen: NSScreen?
+                if !Task.isCancelled,
+                   let currentScreen = NSScreen.screens.first(where: { screen in
+                       screen.wallpaperScreenIdentifier == target.screenID ||
+                       screen.wallpaperScreenFingerprint == target.fingerprint
+                   }),
+                   self.videoURL(for: currentScreen)?.standardizedFileURL == expectedURL {
+                    resolvedScreen = currentScreen
+                    writtenURL = await self.applyPosterAsDesktopWallpaper(
+                        posterURL,
+                        targetScreen: currentScreen,
+                        expectedVideoURL: expectedURL
+                    )
                 }
-                guard self.videoURL(for: currentScreen)?.standardizedFileURL == expectedURL else {
-                    return
-                }
-                await self.applyPosterAsDesktopWallpaper(
-                    posterURL,
-                    targetScreen: currentScreen,
-                    expectedVideoURL: expectedURL
+                self.posterTasks.removeValue(forKey: target.screenID)
+                guard let holdToken else { return }
+                await self.finishVideoSamplingHold(
+                    token: holdToken,
+                    screen: resolvedScreen,
+                    desktopURL: writtenURL,
+                    video: expectedURL.lastPathComponent
                 )
             }
         }
+    }
+
+    /// 同窗交叉淡入的前提：每块目标屏都已有可见的原生视频窗 + 播放器，且没有 Scene/Web/静态图
+    /// 盖在上面。全局切换还要满足 rebuildWindows 里 stageGlobalSharedVideoTransition 的条件
+    /// （共享解码或单屏），否则会退回 teardown + 新建窗，新窗不透明盖住桌面，菜单栏采不到。
+    private func canCrossfadeVideoInPlace(targetScreen: NSScreen?, sharedDecoder: Bool) -> Bool {
+        guard !useExternalVideoRenderer else { return false }
+        let screens: [NSScreen]
+        if let targetScreen {
+            screens = [targetScreen]
+        } else {
+            guard sharedDecoder || NSScreen.screens.count == 1 else { return false }
+            screens = NSScreen.screens
+        }
+        guard !screens.isEmpty else { return false }
+        return screens.allSatisfy { screen in
+            guard let entry = existingVideoWindowEntry(for: screen),
+                  entry.window.contentView is WallpaperVideoContainerView,
+                  entry.window.isVisible,
+                  entry.window.alphaValue > 0.5,
+                  players[entry.screenID] != nil,
+                  presentedVideoScreenIDs.contains(entry.screenID) else { return false }
+            if WallpaperEngineXBridge.shared.hasLivePresentation(on: screen) { return false }
+            if StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen]) { return false }
+            return true
+        }
+    }
+
+    /// 进入采样保持：复用窗改成非不透明 + 0.99999（视觉无差别），桌面层不被挂起。
+    @discardableResult
+    private func beginVideoSamplingHold(screenID: String) -> UUID {
+        let token = UUID()
+        videoSamplingHoldTokens[screenID] = token
+        if let window = windows[screenID] {
+            window.isOpaque = false
+            window.alphaValue = Self.videoSamplingWindowAlpha
+        }
+        return token
+    }
+
+    /// 结束采样保持：转回不透明。只动「仍处于非不透明」的窗口，硬切新建窗（本就不透明、
+    /// 可能正在 0→1 淡入）不受影响。
+    private func endVideoSamplingHold(screenID: String) {
+        videoSamplingHoldTokens.removeValue(forKey: screenID)
+        guard let window = windows[screenID], !window.isOpaque else { return }
+        window.alphaValue = 1.0
+        window.isOpaque = true
+    }
+
+    /// 读回确认 poster 已成系统桌面 → 再保持 15s → 转不透明。令牌过时（新 apply / 新保持）即放弃。
+    /// 没写成桌面（失败 / 过时 / 被闸门挡掉）时立即转回不透明，窗口不会一直半透明。
+    private func finishVideoSamplingHold(
+        token: UUID,
+        screen: NSScreen?,
+        desktopURL: URL?,
+        video: String
+    ) async {
+        // 屏幕重编号会把令牌迁到新 screenID，按令牌值找当前键。
+        func currentScreenID() -> String? {
+            videoSamplingHoldTokens.first(where: { $0.value == token })?.key
+        }
+        guard currentScreenID() != nil else { return }
+
+        var readbackOK = false
+        var holdMS = 0
+        if let desktopURL, let screen {
+            let expectedPath = desktopURL.standardizedFileURL.path
+            let deadline = Date().addingTimeInterval(videoDesktopReadbackTimeout)
+            while Date() < deadline {
+                if NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL.path == expectedPath {
+                    readbackOK = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard currentScreenID() != nil else { return }
+            }
+            try? await Task.sleep(nanoseconds: videoSamplingHoldAfterDesktopWrite)
+            holdMS = Int(videoSamplingHoldAfterDesktopWrite / 1_000_000)
+        }
+        guard let screenID = currentScreenID() else { return }
+        endVideoSamplingHold(screenID: screenID)
+        AppLogger.error(.wallpaper, "[VideoTransition] 交叉淡入采样保持结束，转不透明", metadata: [
+            "video": video,
+            "hadPoster": desktopURL != nil ? "1" : "0",
+            "readback": readbackOK ? "1" : "0",
+            "holdMS": String(holdMS),
+            "screen": screenID
+        ])
     }
 
     private func cacheDisplaySwitchIfNeeded(
@@ -6305,8 +6440,10 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
 
-    private func applyPosterAsDesktopWallpaperSync(_ posterURL: URL, targetScreen: NSScreen? = nil) {
-        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+    /// 返回真正写进系统桌面的槽位文件（读回比对用），未写返回 nil。
+    @discardableResult
+    private func applyPosterAsDesktopWallpaperSync(_ posterURL: URL, targetScreen: NSScreen? = nil) -> URL? {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
         AppLogger.debug(.wallpaper, "posterSync: 同步设置桌面壁纸", metadata: [
             "poster": posterURL.lastPathComponent,
             "screen": targetScreen?.localizedName ?? "all"
@@ -6314,13 +6451,13 @@ final class VideoWallpaperManager: ObservableObject {
         // 安全兜底：动态锁屏启用时绝不设置静态桌面壁纸。
         if shouldSkipStaticPosterForDynamicLockScreen {
             print("[VideoWallpaperManager] 🔒 [sync poster safety] 动态锁屏已启用，跳过静态桌面 poster 设置")
-            return
+            return nil
         }
 
         // 系统壁纸同步关闭时，冻结 setDesktopImageURL 链路（mp4/场景/web 动态壁纸不受影响）
         if !isSystemWallpaperSyncEnabled {
             print("[VideoWallpaperManager] 🧊 [sync poster safety] 系统壁纸同步已关闭，跳过静态桌面 poster 设置")
-            return
+            return nil
         }
 
         let workspace = NSWorkspace.shared
@@ -6355,32 +6492,35 @@ final class VideoWallpaperManager: ObservableObject {
                 )
             }
             print("[VideoWallpaperManager] [sync] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
+            return persistentURL
         } catch {
             print("[VideoWallpaperManager] [sync] Failed to set poster: \(error)")
+            return nil
         }
     }
 
-    /// 异步可等待的 poster 设置核心逻辑
+    /// 异步可等待的 poster 设置核心逻辑。返回真正写进系统桌面的槽位文件（读回比对用），未写返回 nil。
+    @discardableResult
     private func applyPosterAsDesktopWallpaper(
         _ posterURL: URL,
         targetScreen: NSScreen? = nil,
         expectedVideoURL: URL? = nil
-    ) async {
-        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+    ) async -> URL? {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return nil }
         // 检查是否已被取消（快速连续切换壁纸时，旧任务应放弃）
         try? await Task.sleep(nanoseconds: 0)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return nil }
 
         // 安全兜底：动态锁屏启用时绝不设置静态桌面壁纸，避免覆盖用户手动选择的锁屏实例。
         if shouldSkipStaticPosterForDynamicLockScreen {
             print("[VideoWallpaperManager] 🔒 [poster safety] 动态锁屏已启用，跳过静态桌面 poster 设置")
-            return
+            return nil
         }
 
         // 系统壁纸同步关闭时，冻结 setDesktopImageURL 链路（mp4/场景/web 动态壁纸不受影响）
         if !isSystemWallpaperSyncEnabled {
             print("[VideoWallpaperManager] 🧊 [poster safety] 系统壁纸同步已关闭，跳过静态桌面 poster 设置")
-            return
+            return nil
         }
 
         let workspace = NSWorkspace.shared
@@ -6393,7 +6533,7 @@ final class VideoWallpaperManager: ObservableObject {
                 let (d, _) = try await URLSession.shared.data(from: posterURL)
                 data = d
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return nil }
 
             // 2. 保存到持久化目录（而不是临时目录）
             // 使用交替槽位避免 macOS 桌面壁纸缓存旧图
@@ -6425,7 +6565,7 @@ final class VideoWallpaperManager: ObservableObject {
                 if let expectedVideoURL,
                    videoURL(for: screen)?.standardizedFileURL
                     != expectedVideoURL.standardizedFileURL {
-                    return
+                    return nil
                 }
                 try workspace.setDesktopImageURLForAllSpaces(persistentURL, for: screen, options: fillOptions)
                 DesktopWallpaperSyncManager.shared.registerWallpaperSet(
@@ -6436,8 +6576,10 @@ final class VideoWallpaperManager: ObservableObject {
             }
             print("[VideoWallpaperManager] Set poster as desktop wallpaper for \(screensToSet.count) screen(s)")
             // macOS 锁屏壁纸默认跟随桌面壁纸，无需额外设置
+            return persistentURL
         } catch {
             print("[VideoWallpaperManager] Failed to set poster: \(error)")
+            return nil
         }
     }
 
@@ -9127,6 +9269,9 @@ final class VideoWallpaperManager: ObservableObject {
         if let window = windows.removeValue(forKey: oldScreenID) {
             windows[newScreenID] = window
         }
+        if let holdToken = videoSamplingHoldTokens.removeValue(forKey: oldScreenID) {
+            videoSamplingHoldTokens[newScreenID] = holdToken
+        }
         if let fingerprint = windowFingerprintByScreenID.removeValue(forKey: oldScreenID) {
             windowFingerprintByScreenID[newScreenID] = fingerprint
         }
@@ -11672,7 +11817,8 @@ private final class WallpaperVideoContainerView: NSView {
             fade.fromValue = incoming.presentation()?.opacity ?? incoming.opacity
             fade.toValue = 1
             fade.duration = fadeDuration
-            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            // ease-out：新画面一开始就明显浮现，尾段慢慢收住，比对称 easeInEaseOut 少一段「等它出来」的空档。
+            fade.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1)
             incoming.add(fade, forKey: "wallpaperCrossfade")
             incoming.opacity = 1
             CATransaction.commit()

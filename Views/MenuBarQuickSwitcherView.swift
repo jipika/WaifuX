@@ -41,8 +41,10 @@ struct MenuBarQuickSwitcherView: View {
     private let playbackSlotSpacing: CGFloat = 2
     private let playbackBarVerticalPadding: CGFloat = 5
 
-    // Hero 右上角按钮行：10pt 内边距 + 32pt 按钮 + 10pt 内边距，底边落在 52pt。
-    private let heroActionButtonSize: CGFloat = 32
+    // Hero 右上角按钮行：10pt 内边距 + 按钮 + 10pt 内边距。
+    // 直径取播放条宽度（playbackBarWidth = 38），上方圆钮与下方玻璃胶囊同宽，
+    // 右边缘对齐成一条竖列；按钮底边因此落在 10 + 38 = 48pt。
+    private let heroActionButtonSize: CGFloat = 38
     private let heroActionInset: CGFloat = 10
     /// 两个按钮之间的水平间距。
     private let heroActionGap: CGFloat = 8
@@ -214,11 +216,10 @@ struct MenuBarQuickSwitcherView: View {
 
                 // 播放控制条：浮动玻璃胶囊，与上面两个按钮同列、挂在它们下方。
                 // 竖排在 hero 内部右上角，不占布局高度、不改面板尺寸。
-                // 按钮行外框四周各 10pt 内边距，按钮视觉底边在 10 + 32 = 42pt；
-                // 播放条顶边取 42 + 10。
-                // 右侧要按「图标中心」而不是「胶囊边缘」对齐：胶囊比按钮宽
-                // (playbackBarWidth - heroActionButtonSize)，两者右边缘都贴 10pt 时
-                // 图标中心会比按钮中心偏左半个差值，所以这里再往右补一半。
+                // 按钮行外框四周各 10pt 内边距，按钮视觉底边在 10 + 38 = 48pt；
+                // 播放条顶边取 48 + 10 = 58pt。
+                // 按钮直径与胶囊同宽（38），两者右边缘都贴 10pt 即同一条竖列；
+                // 若将来两者宽度再拉开，再按「图标中心」补半个差值。
                 playbackColumn
                     .padding(.top, heroActionInset + heroActionButtonSize + heroPlaybackGap)
                     .padding(.trailing, heroActionInset - (playbackBarWidth - heroActionButtonSize) / 2)
@@ -250,16 +251,11 @@ struct MenuBarQuickSwitcherView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.white)
                 .frame(width: heroActionButtonSize, height: heroActionButtonSize)
-                .background(.ultraThinMaterial, in: Circle())
-                .background(Color.black.opacity(0.22), in: Circle())
-                .overlay {
-                    Circle()
-                        .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.8)
-                }
+                .modifier(HeroGlassCircleSurface())
         }
         .buttonStyle(QuickSwitcherPressButtonStyle())
         .help(help)
@@ -814,6 +810,33 @@ struct PlaybackGlassSurface<S: Shape>: ViewModifier {
                         .fill(Color.clear)
                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
                         .clipShape(shape)
+                }
+        }
+    }
+}
+
+/// hero 右上角浮动圆钮的玻璃底：与播放控制胶囊同一套材质——
+/// macOS 26+ 原生液态玻璃，14/15 回退 ultraThinMaterial。
+/// 不再额外叠「材质模糊 + 黑色蒙版」，否则在亮封面上会糊成一块灰。
+/// 不参与 glassEffectID morph：那套命名空间只服务播放面板的放大形变。
+struct HeroGlassCircleSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(
+                    Glass.regular.tint(Color.primary.opacity(0.05)),
+                    in: Circle()
+                )
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                }
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
                 }
         }
     }
