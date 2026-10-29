@@ -304,6 +304,33 @@ targets:
             | while IFS= read -r -d '' file; do
                 codesign --force -s - "$file" 2>/dev/null || true
               done
+      - basedOnDependencyAnalysis: false
+        name: SignSparkleForDebug
+        script: |
+          # SPM 的 Sparkle.xcframework 发布时就是 ad-hoc 签名；增量构建时 builtin-copy 拷入
+          # adhoc 副本且 CodeSign 判 up-to-date 跳过 → dyld 报 different Team IDs 崩溃。
+          # 这里每次构建后强制用当前开发证书重签（Debug 才需要；Release 由 package.sh 统一处理）。
+          if [[ "${CONFIGURATION:-}" != "Debug" ]]; then
+            exit 0
+          fi
+          SPARKLE_FRAMEWORK="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks/Sparkle.framework"
+          if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+            exit 0
+          fi
+          IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+            | grep "Apple Development" | head -1 | grep -oE "[A-F0-9]{40}")
+          if [[ -z "$IDENTITY" ]]; then
+            echo "warning: no Apple Development identity; skip Sparkle re-sign"
+            exit 0
+          fi
+          VB="$SPARKLE_FRAMEWORK/Versions/B"
+          codesign --force --options runtime -s "$IDENTITY" "$VB/Autoupdate" 2>/dev/null || true
+          codesign --force --options runtime -s "$IDENTITY" "$VB/XPCServices/Downloader.xpc" 2>/dev/null || true
+          codesign --force --options runtime -s "$IDENTITY" "$VB/XPCServices/Installer.xpc" 2>/dev/null || true
+          codesign --force --options runtime -s "$IDENTITY" "$VB/Updater.app" 2>/dev/null || true
+          codesign --force --options runtime -s "$IDENTITY" "$VB/Sparkle" 2>/dev/null || true
+          codesign --force --options runtime -s "$IDENTITY" "$SPARKLE_FRAMEWORK" 2>/dev/null || true
+          echo "Sparkle re-signed with $IDENTITY"
     entitlements:
       path: WaifuX.entitlements
       properties:
@@ -414,7 +441,9 @@ targets:
       - path: Services/PowerSourceMonitor.swift
       - path: Services/SceneBakeEligibilityService.swift
       - path: Services/SceneConfigOverrideService.swift
+      - path: Services/SceneHandoffProtocol.swift
       - path: Services/SceneOfflineBakeService.swift
+      - path: Services/SceneTransitionPosterPresenter.swift
       - path: Services/SceneWallpaperDesignService.swift
       - path: Services/SceneWallpaperPropertiesService.swift
       - path: Services/ScreenSaverService.swift

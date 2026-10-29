@@ -260,24 +260,24 @@ enum LocalWallpaperApplyService {
     // MARK: - Primitives
 
     private static func applyVideo(_ videoURL: URL, to screens: [NSScreen], options: Options) async throws {
-        // 桌面/锁屏静态底图只认高清 poster（scene_bake_* / poster_wallpaper_*），
-        // existingWallpaperPosterURL 已与列表 generateThumbnail（800×600）隔离。
-        //
-        // 性能关键：只同步读取已有高清缓存；缺失时先起播视频，再后台抽帧补静帧，
-        // 避免 4K copyCGImage 阻塞「设为壁纸 / 调度切换」热路径（静态图很快、动态却很慢的主因）。
-        // 只查真正的 HD poster（scene_bake / poster_wallpaper），不把任何 fallback 预览
-        // （WE 工程 preview.* / 站点封面）算作已缓存或桌面底图——预览图是商店缩略图，
-        // 不适合桌面/锁屏；无 HD poster 时系统壁纸保持旧图，由后台补帧回写高清静帧。
-        let hdPosterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
+        // 桌面/锁屏静态底图只认高清 poster（scene_bake_* / poster_wallpaper_*）。
+        // 有缓存直接用；没有就同步抽一帧——切换需要静态帧先写桌面、拆旧窗、
+        // 菜单栏采样，不能跳过。
+        var hdPosterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
             forLocalVideo: videoURL,
             sceneBakeItemID: options.sceneBakeItemID
         )
-        // 没有 HD 缓存时不写 fallback：immediate 为 nil 时视频先起播、系统壁纸保持旧图
+        if hdPosterURL == nil, options.generatePosterFromVideoIfNeeded {
+            let genStarted = Date()
+            hdPosterURL = await VideoThumbnailCache.shared.posterJPEGFileURL(forLocalVideo: videoURL)
+            AppLogger.error(.wallpaper, "[VideoTransition] 无缓存封面，同步抽帧", metadata: [
+                "video": videoURL.lastPathComponent,
+                "ok": hdPosterURL != nil ? "1" : "0",
+                "genMS": String(Int(Date().timeIntervalSince(genStarted) * 1000))
+            ])
+        }
         let immediatePosterURL = hdPosterURL
-        print("[LocalWallpaperApply] applyVideo hdPoster=\(hdPosterURL?.lastPathComponent ?? "nil") needsBackgroundPoster=\(hdPosterURL == nil && options.generatePosterFromVideoIfNeeded)")
-        // 无 HD 缓存时后台补静帧（异步、不阻塞切换），生成后回写系统桌面/锁屏底图。
-        // 调度器必须允许补帧，否则无预生成 poster 的视频会「偶尔设置不到静态帧」。
-        let needsBackgroundPoster = (hdPosterURL == nil && options.generatePosterFromVideoIfNeeded)
+        print("[LocalWallpaperApply] applyVideo hdPoster=\(hdPosterURL?.lastPathComponent ?? "nil")")
 
         // Full current-screen-set applies use the nil-target path so window rebuild
         // and URL maps stay atomic across displays. Subsets still loop per screen.
@@ -328,15 +328,22 @@ enum LocalWallpaperApplyService {
             }
         }
 
-        // 后台补高清静帧：生成后回写各屏 poster，并更新系统桌面/锁屏静态底图
-        if needsBackgroundPoster {
+        // 同步抽帧失败时的后台兜底：再试一次，生成后回写各屏 poster 和系统桌面
+        if immediatePosterURL == nil, options.generatePosterFromVideoIfNeeded {
             let sceneBakeItemID = options.sceneBakeItemID
+            let bakedVideoPath = options.bakedVideoPath
             let targetScreenIDs = Set(screens.map(\.wallpaperScreenIdentifier))
             let targetFingerprints = Set(screens.map(\.wallpaperScreenFingerprint))
             let expectedVideoURL = videoURL.standardizedFileURL
             Task(priority: .utility) { @MainActor in
                 var posterURL: URL?
-                if let itemID = sceneBakeItemID {
+                // scene_bake 键只属于真烘焙产物：应用的正是那份可用烘焙 MP4 时才写；
+                // 纯视频（无 bakedVideoPath 或根本对不上）一律走路径键，杜绝视频蹭出 scene_bake_*。
+                if let itemID = sceneBakeItemID,
+                   let bakedPath = bakedVideoPath,
+                   !bakedPath.isEmpty,
+                   URL(fileURLWithPath: bakedPath).standardizedFileURL == videoURL.standardizedFileURL,
+                   SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: bakedPath)) {
                     posterURL = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
                         forLocalVideo: videoURL,
                         itemID: itemID
@@ -409,8 +416,11 @@ enum LocalWallpaperApplyService {
         // 实时 scene / web 不经过 applyVideo，系统桌面与锁屏的静态底图不会被刷新：
         // 有可用高清 poster 时在这里补一次系统写入；无 poster 时保持旧图（与 applyVideo 的
         // 「没有 HD poster 就不写 fallback」策略一致）。
+        // Web 屏的系统桌面由 WallpaperEngineXBridge 的 Web 海报收尾链统一写（带读回确认 +
+        // 延迟转不透明）。这里再写一次会在一秒内连写同一屏，系统合并丢弃后哪张生效不确定。
         let currentScreens = screens.filter {
             WallpaperEngineXBridge.shared.currentWallpaperPath(for: $0) == path
+                && !WallpaperEngineXBridge.shared.isWebRendering(on: $0)
         }
         syncSystemWallpaperPosterIfAvailable(for: currentScreens, options: options)
         // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，

@@ -165,6 +165,11 @@ final class BackgroundAgentRuntime {
                 _ = await LocalWallpaperScanner.shared.rebuildManagedLibraryIndexForUpgradeIfNeeded()
                 guard !Task.isCancelled else { return }
                 _ = await LocalWallpaperScanner.shared.rebuildManagedLibraryIndexIfNoLiveRecords()
+                guard !Task.isCancelled else { return }
+                // 等桌面恢复先跑完，再后台补回丢失的纯静态 scene 封面。
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard !Task.isCancelled else { return }
+                await SceneOfflineBakeService.restoreMissingStaticSceneCovers()
             }
             DownloadTaskService.shared.restoreSavedTasks()
             if PersistentDownloadQueueService.shared.hasPersistedWork { prepareDownloadExecutors() }

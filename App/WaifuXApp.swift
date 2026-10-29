@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AppIntents
+import ServiceManagement
 import Kingfisher
 import ExceptionHandling
 import WebKit
@@ -467,6 +468,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     private var settingsWindowController: NSWindowController?
     private var uiRequestRouter = WaifuXUIActions.RequestRouter()
     private var mainWindowDataRestored = false
+    /// 登录项启动标记：`oapp` 事件带 `lgit` 即为开机自启动。
+    /// 必须在 didFinishLaunching 同步捕获（事件派发期内 currentAppleEvent 才有效），
+    /// 异步建窗时据此跳过默认主窗口 —— 壁纸恢复由 Helper 负责，主界面不再自动弹出。
+    private var launchedAsLoginItem = false
     /// 窗口隐藏后延迟释放视图树的任务，用于回收 IOSurface / CoreAnimation 等系统图形缓存
     private var delayedReleaseTask: Task<Void, Never>?
     /// Sparkle 自动更新控制器（检测 + 内置弹窗 + 自动安装）
@@ -510,6 +515,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
+        launchedAsLoginItem = Self.wasLaunchedAsLoginItem()
+        // 历史版本曾把主 App 注册为登录项；服务拆到 Helper 后登录恢复归 LaunchAgent，
+        // 主 App 不再担任登录项 —— 每次启动都顺手清理残留，之后重启只起 Helper。
+        if SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
         installHelperQuitHandlers()
         WaifuXPreferences.shared.loadLegacyPreferences()
         BackgroundAgentClient.shared.start()
@@ -595,7 +604,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             // （Helper 藏在 Contents/Helpers/ 下，用户既找不到也拖不进去）。
             // noteAppLaunch 内部自带 90 秒错峰 + 10 分钟节流 + 24h 兜底，不阻塞启动。
             WallpaperSystemCacheJanitor.shared.noteAppLaunch()
-            for action in self.uiRequestRouter.start(arguments: CommandLine.arguments) {
+            var actions = self.uiRequestRouter.start(arguments: CommandLine.arguments)
+            if self.launchedAsLoginItem, WaifuXPreferences.shared.bool(forKey: "launch_at_login") {
+                // 开机自启动：Helper 负责恢复壁纸，主窗口不再自动弹出。
+                // 用户明确的 UI 请求（菜单栏/Helper openUI）不受影响，照常弹窗。
+                actions.removeAll { $0 == .main }
+                if actions.isEmpty {
+                    self.enterBackgroundModeIfNoForegroundInterface(hideDockIcon: true)
+                    return
+                }
+            }
+            for action in actions {
                 WaifuXUIActions.perform(action)
             }
         }
@@ -1597,6 +1616,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             print("[WaifuXApp] \(launchPath) failed: \(error.localizedDescription)")
             return ""
         }
+    }
+
+    /// 是否为登录项启动：LaunchServices 随 `oapp` 事件在 `keyAEPropData` 里带 `lgit`。
+    /// 四字符码取值来自 SDK 头（AE/AppleEvents.h `kAEOpenApplication='oapp'`、
+    /// AERegistry.h `keyAEPropData='prdt'` / `keyAELaunchedAsLogInItem='lgit'`），
+    /// 直接写字面量，避免引入 Carbon 导入。Apple 原话：登录启动的应用
+    /// "probably shouldn't open up untitled documents" —— 对我们即不弹主窗口。
+    /// 必须在启动事件派发期内同步调用；取不到事件时返回 false（保持原行为）。
+    private static func wasLaunchedAsLoginItem() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+        guard event.eventID == AEEventID(0x6F61_7070) else { return false }
+        return event.paramDescriptor(forKeyword: AEKeyword(0x7072_6474))?.enumCodeValue == OSType(0x6C67_6974)
     }
 
     private func updateActivationPolicy(showDockIcon: Bool) {

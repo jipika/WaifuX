@@ -292,10 +292,16 @@ final class GlobalWallpaperSyncCoordinator {
                   FileManager.default.fileExists(atPath: rollbackSnapshot.localPath) else {
                 throw error
             }
+            // 恢复是独立事务：只覆盖「原事务目标 ∩ 仍在线」的屏，不重新取全部屏；
+            // 可被更新请求 / 退出取消。失败时 Scene 侧过渡图仍保留为可用静态图。
+            try Task.checkCancellation()
+            let originalIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
+            let rollbackScreens = NSScreen.screens.filter { originalIDs.contains($0.wallpaperScreenIdentifier) }
+            guard !rollbackScreens.isEmpty else { throw error }
             do {
                 let rolledBack = try await LocalWallpaperApplyService.apply(
                     localURL: rollbackSnapshot.localURL,
-                    targetScreens: NSScreen.screens,
+                    targetScreens: rollbackScreens,
                     options: rollbackSnapshot.options(isGlobalTransaction: true)
                 )
                 try Task.checkCancellation()

@@ -710,6 +710,21 @@ sign_exported_app() {
         done
   )
 
+  # 推送到手机工具（PyInstaller 单文件，Mach-O 可执行）：必须带 hardened runtime + 安全时间戳，
+  # 否则公证人/网关拦截。无 entitlements 需求，直接用外层身份签。
+  # 注：它们本来就会命中上面的 Mach-O 遍历被 ad-hoc 或身份签一遍，这里显式重签保证
+  # --options runtime + --timestamp 与主 App 一致，公证不因这两个新成员挂掉。
+  for push_tool in we-mpkg-tool we-pair-server; do
+    local push_tool_path="$app_path/Contents/Resources/$push_tool"
+    if [[ -f "$push_tool_path" ]]; then
+      codesign --force --timestamp --options runtime -s "$identity" "$push_tool_path" || {
+        echo "  ❌ 推送工具签名失败: $push_tool_path" >&2
+        return 1
+      }
+      echo "  ✅ 推送工具已签名: $push_tool"
+    fi
+  done
+
   while IFS= read -r bundle_path; do
     sign_nested_code "$bundle_path"
   done < <(

@@ -997,6 +997,364 @@ enum SceneOfflineBakeService {
         return firstApplied
     }
 
+    // MARK: - Scene 交接：过渡图写系统桌面
+
+    /// 过渡图能否直接写成系统桌面（让菜单栏 backdrop 在渲染器出现前采样到新图）。
+    /// 与 `prepareDesktopStaticWallpaper` 同一套语义闸门：同步关闭 / 动态锁屏接管时不写桌面。
+    @MainActor
+    static var canUseSystemDesktopForSceneTransition: Bool {
+        guard BackgroundRuntimeRole.isHelper else { return false }
+        guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else { return false }
+        if #available(macOS 26.0, *),
+           VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
+            return false
+        }
+        return true
+    }
+
+    /// 把一张过渡图写成指定屏的系统桌面，并等系统读回一致。返回 true = 已确认生效。
+    @MainActor
+    static func applyTransitionPosterAsSystemDesktop(
+        _ posterURL: URL,
+        screens: [NSScreen],
+        reason: String
+    ) async -> Bool {
+        let targets: [RealtimePosterTarget] = screens.compactMap { screen in
+            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            return RealtimePosterTarget(
+                displayID: n.uint32Value,
+                size: WallpaperPosterGeometry.evenPixelSize(
+                    widthPoints: screen.frame.width,
+                    heightPoints: screen.frame.height,
+                    scale: screen.backingScaleFactor
+                )
+            )
+        }
+        guard targets.count == screens.count, !targets.isEmpty else { return false }
+        return await applyPreparedDesktopPoster(posterURL, targets: targets, reason: reason) != nil
+    }
+
+    // MARK: - Scene 交接精确过渡图（逐屏结果）
+
+    /// 一块屏的过渡图需求。`cropArguments` 与实时启动传给渲染器的初始裁剪一致。
+    struct TransitionPosterTarget: Sendable {
+        let screenID: String
+        let pixelSize: WallpaperPosterPixelSize
+        let backingScale: Double
+        let cropSignature: String
+        let cropArguments: [String]
+    }
+
+    /// 为 Scene 交接准备逐屏精确过渡图。
+    ///
+    /// 与 `prepareDesktopStaticWallpaper` 的区别：不看系统壁纸同步 / 锁屏选择，不写桌面；
+    /// 缓存身份含内容、属性、几何、scale、裁剪与 schema；结果逐屏返回。
+    /// 不依赖全局 companion generation，取消只由调用方的 `isCurrent` 决定，
+    /// 因此不相交显示器上的请求不会互相作废。
+    @MainActor
+    static func prepareTransitionPosters(
+        contentRoot: URL,
+        contentDigest: String,
+        propertiesDigest: String,
+        effectiveProperties: String?,
+        targets: [TransitionPosterTarget],
+        reason: String,
+        isCurrent: @escaping @MainActor () -> Bool
+    ) async -> [String: SceneTransitionPosterOutcome] {
+        var outcomes: [String: SceneTransitionPosterOutcome] = [:]
+        guard !targets.isEmpty else { return outcomes }
+        let startedAt = Date()
+
+        guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
+            for t in targets { outcomes[t.screenID] = .failed("非 scene 工程") }
+            return outcomes
+        }
+
+        func metadata(for t: TransitionPosterTarget) -> SceneTransitionPosterMetadata {
+            SceneTransitionPosterMetadata(
+                schemaVersion: SceneHandoffIdentity.posterSchemaVersion,
+                identity: SceneHandoffIdentity.posterIdentity(
+                    contentDigest: contentDigest,
+                    propertiesDigest: propertiesDigest,
+                    pixelWidth: t.pixelSize.width,
+                    pixelHeight: t.pixelSize.height,
+                    backingScale: t.backingScale,
+                    cropSignature: t.cropSignature
+                ),
+                contentDigest: contentDigest,
+                propertiesDigest: propertiesDigest,
+                pixelWidth: t.pixelSize.width,
+                pixelHeight: t.pixelSize.height,
+                backingScale: t.backingScale,
+                cropSignature: t.cropSignature,
+                createdAt: Date()
+            )
+        }
+
+        // 同一身份的屏共享一张图（同尺寸同 scale 同裁剪），每组只生成一次。
+        var groups: [String: (meta: SceneTransitionPosterMetadata, target: TransitionPosterTarget, screenIDs: [String])] = [:]
+        for t in targets {
+            let meta = metadata(for: t)
+            if groups[meta.identity] == nil {
+                groups[meta.identity] = (meta, t, [t.screenID])
+            } else {
+                groups[meta.identity]!.screenIDs.append(t.screenID)
+            }
+        }
+
+        // 1. 精确缓存
+        var missing: [String] = []
+        for (identity, group) in groups {
+            if let hit = VideoThumbnailCache.shared.cachedSceneTransitionPoster(expected: group.meta) {
+                for id in group.screenIDs { outcomes[id] = .cacheHit(hit) }
+            } else {
+                missing.append(identity)
+            }
+        }
+        guard !missing.isEmpty else {
+            logTransitionPosterTiming(reason: reason, startedAt: startedAt, outcomes: outcomes)
+            return outcomes
+        }
+
+        // 2. 冷缓存：1 秒烘焙抽帧（串行队列）。裁剪需要渲染器 bake 支持 --crop。
+        guard let wgpuBinary = WallpaperEngineXBridge.resolvedCLIExecutableURL() else {
+            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("渲染器不存在") } }
+            return outcomes
+        }
+        let bakeSupportsCrop = SceneHandoffProtocol.binaryContains(SceneHandoffProtocol.bakeCropMarker, at: wgpuBinary)
+
+        let eligibility: SceneBakeEligibilitySnapshot
+        let record = downloadedRecord(forResolvedContentRoot: contentRoot)
+        do {
+            if let existing = record?.sceneBakeEligibility,
+               SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, contentRoot.path) {
+                eligibility = existing
+            } else if let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) {
+                eligibility = analyzed
+            } else {
+                for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("内存不足无法分析") } }
+                return outcomes
+            }
+        } catch {
+            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("分析失败: \(error.localizedDescription)") } }
+            return outcomes
+        }
+        guard isCurrent(), !Task.isCancelled else {
+            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .cancelled } }
+            return outcomes
+        }
+
+        // 1.5 已有静态抽帧（静态检测抽帧 / 临时抽帧 / 烘焙封面）直接复用，不再烘 1 秒视频。
+        // 只在无用户裁剪时复用：已有抽帧是整画面，带裁剪的屏用它会和实时首帧对不上。
+        missing = missing.filter { identity in
+            let group = groups[identity]!
+            guard group.target.cropArguments.isEmpty,
+                  let source = existingStaticPoster(
+                      record: record,
+                      contentRoot: contentRoot,
+                      eligibility: eligibility,
+                      size: WallpaperPosterPixelSize(width: group.meta.pixelWidth, height: group.meta.pixelHeight)
+                  ),
+                  let adopted = VideoThumbnailCache.shared.adoptSceneTransitionPoster(
+                      fromExistingPoster: source,
+                      metadata: group.meta
+                  ) else {
+                return true
+            }
+            AppLogger.error(.wallpaper, "[SceneHandoff] 复用已有静态抽帧作过渡图", metadata: [
+                "reason": reason,
+                "source": source.lastPathComponent,
+                "size": "\(group.meta.pixelWidth)x\(group.meta.pixelHeight)"
+            ])
+            for id in group.screenIDs { outcomes[id] = .cacheHit(adopted) }
+            return false
+        }
+        guard !missing.isEmpty else {
+            logTransitionPosterTiming(reason: reason, startedAt: startedAt, outcomes: outcomes)
+            return outcomes
+        }
+
+        // 1.75 已有烘焙 MP4：直接从视频抽帧，不重新烘 1 秒（无自定义裁剪时）。
+        // 封面图丢失但 MP4 还在的场景走这里；analysisId 由 usableArtifact 校验内容版本。
+        if let artifact = usableArtifact(from: record) {
+            let bakedURL = URL(fileURLWithPath: artifact.videoPath)
+            for identity in missing {
+                let group = groups[identity]!
+                guard group.target.cropArguments.isEmpty,
+                      isCurrent(), !Task.isCancelled else { continue }
+                guard let poster = await VideoThumbnailCache.shared.storeSceneTransitionPoster(
+                    forLocalVideo: bakedURL,
+                    metadata: group.meta
+                ) else { continue }
+                AppLogger.error(.wallpaper, "[SceneHandoff] 从已有烘焙 MP4 抽帧作过渡图", metadata: [
+                    "reason": reason,
+                    "source": bakedURL.lastPathComponent,
+                    "size": "\(group.meta.pixelWidth)x\(group.meta.pixelHeight)"
+                ])
+                for id in group.screenIDs { outcomes[id] = .cacheHit(poster) }
+            }
+            missing = missing.filter { identity in
+                groups[identity]!.screenIDs.contains { outcomes[$0] == nil }
+            }
+        }
+        guard !missing.isEmpty else {
+            logTransitionPosterTiming(reason: reason, startedAt: startedAt, outcomes: outcomes)
+            return outcomes
+        }
+
+        let jobID = UUID()
+        let queueStartedAt = Date()
+        await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
+        let queueWaitMS = Int(Date().timeIntervalSince(queueStartedAt) * 1000)
+        defer { Task { await OfflineBakeSerialQueue.shared.leave(jobID: jobID) } }
+
+        for identity in missing {
+            let group = groups[identity]!
+            guard isCurrent(), !Task.isCancelled else {
+                for id in group.screenIDs { outcomes[id] = .cancelled }
+                continue
+            }
+            // 排队期间可能已被别的请求生成。
+            if let hit = VideoThumbnailCache.shared.cachedSceneTransitionPoster(expected: group.meta) {
+                for id in group.screenIDs { outcomes[id] = .cacheHit(hit) }
+                continue
+            }
+            if !group.target.cropArguments.isEmpty && !bakeSupportsCrop {
+                for id in group.screenIDs { outcomes[id] = .failed("渲染器 bake 不支持 --crop，无法生成与实时首帧一致的过渡图") }
+                continue
+            }
+            let bakeStartedAt = Date()
+            let outcome = await bakeTransitionPoster(
+                contentRoot: contentRoot,
+                eligibility: eligibility,
+                meta: group.meta,
+                target: group.target,
+                userProperties: effectiveProperties,
+                reason: reason
+            )
+            AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图生成", metadata: [
+                "reason": reason,
+                "size": "\(group.meta.pixelWidth)x\(group.meta.pixelHeight)",
+                "queueWaitMS": String(queueWaitMS),
+                "bakeMS": String(Int(Date().timeIntervalSince(bakeStartedAt) * 1000)),
+                "result": outcome.imageURL == nil ? "failed" : "generated"
+            ])
+            for id in group.screenIDs {
+                outcomes[id] = isCurrent() ? outcome : .cancelled
+            }
+        }
+        logTransitionPosterTiming(reason: reason, startedAt: startedAt, outcomes: outcomes)
+        return outcomes
+    }
+
+    /// 已有静态抽帧查找顺序：同尺寸 `scene_realtime_*`（静态检测/临时抽帧）→ `scene_bake_*` 烘焙封面
+    /// → 该条目最新 `scene_realtime_*`。后两者尺寸不一定一致，只接受比例一致（±1%）的。
+    @MainActor
+    private static func existingStaticPoster(
+        record: MediaDownloadRecord?,
+        contentRoot: URL,
+        eligibility: SceneBakeEligibilitySnapshot,
+        size: WallpaperPosterPixelSize
+    ) -> URL? {
+        let cache = VideoThumbnailCache.shared
+        let itemID = record?.item.id ?? stableOrphanCacheItemID(contentRootPath: contentRoot.path)
+        if let exact = cache.cachedSceneRealtimePosterFileURLIfExists(
+            itemID: itemID,
+            variantKey: realtimePosterVariantKey(eligibility: eligibility, size: size)
+        ) {
+            return exact
+        }
+        let targetAspect = Double(size.width) / Double(max(1, size.height))
+        func aspectMatches(_ url: URL) -> Bool {
+            guard let px = cache.imagePixelSize(at: url) else { return false }
+            let aspect = Double(px.width) / Double(max(1, px.height))
+            return abs(aspect - targetAspect) / targetAspect < 0.01
+        }
+        let fallbacks = [
+            cache.cachedSceneBakePosterFileURLIfExists(itemID: itemID),
+            cache.latestSceneRealtimePosterFileURLIfExists(itemID: itemID)
+        ].compactMap { $0 }
+        return fallbacks.first(where: aspectMatches)
+    }
+
+    private static func bakeTransitionPoster(
+        contentRoot: URL,
+        eligibility: SceneBakeEligibilitySnapshot,
+        meta: SceneTransitionPosterMetadata,
+        target: TransitionPosterTarget,
+        userProperties: String?,
+        reason: String
+    ) async -> SceneTransitionPosterOutcome {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WaifuX", isDirectory: true)
+            .appendingPathComponent("TransitionScenePosters", isDirectory: true)
+        let videoURL = directory.appendingPathComponent("\(UUID().uuidString).mp4")
+        let sidecarURL = videoURL.deletingPathExtension().appendingPathExtension("json")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failed("临时目录创建失败: \(error.localizedDescription)")
+        }
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: sidecarURL)
+        }
+        let artifact: SceneBakeArtifact
+        do {
+            artifact = try await bakeWithWallpaperWgpu(
+                contentRoot: contentRoot,
+                outURL: videoURL,
+                eligibility: eligibility,
+                width: meta.pixelWidth,
+                height: meta.pixelHeight,
+                fps: min(resolvedBakeFPS(requestedFPS: nil), 30),
+                durationSeconds: 1,
+                userProperties: userProperties,
+                progress: nil,
+                isCompanion: false,
+                companionGeneration: nil,
+                extraArguments: target.cropArguments
+            )
+        } catch is CancellationError {
+            return .cancelled
+        } catch {
+            return .failed("1 秒烘焙失败: \(error.localizedDescription)")
+        }
+        let bakedURL = URL(fileURLWithPath: artifact.videoPath)
+        guard isUsableBakedVideo(at: bakedURL) else { return .failed("烘焙产物不可用") }
+        guard let poster = await VideoThumbnailCache.shared.storeSceneTransitionPoster(
+            forLocalVideo: bakedURL,
+            metadata: meta
+        ) else {
+            return .failed("抽帧失败")
+        }
+        print("[SceneHandoff] 过渡图已生成(\(reason)): \(poster.lastPathComponent)")
+        return .generated(poster)
+    }
+
+    private static func logTransitionPosterTiming(
+        reason: String,
+        startedAt: Date,
+        outcomes: [String: SceneTransitionPosterOutcome]
+    ) {
+        let summary = outcomes.keys.sorted().map { id -> String in
+            switch outcomes[id]! {
+            case .cacheHit: return "\(id)=hit"
+            case .generated: return "\(id)=generated"
+            case .failed(let m): return "\(id)=failed(\(m))"
+            case .cancelled: return "\(id)=cancelled"
+            case .displayInvalid: return "\(id)=displayInvalid"
+            }
+        }.joined(separator: ",")
+        AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图准备完成", metadata: [
+            "reason": reason,
+            "elapsedMS": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+            "outcomes": summary
+        ])
+    }
+
     /// 写系统桌面并等待状态读回一致。与 `syncRealtimeStaticPoster` 的差别：
     /// 不做锁屏/开关的分支判断（调用方已判过），且**返回前确认系统真的切过去**。
     @MainActor
@@ -2839,7 +3197,8 @@ enum SceneOfflineBakeService {
         userProperties: String?,
         progress: (@MainActor (Double) -> Void)?,
         isCompanion: Bool,
-        companionGeneration: UInt?
+        companionGeneration: UInt?,
+        extraArguments: [String] = []
     ) async throws -> SceneBakeArtifact {
         // 使用 wallpaper-wgpu bake 子命令（GPU readback 直接编码，不需要屏幕录制）
         guard let wgpuBinary = WallpaperEngineXBridge.resolvedCLIExecutableURL() else {
@@ -2879,6 +3238,9 @@ enum SceneOfflineBakeService {
                 args += ["--no-loop-analyze"]
             }
         }
+
+        // 过渡静态图：与实时启动相同的初始 --crop / --crop-viewport，保证画面同构。
+        args += extraArguments
 
         guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
             throw CancellationError()
@@ -3412,6 +3774,138 @@ enum SceneOfflineBakeService {
                 print("[SceneOfflineBake] auto-bake failed \(itemID): \(error.localizedDescription)")
             }
         }
+    }
+
+    /// 启动时补回丢失的纯静态 scene 封面（无烘焙 MP4，封面只有 detect-static 抽帧这一份）。
+    /// 有烘焙 MP4 的条目不在这里处理：卡片 / 详情页缺封面时会从 MP4 现抽。
+    /// 串行执行、每次启动最多 `limit` 条，避免与用户操作抢渲染器。
+    @MainActor
+    static func restoreMissingStaticSceneCovers(limit: Int = 40) async {
+        guard BackgroundRuntimeRole.isHelper, !BackgroundRuntimeRole.isIsolatedTest else { return }
+        let cache = VideoThumbnailCache.shared
+        let candidates = MediaLibraryService.shared.downloadedItems.filter { record in
+            guard let eligibility = record.sceneBakeEligibility,
+                  eligibility.isStaticScene == true,
+                  usableArtifact(from: record) == nil else { return false }
+            return cache.latestSceneRealtimePosterFileURLIfExists(itemID: record.item.id) == nil
+                && cache.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) == nil
+        }
+        guard !candidates.isEmpty else { return }
+        AppLogger.error(.wallpaper, "[SceneCovers] 补回缺失的静态封面", metadata: [
+            "missing": String(candidates.count),
+            "thisRun": String(min(candidates.count, limit))
+        ])
+        let targets = realtimePosterTargets(for: nil)
+        for record in candidates.prefix(limit) {
+            guard !Task.isCancelled, let eligibility = record.sceneBakeEligibility else { return }
+            await generateStaticScenePosters(
+                contentRoot: URL(fileURLWithPath: eligibility.contentRootPath),
+                eligibility: eligibility,
+                record: record,
+                targets: targets,
+                reason: "restore missing cover",
+                generation: nil,
+                syncToDisplays: false
+            )
+        }
+    }
+
+    /// 详情页「重新抽帧」无烘焙兜底：无 bake MP4 / 本地视频时走渲染器现场抽。
+    /// 有烘焙的调用方走视频路径，不要调这里。
+    /// 静态 → `detect-static` 直接出 PNG；动态 → 1s 临时烘焙抽一帧。
+    /// 只产主屏尺寸的 `scene_realtime_*`（详情 hero + 列表共用），不写屏、不触发整片烘焙。
+    @MainActor
+    static func regenerateDetailRealtimePoster(record: MediaDownloadRecord, reason: String) async -> URL? {
+        let itemID = record.item.id
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: record.localFileURL)
+        guard FileManager.default.fileExists(atPath: contentRoot.path) else { return nil }
+
+        let eligibility: SceneBakeEligibilitySnapshot
+        if let existing = record.sceneBakeEligibility,
+           SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, contentRoot.path) {
+            eligibility = existing
+        } else {
+            guard let analyzed = try? await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) else {
+                return nil
+            }
+            eligibility = analyzed
+            MediaLibraryService.shared.attachSceneBakeEligibility(
+                itemID: itemID,
+                snapshot: analyzed,
+                triggerAutoBake: false
+            )
+        }
+
+        let targets = realtimePosterTargets(for: nil)
+        guard let primary = targets.first else { return nil }
+        let size = primary.size
+        let posterCacheID = itemID
+        let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
+        let userProperties = SceneConfigOverrideService.mergedPropertiesJSON(
+            userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(
+                for: contentRoot.path
+            ),
+            for: contentRoot.path
+        )
+
+        // 先判定静态：静态直接用单帧 PNG 落盘，不烘 1 秒视频。
+        let detection = await detectStaticScene(
+            contentRoot: contentRoot,
+            eligibility: eligibility,
+            itemID: itemID,
+            reason: reason
+        )
+        if detection.isStatic, let frameURL = detection.frameURL {
+            defer { try? FileManager.default.removeItem(at: frameURL) }
+            return await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
+                forImageFile: frameURL,
+                itemID: posterCacheID,
+                variantKey: variantKey,
+                targetWidth: size.width,
+                targetHeight: size.height,
+                forceRegenerate: true
+            )
+        }
+
+        // 动态无烘焙：1s 临时烘焙抽一帧（只为出封面，不进 SceneBakes）。
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WaifuX", isDirectory: true)
+            .appendingPathComponent("TransientScenePosters", isDirectory: true)
+        let temporaryVideoURL = temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let temporarySidecarURL = temporaryVideoURL
+            .deletingPathExtension()
+            .appendingPathExtension("json")
+        try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: temporaryVideoURL)
+            try? FileManager.default.removeItem(at: temporarySidecarURL)
+        }
+        guard let artifact = try? await bakeWithWallpaperWgpu(
+            contentRoot: contentRoot,
+            outURL: temporaryVideoURL,
+            eligibility: eligibility,
+            width: size.width,
+            height: size.height,
+            fps: min(resolvedBakeFPS(requestedFPS: nil), 30),
+            durationSeconds: 1,
+            userProperties: userProperties,
+            progress: nil,
+            isCompanion: false,
+            companionGeneration: nil
+        ) else {
+            return nil
+        }
+        let videoURL = URL(fileURLWithPath: artifact.videoPath)
+        guard isUsableBakedVideo(at: videoURL) else { return nil }
+        return await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
+            forLocalVideo: videoURL,
+            itemID: posterCacheID,
+            variantKey: variantKey,
+            targetWidth: size.width,
+            targetHeight: size.height,
+            forceRegenerate: true
+        )
     }
 
     /// Lightweight, main-thread-safe gate: file exists and is non-trivial.

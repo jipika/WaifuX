@@ -85,7 +85,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Launch at Login
         "launchAtLogin": "LAUNCH AT LOGIN",
         "launchAtLoginDesc": "Automatically start WaifuX when you log in.",
-        "launchAtLoginSubtitle": "Start minimized in menu bar, applying dynamic wallpapers automatically.",
+        "launchAtLoginSubtitle": "Starts only the background service at login and restores wallpapers without opening the main window.",
         "preventSystemSleep": "Prevent Sleep",
         "preventSystemSleepDesc": "Keep the display awake while WaifuX is running, so wallpapers stay visible on the lock screen.",
         // Categories
@@ -1743,7 +1743,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Launch at Login
         "launchAtLogin": "开机启动",
         "launchAtLoginDesc": "登录时自动启动 WaifuX。",
-        "launchAtLoginSubtitle": "启动后最小化到菜单栏，自动应用动态壁纸。",
+        "launchAtLoginSubtitle": "开机只启动后台服务并自动恢复壁纸，不打开主窗口。",
         "preventSystemSleep": "永不休眠",
         "preventSystemSleepDesc": "运行时阻止系统空闲息屏与睡眠，锁屏后桌面壁纸可继续显示。",
         // Categories
@@ -3401,7 +3401,7 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Launch at Login
         "launchAtLogin": "ログイン時に起動",
         "launchAtLoginDesc": "ログイン時にWaifuXを自動的に起動します。",
-        "launchAtLoginSubtitle": "起動後はメニューバーに最小化され、動的壁紙を自動的に適用します。",
+        "launchAtLoginSubtitle": "ログイン時はバックグラウンドサービスのみ起動し、メインウィンドウを開かずに壁紙を復元します。",
         "preventSystemSleep": "スリープを防止",
         "preventSystemSleepDesc": "実行中はディスプレイのスリープとアイドルスリープを防ぎ、ロック画面でも壁紙を表示し続けます。",
         // Categories

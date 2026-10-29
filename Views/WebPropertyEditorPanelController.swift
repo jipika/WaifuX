@@ -557,6 +557,11 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
         var items: [PropertyEditorItem] = []
         var currentValues: [String: Any] = [:]
 
+        // 壁纸自带的 general.localization 才是自定义 ui_* key 的中文来源
+        //（如白影轻扬的 ui_always_show_text_box → 每次启动都显示更新记录）。
+        //只查内置表会导致这类 key 原样显示。
+        let localizationTable = Self.wallpaperLocalizationTable(in: general)
+
         for (key, prop) in rawProperties {
             let rawType = prop["type"] as? String ?? "text"
             let text = prop["text"] as? String
@@ -567,7 +572,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
             ) != .decoration else {
                 continue
             }
-            let options = parseOptions(prop["options"])
+            let options = parseOptions(prop["options"], table: localizationTable)
             let min = prop["min"] as? Double
             let max = prop["max"] as? Double
             let step = prop["step"] as? Double
@@ -589,7 +594,12 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
                 // 作者不填 `text`（或留空）时 JS 会退回 `prop.key`（`prop.text || prop.key`），
                 // 所以这里对 key 也过一遍内置表：`newproperty17` 这类直接拿 WE 内置
                 // key 当属性名的写法，否则面板上就会原样显示 `ui_editor_*`。
-                text: WallpaperEnginePropertyLocalizer.label(for: displayTextSource),
+                // 顺序：壁纸自带 localization → 内置 WE 通用表 → 原文。
+                text: Self.resolveWallpaperLabel(
+                    text: displayTextSource,
+                    table: localizationTable,
+                    fallbackKey: key
+                ),
                 defaultValue: defaultValue,
                 options: options,
                 min: min,
@@ -1020,18 +1030,72 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private static func parseOptions(_ raw: Any?) -> [[String: String]] {
+    private static func parseOptions(_ raw: Any?, table: [String: String] = [:]) -> [[String: String]] {
         guard let raw else { return [] }
         if let array = raw as? [[String: Any]] {
             return array.compactMap { item in
                 guard let value = item["value"], let label = item["label"] as? String else { return nil }
-                return ["value": String(describing: value), "label": WallpaperEnginePropertyLocalizer.label(for: label)]
+                return ["value": String(describing: value), "label": Self.resolveWallpaperLabel(text: label, table: table, fallbackKey: label)]
             }
         }
         if let dict = raw as? [String: String] {
-            return dict.map { ["value": $0.key, "label": WallpaperEnginePropertyLocalizer.label(for: $0.value)] }
+            return dict.map { ["value": $0.key, "label": Self.resolveWallpaperLabel(text: $0.value, table: table, fallbackKey: $0.value)] }
         }
         return []
+    }
+
+    /// 读取壁纸自带的 `general.localization`，按系统语言合成 key → 文案表。
+    /// 与 `WebWallpaperDesignService.preferredLocalizationTable` 同一算法，
+    /// 补上设计场景/设计壁纸 HTML 面板缺的那一环。
+    private static func wallpaperLocalizationTable(in general: [String: Any]) -> [String: String] {
+        guard let raw = general["localization"] as? [String: Any] else { return [:] }
+        var order: [String] = []
+        for tag in Locale.preferredLanguages {
+            let lower = tag.lowercased()
+            if lower.hasPrefix("zh-hant") || lower.hasPrefix("zh-tw") || lower.hasPrefix("zh-hk") {
+                order.append("zh-cht")
+            } else if lower.hasPrefix("zh") {
+                order.append("zh-chs")
+            } else if lower.hasPrefix("ja") {
+                order.append("ja-jp")
+            } else if lower.hasPrefix("ko") {
+                order.append("ko-kr")
+            } else if lower.hasPrefix("en") {
+                order.append("en-us")
+            }
+        }
+        order += ["zh-chs", "en-us"]
+        var table: [String: String] = [:]
+        for language in order.reversed() {
+            guard let entries = raw[language] as? [String: Any] else { continue }
+            for (key, value) in entries {
+                if let text = value as? String, !text.isEmpty {
+                    table[key] = text
+                }
+            }
+        }
+        return table
+    }
+
+    /// 属性/选项 `text` 解析：壁纸自带表 → 内置 WE 通用表 → 原文。
+    /// HTML 面板需要保留原文 HTML（JS 侧 `plainLabel()` 会剥标签），所以这里不 strip。
+    private static func resolveWallpaperLabel(
+        text: String,
+        table: [String: String],
+        fallbackKey: String
+    ) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let localized = table[trimmed], !localized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return localized
+        }
+        let builtin = WallpaperEnginePropertyLocalizer.label(for: trimmed, fallback: "")
+        if !builtin.isEmpty {
+            return builtin
+        }
+        if trimmed.isEmpty || trimmed.hasPrefix("ui_") {
+            return fallbackKey
+        }
+        return trimmed
     }
 
     private static func normalizeType(_ raw: String) -> String {

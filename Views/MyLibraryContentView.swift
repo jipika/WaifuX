@@ -5051,8 +5051,7 @@ private struct AnyMediaItem: Identifiable {
         if url.isFileURL {
             let path = url.standardizedFileURL.path
             // 已生成的静态列表缓存绝不是可播放 GIF
-            if path.contains("/WaifuX/VideoThumbnails/")
-                || path.contains("/WaifuX/LocalImageThumbnails/") {
+            if VideoThumbnailCache.isGeneratedStaticImagePath(path) {
                 return false
             }
 

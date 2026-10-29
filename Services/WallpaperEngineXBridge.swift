@@ -28,6 +28,12 @@ private struct WebDaemonAudioMessage: Codable {
     let screen: Int?
 }
 
+/// Web daemon 通用控制消息（goOpaque 等无额外参数的命令）。
+private struct WebDaemonControlMessage: Codable {
+    let command: String
+    let screen: Int?
+}
+
 /// 与 wallpaperengine-cli daemon IPC 的音频频谱数据消息。
 /// 协议：command="audioData", spectrum=[128 floats]（0..63=L, 64..127=R）；daemon 不回响应。
 private struct WebDaemonAudioDataMessage: Codable {
@@ -297,6 +303,17 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var bakedStaticUpdateGeneration: UInt64 = 0
     /// 交替写烘焙静态图，避免 macOS 因路径不变缓存旧图
     private var bakedStaticDesktopSlot = 0
+    /// Web 海报收尾令牌（按屏）。每次 scheduleWebPosterCapture 给目标屏换新令牌；
+    /// 旧收尾任务在每个 await 之后核对，令牌变了就既不写桌面也不发 goOpaque，
+    /// 防止 A 的海报晚到盖掉 B、或 A 的 goOpaque 打到 B 的新窗口上。
+    /// 不用全局 wallpaperSwitchGeneration：多屏时另一块屏换壁纸会误杀本屏收尾。
+    private var webPosterFinalizeTokens: [String: UUID] = [:]
+    /// 海报写进系统桌面后，Web 窗口保持半透明多久再转不透明。
+    /// 菜单栏 backdrop 懒采样约 10s 一次，转不透明会挂起壁纸层；
+    /// 此前写完 1s 就转，采样节拍没到 → 菜单栏停在上一张。留出 1.5 个采样周期。
+    private static let webOpaqueHoldAfterDesktopWrite: UInt64 = 15_000_000_000
+    /// 写桌面后读回确认 desktopImageURL 的最长等待。
+    private static let webDesktopReadbackTimeout: TimeInterval = 2
 
     // MARK: - 线程安全的进程终止事件管道
 
@@ -328,6 +345,21 @@ final class WallpaperEngineXBridge: ObservableObject {
         let startedAt: Date
     }
     private var pendingCrossTypeTransition: PendingCrossTypeTransition?
+
+    // MARK: Scene 安全交接（静态先行）
+
+    /// 每个渲染进程的交接 session：session ID 只对启动时传入的那个 pid 有效。
+    fileprivate struct SceneHandoffSession {
+        let pid: pid_t
+        let sessionID: String
+        let statusURL: URL
+        var nextSeq: UInt64
+    }
+    fileprivate var sceneHandoffSessions: [String: SceneHandoffSession] = [:]
+    /// 每屏请求所有权：同屏最新请求胜出，不相交屏互不取消。
+    fileprivate var sceneOwnership = SceneScreenOwnershipTable()
+    /// 正在进行 Scene 交接的屏（判断新请求与旧请求是否相交）。
+    fileprivate var sceneHandoffInFlightScreenIDs: Set<String> = []
 
     // MARK: - 持久化状态
 
@@ -750,12 +782,24 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 释放标志），随后仅短暂让位等它收尾。用户连续/双屏快速设置时，最新一次
         // 永远立即生效，绝不因旧任务占用而静默丢弃或报「请稍后重试」。
         if isSettingWallpaper {
-            wallpaperSwitchGeneration &+= 1
-            AppLogger.error(.wallpaper, "setWallpaper 顶掉进行中的旧设置任务(最新请求胜出)", metadata: [
+            // Scene 交接：同屏最新请求胜出；不相交显示器上的请求只排队，不作废旧请求。
+            let requestedIDs = Set((targetScreens?.isEmpty == false ? targetScreens! : NSScreen.screens)
+                .map(\.wallpaperScreenIdentifier))
+            let disjointFromSceneHandoff = !sceneHandoffInFlightScreenIDs.isEmpty
+                && sceneHandoffInFlightScreenIDs.isDisjoint(with: requestedIDs)
+            if !disjointFromSceneHandoff {
+                wallpaperSwitchGeneration &+= 1
+            }
+            AppLogger.error(.wallpaper, disjointFromSceneHandoff
+                ? "setWallpaper 等待不相交显示器上的 Scene 交接完成"
+                : "setWallpaper 顶掉进行中的旧设置任务(最新请求胜出)", metadata: [
                 "path": path,
                 "newGeneration": String(wallpaperSwitchGeneration)
             ])
-            let yieldDeadline = Date().addingTimeInterval(2)
+            // 冷缓存过渡图烘焙（约 6s）期间没有检查点，相交请求也要等它走到检查点。
+            let yieldDeadline = Date().addingTimeInterval(
+                disjointFromSceneHandoff ? 45 : (sceneHandoffInFlightScreenIDs.isEmpty ? 2 : 20)
+            )
             while isSettingWallpaper && Date() < yieldDeadline {
                 try? await Task.sleep(nanoseconds: 25_000_000)
             }
@@ -880,16 +924,48 @@ final class WallpaperEngineXBridge: ObservableObject {
             reason: "WallpaperEngineXBridge.setWallpaper"
         )
 
-        // 视频 -> Scene/Web 的交接期间，旧视频必须是唯一可见的桌面层。此时写系统
-        // poster 会触发 WindowServer 重合成，打断交叉淡入并造成视频层轻微跳动；等交接
-        // 完成后由 scheduleBakedCoverSync 统一写入。没有旧视频时仍可提前提交高清 poster。
-        let preservesNativeVideoUntilReady = VideoWallpaperManager.shared
+        // ── Scene 安全交接（阶段一+二）：新场景的精确静态图先盖住旧壁纸并通过展示屏障，
+        // 之后才释放旧动态资源、准备新运行时。静态图准备/展示失败且有旧内容时直接抛错，
+        // 旧动态壁纸原样保留，不启动新运行时。
+        var sceneHandoff: SceneHandoffTransaction?
+        /// 失败 / 完成路径已显式处理交接收尾；否则 defer 按「被取代」清理。
+        var sceneHandoffSettled = false
+        defer {
+            if let tx = sceneHandoff, !sceneHandoffSettled {
+                if didReachCompletion {
+                    endSceneHandoff(tx)
+                } else {
+                    Task { @MainActor [weak self] in await self?.abandonSupersededSceneHandoff(tx) }
+                }
+            }
+        }
+        if renderKind == .scene {
+            guard let tx = try await beginSceneHandoff(
+                resolvedPath: resolvedPath,
+                screens: effectiveScreens,
+                userProperties: userProperties,
+                generation: switchGeneration
+            ) else { return }
+            sceneHandoff = tx
+            guard wallpaperSwitchGeneration == switchGeneration else { return }
+            // 过渡图已覆盖：目标屏旧的持久静态层可以直接清掉（不碰其它屏）。
+            if preservesStaticOverlayUntilReady {
+                for screen in effectiveScreens {
+                    StaticImageWallpaperOverlayManager.shared.clearState(for: screen)
+                }
+            }
+        }
+
+        // 视频 -> Web 的交接期间，旧视频必须是唯一可见的桌面层。Scene 路径已由过渡图
+        // 覆盖，旧视频在屏障通过后直接释放（低峰值内存：不让旧/新动态内容长期叠加）。
+        let preservesNativeVideoUntilReady = sceneHandoff == nil && VideoWallpaperManager.shared
             .hasNativeVideoWallpaper(on: effectiveScreens)
         guard wallpaperSwitchGeneration == switchGeneration else { return }
 	
-        // 跨类型切换不能先拆视频窗。先让 Scene/Web 在旧视频后方完整加载，
-        // 最后才在短黑场内提交并释放旧解码器。
-        let preservesOldWallpaperUntilReady = preservesNativeVideoUntilReady || preservesStaticOverlayUntilReady
+        // 跨类型切换不能先拆视频窗（Web 路径）。Scene 路径不再保留旧内容在前、
+        // 也不再用 30s「超时就放开旧窗口」兜底：超时只进入明确失败态。
+        let preservesOldWallpaperUntilReady = sceneHandoff == nil
+            && (preservesNativeVideoUntilReady || preservesStaticOverlayUntilReady)
         if preservesNativeVideoUntilReady {
             pendingCrossTypeTransition = PendingCrossTypeTransition(
                 generation: switchGeneration,
@@ -1010,6 +1086,8 @@ final class WallpaperEngineXBridge: ObservableObject {
             // 否则用户快速再切视频/Scene 会被「已有设置任务」挡住。
             guard wallpaperSwitchGeneration == switchGeneration else { return }
             recordRenderState(path: resolvedPath, renderKind: renderKind, screens: effectiveScreens, userProperties: userProperties)
+            // Web 接管：该屏残留的 Scene 过渡图（失败回退）收掉。
+            releaseSceneHandoff(screenIDs: effectiveScreens.map(\.wallpaperScreenIdentifier), reason: "web wallpaper set")
             releaseSettingFlag()
             if preservesOldWallpaperUntilReady {
                 do {
@@ -1094,27 +1172,20 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // 是否需要启动新进程？（至少有一个屏幕无现有进程才生成新 launchGeneration）
         let needsFreshLaunch = effectiveScreens.contains { screenProcesses[$0.wallpaperScreenIdentifier] == nil }
-        let needsPreservedReplacement = preserveExistingRendererUntilReady
+        // Scene 交接路径不再「旧 renderer 留在前面等新 renderer」：过渡图已经覆盖，
+        // 旧场景在过渡图后面直接释放或热重载替换，避免两份场景同时占 GPU 内存。
+        let keepsOldRendererUntilReady = preserveExistingRendererUntilReady && sceneHandoff == nil
+        let needsPreservedReplacement = keepsOldRendererUntilReady
             && effectiveScreens.contains { screenProcesses[$0.wallpaperScreenIdentifier] != nil }
         if needsFreshLaunch || needsPreservedReplacement {
             launchGeneration &+= 1
         }
 
-        // 桌面底图前置（用户要求，2026-10-28）：**先**把系统桌面静态壁纸设好并确认
-        // 生效，**再**启动渲染器。有烘焙产物/抽帧缓存时是秒级；只有冷启动才现场抽帧
-        // （这一步会慢，但必须等它完成，不能拿「渲染器先出」来掩盖）。
-        // 语义闸门在 `prepareDesktopStaticWallpaper` 内部保留：
-        // 系统壁纸同步关闭 / 动态锁屏接管 / 非 scene 工程 → 返回 nil，不写桌面。
-        // 有旧视频在播时不在此处预写（会打断交叉淡入），由交接完成后的
-        // `applyRenderer` 补写。
-        if !preservesNativeVideoUntilReady {
-            _ = await SceneOfflineBakeService.prepareDesktopStaticWallpaper(
-                path: resolvedPath,
-                targetScreens: effectiveScreens,
-                reason: "setWallpaper(scene 启动前)"
-            )
-            guard wallpaperSwitchGeneration == switchGeneration else { return }
-        }
+        // 原「启动前先写系统桌面并等读回」已由过渡图展示屏障取代（系统壁纸 URL
+        // 一致不能证明它盖住了旧动态窗口）。系统壁纸同步仍按原设置在成功路径执行。
+
+        /// 本请求每屏下发的交接命令（show 或热重载），用于就绪判定。
+        var sceneHandoffCommands: [String: SceneHandoffCommand] = [:]
 
         // 5. 遍历目标屏幕 — 每条路径都先尝试热切换，失败或首次则启动新进程
         var anyLaunchFailed = false
@@ -1146,7 +1217,11 @@ final class WallpaperEngineXBridge: ObservableObject {
                existingInfo.process.isRunning,
                kill(existingInfo.pid, 0) == 0,
                screenW == existingInfo.launchedScreenWidth,
-               screenH == existingInfo.launchedScreenHeight {
+               screenH == existingInfo.launchedScreenHeight,
+               // 过渡图已写成系统桌面的屏必须拆掉旧窗口、让真实桌面露出给菜单栏采样，
+               // 因此不走热切换，冷启动 --defer-show 新进程。
+               !(sceneHandoff?.desktopScreenIDs.contains(screenID) ?? false),
+               sceneHandoff == nil || sceneHandoffSessions[screenID]?.pid == existingInfo.pid {
                 print("[WallpaperEngineXBridge] 屏幕 \(screenID) 已有活跃进程 (pid=\(existingInfo.pid))，通过控制文件热切换")
 
                 // ── 调试：打印热切换完整参数 ──
@@ -1189,10 +1264,28 @@ final class WallpaperEngineXBridge: ObservableObject {
                     lastCanvasSizeByScreenID[screenID] = known
                 }
                 if let ccURL = existingInfo.cropControlURL {
-                    writeCropControl(url: ccURL, crop: nil, viewport: nil)
+                    // 交接路径：先写与过渡图相同的初始裁剪，首帧与静态图同构，淡出无跳变。
+                    let initial = sceneHandoff == nil ? nil : sceneInitialCropLayout(screen: screen, path: resolvedPath)
+                    writeCropControl(url: ccURL, crop: initial?.crop, viewport: initial?.viewport)
                 }
                 if let csURL = existingInfo.canvasSizeURL {
                     invalidateCanvasSizeFile(at: csURL)
+                }
+
+                // 热重载命令：带 commandSeq，渲染器接受后清空就绪状态，旧场景的 ready 不会沿用。
+                var hotCommand: SceneHandoffCommand?
+                if let tx = sceneHandoff, var session = sceneHandoffSessions[screenID],
+                   let token = tx.tokens[screenID] {
+                    hotCommand = SceneHandoffCommand(
+                        sessionID: session.sessionID,
+                        commandSeq: session.nextSeq,
+                        requestID: tx.requestID,
+                        generation: token.generation,
+                        contentIdentity: tx.contentIdentity,
+                        show: true
+                    )
+                    session.nextSeq &+= 1
+                    sceneHandoffSessions[screenID] = session
                 }
 
                 guard writeWallpaperControl(
@@ -1203,7 +1296,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                     upscaling: upscalingEnabled,
                     upscalingPercent: upscalingPercentValue,
                     effectReduction: effectReductionEnabled,
-                    perfMode: perfMode
+                    perfMode: perfMode,
+                    handoff: hotCommand
                 ) else {
                     let error = WallpaperEngineError.executionFailed(
                         "无法写入 Scene 壁纸控制文件"
@@ -1226,6 +1320,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
                 // 热切换屏没有进程启动边界，首帧预算从写入控制文件后起算
                 sceneFreshLaunchBudgetStarts[screenID] = Date()
+                if let hotCommand { sceneHandoffCommands[screenID] = hotCommand }
                 if let acURL = existingInfo.audioControlURL {
                     writeAudioControl(
                         url: acURL,
@@ -1298,7 +1393,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             print("[WallpaperEngineXBridge] 📋   userProperties=\(effectiveUserProperties ?? "nil")")
 
             if let existingInfo = screenProcesses[screenID] {
-                let canPreserve = preserveExistingRendererUntilReady
+                let canPreserve = keepsOldRendererUntilReady
                     && existingInfo.process.isRunning
                     && kill(existingInfo.pid, 0) == 0
                 if canPreserve {
@@ -1391,20 +1486,44 @@ final class WallpaperEngineXBridge: ObservableObject {
             // 启动时截断，长时间运行会无限增长。这里先写一个空对象占位（渲染器对空
             // dict 的 setWallpaper/setProperties/upscaling 全为 None，走无操作分支），
             // 之后热切换/属性更新再覆写。
+            // ── 安全交接（Scene）：过渡图已盖住画面，渲染器以 --defer-show 启动，
+            // 启动前就把 show 命令（seq=1）写进控制文件：场景构建完成后在过渡图后方建窗、
+            // 提交真实 surface 帧，宿主等到本请求的 GPU 完成凭据才淡出过渡图。
+            var freshCommand: SceneHandoffCommand?
+            var freshSession: SceneHandoffSession?
+            if let tx = sceneHandoff, let token = tx.tokens[screenID] {
+                let sessionID = UUID().uuidString
+                let statusURL = wallpaperControlURL.deletingPathExtension()
+                    .appendingPathExtension("handoff-status.json")
+                try? FileManager.default.removeItem(at: statusURL)
+                let command = SceneHandoffCommand(
+                    sessionID: sessionID,
+                    commandSeq: 1,
+                    requestID: tx.requestID,
+                    generation: token.generation,
+                    contentIdentity: tx.contentIdentity,
+                    show: true
+                )
+                freshCommand = command
+                freshSession = SceneHandoffSession(pid: 0, sessionID: sessionID, statusURL: statusURL, nextSeq: 2)
+                perScreenArgs += [
+                    "--defer-show",
+                    "--handoff-status", statusURL.path,
+                    "--renderer-session", sessionID,
+                    "--handoff-request", tx.requestID,
+                    "--handoff-generation", String(token.generation),
+                    "--content-identity", tx.contentIdentity
+                ]
+            }
+            // 冷启动若只传路径而不落文件，渲染器会持续报元数据失败；没有交接命令时写空对象占位。
             _ = writeWallpaperControl(
                 url: wallpaperControlURL,
                 setWallpaper: nil,
                 assets: nil,
-                setProperties: nil
+                setProperties: nil,
+                handoff: freshCommand
             )
             perScreenArgs += ["--wallpaper-control", wallpaperControlURL.path]
-
-            // ── 启动即显示 ────────────────────────────────────────────
-            // 旧链路用 `--defer-show` + `--poster-output` 在离屏期预热、再让宿主
-            // 确认桌面后下发 show。实测用户感受是「卡住很久然后直接出渲染器」，
-            // 已废弃：改为**启动渲染器之前**就把桌面静态壁纸设好并确认生效
-            // （`prepareDesktopStaticWallpaper`，复用缓存/烘焙产物，冷启动才抽帧），
-            // 渲染器随后正常启动并立即显示。
 
             if let effectiveUserProperties, !effectiveUserProperties.isEmpty {
                 perScreenArgs += ["--user-properties", effectiveUserProperties]
@@ -1444,6 +1563,16 @@ final class WallpaperEngineXBridge: ObservableObject {
                 )
                 _deinitPIDs.insert(launchedPID)
                 sceneFreshLaunchBudgetStarts[screenID] = Date()
+                if var session = freshSession, let freshCommand {
+                    session = SceneHandoffSession(
+                        pid: launchedPID,
+                        sessionID: session.sessionID,
+                        statusURL: session.statusURL,
+                        nextSeq: session.nextSeq
+                    )
+                    sceneHandoffSessions[screenID] = session
+                    sceneHandoffCommands[screenID] = freshCommand
+                }
                 print("[WallpaperEngineXBridge] ✅ 屏幕 \(screenID) wallpaper-wgpu 已启动 (pid=\(launchedPID))")
                 // macOS 27：新进程的桌面窗口可能落在非当前 Space，延迟分拍拉回。
                 scheduleRendererWindowVisibilityGuard(pid: launchedPID, screenID: screenID)
@@ -1508,6 +1637,49 @@ final class WallpaperEngineXBridge: ObservableObject {
             releaseSettingFlag()
             throw WallpaperEngineError.executionFailed(launchFailureText ?? "唤醒后 renderer 启动失败")
         }
+        // ── Scene 安全交接（阶段四+五）：等本请求真实窗口首帧 + GPU 完成，再淡出过渡图。
+        // 超时 / 失败只进入明确失败态，绝不「超时就放开」让新窗口自然浮上。
+        if let tx = sceneHandoff {
+            let commands = sceneHandoffCommands.filter { !failedScreenIDs.contains($0.key) }
+            var results: [String: SceneHandoffScreenResult] = [:]
+            for id in tx.tokens.keys where commands[id] == nil {
+                let why = failedScreenIDs.contains(id)
+                    ? (lastLaunchError.map { WallpaperEngineError.userFacingLaunchFailure($0) } ?? "渲染进程启动失败")
+                    : "未下发交接命令"
+                results[id] = .failed(why)
+            }
+            if !(requireAllTargetScreens && !results.isEmpty) {
+                guard let waited = await waitForSceneHandoffReady(
+                    tx,
+                    commands: commands,
+                    budgetStarts: sceneFreshLaunchBudgetStarts,
+                    generation: switchGeneration
+                ) else { return }
+                results.merge(waited) { existing, _ in existing }
+            }
+            let readyIDs = results.filter { $0.value == .ready }.map(\.key).sorted()
+            let failures: [(String, String)] = results.compactMap { id, result in
+                if case .failed(let message) = result { return (id, message) }
+                return nil
+            }.sorted { $0.0 < $1.0 }
+            if !failures.isEmpty {
+                let detail = failures.map { "\($0.0): \($0.1)" }.joined(separator: "; ")
+                // 全局同步：任一屏失败都不开始组淡出；全部屏停新运行时，静态图继续遮盖。
+                if requireAllTargetScreens || readyIDs.isEmpty {
+                    await abandonSceneRuntime(tx, screenIDs: Array(tx.tokens.keys), reason: detail)
+                    sceneHandoffSettled = true
+                    endSceneHandoff(tx)
+                    throw WallpaperEngineError.executionFailed("静态图已显示，动态场景加载失败（\(detail)）")
+                }
+                await abandonSceneRuntime(tx, screenIDs: failures.map(\.0), reason: detail)
+            }
+            _ = await revealSceneHandoff(tx, screenIDs: readyIDs, generation: switchGeneration)
+            // 淡出期间被取代：过期动画只清自己的覆盖层，defer 回收新请求没接管的屏。
+            guard isSceneHandoffCurrent(tx, generation: switchGeneration) else { return }
+            sceneHandoffSettled = true
+            endSceneHandoff(tx)
+        }
+
         // 全局同步不能把“一块屏成功”当成成功：必须让全局协调器回滚到上一张，
         // 否则会留下部分屏新 Scene、部分屏旧 Scene 的分裂状态。
         if anyLaunchFailed && requireAllTargetScreens {
@@ -1534,7 +1706,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // wallpaper-wgpu 的热切换是异步读取控制文件。全局同步必须等待每块屏
         // 写出新 canvas_size，才能确认 Scene 已真正完成加载而不是仅写入了意图。
-        let verifiedSceneReadiness = requireAllTargetScreens && renderKind == .scene
+        // 交接路径已用真实首帧凭据判定，不再退回 canvas 文件猜测。
+        let verifiedSceneReadiness = requireAllTargetScreens && renderKind == .scene && sceneHandoff == nil
         if verifiedSceneReadiness {
             try await waitForScenePresentationReady(
                 path: resolvedPath,
@@ -2230,6 +2403,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     func stopWallpaper(forScreenID screenID: String) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenStop", ["id": screenID]); return }
 
+        // 过渡图可能是失败回退后唯一的覆盖层，即使已不再控制外部引擎也要收掉。
+        releaseSceneHandoff(screenIDs: [screenID], reason: "stopWallpaper(forScreenID:)")
         guard isControllingExternalEngine else { return }
 
         let isManagedScreen = screenProcesses[screenID] != nil
@@ -2360,8 +2535,104 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
-    /// 通过 Unix Socket 把 WE 128-frame 频谱 fire-and-forget 推给 daemon。
-    /// 不读响应、不阻塞：daemon 端 `.audioData` 路由明确不写响应（避免 30fps × OK 塞爆 socket）。
+    /// 通知 daemon 目标屏 Web 窗口转不透明（海报抽帧已落桌面，采样窗口期结束）。
+    /// fire-and-forget；daemon 端幂等（已不透明时 no-op）。
+    private func sendGoOpaqueToWebDaemon(screen: Int?) {
+        let socketPath = "/tmp/wallpaperengine-cli.sock"
+        let msg = WebDaemonControlMessage(command: "goOpaque", screen: screen)
+        guard let data = try? JSONEncoder().encode(msg) else { return }
+        DispatchQueue.global(qos: .utility).async {
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            strncpy(&addr.sun_path, socketPath, MemoryLayout.size(ofValue: addr.sun_path) - 1)
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { return }
+            defer { close(fd) }
+            var rcvTimeout = timeval(tv_sec: 2, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+            let size = MemoryLayout<sockaddr_un>.size
+            let connected = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(size)) }
+            }
+            guard connected == 0 else { return }
+            var length = UInt32(data.count)
+            let payload = Data(bytes: &length, count: MemoryLayout<UInt32>.size) + data
+            let sent = payload.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, payload.count, 0) }
+            guard sent == payload.count else { return }
+            var responseBuf = Data(repeating: 0, count: 64)
+            _ = responseBuf.withUnsafeMutableBytes { recv(fd, $0.baseAddress, 64, 0) }
+        }
+    }
+
+    /// Web 双态透明度的宿主收口：海报已写系统桌面（或确认无海报可写）后调用。
+    ///
+    /// - Parameter desktopURL: 本次真正写进系统桌面的文件；nil = 没写（同步关闭 /
+    ///   锁屏保留选择 / 无海报），菜单栏没有新图可采，直接转不透明。
+    /// 写了桌面时：先读回确认 `desktopImageURL` 已切到新图，再保持半透明
+    /// `webOpaqueHoldAfterDesktopWrite`，让菜单栏懒采样拾取新海报后才转不透明。
+    /// 每个 await 之后都核对收尾令牌，过时任务不发 goOpaque。
+    private func finalizeWebOpacityTransition(
+        path: String,
+        targetScreens: [NSScreen],
+        token: UUID,
+        desktopURL: URL?
+    ) async {
+        guard isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else { return }
+
+        var readbackConfirmed = false
+        var holdMS = 0
+        if let desktopURL {
+            let expectedPath = desktopURL.standardizedFileURL.path
+            let deadline = Date().addingTimeInterval(Self.webDesktopReadbackTimeout)
+            repeat {
+                readbackConfirmed = targetScreens.allSatisfy { screen in
+                    NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL.path == expectedPath
+                }
+                if readbackConfirmed { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else { return }
+            } while Date() < deadline
+
+            do {
+                try await Task.sleep(nanoseconds: Self.webOpaqueHoldAfterDesktopWrite)
+            } catch {
+                return
+            }
+            holdMS = Int(Self.webOpaqueHoldAfterDesktopWrite / 1_000_000)
+            guard isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else { return }
+        }
+
+        let indexes = targetScreens.compactMap(Self.legacyCLIScreenIndex(for:))
+        for index in indexes {
+            sendGoOpaqueToWebDaemon(screen: index)
+        }
+        for screen in targetScreens where webPosterFinalizeTokens[screen.wallpaperScreenIdentifier] == token {
+            webPosterFinalizeTokens.removeValue(forKey: screen.wallpaperScreenIdentifier)
+        }
+        AppLogger.error(.wallpaper, "[WebTransition] 转不透明", metadata: [
+            "path": (path as NSString).lastPathComponent,
+            "hadPoster": desktopURL == nil ? "0" : "1",
+            "readback": readbackConfirmed ? "1" : "0",
+            "holdMS": String(holdMS),
+            "screens": indexes.map(String.init).joined(separator: ",")
+        ])
+    }
+
+    /// 收尾任务是否仍代表目标屏的当前 Web 壁纸（路径一致 + 令牌未被新一次 set 换掉）。
+    private func isWebPosterFinalizeCurrent(path: String, targetScreens: [NSScreen], token: UUID) -> Bool {
+        let screenIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
+        guard isCurrentWebWallpaper(path: path, on: screenIDs) else { return false }
+        return screenIDs.allSatisfy { webPosterFinalizeTokens[$0] == token }
+    }
+
+    /// 该屏当前是否由 Web daemon 渲染。LocalWallpaperApplyService 据此把系统桌面
+    /// 写入交给 Web 收尾链（避免两条路一秒内连写同一屏被系统合并丢弃）。
+    func isWebRendering(on screen: NSScreen) -> Bool {
+        if BackgroundRuntimeRole.isRemoteUI { return false }
+        return renderState(for: screen)?.renderKind == .web
+    }
+
+    /// 通过 Unix Socket 把 WE 128-frame 频谱 fire-and-forget 推给 daemon。    /// 不读响应、不阻塞：daemon 端 `.audioData` 路由明确不写响应（避免 30fps × OK 塞爆 socket）。
     /// 协议帧格式：[UInt32 length, host byte order][JSON body]，与现有命令保持一致。
     func sendAudioDataToWebDaemon(_ spectrum128: [Float]) {
         guard isCurrentWallpaperWeb else { return }
@@ -2680,6 +2951,10 @@ final class WallpaperEngineXBridge: ObservableObject {
         if BackgroundRuntimeRole.isIsolatedTest { return }
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.stop", [:]); return }
 
+        releaseSceneHandoff(
+            screenIDs: Array(Set(sceneOwnership.generations.keys).union(NSScreen.screens.map(\.wallpaperScreenIdentifier))),
+            reason: "stopWallpaper"
+        )
         print("[WallpaperEngineXBridge] stopWallpaper: 停止所有实时渲染 (进程数=\(screenProcesses.count))")
         ensureStoppedForNonCLIWallpaper()
     }
@@ -2714,6 +2989,10 @@ final class WallpaperEngineXBridge: ObservableObject {
     func ensureStoppedForNonCLIWallpaper() {
         if BackgroundRuntimeRole.isIsolatedTest { return }
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.ensureStopped", [:]); return }
+        releaseSceneHandoff(
+            screenIDs: Array(Set(sceneOwnership.generations.keys).union(NSScreen.screens.map(\.wallpaperScreenIdentifier))),
+            reason: "ensureStoppedForNonCLIWallpaper"
+        )
 
         let processCount = screenProcesses.count
         AppLogger.error(.wallpaper, "ensureStoppedForNonCLIWallpaper(全局)", metadata: ["processCount": processCount])
@@ -2830,6 +3109,8 @@ final class WallpaperEngineXBridge: ObservableObject {
             targetScreenIDs: Set([screenID]),
             reason: "crossTypeTransition"
         )
+        // 视频 / 静态图接管该屏：Scene 请求作废，过渡图（含失败回退静态图）收掉。
+        releaseSceneHandoff(screenIDs: [screenID], reason: "crossTypeTransition")
         guard isManaging(screen: targetScreen) else { return }
 
         let targetState = renderState(for: targetScreen)
@@ -3245,14 +3526,16 @@ final class WallpaperEngineXBridge: ObservableObject {
             startingAt: URL(fileURLWithPath: path)
         )
         let record = webPosterRecord(for: contentRoot)
+        // 本次收尾令牌：同屏再 set（含同一路径重设）或换别的壁纸都会换掉它。
+        let token = UUID()
+        for screen in targetScreens {
+            webPosterFinalizeTokens[screen.wallpaperScreenIdentifier] = token
+        }
         if let record,
            let artifact = SceneOfflineBakeService.usableArtifact(from: record) {
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard self.isCurrentWebWallpaper(
-                    path: path,
-                    on: Set(targetScreens.map(\.wallpaperScreenIdentifier))
-                ) else {
+                guard let self,
+                      self.isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else {
                     return
                 }
 
@@ -3271,10 +3554,25 @@ final class WallpaperEngineXBridge: ObservableObject {
                         print("[WallpaperEngineXBridge] 🎬 已将 Web 烘焙 MP4 同步到锁屏扩展: display=\(displayIDs) video=\(record.item.id)")
                     }
 
-                    // 锁屏已经使用 MP4；poster 仅用于详情页/封面缓存，绝不降级覆盖为静态锁屏源。
-                    _ = await ensureSceneBakePosterAndNotify(
+                    // 锁屏已经使用 MP4；poster 绝不降级覆盖为静态锁屏源（updateLockScreen=false），
+                    // 但系统桌面仍要写，否则菜单栏一直采上一张（此前这里直接转不透明、不写桌面）。
+                    // 动态锁屏需要保留选择时 applyBakedStaticImage 自己会跳过桌面写入。
+                    let lockPoster = await ensureSceneBakePosterAndNotify(
                         itemID: record.item.id,
                         videoURL: bakedVideoURL
+                    )
+                    var desktopURL: URL?
+                    if let lockPoster {
+                        desktopURL = await self.syncWebPosterToStaticTargets(
+                            lockPoster,
+                            path: path,
+                            targetScreens: targetScreens,
+                            token: token,
+                            updateLockScreen: false
+                        )
+                    }
+                    await self.finalizeWebOpacityTransition(
+                        path: path, targetScreens: targetScreens, token: token, desktopURL: desktopURL
                     )
                     return
                 }
@@ -3284,12 +3582,20 @@ final class WallpaperEngineXBridge: ObservableObject {
                     videoURL: bakedVideoURL
                 ) else {
                     print("[WallpaperEngineXBridge] Web 烘焙 MP4 poster 补抽失败: \(artifact.videoPath)")
+                    // poster 抽不出也要收口采样期，不能让窗口永远半透明。
+                    await self.finalizeWebOpacityTransition(
+                        path: path, targetScreens: targetScreens, token: token, desktopURL: nil
+                    )
                     return
                 }
-                await self.syncWebPosterToStaticTargets(
+                let desktopURL = await self.syncWebPosterToStaticTargets(
                     posterURL,
                     path: path,
-                    targetScreens: targetScreens
+                    targetScreens: targetScreens,
+                    token: token
+                )
+                await self.finalizeWebOpacityTransition(
+                    path: path, targetScreens: targetScreens, token: token, desktopURL: desktopURL
                 )
             }
             return
@@ -3302,16 +3608,17 @@ final class WallpaperEngineXBridge: ObservableObject {
         ) {
             Task { @MainActor [weak self] in
                 guard let self,
-                      self.isCurrentWebWallpaper(
-                          path: path,
-                          on: Set(targetScreens.map(\.wallpaperScreenIdentifier))
-                      ) else {
+                      self.isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else {
                     return
                 }
-                await self.syncWebPosterToStaticTargets(
+                let desktopURL = await self.syncWebPosterToStaticTargets(
                     cachedPoster,
                     path: path,
-                    targetScreens: targetScreens
+                    targetScreens: targetScreens,
+                    token: token
+                )
+                await self.finalizeWebOpacityTransition(
+                    path: path, targetScreens: targetScreens, token: token, desktopURL: desktopURL
                 )
             }
             return
@@ -3319,6 +3626,12 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         guard let posterScreen = targetScreens.first(where: { $0 == NSScreen.main }) ?? targetScreens.first,
               let screenIndex = Self.legacyCLIScreenIndex(for: posterScreen) else {
+            // 截不了图也要收口，否则窗口一直半透明持续合成。
+            Task { @MainActor [weak self] in
+                await self?.finalizeWebOpacityTransition(
+                    path: path, targetScreens: targetScreens, token: token, desktopURL: nil
+                )
+            }
             return
         }
 
@@ -3327,7 +3640,6 @@ final class WallpaperEngineXBridge: ObservableObject {
         let captureWarmup: UInt64 = 7_000_000_000
         let sampleInterval: UInt64 = 1_500_000_000
         let sampleCount = 4
-        let targetScreenIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
         Task(priority: .utility) { @MainActor [weak self] in
             do {
                 try await Task.sleep(nanoseconds: captureWarmup)
@@ -3336,7 +3648,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
 
             guard let self,
-                  self.isCurrentWebWallpaper(path: path, on: targetScreenIDs) else {
+                  self.isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else {
                 return
             }
 
@@ -3365,7 +3677,7 @@ final class WallpaperEngineXBridge: ObservableObject {
 
             var bestCandidate: WebPosterCaptureCandidate?
             for sampleIndex in 0..<sampleCount {
-                guard self.isCurrentWebWallpaper(path: path, on: targetScreenIDs),
+                guard self.isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token),
                       SceneOfflineBakeService.usableArtifact(
                           from: self.webPosterRecord(for: contentRoot)
                       ) == nil else {
@@ -3423,7 +3735,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
 
             let finalRecord = self.webPosterRecord(for: contentRoot)
-            guard self.isCurrentWebWallpaper(path: path, on: targetScreenIDs),
+            guard self.isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token),
                   SceneOfflineBakeService.usableArtifact(from: finalRecord) == nil,
                   let bestCandidate,
                   let posterURL = await VideoThumbnailCache.shared.wallpaperEnginePosterJPEGFileURL(
@@ -3432,6 +3744,10 @@ final class WallpaperEngineXBridge: ObservableObject {
                       forceRegenerate: true
                   ) else {
                 print("[WallpaperEngineXBridge] Web poster capture exhausted without a usable frame")
+                // 无帧可抽也要收口采样期，不能让窗口永远半透明（令牌过时的话 finalize 自己会退出）。
+                await self.finalizeWebOpacityTransition(
+                    path: path, targetScreens: targetScreens, token: token, desktopURL: nil
+                )
                 return
             }
 
@@ -3442,10 +3758,14 @@ final class WallpaperEngineXBridge: ObservableObject {
                     userInfo: ["thumbnailURL": posterURL]
                 )
             }
-            await self.syncWebPosterToStaticTargets(
+            let desktopURL = await self.syncWebPosterToStaticTargets(
                 posterURL,
                 path: path,
-                targetScreens: targetScreens
+                targetScreens: targetScreens,
+                token: token
+            )
+            await self.finalizeWebOpacityTransition(
+                path: path, targetScreens: targetScreens, token: token, desktopURL: desktopURL
             )
             print(
                 "[WallpaperEngineXBridge] Web poster cached screen=\(screenIndex) "
@@ -3571,32 +3891,50 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     /// Web/MP4 共用 canonical poster；锁屏与系统桌面只消费该文件，不直接引用 daemon 的 /tmp 截图。
+    ///
+    /// - Parameters:
+    ///   - token: 收尾令牌；锁屏缓存的 await 之后再核对一次，过时就不写桌面。
+    ///   - updateLockScreen: false = 锁屏已在用烘焙 MP4，不能降级成静态源，只写桌面。
+    /// - Returns: 真正写进系统桌面的文件（交替槽位副本）；没写返回 nil。
+    @discardableResult
     private func syncWebPosterToStaticTargets(
         _ posterURL: URL,
         path: String,
-        targetScreens: [NSScreen]
-    ) async {
-        guard FileManager.default.fileExists(atPath: posterURL.path) else { return }
+        targetScreens: [NSScreen],
+        token: UUID,
+        updateLockScreen: Bool = true
+    ) async -> URL? {
+        guard FileManager.default.fileExists(atPath: posterURL.path) else { return nil }
 
-        if #available(macOS 26.0, *),
+        if updateLockScreen,
+           #available(macOS 26.0, *),
            VideoWallpaperManager.shared.isLockScreenEnabled {
             let displayIDs = targetScreens.compactMap {
                 ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             }
-            guard !displayIDs.isEmpty else { return }
-            do {
-                try await LockScreenWallpaperService.shared.cacheStaticImageSource(
-                    imageURL: posterURL,
-                    displayIDs: displayIDs
-                )
-                print("[WallpaperEngineXBridge] 🖼️ 已将 Web canonical poster 同步到锁屏扩展: \(posterURL.lastPathComponent)")
-            } catch {
-                print("[WallpaperEngineXBridge] ⚠️ Web canonical poster 锁屏同步失败: \(error.localizedDescription)")
+            // 拿不到 displayID 只跳过锁屏，桌面照写（此前这里整个 return，桌面也不写）。
+            if !displayIDs.isEmpty {
+                do {
+                    try await LockScreenWallpaperService.shared.cacheStaticImageSource(
+                        imageURL: posterURL,
+                        displayIDs: displayIDs
+                    )
+                    print("[WallpaperEngineXBridge] 🖼️ 已将 Web canonical poster 同步到锁屏扩展: \(posterURL.lastPathComponent)")
+                } catch {
+                    print("[WallpaperEngineXBridge] ⚠️ Web canonical poster 锁屏同步失败: \(error.localizedDescription)")
+                }
             }
-            return
+            // 不要再提前 return：系统桌面静态帧是否可写由 applyBakedStaticImage
+            // 自己的守卫决定（动态锁屏需要保留锁屏选择时它本来就会跳过桌面写入）。
+            // 此前的提前 return 让锁屏开启的机器 Web poster 从未写进系统桌面，
+            // 菜单栏 backdrop 无图可采（用户实测：设置 Web 壁纸菜单栏不更新）。
         }
 
-        _ = applyBakedStaticImage(
+        // 锁屏缓存 await 期间用户可能已换壁纸：过时就不写，免得 A 的海报盖掉 B。
+        guard isWebPosterFinalizeCurrent(path: path, targetScreens: targetScreens, token: token) else {
+            return nil
+        }
+        return applyBakedStaticImage(
             posterURL,
             for: path,
             targetScreens: targetScreens,
@@ -4616,9 +4954,14 @@ final class WallpaperEngineXBridge: ObservableObject {
         upscaling: Bool? = nil,
         upscalingPercent: Int? = nil,
         effectReduction: Bool? = nil,
-        perfMode: String? = nil
+        perfMode: String? = nil,
+        handoff: SceneHandoffCommand? = nil
     ) -> Bool {
         var dict: [String: Any] = [:]
+        // 安全交接协议 v1：带 commandSeq 的命令被渲染器按序号幂等接受。
+        if let handoff {
+            dict.merge(handoff.jsonFields) { _, new in new }
+        }
         if let sw = setWallpaper {
             dict["setWallpaper"] = sw
         }
@@ -4841,6 +5184,11 @@ final class WallpaperEngineXBridge: ObservableObject {
     private func removeScreenProcess(_ screenID: String) {
         if let info = screenProcesses.removeValue(forKey: screenID) {
             cleanupRendererResources(info)
+            // 交接 session 只属于启动它的那个 pid；先比对所有权再删。
+            if let session = sceneHandoffSessions[screenID], session.pid == info.pid {
+                sceneHandoffSessions.removeValue(forKey: screenID)
+                try? FileManager.default.removeItem(at: session.statusURL)
+            }
         }
     }
 
@@ -6660,5 +7008,410 @@ enum WallpaperEngineError: LocalizedError {
         case .executionFailed(let msg): return msg
         case .sceneRendererUnavailable: return WallpaperEngineAvailability.sceneUnsupportedReason
         }
+    }
+}
+
+// MARK: - Scene 安全交接：静态图先行 → 真实首帧 → 淡出
+
+/// 一次 Scene 设置请求的事务上下文（入口即建立）。
+@MainActor
+struct SceneHandoffTransaction {
+    let requestID: String
+    let contentRoot: String
+    let contentDigest: String
+    let propertiesDigest: String
+    let contentIdentity: String
+    /// 一次性解析出的有效属性快照：过渡图生成与运行时共用，禁止两边各自重新合并。
+    let effectiveProperties: String?
+    let tokens: [String: SceneScreenOwnershipTable.Token]
+    /// 过渡图以临时覆盖窗展示成功的屏（系统壁纸同步关闭 / 写桌面失败时的回退）。
+    var posterScreenIDs: Set<String>
+    /// 过渡图已写成系统桌面并读回确认的屏：这些屏要拆掉旧动态窗口露出真实桌面，
+    /// 让菜单栏 backdrop 在渲染器出现前采样新图；渲染器一律冷启动（不热重载旧窗口）。
+    var desktopScreenIDs: Set<String> = []
+    var desktopConfirmedAt: Date?
+    let startedAt: Date
+
+    func owner(for screenID: String) -> SceneTransitionPosterPresenter.Owner? {
+        guard let token = tokens[screenID] else { return nil }
+        return .init(requestID: token.requestID, screenID: screenID, generation: token.generation)
+    }
+}
+
+enum SceneHandoffScreenResult: Equatable {
+    case ready
+    case failed(String)
+}
+
+extension WallpaperEngineXBridge {
+    /// 初始裁剪：与实时启动传给渲染器的 `--crop` / `--crop-viewport` 完全一致。
+    fileprivate func sceneInitialCropLayout(screen: NSScreen, path: String) -> (crop: UnitRect, viewport: UnitRect)? {
+        let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
+        guard cropSettings.shouldApplyCrop else { return nil }
+        let w = Int(screen.frame.width.rounded())
+        let h = Int(screen.frame.height.rounded())
+        let wallpaperSize = cropWallpaperSize(screen: screen, path: path, canvasSizeURL: nil, allowCachedCanvas: false)
+        if wallpaperSize == nil,
+           cropSettings.aspectPreset == .autoFill
+            || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil) {
+            return nil
+        }
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: wallpaperSize ?? CGSize(width: w, height: h),
+            screenSize: CGSize(width: w, height: h),
+            settings: cropSettings
+        )
+        return (layout.wallpaperCropRect, layout.viewportRect)
+    }
+
+    fileprivate static func cropArguments(_ layout: (crop: UnitRect, viewport: UnitRect)?) -> (args: [String], signature: String) {
+        guard let layout else { return ([], "none") }
+        let c = layout.crop, v = layout.viewport
+        var args = ["--crop", "\(c.x),\(c.y),\(c.w),\(c.h)"]
+        let fullVP = abs(v.x) < 1e-4 && abs(v.y) < 1e-4 && abs(v.w - 1) < 1e-4 && abs(v.h - 1) < 1e-4
+        if !fullVP { args += ["--crop-viewport", "\(v.x),\(v.y),\(v.w),\(v.h)"] }
+        return (args, args.joined(separator: " "))
+    }
+
+    /// 该屏当前是否有需要保护的旧动态内容（视频 / Scene / Web / 持久静态层 / 上一次过渡图）。
+    fileprivate func screenHasOldContentToProtect(_ screen: NSScreen) -> Bool {
+        let id = screen.wallpaperScreenIdentifier
+        return VideoWallpaperManager.shared.hasNativeVideoWallpaper(on: [screen])
+            || screenProcesses[id] != nil
+            || screenRenderStates[id] != nil
+            || StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen])
+            || SceneTransitionPosterPresenter.shared.hasPoster(on: id)
+    }
+
+    fileprivate func isSceneHandoffCurrent(_ tx: SceneHandoffTransaction, generation: UInt64) -> Bool {
+        wallpaperSwitchGeneration == generation
+            && !Task.isCancelled
+            && tx.tokens.values.allSatisfy { sceneOwnership.isCurrent($0) }
+    }
+
+    fileprivate func endSceneHandoff(_ tx: SceneHandoffTransaction) {
+        sceneHandoffInFlightScreenIDs.subtract(tx.tokens.keys)
+    }
+
+    /// 视频 / 静态图 / Web 接管或停止某屏时：该屏 Scene 请求作废，过渡图收掉。
+    func releaseSceneHandoff(screenIDs: [String], reason: String) {
+        for id in screenIDs { sceneOwnership.invalidate(screenID: id) }
+        SceneTransitionPosterPresenter.shared.releaseScreens(screenIDs, reason: reason)
+    }
+
+    /// 阶段一+二：固定身份 → 准备逐屏精确过渡图 → 展示并通过屏障。
+    /// 返回 nil = 被更新请求取代（调用方静默退出）；抛错 = 失败且旧壁纸保持原样。
+    fileprivate func beginSceneHandoff(
+        resolvedPath: String,
+        screens: [NSScreen],
+        userProperties: String?,
+        generation: UInt64
+    ) async throws -> SceneHandoffTransaction? {
+        guard let cliURL = Self.resolvedCLIExecutableURL() else { throw WallpaperEngineError.cliNotFound }
+        guard SceneHandoffProtocol.binarySupportsHandoff(at: cliURL) else {
+            throw WallpaperEngineError.executionFailed(
+                "当前 wallpaper-wgpu 不支持安全交接协议（缺少 \(SceneHandoffProtocol.capabilityMarker)），已保留原壁纸"
+            )
+        }
+        let effective = Self.mergeSceneConfigOverrides(userProperties, wallpaperPath: resolvedPath)
+        let contentDigest = SceneHandoffIdentity.contentDigest(projectRoot: resolvedPath)
+        let propertiesDigest = SceneHandoffIdentity.propertiesDigest(effective)
+        let requestID = UUID().uuidString
+        let screenIDs = screens.map(\.wallpaperScreenIdentifier)
+        let tokens = sceneOwnership.claim(requestID: requestID, screenIDs: screenIDs)
+        sceneHandoffInFlightScreenIDs.formUnion(screenIDs)
+        var tx = SceneHandoffTransaction(
+            requestID: requestID,
+            contentRoot: resolvedPath,
+            contentDigest: contentDigest,
+            propertiesDigest: propertiesDigest,
+            contentIdentity: SceneHandoffIdentity.contentIdentity(contentDigest: contentDigest, propertiesDigest: propertiesDigest),
+            effectiveProperties: effective,
+            tokens: tokens,
+            posterScreenIDs: [],
+            startedAt: Date()
+        )
+        let snapshot = tx
+        let isCurrent: @MainActor () -> Bool = { [weak self] in
+            self?.isSceneHandoffCurrent(snapshot, generation: generation) ?? false
+        }
+
+        var targets: [SceneOfflineBakeService.TransitionPosterTarget] = []
+        for screen in screens {
+            let crop = Self.cropArguments(sceneInitialCropLayout(screen: screen, path: resolvedPath))
+            targets.append(.init(
+                screenID: screen.wallpaperScreenIdentifier,
+                pixelSize: WallpaperPosterGeometry.evenPixelSize(
+                    widthPoints: screen.frame.width,
+                    heightPoints: screen.frame.height,
+                    scale: screen.backingScaleFactor
+                ),
+                backingScale: Double(screen.backingScaleFactor),
+                cropSignature: crop.signature,
+                cropArguments: crop.args
+            ))
+        }
+
+        let prepareStarted = Date()
+        let outcomes = await SceneOfflineBakeService.prepareTransitionPosters(
+            contentRoot: URL(fileURLWithPath: resolvedPath),
+            contentDigest: contentDigest,
+            propertiesDigest: propertiesDigest,
+            effectiveProperties: effective,
+            targets: targets,
+            reason: "setWallpaper",
+            isCurrent: isCurrent
+        )
+        let prepareMS = Int(Date().timeIntervalSince(prepareStarted) * 1000)
+        guard isCurrent() else { endSceneHandoff(tx); return nil }
+
+        // 先判定全部屏能否继续，再展示：避免一半屏已盖图、一半屏因失败中止。
+        var plan: [(NSScreen, URL)] = []
+        for screen in screens {
+            let id = screen.wallpaperScreenIdentifier
+            if let url = outcomes[id]?.imageURL {
+                plan.append((screen, url))
+                continue
+            }
+            let why = outcomes[id].map { "\($0)" } ?? "missing"
+            if screenHasOldContentToProtect(screen) {
+                endSceneHandoff(tx)
+                throw WallpaperEngineError.executionFailed("Scene 过渡静态图准备失败（\(id): \(why)），已保留原壁纸")
+            }
+            AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图准备失败但无旧内容需保护，直接加载", metadata: [
+                "screenID": id, "outcome": why
+            ])
+        }
+
+        let presentStarted = Date()
+        // 首选：过渡图直接写成系统桌面（读回确认），随后旧动态窗被拆掉、真实桌面露出，
+        // 菜单栏 backdrop 在渲染器出现前就能采样到新图；渲染器保持不透明，不靠半透明持续合成。
+        let useSystemDesktop = SceneOfflineBakeService.canUseSystemDesktopForSceneTransition
+        for (screen, url) in plan {
+            let id = screen.wallpaperScreenIdentifier
+            guard let owner = tx.owner(for: id) else { continue }
+            if useSystemDesktop {
+                let desktopStarted = Date()
+                let ok = await SceneOfflineBakeService.applyTransitionPosterAsSystemDesktop(
+                    url, screens: [screen], reason: "sceneHandoff"
+                )
+                guard isCurrent() else { endSceneHandoff(tx); return nil }
+                AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图写系统桌面", metadata: [
+                    "screenID": id,
+                    "ok": ok ? "1" : "0",
+                    "desktopWriteMS": String(Int(Date().timeIntervalSince(desktopStarted) * 1000))
+                ])
+                if ok {
+                    tx.desktopScreenIDs.insert(id)
+                    tx.desktopConfirmedAt = tx.desktopConfirmedAt ?? Date()
+                    // 上一个请求遗留的覆盖层会挡住真实桌面，必须撤掉。
+                    if SceneTransitionPosterPresenter.shared.hasPoster(on: id) {
+                        SceneTransitionPosterPresenter.shared.releaseScreens([id], reason: "desktopExposed")
+                    }
+                    continue
+                }
+            }
+            do {
+                try await SceneTransitionPosterPresenter.shared.present(
+                    imageURL: url, on: screen, owner: owner, isCurrent: isCurrent
+                )
+                tx.posterScreenIDs.insert(id)
+            } catch {
+                guard isCurrent() else { endSceneHandoff(tx); return nil }
+                if screenHasOldContentToProtect(screen) {
+                    // 撤掉本请求已盖上的过渡图，旧动态内容仍在后面原样露出。
+                    for shown in tx.posterScreenIDs.union([id]) {
+                        if let o = tx.owner(for: shown) { SceneTransitionPosterPresenter.shared.remove(owner: o) }
+                    }
+                    endSceneHandoff(tx)
+                    throw WallpaperEngineError.executionFailed(
+                        "Scene 过渡静态图展示屏障未通过（\(error.localizedDescription)），已保留原壁纸"
+                    )
+                }
+                AppLogger.error(.wallpaper, "[SceneHandoff] 展示屏障未通过但无旧内容需保护，继续", metadata: [
+                    "screenID": id, "error": error.localizedDescription
+                ])
+            }
+        }
+        AppLogger.error(.wallpaper, "[SceneHandoff] 静态图已接管画面", metadata: [
+            "requestID": requestID,
+            "screens": screenIDs.sorted().joined(separator: ","),
+            "posterScreens": tx.posterScreenIDs.sorted().joined(separator: ","),
+            "desktopScreens": tx.desktopScreenIDs.sorted().joined(separator: ","),
+            "prepareMS": String(prepareMS),
+            "presentMS": String(Int(Date().timeIntervalSince(presentStarted) * 1000)),
+            "clickToPosterMS": String(Int(Date().timeIntervalSince(tx.startedAt) * 1000))
+        ])
+        return tx
+    }
+
+    /// 阶段四：等每屏「本请求」的真实窗口首帧 + GPU 完成。
+    /// 预算按每屏实际启动 / 接受加载命令的时刻起算；控制确认与加载超时分开报错。
+    /// 返回 nil = 被更新请求取代。
+    fileprivate func waitForSceneHandoffReady(
+        _ tx: SceneHandoffTransaction,
+        commands: [String: SceneHandoffCommand],
+        budgetStarts: [String: Date],
+        generation: UInt64
+    ) async -> [String: SceneHandoffScreenResult]? {
+        let loadBudget: TimeInterval = 12
+        let ackBudget: TimeInterval = 4
+        var results: [String: SceneHandoffScreenResult] = [:]
+        var acknowledgedScreenIDs: Set<String> = []
+        while results.count < commands.count {
+            guard isSceneHandoffCurrent(tx, generation: generation) else { return nil }
+            for (screenID, command) in commands where results[screenID] == nil {
+                guard let session = sceneHandoffSessions[screenID],
+                      let info = screenProcesses[screenID], info.pid == session.pid else {
+                    results[screenID] = .failed("渲染进程所有权已变化"); continue
+                }
+                guard info.process.isRunning, kill(info.pid, 0) == 0 else {
+                    results[screenID] = .failed("渲染进程已退出"); continue
+                }
+                guard let screen = SceneTransitionPosterPresenter.liveScreen(id: screenID),
+                      Int(screen.frame.width.rounded()) == info.launchedScreenWidth,
+                      Int(screen.frame.height.rounded()) == info.launchedScreenHeight else {
+                    results[screenID] = .failed("目标显示器已失效或几何已变化"); continue
+                }
+                let elapsed = Date().timeIntervalSince(budgetStarts[screenID] ?? tx.startedAt)
+                let status = SceneHandoffStatus.read(from: session.statusURL)
+                let readiness = SceneHandoffProtocol.evaluate(status, expected: command.expectation)
+                let awaitingAcceptance: Bool
+                switch readiness {
+                case .pending("missing"), .pending("awaitingAccept"), .stale, .unsupported:
+                    awaitingAcceptance = true
+                default:
+                    awaitingAcceptance = false
+                }
+                if !awaitingAcceptance, acknowledgedScreenIDs.insert(screenID).inserted {
+                    AppLogger.error(.wallpaper, "[SceneHandoff] 渲染器已确认控制命令", metadata: [
+                        "screenID": screenID, "requestID": tx.requestID,
+                        "pid": session.pid, "acceptedSeq": status?.acceptedSeq ?? 0,
+                        "ackMS": String(Int(elapsed * 1000)), "phase": status?.phase ?? "missing"
+                    ])
+                }
+                switch readiness {
+                case .ready:
+                    results[screenID] = .ready
+                    // desktopExposedMS = 过渡图读回确认 → 渲染器窗口出现，即菜单栏可采样新桌面的窗口期上界
+                    // （旧窗在启动循环里才被拆，实际露出时长略短）。
+                    let exposedMS: String = {
+                        guard tx.desktopScreenIDs.contains(screenID), let at = tx.desktopConfirmedAt else { return "-" }
+                        return String(Int(Date().timeIntervalSince(at) * 1000))
+                    }()
+                    AppLogger.error(.wallpaper, "[SceneHandoff] 真实首帧已就绪", metadata: [
+                        "screenID": screenID, "requestID": tx.requestID,
+                        "loadMS": String(Int(elapsed * 1000)),
+                        "desktopExposedMS": exposedMS
+                    ])
+                case .failed(let code, let message):
+                    results[screenID] = .failed("渲染器报告失败 \(code): \(message)")
+                case .unsupported(let why):
+                    results[screenID] = .failed("渲染器不支持安全交接协议：\(why)")
+                case .pending(let phase):
+                    if (phase == "missing" || phase == "awaitingAccept"), elapsed > ackBudget {
+                        results[screenID] = .failed("控制命令未被渲染器确认（\(Int(ackBudget))s）")
+                    } else if elapsed > loadBudget {
+                        results[screenID] = .failed("场景加载超时（\(Int(loadBudget))s，阶段 \(phase)）")
+                    }
+                case .stale:
+                    if elapsed > ackBudget {
+                        results[screenID] = .failed("渲染器状态仍属于旧请求（\(Int(ackBudget))s）")
+                    }
+                }
+            }
+            if results.count < commands.count {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        guard isSceneHandoffCurrent(tx, generation: generation) else { return nil }
+        return results
+    }
+
+    /// 阶段五：在同一次主线程提交里淡出就绪屏的过渡图。
+    fileprivate func revealSceneHandoff(_ tx: SceneHandoffTransaction, screenIDs: [String], generation: UInt64) async -> Bool {
+        let owners = screenIDs.filter { tx.posterScreenIDs.contains($0) }.compactMap { tx.owner(for: $0) }
+        guard !owners.isEmpty else { return isSceneHandoffCurrent(tx, generation: generation) }
+        let started = Date()
+        let ok = await SceneTransitionPosterPresenter.shared.fadeOut(owners: owners) { [weak self] in
+            self?.isSceneHandoffCurrent(tx, generation: generation) ?? false
+        }
+        AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图淡出", metadata: [
+            "requestID": tx.requestID,
+            "screens": screenIDs.sorted().joined(separator: ","),
+            "completed": ok,
+            "fadeMS": String(Int(Date().timeIntervalSince(started) * 1000)),
+            "totalMS": String(Int(Date().timeIntervalSince(tx.startedAt) * 1000))
+        ])
+        return ok
+    }
+
+    /// 停进程会清掉 status，下一次启动会截断 screen 日志：先留一份有界诊断（每屏只保留最近一次）。
+    private func preserveSceneHandoffFailure(_ tx: SceneHandoffTransaction, screenID: String, reason: String) {
+        guard reason != "superseded",
+              let session = sceneHandoffSessions[screenID],
+              let info = screenProcesses[screenID], info.pid == session.pid else { return }
+        let status = SceneHandoffStatus.read(from: session.statusURL)
+        var diagnostic: [String: Any] = [
+            "screenID": screenID, "requestID": tx.requestID, "sessionID": session.sessionID,
+            "pid": session.pid, "reason": reason, "capturedAt": Date().timeIntervalSince1970,
+            "phase": status?.phase ?? "missingOrUnreadable", "acceptedSeq": status?.acceptedSeq ?? 0,
+            "contentPrepared": status?.contentPrepared ?? false, "windowOrdered": status?.windowOrdered ?? false
+        ]
+        if let data = try? Data(contentsOf: session.statusURL), data.count <= 16_384,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            diagnostic["rendererStatus"] = object
+        }
+        let logURL = Self.rendererLogURL(screenID: screenID)
+        if let logURL, let handle = try? FileHandle(forReadingFrom: logURL) {
+            defer { try? handle.close() }
+            if let end = try? handle.seekToEnd() {
+                try? handle.seek(toOffset: end > 12_288 ? end - 12_288 : 0)
+                if let tail = try? handle.read(upToCount: 12_288) {
+                    diagnostic["rendererLogTail"] = String(decoding: tail, as: UTF8.self)
+                }
+            }
+        }
+        let snapshotURL = logURL?.deletingPathExtension().appendingPathExtension("handoff-failure.json")
+        if let snapshotURL, let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]) {
+            try? data.write(to: snapshotURL, options: .atomic)
+        }
+        AppLogger.error(.wallpaper, "[SceneHandoff] 失败前状态快照", metadata: [
+            "screenID": screenID, "requestID": tx.requestID, "pid": session.pid,
+            "phase": status?.phase ?? "missingOrUnreadable", "acceptedSeq": status?.acceptedSeq ?? 0,
+            "diagnosticPath": snapshotURL?.path ?? "unavailable"
+        ])
+    }
+
+    /// 本请求在这些屏上的新运行时作废：停进程、清运行状态，过渡图保留为静态回退。
+    /// 只处理所有权仍归本请求的屏，绝不碰新请求的资源。
+    fileprivate func abandonSceneRuntime(_ tx: SceneHandoffTransaction, screenIDs: [String], reason: String) async {
+        for screenID in screenIDs {
+            guard let token = tx.tokens[screenID], sceneOwnership.isCurrent(token) else { continue }
+            if let session = sceneHandoffSessions[screenID], screenProcesses[screenID]?.pid == session.pid {
+                preserveSceneHandoffFailure(tx, screenID: screenID, reason: reason)
+                await stopScreenProcess(screenID)
+            }
+            screenRenderStates.removeValue(forKey: screenID)
+            SceneTransitionPosterPresenter.shared.cancelFade(on: [screenID])
+            SceneTransitionPosterPresenter.shared.reassertFront(on: [screenID])
+            AppLogger.error(.wallpaper, "[SceneHandoff] 静态图已显示，动态场景加载失败", metadata: [
+                "screenID": screenID,
+                "requestID": tx.requestID,
+                "reason": reason,
+                "posterShown": tx.posterScreenIDs.contains(screenID)
+            ])
+        }
+        updateControlStateFromScreenStates()
+        persistState()
+    }
+
+    /// 被更新请求取代时：只清理新请求没接管的屏；旧任务停止写状态，覆盖层留给新请求接管。
+    fileprivate func abandonSupersededSceneHandoff(_ tx: SceneHandoffTransaction) async {
+        let orphaned = tx.tokens.values.filter { sceneOwnership.isCurrent($0) }.map(\.screenID)
+        if !orphaned.isEmpty {
+            await abandonSceneRuntime(tx, screenIDs: orphaned, reason: "superseded")
+        }
+        endSceneHandoff(tx)
     }
 }

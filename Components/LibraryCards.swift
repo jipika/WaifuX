@@ -308,7 +308,7 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
                 // 静态列表缓存路径不可能是动图
                 let path = probeURL.standardizedFileURL.path
                 if probeURL.isFileURL,
-                   path.contains("/WaifuX/VideoThumbnails/") || path.contains("/WaifuX/LocalImageThumbnails/") {
+                   VideoThumbnailCache.isGeneratedStaticImagePath(path) {
                     detectedGIF = false
                     return
                 }

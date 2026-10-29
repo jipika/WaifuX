@@ -57,15 +57,6 @@ struct MenuBarQuickSwitcherView: View {
 
     private var hasAnyExpandedOverlay: Bool { isVolumeExpanded || isRateExpanded }
 
-    /// 当前展示的形态。作为 `.id` 挂在播放条上：形态一变就换身份，
-    /// SwiftUI 才会走「旧内容移出 + 新内容移入」的 transition；
-    /// 只用 if/else 分支时它常常当作原地更新，过渡被吃掉。
-    private var playbackContentShape: Int {
-        if isVolumeExpanded { return 1 }
-        if isRateExpanded { return 2 }
-        return 0
-    }
-
     private var selectionSpring: Animation {
         reduceMotion
             ? .easeInOut(duration: 0.16)
@@ -282,7 +273,8 @@ struct MenuBarQuickSwitcherView: View {
                 $0.id == viewModel.selectedItem?.id
             },
             itemStride: thumbnailSize + thumbnailSpacing,
-            contentSignature: railContentSignature
+            contentSignature: railContentSignature,
+            railMinimumHeight: thumbnailSize + 4
         ) {
             HStack(spacing: thumbnailSpacing) {
                 ForEach(viewModel.batchItems) { item in
@@ -358,29 +350,71 @@ struct MenuBarQuickSwitcherView: View {
         return CGFloat(slots) * playbackButtonSize + CGFloat(max(0, slots - 1)) * playbackSlotSpacing
     }
 
-    /// 竖排玻璃控制条：上一张 · 暂停/播放 · 下一张 · 音量 · 播放速度，
-    /// 浮动在 hero 内右上角（画笔/详情按钮下方）。
-    /// 展开态不再「叠一个横放面板」——同一条胶囊原地换成竖向内容，
-    /// 图标留在胶囊底部兼作收起按钮，避免两个胶囊互相错位。
+    /// 竖排玻璃控制条：上一张 · 暂停/播放 · 下一张 · 音量 · 播放速度。
     ///
-    /// 过渡挂在内层内容上（不是外层胶囊）：外层带 glassEffectID，重建会让
-    /// 玻璃的形变配对断掉，胶囊会闪一下。内层用 `.id(形态)` 换身份，
-    /// SwiftUI 才会走「旧内容移出 + 新内容移入」，否则 if/else 常被当成原地更新。
-    /// 锚点取 .bottom——展开是「从底部那个图标的位置向上长出」，收起反之。
+    /// macOS Tahoe / 27 的做法（`GlassEffectContainer` + `glassEffectID`）：
+    /// · 胶囊尺寸锁死，布局一次定死——滑块**不进 VStack**，不撑高；
+    /// · 滑块是 **overlay 覆盖层**，对齐到底部、从按钮顶端向上长出，
+    ///   盖住上面的图标，按钮自己还在原位；
+    /// · 也就是文档里的「second button will be like growing out of the first」。
     @ViewBuilder
     private var playbackColumn: some View {
         let live = viewModel.hasLivePlayback
-        Group {
-            if isVolumeExpanded, viewModel.showsVolumeControl {
-                volumeExpandedContent
-            } else if isRateExpanded, viewModel.playbackRate != nil {
-                rateExpandedContent
-            } else {
-                collapsedControls(live: live)
+        let kind = expandedKind
+        // 槽位序号：prev 0 · play 1 · next 2 · volume 3 · rate 4（无音量时 rate 为 3）。
+        let volumeSlot = 3
+        let rateSlot = viewModel.showsVolumeControl ? 4 : 3
+        let anchorSlot: Int? = {
+            guard let kind else { return nil }
+            switch kind {
+            case .volume: return viewModel.showsVolumeControl ? volumeSlot : nil
+            case .rate: return viewModel.playbackRate != nil ? rateSlot : nil
             }
+        }()
+        // 被盖住的图标隐身（只留布局占位，尺寸不动；半透玻璃下不透字）。
+        let dimmed: (Int) -> Bool = { slot in
+            guard let anchorSlot else { return false }
+            return slot < anchorSlot
         }
-        .id(playbackContentShape)
-        .transition(playbackContentTransition)
+
+        let column = ZStack {
+            VStack(spacing: playbackSlotSpacing) {
+                playbackBarButton("backward.end.fill", enabled: live && viewModel.canGoPrevious) {
+                    viewModel.previousWallpaperForTargetScreen()
+                    refreshPlaybackControls()
+                }
+                .opacity(dimmed(0) ? 0 : 1)
+                .allowsHitTesting(anchorSlot == nil)
+                playbackBarButton(
+                    viewModel.isPlaybackPaused ? "play.fill" : "pause.fill",
+                    enabled: live
+                ) {
+                    viewModel.togglePlaybackForTargetScreen()
+                    refreshPlaybackControls()
+                }
+                .opacity(dimmed(1) ? 0 : 1)
+                .allowsHitTesting(anchorSlot == nil)
+                playbackBarButton("forward.end.fill", enabled: live && viewModel.canSwitchWallpaper) {
+                    viewModel.nextWallpaperForTargetScreen()
+                    refreshPlaybackControls()
+                }
+                .opacity(dimmed(2) ? 0 : 1)
+                .allowsHitTesting(anchorSlot == nil)
+
+                if viewModel.showsVolumeControl {
+                    playbackAnchorIcon(.volume, isExpanded: kind == .volume)
+                        .opacity(dimmed(volumeSlot) ? 0 : 1)
+                        .allowsHitTesting(!dimmed(volumeSlot))
+                }
+                if viewModel.playbackRate != nil {
+                    playbackAnchorIcon(.rate, isExpanded: kind == .rate)
+                        .opacity(dimmed(rateSlot) ? 0 : 1)
+                        .allowsHitTesting(!dimmed(rateSlot))
+                }
+            }
+            .frame(width: playbackBarWidth - 6, height: playbackControlsHeight)
+            .animation(expanderSpring, value: kind)
+        }
         .frame(width: playbackBarWidth - 6)
         .padding(.vertical, playbackBarVerticalPadding)
         .frame(width: playbackBarWidth)
@@ -389,128 +423,196 @@ struct MenuBarQuickSwitcherView: View {
             id: PlaybackGlassID.bar
         ))
         .opacity(live || viewModel.canSwitchWallpaper ? 1.0 : 0.55)
-        .animation(selectionSpring, value: hasAnyExpandedOverlay)
-        .animation(selectionSpring, value: playbackContentShape)
-    }
-
-    /// 收起 ↔ 展开的内容过渡：从底部轻微放大 + 淡入，配合 selectionSpring。
-    /// 0.86 是实测过的手感——再小会像「弹出新面板」，再大就看不出变化。
-    private var playbackContentTransition: AnyTransition {
-        .scale(scale: 0.86, anchor: .bottom).combined(with: .opacity)
-    }
-
-    private func collapsedControls(live: Bool) -> some View {
-        VStack(spacing: playbackSlotSpacing) {
-            playbackBarButton("backward.end.fill", enabled: live && viewModel.canGoPrevious) {
-                viewModel.previousWallpaperForTargetScreen()
-                refreshPlaybackControls()
-            }
-
-            playbackBarButton(
-                viewModel.isPlaybackPaused ? "play.fill" : "pause.fill",
-                enabled: live
-            ) {
-                viewModel.togglePlaybackForTargetScreen()
-                refreshPlaybackControls()
-            }
-
-            playbackBarButton("forward.end.fill", enabled: live && viewModel.canSwitchWallpaper) {
-                viewModel.nextWallpaperForTargetScreen()
-                refreshPlaybackControls()
-            }
-
-            if viewModel.showsVolumeControl {
-                playbackBarButton(
-                    volumeValue <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                    enabled: true
-                ) {
-                    toggleExpansion(&isVolumeExpanded, other: &isRateExpanded)
-                    refreshPlaybackControls()
-                }
-            }
-
-            if viewModel.playbackRate != nil {
-                playbackBarButton("speedometer", enabled: true) {
-                    toggleExpansion(&isRateExpanded, other: &isVolumeExpanded)
-                    refreshPlaybackControls()
-                }
+        // 滑块盖在胶囊上：不占布局（overlay），从按钮顶端向上长出。
+        .overlay(alignment: .bottom) {
+            if let kind {
+                sliderPanel(kind)
+                    .padding(.bottom, overlayBottomPadding(kind))
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.6, anchor: panelAnchor(kind)).combined(with: .opacity),
+                            removal: .scale(scale: 0.8, anchor: panelAnchor(kind)).combined(with: .opacity)
+                        )
+                    )
             }
         }
-        .frame(height: playbackControlsHeight)
+        .animation(expanderSpring, value: kind)
+
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: 6) { column }
+        } else {
+            column
+        }
     }
 
-    /// 音量展开态：竖向滑块先装进一层描边胶囊（同参考里的内层轨道框），
-    /// 喇叭键在外层胶囊底部，点击收起。
-    private var volumeExpandedContent: some View {
-        VStack(spacing: 6) {
-            GlassVerticalSlider(
-                value: Binding(
-                    get: { volumeValue },
-                    set: { newValue in
-                        volumeValue = newValue
-                        viewModel.setPlaybackVolume(newValue)
-                    }
+
+
+    /// 被盖住区域的高度：anchor 之上的 a 个槽（a*27）加 a 个间距（a*2）。
+    private func upperAreaHeight(_ rowKind: ExpanderKind) -> CGFloat {
+        CGFloat(anchorSlotIndex(rowKind)) * (playbackButtonSize + playbackSlotSpacing)
+    }
+
+    /// anchor 在整条里的槽位号：prev0/play1/next2/volume3/rate4（无音量时 rate 为 3）。
+    private func anchorSlotIndex(_ rowKind: ExpanderKind) -> Int {
+        switch rowKind {
+        case .volume: return 3
+        case .rate: return viewModel.showsVolumeControl ? 4 : 3
+        }
+    }
+
+    /// 滑块面板：和外框同宽，底边托在按钮顶端上，顶到胶囊顶部。
+    /// 高度按被盖住的槽位精确计算，滑块自适应填满。
+    @ViewBuilder
+    private func sliderPanel(_ rowKind: ExpanderKind) -> some View {
+        // 不给面板 glassEffectID：容器只管采样不做 morph。
+        let content = sliderWellContent(rowKind)
+            .padding(.horizontal, 3)
+            .padding(.vertical, 4)
+            .frame(width: playbackBarWidth, height: upperAreaHeight(rowKind))
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(
+                    Glass.regular.tint(Color.primary.opacity(0.05)),
+                    in: Capsule(style: .continuous)
                 )
-            )
-            .padding(.horizontal, 5)
-            .padding(.vertical, 4)
-            .frame(maxHeight: .infinity)
-            .background(sliderTrackCapsule)
-
-            Button {
-                withAnimation(selectionSpring) { isVolumeExpanded = false }
-            } label: {
-                Image(systemName: volumeValue <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.primary.opacity(0.72))
-                    .frame(width: playbackButtonSize, height: playbackButtonSize)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(QuickSwitcherPressButtonStyle())
-            .help(t("statusbar.volume"))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                }
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+                .overlay {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+                        .clipShape(Capsule(style: .continuous))
+                }
         }
-        .padding(.vertical, 6)
-        .frame(height: playbackControlsHeight)
     }
 
-    /// 速度展开态：倍率读数在顶、竖向滑块居中、速度键在底部。
-    private var rateExpandedContent: some View {
-        VStack(spacing: 6) {
-            Text(Self.rateLabel(rateValue))
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.primary.opacity(0.6))
-                .frame(width: playbackButtonSize, height: 14)
-
-            GlassVerticalSlider(
-                value: Binding(
-                    get: { rateValue },
-                    set: { newValue in
-                        rateValue = newValue
-                        viewModel.setPlaybackRate(newValue)
-                    }
-                ),
-                range: VideoWallpaperManager.minPlaybackRate...VideoWallpaperManager.maxPlaybackRate,
-                tickValue: 1.0
-            )
-            .padding(.horizontal, 5)
-            .padding(.vertical, 4)
-            .frame(maxHeight: .infinity)
-            .background(sliderTrackCapsule)
-
-            Button {
-                withAnimation(selectionSpring) { isRateExpanded = false }
-            } label: {
-                Image(systemName: "speedometer")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.primary.opacity(0.72))
-                    .frame(width: playbackButtonSize, height: playbackButtonSize)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(QuickSwitcherPressButtonStyle())
-            .help(t("statusbar.playbackSpeed"))
+    /// 面板底边到胶囊底边的距离：正好把面板托在被点的按钮顶端上。
+    private func overlayBottomPadding(_ rowKind: ExpanderKind) -> CGFloat {
+        // 最后一格按钮顶端到胶囊底：padding + 按钮高 + 间距。
+        let lastTop = playbackBarVerticalPadding + playbackButtonSize + playbackSlotSpacing
+        switch rowKind {
+        case .rate:
+            return lastTop
+        case .volume:
+            // volume 上面还有 rate 时，它是倒数第二格，再垫一格。
+            return viewModel.playbackRate != nil
+                ? lastTop + playbackButtonSize + playbackSlotSpacing
+                : lastTop
         }
-        .padding(.vertical, 6)
-        .frame(height: playbackControlsHeight)
+    }
+
+    /// 转场缩放的锚点：面板底边中心也就是被点按钮的顶端中心。
+    private func panelAnchor(_ rowKind: ExpanderKind) -> UnitPoint {
+        let panelH = upperAreaHeight(rowKind)
+        let totalH = panelH + overlayBottomPadding(rowKind)
+        guard totalH > 0 else { return .bottom }
+        return UnitPoint(x: 0.5, y: panelH / totalH)
+    }
+
+    private func sliderWellContent(_ kind: ExpanderKind) -> some View {
+        VStack(spacing: 3) {
+            if kind == .rate {
+                Text(Self.rateLabel(rateValue))
+                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.primary.opacity(0.6))
+                    .frame(height: 11)
+            }
+
+            Group {
+                if kind == .rate {
+                    GlassVerticalSlider(
+                        value: Binding(
+                            get: { rateValue },
+                            set: { newValue in
+                                rateValue = newValue
+                                viewModel.setPlaybackRate(newValue)
+                            }
+                        ),
+                        range: VideoWallpaperManager.minPlaybackRate...VideoWallpaperManager.maxPlaybackRate,
+                        tickValue: 1.0
+                    )
+                } else {
+                    GlassVerticalSlider(
+                        value: Binding(
+                            get: { volumeValue },
+                            set: { newValue in
+                                volumeValue = newValue
+                                viewModel.setPlaybackVolume(newValue)
+                            }
+                        )
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 滑块（圆头+轨道）在加宽后的胶囊里居中：宽度改了但轨道仍按自身
+            // 宽度画，不居中会贴在左边。
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// 一颗可展开的图标：点开/收起，展开中高亮。
+    private func playbackAnchorIcon(_ rowKind: ExpanderKind, isExpanded: Bool) -> some View {
+        Button {
+            withAnimation(expanderSpring) {
+                switch rowKind {
+                case .volume:
+                    isVolumeExpanded.toggle()
+                    if isVolumeExpanded { isRateExpanded = false }
+                case .rate:
+                    isRateExpanded.toggle()
+                    if isRateExpanded { isVolumeExpanded = false }
+                }
+            }
+            refreshPlaybackControls()
+        } label: {
+            Image(systemName: rowIcon(rowKind))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isExpanded ? Color.primary : Color.primary.opacity(0.72))
+                .frame(width: playbackButtonSize, height: playbackButtonSize)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PlaybackPressButtonStyle(diameter: playbackButtonSize - 1))
+        .help(rowKind == .volume ? t("statusbar.volume") : t("statusbar.playbackSpeed"))
+    }
+
+    private func rowIcon(_ kind: ExpanderKind) -> String {
+        switch kind {
+        case .volume:
+            return volumeValue <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        case .rate:
+            return "speedometer"
+        }
+    }
+
+    /// 当前展开的是哪一块；nil = 收起。
+    private enum ExpanderKind: Hashable {
+        case volume
+        case rate
+
+        var glassKey: ExpanderKindKey {
+            switch self {
+            case .volume: return .volume
+            case .rate: return .rate
+            }
+        }
+    }
+    private var expandedKind: ExpanderKind? {
+        if isVolumeExpanded, viewModel.showsVolumeControl { return .volume }
+        if isRateExpanded, viewModel.playbackRate != nil { return .rate }
+        return nil
+    }
+
+    /// 展开/收起专用弹簧：稍快并带一点回弹，起点钉按钮顶。
+    /// 玻璃本身的形变由系统 matchedGeometry 接管，这里只管布局事务。
+    private var expanderSpring: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.25)
+            : .spring(response: 0.4, dampingFraction: 0.8, blendDuration: 0)
     }
 
     /// 滑块底衬：细描边胶囊，与外层玻璃胶囊拉开层次（参考展开态的轨道框）。
@@ -539,7 +641,7 @@ struct MenuBarQuickSwitcherView: View {
                 .frame(width: playbackButtonSize, height: playbackButtonSize)
                 .contentShape(Circle())
         }
-        .buttonStyle(QuickSwitcherPressButtonStyle())
+        .buttonStyle(PlaybackPressButtonStyle(diameter: playbackButtonSize - 1))
         .disabled(!enabled)
     }
 
@@ -731,20 +833,37 @@ final class MenuBarPlaybackGlassCoordinator {
 /// 展开态是同一条胶囊原地换内容，所以只需一个 id——这也让玻璃形变
 /// 在收起/展开之间保持连续，不会出现两个胶囊各自缩放的错位。
 enum PlaybackGlassID: Hashable {
+    /// 竖条本体。滑块也会 union 进这个 id，让两者是同一块玻璃。
     case bar
+    /// 覆盖式滑块自己的形变身份：出现/消失时走 matchedGeometry，
+    /// 视觉上就是从图标里长出来（与 `bar` 分开，才能各自独立形变）。
+    case well(ExpanderKindKey)
 }
 
-/// 竖向滑块（音量/速度共用）：细竖轨 + 玻璃小球，拖动即时生效。
-/// 竖版是原生排版，不再靠 rotationEffect 硬转——旋转后再被窄槽裁切会缩成一截。
+/// `PlaybackGlassID` 需要跨类型引用展开档位，这里给一个独立的 Hashable 标识，
+/// 避免把 View 内部的私有枚举暴露出去。
+enum ExpanderKindKey: Hashable {
+    case volume
+    case rate
+}
+
+/// 竖向滑块（音量/速度共用），版式对齐系统播放器的竖向音量条：
+/// 一条细轨 + 顶部一个白色圆头，圆头下面连一小段同宽短柄，
+/// 整体被一圈细描边胶囊包住（用户给的目标截图就是这个构造）。
+/// 0 在底、最大值在顶，拖动即时生效。
 private struct GlassVerticalSlider: View {
     @Binding var value: Double
     var range: ClosedRange<Double> = 0...1
-    /// 在轨上额外画的刻度（取值本身就是标记点），速度滑块用它标 1x。
+    /// 额外刻度点（速度滑块用它标 1x）。
     var tickValue: Double?
     @State private var isDragging = false
 
-    private let knobSize: CGFloat = 15
-    private let trackHeight: CGFloat = 4
+    /// 尺寸按参考截图实测比例标定：参考条宽 93px、圆头 30px、轨道 8px，
+    /// 即 圆头 ≈ 条宽 × 0.32、轨道 ≈ 条宽 × 0.086。
+    /// 我们竖条内容宽 32pt → 圆头 10pt、轨道 3pt。
+    /// 11pt 实测渲染后直径仍占条宽 0.69（离屏量过），偏大，收到 10pt。
+    private let knobSize: CGFloat = 10
+    private let trackThickness: CGFloat = 3
 
     var body: some View {
         GeometryReader { geo in
@@ -756,31 +875,34 @@ private struct GlassVerticalSlider: View {
             // 上大下小：0 在底、最大值在顶。
             let knobY = usable * (1 - fraction)
             let knobCenter = knobY + knobSize / 2
-            let fillHeight = max(0, height - knobCenter)
 
             ZStack {
+                // 轨道分两段画：
+                // · 底槽（整条，浅色）——之前完全没画，所以看着像「只有一根杆」；
+                // · 已填充段（从底到圆头中心，深色）——表示当前值。
                 Capsule()
-                    .fill(Color.primary.opacity(0.10))
-                    .frame(width: trackHeight, height: height)
+                    .fill(Color.primary.opacity(0.18))
+                    .frame(width: trackThickness, height: height)
 
                 Capsule()
-                    .fill(Color.primary.opacity(0.55))
-                    .frame(width: trackHeight, height: fillHeight)
-                    .offset(y: height / 2 - fillHeight / 2)
+                    .fill(Color.primary.opacity(0.82))
+                    .frame(width: trackThickness, height: max(0, height - knobCenter))
+                    .offset(y: height / 2 - max(0, height - knobCenter) / 2)
 
+                // 刻度点（1x）画在描边胶囊内侧。
                 if let tickValue {
                     let tf = (min(max(tickValue, range.lowerBound), range.upperBound) - range.lowerBound) / span
                     Circle()
-                        .fill(Color.primary.opacity(0.22))
+                        .fill(Color.primary.opacity(0.30))
                         .frame(width: 3, height: 3)
-                        .offset(y: usable * (1 - tf) + knobSize / 2 - height / 2)
+                        .offset(y: usable * (1 - tf) + knobSize / 2 - height / 2 - 8)
                 }
 
                 Circle()
                     .fill(.white)
                     .frame(width: knobSize, height: knobSize)
-                    .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
-                    .scaleEffect(isDragging ? 1.12 : 1.0)
+                    .shadow(color: .black.opacity(0.18), radius: 1.5, y: 0.5)
+                    .scaleEffect(isDragging ? 1.08 : 1.0)
                     .offset(y: knobCenter - height / 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -791,13 +913,12 @@ private struct GlassVerticalSlider: View {
                         isDragging = true
                         let raw = min(max((drag.location.y - knobSize / 2) / max(usable, 1), 0), 1)
                         let next = range.lowerBound + (1 - raw) * span
-                        // 靠近 1x 时吸附，方便取回原速
+                        // 靠近 1x 吸附，方便取回原速
                         value = abs(next - 1.0) < 0.04 ? 1.0 : next
                     }
                     .onEnded { _ in isDragging = false }
             )
         }
-        .frame(minHeight: 60)
         .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isDragging)
     }
 }
@@ -811,6 +932,33 @@ private struct QuickSwitcherPressButtonStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.88 : 1.0)
             .animation(
                 .spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0),
+                value: configuration.isPressed
+            )
+    }
+}
+
+/// 播放控制条按钮的按压样式：按下时图标周围浮出一个圆形高亮底，
+/// 释放后弹回并淡出（与参考录像里点喇叭键时那圈浅色圆一致）。
+/// 玻璃胶囊里的图标是纯线条，没有这个底就完全看不出点到了。
+private struct PlaybackPressButtonStyle: ButtonStyle {
+    /// 高亮圆的直径。默认略大于图标以留出呼吸感。
+    var diameter: CGFloat = 26
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // 按下时图标本身也提亮（录像里喇叭键会从灰变深），
+            // 配合下面那圈底，反馈才明确。
+            .brightness(configuration.isPressed ? 0.22 : 0)
+            .background {
+                Circle()
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.16 : 0))
+                    .frame(width: diameter, height: diameter)
+                    // 按下时从略小长到全尺寸，像被手指压出来的一圈。
+                    .scaleEffect(configuration.isPressed ? 1.0 : 0.72)
+            }
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(
+                .spring(response: 0.20, dampingFraction: 0.72, blendDuration: 0),
                 value: configuration.isPressed
             )
     }
@@ -830,17 +978,22 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
     let itemStride: CGFloat
     /// 轨道显示依赖的签名：相同就不重赋 rootView、不重排（切换选中不再整条重排）。
     let contentSignature: Int
+    /// 轨道最小行高：与 SwiftUI 侧 `.frame(height: thumbnailSize + 4)` 对齐，
+    /// 内容未加载时 documentView 不得塌成 0 高。
+    let railMinimumHeight: CGFloat
 
     init(
         selectedIndex: Int?,
         itemStride: CGFloat,
         contentSignature: Int,
+        railMinimumHeight: CGFloat = 0,
         @ViewBuilder content: () -> Content
     ) {
         self.content = content()
         self.selectedIndex = selectedIndex
         self.itemStride = itemStride
         self.contentSignature = contentSignature
+        self.railMinimumHeight = railMinimumHeight
     }
 
     func makeCoordinator() -> Coordinator {
@@ -884,12 +1037,22 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
             if signatureChanged {
                 hostingView.layoutSubtreeIfNeeded()
                 let fittingSize = hostingView.fittingSize
+                // 轨道高度兜底：首帧内容未加载（缩略图 URL 未解析/图未解码）时
+                // fittingSize 可能塌成 0 高，documentView 高度跟着为 0，
+                // 视觉上整条 rail 坍缩、footer 跳位。内容真实高度与
+                // thumbnailSize+4 取大者，加载完成后再由正常 fittingSize 接管。
+                let minHeight = railMinimumHeight
                 let size = NSSize(
                     width: max(fittingSize.width, scrollView.contentSize.width),
-                    height: max(fittingSize.height, scrollView.contentSize.height)
+                    height: max(fittingSize.height, scrollView.contentSize.height, minHeight)
                 )
                 if hostingView.frame.size != size {
                     hostingView.setFrameSize(size)
+                }
+                if scrollView.contentSize.height < minHeight {
+                    // NSScrollView 不会自己长高；容器高度由 SwiftUI 侧固定，
+                    // 这里只把 clip view 的可见行高顶住，避免塌缩闪烁。
+                    scrollView.contentView.frame.size.height = max(scrollView.contentView.frame.height, minHeight)
                 }
             }
             if let revealIndex {
@@ -1035,20 +1198,24 @@ private final class VerticalWheelHorizontalScrollView: NSScrollView {
         reflectScrolledClipView(contentView)
     }
 
-    /// 把某个 chip 滚进可视区（尽量居中）。已经在可视区内时不动，
-    /// 避免用户手动滚动后被抢回。
+    /// 把某个 chip 滚进可视区（左对齐语义）：只有它在可视区外时才滚动，
+    /// 且滚到刚好完整露出它的最小偏移——轨道默认从最左开始展示，
+    /// 内容不足以滚动时保持原位，不做视觉居中。
     func revealItem(at index: Int, stride: CGFloat) {
         guard let documentView, stride > 0 else { return }
         let viewportWidth = contentView.bounds.width
         let maxOffset = max(0, documentView.frame.width - viewportWidth)
-        let itemCenter = CGFloat(index) * stride + stride / 2
+        guard maxOffset > 0 else { return }
+        let itemStart = CGFloat(index) * stride
+        let itemEnd = itemStart + stride
         let currentOffset = contentView.bounds.origin.x
-        // 露出半格以上就算可见。
-        guard itemCenter < currentOffset + stride / 2
-                || itemCenter > currentOffset + viewportWidth - stride / 2 else {
+        // 完整可见（含一格余量）就不动，避免用户手动滚动后被抢回。
+        guard itemStart < currentOffset
+                || itemEnd > currentOffset + viewportWidth else {
             return
         }
-        let targetOffset = min(max(itemCenter - viewportWidth / 2, 0), maxOffset)
+        // 目标：让该 chip 尽量靠视口左侧完整露出。
+        let targetOffset = min(max(itemStart, 0), maxOffset)
         contentView.scroll(to: NSPoint(x: targetOffset, y: contentView.bounds.origin.y))
         reflectScrolledClipView(contentView)
     }

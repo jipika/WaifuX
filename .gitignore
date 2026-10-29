@@ -114,3 +114,6 @@ node_modules/
 # Sparkle appcast 的「固化 default item」片段：由发版 CI 生成并作为 release 资产分发
 # （后续发版从 release 资产读取），不提交进仓库。
 Docs/appcast-default-item.xml
+
+# 推送到手机工具链（源码+二进制，本地保留不入库）
+Tools/MobilePush/

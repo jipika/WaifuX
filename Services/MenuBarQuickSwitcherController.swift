@@ -1427,21 +1427,32 @@ private final class MenuBarQuickWallpaperRepository {
         fileManager.fileExists(atPath: item.localURL.path, isDirectory: &isDirectory)
 
         if isDirectory.boolValue {
-            // Scene/Web 工程没有可播放成片时，只显示它们明确提供的本地预览。
-            if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: item.localURL) {
-                return await localRasterPreviewURL(for: preview)
+            // Scene/Web 工程：抽帧/烘焙封面优先，Workshop 自带 preview.* 只是最后兜底
+            //（它是商店缩略图，用户已有高清抽帧时不应再显示旧预览图）。
+            // 1) 烘焙封面 scene_bake_<itemID>（含 Web canonical poster 同键空间）
+            if let itemID = item.sceneBakeItemID,
+               let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
+                return await localRasterPreviewURL(for: baked)
             }
-            // Fallback: try cached frame thumbnails from VideoThumbnailCache
+            // 2) 实时抽帧 scene_realtime_*（自动烘焙关闭时的临时抽帧）
+            if let itemID = item.sceneBakeItemID,
+               let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: itemID) {
+                return await localRasterPreviewURL(for: realtime)
+            }
+            // 3) 烘焙 MP4 / 原视频的列表小图
+            if let bakedPath = item.bakedVideoPath,
+               let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(
+                   forLocalVideo: URL(fileURLWithPath: bakedPath)
+               ) {
+                return cached
+            }
             if let videoURL = item.videoPreviewURL,
                let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
                 return cached
             }
-            if let bakedPath = item.bakedVideoPath {
-                let bakedURL = URL(fileURLWithPath: bakedPath)
-                if let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: bakedURL)
-                    ?? VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: item.sceneBakeItemID ?? "") {
-                    return cached
-                }
+            // 4) Workshop 自带 preview.*（最后兜底）
+            if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: item.localURL) {
+                return await localRasterPreviewURL(for: preview)
             }
             return nil
         }
@@ -1483,7 +1494,12 @@ private final class MenuBarQuickWallpaperRepository {
         let thumbnailURL: URL?
         var isDirectory: ObjCBool = false
         fileManager.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
-        if let videoPreviewURL,
+        // 抽帧/烘焙封面优先，Workshop preview.* 仅作最后兜底（与 previewURL(for:) 同序）。
+        if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
+            thumbnailURL = baked
+        } else if let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: record.item.id) {
+            thumbnailURL = realtime
+        } else if let videoPreviewURL,
            let thumbnail = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
                 forLocalFile: videoPreviewURL
            ) {
@@ -1491,22 +1507,17 @@ private final class MenuBarQuickWallpaperRepository {
         } else if let bakedVideoPath = record.sceneBakeArtifact?.videoPath,
            let thumbnail = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(
                 forLocalVideo: URL(fileURLWithPath: bakedVideoPath)
-           ) ?? VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
+           ) {
             thumbnailURL = thumbnail
         } else if !isDirectory.boolValue {
             thumbnailURL = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
                 forLocalFile: localURL
             )
+        } else if let videoURL = videoPreviewURL ?? record.sceneBakeArtifact.map({ URL(fileURLWithPath: $0.videoPath) }),
+                  let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
+            thumbnailURL = cached
         } else {
-            // Fallback: try cached frame thumbnails from VideoThumbnailCache
-            if let videoURL = videoPreviewURL ?? record.sceneBakeArtifact.map({ URL(fileURLWithPath: $0.videoPath) }),
-               let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
-                thumbnailURL = cached
-            } else if let cached = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
-                thumbnailURL = cached
-            } else {
-                thumbnailURL = nil
-            }
+            thumbnailURL = nil
         }
 
         // 只暴露 usable 烘焙产物；过期/损坏路径留给 LocalWallpaperApplyService 再解析。

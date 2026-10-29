@@ -1484,8 +1484,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
             guard let candidate else { continue }
             let path = candidate.standardizedFileURL.path
             let isGeneratedStatic = candidate.isFileURL
-                && (path.contains("/WaifuX/VideoThumbnails/")
-                    || path.contains("/WaifuX/LocalImageThumbnails/"))
+                && VideoThumbnailCache.isGeneratedStaticImagePath(path)
             if !isGeneratedStatic || LocalImageThumbnailCache.isGIFFile(candidate) {
                 append(candidate)
             }
@@ -1831,6 +1830,11 @@ final class LibraryFolderGridCell: ExploreGridItem {
     private var previewRetryCounts = [0, 0, 0, 0]
     private var previewRetryTasks: [Task<Void, Never>?] = [nil, nil, nil, nil]
     private var previewTargetSize: CGSize = .zero
+    /// 叠图齐显代数：同一批 3-4 张一起淡入，避免逐张蹦出来。
+    /// reconfigure / 复用 / retry 会递增，旧批次的 completion 直接丢弃。
+    private var stackRevealGeneration = 0
+    /// 本批次还在等 Kingfisher 回调的槽位。layout 期间跳过这些槽位的 alpha 赋值，保持 0 直到齐显。
+    private var stackLoadingIndices: Set<Int> = []
 
     /// 当前是否处于「锁定且未解锁」的模糊展示态
     private var isPreviewBlurred = false {
@@ -2029,6 +2033,8 @@ final class LibraryFolderGridCell: ExploreGridItem {
             previewRetryTasks[index]?.cancel()
             previewRetryTasks[index] = nil
         }
+        stackRevealGeneration &+= 1
+        stackLoadingIndices.removeAll()
         previewCanvasView.layer?.filters = nil
         previewTargetSize = .zero
         placeholderIconView.isHidden = true
@@ -2096,7 +2102,11 @@ final class LibraryFolderGridCell: ExploreGridItem {
             accessibilityDescription: nil
         )
         placeholderIconView.isHidden = !activeURLs.isEmpty
+        stackRevealGeneration &+= 1
+        let generation = stackRevealGeneration
 
+        // 先算出本批真正要走网络/磁盘的槽位：已在显示的只同步透明度，不参与齐显等待。
+        var pending: [Int] = []
         for (index, preview) in stackPreviewViews.enumerated() {
             guard index < activeURLs.count else {
                 previewRetryTasks[index]?.cancel()
@@ -2106,13 +2116,34 @@ final class LibraryFolderGridCell: ExploreGridItem {
                 preview.isHidden = true
                 preview.image = nil
                 previewLoadedKeys[index] = nil
+                stackLoadingIndices.remove(index)
                 continue
             }
             preview.isHidden = false
             // 同 URL 已在显示：只同步可见性/透明度，跳过 setImage（防 reconfigure 闪动）
+            let key = "\(activeURLs[index].absoluteString)|\(Int(targetSize.width))x\(Int(targetSize.height))"
+            guard previewLoadedKeys[index] != key else {
+                stackLoadingIndices.remove(index)
+                preview.alphaValue = CGFloat(Self.stackConfigs[index].opacity)
+                continue
+            }
+            pending.append(index)
+        }
+        stackLoadingIndices = Set(pending)
+        guard !pending.isEmpty else { return }
+
+        // 首刷（整叠都要加载）时先露文件夹占位，叠图凑齐再一起淡入，避免空黑卡。
+        if pending.count == activeURLs.count {
+            placeholderIconView.isHidden = false
+        }
+        for index in pending {
+            stackPreviewViews[index].alphaValue = 0
+        }
+
+        for index in pending {
+            let preview = stackPreviewViews[index]
             let snapshotKey = "folder|\(activeURLs[index].absoluteString)"
             let key = "\(activeURLs[index].absoluteString)|\(Int(targetSize.width))x\(Int(targetSize.height))"
-            guard previewLoadedKeys[index] != key else { continue }
             if previewRetryKeys[index] != key {
                 previewRetryTasks[index]?.cancel()
                 previewRetryTasks[index] = nil
@@ -2139,8 +2170,34 @@ final class LibraryFolderGridCell: ExploreGridItem {
                     case .failure:
                         self?.retryPreviewAfterFailure(index: index, key: key)
                     }
+                    self?.stackPreviewDidSettle(index: index, generation: generation)
                 }
             )
+        }
+    }
+
+    /// 单槽加载结算：本批次全部回齐（成功或失败都算）才一起淡入，避免叠图逐张蹦。
+    private func stackPreviewDidSettle(index: Int, generation: Int) {
+        guard generation == stackRevealGeneration else { return }
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.stackPreviewDidSettle(index: index, generation: generation)
+            }
+            return
+        }
+        stackLoadingIndices.remove(index)
+        guard stackLoadingIndices.isEmpty else { return }
+        if let urls = currentModel?.previewURLs, !urls.isEmpty {
+            placeholderIconView.isHidden = true
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            for (i, preview) in stackPreviewViews.enumerated() {
+                guard previewLoadedKeys[i] != nil, !preview.isHidden else { continue }
+                preview.animator().alphaValue = CGFloat(Self.stackConfigs[i].opacity)
+            }
         }
     }
 
@@ -2207,7 +2264,10 @@ final class LibraryFolderGridCell: ExploreGridItem {
                 width: stackWidth,
                 height: stackHeight
             )
-            preview.alphaValue = CGFloat(config.opacity)
+            // 齐显等待中的槽位保持 0，凑齐后由 stackPreviewDidSettle 一起淡入。
+            if !stackLoadingIndices.contains(index) {
+                preview.alphaValue = CGFloat(config.opacity)
+            }
             preview.layer?.contentsScale = backingScale
             // 旋转取反（SwiftUI y 向下）；模糊态放大 1.06 补偿高斯模糊的边缘透明
             let radians = -config.rotationDegrees * .pi / 180

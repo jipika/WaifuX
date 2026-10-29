@@ -205,6 +205,8 @@ private func waifuXGrayscaleThumb(from cgImage: CGImage, dimension: Int) -> [UIn
 // MARK: - IPC
 private enum IPCCommand: String, Codable {
     case set, pause, resume, stop, capture, applyProperties, crop, audioControl, audioData
+    /// Host → daemon：海报抽帧已落桌面，目标屏窗口可转不透明（退出持续合成）。
+    case goOpaque
     /// Host → daemon：系统 Now Playing 元数据（低频）
     case mediaUpdate, mediaThumbnail
     /// Host → daemon：Apple Music 歌词（整首 / 当前行）；Web 只收 JSON
@@ -2356,6 +2358,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         w.acceptsMouseMovedEvents = effectiveAllowsMouseInput
         w.ignoresMouseEvents = !effectiveAllowsMouseInput
         w.isReleasedWhenClosed = false
+        dlog("[WebRendererBridge] window screen=\(screenIdx) offscreen=\(offscreen) allowsMouseInput=\(allowsMouseInput) effective=\(effectiveAllowsMouseInput) ignoresMouse=\(w.ignoresMouseEvents) level=\(w.level.rawValue) frame=\(w.frame) ax=\(AXIsProcessTrusted())")
 
         guard let contentView = w.contentView else {
             screenStates[screenIdx]?.pendingCompletion = nil
@@ -2986,27 +2989,79 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     private var loggedFinderHitTestFailure = false
     /// AX 未授权时的降级只报告一次，避免每次点击刷日志。
     private var loggedAccessibilityFallback = false
+    // MARK: 点击/权限诊断（2026-10-28）：权限变化追踪 + 高频事件聚合，避免 mousemove 刷爆 1MB 日志预算。
+    private var lastAXTrustedForLog: Bool?
+    private var mouseForwardedCounts: [String: Int] = [:]
+    private var mouseDroppedCounts: [String: Int] = [:]
+    private var lastMouseSummaryTime: TimeInterval = 0
+    /// 最近一次 Finder hit-test 的细节，供 mousedown 丢弃日志归因（AX error / subrole），避免重复打 AX 调用。
+    private var lastFinderHitDetail: String = "n/a"
 
     private func startMouseEventBridge(for screen: Int) {
-        guard screenStates[screen]?.window != nil, screenStates[screen]?.webView != nil else { return }
+        guard screenStates[screen]?.window != nil, screenStates[screen]?.webView != nil else {
+            dlog("[WebRendererBridge] mouse bridge NOT started screen=\(screen) reason=no-window-or-webview")
+            return
+        }
         // Bake / offscreen surfaces must not receive cursor parallax or click injection.
-        guard screenStates[screen]?.isOffscreen != true else { return }
-        if !globalMouseMonitors.isEmpty { return }
+        guard screenStates[screen]?.isOffscreen != true else {
+            dlog("[WebRendererBridge] mouse bridge NOT started screen=\(screen) reason=offscreen")
+            return
+        }
+        if !globalMouseMonitors.isEmpty {
+            dlog("[WebRendererBridge] mouse bridge already running, screen=\(screen) joined ax=\(AXIsProcessTrusted()) monitors=\(globalMouseMonitors.count)")
+            return
+        }
         refreshFinderDesktopWindowIDs()
-        dlog("[WebRendererBridge] mouse bridge Finder desktop windows=\(finderDesktopWindowIDs.sorted()) accessibility=\(AXIsProcessTrusted())")
+        let ax = AXIsProcessTrusted()
+        lastAXTrustedForLog = ax
+        lastMouseSummaryTime = CFAbsoluteTimeGetCurrent()
+        dlog("[WebRendererBridge] mouse bridge START screen=\(screen) accessibility=\(ax) FinderDesktopWindows=\(finderDesktopWindowIDs.sorted()) loadedScreens=\(loadedScreens.sorted())")
         let eventTypes: [(NSEvent.EventTypeMask, String)] = [
             (.leftMouseDown, "mousedown"), (.leftMouseUp, "mouseup"),
             (.mouseMoved, "mousemove"), (.scrollWheel, "wheel")
         ]
+        var installedGlobal = 0
+        var installedLocal = 0
         for (eventType, type) in eventTypes {
-            if let g = NSEvent.addGlobalMonitorForEvents(matching: eventType) { [weak self] event in
+            let gmon = NSEvent.addGlobalMonitorForEvents(matching: eventType, handler: { [weak self] event in
                 self?.dispatchMouseEvent(event, type: type)
-            } { globalMouseMonitors.append(g) }
-            if let l = NSEvent.addLocalMonitorForEvents(matching: eventType) { [weak self] event -> NSEvent? in
+            })
+            if let gmon { globalMouseMonitors.append(gmon); installedGlobal += 1 }
+            else {
+                dlog("[WebRendererBridge] mouse bridge global monitor FAILED type=\(type) ax=\(AXIsProcessTrusted())")
+            }
+            let lmon = NSEvent.addLocalMonitorForEvents(matching: eventType, handler: { [weak self] event -> NSEvent? in
                 self?.dispatchMouseEvent(event, type: type)
                 return event
-            } { globalMouseMonitors.append(l) }
+            })
+            if let lmon { globalMouseMonitors.append(lmon); installedLocal += 1 }
+            else {
+                dlog("[WebRendererBridge] mouse bridge local monitor FAILED type=\(type)")
+            }
         }
+        dlog("[WebRendererBridge] mouse bridge monitors installed global=\(installedGlobal)/4 local=\(installedLocal)/4 ax=\(ax)")
+        // JS 桥存在性探针：区分“事件没进来”与“进来但页面没桥”。只打一次，不进热路径。
+        if let webView = screenStates[screen]?.webView {
+            webView.evaluateJavaScript("String(typeof window.__wxMouseBridge)") { result, error in
+                if let error {
+                    dlog("[WebRendererBridge] mouse JS bridge probe screen=\(screen) error=\(error)")
+                } else {
+                    dlog("[WebRendererBridge] mouse JS bridge probe screen=\(screen) typeof=\(String(describing: result))")
+                }
+            }
+        }
+    }
+
+    private func flushMouseSummary(force: Bool = false) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard force || now - lastMouseSummaryTime >= 10 else { return }
+        lastMouseSummaryTime = now
+        if mouseForwardedCounts.isEmpty && mouseDroppedCounts.isEmpty { return }
+        let fwd = mouseForwardedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        let drop = mouseDroppedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        dlog("[WebRendererBridge] mouse summary 10s fwd{\(fwd)} drop{\(drop)} ax=\(AXIsProcessTrusted()) finder=\(finderDesktopWindowIDs.sorted())")
+        mouseForwardedCounts.removeAll()
+        mouseDroppedCounts.removeAll()
     }
 
     private func stopMouseEventBridge() {
@@ -3017,6 +3072,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         lastGlobalMouseMoveTime = 0
         loggedFinderHitTestFailure = false
         loggedAccessibilityFallback = false
+        lastAXTrustedForLog = nil
+        flushMouseSummary(force: true)
     }
 
     private func refreshFinderDesktopWindowIDs() {
@@ -3035,7 +3092,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     private func isBlankFinderDesktop(at event: NSEvent) -> Bool {
         guard let finderPID = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.apple.finder"
-        ).first?.processIdentifier else { return false }
+        ).first?.processIdentifier else {
+            lastFinderHitDetail = "no-finder-pid"
+            return false
+        }
         let point: CGPoint
         if let cgEvent = event.cgEvent {
             point = cgEvent.location
@@ -3050,6 +3110,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             finder, Float(point.x), Float(point.y), &hit
         )
         guard error == .success, let hit else {
+            lastFinderHitDetail = "ax-error=\(error.rawValue)"
             if !loggedFinderHitTestFailure {
                 dlog("[WebRendererBridge] Finder desktop hit test unavailable (AX error=\(error.rawValue)); desktop clicks will not be forwarded")
                 loggedFinderHitTestFailure = true
@@ -3058,25 +3119,37 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
         var subrole: CFTypeRef?
         guard AXUIElementCopyAttributeValue(hit, kAXSubroleAttribute as CFString, &subrole) == .success
-        else { return false }
+        else {
+            lastFinderHitDetail = "no-subrole"
+            return false
+        }
+        let role = (subrole as? String) ?? "nil"
+        lastFinderHitDetail = "subrole=\(role)"
         // Finder icons are AXImage; only the empty AXDesktop group is interactive wallpaper.
-        return (subrole as? String) == "AXDesktop"
+        return role == "AXDesktop"
     }
 
-    private func eventTargetsDesktop(_ event: NSEvent, window: NSWindow, requireBlank: Bool) -> Bool {
+    /// 返回 (命中, 原因, targetWindow)。原因供点击丢弃日志归因，调用方热路径外只打 click 类型。
+    private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool) -> (Bool, String, Int) {
         let target = event.windowNumber != 0
             ? event.windowNumber
             : Int(event.cgEvent?.getIntegerValueField(
                 .mouseEventWindowUnderMousePointerThatCanHandleThisEvent
             ) ?? 0)
-        if target == window.windowNumber { return true }
-        guard target > 0 else { return false }
+        if target == window.windowNumber { return (true, "self-window", target) }
+        guard target > 0 else { return (false, "target=0", target) }
         if !finderDesktopWindowIDs.contains(target) && requireBlank {
             // Finder may have recreated its desktop window since the wallpaper loaded.
+            let before = finderDesktopWindowIDs
             refreshFinderDesktopWindowIDs()
+            if finderDesktopWindowIDs != before {
+                dlog("[WebRendererBridge] mouse FinderDesktopWindows changed \(before.sorted())->\(finderDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
+            }
         }
-        guard finderDesktopWindowIDs.contains(target) else { return false }
-        if !requireBlank { return true }
+        guard finderDesktopWindowIDs.contains(target) else {
+            return (false, "target-not-finder-desktop", target)
+        }
+        if !requireBlank { return (true, "finder-desktop", target) }
         // 目标已确认是 Finder 的桌面层窗口（此判定只依赖 CGWindowList，不看 AX）。
         // 但 `isBlankFinderDesktop` 需要辅助功能授权：daemon 由短命 client 进程 spawn 后
         // reparent 到 launchd，TCC 不把 App 的授权归给它，实测恒为 AX error=-25211 →
@@ -3088,9 +3161,17 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 loggedAccessibilityFallback = true
                 dlog("[WebRendererBridge] ⚠️ accessibility not granted; forwarding Finder-desktop clicks without blank-area check")
             }
-            return true
+            return (true, "finder-desktop-ax-fallback", target)
         }
-        return isBlankFinderDesktop(at: event)
+        if isBlankFinderDesktop(at: event) {
+            return (true, "finder-blank", target)
+        } else {
+            return (false, "finder-not-blank(\(lastFinderHitDetail))", target)
+        }
+    }
+
+    private func eventTargetsDesktop(_ event: NSEvent, window: NSWindow, requireBlank: Bool) -> Bool {
+        eventTargetCheck(event, window: window, requireBlank: requireBlank).0
     }
 
     private func cancelBridgedMouseDown() {
@@ -3103,19 +3184,59 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         if type == "mousedown" { cancelBridgedMouseDown() }
         if type == "mousemove" {
             let now = CFAbsoluteTimeGetCurrent()
-            if now - lastGlobalMouseMoveTime < mouseMoveThrottle { return }
+            if now - lastGlobalMouseMoveTime < mouseMoveThrottle {
+                mouseDroppedCounts["throttled-move", default: 0] += 1
+                flushMouseSummary()
+                return
+            }
             lastGlobalMouseMoveTime = now
+        }
+        let isClick = (type == "mousedown" || type == "mouseup")
+        // 权限变化检测：只在 click 路径查，mousemove 高频不查。变化必打一行，这是“权限失效”判读的主依据。
+        if isClick {
+            let ax = AXIsProcessTrusted()
+            if let last = lastAXTrustedForLog, last != ax {
+                dlog("[WebRendererBridge] mouse ⚠️ AX permission changed \(last)->\(ax) type=\(type)")
+                // 授权状态翻转后允许降级/hit-test 日志重打一次，否则恢复授权也看不到。
+                loggedAccessibilityFallback = false
+                loggedFinderHitTestFailure = false
+            }
+            lastAXTrustedForLog = ax
         }
         let mouseLocation = NSEvent.mouseLocation
         var delivered = false
+        // 逐屏失败只保留最后一条（click 直接打，高频只计数），避免多屏时日志翻倍。
+        var dropReason = "no-active-screen"
+        var dropTarget = -1
+        var dropDetail = ""
         for (screen, state) in screenStates {
             // Offline bake uses a full-screen transparent window; never inject into it.
             guard !state.isOffscreen, !state.isPaused,
-                  state.mouseCaptureSuppressionDepth == 0 else { continue }
-            guard state.isLoaded, let window = state.window, let webView = state.webView else { continue }
-            guard window.frame.contains(mouseLocation) else { continue }
-            if type == "mouseup" && bridgedMouseDownScreen != screen { continue }
-            guard eventTargetsDesktop(event, window: window, requireBlank: type != "mousemove") else {
+                  state.mouseCaptureSuppressionDepth == 0 else {
+                dropReason = "suppressed"
+                dropDetail = "offscreen=\(state.isOffscreen) paused=\(state.isPaused) suppress=\(state.mouseCaptureSuppressionDepth)"
+                continue
+            }
+            guard state.isLoaded, let window = state.window, let webView = state.webView else {
+                dropReason = "not-loaded"
+                dropDetail = "loaded=\(state.isLoaded) hasWindow=\(state.window != nil) hasWebView=\(state.webView != nil)"
+                continue
+            }
+            guard window.frame.contains(mouseLocation) else {
+                dropReason = "outside-window"
+                dropDetail = "screen=\(screen)"
+                continue
+            }
+            if type == "mouseup" && bridgedMouseDownScreen != screen {
+                dropReason = "mouseup-no-matching-mousedown"
+                dropDetail = "bridgedDown=\(bridgedMouseDownScreen.map(String.init) ?? "nil") screen=\(screen)"
+                continue
+            }
+            let (hit, reason, target) = eventTargetCheck(event, window: window, requireBlank: type != "mousemove")
+            dropTarget = target
+            guard hit else {
+                dropReason = "target-not-desktop(\(reason))"
+                dropDetail = "target=\(target) finder=\(finderDesktopWindowIDs.sorted()) screen=\(screen)"
                 continue
             }
             let relX = mouseLocation.x - window.frame.origin.x
@@ -3133,6 +3254,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             let viewportHeight = viewport.h * targetHeight
             guard sourceX >= viewportX, sourceX <= viewportX + viewportWidth,
                   sourceY >= viewportY, sourceY <= viewportY + viewportHeight else {
+                dropReason = "viewport-outside"
+                dropDetail = "screen=\(screen)"
                 continue
             }
             let transform = webRootTransform(
@@ -3140,13 +3263,21 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 crop: crop,
                 viewport: viewport
             )
-            guard transform.scaleX > 0, transform.scaleY > 0 else { continue }
+            guard transform.scaleX > 0, transform.scaleY > 0 else {
+                dropReason = "bad-transform"
+                dropDetail = "screen=\(screen)"
+                continue
+            }
             // Mouse coordinates are sent back through the inverse transform of
             // document.documentElement, in the WebView's normal CSS viewport.
             let webViewX = (sourceX - transform.translateX) / transform.scaleX
             let webViewY = (sourceY - transform.translateY) / transform.scaleY
             guard webViewX >= 0, webViewX <= webView.bounds.width,
-                  webViewY >= 0, webViewY <= webView.bounds.height else { continue }
+                  webViewY >= 0, webViewY <= webView.bounds.height else {
+                dropReason = "web-bounds-outside"
+                dropDetail = "screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) bounds=\(Int(webView.bounds.width))x\(Int(webView.bounds.height))"
+                continue
+            }
             let xStr = String(Double(webViewX))
             let yStr = String(Double(webViewY))
             var script = "if(window.__wxMouseBridge){window.__wxMouseBridge.dispatch('" + type + "'," + xStr + "," + yStr + ",0"
@@ -3157,17 +3288,57 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             } else {
                 script += ",0,0"
             }
-            script += ");}"
-            DispatchQueue.main.async { [weak webView] in
-                webView?.evaluateJavaScript(script)
+            script += ");}else{('missing-bridge');}"
+            if isClick {
+                DispatchQueue.main.async { [weak webView] in
+                    webView?.evaluateJavaScript(script) { result, error in
+                        if let error {
+                            dlog("[WebRendererBridge] mouse \(type) JS error screen=\(screen): \(error)")
+                        } else if (result as? String) == "missing-bridge" {
+                            dlog("[WebRendererBridge] mouse \(type) DROPPED reason=js-bridge-missing screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY)))")
+                        }
+                    }
+                }
+            } else {
+                DispatchQueue.main.async { [weak self, weak webView] in
+                    webView?.evaluateJavaScript(script) { result, error in
+                        guard let self else { return }
+                        if let error {
+                            self.mouseDroppedCounts["js-error", default: 0] += 1
+                            // 错误文案只在汇总里带一次 tende，避免每帧刷。首错立即打一行方便归因。
+                            dlog("[WebRendererBridge] mouse \(type) JS error screen=\(screen): \(error)")
+                        } else if (result as? String) == "missing-bridge" {
+                            self.mouseDroppedCounts["js-bridge-missing", default: 0] += 1
+                        }
+                    }
+                }
             }
             if type == "mousedown" {
                 bridgedMouseDownScreen = screen
-                dlog("[WebRendererBridge] mouse mousedown forwarded screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) ax=\(AXIsProcessTrusted())")
+                dlog("[WebRendererBridge] mouse mousedown forwarded screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) desktop=\(NSEvent.mouseLocation) target=\(target)(\(reason)) ax=\(AXIsProcessTrusted()) hit=\(lastFinderHitDetail)")
+            } else if type == "mouseup" {
+                bridgedMouseDownScreen = nil
+                dlog("[WebRendererBridge] mouse mouseup forwarded screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) target=\(target)(\(reason)) ax=\(AXIsProcessTrusted())")
+            } else if type == "wheel" {
+                dlog("[WebRendererBridge] mouse wheel forwarded screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) dx=\(event.scrollingDeltaX) dy=\(event.scrollingDeltaY) ax=\(AXIsProcessTrusted())")
+                // wheel 低频，直接打不计数，避免“滚轮不动”无据可查。
+            } else {
+                mouseForwardedCounts[type, default: 0] += 1
+                flushMouseSummary()
             }
-            if type == "mouseup" { bridgedMouseDownScreen = nil }
             delivered = true
             break
+        }
+        if !delivered {
+            if isClick {
+                dlog("[WebRendererBridge] mouse \(type) DROPPED reason=\(dropReason) \(dropDetail) desktop=\(mouseLocation) target=\(dropTarget) ax=\(AXIsProcessTrusted()) hit=\(lastFinderHitDetail) finder=\(finderDesktopWindowIDs.sorted()) loaded=\(loadedScreens.sorted())")
+            } else if type == "wheel" {
+                // wheel 同 click 处理：低频逐条，丢了也要看得见。
+                dlog("[WebRendererBridge] mouse wheel DROPPED reason=\(dropReason) \(dropDetail) desktop=\(mouseLocation) target=\(dropTarget) ax=\(AXIsProcessTrusted())")
+            } else {
+                mouseDroppedCounts[dropReason, default: 0] += 1
+                flushMouseSummary()
+            }
         }
         if type == "mouseup" && !delivered { cancelBridgedMouseDown() }
     }
@@ -3334,6 +3505,29 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             }
             DispatchQueue.main.async { completion?() }
         }
+    }
+
+    /// 双态透明度（宿主驱动）：窗口以 0.99999 半透明起步（壁纸层活跃，菜单栏
+    /// backdrop 跟随 poster 懒采样）；宿主在海报抽帧落桌面后发 `goOpaque`，
+    /// 此处热切 alpha=1 + isOpaque=true 退出持续合成。下次 set/stop 拆窗重建，
+    /// 自然回到透明采样期。alphaValue/isOpaque 均为 NSWindow 运行期可写属性。
+    /// 无海报可抽（capture 失败/跳过）时宿主也会兜底发本命令，不会永远半透明。
+    func goOpaque(screen: Int) {
+        guard var state = screenStates[screen],
+              !state.isOffscreen,
+              let window = state.window else {
+            dlog("[WebRendererBridge] goOpaque screen=\(screen) no live window")
+            return
+        }
+        guard window.alphaValue < 1 || !window.isOpaque else {
+            dlog("[WebRendererBridge] goOpaque screen=\(screen) already opaque")
+            return
+        }
+        window.isOpaque = true
+        window.alphaValue = 1
+        state.window = window
+        screenStates[screen] = state
+        dlog("[WebRendererBridge] goOpaque applied screen=\(screen)（退出持续合成）")
     }
 
     private func completeLiveWallpaperLoad(screen: Int) {
@@ -5526,6 +5720,19 @@ private final class DesktopWallpaperManager {
         WebRendererBridge.shared.captureFrame(screen: screen, completion: completion)
     }
 
+    /// 海报抽帧已落桌面 → 目标屏 Web 窗口转不透明（退出持续合成）。
+    /// screen 为 nil 时广播到所有运行中的 web 壁纸屏幕。
+    func goOpaque(screen: Int? = nil) {
+        if let screen {
+            guard let state = screenStates[screen], state.isRunning, state.isWebMode else { return }
+            WebRendererBridge.shared.goOpaque(screen: screen)
+        } else {
+            for (screenIdx, state) in screenStates where state.isRunning && state.isWebMode {
+                WebRendererBridge.shared.goOpaque(screen: screenIdx)
+            }
+        }
+    }
+
     @discardableResult
     func applyWebWallpaperProperties(_ jsonString: String, screen: Int = 0) -> Bool {
         guard let state = screenStates[screen], state.isRunning, state.isWebMode else { return false }
@@ -6130,6 +6337,10 @@ private final class Daemon: NSObject, NSApplicationDelegate {
                     } else {
                         sendResponse("ERROR:缺少 propertiesJSON")
                     }
+                case .goOpaque:
+                    let screen = msg.screen ?? 0
+                    DesktopWallpaperManager.shared.goOpaque(screen: screen)
+                    sendResponse("OK")
                 case .crop:
                     let applied = DesktopWallpaperManager.shared.applyWebWallpaperCrop(
                         crop: msg.crop,

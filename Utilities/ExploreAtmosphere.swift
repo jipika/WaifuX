@@ -971,6 +971,8 @@ struct KFMediaCoverImage: View {
     var layoutSize: CGSize? = nil
     /// 是否允许播放 GIF 动画；详情页等大图建议 true。
     var playAnimatedImage: Bool = false
+    /// 同路径文件内容被覆盖后（如详情页「重新抽帧」）强制跳过缓存重读一次。
+    var forceRefresh: Bool = false
     /// 当前卡片/视图是否在视口内；非「仅悬停播放」模式下，离屏时停动画。
     var isVisible: Bool = true
     /// `true` 时仅在 `isHovered == true` 时解码播放 GIF（列表/网格推荐，显著减轻滚动时主线程压力）。
@@ -1024,6 +1026,7 @@ struct KFMediaCoverImage: View {
                 KFImage(url)
                     .wh_optionalDownsample(downsampleSize)
                     .cacheMemoryOnly(false)
+                    .forceRefresh(forceRefresh)
                     .cancelOnDisappear(true)
                     .fade(duration: fadeDuration)
                     .placeholder { _ in underlay }
@@ -1043,6 +1046,7 @@ struct KFMediaCoverImage: View {
                 KFAnimatedImage.url(url)
                     .memoryCacheExpiration(.expired)
                     .diskCacheExpiration(.days(3))
+                    .forceRefresh(forceRefresh)
                     .cancelOnDisappear(true)
                     .configure { view in
                         configureAnimatedGIFViewForAspectFill(view, autoPlay: shouldAnimate)

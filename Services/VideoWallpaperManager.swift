@@ -604,18 +604,20 @@ final class VideoWallpaperManager: ObservableObject {
 
     /// 立刻把桌面壁纸窗提到可见态（无 animator），并强制 flush 合成。
     private static func revealDesktopWallpaperWindow(_ window: NSWindow) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        // alpha 固定 0.99999（近乎不透明）+ isOpaque=false：窗口按半透明层合成，
-        // 必须与壁纸层混合 → 壁纸层不被视频层遮挡挂起 → 菜单栏 backdrop
-        // 懒采样能采到新 poster（alpha=1 时壁纸层被挂起，菜单栏永不更新，
-        // 实测验证）。0.99999 与 1 视觉无差别。
-        window.alphaValue = 0.99999
-        // desktop 层不能只 orderBack：菜单栏/非 key 时 WindowServer 可能推迟合帧，
-        // 表现为“逻辑上已切换，要点一下别的 App 画面才更新”。
+        // 不透明窗口 + 短淡入：桌面已写好静态帧并完成菜单栏采样，
+        // 新视频窗从 alpha=0 淡入到 1，与底下的静态帧自然衔接。
+        window.isOpaque = true
+        window.alphaValue = 0.0
         window.orderFrontRegardless()
         window.orderBack(nil)
         window.displayIfNeeded()
+        NSAnimationContext.runAnimationGroup { context in
+            // 350ms：静态帧与视频首帧内容一致，稍长的淡入让「静→动」更像一个动作。
+            context.duration = 0.35
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+            context.allowsImplicitAnimation = true
+            window.animator().alphaValue = 1.0
+        }
         if let view = window.contentView {
             view.needsDisplay = true
             view.layer?.setNeedsDisplay()
@@ -624,13 +626,9 @@ final class VideoWallpaperManager: ObservableObject {
                 playerLayer.setNeedsDisplay()
             }
         }
-        CATransaction.commit()
         CATransaction.flush()
-        // 再跑一圈 runloop，让桌面层在后台 timer 触发路径上也能立刻合帧。
         CFRunLoopWakeUp(CFRunLoopGetMain())
-        // 注意：不要在这里触发任何菜单栏刷新。reveal 会被 forceCommit / 首帧 /
-        // 重排频繁调用；菜单栏 backdrop 采样依赖窗口 alpha=0.99999 半透明（壁纸层
-        // 不被视频层挂起）+ poster 写入后的系统懒重采样（~10s）。
+        // 注意：不要在这里触发任何菜单栏刷新。菜单栏采样已在切换前的桌面暴露窗口期完成。
     }
 
     /// 新建窗口首帧就绪后的呈现。
@@ -2096,6 +2094,8 @@ final class VideoWallpaperManager: ObservableObject {
             "video": localFileURL.lastPathComponent,
             "targetScreen": targetScreen?.localizedName ?? "nil(全部)"
         ])
+        // 统一硬切 + 桌面采样：忽略调用方传入的 animatedTransition，与 Scene 交接同一策略。
+        let animatedTransition = false
         guard localFileURL.isFileURL else {
             throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: "动态壁纸必须使用本地视频文件。"])
         }
@@ -2372,6 +2372,38 @@ final class VideoWallpaperManager: ObservableObject {
         }
         currentPosterURL = posterURL  // 兼容旧代码
         isMuted = muted
+
+        // 桌面采样窗口期：先拆旧视频窗露出系统桌面（已写入新静态帧），
+        // 等菜单栏 backdrop 完成采样，再创建新视频窗。
+        // 与 Scene 交接的「静态图先显示→菜单栏采样→渲染器出现」同一策略。
+        if !animatedTransition, posterURL != nil, isSystemWallpaperSyncEnabled,
+           !shouldSkipStaticPosterForDynamicLockScreen {
+            let samplingStarted = Date()
+            teardownAllWindows()
+            // 先确认系统桌面真的切到了新 poster（写入是异步的，不读回会偶发采不到）。
+            let expectedPath = posterURL!.standardizedFileURL.path
+            let readbackDeadline = Date().addingTimeInterval(2.0)
+            var readbackOK = false
+            while Date() < readbackDeadline {
+                let targets = targetScreen.map { [$0] } ?? NSScreen.screens
+                let allMatch = targets.allSatisfy { screen in
+                    guard let current = NSWorkspace.shared.desktopImageURL(for: screen) else { return false }
+                    return current.standardizedFileURL.path == expectedPath
+                }
+                if allMatch { readbackOK = true; break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            let readbackMS = Int(Date().timeIntervalSince(samplingStarted) * 1000)
+            // 读回确认后再给菜单栏 backdrop 一个采样节拍（桌面已确认切换，
+            // 实测静态壁纸懒采样约 1s 内完成，压到 0.6s 兼顾切换速度）。
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            AppLogger.error(.wallpaper, "[VideoTransition] 旧窗已拆，桌面采样等待完成", metadata: [
+                "video": localFileURL.lastPathComponent,
+                "readbackOK": readbackOK ? "1" : "0",
+                "readbackMS": String(readbackMS),
+                "totalMS": String(Int(Date().timeIntervalSince(samplingStarted) * 1000))
+            ])
+        }
 
         // 直接沿用调用方传入的 NSScreen，避免再按 screenID 反查失败时
         // 误走 targetScreen == nil 分支、teardown 所有视频窗（副屏会表现为“软件壁纸退出”）。
@@ -5988,7 +6020,6 @@ final class VideoWallpaperManager: ObservableObject {
         if let player = players[screenID] {
             cancelSavedPlaybackPositionRestore(for: player)
         }
-
         playerItemObservers[screenID]?.invalidate()
         playerItemObservers.removeValue(forKey: screenID)
         playerItemObserverTokens.removeValue(forKey: screenID)
@@ -9797,8 +9828,8 @@ final class VideoWallpaperManager: ObservableObject {
         guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
         guard BackgroundRuntimeRole.allowsDesktopRendering else { throw CocoaError(.featureUnsupported) }
         let screenID = screen.wallpaperScreenIdentifier
-        // 全屏覆盖（含菜单栏条带下方）。窗口 alpha=0.99999 近乎不透明（reveal 时设置），
-        // 壁纸层不被视频层挂起，菜单栏 backdrop 懒采样能跟随 poster 更新。
+        // 全屏覆盖（含菜单栏条带下方）。不透明窗口：切换时已先把静态帧写入系统桌面
+        // 并让菜单栏完成采样，不再需要半透明持续合成（与 Scene 渲染器同一策略）。
         let frame = screen.frame
 
         let window = WallpaperVideoWindow(
@@ -9810,11 +9841,14 @@ final class VideoWallpaperManager: ObservableObject {
         window.setFrame(frame, display: true)
         window.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        // isOpaque=false + alpha=0.99999（reveal 时设置，常驻近乎不透明）：窗口按
-        // 半透明层合成，必须与壁纸层混合 → 壁纸层不被视频层挂起 → 菜单栏
-        // backdrop 懒采样能跟随 poster 更新（alpha=1 时壁纸层被挂起，菜单栏
-        // 永不更新——实测验证）。0.99999 与 1 视觉无差别。
-        window.isOpaque = false
+        // 不透明窗口：菜单栏采样已在切换前的桌面暴露窗口期完成，不需要半透明合成。
+        window.isOpaque = true
+        // EDR 激活的屏上，AVPlayerLayer 的视频合成若走扩展色域链会比静态图明显偏暗
+        // （视频 EOTF/SDR 参照与图像 sRGB 转换不一致）。把窗口锁回非扩展 sRGB，
+        // 让视频与桌面静态图（sRGB ICC）在同一合成基准下处理。
+        // 参考：NSWindow.colorSpace（AppKit）与 WWDC21 "Explore HDR rendering with EDR"
+        // 反向用法——官方示例用它提升到 extended，这里显式钉住非扩展。
+        window.colorSpace = NSColorSpace.sRGB
         window.backgroundColor = .black
         window.hasShadow = false
         window.isReleasedWhenClosed = false  // ⚠️ 防止 close() 时自动释放（由我们手动管理生命周期）
@@ -9893,7 +9927,9 @@ final class VideoWallpaperManager: ObservableObject {
         // 菜单栏/非 key 时只 orderBack 仍可能拿不到 surface，需 orderFrontRegardless
         // 再压回 desktop 层，否则 isReadyForDisplay 一直不来，表现为“要点一下才变”。
         let isCrossTypeWarmup = pendingCrossTypeVideoScreenIDs.contains(screenID)
-        window.alphaValue = isCrossTypeWarmup ? 1 : 0.02
+        // 预热期 alpha=0（完全隐藏），首帧就绪后直接 alpha=1 reveal。
+        // 不再用 0.02 半透明维持合成——桌面已在切换前写好并采样完毕。
+        window.alphaValue = isCrossTypeWarmup ? 1 : 0
         window.orderFrontRegardless()
         window.orderBack(nil)
         window.displayIfNeeded()

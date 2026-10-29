@@ -76,10 +76,18 @@ struct MediaDetailSheet: View {
     @State private var copyToastMessage = "链接已复制"
     @State private var showMoreOptionsPopover = false
     @State private var showDeleteBakeConfirm = false
+    /// 「推送到手机」弹窗（详情页更多菜单入口）
+    @State private var showMobilePushSheet = false
+    @State private var isPreparingMobilePush = false
     @State private var showRedownloadConfirm = false
     @State private var showRemoveFrameInterpolationBlacklistConfirm = false
     @State private var pendingRemoveFrameInterpolationBlacklistURL: URL?
     @State private var isDeletingBake = false
+    /// 详情页封面重抽帧进行中（禁用重复点击，底部状态行提示）
+    @State private var isRegeneratingCover = false
+    /// 重抽完成后下一帧 hero 强制跳过 Kingfisher 缓存（同路径覆盖，key 不变）。
+    /// 置位后由 hero 的 loadFinished 复位，避免后续重建每次都走磁盘重读。
+    @State private var coverForceRefresh = false
     /// 删除烘焙 / 本地预览源变化时递增，强制详情背景重建（避免仍挂已删 MP4 黑屏）
     @State private var mediaBackgroundEpoch: Int = 0
     @State private var isResettingVideoOptimization = false
@@ -200,6 +208,48 @@ struct MediaDetailSheet: View {
     private var sceneOfflineBakeButtonVisible: Bool {
         guard isAlreadyDownloaded, currentDownloadRecord != nil else { return false }
         return isCurrentDownloadedSceneProject || isCurrentDownloadedWebProject
+    }
+
+    /// 「推送到手机」入口可见性：仅壁纸引擎（Workshop）数据 — 工程目录里必须有 project.json
+    /// （本地导入的普通视频/图片/音乐不存在 WE 工程，不显示）
+    private var mobilePushButtonVisible: Bool {
+        guard isAlreadyDownloaded, let record = currentDownloadRecord else { return false }
+        let root = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: record.localFileURL
+        )
+        return FileManager.default.fileExists(atPath: root.appendingPathComponent("project.json").path)
+    }
+
+    /// 更多菜单 →「推送到手机」：转码 + 起服务端 + 弹配对码
+    private func startMobilePush() {
+        guard let record = currentDownloadRecord else { return }
+        let root = WorkshopService.resolveWallpaperEngineProjectRoot(
+            startingAt: record.localFileURL
+        )
+        guard FileManager.default.fileExists(atPath: root.appendingPathComponent("project.json").path) else {
+            return
+        }
+        let title = resolvedItem.title
+        isPreparingMobilePush = true
+        showMobilePushSheet = true
+        Task { @MainActor in
+            defer { isPreparingMobilePush = false }
+            do {
+                let mpkg = try await MobilePushService.shared.convertProject(root, title: title)
+                _ = try await MobilePushService.shared.startPush(files: [(url: mpkg, title: title)])
+                // phase 由服务端日志驱动；UI 在 MobilePushSheet 里呈现
+            } catch {
+                MobilePushService.shared.stopPush()
+                showMobilePushSheet = false
+                sceneBakeStatusFlash = "推送失败：\(error.localizedDescription)"
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    if sceneBakeStatusFlash?.hasPrefix("推送失败") == true {
+                        sceneBakeStatusFlash = nil
+                    }
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -436,6 +486,15 @@ struct MediaDetailSheet: View {
         .overlay {
             sceneBakeRendererOverlay
         }
+        .overlay {
+            if showMobilePushSheet {
+                MobilePushSheet(
+                    title: resolvedItem.title,
+                    onCancel: { showMobilePushSheet = false }
+                )
+                .transition(.opacity)
+            }
+        }
         .onExitCommand {
             if DisplaySelectorManager.shared.isShowingSelector {
                 DisplaySelectorManager.shared.handleCancel()
@@ -494,7 +553,8 @@ struct MediaDetailSheet: View {
         .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)) { notification in
             guard let itemID = notification.object as? String,
                   itemID == resolvedItem.id,
-                  cachedSceneBakeVideoURL == nil else {
+                  cachedSceneBakeVideoURL == nil,
+                  (notification.userInfo?["coverRegen"] as? Bool) != true else {
                 return
             }
             isMediaLoaded = false
@@ -581,6 +641,34 @@ struct MediaDetailSheet: View {
             return nil
         }
         return VideoThumbnailCache.shared.cachedPosterJPEGFileURLIfExists(forLocalVideo: videoURL)
+    }
+
+    /// 「重新抽帧」的片源：烘焙成片优先，其次本地视频文件（含 Workshop 目录内视频）。
+    /// 纯 scene/web（无视频、无烘焙）返回 nil，调用方隐藏入口。
+    private var coverRegenSourceVideoURL: URL? {
+        if let baked = cachedSceneBakeVideoURL {
+            return baked
+        }
+        guard let record = currentDownloadRecord else { return nil }
+        if let resolved = MediaItem.resolveLocalVideoFile(from: record.localFileURL) {
+            return resolved
+        }
+        if Self.previewVideoExtensions.contains(record.localFileURL.pathExtension.lowercased()),
+           FileExistenceCache.shared.fileExists(atPath: record.localFileURL.path) {
+            return record.localFileURL
+        }
+        return nil
+    }
+
+    /// 无烘焙 scene 也可重抽：走渲染器现场抽帧（静态直出 PNG / 动态 1s 临时烘焙）。
+    /// 有烘焙/本地视频的走视频路径；纯 scene 无视频无烘焙走该兜底。Web 无此路径。
+    private var canRegenerateSceneRealtimePoster: Bool {
+        isAlreadyDownloaded && isCurrentDownloadedSceneProject && currentDownloadRecord != nil
+    }
+
+    /// 有视频片源、或无烘焙 scene 可现场抽时展示「重新抽帧」。
+    private var canRegenerateCoverFrame: Bool {
+        isAlreadyDownloaded && (coverRegenSourceVideoURL != nil || canRegenerateSceneRealtimePoster)
     }
 
     /// 下载的 Workshop 工程自带预览图。静帧未生成前优先于远程 Steam 缩略图，
@@ -792,6 +880,7 @@ struct MediaDetailSheet: View {
                     downsampleSize: heroDownsampleSize,
                     fadeDuration: 0.3,
                     loadFinished: {
+                        coverForceRefresh = false
                         // 仅在没有视频、或视频尚未 ready 时由封面结束 loading
                         if previewVideoURL == nil {
                             withAnimation(.easeInOut(duration: 0.3)) {
@@ -800,7 +889,8 @@ struct MediaDetailSheet: View {
                         }
                     },
                     layoutSize: heroLayoutSize,
-                    playAnimatedImage: previewVideoURL == nil
+                    playAnimatedImage: previewVideoURL == nil,
+                    forceRefresh: coverForceRefresh
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1447,6 +1537,94 @@ struct MediaDetailSheet: View {
         }
     }
 
+    /// 「更多」菜单→「重新抽帧」：有视频走视频重抽，无烘焙 scene 走渲染器现场抽。
+    /// 烘焙项重抽 `scene_bake_*` 高清 poster + 列表小图；普通视频重抽高清 poster + 列表小图；
+    /// 无烘焙 scene 现场抽 `scene_realtime_*`（静态直出 PNG / 动态 1s 临时烘焙）。
+    /// 缓存文件路径不变（内容覆盖）：hero 靠 `coverForceRefresh` 跳过缓存重读一次，
+    /// 库列表靠 `.sceneOfflineBakeThumbnailDidUpdate` 通知走既有刷新链路。
+    private func regenerateCoverFrame() {
+        guard currentDownloadRecord != nil, !isRegeneratingCover else { return }
+        guard let record = currentDownloadRecord else { return }
+        let itemID = record.item.id
+        let bakedURL = cachedSceneBakeVideoURL
+        let sourceURL = coverRegenSourceVideoURL
+        let needsSceneFallback = bakedURL == nil && sourceURL == nil
+        guard bakedURL != nil || sourceURL != nil || canRegenerateSceneRealtimePoster else { return }
+        isRegeneratingCover = true
+        Task {
+            var freshURLs: [URL] = []
+            var success = false
+            if let baked = bakedURL {
+                if let poster = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
+                    forLocalVideo: baked,
+                    itemID: itemID,
+                    forceRegenerate: true
+                ) {
+                    freshURLs.append(poster)
+                    success = true
+                }
+                if let list = await VideoThumbnailCache.shared.regenerateListThumbnailJPEGFileURL(forLocalVideo: baked) {
+                    freshURLs.append(list)
+                    success = true
+                }
+            }
+            if let videoURL = sourceURL, videoURL != bakedURL {
+                if let list = await VideoThumbnailCache.shared.regenerateListThumbnailJPEGFileURL(forLocalVideo: videoURL) {
+                    freshURLs.append(list)
+                    success = true
+                }
+                if let poster = await VideoThumbnailCache.shared.regeneratePosterJPEGFileURL(forLocalVideo: videoURL) {
+                    freshURLs.append(poster)
+                    success = true
+                }
+            }
+            // 无视频片源的 scene：走渲染器现场抽（静态直出 PNG / 动态 1s 临时烘焙）。
+            if needsSceneFallback, !success {
+                let fallbackRecord: MediaDownloadRecord? = await MainActor.run { currentDownloadRecord }
+                if let fallbackRecord,
+                   let poster = await SceneOfflineBakeService.regenerateDetailRealtimePoster(record: fallbackRecord, reason: "detail-regen") {
+                    freshURLs.append(poster)
+                    success = true
+                }
+            }
+            // 清 Kingfisher 原图 + 512 降采样变体（与烘焙链路同口径），库列表刷新靠通知。
+            let processor = DownsamplingImageProcessor(size: CGSize(width: 512, height: 512))
+            for url in freshURLs {
+                try? await ImageCache.default.removeImage(forKey: url.cacheKey)
+                try? await ImageCache.default.removeImage(
+                    forKey: url.cacheKey,
+                    processorIdentifier: processor.identifier
+                )
+            }
+            await MainActor.run {
+                // 库列表（我的库/探索网格）走既有通知刷新；自带 coverRegen 标记，
+                // 本 sheet 的通知接收器会跳过（此处已手动刷新，避免 epoch 双 bump）。
+                if success, let displayURL = freshURLs.first {
+                    NotificationCenter.default.post(
+                        name: .sceneOfflineBakeThumbnailDidUpdate,
+                        object: itemID,
+                        userInfo: ["thumbnailURL": displayURL, "coverRegen": true]
+                    )
+                }
+                coverForceRefresh = success
+                mediaBackgroundEpoch &+= 1
+                isRegeneratingCover = false
+                if success {
+                    sceneBakeStatusFlash = "已重新抽帧"
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if sceneBakeStatusFlash == "已重新抽帧" {
+                            sceneBakeStatusFlash = nil
+                        }
+                    }
+                } else {
+                    errorMessage = "抽帧失败：找不到可用视频或解码失败"
+                    showError = true
+                }
+            }
+        }
+    }
+
     private func presentSceneBakeRendererDialog(clearCachedArtifact: Bool) {
         guard currentDownloadRecord != nil else { return }
         sceneBakeShouldClearCachedArtifact = clearCachedArtifact
@@ -1927,6 +2105,24 @@ struct MediaDetailSheet: View {
                 .buttonStyle(.plain)
             }
 
+            // 推送到手机（已下载的 WE 壁纸：scene/video/图片均可）
+            if mobilePushButtonVisible {
+                Button {
+                    showMoreOptionsPopover = false
+                    startMobilePush()
+                } label: {
+                    HStack {
+                        Image(systemName: isPreparingMobilePush ? "hourglass" : "iphone.gen3.radiowaves.left.and.right")
+                        Text(isPreparingMobilePush ? "正在准备…" : "推送到手机（安卓）")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(isPreparingMobilePush)
+            }
+
             // 重新烘焙（仅 Scene 类型已下载壁纸）
             if sceneOfflineBakeButtonVisible {
                 Button {
@@ -1961,6 +2157,24 @@ struct MediaDetailSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isBakingScene || isDeletingBake)
+            }
+
+            // 重新抽帧：有视频走视频重抽，无烘焙 scene 走渲染器现场抽（详情背景 + 库列表共用同一份缓存文件）
+            if canRegenerateCoverFrame {
+                Button {
+                    showMoreOptionsPopover = false
+                    regenerateCoverFrame()
+                } label: {
+                    HStack {
+                        Image(systemName: isRegeneratingCover ? "arrow.triangle.2.circlepath" : "photo.badge.checkmark")
+                        Text(isRegeneratingCover ? "正在抽帧…" : "重新抽帧")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .disabled(isRegeneratingCover || isBakingScene || isDeletingBake)
             }
 
             // 视频转码（检测到 B 帧+高码率时显示，转码后自动消失）
@@ -2661,6 +2875,9 @@ struct MediaDetailSheet: View {
     private var statusText: String {
         if isBakingScene {
             return t("sceneBake.progressTitle")
+        }
+        if isRegeneratingCover {
+            return "正在抽帧…"
         }
         if let flash = sceneBakeStatusFlash {
             return flash
