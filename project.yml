@@ -76,10 +76,17 @@ targets:
       # 推送到手机工具（PyInstaller 单文件，随包发布）。二进制已入库（Tools/MobilePush/
       # 下的 .py 源码仍被 .gitignore 排除），CI 缺了它会直接让 xcodegen spec 校验失败，
       # 因此这里**不能**写 optional：手机推送是 App 的正式功能，构建产物必须带上。
-      # 注意这两个工具目前只有 arm64 单架构（PyInstaller 不能交叉编译）。
+      # 两个架构各一份：扁名 = arm64，-x86_64 后缀 = Intel。PyInstaller 单文件不能 lipo
+      # 合并（bootloader 靠文件尾 cookie 定位内嵌归档，fat 化会失效），所以由 package.sh
+      # 按包架构换装/清理：x86_64 包换扁名、arm64 包删后缀件、universal 包两份都留，
+      # 运行时 MobilePushService.toolURL 按进程架构挑。
       - path: Tools/MobilePush/we-mpkg-tool
         buildPhase: resources
       - path: Tools/MobilePush/we-pair-server
+        buildPhase: resources
+      - path: Tools/MobilePush/we-mpkg-tool-x86_64
+        buildPhase: resources
+      - path: Tools/MobilePush/we-pair-server-x86_64
         buildPhase: resources
       # 根目录源文件（未被以上子目录覆盖）
       - path: WallpaperEngineEmbeddedAssets.swift

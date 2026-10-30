@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Darwin
 
 /// Wallpaper Engine 手机推送：we-mpkg-tool 转码 + 官方 App 配对推送（python 服务端打包版）
 ///
@@ -37,7 +38,31 @@ final class MobilePushService: ObservableObject {
 
     // MARK: - 工具二进制定位（与 RendererComponentStore 同套路）
 
+    /// universal 包同时携带 arm64 与 x86_64 两版推送工具（PyInstaller 单文件不能 lipo
+    /// 合并 —— bootloader 靠文件尾 cookie 定位内嵌归档，fat 化会失效），靠它挑对应那份。
+    nonisolated static var isX86_64Process: Bool {
+#if arch(x86_64)
+        return true
+#else
+        // Apple Silicon 上也可能被 Rosetta 拉起（Finder 里勾了「用 Rosetta 打开」）
+        var translated: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0) == 0 else {
+            return false
+        }
+        return translated == 1
+#endif
+    }
+
     nonisolated static func toolURL(named name: String) -> URL? {
+        // 优先按进程架构挑后缀件；单架构包里后缀件已被 package.sh 换装掉，这里自然落空。
+        if isX86_64Process, let url = toolURL(exactName: "\(name)-x86_64") {
+            return url
+        }
+        return toolURL(exactName: name)
+    }
+
+    nonisolated private static func toolURL(exactName name: String) -> URL? {
         if let url = Bundle.main.url(forResource: name, withExtension: nil),
            FileManager.default.isExecutableFile(atPath: url.path) {
             return url

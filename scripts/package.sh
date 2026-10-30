@@ -294,6 +294,15 @@ if [[ "$PKG_ARCH" == "x86_64" ]]; then
   cp -f "$PROJECT_DIR/Resources/wallpaperengine-cli-x86_64" "$APP_RES/wallpaperengine-cli"
   chmod +x "$APP_RES/wallpaperengine-cli"
   lipo -info "$APP_RES/wallpaperengine-cli"
+  # 推送工具：PyInstaller 单文件不能 lipo 合并（bootloader 靠文件尾 cookie 定位内嵌归档，
+  # fat 化后失效），只能按架构换装。这里把 -x86_64 后缀件顶到扁名位置，后缀件本身删掉。
+  echo "🔁 换装手机推送工具为 x86_64 版..."
+  for push_tool in we-mpkg-tool we-pair-server; do
+    cp -f "$PROJECT_DIR/Tools/MobilePush/${push_tool}-x86_64" "$APP_RES/$push_tool"
+    chmod +x "$APP_RES/$push_tool"
+    rm -f "$APP_RES/${push_tool}-x86_64"
+    file "$APP_RES/$push_tool" | sed 's/^/  /'
+  done
   echo "✅ x86_64 包换装完成"
 fi
 
@@ -302,6 +311,11 @@ if [[ "$PKG_ARCH" != "x86_64" ]]; then
   APP_RES="$BUILD_DIR/$APP_NAME/Contents/Resources"
   rm -f "$APP_RES/wallpaper-wgpu-x86_64" "$APP_RES/dxc-x86_64" "$APP_RES/libdxcompiler-x86_64.dylib" "$APP_RES/ffmpeg-x86_64"
   rm -f "$APP_RES/wallpaperengine-cli-x86_64"
+  # 推送工具的 x86_64 后缀件：arm64 包用不上，删掉；universal 包必须保留
+  # （双架构全量包两份都留，运行时按进程架构挑）。
+  if [[ "$PKG_ARCH" == "arm64" ]]; then
+    rm -f "$APP_RES/we-mpkg-tool-x86_64" "$APP_RES/we-pair-server-x86_64"
+  fi
   if [[ -d "$APP_RES/Resources" ]]; then
     rm -f "$APP_RES/Resources/wallpaper-wgpu-x86_64" "$APP_RES/Resources/dxc-x86_64" \
           "$APP_RES/Resources/libdxcompiler-x86_64.dylib" "$APP_RES/Resources/ffmpeg-x86_64"
@@ -714,7 +728,8 @@ sign_exported_app() {
   # 否则公证人/网关拦截。无 entitlements 需求，直接用外层身份签。
   # 注：它们本来就会命中上面的 Mach-O 遍历被 ad-hoc 或身份签一遍，这里显式重签保证
   # --options runtime + --timestamp 与主 App 一致，公证不因这两个新成员挂掉。
-  for push_tool in we-mpkg-tool we-pair-server; do
+  # universal 包会同时带 arm64 扁名与 -x86_64 后缀件，两份都要带安全时间戳重签。
+  for push_tool in we-mpkg-tool we-pair-server we-mpkg-tool-x86_64 we-pair-server-x86_64; do
     local push_tool_path="$app_path/Contents/Resources/$push_tool"
     if [[ -f "$push_tool_path" ]]; then
       codesign --force --timestamp --options runtime -s "$identity" "$push_tool_path" || {
