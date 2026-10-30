@@ -27,6 +27,7 @@ appcast 结构（38.0.154 起）：
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -78,20 +79,20 @@ def fail(message: str) -> None:
     raise SystemExit(f"❌ {message}")
 
 
-def xml_escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def changelog_html(version: str, changelog: str) -> str:
-    lines = changelog.splitlines()
-    items = "".join(
-        "<li>{}</li>".format(xml_escape(line.lstrip("- ").strip()))
-        for line in lines
-        if line.strip().startswith("- ")
-    )
-    if items:
-        return f"<h3>WaifuX {version}</h3><ul>{items}</ul>"
-    return f"<p>WaifuX {version}</p>"
+    """把 changelog 文本渲染成 appcast 描述 HTML。
+
+    渲染规则与 scripts/generate-appcast-changelog.py 共用同一份实现（`## 分组`
+    渲染成 <h4>、`- 条目` 渲染成 <li>），避免两处逻辑漂移——历史上正是这个
+    漂移导致手写分组标题在 appcast 里消失。
+    """
+    script = Path(__file__).with_name("generate-appcast-changelog.py")
+    spec = importlib.util.spec_from_file_location("appcast_changelog", script)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"❌ 无法加载 {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.notes_to_html(changelog, version)
 
 
 def find_sign_update(explicit: str | None) -> str | None:

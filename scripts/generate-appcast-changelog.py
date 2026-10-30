@@ -17,7 +17,12 @@ import re
 import subprocess
 import sys
 from html import escape
+from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+
+# 手写更新日志目录：Docs/release-notes/<version>.md
+# 手写稿优先于 commit 抓取（分组清晰、面向用户可读），CI 与本地 bump 都走这里。
+DEFAULT_RELEASE_NOTES_DIR = Path(__file__).resolve().parents[1] / "Docs" / "release-notes"
 
 
 # Version-bump / meta commits that shouldn't appear in user-facing notes.
@@ -174,6 +179,61 @@ def to_html(entries: List[Tuple[str, List[str]]], version: Optional[str] = None)
     return body
 
 
+def load_handwritten_notes(version: str, notes_dir: Path) -> Optional[str]:
+    """返回 VERSION 的手写更新日志正文；没有就用 None 让调用方回退 commit 抓取。"""
+    if not version:
+        return None
+    candidate = notes_dir / f"{version.strip()}.md"
+    if not candidate.is_file():
+        return None
+    text = candidate.read_text(encoding="utf-8").strip()
+    return text or None
+
+
+def notes_to_markdown(notes: str) -> str:
+    """手写稿 → markdown 输出：去掉顶部的 `# 标题`（Release 正文自带「更新内容」）。"""
+    body = "\n".join(line for line in notes.splitlines() if not line.lstrip().startswith("# "))
+    return body.strip()
+
+
+def notes_to_html(notes: str, version: Optional[str] = None) -> str:
+    """把手写 markdown 更新日志渲染成 appcast 用的 HTML。
+
+    `## 新增功能` → <h4>，`- ✨ feat(...): …` → <li>；开头的 `# 标题` 丢弃，
+    因为外层已经输出 <h3>WaifuX VERSION</h3>。generate-appcast.py 复用本函数，
+    避免两处渲染逻辑漂移。
+    """
+    chunks: List[str] = []
+    list_open = False
+    for raw in notes.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            if list_open:
+                chunks.append("</ul>")
+                list_open = False
+            chunks.append(f"<h4>{escape(line[3:].strip())}</h4>")
+            continue
+        if line.startswith("# "):
+            continue
+        if line.startswith("- "):
+            if not list_open:
+                chunks.append("<ul>")
+                list_open = True
+            chunks.append(f"<li>{escape(line[2:].strip())}</li>")
+    if list_open:
+        chunks.append("</ul>")
+
+    if not chunks:
+        return f"<p>WaifuX {escape(version)}</p>" if version else "<p>Initial release</p>"
+
+    body = "".join(chunks)
+    if version:
+        return f"<h3>WaifuX {escape(version)}</h3>{body}"
+    return body
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", default="", help="Git ref for lower bound (exclusive)")
@@ -194,13 +254,36 @@ def main() -> int:
         action="store_true",
         help="With format=html, emit only <li>…</li> rows (no outer ul/h3)",
     )
+    parser.add_argument(
+        "--release-notes-dir",
+        type=Path,
+        default=DEFAULT_RELEASE_NOTES_DIR,
+        help="手写更新日志目录（默认 Docs/release-notes）",
+    )
     args = parser.parse_args()
+
+    fmt = "markdown" if args.format == "md" else args.format
+
+    # 手写稿优先：存在 Docs/release-notes/<version>.md 就直接输出它。
+    handwritten = load_handwritten_notes(args.version, args.release_notes_dir)
+    if handwritten is not None:
+        print(
+            f"using hand-written notes: {args.release_notes_dir / (args.version.strip() + '.md')}",
+            file=sys.stderr,
+        )
+        sys.stdout.write(
+            notes_to_markdown(handwritten)
+            if fmt == "markdown"
+            else notes_to_html(handwritten, args.version or None)
+        )
+        if sys.stdout.isatty():
+            sys.stdout.write("\n")
+        return 0
 
     since = resolve_since(args.since or None)
     commits = fetch_commits(since, args.limit)
     entries = collect_entries(commits)
 
-    fmt = "markdown" if args.format == "md" else args.format
     if fmt == "markdown":
         sys.stdout.write(to_markdown(entries))
     else:

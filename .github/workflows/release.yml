@@ -552,18 +552,27 @@ jobs:
       - name: Generate Changelog
         id: changelog
         run: |
+          # 手写更新日志优先：Docs/release-notes/<VERSION>.md（按「新增功能 / 修复问题」分组）
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          NOTES="Docs/release-notes/${VERSION}.md"
+
           # 获取上一个 tag（用于生成变更日志）
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
-          if [ -n "$PREV_TAG" ]; then
+          if [ -f "$NOTES" ]; then
+            # 手写稿走同一个生成脚本，保证本地 bump 与 CI 渲染一致
+            CHANGELOG=$(python3 scripts/generate-appcast-changelog.py --format markdown --version "$VERSION")
+            echo "Using hand-written release notes: $NOTES"
+          elif [ -n "$PREV_TAG" ]; then
             # 从上一个 tag 到当前提交的 commit messages 生成日志
             CHANGELOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges | head -30)
             echo "Generated changelog from $PREV_TAG to $GITHUB_REF_NAME:"
-            echo "$CHANGELOG"
           else
             CHANGELOG="- Initial release"
             echo "No previous tag found, using default changelog"
           fi
+
+          echo "$CHANGELOG"
 
           # 写入 GITHUB_OUTPUT 供后续 step 使用
           {
