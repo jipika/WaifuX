@@ -115,5 +115,12 @@ node_modules/
 # （后续发版从 release 资产读取），不提交进仓库。
 Docs/appcast-default-item.xml
 
-# 推送到手机工具链（源码+二进制，本地保留不入库）
-Tools/MobilePush/
+# 推送到手机工具链：两个 PyInstaller 单文件二进制**必须入库**（project.yml 把它们
+# 声明为主 target 的 resources，CI 的 checkout 里没有就会让 xcodegen spec 校验失败，
+# 即便放过也会让发出去的包缺手机推送功能）。源码脚本、中间产物、PyInstaller 工作目录
+# 仅在本地保留。
+Tools/MobilePush/*.py
+Tools/MobilePush/build/
+Tools/MobilePush/dist/
+Tools/MobilePush/*.spec
+Tools/MobilePush/__pycache__/

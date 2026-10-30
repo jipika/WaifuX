@@ -73,7 +73,10 @@ targets:
       - path: AnimeRules
         type: folder
         buildPhase: resources
-      # 推送到手机工具（PyInstaller 单文件；源码+二进制在 Tools/MobilePush/，git 忽略）
+      # 推送到手机工具（PyInstaller 单文件，随包发布）。二进制已入库（Tools/MobilePush/
+      # 下的 .py 源码仍被 .gitignore 排除），CI 缺了它会直接让 xcodegen spec 校验失败，
+      # 因此这里**不能**写 optional：手机推送是 App 的正式功能，构建产物必须带上。
+      # 注意这两个工具目前只有 arm64 单架构（PyInstaller 不能交叉编译）。
       - path: Tools/MobilePush/we-mpkg-tool
         buildPhase: resources
       - path: Tools/MobilePush/we-pair-server
