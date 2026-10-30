@@ -131,9 +131,10 @@ struct MobilePushSheet: View {
             }
             .buttonStyle(.plain)
 
-            Text("手机与电脑需在同一网络")
+            Text("若传输中断，请保持此页面；重新选择电脑后会自动重传")
                 .font(.system(size: 11))
                 .foregroundStyle(LiquidGlassColors.textSecondary.opacity(0.7))
+                .multilineTextAlignment(.center)
         }
         .padding(.vertical, 8)
     }

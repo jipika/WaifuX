@@ -27,6 +27,9 @@ struct MediaDetailSheet: View {
     @State private var isMuted = true
     @State private var isVisible = false
     @State private var isMediaLoaded = false
+    /// 以「未下载」状态打开（或切到）的详情项 ID：背景钉在打开时的远程预览，
+    /// 直到真正可播放的资源（烘焙 MP4 / 本地视频 / 静态 Scene 抽帧）落地才替换。
+    @State private var pinnedRemoteBackgroundItemID: String?
     @State private var isSourcesReady = false // 来源是否排序/加载完毕
     @State private var scrollOffset: CGFloat = 0
     @State private var showInfoBubble = false
@@ -210,6 +213,43 @@ struct MediaDetailSheet: View {
         return isCurrentDownloadedSceneProject || isCurrentDownloadedWebProject
     }
 
+    /// 本地资源是否已完整落地。下载记录只在文件写完并校验后才写入，
+    /// 下载中 / 重新下载删旧文件后都没有记录，此时磁盘上的文件不可信。
+    private var isLocalContentSettled: Bool {
+        isLocalFile || currentDownloadRecord != nil
+    }
+
+    /// 详情背景可以「真正替换」的资源：烘焙成片、本地视频，或已判定为纯静态 Scene 的抽帧。
+    /// Scene / Web 刚下载完但还没烘焙时都不算。
+    private var hasPlayableBackgroundResource: Bool {
+        if backgroundSceneBakeVideoURL != nil { return true }
+        if resolvedLocalPreviewVideoURL() != nil { return true }
+        if currentDownloadRecord?.sceneBakeEligibility?.isStaticScene == true,
+           cachedSceneBakePosterURL != nil || cachedSceneRealtimePosterURL != nil {
+            return true
+        }
+        return false
+    }
+
+    /// 背景当前是否钉在打开时的远程预览上。
+    private var isBackgroundPinnedToRemote: Bool {
+        pinnedRemoteBackgroundItemID == resolvedItem.id && !hasPlayableBackgroundResource
+    }
+
+    /// 打开 / 切换详情项时调用：未下载的项钉住远程背景；已下载的项按原逻辑显示本地资源。
+    private func pinRemoteBackgroundIfNeeded() {
+        if !isAlreadyDownloaded && !hasPlayableBackgroundResource {
+            pinnedRemoteBackgroundItemID = resolvedItem.id
+        } else {
+            pinnedRemoteBackgroundItemID = nil
+        }
+    }
+
+    /// 背景视图身份：变化才重建背景并显示加载遮罩。
+    private var mediaBackgroundIdentityKey: String {
+        previewVideoURL?.path ?? heroImageURL.path
+    }
+
     /// 「推送到手机」入口可见性：仅壁纸引擎（Workshop）数据 — 工程目录里必须有 project.json
     /// （本地导入的普通视频/图片/音乐不存在 WE 工程，不显示）
     private var mobilePushButtonVisible: Bool {
@@ -268,7 +308,7 @@ struct MediaDetailSheet: View {
 
                 if isVisible {
                     fixedMediaBackground(width: viewW, height: viewH)
-                        .id("media-bg-\(resolvedItem.id)-\(mediaBackgroundEpoch)-\(previewVideoURL?.path ?? heroImageURL.path)")
+                        .id("media-bg-\(resolvedItem.id)-\(mediaBackgroundEpoch)-\(mediaBackgroundIdentityKey)")
                         .transition(
                             isAuthorPanelFade
                                 ? AnyTransition.opacity.animation(.easeInOut(duration: 0.28))
@@ -515,12 +555,14 @@ struct MediaDetailSheet: View {
             AppLogger.info(.media, "媒体详情页 onAppear",
                 metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
+            pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
             setupNextItemDataSource()
             setupKeyboardMonitor()
             await loadDetailIfNeeded()
         }
         .onChange(of: resolvedItem.id) { _, _ in
+            pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
             hasWorkshopUpdateAvailable = false
             remoteWorkshopUpdatedAt = nil
@@ -554,7 +596,8 @@ struct MediaDetailSheet: View {
             guard let itemID = notification.object as? String,
                   itemID == resolvedItem.id,
                   cachedSceneBakeVideoURL == nil,
-                  (notification.userInfo?["coverRegen"] as? Bool) != true else {
+                  (notification.userInfo?["coverRegen"] as? Bool) != true,
+                  !isBackgroundPinnedToRemote else {
                 return
             }
             isMediaLoaded = false
@@ -563,7 +606,8 @@ struct MediaDetailSheet: View {
         .onReceive(NotificationCenter.default.publisher(for: .localMediaPosterDidUpdate)) { notification in
             guard let itemID = notification.object as? String,
                   itemID == resolvedItem.id,
-                  cachedSceneBakeVideoURL == nil else {
+                  cachedSceneBakeVideoURL == nil,
+                  !isBackgroundPinnedToRemote else {
                 return
             }
             isMediaLoaded = false
@@ -591,6 +635,10 @@ struct MediaDetailSheet: View {
 
     /// 无循环烘焙视频时，优先复用 Scene 高清抽帧，再回退 catalog/远程缩略图。
     private var heroImageURL: URL {
+        // 未下载打开的项：下载完成但还没有可播放资源（需烘焙）前，保持打开时的远程预览。
+        if isBackgroundPinnedToRemote {
+            return undownloadedStylePreviewImageURL
+        }
         // 临时 1 秒烘焙不会写入 artifact，但会留下稳定的 item 级 JPEG poster。
         // 详情页应优先展示它，避免退化到 Workshop 的低分辨率 preview.*。
         if backgroundSceneBakeVideoURL == nil {
@@ -674,6 +722,8 @@ struct MediaDetailSheet: View {
     /// 下载的 Workshop 工程自带预览图。静帧未生成前优先于远程 Steam 缩略图，
     /// 确保离线或远程预览失效时仍有可显示的本地背景。
     private var localWorkshopPreviewFallbackURL: URL? {
+        // 未落地（下载中）的工程目录可能只有半截 preview.*，不能拿来当背景。
+        guard isLocalContentSettled else { return nil }
         if let recordURL = currentDownloadRecord?.localFileURL,
            let previewURL = MediaItem.resolveLocalWorkshopPreviewImage(from: recordURL) {
             return previewURL
@@ -714,6 +764,14 @@ struct MediaDetailSheet: View {
         // 只有资源本身是视频时才播放本地视频；Scene/Web 工程内的素材视频不能当详情背景。
         if let localVideo = resolvedLocalPreviewVideoURL() {
             return localVideo
+        }
+
+        // 钉住远程背景：只沿用远程预览视频；resolvedItem 里注入的本地路径一律不用。
+        if isBackgroundPinnedToRemote {
+            if let preview = resolvedItem.previewVideoURL, !preview.isFileURL {
+                return preview
+            }
+            return nil
         }
 
         // Scene / Web 等非视频工程没有烘焙成片时只显示静态 poster / preview，
@@ -760,6 +818,9 @@ struct MediaDetailSheet: View {
     /// 从下载记录 / Workshop 本地路径解析可用于详情页背景循环的原始视频。
     /// 仅允许直接视频文件或 `project.json.type == "video"` 的工程。
     private func resolvedLocalPreviewVideoURL() -> URL? {
+        // 下载中 steamcmd / 直链会边下边写进 Media/，此时磁盘兜底扫描会拿到半截文件。
+        // 下载记录只在文件校验完成后写入，以它为「本地资源已落地」的唯一信号。
+        guard isLocalContentSettled else { return nil }
         let fileCache = FileExistenceCache.shared
         var candidates: [URL] = []
         if let recordURL = currentDownloadRecord?.localFileURL {
@@ -849,9 +910,13 @@ struct MediaDetailSheet: View {
             FileExistenceCache.shared.markExisting(atPath: localVideo.path)
         }
 
-        // 强制背景视图按新 URL 重建（.id 依赖 preview 路径）
-        isMediaLoaded = false
+        // 背景身份变了才重建并显示加载遮罩；钉住远程背景时 key 不变，
+        // 若仍置 false 会因背景不重建、onReady 不再触发而卡在黑色遮罩。
+        let previousBackgroundKey = mediaBackgroundIdentityKey
         resolvedItem = item
+        if mediaBackgroundIdentityKey != previousBackgroundKey {
+            isMediaLoaded = false
+        }
         return true
     }
 
@@ -1550,6 +1615,8 @@ struct MediaDetailSheet: View {
         let sourceURL = coverRegenSourceVideoURL
         let needsSceneFallback = bakedURL == nil && sourceURL == nil
         guard bakedURL != nil || sourceURL != nil || canRegenerateSceneRealtimePoster else { return }
+        // 用户主动抽帧＝要看新封面，解除「钉住远程背景」。
+        pinnedRemoteBackgroundItemID = nil
         isRegeneratingCover = true
         Task {
             var freshURLs: [URL] = []
@@ -4807,6 +4874,11 @@ struct MediaDetailSheet: View {
     /// 如果 Workshop 项已下载本地资产，优先注入本地视频和本地预览图
     private func itemWithLocalWorkshopVideo(_ item: MediaItem) -> MediaItem {
         guard item.id.hasPrefix("workshop_") else { return item }
+        // 没有下载记录 = 还在下载 / 已删除；磁盘上的 workshop_ 目录可能是 steamcmd 写了一半的，
+        // 不能把其中的视频或 preview.* 注入详情背景。
+        guard MediaLibraryService.shared.downloadRecord(for: item.id)?.isActive == true else {
+            return item
+        }
 
         var updatedPreviewVideoURL = item.previewVideoURL
         var updatedPosterURL = item.posterURL

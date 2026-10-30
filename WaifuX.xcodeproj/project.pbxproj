@@ -230,6 +230,7 @@
 		5D0FCD4319EAA71A1E73BDBD /* LiquidGlassAudioVisualizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF6005F8F505439E1DD6D6C /* LiquidGlassAudioVisualizer.swift */; };
 		5E39EAB9DDC69B0152A06792 /* WaifuXPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B67008CBA0E630EDEC272D /* WaifuXPreferences.swift */; };
 		5F1F3FAD775905FF0B8AE77B /* AnimeRuleStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85B695679FF6AF35EC8B9B65 /* AnimeRuleStore.swift */; };
+		5F30A581CA0AE6399F53BB51 /* we-pair-server in Resources */ = {isa = PBXBuildFile; fileRef = D070D24E041E27D0A15358A5 /* we-pair-server */; };
 		5F43439B6F0FDEE43016874E /* DynamicWallpaperItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8461FE463B12837648DB1F26 /* DynamicWallpaperItem.swift */; };
 		5F8B51BDCBD45C15CB23DCD1 /* LibraryItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AF419A73AEE59CD0860AFA0 /* LibraryItem.swift */; };
 		5FA2C79F81AC226478B5DCEF /* WebWallpaperDesignPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6E9443ECE5DC4B6554F655 /* WebWallpaperDesignPanel.swift */; };
@@ -393,6 +394,7 @@
 		B4A45A5B51FFA8BB4D15BEE7 /* com.waifux.app.helper.plist in CopyFiles */ = {isa = PBXBuildFile; fileRef = B1DBF2B67F9E5DEF8BFFE2D8 /* com.waifux.app.helper.plist */; };
 		B579E1A0C5510C593B4D88CA /* AnimeFavoriteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B51709E119BA664979BCCA7A /* AnimeFavoriteStore.swift */; };
 		B58AB17ABC36D8891C3E71EF /* MediaLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D02D76F3DC7DB2F623B5A75 /* MediaLibraryService.swift */; };
+		B59ED61D680C08B5CB14455A /* we-mpkg-tool in Resources */ = {isa = PBXBuildFile; fileRef = 44D6686F1C524EE2B15ADF72 /* we-mpkg-tool */; };
 		B5BDE544995243CB176BD9F8 /* VideoLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B5B3CC39DD8C2D69D3443D4 /* VideoLibrary.swift */; };
 		B5DFC8C7E66D2880AD4AC40A /* LiquidGlassClockOverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7161F6D026FC623EB6D42B01 /* LiquidGlassClockOverlayManager.swift */; };
 		B6587E454CD823DE101CB3DF /* MediaExploreViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDD6C2D290470B8843A1A157 /* MediaExploreViewModel.swift */; };
@@ -579,10 +581,10 @@
 		6367CD2B049670AE8262B27D /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = Contents/Helpers;
+			dstPath = "Contents/Resources/Screen Savers";
 			dstSubfolderSpec = 1;
 			files = (
-				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
+				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -611,10 +613,10 @@
 		F68564DF1E026B1AC3471511 /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "Contents/Resources/Screen Savers";
+			dstPath = Contents/Helpers;
 			dstSubfolderSpec = 1;
 			files = (
-				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
+				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -729,6 +731,7 @@
 		43FB96E1C34C1865A12D061B /* AuthorWallpaperSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorWallpaperSheet.swift; sourceTree = "<group>"; };
 		4402859CDA249BA3FD298264 /* GuideTours.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuideTours.swift; sourceTree = "<group>"; };
 		4462B9EB484AA7BCB2E7ADED /* HeroPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroPalette.swift; sourceTree = "<group>"; };
+		44D6686F1C524EE2B15ADF72 /* we-mpkg-tool */ = {isa = PBXFileReference; path = "we-mpkg-tool"; sourceTree = "<group>"; };
 		45A0C1ABDB171C326129A73E /* VideoThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoThumbnailCache.swift; sourceTree = "<group>"; };
 		461FAC93DBC7FF6EACC9547A /* SteamLoginWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamLoginWebView.swift; sourceTree = "<group>"; };
 		46516D807852C39C100910A6 /* ExploreGridContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreGridContainer.swift; sourceTree = "<group>"; };
@@ -909,6 +912,7 @@
 		CE3727E57F3F09F93DF5B40C /* ContentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentModels.swift; sourceTree = "<group>"; };
 		CF73A88F9609C0F1FFF6C2EE /* GlassSheetShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSheetShell.swift; sourceTree = "<group>"; };
 		CFF7EC2802DEB922E192AE8E /* GitHubHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHosts.swift; sourceTree = "<group>"; };
+		D070D24E041E27D0A15358A5 /* we-pair-server */ = {isa = PBXFileReference; path = "we-pair-server"; sourceTree = "<group>"; };
 		D14939A9C3DA965DB90E5F22 /* AppGroupCacheBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupCacheBudget.swift; sourceTree = "<group>"; };
 		D154DF41056CBDAB804D79D2 /* DesktopIconManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopIconManager.swift; sourceTree = "<group>"; };
 		D2720DE597FBD8AD782F02D2 /* FrameChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameChannel.swift; sourceTree = "<group>"; };
@@ -1360,6 +1364,16 @@
 			path = Resources;
 			sourceTree = "<group>";
 		};
+		95A878299887F570FA27D01F /* MobilePush */ = {
+			isa = PBXGroup;
+			children = (
+				44D6686F1C524EE2B15ADF72 /* we-mpkg-tool */,
+				D070D24E041E27D0A15358A5 /* we-pair-server */,
+			);
+			name = MobilePush;
+			path = Tools/MobilePush;
+			sourceTree = "<group>";
+		};
 		A555AFD4DFB8E300E93B99B4 /* Views */ = {
 			isa = PBXGroup;
 			children = (
@@ -1472,6 +1486,7 @@
 				43CF9F5E440158F7941B2A02 /* Components */,
 				0938ADD8D18007409F613228 /* DesignSystem */,
 				1EE83ECA069707C970EB8CE5 /* Metal */,
+				95A878299887F570FA27D01F /* MobilePush */,
 				F58AC47A8A86E7F8CACFB332 /* Models */,
 				7FB9863A9F7951C68CA8EBC3 /* Resources */,
 				541662FB08D299686744D90A /* Services */,
@@ -1713,6 +1728,8 @@
 				C7D1207E42F6526D28004C0A /* Assets.xcassets in Resources */,
 				C2D92D7D81345EBF5BD435E2 /* LockScreenWallpaperService.swift.bak in Resources */,
 				0FBA60AD0ADF8273C401F189 /* Resources in Resources */,
+				B59ED61D680C08B5CB14455A /* we-mpkg-tool in Resources */,
+				5F30A581CA0AE6399F53BB51 /* we-pair-server in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

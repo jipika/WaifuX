@@ -661,7 +661,9 @@ final class LibraryGridOrderStore: ObservableObject {
         }
 
         var next = orderedIDs(for: availableIDs, scope: scope)
-        next.removeAll { moving.contains($0) }
+        // Set 查找：全选拖动时 moving 可能有上千项，数组 contains 会变成 O(N×M)。
+        let movingSet = Set(moving)
+        next.removeAll { movingSet.contains($0) }
 
         let insertIndex: Int
         if let targetID, let index = next.firstIndex(of: targetID) {

@@ -163,6 +163,8 @@ struct MyLibraryContentView: View {
     // 编辑状态
     @State private var isEditing = false
     @State private var selectedItems = Set<String>()
+    /// 本页拖拽排序预期写入的 gridOrderStore revision；-1 表示没有待认领的本地写入。
+    @State private var expectedLocalGridOrderRevision = -1
 
     // MARK: - AppKit 网格状态（2026-09 迁移：NSCollectionView 自滚动 + cell 真复用）
     /// 收藏/排序/选择/当前壁纸标记等「数量不变但内容变化」时递增，强制重配可见 cell。
@@ -795,9 +797,8 @@ struct MyLibraryContentView: View {
         .onReceive(folderStore.$mediaFolders) { _ in
             debouncedUpdateMediaItems()
         }
-        .onReceive(gridOrderStore.$revision) { _ in
-            debouncedUpdateWallpaperItems()
-            debouncedUpdateMediaItems()
+        .onReceive(gridOrderStore.$revision) { revision in
+            handleGridOrderRevision(revision)
         }
         // 当前壁纸 / 文件夹解锁：只在集合真变化时写 @State，避免无关 @Published 刷整页
         .onReceive(CurrentWallpaperService.shared.$activeFilePaths) { paths in
@@ -1342,14 +1343,17 @@ struct MyLibraryContentView: View {
             },
             onValidateReorderDrop: { payloads, _ in
                 guard isEditing else { return false }
-                // 拖拽 hover 期间每次鼠标移动都会走这里：availableIDs 必须只求值一次，
-                // 不能写进 filter 闭包内（那样每个负载 ID 都会重算一遍 currentItemIDs 的排序结果）。
-                let availableIDs = Set(currentItemIDs)
+                // 拖拽 hover 期间每次鼠标移动都会走这里。不调 currentItemIDs（它会重新取文件夹、
+                // 重新排序）；直接用渲染时已算好的集合，只做一次 Set 构建。
+                let availableIDs = Set(entries.map(\.id))
                 return LibraryDragPayload.ids(from: payloads).contains { availableIDs.contains($0) }
             },
             onPerformReorderDrop: { payloads, targetIndex in
                 let targetID: String? = targetIndex < entries.count ? entries[targetIndex].id : nil
                 return handleGridReorderDrop(payloads, before: targetID)
+            },
+            itemIdentifier: { idx in
+                idx < entries.count ? entries[idx].id : ""
             }
         )
     }
@@ -2191,14 +2195,17 @@ struct MyLibraryContentView: View {
             },
             onValidateReorderDrop: { payloads, _ in
                 guard isEditing else { return false }
-                // 拖拽 hover 期间每次鼠标移动都会走这里：availableIDs 必须只求值一次，
-                // 不能写进 filter 闭包内（那样每个负载 ID 都会重算一遍 currentItemIDs 的排序结果）。
-                let availableIDs = Set(currentItemIDs)
+                // 拖拽 hover 期间每次鼠标移动都会走这里。不调 currentItemIDs（它会重新取文件夹、
+                // 重新排序）；直接用渲染时已算好的集合，只做一次 Set 构建。
+                let availableIDs = Set(entries.map(\.id))
                 return LibraryDragPayload.ids(from: payloads).contains { availableIDs.contains($0) }
             },
             onPerformReorderDrop: { payloads, targetIndex in
                 let targetID: String? = targetIndex < entries.count ? entries[targetIndex].id : nil
                 return handleGridReorderDrop(payloads, before: targetID)
+            },
+            itemIdentifier: { idx in
+                idx < entries.count ? entries[idx].id : ""
             }
         )
     }
@@ -2487,14 +2494,27 @@ struct MyLibraryContentView: View {
         .animation(.easeOut(duration: 0.12), value: isActive)
     }
 
+    /// gridOrderStore 每次写入都会发布 revision。
+    /// 本页拖拽排序自己写入的这一版：网格已经在动画里换好位置，不再整表重建两套列表
+    /// （重建会在移动动画进行中重配所有可见卡片）。云同步等外部改动照常重建。
+    private func handleGridOrderRevision(_ revision: Int) {
+        if revision == expectedLocalGridOrderRevision {
+            expectedLocalGridOrderRevision = -1
+            return
+        }
+        debouncedUpdateWallpaperItems()
+        debouncedUpdateMediaItems()
+    }
+
     /// 处理排序 drop。
     /// - Parameter targetID: 插入到该 entry 之前；传 nil 表示插入到末尾。
     @discardableResult
     private func handleGridReorderDrop(_ payloads: [String], before targetID: String?) -> Bool {
         let orderedItemIDs = currentItemIDs
-        let availableIDs = Set(orderedItemIDs)
-        let movingIDs = uniqueIDs(payloads.flatMap(parseDropPayload))
-            .filter { availableIDs.contains($0) }
+        let payloadIDs = Set(payloads.flatMap(parseDropPayload))
+        // 按网格里的现有先后排列（负载里是按字符串排序的），多选拖动后保持原相对顺序。
+        let movingIDs = orderedItemIDs.filter { payloadIDs.contains($0) }
+        let movingSet = Set(movingIDs)
         AppLogger.debug(.grid, "[DragDiag] 排序落点", metadata: [
             "payloadStrings": payloads.count,
             "movingItems": movingIDs.count,
@@ -2503,16 +2523,38 @@ struct MyLibraryContentView: View {
         ])
         guard !movingIDs.isEmpty else { return false }
 
-        withAnimation(.spring(response: 0.36, dampingFraction: 0.85)) {
-            gridOrderStore.reorder(
-                moving: movingIDs,
-                before: targetID,
-                availableIDs: orderedItemIDs,
-                scope: currentGridOrderScope
-            )
-            rebuildCurrentLibraryLists(reason: "library-reset")
-            hoveredInsertionID = nil
+        // 落点在被拖动的那一块里面（多选时最常见）：顺延到它后面第一张不在拖动集合里的卡片。
+        var effectiveTargetID: String? = nil
+        if let targetID {
+            guard let targetIndex = orderedItemIDs.firstIndex(of: targetID) else { return false }
+            effectiveTargetID = orderedItemIDs[targetIndex...].first { !movingSet.contains($0) }
         }
+
+        var nextOrder = orderedItemIDs.filter { !movingSet.contains($0) }
+        let insertIndex = effectiveTargetID.flatMap { nextOrder.firstIndex(of: $0) } ?? nextOrder.endIndex
+        nextOrder.insert(contentsOf: movingIDs, at: insertIndex)
+        // 放回原位：不写盘、不重建，卡片直接落回去。
+        guard nextOrder != orderedItemIDs else {
+            hoveredInsertionID = nil
+            return true
+        }
+
+        let revisionBefore = gridOrderStore.revision
+        expectedLocalGridOrderRevision = revisionBefore + 1
+        gridOrderStore.reorder(
+            moving: movingIDs,
+            before: effectiveTargetID,
+            availableIDs: orderedItemIDs,
+            scope: currentGridOrderScope
+        )
+        guard gridOrderStore.revision != revisionBefore else {
+            expectedLocalGridOrderRevision = -1
+            return false
+        }
+        // 顺序在 body 里由 orderedGridEntries 实时套用，不需要重建列表；
+        // 网格按 itemIdentifier 发现换序，用移动动画把卡片滑到新位置。
+        gridReloadToken &+= 1
+        hoveredInsertionID = nil
         return true
     }
 
@@ -3153,17 +3195,10 @@ struct MyLibraryContentView: View {
                 guard idx < items.count else { return nil }
                 return NSString(string: dragPayload(for: items[idx].id))
             },
-            onValidateReorderDrop: { payloads, _ in
-                guard isEditing else { return false }
-                // 拖拽 hover 期间每次鼠标移动都会走这里：availableIDs 必须只求值一次，
-                // 不能写进 filter 闭包内（那样每个负载 ID 都会重算一遍 currentItemIDs 的排序结果）。
-                let availableIDs = Set(currentItemIDs)
-                return LibraryDragPayload.ids(from: payloads).contains { availableIDs.contains($0) }
-            },
-            onPerformReorderDrop: { payloads, targetIndex in
-                let targetID: String? = targetIndex < items.count ? items[targetIndex].id : nil
-                return handleGridReorderDrop(payloads, before: targetID)
-            }
+            // 动漫收藏的顺序不经过 gridOrderStore（currentAnimeItems 不套用排序），
+            // 落点只会写进媒体作用域、界面毫无变化。不接排序落点，避免「看着能放、放了没反应」。
+            onValidateReorderDrop: nil,
+            onPerformReorderDrop: nil
         )
     }
 

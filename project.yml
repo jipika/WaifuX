@@ -73,6 +73,11 @@ targets:
       - path: AnimeRules
         type: folder
         buildPhase: resources
+      # 推送到手机工具（PyInstaller 单文件；源码+二进制在 Tools/MobilePush/，git 忽略）
+      - path: Tools/MobilePush/we-mpkg-tool
+        buildPhase: resources
+      - path: Tools/MobilePush/we-pair-server
+        buildPhase: resources
       # 根目录源文件（未被以上子目录覆盖）
       - path: WallpaperEngineEmbeddedAssets.swift
       - path: BackgroundAgent/BackgroundAgentWire.swift

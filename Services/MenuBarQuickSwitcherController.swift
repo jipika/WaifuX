@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Kingfisher
 import SwiftUI
 
 @MainActor
@@ -259,6 +260,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 这里用 CombineLatest 合成一份快照，值相等就丢弃，避免三个服务各报一次
     /// 变更导致弹窗重复重绘。
     @Published private(set) var playbackSnapshot = PlaybackSnapshot.empty
+    /// 封面同路径覆盖（重新抽帧）时 URL 不变，KFImage 不会重载；视图把它拼进 `.id` 强制换图。
+    @Published private(set) var coverRevision = 0
+    private var coverObservers: Set<AnyCancellable> = []
+    /// 封面更新通知触发的重解析任务；与 `previewTasks` 分开，免得打乱预热并发槽计数。
+    private var coverRefreshTasks: [String: Task<Void, Never>] = [:]
     private var playbackObservers: Set<AnyCancellable> = []
     private var playbackRefreshWorkItem: DispatchWorkItem?
 
@@ -386,6 +392,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         lastRepositoryBuildMS = repository.lastBuildDurationMS
 
         startObservingPlaybackState()
+        startObservingCoverUpdates()
         refreshPlaybackSnapshot()
     }
 
@@ -613,6 +620,49 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: item)
             }
             .store(in: &playbackObservers)
+    }
+
+    /// 抽帧/烘焙封面落盘后（`.sceneOfflineBakeThumbnailDidUpdate`，object = itemID）
+    /// 刷新候选项封面。抽帧不改下载记录，仓库按记录指纹缓存的旧 preview 必须显式失效。
+    func startObservingCoverUpdates() {
+        guard coverObservers.isEmpty else { return }
+        NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self, let itemID = notification.object as? String else { return }
+                let posterURL = notification.userInfo?["thumbnailURL"] as? URL
+                self.handleCoverUpdate(itemID: itemID, posterURL: posterURL)
+            }
+            .store(in: &coverObservers)
+    }
+
+    private func handleCoverUpdate(itemID: String, posterURL: URL?) {
+        MenuBarQuickWallpaperRepository.shared.invalidateItemsCache()
+        let targets = batchItems.filter { $0.sceneBakeItemID == itemID }
+        guard !targets.isEmpty else { return }
+
+        for item in targets {
+            coverRefreshTasks[item.id]?.cancel()
+            coverRefreshTasks[item.id] = Task { @MainActor [weak self] in
+                // 同路径覆盖写入：清掉 hero/chip 用的 768 降采样内存缓存，否则同 URL 仍出旧帧。
+                if let posterURL {
+                    let processor = DownsamplingImageProcessor(size: CGSize(width: 768, height: 768))
+                    try? await ImageCache.default.removeImage(
+                        forKey: posterURL.cacheKey,
+                        processorIdentifier: processor.identifier
+                    )
+                }
+                let resolved = await MenuBarQuickWallpaperRepository.shared.previewURL(
+                    for: item,
+                    ignoringCurrentThumbnail: true
+                )
+                guard let self, !Task.isCancelled else { return }
+                self.coverRefreshTasks[item.id] = nil
+                guard let resolved else { return }
+                self.updateThumbnail(resolved, for: item.id)
+                self.coverRevision &+= 1
+            }
+        }
     }
 
     func togglePlaybackForTargetScreen() {
@@ -1034,6 +1084,10 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             task.cancel()
         }
         previewTasks.removeAll()
+        for task in coverRefreshTasks.values {
+            task.cancel()
+        }
+        coverRefreshTasks.removeAll()
         previewSlotReleased = false
     }
 
@@ -1414,8 +1468,22 @@ private final class MenuBarQuickWallpaperRepository {
         return selectedFolderIDs.contains(normalizedFolderID)
     }
 
-    func previewURL(for item: MenuBarQuickWallpaperItem) async -> URL? {
-        if let thumbnailURL = item.thumbnailURL {
+    /// 清掉候选项缓存。抽帧/烘焙封面落盘不改下载记录，记录指纹不变，
+    /// 必须显式失效，否则下次打开仍拿建项时的旧 preview。
+    func invalidateItemsCache() {
+        cachedAllFingerprint = nil
+        cachedFilteredItems.removeAll(keepingCapacity: true)
+        cachedCurrentKey = nil
+        cachedCurrentItem = nil
+    }
+
+    /// - Parameter ignoringCurrentThumbnail: 封面更新通知后重新解析时为 true，
+    ///   跳过 item 上已有的（可能是旧 preview 的）thumbnailURL。
+    func previewURL(
+        for item: MenuBarQuickWallpaperItem,
+        ignoringCurrentThumbnail: Bool = false
+    ) async -> URL? {
+        if !ignoringCurrentThumbnail, let thumbnailURL = item.thumbnailURL {
             return thumbnailURL
         }
 
@@ -1429,17 +1497,14 @@ private final class MenuBarQuickWallpaperRepository {
         if isDirectory.boolValue {
             // Scene/Web 工程：抽帧/烘焙封面优先，Workshop 自带 preview.* 只是最后兜底
             //（它是商店缩略图，用户已有高清抽帧时不应再显示旧预览图）。
+            // 烘焙/抽帧封面直接返回原图 URL：KFImage 已按 768 降采样；
+            // LocalImageThumbnailCache 只按路径做键，重抽覆盖同路径后会命中旧小图。
             // 1) 烘焙封面 scene_bake_<itemID>（含 Web canonical poster 同键空间）
             if let itemID = item.sceneBakeItemID,
                let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
-                return await localRasterPreviewURL(for: baked)
+                return baked
             }
-            // 2) 实时抽帧 scene_realtime_*（自动烘焙关闭时的临时抽帧）
-            if let itemID = item.sceneBakeItemID,
-               let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: itemID) {
-                return await localRasterPreviewURL(for: realtime)
-            }
-            // 3) 烘焙 MP4 / 原视频的列表小图
+            // 2) 烘焙 MP4 / 原视频的列表小图（有视频或烘焙资源时保持原逻辑）
             if let bakedPath = item.bakedVideoPath,
                let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(
                    forLocalVideo: URL(fileURLWithPath: bakedPath)
@@ -1449,6 +1514,11 @@ private final class MenuBarQuickWallpaperRepository {
             if let videoURL = item.videoPreviewURL,
                let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
                 return cached
+            }
+            // 3) 高清抽帧 scene_realtime_*（无视频/烘焙时的唯一高清来源）
+            if let itemID = item.sceneBakeItemID,
+               let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: itemID) {
+                return realtime
             }
             // 4) Workshop 自带 preview.*（最后兜底）
             if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: item.localURL) {
@@ -1494,11 +1564,11 @@ private final class MenuBarQuickWallpaperRepository {
         let thumbnailURL: URL?
         var isDirectory: ObjCBool = false
         fileManager.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
-        // 抽帧/烘焙封面优先，Workshop preview.* 仅作最后兜底（与 previewURL(for:) 同序）。
+        // 顺序（与 previewURL(for:) 同序）：烘焙封面 → 视频/烘焙 MP4 帧 → 高清抽帧
+        // scene_realtime_* → Workshop preview.*（最后兜底，由预热补）。
+        // 有视频或烘焙资源时保持原逻辑；只有抽帧时必须显示抽帧高清图。
         if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
             thumbnailURL = baked
-        } else if let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: record.item.id) {
-            thumbnailURL = realtime
         } else if let videoPreviewURL,
            let thumbnail = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
                 forLocalFile: videoPreviewURL
@@ -1516,6 +1586,8 @@ private final class MenuBarQuickWallpaperRepository {
         } else if let videoURL = videoPreviewURL ?? record.sceneBakeArtifact.map({ URL(fileURLWithPath: $0.videoPath) }),
                   let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
             thumbnailURL = cached
+        } else if let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: record.item.id) {
+            thumbnailURL = realtime
         } else {
             thumbnailURL = nil
         }

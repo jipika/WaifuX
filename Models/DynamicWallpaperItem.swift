@@ -21,7 +21,9 @@ struct DynamicWallpaperRawItem: Decodable, Hashable {
     let isHidden: Int?
     /// 条目在本列表（collection/exclusive 各自独立）JSON 数组中的位置。
     /// 官方更新列表是文件同名覆盖 + 新条目追加在数组尾部（2026-10-14 实测 +119 条全落 index 6483-6601，
-    /// 全部 385 条新命名条目都在尾段 6217+），数组位置 = 上架顺序；老命名的时间戳在数组顺序中有
+    /// 全部 385 条新命名条目都在尾段 6217+；2026-10-29 实测再 +714 条全落 index 6602-7315、零删除），
+    /// 文件编号与 `dongtai_current_version` 都不随内容更新变化，只能比对 `Last-Modified` / 体积判断是否出新；
+    /// 数组位置 = 上架顺序；老命名的时间戳在数组顺序中有
     /// ≤8 分钟的相邻抖动、无大回退，位置序与时间序基本一致且更权威。
     /// 运行时由 DynamicWallpaperService.parseAndAppend 填充，不属于 JSON 字段。
     var listIndex: Int = 0

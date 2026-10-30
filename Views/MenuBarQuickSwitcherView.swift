@@ -138,7 +138,7 @@ struct MenuBarQuickSwitcherView: View {
                 Color.black.opacity(0.10)
                     .overlay {
                         QuickSwitcherImage(url: selected.thumbnailURL, fallbackSymbol: "photo")
-                            .id(selected.id + (selected.thumbnailURL?.absoluteString ?? ""))
+                            .id(selected.id + (selected.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision)")
                             .transition(.opacity)
                     }
                     .overlay {
@@ -295,6 +295,7 @@ struct MenuBarQuickSwitcherView: View {
             hasher.combine(item.title)
         }
         hasher.combine(viewModel.selectedItem?.id)
+        hasher.combine(viewModel.coverRevision)
         hasher.combine(viewModel.isApplying)
         return hasher.finalize()
     }
@@ -309,6 +310,7 @@ struct MenuBarQuickSwitcherView: View {
             Color.black.opacity(0.08)
                 .overlay {
                     QuickSwitcherImage(url: item.thumbnailURL, fallbackSymbol: "photo")
+                        .id((item.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision)")
                 }
                 .frame(width: thumbnailSize, height: thumbnailSize)
                 .clipped()

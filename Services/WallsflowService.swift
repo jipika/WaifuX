@@ -169,10 +169,15 @@ actor WallsflowService {
                 ? "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
                 : "*/*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Sec-Fetch-Dest": isImage ? "image" : "video",
-            "Sec-Fetch-Mode": "no-cors",
-            "Sec-Fetch-Site": "same-site",
         ]
+        // 主站（签名下载 index.php?do=download…）对 Sec-Fetch-* 零容忍：2026-10-29 实测
+        // 同签名链接带 Sec-Fetch 三件套 403，只留 UA + CH + Referer 则 206 video/mp4。
+        // 媒体子域（cloud./play.）沿用原头组合（已实测可用）。
+        if url.host?.lowercased() != "wallsflow.com" {
+            headers["Sec-Fetch-Dest"] = isImage ? "image" : "video"
+            headers["Sec-Fetch-Mode"] = "no-cors"
+            headers["Sec-Fetch-Site"] = "same-site"
+        }
         headers.merge(clientHintHeaders) { _, new in new }
         return headers
     }
@@ -285,6 +290,59 @@ actor WallsflowService {
         return try await fetchDetail(url: item.pageURL)
     }
 
+    // MARK: - 高清原片签名链接
+
+    /// 高清原片入口（2026-10-29 站点改版后）：详情页按钮指向 `/download/<fileId>.html`，
+    /// 该页的按钮 `data-wf-dl` + `data-wf-t`（签名，约 10 分钟有效）在点击时拼成
+    /// `index.php?do=download&id=<fileId>&t=<签名>&ab=2` 才回 `video/mp4` 文件流。
+    /// 旧版无签名的 `do=download&id=` 现在只回 HTML。签名会过期，所以选项里只存
+    /// 下载页地址，真正下载前再调本方法现取。旧缓存里的 `do=download&id=N`
+    /// 映射到 `/download/N.html`（实测 id 同为文件号）。
+    nonisolated static func signedDownloadPageURL(for url: URL) -> URL? {
+        guard url.host?.lowercased() == "wallsflow.com" else { return nil }
+        let path = url.path
+        if path.hasPrefix("/download/"), path.hasSuffix(".html") { return url }
+        guard path == "/index.php",
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              items.first(where: { $0.name == "do" })?.value == "download",
+              !items.contains(where: { $0.name == "t" }),
+              let id = items.first(where: { $0.name == "id" })?.value,
+              !id.isEmpty, id.allSatisfy(\.isNumber)
+        else { return nil }
+        return URL(string: "\(siteOrigin)download/\(id).html")
+    }
+
+    /// 取下载页并拼出签名直链。`referer` 必须是详情页：只带站点根的 Referer 时
+    /// 下载页会直接回详情页内容（无 data-wf-dl）。
+    func resolveSignedDownloadURL(downloadPage: URL, referer: URL?) async throws -> URL {
+        let html = try await fetchHTML(from: downloadPage, referer: referer)
+        func attribute(_ name: String) -> String? {
+            let pattern = name + #"="([^"]+)""#
+            guard let re = try? NSRegularExpression(pattern: pattern),
+                  let match = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+                  let range = Range(match.range(at: 1), in: html) else { return nil }
+            return String(html[range]).replacingOccurrences(of: "&amp;", with: "&")
+        }
+        guard let base = attribute("data-wf-dl"), let token = attribute("data-wf-t"),
+              var components = URLComponents(string: base) else {
+            // 站点对同一壁纸有短冷却（2026-10-29 实测文案：「You already downloaded this
+            // wallpaper. You can download it again in 1 min.」），此时页面不出按钮。
+            if html.contains("wf-dlp-done") || html.contains("You already downloaded this wallpaper") {
+                print("[WallsflowService] 下载冷却中 | page=\(downloadPage.absoluteString)")
+                throw WallsflowDownloadError.cooldown
+            }
+            print("[WallsflowService] 下载页缺少 data-wf-dl/data-wf-t | page=\(downloadPage.absoluteString) len=\(html.count)")
+            throw WallsflowError.parseFailed("高清下载链接解析失败")
+        }
+        // ab=2：站点脚本对「未请求 AdSense」的环境传 2，服务端按非广告拦截放行。
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "t", value: token),
+            URLQueryItem(name: "ab", value: "2"),
+        ]
+        guard let url = components.url, Self.isProtectedMediaURL(url) else { throw WallsflowError.invalidURL }
+        return url
+    }
+
     // MARK: - 出口敏感的请求（直连优先）
 
     /// 抓取 HTML（列表 / 搜索 / 详情）。
@@ -298,9 +356,10 @@ actor WallsflowService {
     ///    通过、用户无感），拿到 HTML 的同时把 `cf_clearance` 同步进共享 cookie
     ///    存储，后续请求可复用站点允许的会话；有效期由站点决定。
     /// 已取得浏览器会话后，页面和媒体优先使用同一 UA、Cookie 和系统代理路由。
-    func fetchHTML(from url: URL) async throws -> String {
+    func fetchHTML(from url: URL, referer: URL? = nil) async throws -> String {
         let browserUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
         var headers = defaultHeaders
+        if let referer { headers["Referer"] = referer.absoluteString }
         if let browserUserAgent {
             headers["User-Agent"] = browserUserAgent
             for key in Self.clientHintHeaders.keys { headers.removeValue(forKey: key) }
@@ -402,6 +461,15 @@ actor WallsflowService {
         try Task.checkCancellation()
         guard Self.isProtectedMediaURL(url) else { throw WallsflowError.invalidURL }
         progressHandler?(0.02)
+        var url = url
+        var headers = headers
+        if let downloadPage = Self.signedDownloadPageURL(for: url) {
+            // 调用方传入的 Referer 是详情页（mediaRequestHeaders(pageURL:)），下载页要求它。
+            let detailReferer = headers["Referer"].flatMap(URL.init(string:))
+            url = try await resolveSignedDownloadURL(downloadPage: downloadPage, referer: detailReferer)
+            headers = Self.mediaRequestHeaders(for: url, pageURL: downloadPage) ?? headers
+            print("[WallsflowService] 高清原片签名链接已生成 | page=\(downloadPage.path)")
+        }
         let userAgent = await WallsflowWebFetcher.shared.currentUserAgent
         var request = URLRequest(url: url)
         request.allHTTPHeaderFields = headers
@@ -1005,10 +1073,16 @@ private extension WallsflowService {
         }()
 
         // 下载 URL
+        // 2026-10-29 改版：按钮指向 /download/<fileId>.html（下载时再换签名直链）；
+        // 旧版 index.php?do=download&id= 作兜底（下载时同样映射到下载页）。
         let downloadURL: URL? = {
-            if let link = try? document.select("a[href*=\"index.php?do=download&id=\"]").first(),
-               let href = try? link.attr("href") {
-                return URL(string: href.hasPrefix("http") ? href : "https://wallsflow.com\(href)")
+            for selector in ["a[href*=\"/download/\"][href$=\".html\"]", "a[href*=\"index.php?do=download&id=\"]"] {
+                if let link = try? document.select(selector).first(),
+                   let href = try? link.attr("href"),
+                   let url = URL(string: href.hasPrefix("http") ? href : "https://wallsflow.com\(href)"),
+                   Self.signedDownloadPageURL(for: url) != nil {
+                    return url
+                }
             }
             return nil
         }()
@@ -1246,6 +1320,17 @@ enum WallsflowError: LocalizedError, ParseFailureError {
         case .parseFailed(let detail): return "Wallsflow 解析失败: \(detail)"
         case .invalidURL: return "无效的 Wallsflow URL"
         case .notFound: return "Wallsflow 内容未找到"
+        }
+    }
+}
+
+/// 高清原片下载的站点侧限制（不是解析失败，不挂 ParseFailureError）。
+enum WallsflowDownloadError: LocalizedError {
+    case cooldown
+
+    var errorDescription: String? {
+        switch self {
+        case .cooldown: return "Wallsflow 限制同一壁纸短时间内重复下载，请约 1 分钟后再试"
         }
     }
 }

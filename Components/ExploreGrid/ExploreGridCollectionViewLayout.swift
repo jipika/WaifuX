@@ -455,7 +455,10 @@ final class ExploreGridCollectionViewLayout: NSCollectionViewLayout {
     private func insertionIndex(for point: NSPoint) -> Int {
         let itemCount = cache.count
         guard let collectionView else { return itemCount }
-        let probeRect = collectionView.bounds.insetBy(dx: -columnSpacing, dy: -rowSpacing)
+        // 只扫视口附近：bounds 是整个文档高度，大库 hover 每帧都会遍历全部 item 的布局属性。
+        let visible = collectionView.visibleRect
+        let probeBase = visible.isEmpty ? collectionView.bounds : visible
+        let probeRect = probeBase.insetBy(dx: -columnSpacing, dy: -rowSpacing)
         var nearest: NSCollectionViewLayoutAttributes?
         var nearestDistance = CGFloat.greatestFiniteMagnitude
         var lowestMaxY = -CGFloat.greatestFiniteMagnitude

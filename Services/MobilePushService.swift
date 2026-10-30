@@ -185,11 +185,26 @@ final class MobilePushService: ObservableObject {
     private var pendingLog = ""
     private func ingestLog(_ chunk: String) {
         pendingLog += chunk
-        while let nl = pendingLog.firstIndex(of: "\n") {
-            let line = String(pendingLog[..<nl])
-            pendingLog = String(pendingLog[pendingLog.index(after: nl)...])
+        // 服务端推送进度用 \r 结尾(同行刷新), 也可能混 \n — 统一按 \r 和 \n 双分隔切
+        while let idx = pendingLog.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(pendingLog[..<idx])
+            pendingLog = String(pendingLog[pendingLog.index(after: idx)...])
             serverLog.append(line)
             if serverLog.count > 400 { serverLog.removeFirst(serverLog.count - 400) }
+            // 落盘副本：设置页「导出日志」会合并带上（诊断手机配对/推送用）
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".waifux", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let logURL = dir.appendingPathComponent("pair-server-client.log")
+            let data = Data((line + "\n").utf8)
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                defer { try? handle.close() }
+                handle.seekToEndOfFile()
+                handle.write(data)
+            } else {
+                try? data.write(to: logURL)
+            }
             if line.contains("PIN:") {
                 let pin = line.components(separatedBy: "PIN:")[1]
                     .trimmingCharacters(in: .whitespaces)
@@ -197,8 +212,17 @@ final class MobilePushService: ObservableObject {
                 pendingPIN = String(pin)
             }
             if line.contains("配对成功") {
-                if case .waitingPairing = phase {
-                    phase = .pushing(name: "传输中", progress: 0)
+                phase = .pushing(name: "传输中", progress: 0)
+            }
+            if line.contains("等待手机重连"), case .waitingPairing(let pin) = phase {
+                phase = .waitingPairing(pin: pin)
+            }
+            // 推送进度: "  标题: 34% (3840KB/11267KB)"
+            if line.contains("%"), line.contains("KB/"), case .pushing(let name, _) = phase {
+                if let pctPart = line.components(separatedBy: "%").first,
+                   let lastNum = pctPart.split(separator: " ").last,
+                   let pct = Double(lastNum.replacingOccurrences(of: "%", with: "")) {
+                    phase = .pushing(name: name, progress: min(1.0, pct / 100.0))
                 }
             }
             if line.contains("完成 "), line.contains("B in") {

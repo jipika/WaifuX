@@ -74,6 +74,9 @@ struct ExploreGridContainer: NSViewRepresentable {
     var onValidateReorderDrop: (([String], Int) -> Bool)? = nil
     /// 编辑态拖拽排序：drop 落地，返回是否消费。
     var onPerformReorderDrop: (([String], Int) -> Bool)? = nil
+    /// 稳定 ID（可选）。提供后，数量不变但顺序变化（拖拽排序落地）会用移动动画把卡片滑到新位置，
+    /// 而不是原地换内容。nil 的页面行为不变。
+    var itemIdentifier: ((Int) -> String)? = nil
     /// 固定尺寸卡片（猜你喜欢 260×360 等）。非 nil 时布局忽略 aspectRatio，
     /// 卡片保持固定宽高且列块居中。见 `ExploreGridCollectionViewLayout.fixedCardSize`。
     var fixedCardSize: CGSize? = nil
@@ -101,6 +104,7 @@ struct ExploreGridContainer: NSViewRepresentable {
         coordinator.syncHeaderCollapseStateFromParent()
         coordinator.syncGridSpacingIfNeeded(gridSpacing)
         coordinator.syncReorderDropRegistrationIfNeeded()
+        coordinator.syncClickDeferralIfNeeded()
         let layoutRefreshChanged = layoutRefreshToken != coordinator.lastLayoutRefreshToken
         let visibilityRefreshChanged = visibilityRefreshToken != coordinator.lastVisibilityRefreshToken
 
@@ -159,6 +163,8 @@ struct ExploreGridContainer: NSViewRepresentable {
             } else {
                 coordinator.reloadData()
             }
+        } else if coordinator.reconcileItemOrderIfNeeded() {
+            // 已按 ID 顺序差异安排了移动动画或整屏重配，动画结束会顺带重配可见 cell。
         } else if reloadToken != coordinator.lastReloadToken {
             coordinator.refreshVisibleItems()
         }

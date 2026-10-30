@@ -89,6 +89,72 @@ private final class ExploreGridScrollView: NSScrollView {
     }
 }
 
+/// 可拖拽网格的点击/拖拽判定。
+///
+/// NSCollectionView 在鼠标按下时就完成选中，`didSelectItemsAt` 立刻触发 `onSelect`：
+/// 按住卡片准备拖动的那一刻，浏览态已经打开详情页、编辑态已经切换了勾选，拖拽还没开始界面就被换掉了。
+/// 这里把选中结果暂存到「鼠标松开且本次按压没有发起拖拽」时才执行（和 Finder 的点击/拖动判定一致）。
+/// 只对提供拖拽源的网格启用，其余网格行为不变。
+@MainActor
+final class ExploreGridCollectionView: NSCollectionView {
+    var defersClickUntilMouseUp = false
+    var onDeferredClick: ((IndexPath) -> Void)?
+
+    private var isPressActive = false
+    private var pressStartedDrag = false
+    private var pendingClickIndexPath: IndexPath?
+
+    override func mouseDown(with event: NSEvent) {
+        guard defersClickUntilMouseUp else {
+            super.mouseDown(with: event)
+            return
+        }
+        isPressActive = true
+        pressStartedDrag = false
+        pendingClickIndexPath = nil
+        super.mouseDown(with: event)
+        // super 可能在内部跑完整段鼠标跟踪（含松开）才返回；按键已抬起就直接结算。
+        if NSEvent.pressedMouseButtons & 1 == 0 {
+            finishPress()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        finishPress()
+    }
+
+    /// 选中回调入口：按压进行中只暂存，返回 true；否则返回 false 由调用方立即执行。
+    func deferClickIfPressing(_ indexPath: IndexPath) -> Bool {
+        guard defersClickUntilMouseUp, isPressActive else { return false }
+        pendingClickIndexPath = indexPath
+        return true
+    }
+
+    func dragSessionDidBegin() {
+        pressStartedDrag = true
+        pendingClickIndexPath = nil
+    }
+
+    /// 拖拽会话吞掉了 mouseUp，这里收尾，避免按压状态残留到下一次键盘选择。
+    func dragSessionDidEnd() {
+        isPressActive = false
+        pressStartedDrag = false
+        pendingClickIndexPath = nil
+    }
+
+    private func finishPress() {
+        guard isPressActive else { return }
+        isPressActive = false
+        let indexPath = pressStartedDrag ? nil : pendingClickIndexPath
+        pendingClickIndexPath = nil
+        pressStartedDrag = false
+        if let indexPath {
+            onDeferredClick?(indexPath)
+        }
+    }
+}
+
 /// NSCollectionView 数据源/代理协调器
 /// 管理数据更新、滚动检测、加载更多
 @MainActor
@@ -125,6 +191,17 @@ final class ExploreGridCoordinator: NSObject {
     private var pendingRestoreScrollOffset: CGFloat?
     private var registeredCellClassIdentifiers: Set<NSUserInterfaceItemIdentifier> = []
     private var isRegisteredForReorderDrops = false
+    /// 同一次拖拽（draggingSequenceNumber）内复用粘贴板负载与校验结果。
+    private struct DropValidationCache {
+        let sequence: Int
+        let payloads: [String]
+        let targetIndex: Int
+        let accepted: Bool
+    }
+    private var dropValidationCache: DropValidationCache?
+    /// 网格当前实际展示的 ID 顺序（提供 itemIdentifier 的网格才记录），用于把「同数量换序」做成移动动画。
+    private var displayedItemIDs: [String]?
+    private var pendingReorderAnimation: DispatchWorkItem?
     private var isHoverInteractionEnabled = true
     /// 仅当可见 item 索引范围变化时再回调，减轻 SwiftUI 侧与预取链路的无效触发
     private var lastReportedVisibleItemRange: (min: Int, max: Int)?
@@ -150,7 +227,7 @@ final class ExploreGridCoordinator: NSObject {
         }
 
         // 配置 NSCollectionView
-        self.collectionView = NSCollectionView()
+        self.collectionView = ExploreGridCollectionView()
         collectionView.wantsLayer = true
         collectionView.collectionViewLayout = layout
         collectionView.backgroundColors = [.clear]
@@ -195,6 +272,12 @@ final class ExploreGridCoordinator: NSObject {
         collectionView.dataSource = self
         collectionView.delegate = self
         layout.delegate = self
+        if let gridView = collectionView as? ExploreGridCollectionView {
+            gridView.onDeferredClick = { [weak self] indexPath in
+                self?.performSelect(at: indexPath)
+            }
+        }
+        syncClickDeferralIfNeeded()
 
         // 监听滚动事件
         NotificationCenter.default.addObserver(
@@ -481,6 +564,8 @@ final class ExploreGridCoordinator: NSObject {
         // 会导致 _postWindowNeedsLayout 崩溃。
         pendingReload?.cancel()
         pendingBatchUpdate?.cancel()
+        pendingReorderAnimation?.cancel()
+        pendingReorderAnimation = nil
         let itemCount = parent.itemCount()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -492,6 +577,7 @@ final class ExploreGridCoordinator: NSObject {
             self.layout.preferredColumnCount = self.parent.gridColumnCount
             // reloadData 会完全重建布局，不需要手动 invalidateLayout
             self.collectionView.reloadData()
+            self.recordDisplayedItemIDs()
             self.layoutDocument()
             self.applyPendingRestoreScrollOffsetIfNeeded()
         }
@@ -540,6 +626,12 @@ final class ExploreGridCoordinator: NSObject {
     /// NSCollectionView 必须先 `registerForDraggedTypes:` 才会把 drop 消息派给 delegate：
     /// 不注册时 `validateDrop` / `acceptDrop` 永远不会被调用 —— 拖拽能拖起来，松手毫无反应。
     /// 只对提供排序落点回调的页面（我的库网格）注册，探索页等只读网格保持不注册。
+    /// 有拖拽源的网格才推迟点击到鼠标松开（见 `ExploreGridCollectionView`）。
+    func syncClickDeferralIfNeeded() {
+        (collectionView as? ExploreGridCollectionView)?.defersClickUntilMouseUp =
+            parent.pasteboardWriterForItem != nil
+    }
+
     func syncReorderDropRegistrationIfNeeded() {
         guard !isRegisteredForReorderDrops,
               parent.onValidateReorderDrop != nil,
@@ -548,10 +640,121 @@ final class ExploreGridCoordinator: NSObject {
         isRegisteredForReorderDrops = true
     }
 
+    // MARK: - 换序移动动画（拖拽排序落地）
+
+    /// 单次动画允许的最大移动数；超过就退回原地重配，避免大库一次挪几千个 item。
+    private static let maxAnimatedMoves = 600
+
+    private func currentParentItemIDs() -> [String]? {
+        guard let identify = parent.itemIdentifier else { return nil }
+        let count = parent.itemCount()
+        var ids: [String] = []
+        ids.reserveCapacity(count)
+        for index in 0..<count { ids.append(identify(index)) }
+        return ids
+    }
+
+    fileprivate func recordDisplayedItemIDs() {
+        displayedItemIDs = currentParentItemIDs()
+    }
+
+    /// 数量不变时比对展示顺序与最新顺序。
+    /// 返回 true 表示已处理（安排了移动动画，或内容整体换了已安排重配），调用方不必再走 reloadToken 分支。
+    func reconcileItemOrderIfNeeded() -> Bool {
+        guard parent.itemIdentifier != nil,
+              let displayed = displayedItemIDs,
+              let latest = currentParentItemIDs(),
+              displayed.count == latest.count,
+              displayed != latest else { return false }
+
+        if Self.permutationMoves(from: displayed, to: latest) != nil {
+            scheduleReorderAnimation()
+        } else {
+            // 同数量但不是同一批 ID（换目录等）：原地重配即可。
+            refreshVisibleItems()
+        }
+        return true
+    }
+
+    private func scheduleReorderAnimation() {
+        pendingReorderAnimation?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingReorderAnimation = nil
+            self.performReorderAnimation()
+        }
+        pendingReorderAnimation = workItem
+        // 和 reloadData / batch updates 一样延到下一轮 run loop，避开 SwiftUI update 期间改 AppKit 布局。
+        DispatchQueue.main.async(execute: workItem)
+    }
+
+    private func performReorderAnimation() {
+        guard canSafelyMutateVisibleItems,
+              let displayed = displayedItemIDs,
+              let latest = currentParentItemIDs(),
+              displayed.count == latest.count else {
+            reloadData()
+            return
+        }
+        guard displayed != latest else { return }
+
+        guard let moves = Self.permutationMoves(from: displayed, to: latest),
+              !moves.isEmpty,
+              moves.count <= Self.maxAnimatedMoves,
+              parent.isVisible,
+              collectionView.window != nil,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            reconfigureVisibleItems()
+            return
+        }
+
+        displayedItemIDs = latest
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.28
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+            context.allowsImplicitAnimation = true
+            self.collectionView.animator().performBatchUpdates {
+                for move in moves {
+                    self.collectionView.moveItem(
+                        at: IndexPath(item: move.from, section: 0),
+                        to: IndexPath(item: move.to, section: 0)
+                    )
+                }
+            } completionHandler: { [weak self] _ in
+                guard let self else { return }
+                // 卡片跟着 item 移动，内容本来就对；这里补一次重配同步勾选/编辑态等非顺序状态。
+                self.reconfigureVisibleItems()
+                self.handleScrollUpdate()
+            }
+        }
+    }
+
+    /// old → new 是同一批 ID 的重排时，返回需要移动的 (from, to)；否则 nil。
+    static func permutationMoves(from old: [String], to new: [String]) -> [(from: Int, to: Int)]? {
+        guard old.count == new.count else { return nil }
+        var oldIndexByID: [String: Int] = [:]
+        oldIndexByID.reserveCapacity(old.count)
+        for (index, id) in old.enumerated() {
+            guard oldIndexByID.updateValue(index, forKey: id) == nil else { return nil }
+        }
+        var used = [Bool](repeating: false, count: old.count)
+        var moves: [(from: Int, to: Int)] = []
+        for (newIndex, id) in new.enumerated() {
+            guard let oldIndex = oldIndexByID[id], !used[oldIndex] else { return nil }
+            used[oldIndex] = true
+            if oldIndex != newIndex {
+                moves.append((from: oldIndex, to: newIndex))
+            }
+        }
+        return moves
+    }
+
     func performBatchUpdates(insertedCount: Int, oldCount: Int) {
         // 延迟 batch updates，避免在窗口 display cycle 内同步触发布局循环
         pendingReload?.cancel()
         pendingBatchUpdate?.cancel()
+        pendingReorderAnimation?.cancel()
+        pendingReorderAnimation = nil
         let newTotal = oldCount + insertedCount
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -565,6 +768,7 @@ final class ExploreGridCoordinator: NSObject {
                 self.layout.preferredColumnCount = self.parent.gridColumnCount
                 // reloadData 会完全重建布局，不需要手动 invalidateLayout
                 self.collectionView.reloadData()
+                self.recordDisplayedItemIDs()
                 self.layoutDocument()
                 return
             }
@@ -586,6 +790,7 @@ final class ExploreGridCoordinator: NSObject {
                 self.collectionView.performBatchUpdates {
                     self.collectionView.insertItems(at: Set(newIndexPaths))
                 } completionHandler: { [weak self] _ in
+                    self?.recordDisplayedItemIDs()
                     self?.layoutDocument()
                     self?.applyPendingRestoreScrollOffsetIfNeeded()
                 }
@@ -677,6 +882,8 @@ final class ExploreGridCoordinator: NSObject {
 
     private func reconfigureVisibleItems() {
         guard canSafelyMutateVisibleItems else { return }
+        // 重配后可见 cell 都按最新数据显示，展示顺序即最新顺序。
+        recordDisplayedItemIDs()
 
         let itemCount = parent.itemCount()
         let visibleIndexPaths = targetVisibleIndexPaths(itemCount: itemCount)
@@ -802,6 +1009,7 @@ final class ExploreGridCoordinator: NSObject {
                 self.lastItemCount = expectedCount
                 self.layout.invalidateLayout()
                 self.collectionView.reloadData()
+                self.recordDisplayedItemIDs()
             } else {
                 // 数量未变 → 只重配可视 cell，保留图片，不重启下载。
                 // 历史上这里曾用双层 reloadData 作"切回 tab 双保险"，会强制重建可视 cell
@@ -1054,8 +1262,20 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         guard let indexPath = indexPaths.first else { return }
-        parent.onSelect?(indexPath.item)
         collectionView.deselectItems(at: indexPaths)
+        // 可拖拽网格：按压期间只暂存，松开且没拖动才算点击（见 ExploreGridCollectionView）。
+        if let gridView = collectionView as? ExploreGridCollectionView,
+           gridView.deferClickIfPressing(indexPath) {
+            return
+        }
+        performSelect(at: indexPath)
+    }
+
+    fileprivate func performSelect(at indexPath: IndexPath) {
+        guard indexPath.section == 0,
+              indexPath.item >= 0,
+              indexPath.item < parent.itemCount() else { return }
+        parent.onSelect?(indexPath.item)
     }
 
     // MARK: 拖拽排序落点（可选；onValidateReorderDrop 为 nil 的页面完全不走这些分支）
@@ -1096,8 +1316,28 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
             targetIndex = min(max(0, proposedDropIndexPath.pointee.item), itemCount)
         }
 
-        let payloads = Self.dropPayloadStrings(from: draggingInfo.draggingPasteboard)
-        let accepted = parent.onValidateReorderDrop?(payloads, targetIndex) ?? false
+        // hover 期间每次鼠标移动都会进来：同一次拖拽只读一次粘贴板，
+        // 落点没变就直接复用上一次的校验结果。
+        let sequence = draggingInfo.draggingSequenceNumber
+        let accepted: Bool
+        if let cache = dropValidationCache, cache.sequence == sequence {
+            if cache.targetIndex == targetIndex {
+                accepted = cache.accepted
+            } else {
+                accepted = parent.onValidateReorderDrop?(cache.payloads, targetIndex) ?? false
+                dropValidationCache = DropValidationCache(
+                    sequence: sequence, payloads: cache.payloads,
+                    targetIndex: targetIndex, accepted: accepted
+                )
+            }
+        } else {
+            let payloads = Self.dropPayloadStrings(from: draggingInfo.draggingPasteboard)
+            accepted = parent.onValidateReorderDrop?(payloads, targetIndex) ?? false
+            dropValidationCache = DropValidationCache(
+                sequence: sequence, payloads: payloads,
+                targetIndex: targetIndex, accepted: accepted
+            )
+        }
         guard accepted else { return [] }
 
         proposedDropIndexPath.pointee = NSIndexPath(forItem: min(targetIndex, itemCount), inSection: 0)
@@ -1121,6 +1361,7 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
         } else {
             targetIndex = min(max(0, indexPath.item), itemCount)
         }
+        dropValidationCache = nil
         let payloads = Self.dropPayloadStrings(from: draggingInfo.draggingPasteboard)
         let consumed = onPerform(payloads, targetIndex)
         AppLogger.debug(.grid, "[DragDiag] 排序落点落地", metadata: [
@@ -1140,10 +1381,22 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
         willBeginAt screenPoint: NSPoint,
         forItemsAt indexPaths: Set<IndexPath>
     ) {
+        (collectionView as? ExploreGridCollectionView)?.dragSessionDidBegin()
+        dropValidationCache = nil
         AppLogger.debug(.grid, "[DragDiag] 拖拽开始", metadata: [
             "draggedItems": indexPaths.count,
             "payloadStrings": Self.dropPayloadStrings(from: session.draggingPasteboard).count
         ])
+    }
+
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        draggingSession session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        dragOperation operation: NSDragOperation
+    ) {
+        (collectionView as? ExploreGridCollectionView)?.dragSessionDidEnd()
+        dropValidationCache = nil
     }
 }
 

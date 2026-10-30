@@ -418,6 +418,20 @@ final class AppLogger: @unchecked Sendable {
             to: destination
         )
 
+        // 推送到手机：配对握手诊断 + 推送服务端输出（MobilePushService 落盘副本）
+        readableSegments += appendLogSegment(
+            "MOBILE PUSH PAIRING DEBUG",
+            from: fm.homeDirectoryForCurrentUser.appendingPathComponent(".waifux/pair-debug.log"),
+            maxBytes: 256 * 1024,
+            to: destination
+        )
+        readableSegments += appendLogSegment(
+            "MOBILE PUSH SERVER",
+            from: fm.homeDirectoryForCurrentUser.appendingPathComponent(".waifux/pair-server-client.log"),
+            maxBytes: 512 * 1024,
+            to: destination
+        )
+
         // 最近的烘焙失败现场（按修改时间取前 3 份）
         if let tmpFiles = try? fm.contentsOfDirectory(
             at: fm.temporaryDirectory,
