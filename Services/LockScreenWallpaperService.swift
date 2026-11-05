@@ -516,6 +516,26 @@ final class LockScreenWallpaperService: ObservableObject {
         return requestID
     }
 
+    private nonisolated static func prepareStaticImagePublication(
+        originalImageData: Data, sourceURL: URL, alreadyCropped: Bool,
+        displayIDs: [UInt32], directory: URL, requestID: UUID
+    ) async throws -> (staged: LockScreenImagePublication.Staged, thumbnailData: Data?) {
+        try await Task.detached(priority: .userInitiated) {
+            // Scene transition frames already include their viewport/letterbox.
+            // Trimming black borders or applying crop again would change the frame.
+            let image: (data: Data, fileExtension: String)
+            if alreadyCropped {
+                image = (originalImageData, sourceURL.pathExtension.lowercased() == "png" ? "png" : "jpg")
+            } else {
+                image = prepareStaticLockScreenImageData(originalImageData, sourceURL: sourceURL)
+            }
+            let staged = try LockScreenImagePublication.stage(
+                data: image.data, fileExtension: image.fileExtension, displayIDs: displayIDs,
+                directory: directory, requestID: requestID)
+            return (staged: staged, thumbnailData: staticThumbnailJPEGData(imageData: image.data))
+        }.value
+    }
+
     /// Existing video/Web/static callers still require actual source readiness when requested.
     func cacheStaticImageSource(
         imageURL: URL, displayIDs: [UInt32], alreadyCropped: Bool = false,
@@ -591,20 +611,12 @@ final class LockScreenWallpaperService: ObservableObject {
         let targetDisplayIDs = Set(displayIDs).sorted()
         // Crop, stage and decode the actual written bytes off main. The same
         // decoder is used by the extension; unsupported input cannot replace prefs.
-        let prepared = try await Task.detached(priority: .userInitiated) {
-            // Scene transition frames already include their viewport/letterbox.
-            // Trimming black borders or applying crop again would change the frame.
-            let image: (data: Data, fileExtension: String)
-            if alreadyCropped {
-                image = (originalImageData, imageURL.pathExtension.lowercased() == "png" ? "png" : "jpg")
-            } else {
-                image = Self.prepareStaticLockScreenImageData(originalImageData, sourceURL: imageURL)
-            }
-            let staged = try LockScreenImagePublication.stage(
-                data: image.data, fileExtension: image.fileExtension, displayIDs: targetDisplayIDs,
-                directory: imageDir, requestID: requestID)
-            return (staged: staged, thumbnailData: Self.staticThumbnailJPEGData(imageData: image.data))
-        }.value
+        // Keep this throwing detached coroutine as a plain function call: inlining
+        // its closure here crashes the Swift 6 Release coroutine splitter.
+        let prepared = try await Self.prepareStaticImagePublication(
+            originalImageData: originalImageData, sourceURL: imageURL,
+            alreadyCropped: alreadyCropped, displayIDs: targetDisplayIDs,
+            directory: imageDir, requestID: requestID)
         var committed = false
         defer { if !committed { LockScreenImagePublication.discard(prepared.staged) } }
         // No await from the final request check through prefs publication and
