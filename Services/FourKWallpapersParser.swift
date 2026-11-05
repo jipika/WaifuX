@@ -7,6 +7,7 @@ struct Wallpaper4K: Identifiable, Codable, Equatable {
     let id: String
     let title: String
     let thumbnailURL: String
+    let mediumThumbnailURL: String   // thumbs_2t（800px 列表预览，网格卡片首选档）
     let hdThumbnailURL: String
     let originalURL: String
     let detailURL: String
@@ -430,6 +431,18 @@ final class FourKWallpapersParser {
         // 高清图 URL（从 contentUrl 获取，优先于推断的 URL）
         // contentUrl href 是 thumbs_2t (800px)，替换为 thumbs_3t (1280px) 保证详情页清晰
         let contentUrlElement = try element.select(Selectors.contentUrl).first()
+        // 中档预览 URL：contentUrl 原本就指向 thumbs_2t（800px，约 40–300KB/张），
+        // 网格卡片缩略图用它替代 thumbs_3t（1280px，300–570KB/张）——显示区域
+        // 384×216pt@2x=768px 时两档肉眼无差，但首屏字节量降 5–10 倍（2026-11-02 实测）。
+        // 非 2t 形态（preview/原图直链等）退回按 id+扩展名推导，保证 2t 恒有值。
+        let mediumFallbackURLString = "\(baseURL)/images/walls/thumbs_2t/\(id).\(actualExt)"
+        let resolvedMediumURL: String
+        if let href = try? contentUrlElement?.attr("href"), !href.isEmpty {
+            let fullHref = href.hasPrefix("http") ? href : "\(baseURL)\(href)"
+            resolvedMediumURL = fullHref.contains("/thumbs_2t/") ? fullHref : mediumFallbackURLString
+        } else {
+            resolvedMediumURL = mediumFallbackURLString
+        }
         let resolvedHDURL: String
         if let href = try? contentUrlElement?.attr("href"), !href.isEmpty {
             let fullHref = href.hasPrefix("http") ? href : "\(baseURL)\(href)"
@@ -504,15 +517,22 @@ final class FourKWallpapersParser {
         let contentUrlExt = (contentUrlHref as NSString).pathExtension.lowercased()
         let originalExt = contentUrlExt.isEmpty ? actualExt : contentUrlExt
 
-        if !detailURLString.isEmpty, width > 0, height > 0 {
-            let builtURL = buildOriginalURL(from: detailURLString, width: width, height: height, fileExtension: originalExt)
-            if !builtURL.isEmpty {
-                originalURLString = builtURL
-            } else {
-                // 构建失败，存详情页链接，下载时再解析
-                originalURLString = detailURLString
-            }
+        // ⚠️ 2026-11-02 实测：只有 contentUrl 自带分辨率时，拼出来的原图 URL 才可信。
+        // 现在站点列表页的 contentUrl 全是 `/images/walls/thumbs_2t/{id}.jpg`，不含尺寸，
+        // 一旦走关键词猜测，猜错的尺寸（例如真实 5120x2160 猜成 3840x2160）站点照样返回 200，
+        // 只会静默给出裁切/降采样的图 —— 「同一张壁纸每次加载出来不一样」就是这么来的。
+        // 因此无法确认真实尺寸时不再拼猜测 URL，改为保留详情页链接，
+        // 由下载链路从详情页的 `<a id="resolution">` 取站点认定的原图。
+        if !detailURLString.isEmpty, let confirmed = originalDimensions {
+            let builtURL = buildOriginalURL(
+                from: detailURLString,
+                width: confirmed.width,
+                height: confirmed.height,
+                fileExtension: originalExt
+            )
+            originalURLString = builtURL.isEmpty ? detailURLString : builtURL
         } else if !detailURLString.isEmpty {
+            // 尺寸未确认 → 交给详情页解析，不猜
             originalURLString = detailURLString
         } else {
             originalURLString = hdThumbnailURLString
@@ -522,6 +542,7 @@ final class FourKWallpapersParser {
             id: id,
             title: title,
             thumbnailURL: thumbnailURLString,
+            mediumThumbnailURL: resolvedMediumURL,
             hdThumbnailURL: resolvedHDURL,
             originalURL: originalURLString,
             detailURL: detailURLString,
@@ -549,11 +570,24 @@ final class FourKWallpapersParser {
         let currentPageStr = (try? activePageElement?.attr("data-page")) ?? "1"
         let currentPage = Int(currentPageStr) ?? 1
 
-        // 总页数：取所有页码链接中最大的数字
+        // 总页数：取所有页码元素中最大的数字
         // ⚠️ 不能取 last()，因为省略号后面的页码未必是最后一页
-        let pageLinks = try? pagination.select(Selectors.pageLinks)
+        // ⚠️ 搜索页和浏览页的分页标记不同：浏览页是 <a data-ripples href="?page=N">，
+        //    搜索页是 <p class="pages" style="display:none"><strong data-page="N">，没有 href。
+        //    只读 a 链接会让搜索页恒等于 totalPages=1 → hasMorePages=false，永远停在第一页。
         var totalPages = currentPage
-        if let links = pageLinks {
+
+        // 1) 页码元素自带的 data-page（两种页面结构都有）
+        if let pageNodes = try? pagination.select("[data-page]") {
+            for node in pageNodes {
+                if let raw = try? node.attr("data-page"), let num = Int(raw) {
+                    totalPages = max(totalPages, num)
+                }
+            }
+        }
+
+        // 2) 链接文本与 href 兜底（浏览页）
+        if let links = try? pagination.select(Selectors.pageLinks) {
             for link in links {
                 if let text = try? link.text(), let num = Int(text) {
                     totalPages = max(totalPages, num)
@@ -654,10 +688,18 @@ final class FourKWallpapersParser {
             return nil
         }
         // 标题格式: "Search results for - {keyword}"
-        if let range = text.range(of: "Search results for - ") {
-            return String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        // 第 2 页起站点会追加页码后缀: "Search results for - naruto- Page 2"
+        // ⚠️ 不剥掉后缀的话，关键词会变成 "naruto- Page 2"，用于判断「有无结果」的比对会失真。
+        guard let range = text.range(of: "Search results for - ") else {
+            return text
         }
-        return text
+        var keyword = String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        if let pageSuffix = keyword.range(of: "- Page ", options: .backwards) {
+            keyword = String(keyword[keyword.startIndex..<pageSuffix.lowerBound])
+                .trimmingCharacters(in: .whitespaces)
+        }
+        // 站点把空格规范成 "-"，还原成可读形式交给上层
+        return keyword.replacingOccurrences(of: "-", with: " ").trimmingCharacters(in: .whitespaces)
     }
 
     /// 从 URL 推断分类
@@ -841,11 +883,25 @@ final class FourKWallpapersParser {
         return url
     }
 
+    /// 搜索页 URL。
+    ///
+    /// ⚠️ 2026-11-02 实测：`/search/?q=xxx&page=N` 从第 2 页起直接 404（站点只把 `q`
+    /// 当作表单参数，翻页走路径段）。真实可翻页的格式是 `/search/{关键词}?page=N`，
+    /// 关键词里的空格会被站点规范化成 `-`（`anime girl` → `anime-girl`），第 1 页可省略 `page`。
+    /// 走旧格式时第 2 页及以后全是 404 死链页，解析器拿不到 `#pics-list`，
+    /// 表现为「只能看第一页 / 一翻页就空」。
     func buildSearchURL(query: String, page: Int = 1) -> String {
-        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        var url = "\(baseURL)/search/?q=\(encodedQuery)"
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return buildListURL(page: page) }
+
+        // 路径段编码：空格转 `-`，其余按 path 允许集合编码
+        let slug = trimmed
+            .replacingOccurrences(of: " ", with: "-")
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+
+        var url = "\(baseURL)/search/\(slug)"
         if page > 1 {
-            url += "&page=\(page)"
+            url += "?page=\(page)"
         }
         return url
     }

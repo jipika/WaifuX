@@ -51,6 +51,18 @@ enum WebOfflineBakeService {
         ))
     }
 
+    @MainActor
+    static func usableCurrentArtifact(from record: MediaDownloadRecord) -> SceneBakeArtifact? {
+        guard let artifact = record.sceneBakeArtifact, artifact.renderer == .wallpaperEngineWeb else { return nil }
+        guard SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: artifact.videoPath)) else { return nil }
+        return artifact
+    }
+
+    @MainActor
+    static func isCurrentBakedVideo(at url: URL, contentRoot: URL) -> Bool {
+        SceneOfflineBakeService.isUsableBakedVideo(at: url)
+    }
+
     static func bake(
         record: MediaDownloadRecord,
         durationSeconds: Double? = nil,
@@ -61,22 +73,11 @@ enum WebOfflineBakeService {
         guard isWebProject(at: contentRoot) else {
             throw SceneOfflineBakeError.ineligible
         }
-        guard let cli = WallpaperEngineXBridge.resolvedLegacyCLIExecutableURL() else {
-            throw SceneOfflineBakeError.webCliNotFound
-        }
-        // Web 烘焙靠 ScreenCaptureKit 抓合成器帧：缺「屏幕录制」权限时 SCStream 仍能启动，
-        // 但在限定时间内一帧都收不到，最终只报「未在限定时间内返回 Web 烘焙画面」这种误导性
-        // 文案。这里先确认权限，缺权限直接给可操作的引导（与 scene 烘焙同一口径）。
-        guard await ensureScreenCapturePermission() else {
-            print("[WebOfflineBake] 屏幕录制权限预检失败，中止烘焙（在系统设置勾选后需重启应用才生效）")
-            throw SceneOfflineBakeError.screenCapturePermissionRequired
-        }
-
         let analysisId = stableAnalysisId(for: contentRoot)
         let effectiveDuration = resolvedDuration(requested: durationSeconds)
         let targetSize = mainDisplayPixelSize()
-        let effectiveUserProperties = await MainActor.run {
-            try? WebWallpaperDesignService.shared.effectivePropertiesJSON(for: contentRoot.path)
+        let effectiveUserProperties = try await MainActor.run {
+            try WebWallpaperDesignService.shared.effectivePropertiesJSON(for: contentRoot.path)
         }
         let displayTitle = record.item.title
         let cacheURL = await MainActor.run {
@@ -90,54 +91,14 @@ enum WebOfflineBakeService {
                 displayTitle: displayTitle
             )
         }
-        let legacyCacheURL = await MainActor.run {
-            makeRendererCacheURL(
-                root: DownloadPathManager.shared.sceneBakesFolderURL,
-                itemID: record.id,
-                analysisId: analysisId,
-                width: targetSize.width,
-                height: targetSize.height,
-                duration: effectiveDuration,
-                userPropertiesJSON: effectiveUserProperties,
-                displayTitle: displayTitle
-            )
-        }
-        let legacyUntitledCacheURL = await MainActor.run {
-            makeRendererCacheURL(
-                root: DownloadPathManager.shared.sceneBakesFolderURL,
-                itemID: record.id,
-                analysisId: analysisId,
-                width: targetSize.width,
-                height: targetSize.height,
-                duration: effectiveDuration,
-                userPropertiesJSON: effectiveUserProperties
-            )
-        }
-        let legacyPropertiesCacheURL = await MainActor.run {
-            makePropertiesCacheURL(
-                root: DownloadPathManager.shared.sceneBakesFolderURL,
-                itemID: record.id,
-                analysisId: analysisId,
-                width: targetSize.width,
-                height: targetSize.height,
-                duration: effectiveDuration,
-                userPropertiesJSON: effectiveUserProperties
-            )
-        }
-        let legacyFinalUntitledCacheURL = await MainActor.run {
-            makeCacheURL(
-                root: DownloadPathManager.shared.sceneBakesFolderURL,
-                itemID: record.id,
-                analysisId: analysisId,
-                width: targetSize.width,
-                height: targetSize.height,
-                duration: effectiveDuration
-            )
-        }
 
-        if let existing = SceneOfflineBakeService.usableArtifact(from: record),
-           existing.renderer == .wallpaperEngineWeb,
-           existing.videoPath == cacheURL.path {
+        let reusableArtifact = await MainActor.run {
+            WebOfflineBakeService.usableCurrentArtifact(from: record)
+        }
+        if let existing = reusableArtifact {
+            _ = await ensureSceneBakePosterAndNotify(
+                itemID: record.item.id, videoURL: URL(fileURLWithPath: existing.videoPath)
+            )
             if let resumingJobID {
                 await MainActor.run {
                     SceneOfflineBakeProgressTracker.shared.finish(
@@ -179,34 +140,16 @@ enum WebOfflineBakeService {
         }
 
         do {
-            guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
-                throw SceneOfflineBakeError.insufficientMemory
-            }
             try FileManager.default.createDirectory(
                 at: cacheURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-
-            if !FileManager.default.fileExists(atPath: cacheURL.path) {
-                for legacyURL in [
-                    legacyCacheURL,
-                    legacyUntitledCacheURL,
-                    legacyPropertiesCacheURL,
-                    legacyFinalUntitledCacheURL
-                ]
-                where legacyURL != cacheURL {
-                    guard SceneOfflineBakeService.isUsableBakedVideo(at: legacyURL) else { continue }
-                    try? FileManager.default.moveItem(at: legacyURL, to: cacheURL)
-                    break
-                }
-            }
 
             if let inspection = await inspectVideo(
                 at: cacheURL,
                 expectedWidth: targetSize.width,
                 expectedHeight: targetSize.height
             ) {
-                let bakedAt = fileCreationDate(for: cacheURL) ?? .now
                 let artifact = SceneBakeArtifact(
                     analysisId: analysisId,
                     videoPath: cacheURL.path,
@@ -214,20 +157,26 @@ enum WebOfflineBakeService {
                     height: inspection.height,
                     fps: inspection.fps,
                     durationSeconds: inspection.duration,
-                    bakedAt: bakedAt,
+                    bakedAt: fileCreationDate(for: cacheURL) ?? .now,
                     renderer: .wallpaperEngineWeb
                 )
                 try await complete(
-                    artifact: artifact,
-                    record: record,
-                    contentRoot: contentRoot,
-                    jobID: jobID,
-                    progress: trackedProgress
+                    artifact: artifact, record: record, contentRoot: contentRoot, jobID: jobID,
+                    reusePoster: true, progress: trackedProgress
                 )
                 await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
                 return artifact
             }
 
+            guard let cli = WallpaperEngineXBridge.resolvedLegacyCLIExecutableURL() else {
+                throw SceneOfflineBakeError.webCliNotFound
+            }
+            guard await ensureScreenCapturePermission() else {
+                throw SceneOfflineBakeError.screenCapturePermissionRequired
+            }
+            guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
+                throw SceneOfflineBakeError.insufficientMemory
+            }
             try? FileManager.default.removeItem(at: cacheURL)
             let temporaryURL = cacheURL.deletingLastPathComponent()
                 .appendingPathComponent(".web-bake-\(UUID().uuidString).tmp.mp4")
@@ -260,6 +209,10 @@ enum WebOfflineBakeService {
                 throw SceneOfflineBakeError.bakeProcessFailed("Web 烘焙完成后未找到有效 MP4")
             }
 
+            guard stableAnalysisId(for: contentRoot) == analysisId else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                throw CancellationError()
+            }
             try? FileManager.default.removeItem(at: cacheURL)
             try FileManager.default.moveItem(at: temporaryURL, to: cacheURL)
             let artifact = SceneBakeArtifact(
@@ -273,11 +226,8 @@ enum WebOfflineBakeService {
                 renderer: .wallpaperEngineWeb
             )
             try await complete(
-                artifact: artifact,
-                record: record,
-                contentRoot: contentRoot,
-                jobID: jobID,
-                progress: trackedProgress
+                artifact: artifact, record: record, contentRoot: contentRoot, jobID: jobID,
+                reusePoster: false, progress: trackedProgress
             )
             await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
             return artifact
@@ -315,6 +265,105 @@ enum WebOfflineBakeService {
         )
     }
 
+    /// 详情页「重新抽帧」的无烘焙兜底（Web 侧）：现场烘一小段到临时目录，抽一帧写入
+    /// `scene_realtime_*` 缓存，随后立刻删掉临时 MP4。
+    ///
+    /// 与 `bake(record:)` 的区别：不生成 `SceneBakeArtifact`、不写 `SceneBakes`、不登记持久化
+    /// 作业与进度面板，只产详情 hero / 库列表共用的整屏 JPEG。已有烘焙成片的调用方走视频抽帧，
+    /// 不要调这里。
+    @MainActor
+    static func regenerateDetailRealtimePoster(record: MediaDownloadRecord, reason: String) async throws -> URL? {
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: record.localFileURL)
+        guard isWebProject(at: contentRoot) else { throw SceneOfflineBakeError.ineligible }
+        guard let cli = WallpaperEngineXBridge.resolvedLegacyCLIExecutableURL() else {
+            throw SceneOfflineBakeError.webCliNotFound
+        }
+        guard await ensureScreenCapturePermission() else {
+            throw SceneOfflineBakeError.screenCapturePermissionRequired
+        }
+        guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
+            throw SceneOfflineBakeError.insufficientMemory
+        }
+
+        let targetSize = mainDisplayPixelSize()
+        let analysisId = stableAnalysisId(for: contentRoot)
+        let variantKey = "web-\(analysisId.uuidString)-\(targetSize.width)x\(targetSize.height)"
+        let itemID = record.item.id
+
+        // 与整段烘焙共用一条串行队列：用户点抽帧时如果还有烘焙在跑，
+        // 这里排到它后面，避免两个 WKWebView 烘焙进程同时抢 GPU / 内存。
+        // 无论成功失败都要 leave，否则队列会被这条临时任务永久占住。
+        let jobID = UUID()
+        await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
+        do {
+            let posterURL = try await bakeTransientDetailPoster(
+                contentRoot: contentRoot,
+                cli: cli,
+                itemID: itemID,
+                targetSize: targetSize,
+                variantKey: variantKey,
+                reason: reason
+            )
+            await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+            return posterURL
+        } catch {
+            await OfflineBakeSerialQueue.shared.leave(jobID: jobID)
+            throw error
+        }
+    }
+
+    /// 只烘 `durationSeconds` 秒到临时文件，抽一帧后删源；不触碰任何持久化烘焙状态。
+    private static func bakeTransientDetailPoster(
+        contentRoot: URL,
+        cli: URL,
+        itemID: String,
+        targetSize: (width: Int, height: Int),
+        variantKey: String,
+        reason: String
+    ) async throws -> URL? {
+        // Web 项目要等页面加载 + 首帧 settle 才有内容，太短的片段可能整段是加载动画。
+        let durationSeconds = 6.0
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("WaifuX", isDirectory: true)
+            .appendingPathComponent("TransientWebPosters", isDirectory: true)
+        let videoURL = directory.appendingPathComponent("\(UUID().uuidString).mp4")
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: videoURL) }
+
+        let userProperties = try? await MainActor.run {
+            try WebWallpaperDesignService.shared.effectivePropertiesJSON(for: contentRoot.path)
+        }
+        var arguments = [
+            "bake",
+            contentRoot.path,
+            "--size", "\(targetSize.width)x\(targetSize.height)",
+            "--fps", "auto",
+            "--duration", String(Int(durationSeconds.rounded())),
+            "--out", videoURL.path
+        ]
+        if let userProperties,
+           let data = userProperties.data(using: .utf8) {
+            arguments += ["--properties-base64", data.base64EncodedString()]
+        }
+
+        do {
+            try await runCLI(executableURL: cli, arguments: arguments, progress: nil)
+        } catch {
+            print("[WebOfflineBake] \(reason): transient detail bake failed: \(error.localizedDescription)")
+            throw error
+        }
+        guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else { return nil }
+        return await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
+            forLocalVideo: videoURL,
+            itemID: itemID,
+            variantKey: variantKey,
+            targetWidth: targetSize.width,
+            targetHeight: targetSize.height,
+            forceRegenerate: true
+        )
+    }
+
     static func scheduleAutoBakeAfterDownload(itemID: String, localFileURL: URL) {
         guard WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
               isWebProject(at: localFileURL) else {
@@ -326,8 +375,9 @@ enum WebOfflineBakeService {
             let record = await MainActor.run {
                 MediaLibraryService.shared.downloadRecord(for: itemID)
             }
-            guard let record,
-                  SceneOfflineBakeService.usableArtifact(from: record)?.renderer != .wallpaperEngineWeb else {
+            guard let record else { return }
+            let currentArtifact = await MainActor.run { usableCurrentArtifact(from: record) }
+            guard currentArtifact == nil else {
                 return
             }
             do {
@@ -339,18 +389,19 @@ enum WebOfflineBakeService {
         }
     }
 
+    @MainActor
     private static func complete(
         artifact: SceneBakeArtifact,
         record: MediaDownloadRecord,
         contentRoot: URL,
         jobID: UUID,
+        reusePoster: Bool,
         progress: (@MainActor (Double) -> Void)?
     ) async throws {
+        guard stableAnalysisId(for: contentRoot) == artifact.analysisId else {
+            throw CancellationError()
+        }
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
-        SceneOfflineBakeService.cleanupStaleBakeFiles(
-            inDirectory: videoURL.deletingLastPathComponent(),
-            keeping: videoURL
-        )
         await MainActor.run {
             MediaLibraryService.shared.attachSceneBakeArtifact(
                 itemID: record.id,
@@ -358,10 +409,11 @@ enum WebOfflineBakeService {
                 regeneratePoster: false
             )
         }
-        await regenerateSceneBakePosterAndNotify(
-            itemID: record.item.id,
-            videoURL: videoURL
-        )
+        if reusePoster {
+            _ = await ensureSceneBakePosterAndNotify(itemID: record.item.id, videoURL: videoURL)
+        } else {
+            _ = await regenerateSceneBakePosterAndNotify(itemID: record.item.id, videoURL: videoURL)
+        }
         await MainActor.run {
             progress?(1)
             SceneOfflineBakeProgressTracker.shared.finish(jobID: jobID, success: true)
@@ -410,61 +462,6 @@ enum WebOfflineBakeService {
         let titleSegment = SceneOfflineBakeService.sanitizedBakeFileTitle(displayTitle).map { "_\($0)" } ?? ""
         let name = "\(analysisId.uuidString)\(titleSegment)_\(width)x\(height)_\(Int(duration.rounded()))s.mp4"
         return dir.appendingPathComponent(name)
-    }
-
-    /// 上一版无 renderer/title、但仍携带属性哈希的缓存格式。
-    private static func makePropertiesCacheURL(
-        root: URL,
-        itemID: String,
-        analysisId: UUID,
-        width: Int,
-        height: Int,
-        duration: Double,
-        userPropertiesJSON: String?
-    ) -> URL {
-        let safeItemID = itemID.replacingOccurrences(of: "/", with: "_")
-        let dir = root.appendingPathComponent(safeItemID, isDirectory: true)
-        let propertiesSuffix = propertiesCacheKey(for: userPropertiesJSON).map { "_props-\($0)" } ?? ""
-        let name =
-            "\(analysisId.uuidString)_\(width)x\(height)_\(Int(duration.rounded()))s\(propertiesSuffix).mp4"
-        return dir.appendingPathComponent(name)
-    }
-
-    /// v3 Web 旧缓存格式，保留用于无重烘迁移。
-    private static func makeRendererCacheURL(
-        root: URL,
-        itemID: String,
-        analysisId: UUID,
-        width: Int,
-        height: Int,
-        duration: Double,
-        userPropertiesJSON: String?,
-        displayTitle: String? = nil
-    ) -> URL {
-        let safeItemID = itemID.replacingOccurrences(of: "/", with: "_")
-        let dir = root.appendingPathComponent(safeItemID, isDirectory: true)
-        let propertiesSuffix = propertiesCacheKey(for: userPropertiesJSON).map { "_props-\($0)" } ?? ""
-        let titleSegment = SceneOfflineBakeService.sanitizedBakeFileTitle(displayTitle).map { "_\($0)" } ?? ""
-        let name =
-            "\(analysisId.uuidString)\(titleSegment)_\(SceneBakeRenderer.wallpaperEngineWeb.rawValue)_\(width)x\(height)_autofps-v3_\(Int(duration.rounded()))s\(propertiesSuffix).mp4"
-        return dir.appendingPathComponent(name)
-    }
-
-    /// Same as scene bake: empty properties → no suffix; otherwise SHA256 prefix.
-    private static func propertiesCacheKey(for userPropertiesJSON: String?) -> String? {
-        guard let userPropertiesJSON,
-              !userPropertiesJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        let data: Data
-        if let source = userPropertiesJSON.data(using: .utf8),
-           let object = try? JSONSerialization.jsonObject(with: source),
-           let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
-            data = canonical
-        } else {
-            data = Data(userPropertiesJSON.utf8)
-        }
-        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func fileCreationDate(for url: URL) -> Date? {

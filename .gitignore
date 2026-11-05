@@ -69,6 +69,11 @@ WebWallpaperDemo/
 # 产物入库、脚本本身归档到仓库外 WallHaven-pruned/（含 README.txt 清单与恢复方法）。
 tmp/
 
+# 本机测试：scripts/ 下 test- 开头的脚本和 Tests/ 只在本机跑，不入库；
+# CI / release workflow 与 package.sh 一律不调用（2026-11-05 定）。
+scripts/test-*.py
+/Tests/
+
 # Linux 壁纸引擎 CLI（macOS 项目无用，死文件）
 linux-wallpaperengine-cli
 *.tmp

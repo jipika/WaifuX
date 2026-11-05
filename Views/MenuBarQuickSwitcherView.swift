@@ -177,10 +177,26 @@ struct MenuBarQuickSwitcherView: View {
                                 .transition(
                                     .opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading))
                                 )
+                        } else if let status = viewModel.synchronizationStatus {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(.white)
+                                Text(status)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(2)
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(.black.opacity(0.54), in: Capsule())
+                            .padding(10)
+                            .accessibilityElement(children: .combine)
+                            .transition(.opacity)
                         }
                     }
                     .overlay {
-                        if viewModel.isApplying {
+                        if viewModel.isBlockingApply {
                             ZStack {
                                 Color.black.opacity(0.22)
                                 ProgressView()
@@ -240,7 +256,7 @@ struct MenuBarQuickSwitcherView: View {
         .frame(width: heroWidth, height: heroHeight)
         .clipShape(heroShape)
         .animation(crossfadeAnimation, value: viewModel.selectedItem?.id)
-        .animation(crossfadeAnimation, value: viewModel.isApplying)
+        .animation(crossfadeAnimation, value: viewModel.applyProgress.stage)
         .animation(crossfadeAnimation, value: viewModel.errorMessage)
     }
 
@@ -296,7 +312,7 @@ struct MenuBarQuickSwitcherView: View {
         }
         hasher.combine(viewModel.selectedItem?.id)
         hasher.combine(viewModel.coverRevision)
-        hasher.combine(viewModel.isApplying)
+        hasher.combine(viewModel.isBlockingApply)
         return hasher.finalize()
     }
 
@@ -333,7 +349,7 @@ struct MenuBarQuickSwitcherView: View {
         }
         .buttonStyle(QuickSwitcherPressButtonStyle())
         .help(item.title)
-        .disabled(viewModel.isApplying)
+        .disabled(viewModel.isBlockingApply)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityLabel(item.title)
     }
@@ -744,7 +760,7 @@ struct MenuBarQuickSwitcherView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .help(viewModel.selectedFolderLabel)
-                .disabled(viewModel.isApplying)
+                .disabled(viewModel.isBlockingApply)
 
                 Button {
                     viewModel.applySelectedItem()
@@ -759,7 +775,7 @@ struct MenuBarQuickSwitcherView: View {
                         .background(Color.black.opacity(0.92), in: Capsule())
                 }
                 .buttonStyle(QuickSwitcherPressButtonStyle())
-                .disabled(viewModel.selectedItem == nil || viewModel.isApplying)
+                .disabled(viewModel.selectedItem == nil || viewModel.isBlockingApply)
             }
         }
         .frame(height: footerButtonHeight)

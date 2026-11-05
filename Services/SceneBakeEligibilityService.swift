@@ -683,7 +683,7 @@ extension SceneBakeEligibilityAnalyzer {
             guard isSameContentRoot(existing.contentRootPath, contentURL.path) else {
                 return false
             }
-            if let artifact = SceneOfflineBakeService.usableArtifact(from: record),
+            if let artifact = SceneOfflineBakeService.usableCurrentArtifact(from: record),
                artifact.analysisId == existing.analysisId {
                 print("[SceneBakeEligibility] skip re-analyze \(itemID): usable bake already bound")
                 return true

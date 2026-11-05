@@ -142,7 +142,7 @@ final class GuessYouLikeService {
         var displayName: String {
             switch self {
             case .wallhaven: return "WallHaven"
-            case .fourK: return "4K Wallpapers"
+            case .fourK: return "PixelVault"
             case .motionBG: return "MotionBG"
             case .workshop: return "Wallpaper Engine"
             case .dongtai: return "DongTai"

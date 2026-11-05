@@ -15,6 +15,7 @@ final class GlobalWallpaperSyncCoordinator {
         let bakedVideoPath: String?
         let requirePlaybackEndSupport: Bool
         let reason: String
+        let wallpaperTransitionToken: [String: UInt64]?
 
         private enum CodingKeys: String, CodingKey {
             case localPath
@@ -23,6 +24,7 @@ final class GlobalWallpaperSyncCoordinator {
             case bakedVideoPath
             case requirePlaybackEndSupport
             case reason
+            case wallpaperTransitionToken
         }
 
         init(
@@ -31,7 +33,8 @@ final class GlobalWallpaperSyncCoordinator {
             sceneBakeItemID: String?,
             bakedVideoPath: String?,
             requirePlaybackEndSupport: Bool,
-            reason: String
+            reason: String,
+            wallpaperTransitionToken: [String: UInt64]? = nil
         ) {
             self.localPath = localPath
             self.muted = muted
@@ -39,6 +42,7 @@ final class GlobalWallpaperSyncCoordinator {
             self.bakedVideoPath = bakedVideoPath
             self.requirePlaybackEndSupport = requirePlaybackEndSupport
             self.reason = reason
+            self.wallpaperTransitionToken = wallpaperTransitionToken
         }
 
         init(from decoder: Decoder) throws {
@@ -53,10 +57,19 @@ final class GlobalWallpaperSyncCoordinator {
                 forKey: .requirePlaybackEndSupport
             ) ?? false
             reason = try container.decode(String.self, forKey: .reason)
+            wallpaperTransitionToken = try container.decodeIfPresent([String: UInt64].self, forKey: .wallpaperTransitionToken)
         }
 
         var localURL: URL {
             URL(fileURLWithPath: localPath)
+        }
+
+        var durable: Snapshot {
+            Snapshot(
+                localPath: localPath, muted: muted, sceneBakeItemID: sceneBakeItemID,
+                bakedVideoPath: bakedVideoPath, requirePlaybackEndSupport: requirePlaybackEndSupport,
+                reason: reason, wallpaperTransitionToken: nil
+            )
         }
 
         func options(isGlobalTransaction: Bool) -> LocalWallpaperApplyService.Options {
@@ -71,7 +84,8 @@ final class GlobalWallpaperSyncCoordinator {
                 isGlobalTransaction: isGlobalTransaction,
                 // Global applies target every connected screen; share one decoder.
                 usesSharedVideoDecoder: true,
-                reason: reason
+                reason: reason,
+                wallpaperTransitionToken: wallpaperTransitionToken
             )
         }
     }
@@ -80,7 +94,15 @@ final class GlobalWallpaperSyncCoordinator {
         let id: UUID
         let snapshot: Snapshot
         let animatedTransition: Bool
+        let onStageChange: WallpaperApplyStageHandler?
         let continuation: CheckedContinuation<Bool, Error>
+    }
+
+    struct WallpaperApplySupersededError: LocalizedError {
+        let screenIDs: Set<String>
+        let requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
+
+        var errorDescription: String? { "壁纸设置已被更新请求取代" }
     }
 
     private enum TransactionError: LocalizedError {
@@ -113,7 +135,7 @@ final class GlobalWallpaperSyncCoordinator {
               FileManager.default.fileExists(atPath: snapshot.localPath) else {
             return
         }
-        lastSuccessfulSnapshot = snapshot
+        lastSuccessfulSnapshot = snapshot.durable
     }
 
     /// Last successful global apply. Exposed for diagnostics and regressions.
@@ -123,17 +145,24 @@ final class GlobalWallpaperSyncCoordinator {
 
     func apply(
         localURL: URL,
-        options: LocalWallpaperApplyService.Options
+        options: LocalWallpaperApplyService.Options,
+        onStageChange: WallpaperApplyStageHandler? = nil
     ) async throws -> Bool {
         try Task.checkCancellation()
         guard !isStopping else { throw CancellationError() }
+        var options = options
+        if options.wallpaperTransitionToken == nil {
+            options.wallpaperTransitionToken = WallpaperCrossTypeTransitionCoordinator.shared
+                .beginRequest(on: NSScreen.screens).generationsByScreen
+        }
         let snapshot = Snapshot(
             localPath: localURL.standardizedFileURL.path,
             muted: options.muted,
             sceneBakeItemID: options.sceneBakeItemID,
             bakedVideoPath: options.bakedVideoPath,
             requirePlaybackEndSupport: options.requirePlaybackEndSupport,
-            reason: options.reason
+            reason: options.reason,
+            wallpaperTransitionToken: options.wallpaperTransitionToken
         )
 
         let id = UUID()
@@ -144,6 +173,7 @@ final class GlobalWallpaperSyncCoordinator {
                     id: id,
                     snapshot: snapshot,
                     animatedTransition: options.animatedTransition,
+                    onStageChange: onStageChange,
                     continuation: continuation
                 ))
                 startNextRequestIfNeeded()
@@ -270,20 +300,48 @@ final class GlobalWallpaperSyncCoordinator {
         let rollbackSnapshot = lastSuccessfulSnapshot ?? currentWallpaperSnapshot(reason: "globalRollback")
         var options = request.snapshot.options(isGlobalTransaction: true)
         options.animatedTransition = request.animatedTransition
+        options.wallpaperTransitionToken = request.snapshot.wallpaperTransitionToken
 
         do {
             let applied = try await LocalWallpaperApplyService.apply(
                 localURL: request.snapshot.localURL,
                 targetScreens: targetScreens,
-                options: options
+                options: options,
+                onStageChange: request.onStageChange
             )
             try Task.checkCancellation()
             guard !isStopping else { throw CancellationError() }
             guard applied else { throw TransactionError.applicationReturnedFalse }
-            lastSuccessfulSnapshot = request.snapshot
+            lastSuccessfulSnapshot = request.snapshot.durable
             persistLastSuccessfulSnapshot()
             return true
         } catch {
+            if let superseded = error as? WallpaperApplySupersededError {
+                guard !Task.isCancelled, !isStopping,
+                      let rollbackSnapshot,
+                      FileManager.default.fileExists(atPath: rollbackSnapshot.localPath) else {
+                    throw error
+                }
+                let ownedScreens = NSScreen.screens.filter { screen in
+                    superseded.screenIDs.contains(screen.wallpaperScreenIdentifier)
+                        && WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(
+                            superseded.requestToken, on: screen
+                        )
+                }
+                guard !ownedScreens.isEmpty else { throw error }
+                guard let rollbackToken = WallpaperCrossTypeTransitionCoordinator.shared.subset(
+                    superseded.requestToken, screens: ownedScreens
+                ) else { throw error }
+                var rollbackOptions = rollbackSnapshot.options(isGlobalTransaction: true)
+                rollbackOptions.wallpaperTransitionToken = rollbackToken.generationsByScreen
+                let rolledBack = try await LocalWallpaperApplyService.apply(
+                    localURL: rollbackSnapshot.localURL,
+                    targetScreens: ownedScreens,
+                    options: rollbackOptions
+                )
+                guard rolledBack else { throw TransactionError.applicationReturnedFalse }
+                throw error
+            }
             // Quit/caller cancellation is terminal. Rolling back here would
             // create new windows/players after the exit cleanup has started.
             if error is CancellationError || Task.isCancelled || isStopping { throw CancellationError() }
@@ -292,17 +350,23 @@ final class GlobalWallpaperSyncCoordinator {
                   FileManager.default.fileExists(atPath: rollbackSnapshot.localPath) else {
                 throw error
             }
-            // 恢复是独立事务：只覆盖「原事务目标 ∩ 仍在线」的屏，不重新取全部屏；
-            // 可被更新请求 / 退出取消。失败时 Scene 侧过渡图仍保留为可用静态图。
+            // 回滚沿用原请求所有权，只恢复仍归本次请求的在线屏幕。
             try Task.checkCancellation()
+            guard let generations = request.snapshot.wallpaperTransitionToken else { throw error }
+            let owner = WallpaperCrossTypeTransitionCoordinator.RequestToken(generationsByScreen: generations)
             let originalIDs = Set(targetScreens.map(\.wallpaperScreenIdentifier))
-            let rollbackScreens = NSScreen.screens.filter { originalIDs.contains($0.wallpaperScreenIdentifier) }
-            guard !rollbackScreens.isEmpty else { throw error }
+            let rollbackScreens = NSScreen.screens.filter {
+                originalIDs.contains($0.wallpaperScreenIdentifier)
+                    && WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(owner, on: $0)
+            }
+            guard let rollbackToken = WallpaperCrossTypeTransitionCoordinator.shared.subset(owner, screens: rollbackScreens) else { throw error }
+            var rollbackOptions = rollbackSnapshot.options(isGlobalTransaction: true)
+            rollbackOptions.wallpaperTransitionToken = rollbackToken.generationsByScreen
             do {
                 let rolledBack = try await LocalWallpaperApplyService.apply(
                     localURL: rollbackSnapshot.localURL,
                     targetScreens: rollbackScreens,
-                    options: rollbackSnapshot.options(isGlobalTransaction: true)
+                    options: rollbackOptions
                 )
                 try Task.checkCancellation()
                 guard !isStopping else { throw CancellationError() }
@@ -352,7 +416,7 @@ final class GlobalWallpaperSyncCoordinator {
             return candidate == path
                 || path.hasPrefix(candidate + "/")
                 || candidate.hasPrefix(path + "/")
-        }), let art = SceneOfflineBakeService.usableArtifact(from: record) {
+        }), let art = SceneOfflineBakeService.usableCurrentArtifact(from: record) {
             sceneBakeItemID = record.item.id
             if SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
                 bakedVideoPath = art.videoPath

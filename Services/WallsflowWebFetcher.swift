@@ -212,7 +212,9 @@ final class WallsflowWebFetcher: NSObject, WKNavigationDelegate, WKDownloadDeleg
             try checkRequest()
             guard let destination = mediaDestination else { throw URLError(.badServerResponse) }
             let data = try Data(contentsOf: destination, options: [.mappedIfSafe])
-            guard WallsflowMediaPolicy.isMedia(data) else { throw WallsflowMediaPolicy.verificationRequired }
+            // 假 mp4 是结构合法的 15KB，`isMedia` 会放行；尺寸/路径再判一次。
+            guard WallsflowMediaPolicy.isMedia(data), !WallsflowService.isDecoyMedia(data, url: request.url ?? originalRequest.url ?? destination)
+            else { throw WallsflowMediaPolicy.verificationRequired }
             try await syncCookies(in: view, id: id)
             currentUserAgent = userAgent
             try checkRequest()
@@ -282,7 +284,9 @@ final class WallsflowWebFetcher: NSObject, WKNavigationDelegate, WKDownloadDeleg
                     currentUserAgent = try await evaluateString("navigator.userAgent", in: view, id: id)
                     try await syncCookies(in: view, id: id)
                     try checkRequest()
-                    return html
+                    // WebView 是 Safari 身份、不带 sec-ch-ua，正常不会拿到诱饵页；
+                    // 但站点改判据时这里就是最后一道闸。
+                    return try WallsflowService.rejectDecoyPage(html, url: url, via: "webview")
                 }
                 try await Task.sleep(for: .milliseconds(800))
             }

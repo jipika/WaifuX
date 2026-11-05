@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- PyInstaller onefile 解压出的 Python / 扩展库为 ad-hoc 签名，不继承外层 Team ID。
+	     仅放宽这两个推送子进程的库验证；保留 hardened runtime，不开放 JIT。 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

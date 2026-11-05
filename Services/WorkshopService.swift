@@ -54,6 +54,15 @@ private actor WorkshopDownloadLimiter {
     func currentActiveCount() -> Int { activeCount }
 }
 
+// MARK: - 作者作品分页
+
+/// 作者 Workshop 作品的一页。`hasMore` 由数据源判断：协议层按服务端精确总数，
+/// 网页回退按「本页满 30 条」。
+struct WorkshopAuthorPage {
+    let items: [WorkshopWallpaper]
+    let hasMore: Bool
+}
+
 // MARK: - Workshop Service
 ///
 /// 处理 Wallpaper Engine Steam 创意工坊的搜索和下载
@@ -92,12 +101,97 @@ class WorkshopService: ObservableObject {
 
     // MARK: - 按作者查询 Workshop 物品
 
-    /// 从 Steam Workshop 作者页面抓取壁纸列表
+    /// 获取作者的 Workshop 作品（每页 30 条，新到旧）。
+    /// Steam 服务已登录且作者 ID 为数字时走协议层 listUserFiles，拿完整列表；
+    /// 否则或协议层失败时回退作者网页。作者网页对匿名访客隐藏带成人内容描述符的作品
+    /// （实测作者主页 373、匿名网页 328），所以协议层是首选。
     /// - Parameters:
-    ///   - steamID: Steam 64位数字 ID
+    ///   - steamID: Steam 64位数字 ID（自定义 URL 名只能走网页）
     ///   - page: 页码（从 1 开始）
-    /// - Returns: 壁纸列表
-    func fetchByAuthor(steamID: String, page: Int = 1) async throws -> [WorkshopWallpaper] {
+    func fetchByAuthor(steamID: String, page: Int = 1) async throws -> WorkshopAuthorPage {
+        let pageNumber = max(page, 1)
+        let trimmedID = steamID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if SteamServiceManager.shared.isLoggedIn, UInt64(trimmedID) != nil {
+            do {
+                return try await fetchByAuthorViaSteamService(steamID: trimmedID, page: pageNumber)
+            } catch {
+                AppLogger.error(.media, "作者作品协议层拉取失败，回退作者网页", metadata: [
+                    "steamID": trimmedID,
+                    "page": pageNumber,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+        let items = try await fetchByAuthorFromWebPage(steamID: steamID, page: pageNumber)
+        return WorkshopAuthorPage(items: items, hasMore: items.count >= authorPageSize)
+    }
+
+    /// 协议层：listUserFiles 给精确 ID 与总数，再用公开 GetPublishedFileDetails 补详情
+    /// （实测该接口对网页隐藏的成人条目同样返回完整详情）。
+    private func fetchByAuthorViaSteamService(steamID: String, page: Int) async throws -> WorkshopAuthorPage {
+        let startIndex = (page - 1) * authorPageSize
+        let listing = try await SteamServiceManager.shared.fetchUserFiles(
+            creatorSteamID: steamID,
+            startIndex: startIndex,
+            count: authorPageSize
+        )
+        let hasMore = listing.nextStartIndex > startIndex && listing.nextStartIndex < listing.total
+        let ids = listing.workshopIDs
+        guard !ids.isEmpty else {
+            return WorkshopAuthorPage(items: [], hasMore: hasMore)
+        }
+
+        let details = try await fetchPublishedFileDetails(ids: ids)
+        if details.isEmpty {
+            // 有 ID 却一条详情都没有，多半是 Web API 临时故障；抛错让调用方回退网页，
+            // 别把空页当成列表结束。
+            throw WorkshopError.apiError("作者作品详情为空")
+        }
+        let detailMap = Dictionary(details.map { ($0.publishedfileid, $0) }, uniquingKeysWith: { first, _ in first })
+        let profile = try? await fetchSteamProfile(profileID: steamID)
+        let author = WorkshopAuthor(
+            steamID: profile?.steamID ?? steamID,
+            name: bestAuthorName(profile?.name ?? "", fallback: steamID),
+            avatarURL: profile?.avatarURL
+        )
+
+        let items: [WorkshopWallpaper] = ids.compactMap { id in
+            guard let detail = detailMap[id] else { return nil }
+            let base = WorkshopWallpaper(
+                id: id,
+                title: detail.title,
+                description: nil,
+                previewURL: nil,
+                author: author,
+                fileSize: nil,
+                fileURL: nil,
+                steamAppID: wallpaperEngineAppID,
+                subscriptions: nil,
+                favorites: nil,
+                views: nil,
+                rating: nil,
+                type: .unknown,
+                tags: [],
+                isAnimatedImage: (detail.preview_url ?? "").lowercased().contains(".gif"),
+                createdAt: nil,
+                updatedAt: nil
+            )
+            return WorkshopWallpaper(base: base, detail: detail)
+        }
+
+        AppLogger.info(.media, "fetchByAuthor via Steam service", metadata: [
+            "steamID": steamID,
+            "page": page,
+            "total": listing.total,
+            "ids": ids.count,
+            "items": items.count,
+            "hasMore": hasMore
+        ])
+        return WorkshopAuthorPage(items: items, hasMore: hasMore)
+    }
+
+    /// 网页回退：匿名抓取作者页（看不到带成人内容描述符的作品）。
+    private func fetchByAuthorFromWebPage(steamID: String, page: Int) async throws -> [WorkshopWallpaper] {
         let profilePath = steamProfilePath(for: steamID)
         var components = URLComponents(string: "https://steamcommunity.com\(profilePath)/myworkshopfiles/")
         components?.queryItems = [
@@ -1320,6 +1414,30 @@ class WorkshopService: ObservableObject {
         return (updatedAt, fileSize)
     }
 
+    /// 批量查询远端更新信息（我的库「全部更新」用）。
+    /// Steam GetPublishedFileDetails 单请求最多 100 条，这里按 100 分批；
+    /// 已下架/转私密/被删条目不会出现在返回结果里（上层按「保留本地不动」处理）。
+    /// - Returns: `[workshopID: (updatedAt, fileSize)]`
+    func fetchRemoteUpdateInfoBatch(ids: [String]) async throws -> [String: (updatedAt: Date, fileSize: Int64?)] {
+        var result: [String: (updatedAt: Date, fileSize: Int64?)] = [:]
+        for chunkStart in stride(from: 0, to: ids.count, by: 100) {
+            let chunk = Array(ids[chunkStart..<min(chunkStart + 100, ids.count)])
+            let details = try await fetchPublishedFileDetails(ids: chunk)
+            for detail in details {
+                guard let timeUpdated = detail.time_updated else { continue }
+                let updatedAt = Date(timeIntervalSince1970: TimeInterval(timeUpdated))
+                let fileSize: Int64? = {
+                    guard let sizeStr = detail.file_size, let size = Int64(sizeStr), size > 0 else {
+                        return nil
+                    }
+                    return size
+                }()
+                result[detail.publishedfileid] = (updatedAt, fileSize)
+            }
+        }
+        return result
+    }
+
     /// 通过 Workshop URL 获取单个项目详情并转换为 MediaItem
     func resolveWorkshopItemByURL(_ urlString: String) async throws -> MediaItem {
         guard let workshopID = Self.extractWorkshopID(from: urlString) else {
@@ -1481,6 +1599,8 @@ class WorkshopService: ObservableObject {
             default:
                 return .steamLoginFailed(message)
             }
+        case .requestFailed(let message, _):
+            return .executionFailed(message)
         case .downloadFailed(let message, let code):
             switch code {
             case "NOT_AUTHENTICATED":

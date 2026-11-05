@@ -318,9 +318,9 @@ struct ContentView: View {
     @StateObject private var guessYouLikeVM = GuessYouLikeViewModel()
     @ObservedObject private var localization = LocalizationService.shared
     // 注意：WallpaperSourceManager.shared 不在此顶层观察。
-    // 它有 5 个 @Published 属性，若顶层 @ObservedObject 会在数据源切换时触发整个 ContentView body 重算。
-    // 顶层仅在 .task 中一次性轮询 isInitialSourceSelectionComplete，无需响应式；
-    // 数据源切换提示由独立子视图各自观察，并复用同一个 SourceSwitchToast 外观。
+    // 它有 2 个 @Published 属性（activeSource / lastSwitchMessage），若顶层 @ObservedObject 会在数据源切换时触发整个 ContentView body 重算。
+    // 数据源切换提示由独立子视图（WallpaperSourceSwitchToast）各自观察，并复用同一个 SourceSwitchToast 外观。
+    // 数据源已无任何自动切换逻辑（启动 ping/VPN 决策已删除），启动后可直接加载数据。
     @State private var detailPath: [MainDetailRoute] = []
     /// 状态栏可在已有详情页上请求另一个详情；重建栈以避免 SwiftUI 复用旧 destination。
     @State private var detailNavigationStackID = UUID()
@@ -428,22 +428,8 @@ struct ContentView: View {
             openDetail(.anime(anime))
         }
         .task {
-            // ⚠️ 等待启动时数据源选择完成（ping Google 决策）
-            // 在确定数据源之前不加载壁纸列表数据
-            // 直接读单例（非观察）：isInitialSourceSelectionComplete 只在启动决策时变化一次，无需响应式
-            let sourceManager = WallpaperSourceManager.shared
-            if !sourceManager.isInitialSourceSelectionComplete {
-                print("[ContentView] Waiting for initial source selection...")
-                // 最多等待 10 秒超时
-                for _ in 0..<20 {
-                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
-                    if sourceManager.isInitialSourceSelectionComplete {
-                        break
-                    }
-                }
-            }
-
-            // 数据源确定后再加载首页数据（各管线按功能模块开关门控）
+            // 数据源已无启动决策流程（ping Google / VPN 检测与 isInitialSourceSelectionComplete 门控已删除），
+            // 直接加载首页数据（各管线按功能模块开关门控）
             try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
             if ModuleAvailability.shared.wallpaperEnabled {
                 await viewModel.initialLoad()
@@ -479,6 +465,9 @@ struct ContentView: View {
                     },
                     onCancel: { snapshot in
                         handleDownloadToastCancel(snapshot)
+                    },
+                    onRemove: { snapshot in
+                        handleDownloadToastRemove(snapshot)
                     },
                     onRetry: { snapshot in
                         handleDownloadToastRetry(snapshot)
@@ -901,6 +890,13 @@ struct ContentView: View {
         service.removeTask(id: snapshot.id)
     }
 
+    /// 失败/已取消/暂停态的「取消任务」：终止队列残留并把任务从列表里移除。
+    private func handleDownloadToastRemove(_ snapshot: DownloadToastSnapshot) {
+        let service = DownloadTaskService.shared
+        service.cancelTask(id: snapshot.id)
+        service.removeTask(id: snapshot.id)
+    }
+
     private func handleDownloadToastRetry(_ snapshot: DownloadToastSnapshot) {
         DownloadTaskService.shared.clearToastSuppression(for: snapshot.id)
 
@@ -983,6 +979,7 @@ private struct DownloadProgressToastHost: View {
     @StateObject private var scrollTracker = ScrollActivityTracker()
     let onDismiss: (DownloadToastSnapshot) -> Void
     let onCancel: (DownloadToastSnapshot) -> Void
+    let onRemove: (DownloadToastSnapshot) -> Void
     let onRetry: (DownloadToastSnapshot) -> Void
 
     @State private var displayedSnapshot: DownloadToastSnapshot?
@@ -1017,6 +1014,9 @@ private struct DownloadProgressToastHost: View {
                     },
                     onCancel: {
                         cancel(snapshot)
+                    },
+                    onRemove: {
+                        remove(snapshot)
                     },
                     onRetry: {
                         retry(snapshot)
@@ -1168,6 +1168,15 @@ private struct DownloadProgressToastHost: View {
 
     private func cancel(_ snapshot: DownloadToastSnapshot) {
         onCancel(snapshot)
+        performHide {
+            if displayedSnapshot?.id == snapshot.id {
+                displayedSnapshot = nil
+            }
+        }
+    }
+
+    private func remove(_ snapshot: DownloadToastSnapshot) {
+        onRemove(snapshot)
         performHide {
             if displayedSnapshot?.id == snapshot.id {
                 displayedSnapshot = nil
@@ -1333,6 +1342,7 @@ private struct DownloadProgressToast: View {
     var suppressProgressAnimation: Bool = false
     let onDismiss: () -> Void
     let onCancel: () -> Void
+    let onRemove: () -> Void
     let onRetry: () -> Void
 
     @State private var animatedProgress: Double = 0
@@ -1518,12 +1528,30 @@ private struct DownloadProgressToast: View {
                         action: onDismiss
                     )
 
-                    toastActionButton(
-                        title: showsCancel ? "取消下载" : "重新下载",
-                        icon: showsCancel ? "xmark.circle.fill" : "arrow.clockwise",
-                        role: showsCancel ? .destructive : .retry,
-                        action: showsCancel ? onCancel : onRetry
-                    )
+                    if showsCancel {
+                        toastActionButton(
+                            title: "取消下载",
+                            icon: "xmark.circle.fill",
+                            role: .destructive,
+                            action: onCancel
+                        )
+                    } else {
+                        // 失败/已取消/暂停态：除了重试，还要能直接取消并移除任务，
+                        // 否则永远下载不了的资源只能反复「重新下载」或干等弹窗超时。
+                        toastActionButton(
+                            title: "取消任务",
+                            icon: "xmark.circle.fill",
+                            role: .destructive,
+                            action: onRemove
+                        )
+
+                        toastActionButton(
+                            title: "重新下载",
+                            icon: "arrow.clockwise",
+                            role: .retry,
+                            action: onRetry
+                        )
+                    }
                 }
             }
         }

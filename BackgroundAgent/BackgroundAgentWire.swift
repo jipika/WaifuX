@@ -9,6 +9,14 @@ enum BackgroundAgentWire {
     static let preferencesSuite = "group.com.waifux.app"
     static let migrationKey = "background_preferences_migrated_v1"
     static let maximumCommandBytes = 16 * 1024 * 1024
+
+    /// 生产 Helper 的单实例锁（与 AgentMain 的非测试路径一致）。UI 修复注册时
+    /// 按它找残留 Helper，诊断导出也用它标出持锁进程。
+    static var productionLockFileURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("WaifuX", isDirectory: true)
+            .appendingPathComponent("background-helper.lock")
+    }
 }
 
 struct BackgroundAgentHello: Codable, Sendable {

@@ -12,15 +12,19 @@ import QuartzCore
 struct ActiveWallpaper: @unchecked Sendable {
     let caContext: AnyObject
     let rootLayer: CALayer
-    let renderer: VideoRenderer?
-    let displayID: UInt32?
-    let videoID: String?
+    var renderer: VideoRenderer?
+    var displayID: UInt32?
+    var videoID: String?
     let contextId: UInt32
     /// 系统 WallpaperAgent 通过 XPC 传给 acquire 的 id（已 normalize 成 "uuid:..." 或 "raw:..."）。
     /// 同一 wallpaperID 可对应多个 contextId（桌面 + 锁屏两 instance 共享 wallpaperID）。
     /// 注意：videoID 存的是 instanceID（"display-<n>"），与 wallpaperID 是两个命名空间，
     /// 历史代码混用导致 invalidate/几何更新等路径全部 mismatch — 见 commit b74db8a 后的修复。
     let wallpaperID: String?
+    var role: WallpaperContextRole = .unknown
+    var roleIsExplicit = false
+    var sourceGeneration: UInt64 = 0
+    var presentedImagePath: String? = nil
 }
 
 final class WallpaperState: Sendable {
@@ -96,8 +100,12 @@ final class WallpaperState: Sendable {
         let result = lock.withLock { state -> (UInt64, Task<Void, Never>?, VideoRenderer?) in
             let oldTask = state.setupTasks.removeValue(forKey: context.contextId)
             let oldRenderer = state.activeContexts[context.contextId]?.renderer
-            state.activeContexts[context.contextId] = context
-            return (state.contextGenerations.admit(context.contextId), oldTask, oldRenderer)
+            let generation = state.contextGenerations.admit(context.contextId)
+            var admitted = context
+            admitted.sourceGeneration = generation
+            admitted.presentedImagePath = nil
+            state.activeContexts[context.contextId] = admitted
+            return (generation, oldTask, oldRenderer)
         }
         result.1?.cancel()
         result.2?.stop()
@@ -106,9 +114,13 @@ final class WallpaperState: Sendable {
 
     func beginRendererReplacement(contextId: UInt32, expectedRootLayer: CALayer) -> (context: ActiveWallpaper, generation: UInt64)? {
         let result = lock.withLock { state -> (ActiveWallpaper, UInt64, Task<Void, Never>?)? in
-            guard let context = state.activeContexts[contextId], context.rootLayer === expectedRootLayer else { return nil }
+            guard var context = state.activeContexts[contextId], context.rootLayer === expectedRootLayer else { return nil }
             let task = state.setupTasks.removeValue(forKey: contextId)
-            return (context, state.contextGenerations.begin(contextId), task)
+            let generation = state.contextGenerations.begin(contextId)
+            context.sourceGeneration = generation
+            context.presentedImagePath = nil
+            state.activeContexts[contextId] = context
+            return (context, generation, task)
         }
         guard let result else { return nil }
         result.2?.cancel()
@@ -141,36 +153,14 @@ final class WallpaperState: Sendable {
     func commitRenderer(contextId: UInt32, generation: UInt64, renderer: VideoRenderer?, videoID: String?) -> (committed: Bool, previous: VideoRenderer?) {
         lock.withLock { state in
             guard let old = state.activeContexts[contextId], state.contextGenerations.isCurrent(generation, for: contextId) else { return (false, nil) }
-            state.activeContexts[contextId] = ActiveWallpaper(
-                caContext: old.caContext, rootLayer: old.rootLayer, renderer: renderer,
-                displayID: old.displayID, videoID: videoID ?? old.videoID,
-                contextId: contextId, wallpaperID: old.wallpaperID
-            )
+            var updated = old
+            updated.renderer = renderer
+            updated.videoID = videoID ?? old.videoID
+            updated.sourceGeneration = generation
+            updated.presentedImagePath = nil
+            state.activeContexts[contextId] = updated
             return (true, old.renderer)
         }
-    }
-
-    /// 移除所有匹配 wallpaperID 的 context（桌面 + 锁屏均可能被系统一次性 invalidate）。
-    /// 返回所有被移除的 context，调用方负责对每个 renderer 调用 stop()。
-    /// 历史实现按 videoID 比较 wallpaperID（命名空间不同，永远 mismatch），且循环里 `removed = ...`
-    /// 会覆盖只剩最后一个，导致前面的 renderer 永久泄漏 — 现已修正。
-    func removeContext(wallpaperID: String) -> [ActiveWallpaper] {
-        let result = lock.withLock { state -> ([ActiveWallpaper], [Task<Void, Never>]) in
-            let matching = state.activeContexts.filter { $0.value.wallpaperID == wallpaperID }.map { $0.key }
-            var removed: [ActiveWallpaper] = []
-            var tasks: [Task<Void, Never>] = []
-            removed.reserveCapacity(matching.count)
-            for id in matching {
-                state.contextGenerations.remove(id)
-                if let task = state.setupTasks.removeValue(forKey: id) { tasks.append(task) }
-                if let ctx = state.activeContexts.removeValue(forKey: id) {
-                    removed.append(ctx)
-                }
-            }
-            return (removed, tasks)
-        }
-        for task in result.1 { task.cancel() }
-        return result.0
     }
 
     /// 只移除某一条 XPC 连接创建的 context。
@@ -247,6 +237,23 @@ final class WallpaperState: Sendable {
         }
     }
 
+    /// Apply one connection's raw policy only to its own still-owned contexts.
+    /// Other displays, previews and lock-screen instances keep their own policy.
+    func forEachActiveContext(ownedBy owners: [UInt32: UInt64], wallpaperID: String?, displayID: UInt32?, _ body: (UInt32?, VideoRenderer) -> Void) {
+        let contexts = lock.withLock { state in
+            state.activeContexts.values.filter { context in
+                guard let owner = owners[context.contextId],
+                      state.contextGenerations.isOwned(by: owner, contextID: context.contextId),
+                      wallpaperID == nil || context.wallpaperID == wallpaperID,
+                      displayID == nil || context.displayID == displayID else { return false }
+                return true
+            }
+        }
+        for context in contexts {
+            if let renderer = context.renderer { body(context.displayID, renderer) }
+        }
+    }
+
     /// 根据 displayID 查找活跃 renderer
     func renderer(for displayID: UInt32) -> VideoRenderer? {
         lock.withLock {
@@ -290,17 +297,34 @@ final class WallpaperState: Sendable {
         lock.withLock { state in
             let matching = state.activeContexts.filter { $0.value.wallpaperID == wallpaperID && $0.value.displayID != displayID }
             for (key, old) in matching {
-                state.activeContexts[key] = ActiveWallpaper(
-                    caContext: old.caContext,
-                    rootLayer: old.rootLayer,
-                    renderer: old.renderer,
-                    displayID: displayID,
-                    videoID: old.videoID,
-                    contextId: old.contextId,
-                    wallpaperID: old.wallpaperID
-                )
+                var updated = old
+                updated.displayID = displayID
+                state.activeContexts[key] = updated
             }
         }
+    }
+
+    func contextIDs(wallpaperID: String, ownedBy owners: [UInt32: UInt64]) -> Set<UInt32> {
+        lock.withLock { state in
+            Set(state.activeContexts.values.compactMap { context in
+                guard context.wallpaperID == wallpaperID,
+                      let owner = owners[context.contextId],
+                      state.contextGenerations.isOwned(by: owner, contextID: context.contextId) else { return nil }
+                return context.contextId
+            })
+        }
+    }
+
+    func activeContext(wallpaperID: String, ownedBy owners: [UInt32: UInt64]) -> ActiveWallpaper? {
+        let contexts = lock.withLock { state in
+            state.activeContexts.values.filter { context in
+                context.wallpaperID == wallpaperID
+                    && owners[context.contextId].map { state.contextGenerations.isOwned(by: $0, contextID: context.contextId) } == true
+            }.sorted { $0.contextId < $1.contextId }
+        }
+        if contexts.count == 1 { return contexts[0] }
+        if let desktop = contexts.first(where: { $0.role == .desktop }) { return desktop }
+        return contexts.first(where: { $0.role != .preview })
     }
 
     func updateContextDisplayID(rootLayer: CALayer, displayID: UInt32) {
@@ -310,15 +334,9 @@ final class WallpaperState: Sendable {
                 return
             }
             let old = pair.value
-            state.activeContexts[pair.key] = ActiveWallpaper(
-                caContext: old.caContext,
-                rootLayer: old.rootLayer,
-                renderer: old.renderer,
-                displayID: displayID,
-                videoID: old.videoID,
-                contextId: pair.key,
-                wallpaperID: old.wallpaperID
-            )
+            var updated = old
+            updated.displayID = displayID
+            state.activeContexts[pair.key] = updated
         }
     }
 
@@ -326,56 +344,53 @@ final class WallpaperState: Sendable {
         lock.withLock { Array($0.activeContexts.values) }
     }
 
-    func replaceContextRenderer(displayID: UInt32, renderer: VideoRenderer?, videoID: String?) -> VideoRenderer? {
+    /// Only a current, successfully decoded image transaction can record this.
+    func recordImageFrame(contextId: UInt32, generation: UInt64, sourceURL: URL, expectedRootLayer: CALayer) {
         lock.withLock { state in
-            guard let pair = state.activeContexts.first(where: { $0.value.displayID == displayID }) else {
-                return nil
-            }
-            let old = pair.value
-            state.activeContexts[pair.key] = ActiveWallpaper(
-                caContext: old.caContext,
-                rootLayer: old.rootLayer,
-                renderer: renderer,
-                displayID: old.displayID,
-                videoID: videoID ?? old.videoID,
-                contextId: pair.key,
-                wallpaperID: old.wallpaperID
-            )
-            return old.renderer
-        }
-    }
-
-    /// 命令路由用的渲染器替换：必须精确匹配 displayID，不再回退到任意上下文，
-    /// 避免多显示器下把某一屏的渲染器替换错误地应用到另一屏（与 activeContextForCommand 保持一致）。
-    /// 替换指定 contextId 的渲染器，返回旧的渲染器（如果存在）。
-    /// 用于 switch_video 命令中需要精确更新特定 context 的场景。
-    func replaceContextRendererByContextId(contextId: UInt32, renderer: VideoRenderer?, videoID: String?) -> VideoRenderer? {
-        lock.withLock { state in
-            guard let old = state.activeContexts[contextId] else {
-                return nil
-            }
-            state.activeContexts[contextId] = ActiveWallpaper(
-                caContext: old.caContext,
-                rootLayer: old.rootLayer,
-                renderer: renderer,
-                displayID: old.displayID,
-                videoID: videoID ?? old.videoID,
-                contextId: contextId,
-                wallpaperID: old.wallpaperID
-            )
-            return old.renderer
-        }
-    }
-
-    /// 替换指定 contextId 的上下文，返回旧的上下文（如果存在）。
-    func replaceContextById(contextId: UInt32, context: ActiveWallpaper) -> ActiveWallpaper? {
-        lock.withLock { state in
-            guard let current = state.activeContexts[contextId],
-                  current.rootLayer === context.rootLayer,
-                  current.renderer === context.renderer else { return nil }
-            let old = state.activeContexts.removeValue(forKey: contextId)
+            guard var context = state.activeContexts[contextId], context.renderer == nil,
+                  context.rootLayer === expectedRootLayer,
+                  state.contextGenerations.isCurrent(generation, for: contextId),
+                  context.sourceGeneration == generation else { return }
+            context.presentedImagePath = sourceURL.resolvingSymlinksInPath().standardizedFileURL.path
             state.activeContexts[contextId] = context
-            return old
+        }
+    }
+
+    func invalidateImageFrame(contextId: UInt32, generation: UInt64) {
+        lock.withLock { state in
+            guard var context = state.activeContexts[contextId],
+                  state.contextGenerations.isCurrent(generation, for: contextId) else { return }
+            context.presentedImagePath = nil
+            state.activeContexts[contextId] = context
+        }
+    }
+
+    func isImageFrameReady(contextId: UInt32, sourceURL: URL, expectedRootLayer: CALayer) -> Bool {
+        lock.withLock { state in
+            guard let context = state.activeContexts[contextId], context.renderer == nil,
+                  context.role != .preview, context.rootLayer === expectedRootLayer,
+                  state.contextGenerations.isCurrent(context.sourceGeneration, for: contextId) else { return false }
+            return context.presentedImagePath == sourceURL.resolvingSymlinksInPath().standardizedFileURL.path
+        }
+    }
+
+    /// Raw per-connection evidence only. Multiple contexts with a shared wallpaper
+    /// ID are ambiguous unless their acquire destination already identified them.
+    func updatePresentationRoles(ownedBy owners: [UInt32: UInt64], wallpaperID: String?, displayID: UInt32?, mode: String) {
+        lock.withLock { state in
+            let candidates = state.activeContexts.values.filter { context in
+                guard let owner = owners[context.contextId],
+                      state.contextGenerations.isOwned(by: owner, contextID: context.contextId),
+                      wallpaperID == nil || context.wallpaperID == wallpaperID,
+                      displayID == nil || context.displayID == displayID else { return false }
+                return context.role != .preview
+            }
+            for context in candidates {
+                var updated = context
+                updated.role = context.role.updated(mode: mode, explicit: context.roleIsExplicit,
+                                                    uniquelyAddressed: candidates.count == 1)
+                state.activeContexts[context.contextId] = updated
+            }
         }
     }
 
@@ -554,11 +569,15 @@ final class WallpaperState: Sendable {
 
     var isDisplayAsleep: Bool {
         get { lock.withLock { $0.isDisplayAsleep } }
-        set { lock.withLock { $0.isDisplayAsleep = newValue } }
+        set {
+            lock.withLock { $0.isDisplayAsleep = newValue }
+        }
     }
 
     var isScreenLocked: Bool {
         get { lock.withLock { $0.isScreenLocked } }
-        set { lock.withLock { $0.isScreenLocked = newValue } }
+        set {
+            lock.withLock { $0.isScreenLocked = newValue }
+        }
     }
 }

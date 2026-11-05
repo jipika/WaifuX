@@ -1222,6 +1222,7 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         let workshopID = String(item.id.dropFirst("workshop_".count))
+        try await WorkshopSubscriptionAutomation.subscribeBeforeDownload(workshopID: workshopID)
         let localURL = try await workshopService.downloadWorkshopItem(
             workshopID: workshopID,
             progressHandler: { progress in
@@ -1857,8 +1858,9 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 批量删除媒体下载记录
     /// - Parameter ids: 要删除的项目 ID 集合
-    func removeDownloads(withIDs ids: Set<String>) {
+    func removeDownloads(withIDs ids: Set<String>) async -> [String: Error] {
         mediaLibrary.removeDownloadRecords(withIDs: ids)
+        return await WorkshopSubscriptionAutomation.unsubscribeAfterUserDeletion(itemIDs: ids)
     }
 
     /// 批量删除指定 ID 的项目
@@ -2854,18 +2856,16 @@ final class MediaExploreViewModel: ObservableObject {
     ///   - page: 页码
     /// - Returns: 本页媒体 + 是否还有下一页
     func fetchMediaByAuthor(steamID: String, page: Int = 1) async throws -> AuthorMediaPageResult {
-        let wallpapers = try await workshopService.fetchByAuthor(steamID: steamID, page: page)
-        let mediaItems = workshopService.convertToMediaItems(wallpapers)
+        let authorPage = try await workshopService.fetchByAuthor(steamID: steamID, page: page)
+        let mediaItems = workshopService.convertToMediaItems(authorPage.items)
 
         // 缓存到本地库
         for item in mediaItems {
             mediaLibrary.upsert(item)
         }
 
-        // 作者页实测可按 numperpage=30 翻页；满页继续，未满/空页结束。
-        // 不用「非空即 hasMore」，否则最后一页仍会多请求一次空页。
-        let hasMore = mediaItems.count >= 30
-        return AuthorMediaPageResult(items: mediaItems, hasMore: hasMore)
+        // hasMore 由数据源给出：协议层按服务端精确总数，网页回退按「满 30 条一页」。
+        return AuthorMediaPageResult(items: mediaItems, hasMore: authorPage.hasMore)
     }
 
     // MARK: - Workshop 下载
@@ -2979,6 +2979,129 @@ final class MediaExploreViewModel: ObservableObject {
                 scope: .downloads
             )
         }
+    }
+
+    /// 若该 Workshop 壁纸正在被桌面/外部引擎使用，先停止再删包/重下。
+    /// 详情页「更新壁纸」与「我的库 · 全部更新」共用同一口径。
+    func stopPlayingWallpaperForUpdate(for item: MediaItem) {
+        guard item.id.hasPrefix("workshop_") else { return }
+        let workshopID = String(item.id.dropFirst("workshop_".count))
+        let bridge = WallpaperEngineXBridge.shared
+
+        if bridge.isControllingExternalEngine,
+           let path = bridge.currentWallpaperPathForDesign,
+           path.contains(workshopID) {
+            bridge.stopWallpaper()
+            return
+        }
+
+        // 本机视频路径命中 workshop 目录时也停掉
+        if let currentURL = videoWallpaperManager.currentVideoURL,
+           currentURL.path.contains(workshopID) || currentURL.path.contains("workshop_\(workshopID)") {
+            videoWallpaperManager.stopWallpaper()
+        }
+    }
+
+    /// 「全部更新」：检查库内全部已下载 Wallpaper Engine 数据的远端版本，重下有更新的条目。
+    /// 远端元数据按 100 条/请求分批查询；逐条更新走与详情页单条更新相同的
+    /// updateWorkshopWallpaper 链路（删记录 → 队列重下 → 恢复文件夹归属）。
+    /// - Parameters:
+    ///   - onProgress: 更新阶段进度回调 `(已完成数, 待更新总数, 当前标题)`，主线程调用。
+    /// - Returns: 检查/更新统计。
+    func updateAllWorkshopWallpapers(
+        onProgress: ((Int, Int, String) -> Void)? = nil
+    ) async throws -> (
+        checked: Int, toUpdate: Int, updated: Int, failed: Int, upToDate: Int, unavailable: Int
+    ) {
+        // 快照：避免遍历中库数组变化打乱顺序；只处理有效下载记录里的 Workshop 项
+        let records = mediaLibrary.downloadRecords.filter { $0.isActive && $0.item.id.hasPrefix("workshop_") }
+        let checked = records.count
+        guard checked > 0 else {
+            return (0, 0, 0, 0, 0, 0)
+        }
+
+        onProgress?(0, 0, "")
+
+        // 1) 分批拉取远端元数据（GetPublishedFileDetails 单请求最多 100 条）
+        let workshopIDs = records.map { String($0.item.id.dropFirst("workshop_".count)) }
+        let remoteInfo: [String: (updatedAt: Date, fileSize: Int64?)]
+        do {
+            remoteInfo = try await workshopService.fetchRemoteUpdateInfoBatch(ids: workshopIDs)
+        } catch {
+            AppLogger.error(.download, "Wallpaper Engine 数据批量更新检查失败", metadata: [
+                "count": checked,
+                "error": error.localizedDescription
+            ])
+            throw error
+        }
+
+        // 2) 与单条检查相同口径：远端 time_updated 对比 下载时记录的 updatedAt
+        //    （老记录无该项时退回 downloadedAt）；不下架的坏条目保留本地不动。
+        var pending: [(item: MediaItem, remote: (updatedAt: Date, fileSize: Int64?))] = []
+        var upToDate = 0
+        var unavailable = 0
+        for record in records {
+            let workshopID = String(record.item.id.dropFirst("workshop_".count))
+            guard let remote = remoteInfo[workshopID] else {
+                unavailable += 1
+                continue
+            }
+            let baseline = record.item.updatedAt ?? record.downloadedAt
+            let hasUpdate = remote.updatedAt > baseline.addingTimeInterval(1)
+            if hasUpdate {
+                pending.append((record.item, remote))
+            } else {
+                // 与 checkWorkshopUpdateAvailability 一致：老记录补齐元数据，后续比较更稳
+                if record.item.updatedAt == nil || record.item.fileSize == nil {
+                    let patched = mediaItemByUpdatingRemoteMetadata(
+                        record.item,
+                        updatedAt: remote.updatedAt,
+                        fileSize: remote.fileSize
+                    )
+                    mediaLibrary.upsert(patched)
+                }
+                upToDate += 1
+            }
+        }
+
+        // 3) 逐条重下（队列内部限速 3 并发，串行提交最稳；正在播放的先停）
+        var updated = 0
+        var failed = 0
+        let toUpdate = pending.count
+        for (index, entry) in pending.enumerated() {
+            let item = entry.item
+            stopPlayingWallpaperForUpdate(for: item)
+            do {
+                let itemToDownload = mediaItemByUpdatingRemoteMetadata(
+                    item,
+                    updatedAt: entry.remote.updatedAt,
+                    fileSize: entry.remote.fileSize
+                )
+                try await updateWorkshopWallpaper(itemToDownload)
+                updated += 1
+                AppLogger.info(.download, "Wallpaper Engine 数据批量更新成功", metadata: [
+                    "id": item.id,
+                    "title": item.title
+                ])
+            } catch {
+                failed += 1
+                AppLogger.error(.download, "Wallpaper Engine 数据批量更新失败", metadata: [
+                    "id": item.id,
+                    "title": item.title,
+                    "error": error.localizedDescription
+                ])
+            }
+            onProgress?(index + 1, toUpdate, item.title)
+        }
+
+        AppLogger.info(.download, "Wallpaper Engine 数据批量更新完成", metadata: [
+            "checked": checked,
+            "updated": updated,
+            "failed": failed,
+            "upToDate": upToDate,
+            "unavailable": unavailable
+        ])
+        return (checked, toUpdate, updated, failed, upToDate, unavailable)
     }
 
     private func mediaItemByUpdatingRemoteMetadata(
@@ -3134,6 +3257,62 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         return false
+    }
+
+    struct LocalWorkshopSubscriptionStats {
+        let total: Int
+        let alreadySubscribed: Int
+        let newlySubscribed: Int
+        let failed: Int
+    }
+
+    /// 订阅本地库中所有 Workshop 项目。先按 100 个一批查询真实状态，
+    /// 只提交未订阅项；单项失败不阻塞剩余项目。
+    func subscribeLocalWorkshopItems(
+        onProgress: @MainActor (Int, Int) -> Void
+    ) async throws -> LocalWorkshopSubscriptionStats {
+        let ids = Set(mediaLibrary.downloadedItems.compactMap { record -> String? in
+            guard record.item.id.hasPrefix("workshop_") else { return nil }
+            return String(record.item.id.dropFirst("workshop_".count))
+        }).sorted()
+        guard !ids.isEmpty else {
+            return LocalWorkshopSubscriptionStats(total: 0, alreadySubscribed: 0, newlySubscribed: 0, failed: 0)
+        }
+
+        var states: [String: Bool] = [:]
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            try Task.checkCancellation()
+            let chunk = Array(ids[start..<min(start + 100, ids.count)])
+            states.merge(try await SteamServiceManager.shared.fetchSubscriptionStates(workshopIDs: chunk)) { _, new in new }
+        }
+
+        var alreadySubscribed = 0
+        var newlySubscribed = 0
+        var failed = 0
+        for (index, id) in ids.enumerated() {
+            try Task.checkCancellation()
+            if states[id] == true {
+                alreadySubscribed += 1
+            } else {
+                do {
+                    try await SteamServiceManager.shared.setSubscribed(true, workshopID: id)
+                    newlySubscribed += 1
+                } catch {
+                    failed += 1
+                    AppLogger.error(.download, "批量订阅本地 Workshop 项目失败", metadata: [
+                        "id": id,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+            onProgress(index + 1, ids.count)
+        }
+        return LocalWorkshopSubscriptionStats(
+            total: ids.count,
+            alreadySubscribed: alreadySubscribed,
+            newlySubscribed: newlySubscribed,
+            failed: failed
+        )
     }
 
     // MARK: - 同步 Steam 订阅

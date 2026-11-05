@@ -88,6 +88,8 @@ targets:
         buildPhase: resources
       - path: Tools/MobilePush/we-pair-server-x86_64
         buildPhase: resources
+      # Host preflight and extension rendering must use the same pixel budget.
+      - path: WaifuXWallpaperExtension/WallpaperSnapshotPixelBudget.swift
       # 根目录源文件（未被以上子目录覆盖）
       - path: WallpaperEngineEmbeddedAssets.swift
       - path: BackgroundAgent/BackgroundAgentWire.swift
@@ -476,6 +478,7 @@ targets:
       - path: Services/VideoOptimizationQueueService.swift
       - path: Services/VideoOptimizationRecordStore.swift
       - path: Services/VideoRendererProcessController.swift
+      - path: Services/VideoRepairService.swift
       - path: Services/VideoThumbnailCache.swift
       - path: Services/VideoTranscodeService.swift
       - path: Services/VideoWallpaperManager.swift
@@ -484,6 +487,7 @@ targets:
       - path: Services/WallpaperDynamicTextParser.swift
       - path: Services/WallpaperEngineAvailability.swift
       - path: Services/WallpaperEngineXBridge.swift
+      - path: Services/WallpaperApplySupport.swift
       - path: Services/WallpaperBatteryPauseOwnership.swift
       - path: Services/WallpaperAutoPauseApplicationIdentity.swift
       - path: Services/WallpaperExtensionSocketServer.swift
@@ -497,6 +501,7 @@ targets:
       - path: Services/WallsflowWebFetcher.swift
       - path: Services/WebOfflineBakeService.swift
       - path: Services/WebWallpaperDesignService.swift
+      - path: Services/WorkshopSubscriptionAutomation.swift
       - path: Services/WorkshopService.swift
       - path: Services/WorkshopSourceManager.swift
       - path: Utilities/AppFluidMotion.swift
@@ -512,9 +517,14 @@ targets:
       - path: Utilities/GitHubHosts.swift
       - path: Utilities/NSScreen+Wallpaper.swift
       - path: Utilities/ProcessLiveness.swift
+      - path: Utilities/WallpaperBoundedImageDecoder.swift
+      - path: Utilities/LockScreenImagePublication.swift
+      - path: WaifuXWallpaperExtension/WallpaperSnapshotPixelBudget.swift
       - path: Utilities/VideoPreloader.swift
       - path: Utilities/WaifuXUIActions.swift
       - path: Utilities/WallpaperExtensionAgentHealer.swift
+      - path: Utilities/WallpaperExtensionContextRecoveryPolicy.swift
+      - path: Utilities/WallpaperAgentRecoveryExecutor.swift
       - path: Utilities/WallpaperExtensionKeeper.swift
       - path: Utilities/WebViewCookieSync.swift
       - path: ViewModels/MediaExploreViewModel.swift
@@ -560,6 +570,7 @@ targets:
     platform: macOS
     sources:
       - path: WaifuXWallpaperExtension
+      - path: Utilities/WallpaperBoundedImageDecoder.swift
     settings:
       base:
         PRODUCT_NAME: WaifuXWallpaperExtension
@@ -577,6 +588,9 @@ targets:
     entitlements:
       path: WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements
       properties:
+        # pkd rejects any unsandboxed plug-in ("plug-ins must be sandboxed"),
+        # including Debug and local package builds.
+        com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
           - group.com.waifux.app
 

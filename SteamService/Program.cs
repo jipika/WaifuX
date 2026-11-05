@@ -145,6 +145,31 @@ while (running)
                 });
             }).ConfigureAwait(false);
             break;
+        case "listUserFiles":
+            if (!session.IsLoggedIn)
+            {
+                writer.Response(command.RequestId, false, "The Steam session is not authenticated.", "NOT_AUTHENTICATED");
+                break;
+            }
+            if (!TryWorkshopId(command.CreatorSteamId, out var userFilesCreatorId))
+            {
+                writer.Response(command.RequestId, false, "The creator Steam ID is invalid.", "INVALID_STEAM_ID");
+                break;
+            }
+            var userFilesStart = Math.Max(0, command.StartIndex ?? 0);
+            var userFilesCount = Math.Clamp(command.Count ?? 30, 1, 100);
+            await RunRequestAsync(command.RequestId, writer, async () =>
+            {
+                var page = await session.GetUserFilesAsync(userFilesCreatorId, userFilesStart, userFilesCount, CancellationToken.None).ConfigureAwait(false);
+                writer.Response(command.RequestId, true, data: new
+                {
+                    total = page.TotalResults,
+                    startIndex = page.StartIndex,
+                    nextStartIndex = page.NextStartIndex,
+                    workshopIds = page.PublishedFileIds.Select(id => id.ToString())
+                });
+            }).ConfigureAwait(false);
+            break;
         case "favorite":
         case "unfavorite":
             if (!session.IsLoggedIn)

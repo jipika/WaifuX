@@ -2020,6 +2020,16 @@ private struct WorkshopSettingsTab: View {
 
                 steamLoginSection
 
+                MacSettingsSection {
+                    MacSettingsRow(
+                        title: t("workshop.subscriptionAutomation"),
+                        subtitle: t("workshop.subscriptionAutomationDesc"),
+                        showDivider: false
+                    ) {
+                        MacToggle(isOn: $viewModel.workshopSubscriptionAutomationEnabled)
+                    }
+                }
+
                 // 场景壁纸实时渲染模式
                 MacSettingsSection {
                     MacSettingsRow(title: t("workshop.sceneRealtimeRendering"), subtitle: t("workshop.sceneRealtimeRenderingDesc"), showDivider: false) {

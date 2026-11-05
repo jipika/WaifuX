@@ -103,6 +103,8 @@ final class MobilePushService: ObservableObject {
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let safeTitle = title.replacingOccurrences(of: "/", with: "_")
         let outURL = outDir.appendingPathComponent("\(safeTitle).mpkg")
+        // 转换缓存只留最新 3 个；当前输出名先保护，避免重转同名包时被当旧文件删掉。
+        pruneConvertedPackages(in: outDir, keeping: 3, protecting: outURL)
 
         await MainActor.run { phase = .converting(progress: 0) }
 
@@ -128,6 +130,30 @@ final class MobilePushService: ObservableObject {
     }
 
     // MARK: - 推送
+
+    /// 转换产物是缓存，不是用户下载内容；只保留最新 3 个，且不动当前输出。
+    private func pruneConvertedPackages(in directory: URL, keeping limit: Int, protecting current: URL) {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let packages = urls.filter { url in
+            url.pathExtension.lowercased() == "mpkg" &&
+            url.standardizedFileURL != current.standardizedFileURL &&
+            (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+        let newestFirst = packages.sorted { lhs, rhs in
+            let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return l > r
+        }
+        // 留一个名额给正在生成的 current；其它文件/子目录一律不碰。
+        for url in newestFirst.dropFirst(max(0, limit - 1)) {
+            try? fm.removeItem(at: url)
+        }
+    }
 
     /// 起服务端并推送一批 mpkg。PIN 由服务端生成，通过回调交 UI 展示。
     func startPush(files: [(url: URL, title: String)]) async throws -> String {
@@ -236,7 +262,7 @@ final class MobilePushService: ObservableObject {
                     .prefix(4)
                 pendingPIN = String(pin)
             }
-            if line.contains("配对成功") {
+            if line.contains("配对成功") || line.contains("自动连接成功") {
                 phase = .pushing(name: "传输中", progress: 0)
             }
             if line.contains("等待手机重连"), case .waitingPairing(let pin) = phase {

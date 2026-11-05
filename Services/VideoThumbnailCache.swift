@@ -152,19 +152,24 @@ final class VideoThumbnailCache {
 
         // 无列表小图时才回退 poster（旧缓存/仅生成过高清帧的路径）
         let path = mediaURL.standardizedFileURL.path
-        if let poster = usablePosterURL(forPathKey: path) { return poster }
-
+        // 列表不做壁纸级来源证明，避免在热路径打开外置视频；严格入口仍逐源验证。
+        for poster in [posterCacheURL(forPathKey: path), legacyPosterCacheURL(forPathKey: path)] {
+            if isUsableCachedImage(at: poster) { return poster }
+        }
         return nil
     }
 
     /// Scene 烘焙封面使用稳定的 item 级缓存文件，避免每次重新烘焙因为 MP4 文件名变化而堆出多张抽帧图。
-    func cachedSceneBakePosterFileURLIfExists(itemID: String) -> URL? {
-        let poster = sceneBakePosterCacheURL(itemID: itemID)
-        if isUsableCachedImage(at: poster) { return poster }
-        // 兼容：迁移前只在 Caches 里的旧封面
-        let legacy = legacySceneBakePosterURL(itemID: itemID)
-        if legacy != poster, isUsableCachedImage(at: legacy) { return legacy }
-        return nil
+    func cachedSceneBakePosterFileURLIfExists(itemID: String, forLocalVideo videoURL: URL? = nil) -> URL? {
+        let candidates = [sceneBakePosterCacheURL(itemID: itemID), legacySceneBakePosterURL(itemID: itemID)]
+        // 无源上下文的旧调用只供列表展示；桌面/锁屏必须传入当前 MP4。
+        return candidates.first { isUsableCachedImage(at: $0) }
+    }
+
+    /// 桌面/锁屏高清缓存按 itemID 直接命中，不做内容/属性/裁剪身份校验。
+    func cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(itemID: String, contentRoot: URL) -> URL? {
+        _ = contentRoot
+        return cachedSceneBakePosterFileURLIfExists(itemID: itemID)
     }
 
     /// 实时 Scene 在关闭自动烘焙时生成的按目标尺寸静帧。
@@ -173,11 +178,12 @@ final class VideoThumbnailCache {
         itemID: String,
         variantKey: String
     ) -> URL? {
-        let poster = sceneRealtimePosterCacheURL(itemID: itemID, variantKey: variantKey)
-        if isUsableCachedImage(at: poster) { return poster }
-        let legacy = legacySceneRealtimePosterURL(itemID: itemID, variantKey: variantKey)
-        if legacy != poster, isUsableCachedImage(at: legacy) { return legacy }
-        return nil
+        let candidates = [sceneRealtimePosterCacheURL(itemID: itemID, variantKey: variantKey),
+                          legacySceneRealtimePosterURL(itemID: itemID, variantKey: variantKey)]
+        return candidates.first { url in
+            guard isUsableCachedImage(at: url) else { return false }
+            return true
+        }
     }
 
     /// `scene_realtime_*` 目录快照索引：itemID.md5 → 修改时间最新的一张。
@@ -274,8 +280,8 @@ final class VideoThumbnailCache {
     ) -> URL? {
         _ = projectRoot // 兼容旧调用；不再从工程目录取 preview.*
 
-        if let sceneBakeItemID,
-           let scenePoster = cachedSceneBakePosterFileURLIfExists(itemID: sceneBakeItemID) {
+        if let sceneBakeItemID, let videoURL,
+           let scenePoster = cachedSceneBakePosterFileURLIfExists(itemID: sceneBakeItemID, forLocalVideo: videoURL) {
             return scenePoster
         }
 
@@ -286,6 +292,8 @@ final class VideoThumbnailCache {
 
         if let fallbackPosterURL,
            fallbackPosterURL.isFileURL,
+           !fallbackPosterURL.lastPathComponent.hasPrefix("list_"),
+           !fallbackPosterURL.deletingPathExtension().lastPathComponent.lowercased().hasPrefix("preview"),
            isUsableCachedImage(at: fallbackPosterURL) {
             return fallbackPosterURL
         }
@@ -309,6 +317,14 @@ final class VideoThumbnailCache {
               sz.intValue > 500 else {
             return false
         }
+        // 只读 ImageIO 元数据 + 1px 缩略图，拒绝「够大但不可解码」的坏缓存。
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1,
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary) != nil else { return false }
         return true
     }
 
@@ -373,13 +389,11 @@ final class VideoThumbnailCache {
 
         let outURL = sceneBakePosterCacheURL(itemID: itemID)
         if !forceRegenerate,
-           let existing = cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
-            scheduleCropExistingPosterIfNeeded(existing)
+           let existing = cachedSceneBakePosterFileURLIfExists(itemID: itemID, forLocalVideo: videoURL) {
             return existing
         }
-
-        try? fileManager.removeItem(at: outURL)
-        return await generatePosterJPEGFile(from: URL(fileURLWithPath: pathKey), outputURL: outURL)
+        return await generatePosterJPEGFile(from: URL(fileURLWithPath: pathKey), outputURL: outURL,
+            cropLetterbox: false, forceRegenerate: forceRegenerate)
     }
 
     /// 为实时 Scene 的临时 1 秒视频生成目标屏幕专用封面。
@@ -402,11 +416,9 @@ final class VideoThumbnailCache {
                itemID: itemID,
                variantKey: variantKey
            ) {
-            scheduleCropExistingPosterIfNeeded(existing)
             return existing
         }
 
-        try? fileManager.removeItem(at: outURL)
         invalidateRealtimePosterIndex()
         return await generatePosterJPEGFile(
             from: URL(fileURLWithPath: pathKey),
@@ -414,7 +426,9 @@ final class VideoThumbnailCache {
             maximumSize: CGSize(
                 width: max(1, targetWidth),
                 height: max(1, targetHeight)
-            )
+            ),
+            cropLetterbox: false,
+            forceRegenerate: forceRegenerate
         )
     }
 
@@ -441,11 +455,9 @@ final class VideoThumbnailCache {
                itemID: itemID,
                variantKey: variantKey
            ) {
-            scheduleCropExistingPosterIfNeeded(existing)
             return existing
         }
 
-        try? fileManager.removeItem(at: outURL)
         invalidateRealtimePosterIndex()
         return await generatePosterJPEGFile(
             fromImageFile: imageURL,
@@ -453,7 +465,9 @@ final class VideoThumbnailCache {
             maximumSize: CGSize(
                 width: max(1, targetWidth),
                 height: max(1, targetHeight)
-            )
+            ),
+            cropLetterbox: false,
+            forceRegenerate: forceRegenerate
         )
     }
 
@@ -474,12 +488,12 @@ final class VideoThumbnailCache {
         let outURL = sceneBakePosterCacheURL(itemID: itemID)
         if !forceRegenerate,
            let existing = cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
-            scheduleCropExistingPosterIfNeeded(existing)
             return existing
         }
-
-        try? fileManager.removeItem(at: outURL)
-        return await generatePosterJPEGFile(fromImageFile: imageURL, outputURL: outURL)
+        return await generatePosterJPEGFile(
+            fromImageFile: imageURL, outputURL: outURL,
+            forceRegenerate: forceRegenerate
+        )
     }
 
     /// 删除 Scene 烘焙稳定封面，并顺手清掉旧的 path-based poster，避免历史重复缓存继续被列表命中。
@@ -487,6 +501,7 @@ final class VideoThumbnailCache {
         try? fileManager.removeItem(at: sceneBakePosterCacheURL(itemID: itemID))
         try? fileManager.removeItem(at: legacySceneBakePosterURL(itemID: itemID))
         let realtimePrefix = "scene_realtime_\(itemID.md5)_"
+        let webPrefix = "scene_web_\(itemID.md5)_"
         var directories = [cacheDirectory]
         if let covers = sceneCoversDirectory(), covers != cacheDirectory { directories.append(covers) }
         for dir in directories {
@@ -496,9 +511,10 @@ final class VideoThumbnailCache {
                 options: [.skipsHiddenFiles]
             ) else { continue }
             for file in files
-            where file.lastPathComponent.hasPrefix(realtimePrefix)
+            where (file.lastPathComponent.hasPrefix(realtimePrefix)
+                   || file.lastPathComponent.hasPrefix(webPrefix))
                 && file.pathExtension.lowercased() == "jpg" {
-                try? fileManager.removeItem(at: file)
+            _ = try? fileManager.removeItem(at: file)
             }
         }
         if let videoPath, !videoPath.isEmpty {
@@ -573,16 +589,15 @@ final class VideoThumbnailCache {
         cacheDirectory.appendingPathComponent("poster_wallpaper_\(pathKey.md5).jpg")
     }
 
-    /// 读高清帧：新位置优先；只剩旧 Caches 那份时立即返回它，并后台复制到新位置（不删源）。
+    /// 读高清帧：新位置优先；只剩旧 Caches 那份时返回它并后台复制到新位置（不删源）。
     private func usablePosterURL(forPathKey pathKey: String) -> URL? {
         let poster = posterCacheURL(forPathKey: pathKey)
         if isUsableCachedImage(at: poster) { return poster }
         let legacy = legacyPosterCacheURL(forPathKey: pathKey)
         guard legacy != poster, isUsableCachedImage(at: legacy) else { return nil }
-        Task.detached(priority: .utility) {
-            let fm = FileManager.default
-            guard !fm.fileExists(atPath: poster.path) else { return }
-            try? fm.copyItem(at: legacy, to: poster)
+        Self.ensureParentDirectory(of: poster)
+        if !fileManager.fileExists(atPath: poster.path) {
+            try? fileManager.copyItem(at: legacy, to: poster)
         }
         return legacy
     }
@@ -644,11 +659,13 @@ final class VideoThumbnailCache {
             var copied = 0
             for file in files {
                 let name = file.lastPathComponent
-                guard name.hasPrefix("scene_bake_") || name.hasPrefix("scene_realtime_"),
+                guard name.hasPrefix("scene_bake_") || name.hasPrefix("scene_realtime_") || name.hasPrefix("scene_web_"),
                       file.pathExtension.lowercased() == "jpg" else { continue }
                 let dest = covers.appendingPathComponent(name)
                 guard !fm.fileExists(atPath: dest.path) else { continue }
-                if (try? fm.copyItem(at: file, to: dest)) != nil { copied += 1 }
+                if (try? fm.copyItem(at: file, to: dest)) != nil {
+                    copied += 1
+                }
             }
             if copied > 0 {
                 print("[VideoThumbnailCache] 旧 Caches 封面已复制进库目录: \(copied) 张 → \(covers.path)")
@@ -685,86 +702,136 @@ final class VideoThumbnailCache {
             || path.contains("/WaifuX/\(sceneCoversFolderName)/")
     }
 
-    // MARK: Scene 精确过渡图（scene_transition_*，独立于 scene_realtime_* 索引与后处理）
-
-    private func sceneTransitionPosterURL(identity: String) -> URL {
-        cacheDirectory.appendingPathComponent("scene_transition_\(identity.prefix(40)).jpg")
+    /// 只供过渡图复用：按 itemID 取同尺寸的烘焙／实时整图，不再做 JSON 身份校验。
+    func reusableSceneHDPosters(itemID: String) -> [URL] {
+        var directories = [cacheDirectory]
+        if let covers = sceneCoversDirectory(), covers != cacheDirectory { directories.insert(covers, at: 0) }
+        let bakeName = "scene_bake_\(itemID.md5).jpg"
+        let realtimePrefix = "scene_realtime_\(itemID.md5)_"
+        return directories.flatMap { directory in
+            ((try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+                .filter { url in
+                    let name = url.lastPathComponent
+                    return (name == bakeName || (name.hasPrefix(realtimePrefix) && url.pathExtension == "jpg"))
+                        && isUsableCachedImage(at: url)
+                }
+        }.sorted { (imagePixelSize(at: $0)?.width ?? 0) > (imagePixelSize(at: $1)?.width ?? 0) }
     }
 
-    private func sceneTransitionMetadataURL(identity: String) -> URL {
-        cacheDirectory.appendingPathComponent("scene_transition_\(identity.prefix(40)).meta.json")
+    // MARK: Scene 过渡图（scene_transition_*）
+
+    private func sceneTransitionPosterURL(spec: SceneTransitionPosterSpec) -> URL {
+        cacheDirectory.appendingPathComponent("scene_transition_\(spec.cacheKey.md5).jpg")
     }
 
-    /// 只在图片可用且 sidecar 元数据与期望**逐字段一致**时返回；旧缓存没有元数据一律不算命中。
-    func cachedSceneTransitionPoster(expected: SceneTransitionPosterMetadata) -> URL? {
-        let imageURL = sceneTransitionPosterURL(identity: expected.identity)
+    /// 在当前壁纸的几何缓存键下按图片和像素尺寸命中，不读内容/属性来源侧车。
+    func cachedSceneTransitionPoster(expected: SceneTransitionPosterSpec) -> URL? {
+        let imageURL = sceneTransitionPosterURL(spec: expected)
         guard isUsableCachedImage(at: imageURL),
-              let data = try? Data(contentsOf: sceneTransitionMetadataURL(identity: expected.identity)),
-              let stored = try? JSONDecoder().decode(SceneTransitionPosterMetadata.self, from: data) else {
-            return nil
-        }
-        let matches = stored.schemaVersion == expected.schemaVersion
-            && stored.identity == expected.identity
-            && stored.contentDigest == expected.contentDigest
-            && stored.propertiesDigest == expected.propertiesDigest
-            && stored.pixelWidth == expected.pixelWidth
-            && stored.pixelHeight == expected.pixelHeight
-            && abs(stored.backingScale - expected.backingScale) < 0.001
-            && stored.cropSignature == expected.cropSignature
-        return matches ? imageURL : nil
+              let size = imagePixelSize(at: imageURL),
+              Int(size.width) == expected.pixelWidth,
+              Int(size.height) == expected.pixelHeight else { return nil }
+        return imageURL
     }
 
-    /// 从临时 1 秒视频抽出精确过渡图，并写 sidecar 元数据（先图后元数据，元数据写成功才算缓存）。
+    /// 从临时 1 秒视频抽取过渡图，仅写 JPEG。
     func storeSceneTransitionPoster(
         forLocalVideo videoURL: URL,
-        metadata: SceneTransitionPosterMetadata
+        spec: SceneTransitionPosterSpec
     ) async -> URL? {
+        if let cached = cachedSceneTransitionPoster(expected: spec) { return cached }
         guard videoURL.isFileURL, fileManager.fileExists(atPath: videoURL.path) else { return nil }
-        let imageURL = sceneTransitionPosterURL(identity: metadata.identity)
-        let metaURL = sceneTransitionMetadataURL(identity: metadata.identity)
-        try? fileManager.removeItem(at: metaURL)
+        let imageURL = sceneTransitionPosterURL(spec: spec)
         try? fileManager.removeItem(at: imageURL)
         guard let written = await generatePosterJPEGFile(
             from: videoURL,
             outputURL: imageURL,
-            maximumSize: CGSize(width: max(1, metadata.pixelWidth), height: max(1, metadata.pixelHeight))
+            maximumSize: CGSize(width: max(1, spec.pixelWidth), height: max(1, spec.pixelHeight)),
+            cropLetterbox: false
         ), isUsableCachedImage(at: written) else {
-            return nil
-        }
-        do {
-            let data = try JSONEncoder().encode(metadata)
-            Self.ensureParentDirectory(of: metaURL)
-            try data.write(to: metaURL, options: .atomic)
-        } catch {
-            try? fileManager.removeItem(at: written)
             return nil
         }
         return written
     }
 
-    /// 复用已有静态抽帧（`scene_realtime_*` / `scene_bake_*`）作为过渡图：复制成独立文件 + 写元数据。
-    /// 复制而不是直接引用，是因为原抽帧随时可能被重新抽帧 / 删除记录清掉，过渡期间文件必须稳定。
+    /// 复用已有帧并沿用目标 crop/viewport 适配，不以原画布比例拒绝资源。
     func adoptSceneTransitionPoster(
         fromExistingPoster sourceURL: URL,
-        metadata: SceneTransitionPosterMetadata
+        spec: SceneTransitionPosterSpec,
+        sourceCropSignature: String = "none"
     ) -> URL? {
-        guard isUsableCachedImage(at: sourceURL) else { return nil }
-        let imageURL = sceneTransitionPosterURL(identity: metadata.identity)
-        let metaURL = sceneTransitionMetadataURL(identity: metadata.identity)
-        try? fileManager.removeItem(at: metaURL)
-        try? fileManager.removeItem(at: imageURL)
-        Self.ensureParentDirectory(of: imageURL)
+        if let cached = cachedSceneTransitionPoster(expected: spec) { return cached }
+        guard isUsableCachedImage(at: sourceURL),
+              let pixels = imagePixelSize(at: sourceURL),
+              spec.pixelWidth > 0, spec.pixelHeight > 0,
+              spec.pixelWidth <= 8192, spec.pixelHeight <= 8192,
+              Int64(spec.pixelWidth) * Int64(spec.pixelHeight) <= 33_554_432,
+              pixels.width * pixels.height <= 33_554_432 else { return nil }
+        let crop: CGRect
+        let viewport: CGRect
+        if sourceCropSignature == spec.cropSignature {
+            crop = CGRect(x: 0, y: 0, width: 1, height: 1)
+            viewport = crop
+        } else {
+            guard sourceCropSignature == "none",
+                  let layout = Self.transitionCropLayout(signature: spec.cropSignature) else { return nil }
+            crop = layout.crop
+            viewport = layout.viewport
+        }
+        let imageURL = sceneTransitionPosterURL(spec: spec)
+        guard sourceURL != imageURL else { return nil }
+        if sourceCropSignature == spec.cropSignature,
+           Int(pixels.width) == spec.pixelWidth, Int(pixels.height) == spec.pixelHeight {
+            do {
+                let data = try Data(contentsOf: sourceURL)
+                Self.ensureParentDirectory(of: imageURL)
+                try data.write(to: imageURL, options: .atomic)
+                return imageURL
+            } catch { return nil }
+        }
+        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let cropped = image.cropping(to: CGRect(x: crop.minX * CGFloat(image.width),
+                  y: crop.minY * CGFloat(image.height), width: crop.width * CGFloat(image.width),
+                  height: crop.height * CGFloat(image.height))),
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: spec.pixelWidth, height: spec.pixelHeight,
+                  bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let width = CGFloat(spec.pixelWidth), height = CGFloat(spec.pixelHeight)
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.draw(cropped, in: CGRect(x: viewport.minX * width, y: (1 - viewport.maxY) * height,
+                                        width: viewport.width * width, height: viewport.height * height))
+        guard let output = context.makeImage(), let jpeg = Self.encodeJPEG(output, quality: 0.90) else { return nil }
         do {
-            try fileManager.copyItem(at: sourceURL, to: imageURL)
-            let data = try JSONEncoder().encode(metadata)
-            try data.write(to: metaURL, options: .atomic)
+            Self.ensureParentDirectory(of: imageURL)
+            try jpeg.write(to: imageURL, options: .atomic)
+            return imageURL
         } catch {
-            print("[SceneHandoff] 复用静态抽帧失败: \(error.localizedDescription)")
-            try? fileManager.removeItem(at: imageURL)
-            try? fileManager.removeItem(at: metaURL)
             return nil
         }
-        return isUsableCachedImage(at: imageURL) ? imageURL : nil
+    }
+
+    /// 直接消费实时启动已算好的归一化 crop/viewport；不重新计算 cover、pan 或 zoom。
+    nonisolated static func transitionCropLayout(signature: String) -> (crop: CGRect, viewport: CGRect)? {
+        let args = signature.split(separator: " ").map(String.init)
+        func rect(_ value: String) -> CGRect? {
+            let components = value.split(separator: ",", omittingEmptySubsequences: false)
+            guard components.count == 4 else { return nil }
+            let numbers = components.compactMap { Double($0) }
+            guard numbers.count == 4, numbers.allSatisfy(\.isFinite),
+                  numbers[0] >= 0, numbers[1] >= 0, numbers[2] > 0, numbers[3] > 0,
+                  numbers[0] + numbers[2] <= 1.000001, numbers[1] + numbers[3] <= 1.000001 else { return nil }
+            return CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+        }
+        guard args.count == 2 || args.count == 4, args[0] == "--crop", let crop = rect(args[1]) else { return nil }
+        if args.count == 4 {
+            guard args[2] == "--crop-viewport", let viewport = rect(args[3]) else { return nil }
+            return (crop, viewport)
+        }
+        return (crop, CGRect(x: 0, y: 0, width: 1, height: 1))
     }
 
     /// 像素尺寸（不解码整图）；用于判断已有抽帧与目标屏比例是否一致。
@@ -788,10 +855,14 @@ final class VideoThumbnailCache {
     private func generatePosterJPEGFile(
         from videoURL: URL,
         outputURL: URL,
-        maximumSize: CGSize = CGSize(width: 3840, height: 2160)
+        maximumSize: CGSize = CGSize(width: 3840, height: 2160),
+        cropLetterbox: Bool = true,
+        forceRegenerate: Bool = false
     ) async -> URL? {
-        await VideoPosterGenerationCoordinator.shared.generate(key: outputURL.path) {
-            await Task.detached(priority: .userInitiated) {
+        return await VideoPosterGenerationCoordinator.shared.generate(key: outputURL.path) {
+            if !forceRegenerate, await self.isUsableCachedImage(at: outputURL) { return outputURL }
+
+            return await Task.detached(priority: .userInitiated) {
                 let startedAt = CFAbsoluteTimeGetCurrent()
                 let asset = AVURLAsset(url: videoURL)
                 let generator = AVAssetImageGenerator(asset: asset)
@@ -837,9 +908,8 @@ final class VideoThumbnailCache {
                         try jpeg.write(to: outputURL, options: .atomic)
                         let elapsed = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
                         print("[VideoThumbnailCache] Poster frame at \(String(format: "%.1f", seconds))s in \(String(format: "%.0f", elapsed))ms → \(outputURL.lastPathComponent)")
-                        // 后台异步去黑边，不阻塞返回
-                        Task.detached(priority: .utility) {
-                            await Self.cropExistingPosterIfNeeded(outputURL)
+                        if cropLetterbox {
+                            Task.detached(priority: .utility) { await Self.cropExistingPosterIfNeeded(outputURL) }
                         }
                         return outputURL
                     } catch {
@@ -857,10 +927,13 @@ final class VideoThumbnailCache {
     private func generatePosterJPEGFile(
         fromImageFile imageURL: URL,
         outputURL: URL,
-        maximumSize: CGSize = CGSize(width: 3840, height: 2160)
+        maximumSize: CGSize = CGSize(width: 3840, height: 2160),
+        cropLetterbox: Bool = true,
+        forceRegenerate: Bool = false
     ) async -> URL? {
-        await VideoPosterGenerationCoordinator.shared.generate(key: outputURL.path) {
-            await Task.detached(priority: .userInitiated) {
+        return await VideoPosterGenerationCoordinator.shared.generate(key: outputURL.path) {
+            if !forceRegenerate, await self.isUsableCachedImage(at: outputURL) { return outputURL }
+            return await Task.detached(priority: .userInitiated) {
                 let startedAt = CFAbsoluteTimeGetCurrent()
                 guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
                     print("[VideoThumbnailCache] Failed to open Web capture: \(imageURL.lastPathComponent)")
@@ -888,8 +961,8 @@ final class VideoThumbnailCache {
                     try jpeg.write(to: outputURL, options: .atomic)
                     let elapsed = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
                     print("[VideoThumbnailCache] Web capture poster in \(String(format: "%.0f", elapsed))ms → \(outputURL.lastPathComponent)")
-                    Task.detached(priority: .utility) {
-                        await Self.cropExistingPosterIfNeeded(outputURL)
+                    if cropLetterbox {
+                        Task.detached(priority: .utility) { await Self.cropExistingPosterIfNeeded(outputURL) }
                     }
                     return outputURL
                 } catch {
@@ -953,6 +1026,8 @@ final class VideoThumbnailCache {
     }
 
     nonisolated private static func cropExistingPosterIfNeeded(_ url: URL) async {
+        // 精确图与 Scene 整画布缓存不允许后台去黑边改变 crop 语义。
+        guard !url.lastPathComponent.hasPrefix("scene_") else { return }
         await Task.detached(priority: .utility) {
             guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),

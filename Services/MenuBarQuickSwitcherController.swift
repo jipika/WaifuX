@@ -246,7 +246,15 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     @Published private(set) var batchItems: [MenuBarQuickWallpaperItem] = []
     @Published private(set) var selectedItem: MenuBarQuickWallpaperItem?
-    @Published private(set) var isApplying = false
+    @Published private(set) var applyProgress = WallpaperApplyProgressState()
+    var isApplying: Bool { applyProgress.isApplying }
+    var isBlockingApply: Bool { applyProgress.isBlocking }
+    var synchronizationStatus: String? {
+        guard isApplying, !isBlockingApply else { return nil }
+        return t(applyProgress.stage == .committing
+            ? "menubar.quick.finishingApply" : "menubar.quick.syncingWallpaper")
+    }
+    private var applyTask: Task<Void, Never>?
     @Published private(set) var errorMessage: String?
     @Published private(set) var previewWarmupToken = UUID()
     @Published private(set) var canDesignCurrentWallpaper = false
@@ -812,7 +820,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     /// 通过菜单栏所在屏幕设置壁纸；全局显示器同步开启时仍覆盖全部屏幕。
     func applySelectedItem() {
-        guard let selectedItem, !isApplying else { return }
+        guard let selectedItem, !isBlockingApply else { return }
 
         errorMessage = nil
         let globallySynced = WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled
@@ -849,14 +857,17 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         targetScreens: [NSScreen]?,
         globallySynced: Bool
     ) {
-        isApplying = true
+        applyTask?.cancel()
+        let requestID = UUID()
+        applyProgress.begin(requestID)
         errorMessage = nil
-        Task { [weak self] in
+        applyTask = Task { [weak self] in
             guard let self else { return }
             await self.performApply(
                 selectedItem,
                 targetScreens: targetScreens,
-                globallySynced: globallySynced
+                globallySynced: globallySynced,
+                requestID: requestID
             )
         }
     }
@@ -864,7 +875,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     private func performApply(
         _ selectedItem: MenuBarQuickWallpaperItem,
         targetScreens: [NSScreen]?,
-        globallySynced: Bool
+        globallySynced: Bool,
+        requestID: UUID
     ) async {
         let applyActivity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
@@ -876,6 +888,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             // Workshop 目录：先解析 content root，且补齐 dependency（与 MediaDetailSheet 一致）。
             let prepareStart = Date()
             let applyURL = try await prepareApplyURL(for: selectedItem)
+            try Task.checkCancellation()
+            guard applyProgress.requestID == requestID else { throw CancellationError() }
             let prepareDone = Date()
     
             // 入库校验：确保 MediaLibraryService.shared.downloadRecord(forLocalFilePath:) 能命中，
@@ -914,8 +928,13 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             let success = try await LocalWallpaperApplyService.apply(
                 localURL: applyURL,
                 targetScreens: screens,
-                options: options
+                options: options,
+                onStageChange: { [weak self] stage in
+                    _ = self?.applyProgress.report(stage, for: requestID)
+                }
             )
+            try Task.checkCancellation()
+            guard applyProgress.requestID == requestID else { throw CancellationError() }
             // 分段耗时：定位「点设壁纸后要等」到底卡在 prepare（工程解析/dependency）
             // 还是 apply 本体（渲染切换）。
             AppLogger.error(.wallpaper, "菜单栏设置壁纸分段耗时", metadata: [
@@ -938,16 +957,28 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                     : screens.first?.wallpaperScreenIdentifier,
                 itemID: Self.schedulerItemID(for: selectedItem)
             )
-            isApplying = false
+            guard applyProgress.finish(requestID) else { return }
+            applyTask = nil
             refreshPlaybackSnapshot()
-            onApplied?()
+            // Keep browsing open if the user selected another candidate while
+            // the previous wallpaper was synchronizing in the background.
+            if self.selectedItem?.id == selectedItem.id { onApplied?() }
         } catch {
+            // A cancelled/older request may clean up its own renderer, but must
+            // never dismiss this panel or clear a newer request's progress/error.
+            guard applyProgress.requestID == requestID else { return }
+            if error is CancellationError || Task.isCancelled {
+                _ = applyProgress.finish(requestID)
+                applyTask = nil
+                return
+            }
             AppLogger.error(.wallpaper, "菜单栏快速设置壁纸失败", metadata: [
                 "item": selectedItem.id,
                 "error": error.localizedDescription,
             ])
             errorMessage = error.localizedDescription
-            isApplying = false
+            _ = applyProgress.finish(requestID)
+            applyTask = nil
         }
     }
 
@@ -995,13 +1026,13 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         }
         if case .media(let mediaItem) = item.source,
            let record = MediaLibraryService.shared.downloadedItems.first(where: { $0.item.id == mediaItem.id }),
-           let art = SceneOfflineBakeService.usableArtifact(from: record),
+           let art = SceneOfflineBakeService.usableCurrentArtifact(from: record),
            SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
             return art.videoPath
         }
         // 也尝试按 content root 命中库记录（LocalWallpaperApplyService 内部会再查一次）
         if let record = MediaLibraryService.shared.downloadRecord(forLocalFilePath: applyURL.path),
-           let art = SceneOfflineBakeService.usableArtifact(from: record),
+           let art = SceneOfflineBakeService.usableCurrentArtifact(from: record),
            SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: art.videoPath)) {
             return art.videoPath
         }
@@ -1499,7 +1530,15 @@ private final class MenuBarQuickWallpaperRepository {
             //（它是商店缩略图，用户已有高清抽帧时不应再显示旧预览图）。
             // 烘焙/抽帧封面直接返回原图 URL：KFImage 已按 768 降采样；
             // LocalImageThumbnailCache 只按路径做键，重抽覆盖同路径后会命中旧小图。
-            // 1) 烘焙封面 scene_bake_<itemID>（含 Web canonical poster 同键空间）
+            // 1) 当前内容/属性身份匹配的 Scene/Web 高清封面
+            if let itemID = item.sceneBakeItemID,
+               let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
+                    itemID: itemID,
+                    contentRoot: WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: item.localURL)
+               ) {
+                return baked
+            }
+            // 列表旧缓存仅作显示回退；设置壁纸入口不使用此无来源重载。
             if let itemID = item.sceneBakeItemID,
                let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
                 return baked
@@ -1567,7 +1606,12 @@ private final class MenuBarQuickWallpaperRepository {
         // 顺序（与 previewURL(for:) 同序）：烘焙封面 → 视频/烘焙 MP4 帧 → 高清抽帧
         // scene_realtime_* → Workshop preview.*（最后兜底，由预热补）。
         // 有视频或烘焙资源时保持原逻辑；只有抽帧时必须显示抽帧高清图。
-        if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
+        if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
+            itemID: record.item.id, contentRoot: contentRoot
+        ) {
+            thumbnailURL = baked
+        } else if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
             thumbnailURL = baked
         } else if let videoPreviewURL,
            let thumbnail = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
@@ -1593,7 +1637,7 @@ private final class MenuBarQuickWallpaperRepository {
         }
 
         // 只暴露 usable 烘焙产物；过期/损坏路径留给 LocalWallpaperApplyService 再解析。
-        let usableBakePath = SceneOfflineBakeService.usableArtifact(from: record)?.videoPath
+        let usableBakePath = SceneOfflineBakeService.usableCurrentArtifact(from: record)?.videoPath
 
         return MenuBarQuickWallpaperItem(
             id: "media.\(record.id)",
@@ -1610,7 +1654,7 @@ private final class MenuBarQuickWallpaperRepository {
     }
 
     private func resolvedVideoPreviewURL(for record: MediaDownloadRecord) -> URL? {
-        if let artifact = SceneOfflineBakeService.usableArtifact(from: record) {
+        if let artifact = SceneOfflineBakeService.usableCurrentArtifact(from: record) {
             let bakedURL = URL(fileURLWithPath: artifact.videoPath)
             if fileManager.fileExists(atPath: bakedURL.path) {
                 return bakedURL

@@ -706,7 +706,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         wallpaperViewModel.restoreExploreSortPreferences()
         mediaViewModel.restoreExploreSortPreferences()
         wallpaperViewModel.restoreAPIKeyState()
-        Task { await WallpaperSourceManager.shared.performStartupSourceSelection() }
+        // 壁纸数据源不再有启动自动选择（ping Google / VPN 检测已移除）；
+        // 源只由用户手动切换，restoreAllDataAsync() 里的 restoreState() 负责恢复持久化选择。
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -1144,7 +1145,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     func applicationWillTerminate(_ notification: Notification) {
         AppExitDiagnostics.record("applicationWillTerminate")
         let children = BackgroundChildProcessCleanup.snapshot()
-        SceneOfflineBakeService.stopPreview()
+        SceneOfflineBakeService.stopPreview(reason: "applicationWillTerminate")
         // UI preview/export workers can still be alive after an asynchronous
         // stop. Keep updater/relaunch tools outside this renderer cleanup.
         let rendererNames: Set<String> = ["wallpaper-wgpu", "wallpaperengine-cli", "wallpaper-video-renderer", "ffmpeg", "dxc", "WaifuXSteamService"]

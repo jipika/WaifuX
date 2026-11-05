@@ -654,7 +654,14 @@ private struct TopBarSegmentedControl: View {
                     Text(tab.title)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(labelColor(for: tab))
-                        .frame(width: itemWidth(for: tab), height: controlHeight - 8)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 12)
+                        .frame(
+                            minWidth: minimumItemWidth,
+                            minHeight: controlHeight - 8,
+                            maxHeight: controlHeight - 8
+                        )
                         .background {
                             if selectedTab == tab {
                                 selectedTabGlass(for: tab)
@@ -680,9 +687,9 @@ private struct TopBarSegmentedControl: View {
         .guideAnchor(.homeTabBar)
     }
 
-    private func itemWidth(for tab: MainTab) -> CGFloat {
-        return 76
-    }
+    /// 标签宽度随文案自适应：中文「静态壁纸」、英文「STATIC WALLPAPER」都比旧的固定 76pt 宽，
+    /// 固定宽会把文字压成省略号。这里改为按内容测量，再夹到最小宽度，保证各语言下胶囊对齐。
+    private let minimumItemWidth: CGFloat = 76
 
     private func labelColor(for tab: MainTab) -> Color {
         if selectedTab == tab {

@@ -48,6 +48,11 @@ enum SceneHandoffProtocol {
     private nonisolated(unsafe) static var capabilityCache: [String: Bool] = [:]
 }
 
+/// 无状态文件的冷启动入口卡死必须区别于 GPU / 材质加载。
+/// 不能靠盲目延长固定超时来掩盖；这个期限只覆盖尚未收到首份状态的入口阶段。
+let sceneHandoffStartupBudget: TimeInterval = 20
+let sceneHandoffContentLoadBudget: TimeInterval = 90
+
 /// 渲染器写出的状态（camelCase）。
 struct SceneHandoffStatus: Decodable, Equatable, Sendable {
     struct ErrorInfo: Decodable, Equatable, Sendable {
@@ -182,8 +187,6 @@ struct SceneHandoffCommand: Equatable, Sendable {
 // MARK: - 内容 / 属性 / 几何身份
 
 enum SceneHandoffIdentity {
-    static let posterSchemaVersion = 2
-
     static func sha256Hex(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -220,37 +223,24 @@ enum SceneHandoffIdentity {
 
     /// 本次交接的内容身份（渲染器回显用）。
     static func contentIdentity(contentDigest: String, propertiesDigest: String) -> String {
-        String(sha256Hex("v\(posterSchemaVersion)|\(contentDigest)|\(propertiesDigest)").prefix(32))
-    }
-
-    /// 精确过渡图身份：内容 + 属性 + 像素几何 + backing scale + 裁剪配置 + schema。
-    static func posterIdentity(
-        contentDigest: String,
-        propertiesDigest: String,
-        pixelWidth: Int,
-        pixelHeight: Int,
-        backingScale: Double,
-        cropSignature: String
-    ) -> String {
-        let scale = Int((backingScale * 1000).rounded())
-        return sha256Hex(
-            "poster-v\(posterSchemaVersion)|\(contentDigest)|\(propertiesDigest)|\(pixelWidth)x\(pixelHeight)@\(scale)|\(cropSignature)"
-        )
+        String(sha256Hex("v2|\(contentDigest)|\(propertiesDigest)").prefix(32))
     }
 }
 
-/// 过渡图的匹配元数据（随图片写成 sidecar JSON）。
-struct SceneTransitionPosterMetadata: Codable, Equatable, Sendable {
-    let schemaVersion: Int
-    let identity: String
-    let contentDigest: String
-    let propertiesDigest: String
+/// 过渡图按壁纸、输出几何和裁剪布局缓存，不保存内容/属性来源 JSON。
+struct SceneTransitionPosterSpec: Equatable, Sendable {
+    let itemID: String
     let pixelWidth: Int
     let pixelHeight: Int
     let backingScale: Double
     let cropSignature: String
-    let createdAt: Date
+
+    var cacheKey: String {
+        let scale = Int((backingScale * 1000).rounded())
+        return "\(itemID)|\(pixelWidth)x\(pixelHeight)@\(scale)-\(cropSignature)"
+    }
 }
+
 
 /// 逐屏准备结果。
 enum SceneTransitionPosterOutcome: Equatable, Sendable {

@@ -173,6 +173,7 @@ class WorkshopViewModel: ObservableObject {
 
     /// 下载壁纸
     func downloadWallpaper(_ wallpaper: WorkshopWallpaper) async throws -> URL {
+        try await WorkshopSubscriptionAutomation.subscribeBeforeDownload(workshopID: wallpaper.id)
         return try await workshopService.downloadWorkshopItem(workshopID: wallpaper.id)
     }
 

@@ -4,94 +4,94 @@
 import CoreMedia
 import ImageIO
 @preconcurrency import IOSurface
-
-struct WallpaperSnapshotFileRevision: Sendable, Equatable {
-    let url: URL
-    let modified: Date?
-    let fileSize: Int?
-
-    init(_ url: URL, readMetadata: Bool = true) {
-        self.url = url
-        let values = readMetadata ? (try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])) : nil
-        modified = values?.contentModificationDate
-        fileSize = values?.fileSize
-    }
-}
-
-private struct SnapshotRequest: Sendable, Equatable {
-    let displayID: UInt32?
-    let images: [WallpaperSnapshotFileRevision]
-    let video: WallpaperSnapshotFileRevision?
-    let playbackTime: Double?
-    let prefsRevision: WallpaperSnapshotFileRevision?
-    let thumbnailsRevision: WallpaperSnapshotFileRevision?
-    let selectedVideoID: String?
-
-    // A cached image/surface remains valid for unchanged media. The timebase
-    // continues across loops and is not a reason to allocate another surface.
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.displayID == rhs.displayID && lhs.images == rhs.images && lhs.video == rhs.video && lhs.prefsRevision == rhs.prefsRevision
-            && lhs.thumbnailsRevision == rhs.thumbnailsRevision && lhs.selectedVideoID == rhs.selectedVideoID
-    }
-}
+import os
 
 private final class SnapshotResult: @unchecked Sendable {
     let value: AnyObject?
-    init(_ value: AnyObject?) { self.value = value }
+    let invalidationRevision: UInt64
+    let failureCacheLifetime: TimeInterval
+
+    init(_ value: AnyObject?, request: SnapshotRequest) {
+        self.value = value
+        invalidationRevision = request.invalidationRevision
+        failureCacheLifetime = request.failureCacheLifetime
+    }
+}
+
+private let runtimeSnapshotRevision = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+/// Invalidates on the next submission without changing the shared coordinator
+/// or increasing its one-successful-surface cache. Late replies are rejected too.
+func invalidateRuntimeSnapshots() {
+    runtimeSnapshotRevision.withLock { $0 &+= 1 }
 }
 
 // Pending requests are independent per display, while only one completed
 // IOSurface is retained by our cache across all displays.
 private let snapshotWork = LatestWallpaperSnapshotWork<SnapshotRequest, SnapshotResult>(maximumKeys: 16, maximumCachedKeys: 1,
                                                                                        key: { $0.displayID ?? 0 },
-                                                                                       cacheLifetime: { $0.value == nil ? 5 : .infinity }) { request in
-    await wallpaperSnapshotDecodeGate.perform { SnapshotResult(await buildSnapshot(request)) }
+                                                                                       cacheLifetime: { $0.value == nil ? $0.failureCacheLifetime : .infinity }) { request in
+    await wallpaperSnapshotDecodeGate.perform { await buildSnapshot(request) }
 }
 
-func requestSnapshotViaRuntime(displayID: UInt32? = nil, currentTime: CMTime? = nil, reply: @escaping @Sendable (AnyObject?) -> Void) {
-    let images: [WallpaperSnapshotFileRevision]
-    let prefsRevision: WallpaperSnapshotFileRevision?
-    let thumbnailsRevision: WallpaperSnapshotFileRevision?
-    if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
-        images = sharedSnapshotCandidateURLs(in: container, displayID: displayID).map {
-            WallpaperSnapshotFileRevision($0, readMetadata: $0.path.hasPrefix(container.path + "/"))
-        }
-        prefsRevision = WallpaperSnapshotFileRevision(container.appendingPathComponent("waifux-wallpaper-prefs.json"))
-        thumbnailsRevision = WallpaperSnapshotFileRevision(container.appendingPathComponent("WallpaperCache/thumbnails"))
+func requestSnapshotViaRuntime(
+    displayID: UInt32? = nil, currentTime: CMTime? = nil,
+    reply: @escaping @Sendable (AnyObject?) -> Void
+) {
+    let targetDisplayID = displayID ?? CGMainDisplayID()
+    let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")
+    let sources: WallpaperSnapshotSources
+    if let container {
+        let paths = currentPrefsPaths(in: container, displayID: displayID)
+        sources = WallpaperSnapshotSources.resolve(
+            in: container, currentImagePath: paths.image, currentVideoPath: paths.video)
     } else {
-        images = []
-        prefsRevision = nil
-        thumbnailsRevision = nil
+        sources = WallpaperSnapshotSources(images: [], video: nil)
     }
-    // External media stat/decode stays inside the single worker. Snapshot's
-    // XPC entry point reads only the small shared configuration/cache metadata.
-    let video = currentPrefsPath("currentVideoPath", displayID: displayID).map {
-        WallpaperSnapshotFileRevision(URL(fileURLWithPath: $0), readMetadata: false)
-    }
+    let prefsRevision = container.map { WallpaperSnapshotFileRevision($0.appendingPathComponent("waifux-wallpaper-prefs.json")) }
+    let thumbnailsRevision = container.map { WallpaperSnapshotFileRevision($0.appendingPathComponent("WallpaperCache/thumbnails")) }
+    let cropPreferences = WallpaperSnapshotCropPreferences(in: container)
+    let invalidationRevision = runtimeSnapshotRevision.withLock { $0 }
+    let selectedVideoID = WallpaperState.shared.currentVideoID
     let time = currentTime.flatMap { $0.isNumeric && $0.seconds.isFinite ? $0.seconds : nil }
-    snapshotWork.submit(SnapshotRequest(displayID: displayID, images: images, video: video, playbackTime: time,
-                                       prefsRevision: prefsRevision, thumbnailsRevision: thumbnailsRevision,
-                                       selectedVideoID: WallpaperState.shared.currentVideoID)) { result in
-        reply(result?.value)
+    // Only layer geometry is read on main. XPC does not synchronously wait for
+    // it, and all image/video decoding still uses the existing single-flight gate.
+    let submit: @Sendable () -> Void = {
+        let geometry = snapshotTargetGeometry(for: targetDisplayID)
+        let request = SnapshotRequest(
+            displayID: displayID, targetDisplayID: targetDisplayID, sources: sources, playbackTime: time,
+            prefsRevision: prefsRevision, thumbnailsRevision: thumbnailsRevision, selectedVideoID: selectedVideoID,
+            targetGeometry: geometry, cropPreferences: cropPreferences, invalidationRevision: invalidationRevision)
+        snapshotWork.submit(request) { result in
+            guard let result, result.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }) else { reply(nil); return }
+            reply(result.value)
+        }
     }
+    if Thread.isMainThread { submit() } else { DispatchQueue.main.async(execute: submit) }
 }
 
-private func buildSnapshot(_ request: SnapshotRequest) async -> AnyObject? {
-    guard !Task.isCancelled else { return nil }
-    for revision in request.images {
-        guard !Task.isCancelled else { return nil }
+/// Caller is on main; never read a CALayer from a detached snapshot worker.
+private func snapshotTargetGeometry(for displayID: UInt32) -> WallpaperSnapshotTargetGeometry? {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if let active = WallpaperState.shared.activeContext(for: displayID),
+       let geometry = WallpaperSnapshotTargetGeometry(size: active.rootLayer.bounds.size, scale: active.rootLayer.contentsScale) {
+        return geometry
+    }
+    return WallpaperSnapshotTargetGeometry(size: CGDisplayBounds(displayID).size)
+}
+
+private func buildSnapshot(_ request: SnapshotRequest) async -> SnapshotResult {
+    let empty = SnapshotResult(nil, request: request)
+    guard !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }) else { return empty }
+    for revision in request.sources.images {
+        guard !Task.isCancelled else { return empty }
         if let image = loadBudgetedSnapshotImage(revision.url),
-           let snapshot = renderSnapshotToIOSurface(image: image) { return snapshot }
+           let snapshot = renderSnapshotToIOSurface(image: image, request: request) { return SnapshotResult(snapshot, request: request) }
     }
-    guard !Task.isCancelled else { return nil }
-    let surfaceRenderer: IOSurfaceFrameRenderer?
-    if let displayID = request.displayID {
-        surfaceRenderer = WallpaperState.shared.ioSurfaceRenderer(for: displayID)
-    } else {
-        surfaceRenderer = WallpaperState.shared.anyIOSurfaceRenderer()
-    }
-    if let snapshot = surfaceRenderer?.makeSnapshotXPC() { return snapshot }
-    guard let videoURL = request.video?.url ?? (request.displayID == nil ? findVideoURL() : nil) else { return nil }
+    guard !Task.isCancelled else { return empty }
+    // A raw live surface bypasses target/crop geometry and can represent older
+    // media. Use only the current video's thumbnail above or a budgeted frame.
+    guard let videoURL = request.sources.video?.url ?? (request.displayID == nil ? findVideoURL() : nil) else { return empty }
     let asset = AVURLAsset(url: videoURL)
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
@@ -103,7 +103,7 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> AnyObject? {
     let duration = try? await withTaskCancellationHandler(operation: {
         try await asset.load(.duration)
     }, onCancel: { asset.cancelLoading() })
-    guard !Task.isCancelled else { return nil }
+    guard !Task.isCancelled else { return empty }
     if let duration, duration.isNumeric, duration.seconds.isFinite, duration.seconds > 0 {
         let time = max(0, request.playbackTime ?? 0).truncatingRemainder(dividingBy: duration.seconds)
         requestTime = CMTime(seconds: time, preferredTimescale: 600)
@@ -116,110 +116,51 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> AnyObject? {
         let result = try await withTaskCancellationHandler(operation: {
             try await generator.image(at: requestTime)
         }, onCancel: { generator.cancelAllCGImageGeneration() })
-        guard !Task.isCancelled else { return nil }
+        guard !Task.isCancelled else { return empty }
         image = result.image
     } catch {
         extLog("  [Snapshot] Failed to get video frame: \(error)")
-        return nil
+        return empty
     }
-    guard let snapshotXPC = renderSnapshotToIOSurface(image: image) else { return nil }
+    guard let snapshotXPC = renderSnapshotToIOSurface(image: image, request: request) else { return empty }
     extLog("  [Snapshot] Created WallpaperSnapshotXPC \(image.width)x\(image.height)")
-    return snapshotXPC
+    return SnapshotResult(snapshotXPC, request: request)
 }
 
 func loadBudgetedSnapshotImage(_ url: URL) -> CGImage? {
-    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
-          let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { return nil }
-    let depth = min(32, max(8, (properties[kCGImagePropertyDepth] as? NSNumber)?.intValue ?? 16))
-    guard let layout = WallpaperSnapshotPixelBudget.layout(width: width.doubleValue, height: height.doubleValue,
-                                                          decodedBytesPerPixel: ((depth + 7) / 8) * 4) else { return nil }
-    let options: [CFString: Any] = [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceShouldCacheImmediately: true,
-        kCGImageSourceShouldAllowFloat: false,
-        kCGImageSourceThumbnailMaxPixelSize: max(layout.width, layout.height),
-    ]
-    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-          WallpaperSnapshotPixelBudget.acceptsDecodedImage(width: image.width, height: image.height, bytesPerRow: image.bytesPerRow) else { return nil }
-    return image
+    guard case .success(let decoded) = WallpaperBoundedImageDecoder.decode(url: url) else { return nil }
+    return decoded.image
 }
 
-private func sharedSnapshotCandidateURLs(in container: URL, displayID: UInt32?) -> [URL] {
-    var candidates: [URL] = []
-
-    if let imagePath = currentPrefsPath("currentImagePath", displayID: displayID) {
-        candidates.append(URL(fileURLWithPath: imagePath))
-    }
-
-    let thumbDir = container.appendingPathComponent("WallpaperCache/thumbnails")
-    if let latestDisplayThumb = latestDisplayThumbnail(in: thumbDir, displayID: displayID) {
-        candidates.append(latestDisplayThumb)
-    }
-
-    if let videoPath = currentPrefsPath("currentVideoPath", displayID: displayID) {
-        let videoID = URL(fileURLWithPath: videoPath).deletingPathExtension().lastPathComponent
-        candidates.append(thumbDir.appendingPathComponent("\(videoID).jpg"))
-    }
-
-    var seen = Set<String>()
-    return candidates.filter { seen.insert($0.path).inserted }
-}
-
-private func currentPrefsPath(_ key: String, displayID: UInt32?) -> String? {
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
-        return nil
-    }
+private func currentPrefsPaths(in container: URL, displayID: UInt32?) -> (image: String?, video: String?) {
     let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
     guard let data = try? Data(contentsOf: prefsURL),
-          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        return nil
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return (nil, nil) }
+    // Resolve both candidates from one configuration read; a concurrent switch
+    // cannot pair the previous image with the next video's thumbnail.
+    func path(_ kind: LockScreenSourceSelection.Kind) -> String? {
+        if let displayID {
+            return LockScreenSourceSelection.path(
+                for: kind, displayID: displayID,
+                videoPaths: object["currentVideoPaths"] as? [String: String],
+                imagePaths: object["currentImagePaths"] as? [String: String],
+                legacyVideoPath: object["currentVideoPath"] as? String,
+                legacyImagePath: object["currentImagePath"] as? String)
+        }
+        let key = kind == .video ? "currentVideoPath" : "currentImagePath"
+        guard let path = object[key] as? String, !path.isEmpty else { return nil }
+        return path
     }
-    if let displayID {
-        return LockScreenSourceSelection.path(
-            for: key == "currentVideoPath" ? .video : .image, displayID: displayID,
-            videoPaths: object["currentVideoPaths"] as? [String: String],
-            imagePaths: object["currentImagePaths"] as? [String: String],
-            legacyVideoPath: object["currentVideoPath"] as? String,
-            legacyImagePath: object["currentImagePath"] as? String
-        )
-    }
-    guard let path = object[key] as? String, !path.isEmpty else { return nil }
-    return path
+    return (path(.image), path(.video))
 }
 
-private func latestDisplayThumbnail(in thumbDir: URL, displayID: UInt32?) -> URL? {
-    guard let files = try? FileManager.default.contentsOfDirectory(
-        at: thumbDir,
-        includingPropertiesForKeys: [.contentModificationDateKey]
-    ) else {
-        return nil
-    }
-
-    return files
-        .filter { file in
-            guard file.pathExtension.lowercased() == "jpg" else { return false }
-            let name = file.deletingPathExtension().lastPathComponent
-            guard let displayID else { return name.hasPrefix("display-") }
-            let prefix = "display-\(displayID)"
-            return name == prefix || name.hasPrefix(prefix + "-")
-        }
-        .max { lhs, rhs in
-            let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            if lhsDate == rhsDate {
-                return lhs.lastPathComponent < rhs.lastPathComponent
-            }
-            return lhsDate < rhsDate
-        }
-}
-
-private func renderSnapshotToIOSurface(image: CGImage) -> AnyObject? {
-    guard !Task.isCancelled,
+private func renderSnapshotToIOSurface(
+    image: CGImage, request: SnapshotRequest, targetSize: CGSize? = nil, alreadyCropped: Bool = false
+) -> AnyObject? {
+    let canvasSize = targetSize ?? request.targetGeometry?.size ?? CGSize(width: image.width, height: image.height)
+    guard !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }),
           WallpaperSnapshotPixelBudget.acceptsDecodedImage(width: image.width, height: image.height, bytesPerRow: image.bytesPerRow),
-          let layout = WallpaperSnapshotPixelBudget.layout(width: Double(image.width), height: Double(image.height),
+          let layout = WallpaperSnapshotPixelBudget.layout(width: Double(canvasSize.width), height: Double(canvasSize.height),
                                                           rowAlignment: IOSurfaceGetPropertyAlignment(kIOSurfaceBytesPerRow),
                                                           allocationAlignment: IOSurfaceGetPropertyAlignment(kIOSurfaceAllocSize)),
           let snapshotClass = objc_getClass("WallpaperSnapshotXPC") as? AnyClass,
@@ -254,10 +195,13 @@ private func renderSnapshotToIOSurface(image: CGImage) -> AnyObject? {
         surface.unlock(options: [], seed: nil)
         return nil
     }
-    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let drewImage = WallpaperSnapshotCropDrawing.draw(
+        image: image, in: ctx, targetSize: canvasSize,
+        settings: request.cropPreferences.settings(forDisplayID: request.targetDisplayID), alreadyCropped: alreadyCropped)
     surface.unlock(options: [], seed: nil)
 
-    guard !Task.isCancelled, let instance = class_createInstance(snapshotClass, 0) else {
+    guard drewImage, !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }),
+          let instance = class_createInstance(snapshotClass, 0) else {
         extLog("  [Snapshot] ❌ Failed to create WallpaperSnapshotXPC instance")
         return nil
     }

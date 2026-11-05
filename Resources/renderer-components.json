@@ -1,23 +1,23 @@
 {
   "wgpu": {
-    "version": "1.0.42",
-    "revision": 43,
+    "version": "1.0.45",
+    "revision": 46,
     "sourceSHA256": {
       "dxc": "c4febd2c06b893aaa69c6ef3ef3498108f395aeee572a290dcbdd2a0609216f9",
       "dxc-x86_64": "fe842195bc4ba49b24cd866ddd940e0445208bfa06697eebd79e872777e878d4",
       "lib/libdxcompiler.dylib": "183f7e651bca16e7a05962a13128523ba2d7a10fb2ed988bcc73e0f30cdc2a32",
       "libdxcompiler-x86_64.dylib": "baea7a81192a47e90b8e50b1301b3fe2f6d7cd1032e87f13b13403698760255c",
-      "wallpaper-wgpu": "4d3706818eeee78c3ab631ff6d06eea078141f35a3792223854acc0e17183902",
-      "wallpaper-wgpu-x86_64": "5934d41c6d49c88f3e6e6e0b7f3526386f6282cf6d21f79eb908cc7f4fefd4f0"
+      "wallpaper-wgpu": "f3b74d97fde456d8e558638d5227add4af69e056d768e2aaa9f91f71bd45def4",
+      "wallpaper-wgpu-x86_64": "472cd475f5c316828ffda85efe7ee836e8c3e62b706ffa19d7a0fcfee2b30c8b"
     }
   },
   "web": {
-    "version": "1.0.27",
-    "revision": 28,
+    "version": "1.0.42",
+    "revision": 43,
     "sourceSHA256": {
       "ffmpeg": "106ece4ba0df8411833c9e78c85698803848dafae6b9411420f25fcf0b648c35",
       "ffmpeg-x86_64": "9e5420d4f5b9fc0150d1818da5e70cfea46b2b44ea49efc794ca305ed0c6903f",
-      "wallpaperengine-cli": "f548605459b9c7444f2fa5c3ab16dd923cf833007ff881ab52c450c64016601e",
+      "wallpaperengine-cli": "71f9ee71c7700b89175630f35ce5c1e795d850177da577d50c72ccfc1a60f33d",
       "wallpaperengine-cli-x86_64": "f8406500ed1da6c441e1dc67d40ac065d591f10cacc66095a935d22ba533e75d"
     }
   },

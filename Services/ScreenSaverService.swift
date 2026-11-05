@@ -636,7 +636,7 @@ final class ScreenSaverService: ObservableObject {
         switch projectType {
         case "scene", "web":
             let kind: Candidate.Kind = projectType == "web" ? .web : .scene
-            guard let artifact = SceneOfflineBakeService.usableArtifact(from: record),
+            guard let artifact = SceneOfflineBakeService.usableCurrentArtifact(from: record),
                   SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: artifact.videoPath)) else {
                 return .unavailable(UnavailableItem(id: record.id, title: title, reason: t("screensaver.unavailable.needsBake")))
             }

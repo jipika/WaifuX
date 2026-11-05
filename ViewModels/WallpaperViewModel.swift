@@ -862,7 +862,13 @@ class WallpaperViewModel: ObservableObject {
     /// - Parameter id: Wallhaven 壁纸 ID
     /// - Returns: 壁纸详情数据（含 uploader）
     func fetchWallpaperDetail(byID id: String) async throws -> Wallpaper {
-        try await resolveWallhavenWallpaperByID(id)
+        // ⚠️ 非 Wallhaven 源的 id（`4k_27628` / `pixiv_…` / Konachan）不能拿去查 Wallhaven 详情接口，
+        // 之前会稳定 404 并在日志里刷「获取壁纸详情失败（不影响浏览）」。
+        // 这些源本来就没有对应的详情接口，直接返回占位，由调用方保留搜索结果字段。
+        if id.hasPrefix("4k_") || id.hasPrefix("pixiv_") || id.hasPrefix("konachan_") || id.hasPrefix("local_") {
+            throw NetworkError.invalidResponse
+        }
+        return try await resolveWallhavenWallpaperByID(id)
     }
 
     // MARK: - 分享
@@ -1309,12 +1315,12 @@ class WallpaperViewModel: ObservableObject {
         let sourceManager = WallpaperSourceManager.shared
 
         // 根据当前活跃源决定从哪个数据源获取
-        // ⚠️ 注意：运行时不再自动切换数据源，切换只在应用启动时的健康检查中决定
+        // ⚠️ 运行时不做任何自动切换；数据源只由用户手动切换（WallpaperSourceManager.switchTo）决定
         switch sourceManager.activeSource {
         case .wallhaven:
             return try await fetchFromWallhaven(parameters: parameters)
         case .fourKWallpapers:
-            return try await fetchFromFallbackSource(.fourKWallpapers, parameters: parameters)
+            return try await fetchFromFourKWallpapers(parameters: parameters)
         case .konachan:
             return try await fetchFromKonachan(parameters: parameters)
         case .pixiv:
@@ -1342,62 +1348,43 @@ class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// 从指定的回退源获取数据
-    private func fetchFromFallbackSource(_ source: WallpaperSourceManager.SourceType, parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
-        switch source {
-        case .fourKWallpapers:
-            do {
-                // 4K 分类映射：优先使用用户在探索页选择的 4K 分类，否则尝试从 WallHaven 分类推断
-                let categorySlug: String?
-                if let selected4K = selected4KCategorySlug {
-                    categorySlug = selected4K
-                } else if !parameters.categories.isEmpty && parameters.categories != "111" {
-                    // 从 WallHaven 分类掩码推断
-                    // "100" = general, "010" = anime, "001" = people
-                    if parameters.categories == "010" {
-                        categorySlug = "anime"
-                    } else if parameters.categories == "001" {
-                        categorySlug = "people"
-                    } else {
-                        categorySlug = nil
-                    }
-                } else {
-                    categorySlug = nil
-                }
-
-                // 决定使用 Popular 还是 Latest URL
-                let usePopular: Bool
-                switch selected4KSorting {
-                case .popular:
-                    usePopular = true
-                case .latest:
-                    usePopular = false
-                }
-
-                return try await FourKWallpapersService.shared.search(
-                    query: parameters.query,
-                    page: parameters.page,
-                    perPage: parameters.perPage,
-                    category: categorySlug,
-                    purity: "sfw",
-                    usePopular: usePopular
-                )
-            } catch {
-                throw error
+    /// 从 PixelVault（4KWallpapers）源获取数据（仅当用户手动选择了该源时才会调用）
+    private func fetchFromFourKWallpapers(parameters: WallhavenAPI.SearchParameters) async throws -> WallpaperSearchResponse {
+        // 4K 分类映射：优先使用用户在探索页选择的 4K 分类，否则尝试从 WallHaven 分类推断
+        let categorySlug: String?
+        if let selected4K = selected4KCategorySlug {
+            categorySlug = selected4K
+        } else if !parameters.categories.isEmpty && parameters.categories != "111" {
+            // 从 WallHaven 分类掩码推断
+            // "100" = general, "010" = anime, "001" = people
+            if parameters.categories == "010" {
+                categorySlug = "anime"
+            } else if parameters.categories == "001" {
+                categorySlug = "people"
+            } else {
+                categorySlug = nil
             }
-
-        case .wallhaven:
-            // 不应该走到这里，但以防万一
-            fatalError("fetchFromFallbackSource called with wallhaven source")
-
-        case .konachan:
-            // Konachan 不作为回退源的一部分
-            throw NetworkError.invalidResponse
-
-        case .pixiv:
-            // Pixiv 不作为回退源的一部分
-            throw NetworkError.invalidResponse
+        } else {
+            categorySlug = nil
         }
+
+        // 决定使用 Popular 还是 Latest URL
+        let usePopular: Bool
+        switch selected4KSorting {
+        case .popular:
+            usePopular = true
+        case .latest:
+            usePopular = false
+        }
+
+        return try await FourKWallpapersService.shared.search(
+            query: parameters.query,
+            page: parameters.page,
+            perPage: parameters.perPage,
+            category: categorySlug,
+            purity: "sfw",
+            usePopular: usePopular
+        )
     }
 
     /// 从 Konachan 源获取数据
@@ -1760,16 +1747,25 @@ class WallpaperViewModel: ObservableObject {
         }
 
         // 4K 源壁纸兜底：如果原图 URL 不是有效图片链接，从详情页解析原图
-        if wallpaper.source == "4kwallpapers",
-           let currentURL = downloadURL,
-           !currentURL.isFileURL,
-           !currentURL.pathExtension.isEmpty,
-           !["jpg", "jpeg", "png", "webp", "gif"].contains(currentURL.pathExtension.lowercased()) {
-            let originalURL = await FourKWallpapersService.shared.fetchOriginalImageURL(for: wallpaper)
-            if let originalURLString = originalURL, let url = URL(string: originalURLString) {
-                downloadURL = url
-            } else {
-                downloadURL = wallpaper.thumbURL  // 最终兜底用缩略图
+        // ⚠️ 2026-11-02 起列表不再靠关键词猜原图尺寸，thumbs.original 常常是 1280px 的
+        //    thumbs_3t 预览图（站点对猜错尺寸也返回 200，静默给出裁切图）。
+        //    因此只要 thumbs.original 不是站点确认的 /images/wallpapers/ 原图，就必须走详情页解析，
+        //    不能退化成「用预览图当原图下载」。
+        if wallpaper.source == "4kwallpapers" {
+            let currentOriginal = wallpaper.thumbs.original
+            let hasConfirmedOriginal = currentOriginal.contains("/images/wallpapers/")
+
+            if !hasConfirmedOriginal {
+                if let resolved = await FourKWallpapersService.shared.fetchOriginalImageURL(for: wallpaper),
+                   let url = URL(string: resolved) {
+                    downloadURL = url
+                } else {
+                    AppLogger.warn(.wallpaper, "4K 原图解析失败，降级为高清预览图", metadata: [
+                        "id": wallpaper.id,
+                        "detail": wallpaper.url
+                    ])
+                    downloadURL = wallpaper.thumbURL
+                }
             }
         }
 

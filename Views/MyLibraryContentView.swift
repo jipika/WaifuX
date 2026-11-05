@@ -288,6 +288,23 @@ struct MyLibraryContentView: View {
     @State private var syncIsLoadingList = false
     @State private var syncErrorMessage: String?
 
+    // 全部更新（Wallpaper Engine 数据）
+    @State private var isUpdatingWorkshopAll = false
+    @State private var workshopUpdateDone = 0
+    @State private var workshopUpdateTotal = 0
+    @State private var showWorkshopUpdateResultAlert = false
+    @State private var workshopUpdateResultMessage = ""
+    @State private var workshopUpdateResultIsWarning = false
+
+    // 批量订阅本地 Workshop 资源
+    @State private var isSubscribingLocalWorkshop = false
+    @State private var localWorkshopSubscriptionDone = 0
+    @State private var localWorkshopSubscriptionTotal = 0
+    @State private var localWorkshopSubscriptionTask: Task<Void, Never>?
+    @State private var showLocalWorkshopSubscriptionResult = false
+    @State private var localWorkshopSubscriptionMessage = ""
+    @State private var localWorkshopSubscriptionIsWarning = false
+
     enum WallpaperRatioFilter: String, CaseIterable {
         case all = "all"
         case landscape = "landscape"
@@ -967,6 +984,20 @@ struct MyLibraryContentView: View {
                     actions: [
                         GlassAlertAction("OK", role: .cancel)
                     ])
+        .glassAlert(t("updateAllWorkshop"), isPresented: $showWorkshopUpdateResultAlert,
+                    message: workshopUpdateResultMessage,
+                    icon: workshopUpdateResultIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                    iconTint: workshopUpdateResultIsWarning ? LiquidGlassColors.warningOrange : LiquidGlassColors.onlineGreen,
+                    actions: [
+                        GlassAlertAction("OK", role: .cancel)
+                    ])
+        .glassAlert(t("subscribeLocalWorkshop"), isPresented: $showLocalWorkshopSubscriptionResult,
+                    message: localWorkshopSubscriptionMessage,
+                    icon: localWorkshopSubscriptionIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                    iconTint: localWorkshopSubscriptionIsWarning ? LiquidGlassColors.warningOrange : LiquidGlassColors.onlineGreen,
+                    actions: [
+                        GlassAlertAction("OK", role: .cancel)
+                    ])
         // 同步订阅弹窗走应用内玻璃 overlay（同 DisplaySelector），原生 glassEffect 可采样页面内容
         .overlay {
             if showSyncProfileSheet {
@@ -1548,6 +1579,24 @@ struct MyLibraryContentView: View {
         }
     }
 
+    /// 「全部更新」菜单标签：空闲显示入口文案，运行中显示检查/进度；
+    /// 检查阶段 total 尚未回填，先显示「检查更新中...」。
+    private var workshopUpdateMenuLabel: String {
+        if isUpdatingWorkshopAll {
+            if workshopUpdateTotal == 0 {
+                return t("updateAllWorkshop.checking")
+            }
+            return String(format: t("updateAllWorkshop.progress"), workshopUpdateDone, workshopUpdateTotal)
+        }
+        return t("updateAllWorkshop")
+    }
+
+    private var localWorkshopSubscriptionMenuLabel: String {
+        guard isSubscribingLocalWorkshop else { return t("subscribeLocalWorkshop") }
+        if localWorkshopSubscriptionTotal == 0 { return t("subscribeLocalWorkshop.checking") }
+        return String(format: t("subscribeLocalWorkshop.progress"), localWorkshopSubscriptionDone, localWorkshopSubscriptionTotal)
+    }
+
     private var isPresentingLibraryModal: Bool {
         showNewFolderSheet ||
         renamingFolder != nil ||
@@ -1564,6 +1613,8 @@ struct MyLibraryContentView: View {
         showSyncFetchErrorAlert ||
         showSyncServiceLoginHint ||
         showSyncResultAlert ||
+        showWorkshopUpdateResultAlert ||
+        showLocalWorkshopSubscriptionResult ||
         NSApp.modalWindow != nil
     }
 
@@ -3792,10 +3843,32 @@ struct MyLibraryContentView: View {
                             Label(t("open.in.finder"), systemImage: "folder")
                         }
                     case .video:
+                        Button {
+                            updateAllWorkshopData()
+                        } label: {
+                            Label(workshopUpdateMenuLabel, systemImage: "arrow.triangle.2.circlepath.circle")
+                        }
+                        .disabled(isUpdatingWorkshopAll || isSyncingSubscriptions || isSubscribingLocalWorkshop)
+
+                        if isSubscribingLocalWorkshop {
+                            Button {
+                                localWorkshopSubscriptionTask?.cancel()
+                            } label: {
+                                Label(t("cancel"), systemImage: "xmark.circle")
+                            }
+                        } else {
+                            Button {
+                                subscribeLocalWorkshopResources()
+                            } label: {
+                                Label(localWorkshopSubscriptionMenuLabel, systemImage: "plus.rectangle.on.rectangle")
+                            }
+                            .disabled(isUpdatingWorkshopAll || isSyncingSubscriptions)
+                        }
+
                         Button(action: { syncSubscriptions() }) {
                             Label(isSyncingSubscriptions ? t("syncing") : t("sync.subscriptions"), systemImage: "arrow.triangle.2.circlepath")
                         }
-                        .disabled(isSyncingSubscriptions)
+                        .disabled(isSyncingSubscriptions || isUpdatingWorkshopAll || isSubscribingLocalWorkshop)
 
                         Button {
                             openFolderInFinder(DownloadPathManager.shared.mediaFolderURL)
@@ -4133,7 +4206,7 @@ struct MyLibraryContentView: View {
                 let allLocal = mediaViewModel.allLocalMedia
                 let ids = itemIDs.intersection(Set(allLocal.map(\.id)))
                 if !ids.isEmpty {
-                    deleteLocalMedias(allLocal.filter { ids.contains($0.id) })
+                    deleteLocalMedias(Array(allLocal.filter { ids.contains($0.id) }))
                 }
             }
 
@@ -4179,7 +4252,9 @@ struct MyLibraryContentView: View {
             mediaViewModel.removeFavorites(withIDs: [item.id])
         } else if MediaLibraryService.shared.downloadRecord(for: item.id) != nil {
             // 网格快照与 allLocalMedia 的异步缓存可能暂时不同步，下载记录才是删除依据。
-            MediaLibraryService.shared.removeDownloadRecord(withID: item.id)
+            unsubscribeDeletedWorkshopItems { @MainActor in
+                await mediaViewModel.removeDownloads(withIDs: [item.id])
+            }
             mediaViewModel.refreshLibraryContent()
         } else if let localItem = mediaViewModel.allLocalMedia.first(where: { $0.id == item.id }) {
             deleteLocalMedias([localItem])
@@ -4190,6 +4265,25 @@ struct MyLibraryContentView: View {
         }
         gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
         updateMediaItems()
+    }
+
+    /// 本地删除不等待 Steam；取消订阅失败时保留资源删除结果并单独提示。
+    private func unsubscribeDeletedWorkshopItems(
+        _ operation: @escaping @MainActor () async -> [String: Error]
+    ) {
+        guard WorkshopSubscriptionAutomation.isEnabled() else {
+            Task { @MainActor in _ = await operation() }
+            return
+        }
+        Task { @MainActor in
+            let failures = await operation()
+            guard !failures.isEmpty else { return }
+            syncErrorMessage = String(
+                format: t("workshop.unsubscribeAfterDeleteFailed"),
+                failures.values.first?.localizedDescription ?? ""
+            )
+            showSyncFetchErrorAlert = true
+        }
     }
 
     /// 删除文件夹及其所有内容（包括子文件夹中的项目）
@@ -4291,7 +4385,7 @@ struct MyLibraryContentView: View {
         }
 
         let itemIDs = Set(records.map(\.item.id))
-        mediaViewModel.removeDownloads(withIDs: itemIDs)
+        MediaLibraryService.shared.removeDownloadRecords(withIDs: itemIDs)
         updateMediaItems()
 
         PersistentDownloadQueueService.shared.start(using: mediaViewModel)
@@ -4433,9 +4527,6 @@ struct MyLibraryContentView: View {
         let fileManager = FileManager.default
 
         for item in items {
-            if let record = item.downloadRecord {
-                MediaLibraryService.shared.removeDownloadRecord(withID: record.item.id)
-            }
             let filePath = item.fileURL.path
             if fileManager.fileExists(atPath: filePath) {
                 do {
@@ -4444,6 +4535,12 @@ struct MyLibraryContentView: View {
                 } catch {
                     print("[MyLibrary] ❌ Failed to delete media file \(filePath): \(error)")
                 }
+            }
+        }
+        let recordIDs = Set(items.compactMap(\.downloadRecord?.item.id))
+        if !recordIDs.isEmpty {
+            unsubscribeDeletedWorkshopItems { @MainActor in
+                await mediaViewModel.removeDownloads(withIDs: recordIDs)
             }
         }
 
@@ -4651,6 +4748,97 @@ struct MyLibraryContentView: View {
         syncSelectedIDs = []
         showSyncSelectionSheet = true
         Task { await fetchSubscriptionList() }
+    }
+
+    // MARK: - 全部更新（Wallpaper Engine 数据）
+
+    /// 我的库更多菜单 → 全部更新：检查全部已下载 Workshop 壁纸的远端版本，
+    /// 重下有更新的项（与详情页单条「更新壁纸」共用 ViewModel 链路）。
+    private func updateAllWorkshopData() {
+        guard !isUpdatingWorkshopAll, !isSyncingSubscriptions else { return }
+        isUpdatingWorkshopAll = true
+        workshopUpdateDone = 0
+        workshopUpdateTotal = 0
+        Task { @MainActor in
+            defer { isUpdatingWorkshopAll = false }
+            do {
+                let stats = try await mediaViewModel.updateAllWorkshopWallpapers(
+                    onProgress: { done, total, _ in
+                        workshopUpdateDone = done
+                        workshopUpdateTotal = total
+                    }
+                )
+                if stats.toUpdate == 0 {
+                    workshopUpdateResultMessage = String(
+                        format: t("updateAllWorkshop.result.upToDate"),
+                        stats.checked
+                    )
+                    workshopUpdateResultIsWarning = false
+                } else if stats.failed == 0 {
+                    workshopUpdateResultMessage = String(
+                        format: t("updateAllWorkshop.result.success"),
+                        stats.checked, stats.toUpdate
+                    )
+                    workshopUpdateResultIsWarning = false
+                } else {
+                    workshopUpdateResultMessage = String(
+                        format: t("updateAllWorkshop.result.partial"),
+                        stats.checked, stats.updated, stats.failed
+                    )
+                    workshopUpdateResultIsWarning = true
+                }
+            } catch {
+                workshopUpdateResultMessage = String(
+                    format: t("updateAllWorkshop.result.checkFailed"),
+                    error.localizedDescription
+                )
+                workshopUpdateResultIsWarning = true
+            }
+            showWorkshopUpdateResultAlert = true
+        }
+    }
+
+    // MARK: - 批量订阅本地 Workshop 资源
+
+    private func subscribeLocalWorkshopResources() {
+        guard !isSubscribingLocalWorkshop, !isUpdatingWorkshopAll, !isSyncingSubscriptions else { return }
+        guard SteamServiceManager.shared.isLoggedIn else {
+            showSyncServiceLoginHint = true
+            return
+        }
+        isSubscribingLocalWorkshop = true
+        localWorkshopSubscriptionDone = 0
+        localWorkshopSubscriptionTotal = 0
+        localWorkshopSubscriptionTask = Task { @MainActor in
+            defer {
+                isSubscribingLocalWorkshop = false
+                localWorkshopSubscriptionTask = nil
+            }
+            do {
+                let stats = try await mediaViewModel.subscribeLocalWorkshopItems { done, total in
+                    localWorkshopSubscriptionDone = done
+                    localWorkshopSubscriptionTotal = total
+                }
+                localWorkshopSubscriptionIsWarning = stats.failed > 0
+                if stats.total == 0 {
+                    localWorkshopSubscriptionMessage = t("subscribeLocalWorkshop.empty")
+                } else {
+                    localWorkshopSubscriptionMessage = String(
+                        format: t("subscribeLocalWorkshop.result"),
+                        stats.total, stats.alreadySubscribed, stats.newlySubscribed, stats.failed
+                    )
+                }
+            } catch is CancellationError {
+                localWorkshopSubscriptionIsWarning = false
+                localWorkshopSubscriptionMessage = t("subscribeLocalWorkshop.cancelled")
+            } catch {
+                localWorkshopSubscriptionIsWarning = true
+                localWorkshopSubscriptionMessage = String(
+                    format: t("subscribeLocalWorkshop.failed"), error.localizedDescription
+                )
+            }
+            showLocalWorkshopSubscriptionResult = true
+        }
     }
 
 }

@@ -29,7 +29,7 @@ enum WallpaperSnapshotPixelBudget {
         var targetWidth = max(1, Int((width * scale).rounded(.down)))
         var targetHeight = max(1, Int((height * scale).rounded(.down)))
         while targetWidth > 0, targetHeight > 0 {
-            let row = ((targetWidth * 4 + rowAlignment - 1) / rowAlignment) * rowAlignment
+            let row = ((targetWidth * decodedBytesPerPixel + rowAlignment - 1) / rowAlignment) * rowAlignment
             let rawBytes = row * targetHeight
             let bytes = ((rawBytes + allocationAlignment - 1) / allocationAlignment) * allocationAlignment
             if bytes <= maximumPixelBytes {

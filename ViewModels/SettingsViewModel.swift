@@ -163,6 +163,15 @@ class SettingsViewModel: ObservableObject {
         }
     }
     @Published var showAllWorkshopContent = false { didSet { WaifuXPreferences.shared.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
+    /// 下载 Workshop 资源时自动订阅，用户删除本地资源后自动取消订阅。
+    @Published var workshopSubscriptionAutomationEnabled = false {
+        didSet {
+            WaifuXPreferences.shared.set(
+                workshopSubscriptionAutomationEnabled,
+                forKey: WorkshopSubscriptionAutomation.defaultsKey
+            )
+        }
+    }
     /// 场景壁纸实时渲染模式开关
     /// 开启后，设置场景壁纸将使用 wallpaper-wgpu 实时渲染桌面，而非烘焙视频
     /// 与桌面动态元素（时钟、音频柱状图等）互斥
@@ -558,6 +567,7 @@ class SettingsViewModel: ObservableObject {
             defaults.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
             applyVideoOptimizationSettings()
             showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
+            workshopSubscriptionAutomationEnabled = WorkshopSubscriptionAutomation.isEnabled(in: defaults)
             // 未写过 key 时默认 true（与属性初始值一致）；bool(forKey:) 会把缺失当成 false
             sceneRealtimeRenderingEnabled = defaults.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true
             upscalingEnabled = defaults.object(forKey: "upscaling_enabled") as? Bool ?? true

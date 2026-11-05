@@ -112,17 +112,53 @@ actor WallsflowService {
     /// 这里对齐真实 Chrome 的文档请求头。
     static let browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 
-    /// Chrome 的 UA 客户端提示三件套（浏览器指纹的关键部分）。
+    /// Chrome 的 UA 客户端提示。
+    ///
+    /// ⚠️ **`sec-ch-ua` 绝不可发**（2026-11-02 探针实测，逐头剥离可复现）：
+    /// 站点不看 UA、不看 Accept、不看 Referer，只认 `sec-ch-ua` 里的占位品牌
+    /// `"Not:A-Brand"`。带上它 → HTTP **200** 返回一份 11KB 的诱饵页
+    /// （`robots: noindex, nofollow`、8 张 `article.story`、标题全是
+    /// 「Not available in WaifuX」、封面/视频/内链全指 `/…/waifux/…`）；
+    /// 去掉它 → 200 正常页（111KB / 12 卡 / `div.pages` 齐全）。
+    /// 诱饵页状态码 200，假 mp4 还是结构合法的 15,257B（`isMedia` 会放行），
+    /// 所以请求侧必须不发，另外靠 `isDecoyPage` / `isDecoyMedia` / `isDecoyURL` 兜底。
+    /// `sec-ch-ua-mobile` / `sec-ch-ua-platform` 单独发送实测无害，保留。
     static let clientHintHeaders: [String: String] = [
-        "sec-ch-ua": "\"Chromium\";v=\"154\", \"Not:A-Brand\";v=\"24\", \"Google Chrome\";v=\"154\"",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"macOS\"",
     ]
 
+    /// 诱饵页 / 诱饵媒体的唯一指纹：站点把「给非目标客户端看的内容」全塞在 `waifux/` 目录下。
+    nonisolated static func isDecoyURL(_ url: URL) -> Bool {
+        url.path.lowercased().contains("/waifux/")
+    }
+
+    /// 页面级诱饵判定（列表 / 详情 / 搜索 / 下载页通用）。
+    ///
+    /// 主指纹是 `/waifux/`：诱饵页的封面、预览片、内链全指 `…/waifux/…`（真实页 0 次命中）。
+    /// 次判据要三个同时成立：①零 `data-wf-` 前台属性（真实页恒有 13~79 个）；
+    /// ②有 `<article>` 正文（排除 404）；③体积 < 30KB（真实页最小 60KB，诱饵页 5.6~11KB）。
+    /// 不用 robots 判：真实搜索页也是 `noindex, nofollow`。
+    nonisolated static func isDecoyPage(_ html: String) -> Bool {
+        if html.contains("/waifux/") { return true }
+        guard html.utf8.count < 30_000, html.contains("<article") else { return false }
+        return !html.contains("data-wf-")
+    }
+
+    /// 诱饵媒体检查：假 mp4 是结构合法的 15,257B 四盒 MP4
+    /// （`ftyp`32 / `moov`825 / `free`8 / `mdat`14392，libx264 编码），`isMedia` 会放行。
+    /// 真实预览片实测 1,990,247B，站内不会有 KB 级视频，所以尺寸阈值只对视频生效。
+    /// 图片（含小缩略图）不看尺寸，只靠 `isDecoyURL` 的 `/waifux/` 路径判。
+    nonisolated static func isDecoyMedia(_ data: Data, url: URL) -> Bool {
+        if isDecoyURL(url) { return true }
+        let isVideo = ["mp4", "mov", "m4v", "webm"].contains(url.pathExtension.lowercased())
+        return isVideo && data.count < 1_000_000
+    }
+
     /// ⚠️ 文档请求严禁携带 `Sec-Fetch-*` 与 `Upgrade-Insecure-Requests`（2026-10-15 探针实测）：
     /// URLSession 直连 + 完整头 = 403 挑战页；删掉 Sec-Fetch 组立即 200（108KB 列表页）。
     /// 机制与媒体头 Origin 教训同构：CF 对「自称浏览器导航、TLS 指纹却不是浏览器」
-    /// 的请求按伪装特征直接拦。裸头 + Chrome UA/CH 三件套均安全。
+    /// 的请求按伪装特征直接拦。裸头 + Chrome UA 安全；CH 只剩 mobile/platform 两项。
     private static let documentFetchHeaders: [String: String] = [:]
 
     private let userAgent = WallsflowService.browserUserAgent
@@ -312,26 +348,51 @@ actor WallsflowService {
         return URL(string: "\(siteOrigin)download/\(id).html")
     }
 
-    /// 取下载页并拼出签名直链。`referer` 必须是详情页：只带站点根的 Referer 时
-    /// 下载页会直接回详情页内容（无 data-wf-dl）。
+    /// 取下载页并换出签名直链。`referer` 必须是详情页：只带站点根的 Referer 时
+    /// 下载页会直接回详情页内容（无 `data-wf-dl`）。
+    ///
+    /// ⚠️ 2026-11-02 站点改了协议（旧实现直接读 `data-wf-t` 拼 URL，此后恒失败）：
+    /// 下载页按钮现在只带 `data-wf-dl`（无签名直链）+ **`data-wf-v`**（种子），
+    /// 必须先用页面内联脚本同样的方式做一次握手换一次性 `t`：
+    /// ```
+    /// POST <下载页>            Content-Type: x-www-form-urlencoded
+    /// body: wfdl=code&v=<data-wf-v 值>
+    /// → 200 {"t":"<一次性签名>"}   或   {"wait":<毫秒>} 表示节流，须等待后重试
+    /// ```
+    /// 拿到 `t` 才拼成 `index.php?do=download&id=N&t=…&ab=2`。
+    ///
+    /// 握手要点（实测缺一不可）：
+    /// - 同一 URLSession 且带 cookie：站点先下发 `PHPSESSID`，握手必须复用它；
+    /// - 带 `Origin: https://wallsflow.com` 与 `Sec-Fetch-*`，否则回落成普通文档请求；
+    /// - `{"wait":N}` 不是错误，等 N 毫秒重发即可（浏览器脚本也是这么做的）。
     func resolveSignedDownloadURL(downloadPage: URL, referer: URL?) async throws -> URL {
         let html = try await fetchHTML(from: downloadPage, referer: referer)
         func attribute(_ name: String) -> String? {
-            let pattern = name + #"="([^"]+)""#
+            // `\b` 前缀必须留：否则 data-wf-t 会命中 data-wf-toggle / data-wf-tooltip。
+            let pattern = "\\b" + name + #"="([^"]+)""#
             guard let re = try? NSRegularExpression(pattern: pattern),
                   let match = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
                   let range = Range(match.range(at: 1), in: html) else { return nil }
             return String(html[range]).replacingOccurrences(of: "&amp;", with: "&")
         }
-        guard let base = attribute("data-wf-dl"), let token = attribute("data-wf-t"),
-              var components = URLComponents(string: base) else {
+        guard let base = attribute("data-wf-dl"), var components = URLComponents(string: base) else {
             // 站点对同一壁纸有短冷却（2026-10-29 实测文案：「You already downloaded this
             // wallpaper. You can download it again in 1 min.」），此时页面不出按钮。
             if html.contains("wf-dlp-done") || html.contains("You already downloaded this wallpaper") {
                 print("[WallsflowService] 下载冷却中 | page=\(downloadPage.absoluteString)")
                 throw WallsflowDownloadError.cooldown
             }
-            print("[WallsflowService] 下载页缺少 data-wf-dl/data-wf-t | page=\(downloadPage.absoluteString) len=\(html.count)")
+            print("[WallsflowService] 下载页缺少 data-wf-dl | page=\(downloadPage.absoluteString) len=\(html.count)")
+            throw WallsflowError.parseFailed("高清下载链接解析失败")
+        }
+        let token: String
+        if let direct = attribute("data-wf-t"), attribute("data-wf-v") == nil {
+            // 旧版页面：签名直接内联在 data-wf-t 里，无需握手。
+            token = direct
+        } else if let seed = attribute("data-wf-v") {
+            token = try await exchangeDownloadToken(downloadPage: downloadPage, seed: seed, referer: referer)
+        } else {
+            print("[WallsflowService] 下载页既无 data-wf-t 也无 data-wf-v | page=\(downloadPage.absoluteString)")
             throw WallsflowError.parseFailed("高清下载链接解析失败")
         }
         // ab=2：站点脚本对「未请求 AdSense」的环境传 2，服务端按非广告拦截放行。
@@ -341,6 +402,57 @@ actor WallsflowService {
         ]
         guard let url = components.url, Self.isProtectedMediaURL(url) else { throw WallsflowError.invalidURL }
         return url
+    }
+
+    /// 下载页握手：用 `data-wf-v` 换一次性签名 `t`。
+    ///
+    /// 走 `browserSession`（共享 cookie，站点靠 `PHPSESSID` 认这次会话）。
+    /// `{"wait":N}` 是节流而非失败，按站点给的毫秒数等待后重发，最多三轮。
+    private func exchangeDownloadToken(
+        downloadPage: URL,
+        seed: String,
+        referer: URL?,
+        attempt: Int = 0
+    ) async throws -> String {
+        var request = URLRequest(url: downloadPage)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        var headers = defaultHeaders
+        if let referer { headers["Referer"] = referer.absoluteString }
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+        headers["Origin"] = "https://wallsflow.com"
+        headers["Sec-Fetch-Site"] = "same-origin"
+        headers["Sec-Fetch-Mode"] = "cors"
+        headers["Sec-Fetch-Dest"] = "empty"
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        request.allHTTPHeaderFields = headers
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let encoded = seed.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? seed
+        request.httpBody = Data("wfdl=code&v=\(encoded)".utf8)
+
+        let (data, response) = try await browserSession.data(for: request)
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            print("[WallsflowService] 下载握手 HTTP 异常 | status=\((response as? HTTPURLResponse)?.statusCode ?? -1)")
+            throw WallsflowError.parseFailed("高清下载握手失败")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("[WallsflowService] 下载握手返回非 JSON | body=\(String(decoding: data.prefix(160), as: UTF8.self))")
+            throw WallsflowError.parseFailed("高清下载握手失败")
+        }
+        if let token = object["t"] as? String, !token.isEmpty {
+            return token
+        }
+        if let waitMS = object["wait"] as? Int, attempt < 3 {
+            print("[WallsflowService] 下载握手节流，等待 \(waitMS)ms 后重试 | attempt=\(attempt + 1)")
+            try await Task.sleep(nanoseconds: UInt64(max(waitMS, 100) + 250) * 1_000_000)
+            try Task.checkCancellation()
+            return try await exchangeDownloadToken(
+                downloadPage: downloadPage, seed: seed, referer: referer, attempt: attempt + 1
+            )
+        }
+        print("[WallsflowService] 下载握手未返回签名 | body=\(String(decoding: data.prefix(160), as: UTF8.self))")
+        throw WallsflowError.parseFailed("高清下载握手失败")
     }
 
     // MARK: - 出口敏感的请求（直连优先）
@@ -356,6 +468,9 @@ actor WallsflowService {
     ///    通过、用户无感），拿到 HTML 的同时把 `cf_clearance` 同步进共享 cookie
     ///    存储，后续请求可复用站点允许的会话；有效期由站点决定。
     /// 已取得浏览器会话后，页面和媒体优先使用同一 UA、Cookie 和系统代理路由。
+    ///
+    /// ⚠️ 每一级出口都要过 `rejectDecoyPage`：诱饵页是 **200**，只靠状态码的
+    /// 回退链会把它当成功直接交给解析器。
     func fetchHTML(from url: URL, referer: URL? = nil) async throws -> String {
         let browserUserAgent = await WallsflowWebFetcher.shared.currentUserAgent
         var headers = defaultHeaders
@@ -373,35 +488,52 @@ actor WallsflowService {
                       http.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() != "challenge" else {
                     throw WallsflowMediaPolicy.verificationRequired
                 }
-                return String(decoding: data, as: UTF8.self)
+                return try Self.rejectDecoyPage(String(decoding: data, as: UTF8.self), url: url, via: "browserSession")
+            } catch is DecoyPageError {
+                throw DecoyPageError(url: url, via: "browserSession")
             } catch {
                 try Task.checkCancellation()
                 return try await WallsflowWebFetcher.shared.fetchHTML(from: url)
             }
         }
         do {
-            return try await networkService.fetchString(
+            let html = try await networkService.fetchString(
                 from: url,
                 headers: headers,
                 bypassSystemProxy: true
             )
+            return try Self.rejectDecoyPage(html, url: url, via: "direct")
         } catch is CancellationError {
             throw CancellationError()
+        } catch is DecoyPageError {
+            // 诱饵页与出口无关，换代理 / 开 WebView 都只会再拿到同一份，直接上报。
+            throw DecoyPageError(url: url, via: "direct")
         } catch {
             print("[WallsflowService] 直连抓取失败，回退系统代理 | url=\(url.absoluteString) error=\(error.localizedDescription)")
             do {
-                return try await networkService.fetchString(
+                let html = try await networkService.fetchString(
                     from: url,
                     headers: headers,
                     bypassSystemProxy: false
                 )
+                return try Self.rejectDecoyPage(html, url: url, via: "proxy")
             } catch is CancellationError {
                 throw CancellationError()
+            } catch is DecoyPageError {
+                throw DecoyPageError(url: url, via: "proxy")
             } catch {
                 print("[WallsflowService] 系统代理仍失败，走 WebView 过挑战 | url=\(url.absoluteString) error=\(error.localizedDescription)")
-                return try await WallsflowWebFetcher.shared.fetchHTML(from: url)
+                let html = try await WallsflowWebFetcher.shared.fetchHTML(from: url)
+                return try Self.rejectDecoyPage(html, url: url, via: "webview")
             }
         }
+    }
+
+    /// 诱饵页检查。命中即抛，绝不把 8 张假卡片交给解析器。
+    nonisolated static func rejectDecoyPage(_ html: String, url: URL, via channel: String) throws -> String {
+        guard isDecoyPage(html) else { return html }
+        print("[WallsflowService] 命中诱饵页 | channel=\(channel) url=\(url.absoluteString) len=\(html.count)")
+        throw DecoyPageError(url: url, via: channel)
     }
 
     /// POST 表单抓取（搜索专用）。
@@ -414,12 +546,16 @@ actor WallsflowService {
             return try await postFormAttempt(url: url, formBody: formBody)
         } catch is CancellationError {
             throw CancellationError()
+        } catch is DecoyPageError {
+            throw DecoyPageError(url: url, via: "post-direct")
         } catch {
             print("[WallsflowService] 直连 POST 失败，回退系统代理 | url=\(url.absoluteString) error=\(error.localizedDescription)")
             do {
                 return try await postFormAttempt(url: url, formBody: formBody, bypassSystemProxy: false)
             } catch is CancellationError {
                 throw CancellationError()
+            } catch is DecoyPageError {
+                throw DecoyPageError(url: url, via: "post-proxy")
             } catch {
                 print("[WallsflowService] 系统代理 POST 仍失败，WebView 取票后重试 | url=\(url.absoluteString) error=\(error.localizedDescription)")
                 _ = try await WallsflowWebFetcher.shared.fetchHTML(from: URL(string: Self.siteOrigin)!)
@@ -444,12 +580,13 @@ actor WallsflowService {
         // 表单 POST 的真实浏览器指纹是 same-origin 文档导航
         headers["Sec-Fetch-Site"] = "same-origin"
         headers.removeValue(forKey: "Sec-Fetch-User")
-        return try await networkService.fetchStringPost(
+        let html = try await networkService.fetchStringPost(
             from: url,
             formBody: formBody,
             headers: headers,
             bypassSystemProxy: bypassSystemProxy
         )
+        return try Self.rejectDecoyPage(html, url: url, via: bypassSystemProxy ? "post-direct" : "post-proxy")
     }
 
     /// Images and videos share the browser identity and the same bounded WebKit fallback.
@@ -460,6 +597,12 @@ actor WallsflowService {
     ) async throws -> Data {
         try Task.checkCancellation()
         guard Self.isProtectedMediaURL(url) else { throw WallsflowError.invalidURL }
+        // 诱饵媒体的封面/预览片全在 `/…/waifux/…` 下，且假 mp4 是结构合法的 15KB
+        // ftyp（`isMedia` 会放行）。请求前直接拦，别浪费一次下载。
+        if Self.isDecoyURL(url) {
+            print("[WallsflowService] 拒绝诱饵媒体 | url=\(url.absoluteString)")
+            throw DecoyPageError(url: url, via: "media")
+        }
         progressHandler?(0.02)
         var url = url
         var headers = headers
@@ -486,8 +629,13 @@ actor WallsflowService {
                     throw WallsflowMediaPolicy.verificationRequired
                 }
                 let data = try Data(contentsOf: file, options: [.mappedIfSafe])
+                // 诱饵先判：非媒体要走去下一级回退，诱饵是「再来一次也一样」。
+                guard !Self.isDecoyMedia(data, url: url) else {
+                    print("[WallsflowService] 媒体 browserSession 命中诱饵 | len=\(data.count) host=\(url.host ?? "")")
+                    throw DecoyPageError(url: url, via: "media-browserSession")
+                }
                 guard WallsflowMediaPolicy.isMedia(data) else {
-                    print("[WallsflowService] 媒体 browserSession 内容非媒体 | head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
+                    print("[WallsflowService] 媒体 browserSession 内容非媒体 | len=\(data.count) head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
                     throw WallsflowMediaPolicy.verificationRequired
                 }
                 progressHandler?(1)
@@ -505,14 +653,21 @@ actor WallsflowService {
                         retryConfig: once, bypassSystemProxy: bypassProxy
                     )
                     try Task.checkCancellation()
+                    guard !Self.isDecoyMedia(data, url: url) else {
+                        print("[WallsflowService] 媒体 URLSession 命中诱饵 | bypass=\(bypassProxy) len=\(data.count) host=\(url.host ?? "")")
+                        throw DecoyPageError(url: url, via: "media-direct")
+                    }
                     guard WallsflowMediaPolicy.isMedia(data) else {
-                        print("[WallsflowService] 媒体 URLSession 内容非媒体 | bypass=\(bypassProxy) head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
+                        print("[WallsflowService] 媒体 URLSession 内容非媒体 | bypass=\(bypassProxy) len=\(data.count) head=\(String(data: data.prefix(80), encoding: .utf8) ?? "binary") host=\(url.host ?? "")")
                         throw WallsflowMediaPolicy.verificationRequired
                     }
                     progressHandler?(1)
                     return data
                 } catch is CancellationError {
                     throw CancellationError()
+                } catch is DecoyPageError {
+                    // 诱饵内容与出口无关，换代理只会再拿一份，直接上报。
+                    throw DecoyPageError(url: url, via: "media-direct")
                 } catch {
                     print("[WallsflowService] 媒体 URLSession 失败 | bypass=\(bypassProxy) host=\(url.host ?? "") error=\(error.localizedDescription)")
                     try Task.checkCancellation()
@@ -1321,6 +1476,17 @@ enum WallsflowError: LocalizedError, ParseFailureError {
         case .invalidURL: return "无效的 Wallsflow URL"
         case .notFound: return "Wallsflow 内容未找到"
         }
+    }
+}
+
+/// 站点下发的诱饵内容（HTTP 200：8 张假卡片 / 15KB 假 mp4）。
+/// 与网络失败、Cloudflare 403 分开，避免被当成"换个出口再试"的瞬时故障。
+struct DecoyPageError: LocalizedError, ParseFailureError {
+    let url: URL
+    let via: String
+
+    var errorDescription: String? {
+        "Wallsflow 返回了站点的占位内容（非真实数据），请稍后重试"
     }
 }
 

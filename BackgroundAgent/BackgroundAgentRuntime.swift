@@ -187,7 +187,8 @@ final class BackgroundAgentRuntime {
                     WallpaperExtensionSocketServer.shared.start()
                     LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
                     WallpaperExtensionSocketServer.shared.notifyExtensionReloadIfBundleChanged()
-                    if WaifuXPreferences.shared.object(forKey: "wallpaper_extension_keeper_enabled") as? Bool ?? true { WallpaperExtensionAgentHealer.shared.start() }
+                    // 断线恢复跟随动态锁屏开关，healer 每次采样时自行读取开关。
+                    WallpaperExtensionAgentHealer.shared.start()
                 }
                 await VideoRendererProcessController.shared.reapOrphanedRenderersFromPreviousVersions()
                 guard !Task.isCancelled, !stopping, !upgrading else { return }
@@ -1124,6 +1125,21 @@ final class BackgroundAgentRuntime {
         case "library.media.moveItemsToRoot0":
             try MediaLibraryService.shared.moveItemsToRoot(fromFolder: try a.string("folderID"))
             return [:]
+        case "library.media.moveToFolder0":
+            let scope: MediaLibraryService.FolderMembershipScope = try a.string("scope") == "favorites" ? .favorites : .downloads
+            var fallback: (item: MediaItem, fileURL: URL)? = nil
+            if let itemData = a.values["fallbackItem"] as? Data,
+               let fileURL = a.values["fallbackFileURL"] as? URL,
+               let item = try? JSONDecoder().decode(MediaItem.self, from: itemData) {
+                fallback = (item, fileURL)
+            }
+            MediaLibraryService.shared.moveMediaToFolder(
+                mediaID: try a.string("mediaID"),
+                folderID: a.optionalString("folderID"),
+                scope: scope,
+                fallback: fallback
+            )
+            return [:]
         case "library.media.repairDownloadPath0":
             try MediaLibraryService.shared.repairDownloadPath(itemID: try a.string("itemID"), newPath: try a.string("newPath"))
             return [:]
@@ -1168,6 +1184,21 @@ final class BackgroundAgentRuntime {
             return [:]
         case "library.wallpaper.moveItemsToRoot0":
             try WallpaperLibraryService.shared.moveItemsToRoot(fromFolder: try a.string("folderID"))
+            return [:]
+        case "library.wallpaper.moveToFolder0":
+            let scope: WallpaperLibraryService.FolderMembershipScope = try a.string("scope") == "favorites" ? .favorites : .downloads
+            var fallback: (wallpaper: Wallpaper, fileURL: URL)? = nil
+            if let wallpaperData = a.values["fallbackWallpaper"] as? Data,
+               let fileURL = a.values["fallbackFileURL"] as? URL,
+               let wallpaper = try? JSONDecoder().decode(Wallpaper.self, from: wallpaperData) {
+                fallback = (wallpaper, fileURL)
+            }
+            WallpaperLibraryService.shared.moveWallpaperToFolder(
+                wallpaperID: try a.string("wallpaperID"),
+                folderID: a.optionalString("folderID"),
+                scope: scope,
+                fallback: fallback
+            )
             return [:]
         case "library.wallpaper.repairDownloadPath0":
             try WallpaperLibraryService.shared.repairDownloadPath(recordID: try a.string("recordID"), newPath: try a.string("newPath"))
@@ -1250,6 +1281,19 @@ final class BackgroundAgentRuntime {
         case "steam.subscriptions.wait":
             let page = try await SteamServiceManager.shared.fetchSubscriptions(startIndex: a.integer("start"))
             return ["page": try JSONEncoder().encode(page)]
+        case "steam.userFiles.wait":
+            let page = try await SteamServiceManager.shared.fetchUserFiles(
+                creatorSteamID: a.string("creator"),
+                startIndex: a.integer("start"),
+                count: a.integer("count")
+            )
+            return ["page": try JSONEncoder().encode(page)]
+        case "steam.subscription.wait":
+            try await SteamServiceManager.shared.setSubscribed(a.bool("subscribed"), workshopID: try a.string("id"))
+            return [:]
+        case "steam.subscriptionStates.wait":
+            let states = try await SteamServiceManager.shared.fetchSubscriptionStates(workshopIDs: try a.decode("ids", as: [String].self))
+            return ["states": try JSONEncoder().encode(states)]
         case "steam.download.wait":
             let url = try await SteamServiceManager.shared.downloadItem(workshopID: a.string("id"), outputRoot: a.url("root"))
             return ["url": try JSONEncoder().encode(url)]
@@ -1313,9 +1357,8 @@ final class BackgroundAgentRuntime {
             StaticWallpaperGrainManager.shared.updateOverlay()
         }
         if key?.hasPrefix("display_crop_") == true { DisplayCropSettingsStore.shared.reloadFromPreferences() }
-        if key == nil || key == "wallpaper_extension_keeper_enabled" {
-            if WaifuXPreferences.shared.object(forKey: "wallpaper_extension_keeper_enabled") as? Bool ?? true { WallpaperExtensionAgentHealer.shared.start() }
-            else { WallpaperExtensionAgentHealer.shared.stop() }
+        if key == nil || key == "dynamic_lock_screen_enabled" {
+            WallpaperExtensionAgentHealer.shared.preferencesChanged()
         }
         if key == "app_language" { LocalizationService.shared.restoreSavedSettings() }
         if key == nil || key == "hide_notch" { NotchOverlayManager.shared.setEnabled(WaifuXPreferences.shared.bool(forKey: "hide_notch")) }
@@ -1396,7 +1439,7 @@ final class BackgroundAgentRuntime {
         if !BackgroundRuntimeRole.isIsolatedTest {
             WallpaperExtensionAgentHealer.shared.stop()
             SceneOfflineBakeService.cancelRealtimeCompanionBake(reason: "applicationQuit")
-            SceneOfflineBakeService.stopPreview()
+            SceneOfflineBakeService.stopPreview(reason: "backgroundRuntimeShutdown")
             SteamServiceManager.shared.shutdown()
         }
         // Preserve the selected wallpaper for the next manual launch. Stop

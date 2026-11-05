@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AppKit
 import AVFoundation
 import CryptoKit
@@ -62,6 +63,49 @@ enum VideoPlaybackResumePolicy {
     ) -> [String: Double] {
         guard positions.count > max(0, limit) else { return positions }
         return positions.filter { activePaths.contains($0.key) }
+    }
+}
+
+/// 宿主只持有观测结果，扩展拥有 state 文件；无 PID 的旧协议不能用文件年龄推断死亡。
+/// 纯规则留在本文件，回归可提取执行，不启动 AppKit / AVPlayer。
+enum WallpaperExtensionHostStatePolicy {
+    static func isActive(reportedActive: Bool, ownerDefinitelyDead: Bool) -> Bool {
+        reportedActive && !ownerDefinitelyDead
+    }
+
+    static func legacyRecovery(
+        previous: UInt64, observedInactive: Bool, reportsDesiredSources: Bool
+    ) -> UInt64 {
+        observedInactive && !reportsDesiredSources ? previous &+ 1 : previous
+    }
+
+    static func ownsCompletion(
+        generation: UInt64, inFlightGeneration: UInt64?
+    ) -> Bool {
+        inFlightGeneration == generation
+    }
+
+    struct VideoSource: Hashable {
+        let displayID: UInt32
+        let path: String
+        let fileSize: UInt64
+        let modifiedAt: TimeInterval
+        let fileNumber: UInt64
+    }
+
+    struct SyncSignature: Equatable {
+        let owner: String
+        let legacyRecovery: UInt64
+        let sources: Set<VideoSource>
+    }
+
+    static func shouldSync(
+        _ signature: SyncSignature,
+        completed: SyncSignature?,
+        inFlight: SyncSignature?
+    ) -> Bool {
+        // A 已完成、B 正在排队、用户又选 A：必须作废 B 并重新提交 A（不能只比 completed）。
+        signature != inFlight && (inFlight != nil || signature != completed)
     }
 }
 
@@ -438,9 +482,8 @@ final class VideoWallpaperManager: ObservableObject {
     /// "播完即换"模式下的播放器播放结束观察者（key: screenID）
     private var playbackEndObservers: [String: Any] = [:]
 
-    /// macOS 26+：WallpaperExtensionKit 锁屏实例是否处于活跃状态。
-    /// 这里仅表示锁屏镜像链路已建立，不代表扩展接管桌面渲染。
-    /// 桌面动态壁纸仍由主应用自己的视频窗口负责。
+    /// macOS 26+：扩展是否报告活跃 context（桌面或锁屏均可能存在）。
+    /// 这里只是宿主观测，不表示当前锁屏，也不改变桌面本地播放器生命周期。
     /// 非 macOS 26 系统始终为 false。
     private(set) var isLockScreenExtensionActive = false
 
@@ -449,8 +492,7 @@ final class VideoWallpaperManager: ObservableObject {
     /// 但该文件可能因时序未及时写出；额外检查 `hasActivePipeline` 确保不遗漏已注册 surface 的活跃实例。
     /// 同时受 `dynamic_lock_screen_enabled` 开关控制 — 关闭时返回 false。
     ///
-    /// ⚠️ 此属性仅在锁屏扩展**当前正在运行**时返回 true（即屏幕已锁定）。
-    /// 桌面场景下扩展未运行，始终返回 false。
+    /// 此属性只授权锁屏期间的菜单路由；解锁态即使存在健康桌面 context 也返回 false。
     /// 如需判断用户是否已启用动态锁屏功能（持久化设置），请使用 `isLockScreenEnabled`。
     var isLockScreenMirroringActive: Bool {
         if BackgroundRuntimeRole.isRemoteUI { return false }
@@ -459,12 +501,8 @@ final class VideoWallpaperManager: ObservableObject {
             guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
                 return false
             }
-            // 最终闸门：桌面解锁时锁屏扩展必然未被系统托管运行。
-            // 扩展在解锁时被系统直接回收，来不及写 state=inactive；残留的
-            // isActive:true state 文件 / 已注册 surface 会让本属性永久为 true，
-            // 菜单栏「暂停动态壁纸」被误路由到扩展 prefs——内置 AVPlayer 和
-            // 独立进程渲染器都收不到暂停命令（实测点击后视频照常播放）。
-            // 因此必须以真实锁屏状态兜底，文件/管线信号只在锁定期间生效。
+            // 控制资格与 context 生命周期分开：桌面也可有存活的扩展实例。
+            // 仅在真实锁屏期间允许菜单控制走扩展 prefs，不能据此回写扩展 state。
             guard isScreenLocked else { return false }
             // 先检查内存标志（避免不必要的文件 I/O）
             guard isLockScreenExtensionActive || WallpaperExtensionSocketServer.shared.hasActivePipeline else {
@@ -596,6 +634,9 @@ final class VideoWallpaperManager: ObservableObject {
     private static let videoSamplingWindowAlpha: CGFloat = 0.99999
     /// 每屏采样保持令牌；新一次 apply 或过时任务据此放弃转不透明。
     private var videoSamplingHoldTokens: [String: UUID] = [:]
+    private var lateSamplingPosterTasks: [String: Task<Void, Never>] = [:]
+    private var lateSamplingPosterTokens: [String: UUID] = [:]
+    private var videoSamplingOwnershipByScreen: [String: WallpaperCrossTypeTransitionCoordinator.RequestToken] = [:]
     private let automaticSwitchReadyTimeout: TimeInterval = 1.2
     /// 自动切换时 poster 写入系统桌面的短延迟。
     /// 视频窗已覆盖桌面，无需等 2s；过长会让「动态壁纸静帧」体感极慢。
@@ -620,7 +661,8 @@ final class VideoWallpaperManager: ObservableObject {
         if needsFadeIn {
             // 不透明窗口 + 短淡入：桌面已写好静态帧并完成菜单栏采样，
             // 新视频窗从 alpha=0 淡入到 1，与底下的静态帧自然衔接。
-            window.isOpaque = true
+            // A source push may already have opened a sampling hold on this
+            // warming window. Keep its opacity until that hold finishes.
             window.alphaValue = 0.0
         }
         window.orderFrontRegardless()
@@ -632,7 +674,7 @@ final class VideoWallpaperManager: ObservableObject {
                 context.duration = 0.35
                 context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
                 context.allowsImplicitAnimation = true
-                window.animator().alphaValue = 1.0
+                window.animator().alphaValue = window.isOpaque ? 1.0 : Self.videoSamplingWindowAlpha
             }
         }
         if let view = window.contentView {
@@ -794,13 +836,20 @@ final class VideoWallpaperManager: ObservableObject {
         posterURLByScreenFingerprint[screen.wallpaperScreenFingerprint] = posterURL
         currentPosterURL = posterURL
         _ = loadPosterImageSync(from: posterURL)
-        if posterURL.isFileURL {
+        if shouldSkipStaticPosterForDynamicLockScreen, isSystemWallpaperSyncEnabled,
+           posterURL.isFileURL, !isScreenLocked, !externalRenderingActive {
+            scheduleLateExtensionPosterSampling(posterURL, for: screen)
+        } else if posterURL.isFileURL {
             applyPosterAsDesktopWallpaperSync(posterURL, targetScreen: screen)
         } else {
             setPosterAsDesktopWallpaper(posterURL, targetScreen: screen)
         }
         syncExternalPosterPath(for: screen, posterURL: posterURL)
         persistState()
+    }
+
+    private func scheduleLateExtensionPosterSampling(_ posterURL: URL, for screen: NSScreen) {
+        // 锁屏选择已启用时保留系统桌面，不再通过扩展采样海报。
     }
 
     private func syncExternalPosterPath(for screen: NSScreen, posterURL: URL?) {
@@ -1728,21 +1777,47 @@ final class VideoWallpaperManager: ObservableObject {
         guard let data = try? Data(contentsOf: stateURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let isActive = json["isActive"] as? Bool else {
-            // 无法读取状态 → 认为扩展未激活
-            if isLockScreenExtensionActive {
-                isLockScreenExtensionActive = false
-                print("[VideoWallpaperManager] Lock screen extension state unreadable → inactive")
-            }
+            // 读失败不是 context 死亡的证据；不能把短暂不可读变成 false→true 重同步。
             return
         }
 
-        // 心跳验活（Mirage 健康报告语义）：isActive=true 但写状态的扩展进程已死
-        // → 立即清理残留，不等 20s 复核。旧版扩展的 state 没有 pid，跳过验活走原逻辑。
         let heartbeat = ProcessLiveness.heartbeat(fromJSON: json)
-        if isActive, let pid = heartbeat.pid, !ProcessLiveness.isAlive(pid) {
-            print("[VideoWallpaperManager] Lock screen extension state stale (pid \(pid) dead) → inactive")
-            writeExtensionStateInactive(reason: "pid 失活")
+        // 只有 ESRCH 才是确定死亡；EPERM / 其它探测错误、无 PID legacy 均保守保留。
+        // updatedAt 是状态更新时间而非周期心跳，健康且媒体不变时可长时间不更新。
+        let ownerDefinitelyDead = heartbeat.pid.map(ProcessLiveness.isDefinitelyDead) ?? false
+        guard WallpaperExtensionHostStatePolicy.isActive(
+            reportedActive: isActive, ownerDefinitelyDead: ownerDefinitelyDead
+        ) else {
+            isLockScreenExtensionActive = false
+            // 与旧逻辑一致：失活后再次激活同一视频时仍要补发一次延迟刷新通知。
+            Self.lastCheckedExtensionVideoID = nil
+            if !isActive, heartbeat.pid == nil {
+                legacyExtensionWasInactive = true
+            }
+            // 不写 extension-owned JSON，避免旧死亡 PID 检查与新进程写 state 竞态。
             return
+        }
+
+        if let pid = heartbeat.pid, pid > 0 {
+            if let birth = OwnedProcessIdentity.capture(pid) {
+                extensionSyncOwner = "pid:\(pid):\(birth.startedSeconds):\(birth.startedMicroseconds)"
+            } else if extensionObservedPID != pid {
+                // libproc 可能因权限/过渡态暂不可读；同 PID 不应因此来回改变签名。
+                extensionSyncOwner = "pid:\(pid)"
+            }
+            extensionObservedPID = pid
+        } else {
+            extensionObservedPID = nil
+            extensionSyncOwner = "legacy"
+            if legacyExtensionWasInactive {
+                // 旧协议无 PID：明确释放后再 acquire 且尚未加载目标媒体，才准许补恢复。
+                // 读失败/解锁都不改变代次；已报告目标媒体的假切换仍由签名去重。
+                legacyExtensionRecovery = WallpaperExtensionHostStatePolicy.legacyRecovery(
+                    previous: legacyExtensionRecovery, observedInactive: true,
+                    reportsDesiredSources: extensionStateMatchesCurrentVideoSources(json)
+                )
+                legacyExtensionWasInactive = false
+            }
         }
 
         // 扩展上报的渲染/切换错误落日志（按错误内容去重，避免同一错误刷屏）
@@ -1755,20 +1830,13 @@ final class VideoWallpaperManager: ObservableObject {
         let wasActive = isLockScreenExtensionActive
         isLockScreenExtensionActive = isActive
 
-        // 扩展只在锁屏期间渲染；解锁态读到 active 一律是残留（扩展被 WallpaperAgent
-        // 回收前重写 state / 解锁通知丢失）。调度延迟复核自愈，否则残留标志会让
-        // 镜像相关路径长期空转。
-        if isActive, !isScreenLocked {
-            scheduleStaleExtensionStateCleanup()
+        if !wasActive {
+            print("[VideoWallpaperManager] Wallpaper extension context became active")
         }
-
-        if isActive && !wasActive {
-            print("[VideoWallpaperManager] Lock screen extension became active")
-            if hasActiveVideoWallpaper {
-                syncAllDisplayVideosToExtension()
-            }
-        } else if !isActive && wasActive {
-            print("[VideoWallpaperManager] Lock screen extension became inactive")
+        // PID 换代不一定经过 inactive 通知。每次 active 观测都走纯签名门控，
+        // 同进程同媒体不再反复清命令/重载，新 PID 和新媒体则立即同步。
+        if hasActiveVideoWallpaper {
+            syncAllDisplayVideosToExtension()
         }
 
         // 检测 videoID 变化（表示扩展已完成视频切换）
@@ -1794,56 +1862,42 @@ final class VideoWallpaperManager: ObservableObject {
     /// 上次落日志的扩展上报错误（按内容去重）
     private static var lastLoggedExtensionStateError: String?
 
-    private var staleExtensionCleanupPending = false
-    private var lastStaleExtensionCleanupAt: Date?
+    private var extensionSyncOwner = "legacy"
+    private var extensionObservedPID: Int32?
+    private var legacyExtensionRecovery: UInt64 = 0
+    private var legacyExtensionWasInactive = false
+    private var completedExtensionVideoSync: WallpaperExtensionHostStatePolicy.SyncSignature?
+    private var inFlightExtensionVideoSync: WallpaperExtensionHostStatePolicy.SyncSignature?
+    private var inFlightExtensionVideoSyncGeneration: UInt64?
+    private var completedExtensionVideoSyncGeneration: UInt64?
 
-    /// 解锁态下对扩展 state 残留的自愈：20 秒后复核（避开「刚锁屏但 isScreenLocked
-    /// 尚未置位」的窗口期），文件仍为 active 才补写；5 分钟内不重复补写，
-    /// 避免与仍存活的扩展互相覆写。兜住 reconcileExtensionStateAfterUnlock
-    /// 依赖的解锁通知丢失 / 扩展回收前重写的场景。
-    private func scheduleStaleExtensionStateCleanup() {
-        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
-        guard !staleExtensionCleanupPending else { return }
-        staleExtensionCleanupPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20.0) { [weak self] in
-            guard let self else { return }
-            self.staleExtensionCleanupPending = false
-            guard !self.isScreenLocked else { return }
-            if let last = self.lastStaleExtensionCleanupAt,
-               Date().timeIntervalSince(last) < 300 { return }
-            guard let container = FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
-            ) else { return }
-            let stateURL = container.appendingPathComponent("waifux-wallpaper-state.json")
-            guard let data = try? Data(contentsOf: stateURL),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  (json["isActive"] as? Bool) == true else { return }
-            self.lastStaleExtensionCleanupAt = Date()
-            self.writeExtensionStateInactive(reason: "解锁态复核")
+    private func invalidateExtensionVideoSync() {
+        if let generation = inFlightExtensionVideoSyncGeneration,
+           WallpaperExtensionSocketServer.isCurrentGeneration(generation) {
+            _ = WallpaperExtensionSocketServer.nextVideoSyncGeneration()
+            WallpaperExtensionSocketServer.shared.clearVideoCommands()
         }
+        completedExtensionVideoSync = nil
+        completedExtensionVideoSyncGeneration = nil
+        inFlightExtensionVideoSync = nil
+        inFlightExtensionVideoSyncGeneration = nil
     }
 
-    /// 把扩展 state 文件补写为 inactive，并清掉内存活跃标志。
-    private func writeExtensionStateInactive(reason: String) {
-        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
-        ) else { return }
-        let stateURL = container.appendingPathComponent("waifux-wallpaper-state.json")
-        let json: [String: Any] = [
-            "isActive": false,
-            "currentVideoID": NSNull(),
-            "currentVideoName": NSNull(),
-            "contexts": NSNull()
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: json) {
-            try? data.write(to: stateURL, options: .atomic)
+    /// legacy 恢复只能靠明确的 release/acquire 与媒体回报，不能靠解锁或文件年龄。
+    private func extensionStateMatchesCurrentVideoSources(_ json: [String: Any]) -> Bool {
+        guard let contexts = json["contexts"] as? [[String: Any]], !contexts.isEmpty else { return false }
+        let sources = NSScreen.screens.compactMap { screen -> (UInt32, String)? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let url = assignedVideoURL(for: screen) else { return nil }
+            let digest = SHA256.hash(data: Data(url.standardizedFileURL.path.utf8))
+            let sourceID = "\(url.deletingPathExtension().lastPathComponent)-\(digest.prefix(12).map { String(format: "%02x", $0) }.joined())"
+            return (number.uint32Value, sourceID)
         }
-        if isLockScreenExtensionActive {
-            isLockScreenExtensionActive = false
-            AppLogger.error(.wallpaper, "扩展 state 残留 active 已清理", metadata: [
-                "reason": reason
-            ])
+        return !sources.isEmpty && sources.allSatisfy { displayID, sourceID in
+            contexts.contains {
+                ($0["displayID"] as? NSNumber)?.uint32Value == displayID
+                    && ($0["videoID"] as? String) == sourceID
+            }
         }
     }
 
@@ -1853,8 +1907,10 @@ final class VideoWallpaperManager: ObservableObject {
     @available(macOS 26.0, *)
     private func syncAllDisplayVideosToExtension() {
         guard !BackgroundRuntimeRole.isIsolatedTest else { return }
-        guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
-            print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 动态锁屏已关闭，跳过")
+        guard WaifuXPreferences.shared.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true,
+              shouldPreserveLockScreenWallpaperSelection else {
+            invalidateExtensionVideoSync()
+            print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 动态锁屏未启用或系统未选择 WaifuX，跳过")
             return
         }
         var displayVideoPairs: [(displayID: UInt32, videoURL: URL)] = []
@@ -1883,14 +1939,45 @@ final class VideoWallpaperManager: ObservableObject {
         }
 
         guard !displayVideoPairs.isEmpty else {
+            invalidateExtensionVideoSync()
             print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 没有可同步的显示器视频源，跳过")
             return
         }
+
+        let sources = Set(displayVideoPairs.map { pair in
+            let url = pair.videoURL.standardizedFileURL
+            let attributes = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+            return WallpaperExtensionHostStatePolicy.VideoSource(
+                displayID: pair.displayID,
+                path: url.path,
+                fileSize: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+                modifiedAt: (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
+                fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+            )
+        })
+        let signature = WallpaperExtensionHostStatePolicy.SyncSignature(
+            owner: extensionSyncOwner, legacyRecovery: legacyExtensionRecovery, sources: sources
+        )
+        if let generation = inFlightExtensionVideoSyncGeneration,
+           !WallpaperExtensionSocketServer.isCurrentGeneration(generation) {
+            inFlightExtensionVideoSync = nil
+            inFlightExtensionVideoSyncGeneration = nil
+        }
+        if let generation = completedExtensionVideoSyncGeneration,
+           !WallpaperExtensionSocketServer.isCurrentGeneration(generation) {
+            completedExtensionVideoSync = nil
+            completedExtensionVideoSyncGeneration = nil
+        }
+        guard WallpaperExtensionHostStatePolicy.shouldSync(
+            signature, completed: completedExtensionVideoSync, inFlight: inFlightExtensionVideoSync
+        ) else { return }
+        inFlightExtensionVideoSync = signature
 
         print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 同步 \(displayVideoPairs.count) 个显示器自解码源到锁屏扩展")
 
         // 递增世代号并清空旧命令，防止前一次异步 Task 入队的过期命令被扩展执行
         let generation = WallpaperExtensionSocketServer.nextVideoSyncGeneration()
+        inFlightExtensionVideoSyncGeneration = generation
         WallpaperExtensionSocketServer.shared.clearVideoCommands()
 
         // ⚠️ 关键时序修复：先不同步实例到 Socket（不同步也就不会发 prefsChanged 通知），
@@ -1907,17 +1994,36 @@ final class VideoWallpaperManager: ObservableObject {
         // 并发写入会导致：1) prefs 文件互相覆盖，只剩最后一路；2) deployedVideoIDs 集合
         // 有 ABA 问题，可能误删另一路正在使用的视频文件。
         // 串行执行代价很小（每个调用主要耗时在 hard link + 通知，非视频解码），但能彻底消除竞态。
-        Task {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var succeeded = true
             for (videoURL, pairs) in grouped {
+                guard self.inFlightExtensionVideoSync == signature,
+                      self.inFlightExtensionVideoSyncGeneration == generation,
+                      WallpaperExtensionSocketServer.isCurrentGeneration(generation),
+                      !Task.isCancelled else { succeeded = false; break }
                 let videoID = videoURL.deletingPathExtension().lastPathComponent
                 let displayIDs = pairs.map(\.displayID)
-                await LockScreenWallpaperService.shared.switchActiveInstancesToLocalDecode(
+                let deployed = await LockScreenWallpaperService.shared.switchActiveInstancesToLocalDecode(
                     videoURL: videoURL,
                     videoID: videoID,
                     displayIDs: displayIDs,
-                    generation: generation
+                    generation: generation,
+                    waitForReady: true
                 )
+                succeeded = succeeded && deployed
                 print("[VideoWallpaperManager] 📺 请求锁屏自解码 display=\(displayIDs) video=\(videoID)")
+            }
+            // 新媒体/PID 已取代本任务时，旧任务不能清掉新任务的签名。
+            guard self.inFlightExtensionVideoSync == signature,
+                  WallpaperExtensionHostStatePolicy.ownsCompletion(
+                    generation: generation, inFlightGeneration: self.inFlightExtensionVideoSyncGeneration
+                  ) else { return }
+            self.inFlightExtensionVideoSync = nil
+            self.inFlightExtensionVideoSyncGeneration = nil
+            if succeeded, WallpaperExtensionSocketServer.isCurrentGeneration(generation), !Task.isCancelled {
+                self.completedExtensionVideoSync = signature
+                self.completedExtensionVideoSyncGeneration = generation
             }
         }
     }
@@ -1949,39 +2055,15 @@ final class VideoWallpaperManager: ObservableObject {
         guard BackgroundRuntimeRole.isHelper else { return }
 
         isLockScreenExtensionActive = false
+        invalidateExtensionVideoSync()
     }
 
-    /// 解锁瞬间对账扩展 state 文件。
-    /// 锁屏扩展在解锁时被系统直接回收，来不及执行 `setActive(false)`，
-    /// `waifux-wallpaper-state.json` 会残留 `isActive:true`。此后：
-    /// 1. `checkExtensionState` 读到残留值会重新点亮内存标志；
-    /// 2. App 冷启动时还会把残留值当成「镜像刚激活」触发一轮多余的视频同步。
-    /// 在解锁事件里补写 inactive 并清掉内存标志，与 `isLockScreenMirroringActive`
-    /// 的 `isScreenLocked` 闸门形成双保险。
+    /// 解锁只重新观测，菜单资格由 isScreenLocked 闸门控制。
+    /// 扩展的桌面 context 仍可能健康，宿主绝不替它回写 inactive。
     @available(macOS 26.0, *)
     private func reconcileExtensionStateAfterUnlock() {
         guard !BackgroundRuntimeRole.isIsolatedTest else { return }
-        guard isLockScreenExtensionActive
-                || WallpaperExtensionSocketServer.shared.hasActivePipeline else {
-            return
-        }
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.waifux.app"
-        ) else { return }
-        let stateURL = container.appendingPathComponent("waifux-wallpaper-state.json")
-        let json: [String: Any] = [
-            "isActive": false,
-            "currentVideoID": NSNull(),
-            "currentVideoName": NSNull(),
-            "contexts": NSNull()
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: json) {
-            try? data.write(to: stateURL, options: .atomic)
-        }
-        if isLockScreenExtensionActive {
-            isLockScreenExtensionActive = false
-            print("[VideoWallpaperManager] 解锁：补写扩展 state=inactive，清理残留镜像标志")
-        }
+        checkExtensionState()
     }
 
 
@@ -2053,10 +2135,21 @@ final class VideoWallpaperManager: ObservableObject {
         targetScreens: [NSScreen]?,
         animatedTransition: Bool = false,
         usesSharedVideoDecoder: Bool = false,
-        forceRebuild: Bool = false
+        forceRebuild: Bool = false,
+        requestTransitionToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
     ) async throws {
         if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("video.apply", ["url": localFileURL, "poster": posterURL, "muted": muted, "screens": targetScreens, "animated": animatedTransition, "shared": usesSharedVideoDecoder, "rebuild": forceRebuild]); return }
         guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
+        let applyScreens = targetScreens?.isEmpty == false ? targetScreens! : NSScreen.screens
+        let transitionToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
+        if let requestTransitionToken {
+            guard let subset = WallpaperCrossTypeTransitionCoordinator.shared.subset(
+                requestTransitionToken, screens: applyScreens
+            ) else { throw CancellationError() }
+            transitionToken = subset
+        } else {
+            transitionToken = WallpaperCrossTypeTransitionCoordinator.shared.beginRequest(on: applyScreens)
+        }
 
         if usesSharedVideoDecoder {
             try await applyVideoWallpaper(
@@ -2066,7 +2159,8 @@ final class VideoWallpaperManager: ObservableObject {
                 targetScreen: nil,
                 animatedTransition: animatedTransition,
                 usesSharedVideoDecoder: true,
-                forceRebuild: forceRebuild
+                forceRebuild: forceRebuild,
+                requestTransitionToken: transitionToken
             )
             return
         }
@@ -2079,7 +2173,8 @@ final class VideoWallpaperManager: ObservableObject {
                     targetScreen: screen,
                     animatedTransition: animatedTransition,
                     usesSharedVideoDecoder: false,
-                    forceRebuild: forceRebuild
+                    forceRebuild: forceRebuild,
+                    requestTransitionToken: transitionToken
                 )
             }
         } else {
@@ -2090,27 +2185,33 @@ final class VideoWallpaperManager: ObservableObject {
                 targetScreen: nil,
                 animatedTransition: animatedTransition,
                 usesSharedVideoDecoder: false,
-                forceRebuild: forceRebuild
+                forceRebuild: forceRebuild,
+                requestTransitionToken: transitionToken
             )
         }
     }
 
     func applyVideoWallpaper(
-        from localFileURL: URL,
+        from originalFileURL: URL,
         posterURL: URL? = nil,
         muted: Bool = true,
         targetScreen: NSScreen? = nil,
         animatedTransition: Bool = false,
         usesSharedVideoDecoder: Bool = false,
-        forceRebuild: Bool = false
+        forceRebuild: Bool = false,
+        requestTransitionToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
     ) async throws {
-        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("video.applySingle", ["url": localFileURL, "poster": posterURL, "muted": muted, "screens": targetScreen.map { [$0] }, "animated": animatedTransition, "shared": usesSharedVideoDecoder, "rebuild": forceRebuild]); return }
+        if BackgroundRuntimeRole.isRemoteUI { _ = try await BackgroundRuntimeBridge.request("video.applySingle", ["url": originalFileURL, "poster": posterURL, "muted": muted, "screens": targetScreen.map { [$0] }, "animated": animatedTransition, "shared": usesSharedVideoDecoder, "rebuild": forceRebuild]); return }
         guard !isTerminating, !Task.isCancelled else { throw CancellationError() }
 
         AppLogger.error(.wallpaper, "applyVideoWallpaper 开始", metadata: [
-            "video": localFileURL.lastPathComponent,
+            "video": originalFileURL.lastPathComponent,
             "targetScreen": targetScreen?.localizedName ?? "nil(全部)"
         ])
+        // 可播性兜底：AVFoundation 打不开的本地视频（如 elst 计数损坏的 Workshop
+        // 内容）先用内置 ffmpeg 转封装修复，再走后续交叉淡入/解码路径；正常文件
+        // 仅多一次毫秒级资产探测。缓存与 LocalWallpaperApplyService.applyVideo 共用。
+        let localFileURL = try await VideoRepairService.playableVideoURL(for: originalFileURL)
         // 只有「本屏已有可见的原生视频窗」的视频→视频切换才走同窗交叉淡入（淡入期窗口
         // 非不透明 + poster 落桌面读回后保持 15s，菜单栏照样能采样）。首次建窗、
         // Scene/Web/静态图 → 视频、外置渲染器仍走硬切 + 桌面采样窗口期。
@@ -2130,9 +2231,24 @@ final class VideoWallpaperManager: ObservableObject {
             throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: "视频文件不存在。"])
         }
 
-        WallpaperCrossTypeTransitionCoordinator.shared.invalidatePendingRequests(
-            on: targetScreen.map { [$0] } ?? NSScreen.screens
-        )
+        let samplingScreens = targetScreen.map { [$0] } ?? NSScreen.screens
+        let samplingOwnership: WallpaperCrossTypeTransitionCoordinator.RequestToken
+        if let requestTransitionToken {
+            guard let subset = WallpaperCrossTypeTransitionCoordinator.shared.subset(
+                requestTransitionToken, screens: samplingScreens
+            ) else { throw CancellationError() }
+            samplingOwnership = subset
+        } else {
+            samplingOwnership = WallpaperCrossTypeTransitionCoordinator.shared.beginRequest(on: samplingScreens)
+        }
+        for screen in targetScreen.map({ [$0] }) ?? NSScreen.screens {
+            let id = screen.wallpaperScreenIdentifier
+            lateSamplingPosterTasks.removeValue(forKey: id)?.cancel()
+            lateSamplingPosterTokens.removeValue(forKey: id)
+            if let generation = samplingOwnership.generationsByScreen[id] {
+                videoSamplingOwnershipByScreen[id] = .init(generationsByScreen: [id: generation])
+            }
+        }
 
         if let targetScreen,
            animatedTransition,
@@ -2153,7 +2269,8 @@ final class VideoWallpaperManager: ObservableObject {
                 targetScreen: targetScreen,
                 usesSharedVideoDecoder: usesSharedVideoDecoder,
                 animatedTransition: animatedTransition,
-                forceRebuild: forceRebuild
+                forceRebuild: forceRebuild,
+                requestToken: samplingOwnership
             )
             return
         }
@@ -2414,35 +2531,50 @@ final class VideoWallpaperManager: ObservableObject {
         // 与 Scene 交接的「静态图先显示→菜单栏采样→渲染器出现」同一策略。
         if !animatedTransition, posterURL != nil, isSystemWallpaperSyncEnabled,
            !shouldSkipStaticPosterForDynamicLockScreen {
-            let samplingStarted = Date()
-            teardownAllWindows()
-            // 先确认系统桌面真的切到了新 poster（写入是异步的，不读回会偶发采不到）。
+            let desktopWaitStarted = Date()
+            // A single-display apply must not dismantle another display's video.
+            if targetScreen != nil {
+                for screen in captureScreens {
+                    if let entry = existingVideoWindowEntry(for: screen) { teardownWindow(for: entry.screenID) }
+                }
+            } else {
+                teardownAllWindows()
+            }
+            var readbackOK = false
+            // Ordinary system wallpaper still uses the slot-copy URL readback.
             let expectedPath = (writtenDesktopPosterURL ?? posterURL!).standardizedFileURL.path
             let readbackDeadline = Date().addingTimeInterval(2.0)
-            var readbackOK = false
             while Date() < readbackDeadline {
-                let targets = targetScreen.map { [$0] } ?? NSScreen.screens
-                let allMatch = targets.allSatisfy { screen in
-                    guard let current = NSWorkspace.shared.desktopImageURL(for: screen) else { return false }
-                    return current.standardizedFileURL.path == expectedPath
+                let allMatch = captureScreens.allSatisfy { screen in
+                    NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL.path == expectedPath
                 }
                 if allMatch { readbackOK = true; break }
                 try? await Task.sleep(nanoseconds: 50_000_000)
+                guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(samplingOwnership),
+                      !Task.isCancelled else { throw CancellationError() }
             }
-            let readbackMS = Int(Date().timeIntervalSince(samplingStarted) * 1000)
+            let readbackMS = Int(Date().timeIntervalSince(desktopWaitStarted) * 1000)
             // 读回确认后再给菜单栏 backdrop 一个采样节拍（桌面已确认切换，
             // 实测静态壁纸懒采样约 1s 内完成，压到 0.6s 兼顾切换速度）。
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try await Task.sleep(nanoseconds: 600_000_000)
+            guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(samplingOwnership),
+                  !Task.isCancelled else { throw CancellationError() }
             AppLogger.error(.wallpaper, "[VideoTransition] 旧窗已拆，桌面采样等待完成", metadata: [
                 "video": localFileURL.lastPathComponent,
                 "readbackOK": readbackOK ? "1" : "0",
                 "readbackMS": String(readbackMS),
-                "totalMS": String(Int(Date().timeIntervalSince(samplingStarted) * 1000))
+                "totalMS": String(Int(Date().timeIntervalSince(desktopWaitStarted) * 1000))
             ])
         }
 
         // 直接沿用调用方传入的 NSScreen，避免再按 screenID 反查失败时
         // 误走 targetScreen == nil 分支、teardown 所有视频窗（副屏会表现为“软件壁纸退出”）。
+        guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(samplingOwnership) else {
+            throw GlobalWallpaperSyncCoordinator.WallpaperApplySupersededError(
+                screenIDs: Set(captureScreens.map(\.wallpaperScreenIdentifier)),
+                requestToken: samplingOwnership
+            )
+        }
         try rebuildWindows(
             targetScreen: targetScreen,
             animatedTransition: animatedTransition
@@ -2610,9 +2742,13 @@ final class VideoWallpaperManager: ObservableObject {
         targetScreen: NSScreen?,
         usesSharedVideoDecoder: Bool,
         animatedTransition: Bool,
-        forceRebuild: Bool
+        forceRebuild: Bool,
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
     ) async throws {
+        let screens = targetScreen.map { [$0] } ?? NSScreen.screens
+        let token = requestToken ?? WallpaperCrossTypeTransitionCoordinator.shared.beginRequest(on: screens)
         try await withExternalRendererTransaction {
+            guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(token) else { throw CancellationError() }
             try await self.applyVideoWallpaperViaExternalRendererLocked(
                 from: localFileURL,
                 posterURL: posterURL,
@@ -2620,7 +2756,8 @@ final class VideoWallpaperManager: ObservableObject {
                 targetScreen: targetScreen,
                 usesSharedVideoDecoder: usesSharedVideoDecoder,
                 animatedTransition: animatedTransition,
-                forceRebuild: forceRebuild
+                forceRebuild: forceRebuild,
+                requestToken: token
             )
         }
     }
@@ -2632,7 +2769,8 @@ final class VideoWallpaperManager: ObservableObject {
         targetScreen: NSScreen?,
         usesSharedVideoDecoder: Bool,
         animatedTransition: Bool,
-        forceRebuild: Bool
+        forceRebuild: Bool,
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
     ) async throws {
         AppLogger.info(.wallpaper, "applyVideoWallpaperViaExternalRenderer", metadata: [
             "video": localFileURL.lastPathComponent,
@@ -2749,6 +2887,8 @@ final class VideoWallpaperManager: ObservableObject {
             await externalRenderer.reconcileChildRenderers()
         }
 
+        guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(requestToken),
+              !Task.isCancelled, !isTerminating else { throw CancellationError() }
         // 停掉主进程内可能残留的旧视频窗口（从旧路径切换过来的场景）。
         teardownAllWindows(preserveDisplaySwitchGate: true)
 
@@ -3018,7 +3158,8 @@ final class VideoWallpaperManager: ObservableObject {
                 generation: transitionGeneration,
                 requestID: requestID,
                 rollback: externalRollback,
-                animated: animatedTransition
+                animated: animatedTransition,
+                requestToken: requestToken
             )
         }
 
@@ -3063,7 +3204,8 @@ final class VideoWallpaperManager: ObservableObject {
         generation: UInt64,
         requestID: String,
         rollback: ExternalTransitionSourceRollback,
-        animated: Bool
+        animated: Bool,
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
     ) {
         let uniqueCrossTypeScreens = uniqueScreens(crossTypeScreens)
         let uniqueVideoScreens = uniqueScreens(videoReplacementScreens)
@@ -3078,7 +3220,8 @@ final class VideoWallpaperManager: ObservableObject {
                     generation: generation,
                     timeout: uniqueVideoScreens.isEmpty ? 12 : 30
                 )
-                guard self.externalTransitionGeneration == generation else { return }
+                guard self.externalTransitionGeneration == generation,
+                      WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(requestToken) else { return }
 
                 if !uniqueVideoScreens.isEmpty {
                     let response = await self.externalRenderer.sendCommand(
@@ -3096,10 +3239,11 @@ final class VideoWallpaperManager: ObservableObject {
                 }
 
                 if !uniqueCrossTypeScreens.isEmpty {
-                    await self.finishCrossTypeVideoHandoff(on: uniqueCrossTypeScreens)
+                    await self.finishCrossTypeVideoHandoff(on: uniqueCrossTypeScreens, requestToken: requestToken)
                 }
 
-                guard self.externalTransitionGeneration == generation else { return }
+                guard self.externalTransitionGeneration == generation,
+                      WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(requestToken) else { return }
                 for screen in pendingScreens {
                     let screenID = screen.wallpaperScreenIdentifier
                     self.externalPendingCommitScreenIDs.remove(screenID)
@@ -3122,7 +3266,8 @@ final class VideoWallpaperManager: ObservableObject {
                     )
                 }
             } catch {
-                guard self.externalTransitionGeneration == generation else { return }
+                guard self.externalTransitionGeneration == generation,
+                      WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(requestToken) else { return }
                 // Scene/Web 已经让位给视频 apply。首帧超时也不能把旧 Scene
                 // 留在桌面上盖住 0.02 的预热视频窗。
                 if !uniqueCrossTypeScreens.isEmpty {
@@ -3137,7 +3282,7 @@ final class VideoWallpaperManager: ObservableObject {
                             timeout: 2.0
                         )
                     }
-                    await self.finishCrossTypeVideoHandoff(on: uniqueCrossTypeScreens)
+                    await self.finishCrossTypeVideoHandoff(on: uniqueCrossTypeScreens, requestToken: requestToken)
                     for screen in pendingScreens {
                         self.externalPendingCommitScreenIDs.remove(
                             screen.wallpaperScreenIdentifier
@@ -3179,11 +3324,15 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
 
-    private func finishCrossTypeVideoHandoff(on screens: [NSScreen]) async {
+    private func finishCrossTypeVideoHandoff(
+        on screens: [NSScreen], requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
+    ) async {
         let unique = uniqueScreens(screens)
-        guard !unique.isEmpty else { return }
+        guard !unique.isEmpty,
+              let subset = WallpaperCrossTypeTransitionCoordinator.shared.subset(requestToken, screens: unique) else { return }
         await WallpaperCrossTypeTransitionCoordinator.shared.commitPreparedContent(
             on: unique,
+            requestToken: subset,
             revealPreparedContent: {
                 for screen in unique {
                     guard let screenIndex = self.externalScreenIndex(for: screen) else {
@@ -6240,6 +6389,43 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
 
+    /// 扩展新底图已回执：与系统桌面写入复用同一段有限采样保持。
+    /// 这里只处理原生视频；Web 沿用自身收尾，Scene 保留延迟显示。
+    func holdDesktopSamplingAfterExtensionPush(displayIDs: [UInt32]) {
+        guard !BackgroundRuntimeRole.isIsolatedTest else { return }
+        guard isSystemWallpaperSyncEnabled, !isScreenLocked else { return }
+        let displays = Set(displayIDs)
+        for screen in NSScreen.screens {
+            let screenID = screen.wallpaperScreenIdentifier
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  displays.contains(number.uint32Value), let window = windows[screenID],
+                  let expectedURL = videoURL(for: screen)?.standardizedFileURL,
+                  let owner = videoSamplingOwnershipByScreen[screenID],
+                  WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(owner, screenID: screenID) else { continue }
+            lateSamplingPosterTasks.removeValue(forKey: screenID)?.cancel()
+            let token = beginVideoSamplingHold(screenID: screenID)
+            lateSamplingPosterTokens[screenID] = token
+            // A newer request can fail before replacing this window. Restore the
+            // same surviving window even then, never a replacement window/source.
+            let isSameWindow: @MainActor () -> Bool = { [weak self, weak window] in
+                guard let self, let window else { return false }
+                return self.existingVideoWindowEntry(for: screen)?.window === window
+                    && self.videoURL(for: screen)?.standardizedFileURL == expectedURL
+            }
+            lateSamplingPosterTasks[screenID] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.finishVideoSamplingHold(
+                    token: token, screen: screen, desktopURL: nil,
+                    video: expectedURL.lastPathComponent, extensionSourceReady: true,
+                    isCurrent: isSameWindow
+                )
+                guard self.lateSamplingPosterTokens[screenID] == token else { return }
+                self.lateSamplingPosterTokens.removeValue(forKey: screenID)
+                self.lateSamplingPosterTasks.removeValue(forKey: screenID)
+            }
+        }
+    }
+
     /// 进入采样保持：复用窗改成非不透明 + 0.99999（视觉无差别），桌面层不被挂起。
     @discardableResult
     private func beginVideoSamplingHold(screenID: String) -> UUID {
@@ -6255,23 +6441,25 @@ final class VideoWallpaperManager: ObservableObject {
     /// 结束采样保持：转回不透明。只动「仍处于非不透明」的窗口，硬切新建窗（本就不透明、
     /// 可能正在 0→1 淡入）不受影响。
     private func endVideoSamplingHold(screenID: String) {
-        videoSamplingHoldTokens.removeValue(forKey: screenID)
         guard let window = windows[screenID], !window.isOpaque else { return }
         window.alphaValue = 1.0
         window.isOpaque = true
     }
 
     /// 读回确认 poster 已成系统桌面 → 再保持 15s → 转不透明。令牌过时（新 apply / 新保持）即放弃。
-    /// 没写成桌面（失败 / 过时 / 被闸门挡掉）时立即转回不透明，窗口不会一直半透明。
+    /// 没写系统桌面但扩展底图已回执时同样保持采样；两条链均无新图才立即转不透明。
     private func finishVideoSamplingHold(
         token: UUID,
         screen: NSScreen?,
         desktopURL: URL?,
-        video: String
+        video: String,
+        extensionSourceReady: Bool = false,
+        isCurrent: @MainActor () -> Bool = { true }
     ) async {
         // 屏幕重编号会把令牌迁到新 screenID，按令牌值找当前键。
         func currentScreenID() -> String? {
-            videoSamplingHoldTokens.first(where: { $0.value == token })?.key
+            guard isCurrent() else { return nil }
+            return videoSamplingHoldTokens.first(where: { $0.value == token })?.key
         }
         guard currentScreenID() != nil else { return }
 
@@ -6288,7 +6476,10 @@ final class VideoWallpaperManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard currentScreenID() != nil else { return }
             }
-            try? await Task.sleep(nanoseconds: videoSamplingHoldAfterDesktopWrite)
+        }
+        if desktopURL != nil || readbackOK || extensionSourceReady {
+            do { try await Task.sleep(nanoseconds: videoSamplingHoldAfterDesktopWrite) }
+            catch { return }
             holdMS = Int(videoSamplingHoldAfterDesktopWrite / 1_000_000)
         }
         guard let screenID = currentScreenID() else { return }
@@ -10978,24 +11169,19 @@ final class WallpaperCrossTypeTransitionCoordinator {
     static let shared = WallpaperCrossTypeTransitionCoordinator()
 
     struct RequestToken: Sendable {
-        fileprivate let generationsByScreen: [String: UInt64]
+        let generationsByScreen: [String: UInt64]
     }
 
-    private var transitionGenerationByScreen: [String: UInt64] = [:]
+    private var transitionOwnership = WallpaperTransitionOwnership()
     private var snapshotWindowsByScreen: [String: NSWindow] = [:]
     private let crossTypeFadeDuration: TimeInterval = 0.28
 
     private init() {}
 
     func beginRequest(on screens: [NSScreen]) -> RequestToken {
-        var generations: [String: UInt64] = [:]
-        for screenID in Set(screens.map(\.wallpaperScreenIdentifier)) {
-            removeSnapshotWindow(for: screenID)
-            let generation = (transitionGenerationByScreen[screenID] ?? 0) &+ 1
-            transitionGenerationByScreen[screenID] = generation
-            generations[screenID] = generation
-        }
-        return RequestToken(generationsByScreen: generations)
+        let screenIDs = Set(screens.map(\.wallpaperScreenIdentifier))
+        for screenID in screenIDs { removeSnapshotWindow(for: screenID) }
+        return RequestToken(generationsByScreen: transitionOwnership.begin(screenIDs: screenIDs))
     }
 
     func invalidatePendingRequests(on screens: [NSScreen]) {
@@ -11004,6 +11190,36 @@ final class WallpaperCrossTypeTransitionCoordinator {
 
     func isCurrent(_ token: RequestToken) -> Bool {
         isCurrent(generations: token.generationsByScreen)
+    }
+
+    func isCurrent(_ token: RequestToken, on screen: NSScreen) -> Bool {
+        isCurrent(token, screenID: screen.wallpaperScreenIdentifier)
+    }
+
+    func isCurrent(_ token: RequestToken, screenID: String) -> Bool {
+        transitionOwnership.isCurrent(token.generationsByScreen, screenID: screenID)
+    }
+
+    func token(for generations: [String: UInt64]) -> RequestToken? {
+        guard !generations.isEmpty, transitionOwnership.isCurrent(generations) else { return nil }
+        return RequestToken(generationsByScreen: generations)
+    }
+
+    func request(_ token: RequestToken, for screen: NSScreen) -> RequestToken? {
+        let id = screen.wallpaperScreenIdentifier
+        guard isCurrent(token, screenID: id), let generation = token.generationsByScreen[id] else { return nil }
+        return RequestToken(generationsByScreen: [id: generation])
+    }
+
+    func subset(_ token: RequestToken, screens: [NSScreen]) -> RequestToken? {
+        var generations: [String: UInt64] = [:]
+        for screen in screens {
+            let id = screen.wallpaperScreenIdentifier
+            guard let generation = token.generationsByScreen[id],
+                  transitionOwnership.isCurrent([id: generation]) else { return nil }
+            generations[id] = generation
+        }
+        return generations.isEmpty ? nil : RequestToken(generationsByScreen: generations)
     }
 
     func commitPreparedContent(
@@ -11106,9 +11322,7 @@ final class WallpaperCrossTypeTransitionCoordinator {
     }
 
     private func isCurrent(generations: [String: UInt64]) -> Bool {
-        generations.allSatisfy { screenID, generation in
-            transitionGenerationByScreen[screenID] == generation
-        }
+        transitionOwnership.isCurrent(generations)
     }
 
     /// 仅在已有屏幕录制权限时捕获；不主动请求权限，拿不到快照就降级为无黑场直切。

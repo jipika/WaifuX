@@ -9,6 +9,7 @@ import IOKit
 import CryptoKit
 import ScreenCaptureKit
 import WebKit
+import QuartzCore
 import ApplicationServices
 import os
 
@@ -648,7 +649,7 @@ private func readWebWallpaperUserPropertiesJSON(contentDir: URL) -> String? {
 }
 
 // MARK: - Web Renderer Bridge (WKWebView-based HTML wallpaper)
-private final class WebRendererBridge: NSObject, WKNavigationDelegate {
+private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     static let shared = WebRendererBridge()
     static let offlineBakeScreen = -1
 
@@ -1982,6 +1983,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 window.__waifuxAudioMuted = false;
             }
             var wrappedRefs = [];
+            var hostMutedElements = new WeakMap();
 
             function effectiveVolume() {
                 if (window.__wxBakeAudio && window.__wxBakeAudio.isOfflineBake) {
@@ -2062,10 +2064,340 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 }
                 applyAudio();
             };
+            // 页面自己的静音按钮只控制页面偏好，不得覆盖宿主音频总闸门。
+            // 每次换装、重建音轨、暂停恢复都重新落到同一份宿主状态。
+            function enforceAudio() {
+                try {
+                    document.querySelectorAll('video,audio').forEach(function(e) {
+                        if (window.__waifuxAudioMuted) {
+                            if (!hostMutedElements.has(e)) hostMutedElements.set(e, e.muted);
+                            if (!e.muted || e.volume !== 0) {
+                                e.muted = true;
+                                e.volume = 0;
+                            }
+                        } else {
+                            if (hostMutedElements.has(e)) {
+                                e.muted = hostMutedElements.get(e);
+                                hostMutedElements.delete(e);
+                            }
+                            var v = window.__waifuxAudioVolume;
+                            if (e.volume !== v) e.volume = v;
+                        }
+                    });
+                } catch (_) {}
+                for (var i = 0; i < wrappedRefs.length; i++) {
+                    try {
+                        var g = wrappedRefs[i].__waifuxGain;
+                        if (g && g.gain) g.gain.value = effectiveVolume();
+                    } catch (_) {}
+                }
+            }
+            if (typeof MutationObserver === 'function') {
+                var audioObserver = new MutationObserver(enforceAudio);
+                function observeAudio() {
+                    try {
+                        audioObserver.observe(document.documentElement || document,
+                            { childList: true, subtree: true });
+                    } catch (_) {}
+                }
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', observeAudio, { once: true });
+                } else {
+                    observeAudio();
+                }
+            }
+            window.__waifuxEnforceAudio = enforceAudio;
+            window.setInterval(enforceAudio, 1000);
         })();
         """,
         injectionTime: .atDocumentStart,
         forMainFrameOnly: false
+    )
+
+    /// Dock 安全区只约束交互控件，不改变 Web 页面尺寸或视频铺满策略。
+    /// 自动隐藏的 Dock 也保留空间：系统恢复出的可见工作区不能作为“无 Dock”证据。
+    /// 只作用于 Dock 所在的活动屏；副屏不白留边缘。
+    private func dockSafeArea(for screen: NSScreen) -> (edge: String, points: CGFloat) {
+        let dockDefaults = UserDefaults(suiteName: "com.apple.dock")
+        let orientation = dockDefaults?.string(forKey: "orientation") ?? "bottom"
+        let autohide = dockDefaults?.bool(forKey: "autohide") == true
+        let configuredSize = dockDefaults?.double(forKey: "tilesize") ?? 48
+        let magnifiedSize = dockDefaults?.double(forKey: "largesize") ?? 0
+        let magnification = dockDefaults?.bool(forKey: "magnification") == true
+        let iconSize = max(32, min(160, configuredSize > 0 ? configuredSize : 48))
+        let visibleIconSize = magnification ? max(iconSize, min(160, magnifiedSize)) : iconSize
+        // 图标本身 + 上下/左右内边距；与系统底部 Dock 实测 80pt 基本一致。
+        let estimatedThickness = min(200, max(56, visibleIconSize + 12))
+
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        let bottom = max(0, visible.minY - frame.minY)
+        let left = max(0, visible.minX - frame.minX)
+        let right = max(0, frame.maxX - visible.maxX)
+
+        // daemon 没有普通前台窗口，不能用 NSScreen.main 判断 Dock 屏；
+        // screens.first 是菜单栏主屏，也是单屏/关闭独立 Spaces 时的 Dock 屏。
+        guard screen.wallpaperScreenIdentifier == NSScreen.screens.first?.wallpaperScreenIdentifier else {
+            return ("none", 0)
+        }
+        // 非自动隐藏时 visibleFrame 是精确值；自动隐藏时它通常恢复整屏，
+        // 改用 Dock 配置估算，保证 Dock 唤出前后控件位置不跳。
+        switch orientation {
+        case "left":
+            return ("left", autohide ? estimatedThickness : max(left, estimatedThickness))
+        case "right":
+            return ("right", autohide ? estimatedThickness : max(right, estimatedThickness))
+        default:
+            return ("bottom", autohide ? estimatedThickness : max(bottom, estimatedThickness))
+        }
+    }
+
+    private var dockDefaultsObserver: NSObjectProtocol?
+    private var screenGeometryObserver: NSObjectProtocol?
+    private var dockGeometryRefreshScheduled = false
+
+    private func installDockSafeAreaObserverIfNeeded() {
+        guard dockDefaultsObserver == nil else { return }
+        // Dock 偏好在另一个进程里修改；UserDefaults.didChangeNotification 收不到。
+        dockDefaultsObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.dock.prefchanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.scheduleDockSafeAreaUpdate() }
+        screenGeometryObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.scheduleDockSafeAreaUpdate() }
+    }
+
+    private func scheduleDockSafeAreaUpdate() {
+        guard !dockGeometryRefreshScheduled else { return }
+        dockGeometryRefreshScheduled = true
+        // Dock 配置、显示器工作区和窗口合成可能分几步更新，短轮询覆盖这个过渡。
+        for attempt in 0..<4 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempt) * 0.15) { [weak self] in
+                guard let self else { return }
+                self.updateDockSafeAreas()
+                if attempt == 3 { self.dockGeometryRefreshScheduled = false }
+            }
+        }
+    }
+
+    private func updateDockSafeAreas() {
+        var updates: [(screen: Int, webView: WKWebView, edge: String, points: CGFloat)] = []
+        for (screen, state) in screenStates where !state.isOffscreen {
+            guard let stored = state.targetScreen, let webView = state.webView else { continue }
+            let target = NSScreen.screens.first {
+                $0.wallpaperScreenIdentifier == stored.wallpaperScreenIdentifier
+            } ?? stored
+            if target.wallpaperScreenIdentifier != stored.wallpaperScreenIdentifier {
+                screenStates[screen]?.targetScreen = target
+            }
+            let area = dockSafeArea(for: target)
+            guard area.edge != state.dockEdge || abs(area.points - state.dockPoints) > 0.5 else { continue }
+            updates.append((screen, webView, area.edge, area.points))
+        }
+        for update in updates {
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: ["edge": update.edge, "points": Double(update.points)]
+            ), let json = String(data: data, encoding: .utf8) else { continue }
+            screenStates[update.screen]?.dockEdge = update.edge
+            screenStates[update.screen]?.dockPoints = update.points
+            update.webView.evaluateJavaScript(
+                "window.__wxApplyDockSafeArea && window.__wxApplyDockSafeArea(\(json));"
+            ) { result, error in
+                if let error {
+                    dlog("[WebRendererBridge] Dock safe area JS error screen=\(update.screen): \(error)")
+                    return
+                }
+                let moved = (result as? [String: Any])?["moved"] as? [[String: Any]]
+                dlog("[WebRendererBridge] Dock safe area screen=\(update.screen) edge=\(update.edge) points=\(Int(update.points)) moved=\(moved?.count ?? 0)")
+            }
+        }
+    }
+
+    private static let dockSafeAreaScript = WKUserScript(
+        source: #"""
+        (function() {
+          if (window.__wxDockSafeArea) return;
+          var config = { edge: 'none', points: 0 };
+          var managed = [];
+          var scanTimer = 0;
+          var margin = 8;
+          window.__wxDockSafeArea = config;
+          var knownSelector = [
+            '.bottom-bar', '#wakeButton', '.wake-button', '.credit', '.wardrobe',
+            '.brand', '.topbar', '.top-right', '.look-caption', '.now-playing',
+            '.view-tools', '.playback', '.panel', '.toast'
+          ].join(',');
+
+          function installStyle() {
+            if (document.getElementById('__wx-dock-safe-area')) return;
+            var style = document.createElement('style');
+            style.id = '__wx-dock-safe-area';
+            style.textContent =
+              '.wx-dock-avoid-bottom{translate:0 calc(-1 * var(--waifux-element-shift,0px)) !important;transition:translate .2s ease-out !important}' +
+              '.wx-dock-avoid-left{translate:var(--waifux-element-shift,0px) 0 !important;transition:translate .2s ease-out !important}' +
+              '.wx-dock-avoid-right{translate:calc(-1 * var(--waifux-element-shift,0px)) 0 !important;transition:translate .2s ease-out !important}';
+            (document.head || document.documentElement).appendChild(style);
+          }
+
+          function clearManaged() {
+            for (var i = 0; i < managed.length; i++) {
+              var el = managed[i];
+              el.classList.remove('wx-dock-avoid-bottom', 'wx-dock-avoid-left', 'wx-dock-avoid-right');
+              el.style.removeProperty('--waifux-element-shift');
+              el.removeAttribute('data-wx-dock-moved');
+            }
+            managed.length = 0;
+          }
+
+          function isExcluded(el) {
+            var tag = el.tagName;
+            return tag === 'HTML' || tag === 'BODY' || tag === 'VIDEO' || tag === 'CANVAS' ||
+              tag === 'IMG' || tag === 'PICTURE' || tag === 'SVG' || tag === 'OBJECT' ||
+              tag === 'EMBED' || tag === 'IFRAME' || tag === 'SCRIPT' || tag === 'STYLE' ||
+              tag === 'LINK' || tag === 'META';
+          }
+
+          function isInteractive(el) {
+            return el.matches('button,a,input,select,textarea,[role="button"],[role="menu"],[role="dialog"]') ||
+              !!el.querySelector('button,a,input,select,textarea,[role="button"],[role="menu"],[role="dialog"]');
+          }
+
+          function collect(vw, vh) {
+            var result = [];
+            var seen = new Set();
+            var candidates = Array.prototype.slice.call(document.querySelectorAll(knownSelector))
+              .concat(Array.prototype.slice.call(document.querySelectorAll('body *')));
+            for (var i = 0; i < candidates.length; i++) {
+              var el = candidates[i];
+              if (!el || seen.has(el) || isExcluded(el)) continue;
+              seen.add(el);
+              var rect = el.getBoundingClientRect();
+              if (rect.width < 24 || rect.height < 8) continue;
+              if (rect.width * rect.height > vw * vh * 0.55) continue;
+              var style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden') continue;
+              var isKnown = el.matches(knownSelector);
+              if (!isKnown) {
+                var position = style.position;
+                if (position !== 'fixed' && position !== 'sticky' && position !== 'absolute') continue;
+                if (!isInteractive(el)) continue;
+              }
+              if (config.edge !== 'bottom' && rect.width > vw * 0.72) continue;
+              if (config.edge === 'bottom' && rect.height > vh * 0.45) continue;
+              result.push({ el: el, rect: rect });
+            }
+            return result;
+          }
+
+          function scan() {
+            clearManaged();
+            var vw = window.innerWidth, vh = window.innerHeight;
+            if (config.edge === 'none' || config.points <= 0) return [];
+            installStyle();
+            var candidates = collect(vw, vh);
+            var selected = [];
+            var limit = config.points + margin;
+            for (var i = 0; i < candidates.length; i++) {
+              var el = candidates[i].el;
+              var nested = false;
+              for (var j = 0; j < selected.length; j++) {
+                if (selected[j].contains(el)) { nested = true; break; }
+              }
+              if (nested) continue;
+              var rect = el.getBoundingClientRect();
+              var shift = 0;
+              var cls = '';
+              if (config.edge === 'bottom') {
+                var bottomThreshold = vh - config.points - margin;
+                if (rect.bottom > bottomThreshold) {
+                  shift = Math.min(limit, rect.bottom - bottomThreshold);
+                  cls = 'wx-dock-avoid-bottom';
+                }
+              } else if (config.edge === 'left') {
+                var leftThreshold = config.points + margin;
+                if (rect.left < leftThreshold) {
+                  shift = Math.min(limit, leftThreshold - rect.left);
+                  cls = 'wx-dock-avoid-left';
+                }
+              } else if (config.edge === 'right') {
+                var rightThreshold = vw - config.points - margin;
+                if (rect.right > rightThreshold) {
+                  shift = Math.min(limit, rect.right - rightThreshold);
+                  cls = 'wx-dock-avoid-right';
+                }
+              }
+              if (!cls || shift < 0.5) continue;
+              el.style.setProperty('--waifux-element-shift', shift.toFixed(1) + 'px');
+              el.classList.add(cls);
+              el.setAttribute('data-wx-dock-moved', config.edge);
+              selected.push(el);
+              managed.push(el);
+            }
+            return selected.map(function(el) {
+              var rect = el.getBoundingClientRect();
+              return {
+                tag: el.tagName,
+                cls: el.className,
+                shift: el.style.getPropertyValue('--waifux-element-shift'),
+                rect: [rect.left, rect.top, rect.right, rect.bottom]
+              };
+            });
+          }
+
+          window.__wxApplyDockSafeArea = function(next) {
+            config.edge = ['bottom', 'left', 'right'].includes(next.edge) ? next.edge : 'none';
+            config.points = Math.max(0, Math.min(240, Number(next.points) || 0));
+            var root = document.documentElement;
+            installStyle();
+            root.dataset.wxDockEdge = config.edge;
+            root.style.setProperty('--waifux-dock-inset', config.points + 'px');
+            root.style.setProperty('--waifux-dock-bottom', (config.edge === 'bottom' ? config.points : 0) + 'px');
+            root.style.setProperty('--waifux-dock-left', (config.edge === 'left' ? config.points : 0) + 'px');
+            root.style.setProperty('--waifux-dock-right', (config.edge === 'right' ? config.points : 0) + 'px');
+            // 页面可直接使用这些变量做精确布局；固定控件由宿主按实际重叠量平移。
+            root.style.setProperty('--safe-area-inset-bottom', 'var(--waifux-dock-bottom)');
+            root.style.setProperty('--safe-area-inset-left', 'var(--waifux-dock-left)');
+            root.style.setProperty('--safe-area-inset-right', 'var(--waifux-dock-right)');
+            return { edge: config.edge, points: config.points, moved: scan() };
+          };
+          window.__wxRefreshDockSafeArea = scan;
+
+          window.addEventListener('resize', function() {
+            clearTimeout(scanTimer);
+            scanTimer = setTimeout(scan, 120);
+          });
+          if (typeof MutationObserver === 'function') {
+            var scheduleScan = function() {
+              if (config.edge === 'none') return;
+              clearTimeout(scanTimer);
+              scanTimer = setTimeout(scan, 180);
+            };
+            var observer = new MutationObserver(scheduleScan);
+            // 沉浸/自动收起只改 body/parent class，没有 childList 变化；
+            // 监听这一层让「打开衣橱」等动态控件出现时也能重新避让。
+            var visibilityObserver = new MutationObserver(scheduleScan);
+            function observe() {
+              try {
+                observer.observe(document.documentElement || document, { childList: true, subtree: true });
+                if (document.body) {
+                  visibilityObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
+                }
+              } catch (e) {}
+            }
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', observe, { once: true });
+            } else {
+              observe();
+            }
+          }
+        })();
+        """#,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true
     )
 
     private struct WebCropRect {
@@ -2126,16 +2458,106 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
     }
 
+    /// UI 淡出、video 复用后，WebKit 的远端媒体 surface 可能仍保留旧尺寸。
+    /// DOM / WKSnapshot 正常而 WindowServer 抓窗出现缩小视频，需重新提交远端尺寸。
+    private static let videoGeometryHandler = "wxVideoGeometry"
+    private static let liveVideoGeometryScript = WKUserScript(
+        source: """
+        (function() {
+          var timer = 0;
+          function schedule() {
+            clearTimeout(timer);
+            timer = setTimeout(function() {
+              if (!document.querySelector('video')) return;
+              window.webkit.messageHandlers.wxVideoGeometry.postMessage('settled');
+            }, 160);
+          }
+          ['loadeddata','seeked','playing','pause','emptied','transitionend','animationend']
+            .forEach(function(name) { document.addEventListener(name, schedule, true); });
+          window.addEventListener('resize', schedule);
+          function observe() {
+            new MutationObserver(schedule).observe(document.body, {
+              attributes: true, attributeFilter: ['class']
+            });
+            schedule();
+          }
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', observe, {once:true});
+          } else { observe(); }
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true
+    )
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == Self.videoGeometryHandler,
+              message.frameInfo.isMainFrame,
+              let webView = message.webView,
+              let screen = screenIndex(for: webView),
+              screenStates[screen]?.isOffscreen == false else { return }
+        screenStates[screen]?.videoGeometryWork?.cancel()
+        let work = DispatchWorkItem { [weak self, weak webView] in
+            guard let self, let webView,
+                  self.screenStates[screen]?.webView === webView,
+                  self.screenStates[screen]?.isOffscreen == false else { return }
+            self.screenStates[screen]?.videoGeometryWork = nil
+            self.resubmitVideoGeometry(in: webView, screen: screen)
+        }
+        screenStates[screen]?.videoGeometryWork = work
+        // The CSS transition and remote media-layer commit can arrive separately.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func resubmitVideoGeometry(in webView: WKWebView, screen: Int) {
+        guard let root = webView.layer else { return }
+        let resolve = NSSelectorFromString("resolveBounds")
+        var count = 0
+        var visited = 0
+        func walk(_ layer: CALayer) {
+            visited += 1
+            guard visited <= 2048 else { return }
+            // This private WebKit layer owns a remote CALayerHost. Guard every
+            // selector, and never alter other page layers or the WebView geometry.
+            if NSStringFromClass(type(of: layer)) == "WebAVPlayerLayer",
+               layer.responds(to: NSSelectorFromString("videoSublayer")),
+               layer.responds(to: resolve),
+               let video = layer.value(forKey: "videoSublayer") as? CALayer,
+               video.superlayer === layer,
+               layer.bounds.width > 2, layer.bounds.height > 2 {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                // resolveBounds otherwise early-returns for the correct outer
+                // frame, even when the remotely hosted video still has old bounds.
+                video.frame = layer.bounds.insetBy(dx: 1, dy: 1)
+                _ = layer.perform(resolve)
+                CATransaction.commit()
+                count += 1
+            }
+            for child in layer.sublayers ?? [] { walk(child) }
+        }
+        walk(root)
+        if count > 0 {
+            CATransaction.flush()
+            dlog("[WebRendererBridge] video geometry resubmitted screen=\(screen) layers=\(count)")
+        }
+    }
+
     /// 每个屏幕独立的 Web 渲染状态
     private struct ScreenState {
         var window: NSWindow?
         /// 仅裁切容器裁掉超出 viewport 的区域，WebView 本身始终保留完整逻辑尺寸。
         var cropContainer: NSView?
         var webView: WKWebView?
-        /// Keep the current Web wallpaper visible while its page is paused.
-        var pauseOverlay: NSImageView?
+        var videoGeometryWork: DispatchWorkItem?
         var isPaused: Bool = false
         var pauseGeneration: UInt64 = 0
+        /// 宿主的音频总闸门；页面自己的声音设置不能绕过此状态。
+        var audioMuted = true
+        var audioVolume = 1.0
+        var targetScreen: NSScreen?
+        var dockEdge = "none"
+        var dockPoints: CGFloat = 0
         var cropLayout: WebCropLayout = .full
         /// 乱序 socket 消息只允许前进，避免拖拽结束后被旧位置覆盖。
         var lastCropRevision: UInt64 = 0
@@ -2281,8 +2703,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         let desktopLevel = CGWindowLevelForKey(.desktopWindow)
         w.level = offscreen ? .normal : .init(rawValue: Int(desktopLevel))
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        w.isOpaque = false
-        w.backgroundColor = .clear
+        // 保留同一套 Web 内容层；实时窗口只在新底图采样期间非不透明，
+        // 宿主完成有限采样窗口后通过既有 goOpaque 收口。离屏烘焙不参与。
+        w.isOpaque = offscreen
+        w.backgroundColor = .black
         w.hasShadow = false
         if offscreen {
             // `orderOut`, transparent, and fully occluded windows make WebKit throttle
@@ -2335,9 +2759,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             w.setFrame(frame, display: false)
             w.alphaValue = 1
         } else {
-            // 全屏覆盖（含菜单栏条带下方）。alpha=0.99999 常驻近乎不透明
-            // （+ isOpaque=false 已有）：壁纸层不被挂起，菜单栏 backdrop
-            // 懒采样能跟随 poster 更新。
+            // 采样期视觉上仍接近完全不透明，但保持底下的新壁纸参与合成。
+            w.alphaValue = 0.99999
             w.setFrame(targetScreen.frame, display: true)
         }
         // 桌面点击穿透。
@@ -2390,6 +2813,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
         ucc.addUserScript(Self.mouseEventBridgeScript)
+        if !offscreen {
+            ucc.addUserScript(Self.dockSafeAreaScript)
+            ucc.addUserScript(Self.liveVideoGeometryScript)
+            ucc.add(self, name: Self.videoGeometryHandler)
+        }
         // 用户属性必须在页面脚本运行前就位：WE 网页壁纸常在 init() 期
         // （如同步监听赋值后紧接的场景选择）读取 forcedTime/bonuschar 等属性
         // 决定内容；didFinish 之后再 evaluateJavaScript 投递为时已晚，
@@ -2429,7 +2857,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         screenStates[screenIdx]?.window = w
         screenStates[screenIdx]?.cropContainer = cropContainer
         screenStates[screenIdx]?.webView = web
+        screenStates[screenIdx]?.targetScreen = targetScreen
         applyCropLayout(for: screenIdx)
+        if !offscreen { installDockSafeAreaObserverIfNeeded() }
 
         let fileURL = baseURL.appendingPathComponent(indexFile)
         let readAccessURL = webWallpaperFileReadAccessURL(projectContentDir: baseURL, cliWallpaperPath: path)
@@ -2441,14 +2871,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         if offscreen {
             w.orderFrontRegardless()
         } else {
+            applyAudioControl(for: screenIdx)
             // `desktopWindow` 层本身低于普通 App 窗口；在该层内前置不会盖住应用，
             // 却能避免 WindowServer 将完整遮挡的 WKWebView/WebGL canvas 停止合成。
+            // 始终沿用同一个内容层；采样结束仅收口窗口透明度。
             w.orderFront(nil)
-            // 常驻近乎不透明 alpha=0.99999（+ isOpaque=false 已有）：窗口按半透明层
-            // 合成，必须与壁纸层混合 → 壁纸层不被挂起 → 菜单栏 backdrop
-            // 懒采样能跟随 poster 更新（alpha=1 时壁纸层被挂起，菜单栏永不
-            // 更新——实测验证）。0.99999 与 1 视觉无差别。
-            w.alphaValue = 0.99999
         }
 
         let destination = offscreen ? "offscreen bake surface" : "screen \(screenIdx) (\(targetScreen.localizedName))"
@@ -2513,6 +2940,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         guard let s = screenIndex(for: webView) else { return }
         dlog("[WebRendererBridge] didFinish screen=\(s)")
         screenStates[s]?.isLoaded = true
+        applyAudioControl(for: s)
+        updateDockSafeAreas()
         runWebWallpaperBootstrap(screen: s) { [weak self] in
             guard let self = self else { return }
             self.applyCropLayout(for: s)
@@ -2592,9 +3021,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     func pause(screen: Int = 0) {
         guard let state = screenStates[screen], !state.isPaused else { return }
-        let pauseGeneration = state.pauseGeneration &+ 1
         screenStates[screen]?.isPaused = true
-        screenStates[screen]?.pauseGeneration = pauseGeneration
+        screenStates[screen]?.pauseGeneration &+= 1
+        applyAudioControl(for: screen)
         state.webView?.evaluateJavaScript("""
             document.querySelectorAll('video, audio').forEach(m => m.pause());
             document.querySelectorAll('*').forEach(el => {
@@ -2602,28 +3031,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 if (st.animationName !== 'none') el.style.animationPlayState = 'paused';
             });
         """) { _, _ in }
-        // Hiding the desktop window reveals the system poster, which can still
-        // belong to the previous item in an automatic rotation. Snapshot the
-        // current page instead and let WebKit throttle the hidden WebView.
-        guard state.isLoaded else { return }
-        let generation = state.firstFrameSettleGeneration
-        snapshotWebView(screen: screen) { [weak self] image in
-            guard let self,
-                  let image,
-                  let current = self.screenStates[screen],
-                  current.isPaused,
-                  current.firstFrameSettleGeneration == generation,
-                  current.pauseGeneration == pauseGeneration,
-                  let webView = current.webView,
-                  let cropContainer = current.cropContainer else { return }
-            let overlay = NSImageView(frame: webView.frame)
-            overlay.image = image
-            overlay.imageScaling = .scaleAxesIndependently
-            cropContainer.addSubview(overlay, positioned: .above, relativeTo: webView)
-            self.screenStates[screen]?.pauseOverlay?.removeFromSuperview()
-            self.screenStates[screen]?.pauseOverlay = overlay
-            webView.isHidden = true
-        }
+        // 保持在当前 WebView 的最后一帧。暂停时叠加 NSImageView 再隐藏
+        // WebView 会多出一层不同生命周期的内容，换人/恢复时可能把旧帧
+        // 留在新内容旁边；不拆、不藏、不覆盖当前渲染表面。
     }
 
     func pauseAll() { for s in screenStates.keys { pause(screen: s) } }
@@ -2632,10 +3042,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         guard let state = screenStates[screen] else { return }
         screenStates[screen]?.isPaused = false
         screenStates[screen]?.pauseGeneration &+= 1
-        state.webView?.isHidden = false
-        state.pauseOverlay?.removeFromSuperview()
-        screenStates[screen]?.pauseOverlay = nil
         guard state.isLoaded else { return }
+        applyAudioControl(for: screen)
         // 与首次加载保持一致：WebGL 壁纸在 desktop 层内必须前置才会持续合成。
         state.window?.orderFront(nil)
         state.webView?.evaluateJavaScript("""
@@ -2653,24 +3061,37 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     func resumeAll() { for s in screenStates.keys { resume(screen: s) } }
 
+    private func applyAudioControl(for screen: Int) {
+        guard let state = screenStates[screen], let webView = state.webView else { return }
+        let muted = state.audioMuted
+        let volume = state.audioVolume
+        let js = """
+        (function(){
+          if (window.__waifuxSetAudio) {
+            window.__waifuxSetAudio({muted:\(muted),volume:\(volume)});
+          }
+          if (window.__waifuxEnforceAudio) window.__waifuxEnforceAudio();
+          return {muted:\(muted),volume:\(volume)};
+        })();
+        """
+        webView.evaluateJavaScript(js) { _, error in
+            if let error { dlog("[WebRendererBridge] audio control JS error screen=\(screen): \(error)") }
+        }
+        // WebKit 的页级静音覆盖所有 HTMLMediaElement，包括页面自行更换 src 的
+        // 主备视频。同步双向状态，取消静音必须解除先前的页级静音。
+        let sel = NSSelectorFromString("_setPageMuted:")
+        guard let method = class_getInstanceMethod(type(of: webView), sel) else { return }
+        typealias SetPageMutedFn = @convention(c) (NSObject, Selector, UInt) -> Void
+        let fn = unsafeBitCast(method_getImplementation(method), to: SetPageMutedFn.self)
+        let muteFlags: UInt = muted ? 1 : 0
+        fn(webView, sel, muteFlags)
+    }
+
     func setAudioControl(muted: Bool?, volume: Double?, screen: Int = 0) {
-        guard let state = screenStates[screen], state.isLoaded, let webView = state.webView else { return }
-        if let muted {
-            let sel = NSSelectorFromString("_setPageMuted:")
-            if let method = class_getInstanceMethod(type(of: webView), sel) {
-                typealias SetPageMutedFn = @convention(c) (NSObject, Selector, UInt) -> Void
-                let imp = method_getImplementation(method)
-                let fn = unsafeBitCast(imp, to: SetPageMutedFn.self)
-                fn(webView, sel, muted ? UInt(1) : UInt(0))
-            } else {
-                webView.evaluateJavaScript("if(window.__waifuxSetAudio)window.__waifuxSetAudio({muted:\(muted)});")
-            }
-        }
-        if let volume {
-            let v = max(0.0, min(1.0, volume))
-            let js = "if(window.__waifuxSetAudio){window.__waifuxSetAudio({volume:\(v)});}else{document.querySelectorAll('video,audio').forEach(function(e){e.volume=\(v);});}"
-            webView.evaluateJavaScript(js)
-        }
+        guard screenStates[screen] != nil else { return }
+        if let muted { screenStates[screen]?.audioMuted = muted }
+        if let volume { screenStates[screen]?.audioVolume = max(0.0, min(1.0, volume)) }
+        applyAudioControl(for: screen)
     }
 
     func pushAudioFrame(_ floats: [Float]) {
@@ -2915,7 +3336,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             width: targetSize.width,
             height: targetSize.height
         )
-        state.pauseOverlay?.frame = webView.frame
 
         let transform = webRootTransform(
             targetSize: targetSize,
@@ -2949,13 +3369,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         guard var state = screenStates[screen] else { return }
         if bridgedMouseDownScreen == screen { cancelBridgedMouseDown() }
         state.firstFrameSettleGeneration &+= 1
-        state.pauseOverlay?.removeFromSuperview()
-        state.pauseOverlay = nil
         state.isPaused = false
         // 必须先调用 pendingCompletion 再置 nil，否则 IPC 响应永远不会发回给 CLI client
         // （CLI client 的 recv() 会一直阻塞直到 35s 超时）
         state.pendingCompletion?(false)
         state.pendingCompletion = nil
+        state.videoGeometryWork?.cancel()
+        state.videoGeometryWork = nil
+        state.webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.videoGeometryHandler)
         state.webView?.stopLoading()
         state.webView?.navigationDelegate = nil
         state.webView?.removeFromSuperview()
@@ -2976,6 +3397,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         for s in Array(screenStates.keys) { stop(screen: s) }
         stopMouseEventBridge()
         screenStates.removeAll()
+        if let dockDefaultsObserver {
+            DistributedNotificationCenter.default().removeObserver(dockDefaultsObserver)
+            self.dockDefaultsObserver = nil
+        }
+        if let screenGeometryObserver {
+            NotificationCenter.default.removeObserver(screenGeometryObserver)
+            self.screenGeometryObserver = nil
+        }
     }
 
     var loadedScreens: [Int] { screenStates.filter { $0.value.isLoaded }.map { $0.key } }
@@ -2983,8 +3412,63 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     // MARK: - Mouse Event Bridge (全局一组 monitor，分发到所有屏幕的 webView)
 
     private var globalMouseMonitors: [Any] = []
+    private var windowlessDesktopEventTap: CFMachPort?
+    private var windowlessDesktopEventSource: CFRunLoopSource?
+
+    private func startWindowlessDesktopEventTap() {
+        let types: [CGEventType] = [.leftMouseDown, .leftMouseUp, .mouseMoved, .scrollWheel]
+        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgAnnotatedSessionEventTap, place: .tailAppendEventTap,
+            options: .listenOnly, eventsOfInterest: mask,
+            callback: { _, type, event, context in
+                guard let context else { return Unmanaged.passUnretained(event) }
+                let bridge = Unmanaged<WebRendererBridge>.fromOpaque(context).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = bridge.windowlessDesktopEventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                // Unlike NSEvent's reconstructed CGEvent, this is the original
+                // system event: its target PID still identifies the real receiver.
+                guard event.getIntegerValueField(.mouseEventWindowUnderMousePointer) == 0,
+                      event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0,
+                      let finderPID = NSRunningApplication.runningApplications(
+                        withBundleIdentifier: "com.apple.finder"
+                      ).first?.processIdentifier,
+                      event.getIntegerValueField(.eventTargetUnixProcessID) == Int64(finderPID),
+                      let mouseEvent = NSEvent(cgEvent: event) else {
+                    return Unmanaged.passUnretained(event)
+                }
+                let name: String
+                switch type {
+                case .leftMouseDown: name = "mousedown"
+                case .leftMouseUp: name = "mouseup"
+                case .mouseMoved: name = "mousemove"
+                case .scrollWheel: name = "wheel"
+                default: return Unmanaged.passUnretained(event)
+                }
+                bridge.dispatchMouseEvent(mouseEvent, type: name, windowlessFinderTarget: true)
+                return Unmanaged.passUnretained(event)
+            }, userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            dlog("[WebRendererBridge] windowless desktop event tap unavailable ax=\(AXIsProcessTrusted())")
+            return
+        }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return
+        }
+        windowlessDesktopEventTap = tap
+        windowlessDesktopEventSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        dlog("[WebRendererBridge] windowless desktop event tap installed (listen-only)")
+    }
     private var lastGlobalMouseMoveTime: TimeInterval = 0
     private var finderDesktopWindowIDs: Set<Int> = []
+    /// 「隐藏桌面图标」期间，点击落在 WindowManager 的 Wallpaper 全屏层。
+    private var wallpaperLayerDesktopWindowIDs: Set<Int> = []
     private var bridgedMouseDownScreen: Int?
     private var loggedFinderHitTestFailure = false
     /// AX 未授权时的降级只报告一次，避免每次点击刷日志。
@@ -3012,6 +3496,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             return
         }
         refreshFinderDesktopWindowIDs()
+        startWindowlessDesktopEventTap()
         let ax = AXIsProcessTrusted()
         lastAXTrustedForLog = ax
         lastMouseSummaryTime = CFAbsoluteTimeGetCurrent()
@@ -3024,7 +3509,14 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         var installedLocal = 0
         for (eventType, type) in eventTypes {
             let gmon = NSEvent.addGlobalMonitorForEvents(matching: eventType, handler: { [weak self] event in
-                self?.dispatchMouseEvent(event, type: type)
+                guard let self else { return }
+                // The raw tap exclusively owns windowless events. Letting this
+                // duplicate down through would cancel the already bridged press.
+                if self.windowlessDesktopEventTap != nil, event.windowNumber == 0,
+                   event.cgEvent?.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0 {
+                    return
+                }
+                self.dispatchMouseEvent(event, type: type)
             })
             if let gmon { globalMouseMonitors.append(gmon); installedGlobal += 1 }
             else {
@@ -3066,9 +3558,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     private func stopMouseEventBridge() {
         cancelBridgedMouseDown()
+        if let source = windowlessDesktopEventSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        if let tap = windowlessDesktopEventTap { CFMachPortInvalidate(tap) }
+        windowlessDesktopEventSource = nil
+        windowlessDesktopEventTap = nil
         for monitor in globalMouseMonitors { NSEvent.removeMonitor(monitor) }
         globalMouseMonitors.removeAll()
         finderDesktopWindowIDs.removeAll()
+        wallpaperLayerDesktopWindowIDs.removeAll()
         lastGlobalMouseMoveTime = 0
         loggedFinderHitTestFailure = false
         loggedAccessibilityFallback = false
@@ -3080,13 +3579,28 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         let desktopIconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
             as? [[String: Any]] ?? []
-        finderDesktopWindowIDs = Set(windows.compactMap { info in
-            guard info[kCGWindowLayer as String] as? Int == desktopIconLevel,
-                  let pid = info[kCGWindowOwnerPID as String] as? Int,
-                  NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier == "com.apple.finder"
-            else { return nil }
-            return info[kCGWindowNumber as String] as? Int
-        })
+        var finderIDs: Set<Int> = []
+        var wallpaperIDs: Set<Int> = []
+        for info in windows {
+            guard let pid = info[kCGWindowOwnerPID as String] as? Int,
+                  let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+                  let windowID = info[kCGWindowNumber as String] as? Int else { continue }
+            // Finder 图标层：桌面图标显示时点击落在这里（现有逻辑）。
+            if app.bundleIdentifier == "com.apple.finder",
+               info[kCGWindowLayer as String] as? Int == desktopIconLevel {
+                finderIDs.insert(windowID)
+            }
+            // 「隐藏桌面图标」会把 Finder CreateDesktop 关掉，Finder 不再创建桌面窗口，
+            // 点击落到 WindowManager 的全屏 Wallpaper 层。接受这一层，Web 壁纸才能继续收到点击；
+            // 普通 App 窗口不在此列，行为不变。
+            if app.bundleIdentifier == "com.apple.WindowManager",
+               (info[kCGWindowName as String] as? String) == "Wallpaper",
+               info[kCGWindowLayer as String] as? Int ?? 0 < desktopIconLevel {
+                wallpaperIDs.insert(windowID)
+            }
+        }
+        finderDesktopWindowIDs = finderIDs
+        wallpaperLayerDesktopWindowIDs = wallpaperIDs
     }
 
     private func isBlankFinderDesktop(at event: NSEvent) -> Bool {
@@ -3138,24 +3652,40 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
     ]
 
     /// 返回 (命中, 原因, targetWindow)。原因供点击丢弃日志归因，调用方热路径外只打 click 类型。
-    private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool) -> (Bool, String, Int) {
+    private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool, windowlessFinderTarget: Bool = false) -> (Bool, String, Int) {
         let target = event.windowNumber != 0
             ? event.windowNumber
             : Int(event.cgEvent?.getIntegerValueField(
                 .mouseEventWindowUnderMousePointerThatCanHandleThisEvent
             ) ?? 0)
         if target == window.windowNumber { return (true, "self-window", target) }
-        guard target > 0 else { return (false, "target=0", target) }
-        if !finderDesktopWindowIDs.contains(target) && requireBlank {
-            // Finder may have recreated its desktop window since the wallpaper loaded.
-            let before = finderDesktopWindowIDs
+        if target == 0 {
+            // NSEvent rewrites the original receiver PID to this observer's PID.
+            // Only the listen-only raw event tap may attest this windowless path.
+            guard windowlessFinderTarget else { return (false, "windowless-not-finder", target) }
+            return (true, "finder-windowless-desktop", target)
+        }
+        if !finderDesktopWindowIDs.contains(target),
+           !wallpaperLayerDesktopWindowIDs.contains(target),
+           requireBlank {
+            // Finder 可能在壁纸加载后重建桌面窗，或用户刚切换隐藏桌面图标。
+            let beforeFinder = finderDesktopWindowIDs
+            let beforeWallpaper = wallpaperLayerDesktopWindowIDs
             refreshFinderDesktopWindowIDs()
-            if finderDesktopWindowIDs != before {
-                dlog("[WebRendererBridge] mouse FinderDesktopWindows changed \(before.sorted())->\(finderDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
+            if finderDesktopWindowIDs != beforeFinder || wallpaperLayerDesktopWindowIDs != beforeWallpaper {
+                dlog("[WebRendererBridge] mouse desktop windows changed finder=\(beforeFinder.sorted())->\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(beforeWallpaper.sorted())->\(wallpaperLayerDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
             }
         }
-        guard finderDesktopWindowIDs.contains(target) else {
+        guard target > 0 else { return (false, "invalid-window", target) }
+        let isFinderDesktop = finderDesktopWindowIDs.contains(target)
+        let isWallpaperLayer = wallpaperLayerDesktopWindowIDs.contains(target)
+        guard isFinderDesktop || isWallpaperLayer else {
             return (false, "target-not-finder-desktop", target)
+        }
+        // 隐藏桌面图标后 Finder 没有桌面窗口，点击落在 WindowManager 的
+        // Wallpaper 全屏层。该层不存在图标，空白检查没有意义，直接转发。
+        if isWallpaperLayer && !isFinderDesktop {
+            return (true, "wallpaper-layer-desktop", target)
         }
         if !requireBlank { return (true, "finder-desktop", target) }
         // 目标已确认是 Finder 的桌面层窗口（此判定只依赖 CGWindowList，不看 AX）。
@@ -3188,7 +3718,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         screenStates[screen]?.webView?.evaluateJavaScript("window.__wxMouseBridge && window.__wxMouseBridge.cancel();")
     }
 
-    private func dispatchMouseEvent(_ event: NSEvent, type: String) {
+    private func dispatchMouseEvent(_ event: NSEvent, type: String, windowlessFinderTarget: Bool = false) {
         if type == "mousedown" { cancelBridgedMouseDown() }
         if type == "mousemove" {
             let now = CFAbsoluteTimeGetCurrent()
@@ -3240,7 +3770,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
                 dropDetail = "bridgedDown=\(bridgedMouseDownScreen.map(String.init) ?? "nil") screen=\(screen)"
                 continue
             }
-            let (hit, reason, target) = eventTargetCheck(event, window: window, requireBlank: type != "mousemove")
+            let (hit, reason, target) = eventTargetCheck(event, window: window, requireBlank: type != "mousemove", windowlessFinderTarget: windowlessFinderTarget)
             dropTarget = target
             guard hit else {
                 dropReason = "target-not-desktop(\(reason))"
@@ -3515,27 +4045,21 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
         }
     }
 
-    /// 双态透明度（宿主驱动）：窗口以 0.99999 半透明起步（壁纸层活跃，菜单栏
-    /// backdrop 跟随 poster 懒采样）；宿主在海报抽帧落桌面后发 `goOpaque`，
-    /// 此处热切 alpha=1 + isOpaque=true 退出持续合成。下次 set/stop 拆窗重建，
-    /// 自然回到透明采样期。alphaValue/isOpaque 均为 NSWindow 运行期可写属性。
-    /// 无海报可抽（capture 失败/跳过）时宿主也会兜底发本命令，不会永远半透明。
+    /// 宿主确认新底图并等待有限采样窗口后，收口为不透明。
+    /// 只更新现有窗口，不替换 WebView、不增加截图或内容叠层。
     func goOpaque(screen: Int) {
-        guard var state = screenStates[screen],
+        guard let state = screenStates[screen],
               !state.isOffscreen,
               let window = state.window else {
             dlog("[WebRendererBridge] goOpaque screen=\(screen) no live window")
             return
         }
-        guard window.alphaValue < 1 || !window.isOpaque else {
-            dlog("[WebRendererBridge] goOpaque screen=\(screen) already opaque")
-            return
-        }
-        window.isOpaque = true
+        guard window.alphaValue < 1 || !window.isOpaque else { return }
         window.alphaValue = 1
-        state.window = window
-        screenStates[screen] = state
-        dlog("[WebRendererBridge] goOpaque applied screen=\(screen)（退出持续合成）")
+        window.isOpaque = true
+        window.displayIfNeeded()
+        CATransaction.flush()
+        dlog("[WebRendererBridge] goOpaque applied screen=\(screen)（有限采样结束）")
     }
 
     private func completeLiveWallpaperLoad(screen: Int) {
@@ -5917,76 +6441,10 @@ private final class DesktopWallpaperManager {
         }
     }
 
+    /// 停止、切换或加载失败时只清理旧快照，保留当前系统壁纸与扩展选择。
     private func restoreOriginalWallpaper() {
-        guard !isDynamicLockScreenEnabledForCurrentLaunch() else {
-            dlog("[DesktopWallpaperManager] Dynamic lock screen enabled; skip restoring desktop wallpaper")
-            return
-        }
-        guard let data = UserDefaults.standard.data(forKey: originalWallpaperKey),
-              let savedState = try? JSONDecoder().decode(SavedOriginalWallpaperState.self, from: data) else {
-            print("[DesktopWallpaperManager] No original wallpaper to restore")
-            return
-        }
-
-        print("[DesktopWallpaperManager] Restoring wallpaper from state saved at \(savedState.savedAt)")
-
-        let workspace = NSWorkspace.shared
-        let currentScreens = NSScreen.screens
-        var restoredCount = 0
-        var unmatchedScreens: [NSScreen] = []
-
-        for screen in currentScreens {
-            let screenID = screen.wallpaperScreenIdentifier
-            if let config = savedState.configs.first(where: { $0.screenID == screenID }),
-               let originalURL = URL(string: config.wallpaperURL),
-               FileManager.default.fileExists(atPath: originalURL.path) {
-                do {
-                    try workspace.setDesktopImageURLForAllSpaces(originalURL, for: screen)
-                    print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (exact match)")
-                    restoredCount += 1
-                } catch {
-                    print("[DesktopWallpaperManager] Failed to restore wallpaper for screen \(screenID): \(error)")
-                    unmatchedScreens.append(screen)
-                }
-            } else {
-                unmatchedScreens.append(screen)
-            }
-        }
-
-        if !unmatchedScreens.isEmpty,
-           let mainConfig = savedState.configs.first(where: { $0.isMainScreen }),
-           let mainURL = URL(string: mainConfig.wallpaperURL),
-           FileManager.default.fileExists(atPath: mainURL.path) {
-            for screen in unmatchedScreens {
-                do {
-                    try workspace.setDesktopImageURLForAllSpaces(mainURL, for: screen)
-                    print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to main screen)")
-                    restoredCount += 1
-                } catch {
-                    print("[DesktopWallpaperManager] Failed to restore wallpaper for screen \(screen.localizedName): \(error)")
-                }
-            }
-        }
-
-        if restoredCount == 0 && !savedState.configs.isEmpty {
-            for config in savedState.configs {
-                if let url = URL(string: config.wallpaperURL),
-                   FileManager.default.fileExists(atPath: url.path) {
-                    for screen in unmatchedScreens {
-                        do {
-                            try workspace.setDesktopImageURLForAllSpaces(url, for: screen)
-                            print("[DesktopWallpaperManager] Restored wallpaper for screen \(screen.localizedName) (fallback to any available)")
-                        } catch {
-                            print("[DesktopWallpaperManager] Failed to restore wallpaper: \(error)")
-                        }
-                    }
-                    break
-                }
-            }
-        }
-
         UserDefaults.standard.removeObject(forKey: originalWallpaperKey)
-        print("[DesktopWallpaperManager] Original wallpaper restore completed")
+        dlog("[DesktopWallpaperManager] Discarded original wallpaper snapshot; current system wallpaper unchanged")
     }
 
     private func isOurPosterImage(_ url: URL) -> Bool {

@@ -14,6 +14,12 @@ actor FourKWallpapersService {
     private let networkService = NetworkService.shared
     private let parser = FourKWallpapersParser()
 
+    /// 详情页 → 原图 URL 的进程内缓存。
+    /// 列表阶段已不再猜测原图尺寸，下载/设为壁纸时都会走一次详情页解析；
+    /// 同一张图可能被「预览 → 下载 → 设为壁纸」多次触达，缓存避免重复抓取同一页。
+    private var originalURLCache: [String: String] = [:]
+    private let originalURLCacheLimit = 200
+
     // MARK: - 公开 API
 
     /// 搜索壁纸（映射为标准 WallpaperSearchResponse 格式）
@@ -104,9 +110,26 @@ actor FourKWallpapersService {
             return nil
         }
 
+        // 列表阶段已确认过原图（contentUrl 自带分辨率）时直接复用，不必再抓详情页
+        let knownOriginal = wallpaper.thumbs.original
+        if knownOriginal.contains("/images/wallpapers/") {
+            return knownOriginal
+        }
+
+        if let cached = originalURLCache[detailURLString] {
+            return cached
+        }
+
         do {
             let html = try await fetchHTML(from: detailURLString)
-            return parser.parseOriginalImageURL(from: html)
+            guard let resolved = parser.parseOriginalImageURL(from: html) else {
+                return nil
+            }
+            if originalURLCache.count >= originalURLCacheLimit {
+                originalURLCache.removeAll(keepingCapacity: true)
+            }
+            originalURLCache[detailURLString] = resolved
+            return resolved
         } catch {
             return nil
         }
@@ -119,31 +142,56 @@ actor FourKWallpapersService {
             throw NetworkError.invalidResponse
         }
 
-        // 4KWallpapers 是 HTML 页面，需要指定 UA 避免被拦截
-        // 使用 NetworkService 已有的 fetchString 方法
+        // ⚠️ 必须显式伪装成浏览器。
+        //
+        // 2026-11-02 实测（同一台机、同一出口、同一个 URL 反复 12 次）：
+        //   · 不发 User-Agent（URLSession 默认发 `WaifuX/38.0.154 CFNetwork/1496.0.7 Darwin/…`）
+        //     → Cloudflare 直接 **403**，正文是 4909B 的挑战页，`#pics-list` 不存在。
+        //   · 发任意浏览器 UA → **200**，正文 45KB，`#pics-list` 齐全。
+        // 这就是「源看着是通的，但 App 里一加载就空」的真凶：命令行用 curl/裸 URLSession
+        // 测会得到 200（curl 自带 UA 不在黑名单里），只有 App 进程内的默认 CFNetwork UA 被拦。
+        //
+        // 头部对齐真实 Chrome 文档请求；`sec-ch-ua` 一律不发（与 Wallsflow 的
+        // 诱饵页教训相同，带占位品牌会换回 200 的假页面）。
         let html: String = try await networkService.fetchString(
             from: url,
-            headers: [
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9"
-            ]
+            headers: Self.browserLikeHeaders
         )
 
         return html
+    }
+
+    /// 伪装浏览器所需的请求头。UA 与 Wallsflow 共用同一份常量，避免各处漂移。
+    static var browserLikeHeaders: [String: String] {
+        [
+            "User-Agent": WallsflowService.browserUserAgent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"macOS\"",
+        ]
     }
 
     // MARK: - 字段映射：Wallpaper4K → Wallpaper
 
     private func mapToWallpaper(_ w: Wallpaper4K) -> Wallpaper {
         // 缩略图 — 使用实际可访问的 URL
-        // thumbs_3t (~1280px) 用于详情页/轮播图高清预览
+        // thumbs_2t (~800px) 用于网格卡片首选（384×216pt@2x 需求红线 691px，够且省 5–10 倍带宽）
+        // thumbs_3t (~1280px) 用于详情页/轮播图/全屏高清预览（path 保持 3t 档）
         // thumbs (~400px) 用于列表小缩略图
-        // 判断 originalURL 是否是真正的原图 URL（以 /images/wallpapers/ 开头且包含分辨率）
-        let isOriginalImage = w.originalURL.contains("/images/wallpapers/") && w.originalURL.contains("x")
+        // 判断 originalURL 是否是站点确认过的原图 URL（/images/wallpapers/{name}-{W}x{H}-{id}）
+        // ⚠️ 只有 contentUrl 自带分辨率时解析器才会拼这个 URL（见 parseWallpaperItem）。
+        //    靠着关键词猜测拼出来的错误尺寸站点也返回 200，会静默给出裁切图，必须排除。
+        let isConfirmedOriginal = w.originalURL.contains("/images/wallpapers/") && w.originalURL.contains("x")
         let thumbs = Wallpaper.Thumbs(
-            large: w.hdThumbnailURL,                                    // 详情页/轮播图高清预览（~800px）
-            original: isOriginalImage ? w.originalURL : w.hdThumbnailURL,  // 原图 URL（用于下载）
-            small: w.thumbnailURL                                       // 列表小缩略图（~400px）
+            large: w.mediumThumbnailURL.isEmpty ? w.hdThumbnailURL : w.mediumThumbnailURL,  // 网格卡片首选（2t，800px）
+            original: isConfirmedOriginal ? w.originalURL : w.hdThumbnailURL,  // 原图 URL（用于下载），未确认时退 3t 高清
+            small: w.thumbnailURL                                           // 列表小缩略图（~400px）
         )
 
         // 从关键词推断分类
@@ -161,8 +209,7 @@ actor FourKWallpapersService {
         }
 
         // path 用于 fullImageURL（详情页/全屏查看/设为壁纸），优先原图 URL（4K+），回退 hdThumbnailURL
-        // isOriginalImage 判断 originalURL 是否为真正的原图 URL
-        let imagePath = isOriginalImage ? w.originalURL : w.hdThumbnailURL
+        let imagePath = isConfirmedOriginal ? w.originalURL : w.hdThumbnailURL
 
         // 文件类型推断
         let detectedFileType: String

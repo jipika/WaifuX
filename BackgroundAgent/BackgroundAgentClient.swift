@@ -146,10 +146,15 @@ final class BackgroundAgentClient: ObservableObject {
                 //    循环失败（EX_CONFIG 类约束拒绝）或 Helper 起来后卡死都是这个
                 //    形态（2026-10-24 本机实测：job spawn failed 24516 次，
                 //    status=1 却只报「后台服务响应超时」，repair 永远不触发）。
-                // 三者都只能靠注销重注册恢复。
+                // ④ 连接被对端立刻拒掉（NSCocoaErrorDomain 4097）：旧 Helper 还活着，
+                //    但它的可执行文件已随旧包被删掉，签名自检失败，于是拒绝每一个新 UI
+                //    （2026-11-01 用户机：Helper runs=1、never exited，UI 每次同秒 4097）。
+                //    hello 都发不出去，③ 的身份比对和原地升级路径根本走不到。
+                // 四者都只能靠注销重注册恢复。
                 let staleHelper = Self.indicatesStaleHelper(error)
                 let unresponsive = Self.indicatesUnresponsiveHelper(error)
-                guard staleHelper || unresponsive || Self.indicatesMissingLaunchdJob(error) else { throw error }
+                let rejected = Self.indicatesRejectedConnection(error)
+                guard staleHelper || unresponsive || rejected || Self.indicatesMissingLaunchdJob(error) else { throw error }
                 // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
                 // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
                 // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
@@ -165,7 +170,9 @@ final class BackgroundAgentClient: ObservableObject {
                                     ? "Helper outdated after replacement, repairing registration"
                                     : unresponsive
                                         ? "Helper unresponsive during bootstrap (120s no reply), repairing registration"
-                                        : "Helper service missing from launchd, repairing registration",
+                                        : rejected
+                                            ? "Helper rejected the connection (4097), repairing registration"
+                                            : "Helper service missing from launchd, repairing registration",
                                 metadata: ["code": (error as NSError).code,
                                            "detail": error.localizedDescription])
                 try Task.checkCancellation()
@@ -177,7 +184,10 @@ final class BackgroundAgentClient: ObservableObject {
                     // SIGKILL（退出码 78，BTM 却一直显示 enabled）。
                     try await BackgroundAgentRegistration.repairLaunchdRegistration(
                         service,
-                        bootout: { await BackgroundAgentRegistration.bootoutCachedJob() }
+                        bootout: {
+                            await BackgroundAgentRegistration.bootoutCachedJob()
+                            await Self.terminateStaleHelperLockHolders()
+                        }
                     ) { [weak self] in
                         guard let self else { return false }
                         return await self.probeHelperReachable()
@@ -226,6 +236,35 @@ final class BackgroundAgentClient: ObservableObject {
         if let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError,
            underlying.domain == NSCocoaErrorDomain, underlying.code == code { return true }
         return false
+    }
+
+    /// 对端在 `shouldAcceptNewConnection` 里拒绝连接时，客户端拿到的是
+    /// `NSXPCConnectionInterrupted`（4097，文案同样是「无法与帮助程序通信。」），
+    /// 不是 4099。实测（tmp/selfcode-probe/reject.swift）：delegate 返回 false，
+    /// errorHandler 在 0ms 内收到 4097，紧接着 interruption + invalidation。
+    private static func indicatesRejectedConnection(_ error: Error) -> Bool {
+        let code = CocoaError.Code.xpcConnectionInterrupted.rawValue
+        let failure = error as NSError
+        if failure.domain == NSCocoaErrorDomain, failure.code == code { return true }
+        if let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSCocoaErrorDomain, underlying.code == code { return true }
+        return false
+    }
+
+    /// bootout 之后仍占着生产单实例锁的 Helper 一律结束。
+    ///
+    /// 旧包被删掉后，它的 Helper 路径已不在当前 bundle 下（`proc_pidpath` 可能读不到），
+    /// 按路径前缀找不到；但它还占着 `background-helper.lock`，新 Helper 拿不到锁会直接退出。
+    /// 这里按「同 uid + 进程名 + 打开着同一 inode 的锁文件」识别，注销之后、注册之前执行，
+    /// 所以此刻任何持锁的 Helper 都是残留。
+    private static func terminateStaleHelperLockHolders() async {
+        let lockPath = BackgroundAgentWire.productionLockFileURL.path
+        let result = await BackgroundChildProcessCleanup.terminateHelperLockHolders(lockPath: lockPath)
+        guard !result.holders.isEmpty else { return }
+        AppLogger.error(.startup, "Terminated stale helper still holding the instance lock", metadata: [
+            "holders": result.holders.map { "\($0.child.pid)@\($0.path)" }.joined(separator: ";"),
+            "survivors": result.survivors.map(String.init).joined(separator: ","),
+        ])
     }
 
     /// bootstrap 阶段的响应超时：`exchange` 的 gate 计时器到期抛出

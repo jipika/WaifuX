@@ -18,7 +18,7 @@ struct MobilePushSheet: View {
         ZStack {
             Color.black.opacity(0.6)
                 .ignoresSafeArea()
-                .onTapGesture { dismiss() }
+                // 推送期间误点空白不能关掉服务端；只允许底部按钮显式关闭。
 
             VStack(spacing: 18) {
                 switch phase {
@@ -62,7 +62,7 @@ struct MobilePushSheet: View {
                 }
             }
         }
-        .onExitCommand { dismiss() }
+        // Esc 与空白点击一样不关闭，避免配对/传输被意外中断。
     }
 
     // MARK: - 阶段视图
@@ -90,10 +90,10 @@ struct MobilePushSheet: View {
             Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(Color.accentColor)
-            Text("在手机上输入配对码")
+            Text("等待手机连接")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
-            Text("打开 Wallpaper Engine App → 计算机图标 → 选择「\(LocalizedBrand.name)」")
+            Text("已配对过：在 Wallpaper Engine 里选择「\(LocalizedBrand.name)」即可自动连接。\n新设备：选择电脑后输入下方配对码。")
                 .font(.system(size: 12))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
                 .multilineTextAlignment(.center)

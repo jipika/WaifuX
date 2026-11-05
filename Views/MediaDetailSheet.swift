@@ -486,8 +486,18 @@ struct MediaDetailSheet: View {
                     message: t("deleteConfirmMessage"),
                     actions: [
                         GlassAlertAction(t("delete"), role: .destructive) {
-                            viewModel.removeDownloads(withIDs: [resolvedItem.id])
+                            let itemID = resolvedItem.id
                             onClose()
+                            Task { @MainActor in
+                                let failures = await viewModel.removeDownloads(withIDs: [itemID])
+                                if !failures.isEmpty {
+                                    errorMessage = String(
+                                        format: t("workshop.unsubscribeAfterDeleteFailed"),
+                                        failures.values.first?.localizedDescription ?? ""
+                                    )
+                                    showError = true
+                                }
+                            }
                         },
                         GlassAlertAction(t("cancel"), role: .cancel)
                     ])
@@ -625,7 +635,7 @@ struct MediaDetailSheet: View {
             isVisible = false
             ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
             removeKeyboardMonitor()
-            SceneOfflineBakeService.stopPreview()
+            SceneOfflineBakeService.stopPreview(reason: "mediaDetailDisappear:\(resolvedItem.id)")
             // 兜底：sheet 消失时取消可能仍在运行的自动下载任务，
             // 避免下载完成后对已关闭的 sheet 执行壁纸应用造成竞态
             autoDownloadTask?.cancel()
@@ -692,11 +702,15 @@ struct MediaDetailSheet: View {
     }
 
     /// 「重新抽帧」的片源：烘焙成片优先，其次本地视频文件（含 Workshop 目录内视频）。
-    /// 纯 scene/web（无视频、无烘焙）返回 nil，调用方隐藏入口。
+    /// 纯 scene/web（无视频、无烘焙）返回 nil，此时由现场抽帧兜底接手。
     private var coverRegenSourceVideoURL: URL? {
         if let baked = cachedSceneBakeVideoURL {
             return baked
         }
+        // Web 工程里的 .webm / 素材视频是图层资源，不是壁纸成片：
+        // AVFoundation 解不了 WebM/VP9，抽出来也不是合成后的画面。
+        // 无烘焙的 web 项一律交给 WebKit 现场渲染，不把素材视频当片源。
+        if isCurrentDownloadedWebProject { return nil }
         guard let record = currentDownloadRecord else { return nil }
         if let resolved = MediaItem.resolveLocalVideoFile(from: record.localFileURL) {
             return resolved
@@ -709,14 +723,23 @@ struct MediaDetailSheet: View {
     }
 
     /// 无烘焙 scene 也可重抽：走渲染器现场抽帧（静态直出 PNG / 动态 1s 临时烘焙）。
-    /// 有烘焙/本地视频的走视频路径；纯 scene 无视频无烘焙走该兜底。Web 无此路径。
+    /// 有烘焙/本地视频的走视频路径；纯 scene 无视频无烘焙走该兜底。
     private var canRegenerateSceneRealtimePoster: Bool {
         isAlreadyDownloaded && isCurrentDownloadedSceneProject && currentDownloadRecord != nil
     }
 
-    /// 有视频片源、或无烘焙 scene 可现场抽时展示「重新抽帧」。
+    /// 无烘焙 web 也可重抽：走 WebKit 现场烘一小段后抽帧（不产烘焙产物）。
+    /// 与 scene 同一条「自动抽帧」语义：没烘焙、没视频也要能出一张整屏封面。
+    private var canRegenerateWebRealtimePoster: Bool {
+        isAlreadyDownloaded && isCurrentDownloadedWebProject && currentDownloadRecord != nil
+    }
+
+    /// 有视频片源、或无烘焙 scene/web 可现场抽时展示「重新抽帧」。
     private var canRegenerateCoverFrame: Bool {
-        isAlreadyDownloaded && (coverRegenSourceVideoURL != nil || canRegenerateSceneRealtimePoster)
+        isAlreadyDownloaded
+            && (coverRegenSourceVideoURL != nil
+                || canRegenerateSceneRealtimePoster
+                || canRegenerateWebRealtimePoster)
     }
 
     /// 下载的 Workshop 工程自带预览图。静帧未生成前优先于远程 Steam 缩略图，
@@ -1602,9 +1625,11 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// 「更多」菜单→「重新抽帧」：有视频走视频重抽，无烘焙 scene 走渲染器现场抽。
+    /// 「更多」菜单→「重新抽帧」：有视频走视频重抽，无烘焙 scene 走渲染器现场抽，
+    /// 无烘焙 web 走 WebKit 现场烘一小段后抽帧。
     /// 烘焙项重抽 `scene_bake_*` 高清 poster + 列表小图；普通视频重抽高清 poster + 列表小图；
-    /// 无烘焙 scene 现场抽 `scene_realtime_*`（静态直出 PNG / 动态 1s 临时烘焙）。
+    /// 无烘焙 scene 现场抽 `scene_realtime_*`（静态直出 PNG / 动态 1s 临时烘焙）；
+    /// 无烘焙 web 现场抽 `scene_realtime_*`（临时 6s 烘焙，不落烘焙产物）。
     /// 缓存文件路径不变（内容覆盖）：hero 靠 `coverForceRefresh` 跳过缓存重读一次，
     /// 库列表靠 `.sceneOfflineBakeThumbnailDidUpdate` 通知走既有刷新链路。
     private func regenerateCoverFrame() {
@@ -1613,8 +1638,10 @@ struct MediaDetailSheet: View {
         let itemID = record.item.id
         let bakedURL = cachedSceneBakeVideoURL
         let sourceURL = coverRegenSourceVideoURL
-        let needsSceneFallback = bakedURL == nil && sourceURL == nil
-        guard bakedURL != nil || sourceURL != nil || canRegenerateSceneRealtimePoster else { return }
+        // 现场抽帧的分派必须在这里取：Task 内已离开主线程上下文，不能再读 View 计算属性。
+        let usesWebFallback = isCurrentDownloadedWebProject
+        let canRenderFallback = canRegenerateSceneRealtimePoster || canRegenerateWebRealtimePoster
+        guard bakedURL != nil || sourceURL != nil || canRenderFallback else { return }
         // 用户主动抽帧＝要看新封面，解除「钉住远程背景」。
         pinnedRemoteBackgroundItemID = nil
         isRegeneratingCover = true
@@ -1645,13 +1672,33 @@ struct MediaDetailSheet: View {
                     success = true
                 }
             }
-            // 无视频片源的 scene：走渲染器现场抽（静态直出 PNG / 动态 1s 临时烘焙）。
-            if needsSceneFallback, !success {
+            // 现场抽帧：视频片源缺失或抽帧失败时兜底。
+            // scene 走渲染器（静态直出 PNG / 动态 1s 临时烘焙），web 走 WebKit 临时烘焙后抽帧。
+            // 两条都不写烘焙产物，只覆盖 `scene_realtime_*`。
+            var fallbackError: Error?
+            if !success, canRenderFallback {
                 let fallbackRecord: MediaDownloadRecord? = await MainActor.run { currentDownloadRecord }
-                if let fallbackRecord,
-                   let poster = await SceneOfflineBakeService.regenerateDetailRealtimePoster(record: fallbackRecord, reason: "detail-regen") {
-                    freshURLs.append(poster)
-                    success = true
+                if let fallbackRecord {
+                    do {
+                        let poster: URL?
+                        if usesWebFallback {
+                            poster = try await WebOfflineBakeService.regenerateDetailRealtimePoster(
+                                record: fallbackRecord,
+                                reason: "detail-regen"
+                            )
+                        } else {
+                            poster = await SceneOfflineBakeService.regenerateDetailRealtimePoster(
+                                record: fallbackRecord,
+                                reason: "detail-regen"
+                            )
+                        }
+                        if let poster {
+                            freshURLs.append(poster)
+                            success = true
+                        }
+                    } catch {
+                        fallbackError = error
+                    }
                 }
             }
             // 清 Kingfisher 原图 + 512 降采样变体（与烘焙链路同口径），库列表刷新靠通知。
@@ -1684,8 +1731,13 @@ struct MediaDetailSheet: View {
                             sceneBakeStatusFlash = nil
                         }
                     }
+                } else if let fallbackError {
+                    // 现场渲染失败（权限 / 内存 / CLI 退出码）比「找不到视频」更具体，优先展示。
+                    errorNeedsScreenCaptureSettings = Self.isScreenCapturePermissionError(fallbackError)
+                    errorMessage = Self.truncateErrorMessage(fallbackError.localizedDescription)
+                    showError = true
                 } else {
-                    errorMessage = "抽帧失败：找不到可用视频或解码失败"
+                    errorMessage = "抽帧失败：没有可用的视频源，现场渲染也未产出封面"
                     showError = true
                 }
             }
@@ -2640,7 +2692,7 @@ struct MediaDetailSheet: View {
         }
 
         // removeDownloads 会软删下载记录 + 物理文件 + 烘焙产物，必须在 re-download 之前。
-        viewModel.removeDownloads(withIDs: [itemID])
+        MediaLibraryService.shared.removeDownloadRecords(withIDs: [itemID])
 
         PersistentDownloadQueueService.shared.start(using: viewModel)
 
@@ -3121,24 +3173,11 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// 若当前详情对应的壁纸正在被桌面/外部引擎使用，先停止再删包
+    /// 若该壁纸正在被桌面/外部引擎使用，先停止再删包
+    /// （实现口径统一放在 MediaExploreViewModel.stopPlayingWallpaperForUpdate，
+    /// 与「我的库 · 全部更新」共用）
     private func stopPlayingWallpaperIfNeeded(for item: MediaItem) {
-        guard item.id.hasPrefix("workshop_") else { return }
-        let workshopID = String(item.id.dropFirst("workshop_".count))
-        let bridge = WallpaperEngineXBridge.shared
-
-        if bridge.isControllingExternalEngine,
-           let path = bridge.currentWallpaperPathForDesign,
-           path.contains(workshopID) {
-            bridge.stopWallpaper()
-            return
-        }
-
-        // 本机视频路径命中 workshop 目录时也停掉
-        if let currentURL = VideoWallpaperManager.shared.currentVideoURL,
-           currentURL.path.contains(workshopID) || currentURL.path.contains("workshop_\(workshopID)") {
-            VideoWallpaperManager.shared.stopWallpaper()
-        }
+        viewModel.stopPlayingWallpaperForUpdate(for: item)
     }
 
     // MARK: - 下一张弹窗相关方法
@@ -5676,6 +5715,33 @@ final class PreviewPlayer: ObservableObject, @unchecked Sendable {
     nonisolated(unsafe) private var timeObserver: Any?
 
     func load(url: URL, isMuted: Bool) {
+        removeTimeObserver()
+        isPlaying = true
+        isBuffering = true
+        loadGeneration += 1
+        let generation = loadGeneration
+        // 可播性兜底：AVFoundation 打不开的本地视频（如 elst 计数损坏的 Workshop
+        // 内容）先转封装修复（与桌面/详情背景链路共享缓存），否则预览窗口黑屏。
+        let loadedURL = url
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let playable = try await VideoRepairService.playableVideoURL(for: loadedURL)
+                guard generation == self.loadGeneration else { return }
+                self.attachVideo(playable, isMuted: isMuted)
+            } catch is CancellationError {
+                // 窗口已关闭
+            } catch {
+                guard generation == self.loadGeneration else { return }
+                self.isBuffering = false
+                print("[PreviewPlayer] repair failed: \(loadedURL.lastPathComponent) \(error)")
+            }
+        }
+    }
+
+    private var loadGeneration = 0
+
+    private func attachVideo(_ url: URL, isMuted: Bool) {
         removeTimeObserver()
 
         player.isMuted = isMuted

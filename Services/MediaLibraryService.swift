@@ -754,7 +754,7 @@ final class MediaLibraryService: ObservableObject {
             if triggerAutoBake,
                WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
                snapshot.isEligibleForOfflineBake,
-               SceneOfflineBakeService.usableArtifact(from: downloadRecords[index]) == nil {
+               SceneOfflineBakeService.usableCurrentArtifact(from: downloadRecords[index]) == nil {
                 SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
             }
             return
@@ -1165,6 +1165,20 @@ final class MediaLibraryService: ObservableObject {
         scope: FolderMembershipScope,
         fallback: (item: MediaItem, fileURL: URL)? = nil
     ) {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var args: [String: Any] = [
+                "mediaID": mediaID,
+                "scope": scope == .favorites ? "favorites" : "downloads"
+            ]
+            if let folderID { args["folderID"] = folderID }
+            if let fallback {
+                args["fallbackItem"] = try? JSONEncoder().encode(fallback.item)
+                args["fallbackFileURL"] = fallback.fileURL
+            }
+            BackgroundRuntimeBridge.send("library.media.moveToFolder0", args)
+            return
+        }
+
         let targetFolderID = Self.normalizedFolderID(folderID)
 
         switch scope {
@@ -2158,6 +2172,20 @@ final class WallpaperLibraryService: ObservableObject {
         scope: FolderMembershipScope,
         fallback: (wallpaper: Wallpaper, fileURL: URL)? = nil
     ) {
+        if BackgroundRuntimeRole.isRemoteUI {
+            var args: [String: Any] = [
+                "wallpaperID": wallpaperID,
+                "scope": scope == .favorites ? "favorites" : "downloads"
+            ]
+            if let folderID { args["folderID"] = folderID }
+            if let fallback {
+                args["fallbackWallpaper"] = try? JSONEncoder().encode(fallback.wallpaper)
+                args["fallbackFileURL"] = fallback.fileURL
+            }
+            BackgroundRuntimeBridge.send("library.wallpaper.moveToFolder0", args)
+            return
+        }
+
         let targetFolderID = Self.normalizedFolderID(folderID)
 
         switch scope {

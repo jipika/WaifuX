@@ -458,21 +458,38 @@ class ExploreGridItem: NSCollectionViewItem {
                 .requestModifier(AnyModifier { request in
                     var req = request
                     req.timeoutInterval = 30
-if let host = req.url?.host?.lowercased() {
-                            if host.contains("steam") || host.contains("akamaihd") {
-                                req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
-                            } else if host.contains("pximg.net") {
-                                req.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
-                            } else if host.contains("wallsflow.com") {
-                                req.setValue(WallsflowService.siteOrigin, forHTTPHeaderField: "Referer")
-                            } else if host.contains("konachan.net") || host.contains("konachan.com") {
-                                req.setValue(KonachanRequestConfiguration.browserUserAgent, forHTTPHeaderField: "User-Agent")
-                                req.setValue(
-                                    KonachanRequestConfiguration.referer(for: req.url),
-                                    forHTTPHeaderField: "Referer"
-                                )
-                            }
+                    if let host = req.url?.host?.lowercased() {
+                        if host.contains("steam") || host.contains("akamaihd") {
+                            req.setValue("https://steamcommunity.com/", forHTTPHeaderField: "Referer")
+                        } else if host.contains("pximg.net") {
+                            req.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+                        } else if host.contains("wallsflow.com") {
+                            req.setValue(WallsflowService.siteOrigin, forHTTPHeaderField: "Referer")
+                        } else if host.contains("konachan.net") || host.contains("konachan.com") {
+                            req.setValue(KonachanRequestConfiguration.browserUserAgent, forHTTPHeaderField: "User-Agent")
+                            req.setValue(
+                                KonachanRequestConfiguration.referer(for: req.url),
+                                forHTTPHeaderField: "Referer"
+                            )
                         }
+                    }
+                    // 此 modifier 属于每格 options，**会覆盖全局 defaultOptions 的
+                    // requestModifier**，导致网格图片裸发 CFNetwork 默认 UA
+                    // （`WaifuX/<ver> CFNetwork/…`，Cloudflare 黑名单画像）。
+                    // 2026-11-02 实测第二批请求被 CF 打 403（1.8KB 拒绝页）→
+                    // 网格整片空白。这里补齐与 HTML 抓取同画像的浏览器头。
+                    // 源站专属 UA（konachan）已设的不覆盖。
+                    if req.value(forHTTPHeaderField: "User-Agent") == nil {
+                        req.setValue(
+                            WallsflowService.browserUserAgent,
+                            forHTTPHeaderField: "User-Agent"
+                        )
+                    }
+                    req.setValue(
+                        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                        forHTTPHeaderField: "Accept"
+                    )
+                    req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
                     return req
                 })
             ]

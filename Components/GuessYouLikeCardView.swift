@@ -106,7 +106,7 @@ struct GuessYouLikeCardOverlayContent: View {
     private var sourceColor: Color {
         switch item.sourceName {
         case "WallHaven": return Color(hex: "FF6B6B")
-        case "4K Wallpapers": return Color(hex: "4ECDC4")
+        case "PixelVault": return Color(hex: "4ECDC4")
         case "MotionBG": return Color(hex: "45B7D1")
         case "Wallpaper Engine": return Color(hex: "96CEB4")
         case "DongTai": return Color(hex: "F472B6")

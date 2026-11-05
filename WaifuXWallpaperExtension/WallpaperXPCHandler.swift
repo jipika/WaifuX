@@ -91,6 +91,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     private let ownedContextLock = NSLock()
     private var ownedContexts: [UInt32: UInt64] = [:]
     private var connectionInvalidated = false
+    private var connectionPresentationMode: String?
     private var previousPresentationMode = "default"
     /// 上次收到 presentationMode == "locked" 的时间。用于防止 screenIsUnlocked
     /// DistributedNotification 偶发丢失导致 isScreenLocked 永久卡死。
@@ -120,6 +121,10 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         guard !connectionInvalidated else { return nil }
         let generation = WallpaperState.shared.beginContextSetup(context)
         ownedContexts[context.contextId] = generation
+        if let mode = connectionPresentationMode {
+            WallpaperState.shared.updatePresentationRoles(ownedBy: ownedContexts,
+                wallpaperID: context.wallpaperID, displayID: context.displayID, mode: mode)
+        }
         return generation
     }
 
@@ -338,7 +343,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         if let renderer = active.renderer {
             renderer.relayoutForCurrentDisplayGeometry(displayID: displayID)
         } else if let image = ExtCropLayers.staticImage(in: active.rootLayer) ?? ExtCropLayers.imageContents(in: active.rootLayer) {
-            applyStaticCrop(rootLayer: active.rootLayer, image: image, displayID: displayID)
+            applyStaticCrop(rootLayer: active.rootLayer, image: image, displayID: displayID,
+                            imageURL: active.presentedImagePath.map { URL(fileURLWithPath: $0) })
         }
     }
 
@@ -356,12 +362,13 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         var destSize = requestGeometry.size ?? .zero
         var scaleFactor = requestGeometry.scale ?? 1.0
         var choiceConfiguration: String?
+        var contextRole = WallpaperContextRole.unknown
 
         if let reqObj = request as? NSObject {
             let mirror = Mirror(reflecting: reqObj)
             if let innerValue = mirror.children.first?.value {
                 let desc = String(describing: innerValue)
-                _ = desc.contains("isPreview: true")
+                if desc.contains("isPreview: true") { contextRole = .preview }
                 // 尝试解析 String 格式的 configuration: Optional("display-instance-id")
                 if let cRange = desc.range(of: "configuration: Optional(\""), let cEnd = desc[cRange.upperBound...].range(of: "\")") {
                     choiceConfiguration = String(desc[cRange.upperBound..<cEnd.lowerBound])
@@ -384,7 +391,12 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                         if prop.label == "destination" {
                             let destMirror = Mirror(reflecting: prop.value)
                             for destProp in destMirror.children {
-                                if destProp.label == "directDisplayID", let did = destProp.value as? UInt32 {
+                                if destProp.label == "isPreview", let preview = destProp.value as? Bool, preview {
+                                    contextRole = .preview
+                                } else if ["role", "kind", "type"].contains(destProp.label ?? ""), contextRole != .preview {
+                                    let evidence = WallpaperContextRole.explicit(isPreview: false, destination: String(describing: destProp.value))
+                                    if evidence != .unknown { contextRole = evidence }
+                                } else if destProp.label == "directDisplayID", let did = destProp.value as? UInt32 {
                                     displayID = did
                                 } else if destProp.label == "cacheDirectory" {
                                     if let url = prop.value as? URL {
@@ -555,7 +567,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             let placeholder = ActiveWallpaper(
                 caContext: caContext, rootLayer: rootLayer, renderer: nil,
                 displayID: did, videoID: instanceID, contextId: contextId,
-                wallpaperID: wallpaperIDString
+                wallpaperID: wallpaperIDString,
+                role: contextRole, roleIsExplicit: contextRole != .unknown
             )
             guard let generation = beginOwnedContext(placeholder) else {
                 reply(nil, CancellationError())
@@ -623,59 +636,18 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         doReply: @escaping @Sendable (String) -> Void
     ) async {
         guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
-        // 静态图和视频热切换都可能恰好落在 WallpaperAgent 重建 context 的窗口。
-        // 静态图必须优先于待处理视频消费，避免旧视频命令在下一次 acquire 时反向覆盖新图片。
-        // 待处理静态图可能来自旧机器/旧用户的容器路径：校验归属，失效则丢弃
-        // 并继续走 prefs / findImageURL，而不是直接渲染失败退成系统桌面图。
-        if let pending = WallpaperState.shared.takePendingImage(for: displayID),
-           let pendingImageURL = containerOwnedImageURL(pending) {
-            extLog("  [Acquire] 📦 应用待处理静态图 display=\(displayID) image=\(pendingImageURL.lastPathComponent)")
-            renderStaticImage(
-                imageURL: pendingImageURL,
-                displayID: displayID,
-                instanceID: instanceID,
-                rootLayer: rootLayer,
-                caContext: caContext,
-                contextId: contextId,
-                generation: generation,
-                wallpaperIDString: wallpaperIDString,
-                doReply: doReply
-            )
-            return
-        }
-
-        // 优先使用待处理的视频切换（扩展重启期间 switch_video 到达但无上下文时缓存的）
-        if let pendingURL = WallpaperState.shared.takePendingVideo(for: displayID) {
-            extLog("  [Acquire] 📦 应用待处理视频 display=\(displayID) video=\(pendingURL.lastPathComponent)")
+        // 当前持久逐屏源优先于无 context 时缓存的旧命令。视频与图片必须来自
+        // 同一份 prefs 快照，避免等待解码期间再次读取而混用两次发布的源。
+        let published = publishedSource(for: displayID)
+        if let videoURL = published.videoURL {
             do {
-                let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: pendingURL, displayID: displayID)
-                guard !Task.isCancelled else { renderer.stop(); return }
-                let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: renderer, videoID: instanceID)
-                guard committed.committed else { renderer.stop(); return }
-                committed.previous?.stop()
-                renderer.start()
-                // 应用当前 policy（可能正处于锁屏 / userPaused / display paused 等暂停状态），
-                // 否则新 renderer 会一直满速跑到下一次 update() 才被拉回。
-                WaifuXWallpaperExtension.recomputeAndApplyPolicy()
-                writeSnapshotCacheIfPossible(videoURL: pendingURL, videoID: instanceID, displayID: displayID, rootLayer: rootLayer)
-                WallpaperPrefs.shared.setActive(true)
-                extLog("  [Acquire] ✅ 待处理视频渲染已启动 display=\(displayID) video=\(pendingURL.lastPathComponent)")
-                doReply("pending video applied")
-                return
-            } catch {
-                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
-                extLog("  [Acquire] ❌ 待处理视频渲染失败: \(error.localizedDescription)，回退到 prefs")
-            }
-        }
-
-        // 先读取 App 写入的共享 prefs，确定上次设置的壁纸类型。
-        // 多显示器场景下按 displayID 取各自的路径（per-display），
-        // 没有时回退到 legacy 全局路径（向后兼容）。
-        // findImageURL(sourceID:) 会通过 Socket 查 localDecodeVideoLock 中残留的旧注册，
-        // 导致切换壁纸后扩展冷启动仍然渲染旧内容。直接读 prefs 才能反映 App 的最后意图。
-        if let videoURL = prefsVideoURL(for: displayID) {
-            do {
-                let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: videoURL, displayID: displayID)
+                let renderer = try await VideoRenderer.create(
+                    rootLayer: rootLayer, videoURL: videoURL, displayID: displayID,
+                    isCurrent: { [contextId, generation] in
+                        WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation)
+                            && Self.publishedSource(for: displayID).videoURL?.standardizedFileURL == videoURL.standardizedFileURL
+                    }
+                )
                 guard !Task.isCancelled else { renderer.stop(); return }
                 let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: renderer, videoID: instanceID)
                 guard committed.committed else { renderer.stop(); return }
@@ -691,8 +663,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
                 extLog("  [Acquire] ❌ 本地回退视频渲染失败: \(error.localizedDescription)")
                 // 视频播放失败，尝试回退到 prefs 中指定的静态图
-                if let imageURL = prefsImageURL(for: displayID) {
-                    renderStaticImage(
+                if let imageURL = published.imageURL {
+                    await renderStaticImage(
                         imageURL: imageURL,
                         displayID: displayID,
                         instanceID: instanceID,
@@ -704,7 +676,10 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                         doReply: doReply
                     )
                 } else {
-                    WallpaperPrefs.shared.setActive(true)
+                    // Context IDs change on every acquire; keep them out of the
+                    // host-deduplicated error so a restart storm logs once.
+                    extLog("  [Acquire] ❌ 视频失败且无静态图兜底 display=\(displayID) context=\(contextId)")
+                    WallpaperPrefs.shared.reportError("video acquire display=\(displayID): \(error.localizedDescription); no image fallback")
                     doReply("video failed, no image fallback")
                 }
             }
@@ -712,8 +687,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         }
 
         // prefs 中当前 displayID 的视频路径未设置 → 检查静态图
-        if let imageURL = prefsImageURL(for: displayID) {
-            renderStaticImage(
+        if let imageURL = published.imageURL {
+            await renderStaticImage(
                 imageURL: imageURL,
                 displayID: displayID,
                 instanceID: instanceID,
@@ -727,9 +702,62 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        // prefs 无有效设置 → 最后的回退：查 findImageURL（兼容旧状态）
+        guard !published.hasAssignment else {
+            WallpaperPrefs.shared.reportError("acquire display=\(displayID): published source unavailable")
+            doReply("published source unavailable")
+            return
+        }
+        // 只有没有持久指定时才消费 pending；不可读的新源不能复活旧源。
+        // 待处理静态图沿用当前容器归属规则，不能读取旧机器/旧用户的路径。
+        if let pending = WallpaperState.shared.takePendingImage(for: displayID),
+           let pendingImageURL = containerOwnedImageURL(pending) {
+            extLog("  [Acquire] 📦 应用待处理静态图 display=\(displayID) image=\(pendingImageURL.lastPathComponent)")
+            await renderStaticImage(
+                imageURL: pendingImageURL,
+                displayID: displayID,
+                instanceID: instanceID,
+                rootLayer: rootLayer,
+                caContext: caContext,
+                contextId: contextId,
+                generation: generation,
+                wallpaperIDString: wallpaperIDString,
+                doReply: doReply
+            )
+            return
+        }
+
+        if let pendingURL = WallpaperState.shared.takePendingVideo(for: displayID) {
+            extLog("  [Acquire] 📦 应用待处理视频 display=\(displayID) video=\(pendingURL.lastPathComponent)")
+            do {
+                let renderer = try await VideoRenderer.create(
+                    rootLayer: rootLayer, videoURL: pendingURL, displayID: displayID,
+                    isCurrent: { [contextId, generation] in
+                        WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation)
+                            && !Self.publishedSource(for: displayID).hasAssignment
+                    }
+                )
+                guard !Task.isCancelled else { renderer.stop(); return }
+                let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: renderer, videoID: instanceID)
+                guard committed.committed else { renderer.stop(); return }
+                committed.previous?.stop()
+                renderer.start()
+                // 应用当前 policy（可能正处于锁屏 / userPaused / display paused 等暂停状态），
+                // 否则新 renderer 会一直满速跑到下一次 update() 才被拉回。
+                WaifuXWallpaperExtension.recomputeAndApplyPolicy()
+                writeSnapshotCacheIfPossible(videoURL: pendingURL, videoID: instanceID, displayID: displayID, rootLayer: rootLayer)
+                WallpaperPrefs.shared.setActive(true)
+                extLog("  [Acquire] ✅ 待处理视频渲染已启动 display=\(displayID) video=\(pendingURL.lastPathComponent)")
+                doReply("pending video applied")
+                return
+            } catch {
+                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
+                extLog("  [Acquire] ❌ 待处理视频渲染失败: \(error.localizedDescription)，回退到旧图片查找")
+            }
+        }
+
+        // prefs / pending 无有效设置 → 最后的回退：查 findImageURL（兼容旧状态）
         if let imageURL = findImageURL(sourceID: "display-\(displayID)") {
-            renderStaticImage(
+            await renderStaticImage(
                 imageURL: imageURL,
                 displayID: displayID,
                 instanceID: instanceID,
@@ -743,13 +771,14 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        extLog("  [Acquire] ❌ 本地回退失败：未找到可播放视频或图片")
-        WallpaperPrefs.shared.setActive(true)
+        extLog("  [Acquire] ❌ 本地回退失败：未找到可播放视频或图片 display=\(displayID) context=\(contextId)")
+        WallpaperPrefs.shared.reportError("acquire display=\(displayID): no playable per-display video or image")
         doReply("fallback no resource")
     }
 
-    /// 从共享 prefs 读取此显示器的视频；仅旧版无按屏记录时使用全局路径。
-    private static func prefsVideoURL(for displayID: UInt32) -> URL? {
+    /// 单次读取当前发布的逐屏源；仅旧版无按屏记录时使用全局路径。
+    /// 视频沿用存在性检查，图片沿用当前 App Group 容器归属及可读性规则。
+    static func publishedSource(for displayID: UInt32) -> (videoURL: URL?, imageURL: URL?, hasAssignment: Bool) {
         struct MirroringPrefs: Decodable {
             let currentVideoPath: String?
             let currentVideoPaths: [String: String]?
@@ -757,29 +786,42 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             let currentImagePaths: [String: String]?
         }
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
-            return nil
+            return (nil, nil, true)
         }
         let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
         guard let data = try? Data(contentsOf: prefsURL),
               let prefs = try? JSONDecoder().decode(MirroringPrefs.self, from: data) else {
-            return nil
+            return (nil, nil, FileManager.default.fileExists(atPath: prefsURL.path))
         }
-        guard let path = LockScreenSourceSelection.path(
-            for: .video,
-            displayID: displayID,
-            videoPaths: prefs.currentVideoPaths,
-            imagePaths: prefs.currentImagePaths,
-            legacyVideoPath: prefs.currentVideoPath,
-            legacyImagePath: prefs.currentImagePath
-        ) else {
-            return nil
+        func sourcePath(for kind: LockScreenSourceSelection.Kind) -> String? {
+            LockScreenSourceSelection.path(
+                for: kind,
+                displayID: displayID,
+                videoPaths: prefs.currentVideoPaths,
+                imagePaths: prefs.currentImagePaths,
+                legacyVideoPath: prefs.currentVideoPath,
+                legacyImagePath: prefs.currentImagePath
+            )
         }
-        let url = URL(fileURLWithPath: path)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            extLog("[prefsVideoURL] ⚠️ 视频路径不存在: display=\(displayID) path=\(path)")
-            return nil
+        let videoURL = sourcePath(for: .video).flatMap { path -> URL? in
+            let url = URL(fileURLWithPath: path)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                extLog("[publishedSource] ⚠️ 视频路径不存在: display=\(displayID) path=\(path)")
+                return nil
+            }
+            return url
         }
-        return url
+        let imageURL = sourcePath(for: .image).flatMap { path -> URL? in
+            guard let owned = containerOwnedImageURL(URL(fileURLWithPath: path)) else {
+                extLog("[publishedSource] ⚠️ 图片路径不属于当前容器或不可读: display=\(displayID) path=\(path)")
+                return nil
+            }
+            return owned
+        }
+        let hasAssignment = LockScreenSourceSelection.hasPerDisplayAssignments(
+            videoPaths: prefs.currentVideoPaths, imagePaths: prefs.currentImagePaths)
+            || prefs.currentVideoPath?.isEmpty == false || prefs.currentImagePath?.isEmpty == false
+        return (videoURL, imageURL, hasAssignment)
     }
 
     /// 持久化/命令里的绝对路径可能来自旧机器或旧用户（例如
@@ -795,40 +837,6 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         guard candidate.path.hasPrefix(root),
               FileManager.default.isReadableFile(atPath: candidate.path) else { return nil }
         return candidate
-    }
-
-    /// 从共享 prefs 读取图片 URL。同 prefsVideoURL(for:)，优先 per-display 路径。
-    private static func prefsImageURL(for displayID: UInt32) -> URL? {
-        struct MirroringPrefs: Decodable {
-            let currentVideoPath: String?
-            let currentVideoPaths: [String: String]?
-            let currentImagePath: String?
-            let currentImagePaths: [String: String]?
-        }
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
-            return nil
-        }
-        let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
-        guard let data = try? Data(contentsOf: prefsURL),
-              let prefs = try? JSONDecoder().decode(MirroringPrefs.self, from: data) else {
-            return nil
-        }
-        guard let path = LockScreenSourceSelection.path(
-            for: .image,
-            displayID: displayID,
-            videoPaths: prefs.currentVideoPaths,
-            imagePaths: prefs.currentImagePaths,
-            legacyVideoPath: prefs.currentVideoPath,
-            legacyImagePath: prefs.currentImagePath
-        ) else {
-            return nil
-        }
-        let url = URL(fileURLWithPath: path)
-        guard let owned = containerOwnedImageURL(url) else {
-            extLog("[prefsImageURL] ⚠️ 图片路径不属于当前容器或不可读: display=\(displayID) path=\(path)")
-            return nil
-        }
-        return owned
     }
 
     static func writeSnapshotCacheIfPossible(videoURL: URL, videoID: String, displayID: UInt32, rootLayer: CALayer) {
@@ -848,6 +856,42 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             )
     }
 
+    private struct StaticImageLoad: Sendable {
+        let decoded: WallpaperDecodedImage?
+        let failure: String?
+    }
+
+    /// A failed legacy cache must not strand a newly acquired context on the
+    /// system image when this display has its own usable preview. Never borrow
+    /// another display's thumbnail or access the original external library URL.
+    private static func loadStaticImageForAcquire(imageURL: URL, displayID: UInt32) -> StaticImageLoad {
+        switch WallpaperBoundedImageDecoder.decode(url: imageURL) {
+        case .success(let decoded): return StaticImageLoad(decoded: decoded, failure: nil)
+        case .failure(let failure):
+            let message = "display=\(displayID) source=\(imageURL.lastPathComponent) \(failure.localizedDescription)"
+            if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+                let directory = container.appendingPathComponent("WallpaperCache/thumbnails")
+                let prefix = "display-\(displayID)"
+                let files = (try? FileManager.default.contentsOfDirectory(at: directory,
+                    includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles)) ?? []
+                let thumbnail = files.filter {
+                    $0.pathExtension.lowercased() == "jpg"
+                        && ($0.deletingPathExtension().lastPathComponent == prefix || $0.lastPathComponent.hasPrefix(prefix + "-"))
+                }.max {
+                    let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    return lhs < rhs
+                }
+                if let thumbnail, thumbnail != imageURL,
+                   let owned = containerOwnedImageURL(thumbnail),
+                   case .success(let decoded) = WallpaperBoundedImageDecoder.decode(url: owned) {
+                    return StaticImageLoad(decoded: decoded, failure: message + " fallback=display-thumbnail")
+                }
+            }
+            return StaticImageLoad(decoded: nil, failure: message + " fallback=system-placeholder")
+        }
+    }
+
     @MainActor private static func renderStaticImage(
         imageURL: URL,
         displayID: UInt32,
@@ -858,15 +902,23 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         generation: UInt64,
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
-    ) {
+    ) async {
         guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
-        guard let image = loadBudgetedSnapshotImage(imageURL) else {
-            extLog("  [Acquire] ❌ 静态图加载失败: \(imageURL.path)")
-            WallpaperPrefs.shared.setActive(true)
+        let loaded = await Task.detached(priority: .userInitiated) {
+            Self.loadStaticImageForAcquire(imageURL: imageURL, displayID: displayID)
+        }.value
+        // Decoding can outlive a wallpaper switch, context invalidation or XPC
+        // teardown. No layer/state write from an obsolete decode is permitted.
+        guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return }
+        let currentSource = publishedSource(for: displayID)
+        guard !currentSource.hasAssignment || currentSource.imageURL?.standardizedFileURL == imageURL.standardizedFileURL else { return }
+        guard let decoded = loaded.decoded else {
+            extLog("  [Acquire] ❌ 静态图加载失败: \(imageURL.path) context=\(contextId)")
+            WallpaperPrefs.shared.reportError("static acquire \(loaded.failure ?? "display=\(displayID) decode failed")")
             doReply("static image failed")
             return
         }
-
+        let image = decoded.image
         let committed = WallpaperState.shared.commitRenderer(contextId: contextId, generation: generation, renderer: nil, videoID: instanceID)
         guard committed.committed else { return }
         committed.previous?.stop()
@@ -874,35 +926,80 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         CATransaction.setDisableActions(true)
         rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
         rootLayer.contents = image
-        applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID)
+        applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL)
         CATransaction.commit()
+        if loaded.failure == nil {
+            WallpaperState.shared.recordImageFrame(contextId: contextId, generation: generation, sourceURL: imageURL, expectedRootLayer: rootLayer)
+        }
 
-        WallpaperPrefs.shared.setActive(true)
-        extLog("  [Acquire] ✅ 静态图渲染已启动 display=\(displayID) image=\(imageURL.lastPathComponent)")
-        doReply("static image")
+        if let failure = loaded.failure {
+            WallpaperPrefs.shared.reportError("static acquire \(failure)")
+        } else {
+            WallpaperPrefs.shared.setActive(true)
+        }
+        extLog("  [Acquire] ✅ 静态图渲染已启动 display=\(displayID) context=\(contextId) image=\(imageURL.lastPathComponent) degraded=\(loaded.failure != nil)")
+        doReply(loaded.failure == nil ? "static image" : "static thumbnail fallback")
+    }
+
+    private static func isPrecomposedImage(_ imageURL: URL, displayID: UInt32) -> Bool {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else { return false }
+        let url = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let size = values.fileSize, size > 0, size <= 131_072,
+              let data = try? Data(contentsOf: url),
+              let prefs = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = (prefs["currentImagePaths"] as? [String: String])?["display-\(displayID)"],
+              let prepared = prefs["precomposedImagePaths"] as? [String], prepared.contains(path) else { return false }
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+            == imageURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
     /// 静态图与视频共用等比 layer 几何。contentsCenter 是九宫格拉伸区，不能当目标 viewport。
-    private static func applyStaticCrop(rootLayer: CALayer, image: CGImage, displayID: UInt32) {
-        let settings = ExtCropPrefs.settings(forDisplayID: displayID)
+    private static func applyStaticCrop(rootLayer: CALayer, image: CGImage, displayID: UInt32, imageURL: URL? = nil) {
+        let settings: ExtCropSettings
+        if let imageURL, isPrecomposedImage(imageURL, displayID: displayID) {
+            settings = .default
+        } else {
+            settings = ExtCropPrefs.settings(forDisplayID: displayID)
+        }
         if ExtCropLayers.setStaticImage(image, in: rootLayer, settings: settings) {
             extLog("[StaticRenderer] layout displayID=\(displayID) image=\(image.width)x\(image.height) display=\(rootLayer.bounds.size) scale=\(rootLayer.contentsScale) preset=\(settings.aspectPreset.rawValue) zoom=\(settings.zoom)")
         }
     }
 
-    static func switchActiveContextToStaticImage(displayID: UInt32, sourceID: String, imageURL: URL) {
+    static func switchActiveContextToStaticImage(
+        displayID: UInt32, sourceID: String, imageURL: URL,
+        isCurrent: @escaping @Sendable () -> Bool = { true },
+        completion: (@MainActor @Sendable (Bool) -> Void)? = nil
+    ) {
+        guard isCurrent() else { Task { @MainActor in completion?(false) }; return }
+        guard !WallpaperState.shared.allActiveContexts(for: displayID).isEmpty else {
+            WallpaperState.shared.setPendingImage(imageURL, for: displayID)
+            extLog("[Commands] ⏳ 无活跃 context，已缓存待处理静态图 display=\(displayID) source=\(sourceID)")
+            Task { @MainActor in completion?(false) }
+            return
+        }
+        let decoded: WallpaperDecodedImage
+        switch WallpaperBoundedImageDecoder.decode(url: imageURL) {
+        case .success(let value): decoded = value
+        case .failure(let failure):
+            // Keep all existing renderers and generations on a failed switch.
+            extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID)")
+            WallpaperPrefs.shared.reportError("static switch display=\(displayID) source=\(sourceID) \(failure.localizedDescription)")
+            Task { @MainActor in completion?(false) }
+            return
+        }
+        guard isCurrent() else { Task { @MainActor in completion?(false) }; return }
+        let image = decoded.image
+        // Include contexts acquired while ImageIO was busy; they must receive
+        // the same revision as the pre-existing desktop/lock-screen instances.
         let allContexts = WallpaperState.shared.allActiveContexts(for: displayID)
         guard !allContexts.isEmpty else {
             WallpaperState.shared.setPendingImage(imageURL, for: displayID)
-            extLog("[Commands] ⏳ 无活跃 context，已缓存待处理静态图 display=\(displayID) source=\(sourceID)")
+            extLog("[Commands] ⏳ 解码期间 context 已全部释放，转为待处理静态图 display=\(displayID) source=\(sourceID)")
+            Task { @MainActor in completion?(false) }
             return
         }
-
-        guard let image = loadBudgetedSnapshotImage(imageURL) else {
-            extLog("[Commands] ❌ 静态图热切换失败 display=\(displayID) source=\(sourceID)")
-            return
-        }
-
         let replacements = allContexts.compactMap {
             WallpaperState.shared.beginRendererReplacement(contextId: $0.contextId, expectedRootLayer: $0.rootLayer)
         }
@@ -911,6 +1008,14 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         // wallpaperCommandQueue（utility 后台串行队列）上，必须切到主线程做 layer 修改。
         // image 和 allContexts 都是 Sendable，可直接捕获到 @Sendable 闭包里。
         let applyBlock: @Sendable () -> Void = {
+            guard isCurrent() else {
+                for replacement in replacements {
+                    WallpaperState.shared.finishSetupTask(contextId: replacement.context.contextId, generation: replacement.generation)
+                }
+                Task { @MainActor in completion?(false) }
+                return
+            }
+            var applied = 0
             for replacement in replacements {
                 let active = replacement.context
                 defer { WallpaperState.shared.finishSetupTask(contextId: active.contextId, generation: replacement.generation) }
@@ -925,10 +1030,22 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 CATransaction.setDisableActions(true)
                 rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
                 rootLayer.contents = image
-                applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID)
+                applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL)
                 CATransaction.commit()
-
+                WallpaperState.shared.recordImageFrame(contextId: active.contextId,
+                    generation: replacement.generation, sourceURL: imageURL, expectedRootLayer: rootLayer)
+                applied += 1
             }
+            guard !replacements.isEmpty, applied == replacements.count else {
+                Task { @MainActor in completion?(false) }
+                return
+            }
+            WallpaperState.shared.removeIOSurfaceRenderer(for: displayID)
+            FrameChannel.shared.unregisterCallback(displayID: displayID)
+            WallpaperPrefs.shared.updateCurrentVideo()
+            CATransaction.flush()
+            extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到静态图: \(sourceID) (\(applied) 个 context)")
+            Task { @MainActor in completion?(true) }
         }
 
         if Thread.isMainThread {
@@ -936,12 +1053,6 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         } else {
             DispatchQueue.main.async(execute: applyBlock)
         }
-
-        // 这些是线程安全的，可以在当前线程执行
-        WallpaperState.shared.removeIOSurfaceRenderer(for: displayID)
-        FrameChannel.shared.unregisterCallback(displayID: displayID)
-        WallpaperPrefs.shared.updateCurrentVideo()
-        extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到静态图: \(sourceID) (\(allContexts.count) 个 context)")
     }
 
     func update(withId id: Any?, request: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
@@ -976,6 +1087,14 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             }
         }
 
+        // Attribute raw mode only to contexts owned by this XPC connection and
+        // addressed by this update; never infer desktop from process-global mode.
+        ownedContextLock.lock()
+        connectionPresentationMode = presentationMode
+        WallpaperState.shared.updatePresentationRoles(ownedBy: ownedContexts,
+            wallpaperID: wallpaperIDString, displayID: geometry.displayID, mode: presentationMode)
+        ownedContextLock.unlock()
+
         if presentationMode == "locked" {
             WallpaperState.shared.isScreenLocked = true
             lastLockedUpdate = Date()
@@ -1004,8 +1123,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         let effectiveActivityState = hostUnavailable ? "active" : activityState
         // Preserve the agent's raw mode so the unlock notification can remove
         // the lock override without waiting for another XPC update.
-        WallpaperState.shared.presentationMode = presentationMode
-        WallpaperState.shared.activityState = activityState
+        if presentationMode != "?" { WallpaperState.shared.presentationMode = presentationMode }
+        if activityState != "?" { WallpaperState.shared.activityState = activityState }
 
         let power = PowerMonitor.shared.currentState
         let basePolicy = PlaybackPolicy.compute(
@@ -1024,8 +1143,12 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             && effectiveActivityState == "active"
             && modeChanged
 
-        // Per-display policy：检查每个显示器是否有独立的暂停设置
-        WallpaperState.shared.forEachActiveContext { displayID, renderer in
+        // Per-display policy plus per-connection ownership: a lock-screen update
+        // must not pause or resume an unrelated desktop/preview renderer.
+        ownedContextLock.lock()
+        let policyOwners = ownedContexts
+        ownedContextLock.unlock()
+        WallpaperState.shared.forEachActiveContext(ownedBy: policyOwners, wallpaperID: wallpaperIDString, displayID: geometry.displayID) { displayID, renderer in
             let isDisplayPaused = displayID.flatMap { prefs.isDisplayPaused($0) } ?? false
             let effectivePolicy: PlaybackPolicy = isDisplayPaused ? .paused : basePolicy
             renderer.applyPolicy(effectivePolicy, animated: animated)
@@ -1044,12 +1167,11 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         let identifier = Self.extractWallpaperContextIdentifier(from: id)
         var cleanedCount = 0
         if let identifier {
-            // 桌面 + 锁屏共享同一 wallpaperID（系统 WallpaperAgent 一次 invalidate 两个 instance），
-            // 必须循环 stop 所有匹配的 renderer，否则前面的 context renderer 永久泄漏。
-            let removed = WallpaperState.shared.removeContext(wallpaperID: identifier)
-            for ctx in removed {
-                ctx.renderer?.stop()
-            }
+            ownedContextLock.lock()
+            let owned = ownedContexts
+            ownedContextLock.unlock()
+            let ids = WallpaperState.shared.contextIDs(wallpaperID: identifier, ownedBy: owned)
+            let removed = WallpaperState.shared.removeContexts(ids: ids, ownedBy: owned)
             forgetOwnedContexts(Set(removed.map(\.contextId)))
             cleanedCount = removed.count
         }
@@ -1065,8 +1187,12 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         noteServed()
         extLog("=== SNAPSHOT ===")
         let identifier = Self.extractWallpaperContextIdentifier(from: id)
-        let context = identifier.flatMap { WallpaperState.shared.activeContext(wallpaperID: $0) }
+        ownedContextLock.lock()
+        let owned = ownedContexts
+        ownedContextLock.unlock()
+        let context = identifier.flatMap { WallpaperState.shared.activeContext(wallpaperID: $0, ownedBy: owned) }
         if identifier != nil, context == nil {
+            extLog("[Snapshot] 同 wallpaperID 未找到本连接唯一桌面 context，拒绝歧义快照")
             reply(nil, nil)
             return
         }
@@ -1089,12 +1215,15 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     /// 参考 Mirage：唤醒后系统侧快照缓存会滞留旧帧，主动失效可避免
     /// 系统设置页/调度预览停留在唤醒前内容。
     static func invalidateSnapshotsAfterWake() {
+        invalidateRuntimeSnapshots()
+        invalidateSystemSnapshots(reason: "wake")
+    }
+
+    private static func invalidateSystemSnapshots(reason: String) {
         WallpaperPrefsChangeObserver.shared.withLiveHandlers { handler in
             guard let proxy = handler.agentProxy else { return }
             proxy.invalidateSnapshots { error in
-                if let error {
-                    extLog("[XPCHandler] 唤醒后 invalidateSnapshots 失败: \(error)")
-                }
+                if let error { extLog("[XPCHandler] invalidateSnapshots failed (\(reason)): \(error)") }
             }
         }
     }
@@ -1245,9 +1374,10 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func isChoiceDownloaded(with _: Any?, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+    func isChoiceDownloaded(with _: Any?, reply: @escaping @Sendable (NSNumber, (any Error)?) -> Void) {
+        noteServed()
         extLog("isChoiceDownloaded")
-        reply(true, nil)
+        reply(NSNumber(value: true), nil)
     }
 
     func download(withChoiceID _: Any?, reply: ((any Error)?) -> Void) -> Any? {

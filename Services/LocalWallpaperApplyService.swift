@@ -56,6 +56,7 @@ enum LocalWallpaperApplyService {
         /// When true, all target screens share one AVQueuePlayer (global sync).
         var usesSharedVideoDecoder: Bool = false
         var reason: String = "apply"
+        var wallpaperTransitionToken: [String: UInt64]? = nil
     }
 
     /// 对本地路径设壁纸。
@@ -66,7 +67,8 @@ enum LocalWallpaperApplyService {
     static func apply(
         localURL: URL,
         targetScreens: [NSScreen]?,
-        options: Options = Options()
+        options: Options = Options(),
+        onStageChange: WallpaperApplyStageHandler? = nil
     ) async throws -> Bool {
         try Task.checkCancellation()
         if BackgroundRuntimeRole.isRemoteUI { return (try await BackgroundRuntimeBridge.request("wallpaper.apply", ["url": localURL, "screens": targetScreens, "options": try JSONEncoder().encode(options)])["success"] as? Bool) ?? false }
@@ -75,13 +77,29 @@ enum LocalWallpaperApplyService {
             throw ApplyError.missingFile(localURL.path)
         }
 
+        var options = options
         let screens: [NSScreen]
-        if let targetScreens, !targetScreens.isEmpty {
+        if WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled, !options.isGlobalTransaction {
+            screens = NSScreen.screens
+        } else if let targetScreens, !targetScreens.isEmpty {
             screens = targetScreens
         } else {
             screens = NSScreen.screens
         }
         guard !screens.isEmpty else { return false }
+        let transitionToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
+        if let generations = options.wallpaperTransitionToken {
+            let supplied = WallpaperCrossTypeTransitionCoordinator.RequestToken(generationsByScreen: generations)
+            guard let token = WallpaperCrossTypeTransitionCoordinator.shared.subset(supplied, screens: screens) else {
+                throw GlobalWallpaperSyncCoordinator.WallpaperApplySupersededError(
+                    screenIDs: Set(screens.map(\.wallpaperScreenIdentifier)), requestToken: supplied
+                )
+            }
+            transitionToken = token
+        } else {
+            transitionToken = WallpaperCrossTypeTransitionCoordinator.shared.beginRequest(on: screens)
+        }
+        options.wallpaperTransitionToken = transitionToken.generationsByScreen
 
         DesktopWallpaperSyncManager.shared.captureOriginalSystemWallpaperIfNeeded(for: screens)
 
@@ -105,24 +123,28 @@ enum LocalWallpaperApplyService {
             }
         }
         try Task.checkCancellation()
-        func succeeded() -> Bool {
+        func succeeded() throws -> Bool {
+            try checkRequestCurrent(transitionToken, on: screens)
+            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
             applySucceeded = true
             return true
         }
 
+        do {
         if WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled,
            !options.isGlobalTransaction {
             let ok = try await GlobalWallpaperSyncCoordinator.shared.apply(
                 localURL: localURL,
-                options: options
+                options: options,
+                onStageChange: onStageChange
             )
-            if ok {
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            }
-            applySucceeded = ok
-            return ok
+            guard ok else { return false }
+            return try succeeded()
         }
 
+        guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(transitionToken) else {
+            throw CancellationError()
+        }
         let ext = localURL.pathExtension.lowercased()
         var isDirectory: ObjCBool = false
         FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
@@ -133,17 +155,15 @@ enum LocalWallpaperApplyService {
 
         // 1) 直接视频文件
         if !isDirectory.boolValue, videoExts.contains(ext) {
-            try await applyVideo(localURL, to: screens, options: options)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyVideo(localURL, to: screens, options: options, requestToken: transitionToken)
+            return try succeeded()
         }
 
         // 2) 直接静态图
         if !isDirectory.boolValue, imageExts.contains(ext) {
             if options.requirePlaybackEndSupport { return false }
-            try await applyStaticImage(localURL, to: screens)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyStaticImage(localURL, to: screens, requestToken: transitionToken)
+            return try succeeded()
         }
 
         // 3) Workshop 目录 / pkg
@@ -157,23 +177,20 @@ enum LocalWallpaperApplyService {
         switch contentType {
         case .video:
             if let videoURL = findVideoFile(in: contentRoot) {
-                try await applyVideo(videoURL, to: screens, options: options)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyVideo(videoURL, to: screens, options: options, requestToken: transitionToken)
+                return try succeeded()
             }
             guard allowNonVideoInOnEnd else { return false }
             // 无内嵌视频文件的 video 工程：退回 CLI/web 渲染，不按 scene 做 companion bake
-            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false, onStageChange: onStageChange, requestToken: transitionToken)
+            return try succeeded()
 
         case .scene:
             if isRealtime {
                 guard allowNonVideoInOnEnd else { return false }
                 // 详情页实时 scene：只 setWallpaper；companion bake 仅在已有产物时推锁屏，无产物且关自动烘焙则不烘不推
-                try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: true)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: true, onStageChange: onStageChange, requestToken: transitionToken)
+                return try succeeded()
             }
             // 非实时：优先烘焙 MP4（与详情页 applySceneWallpaperPreferringBake 一致）
             if let bakedURL = usableBakedVideoURL(options: options, contentRoot: contentRoot) {
@@ -181,20 +198,17 @@ enum LocalWallpaperApplyService {
                 let webDirPath = bakedURL.path.replacingOccurrences(of: ".mp4", with: ".web")
                 if FileManager.default.fileExists(atPath: webDirPath) {
                     guard allowNonVideoInOnEnd else { return false }
-                    try await applyRenderer(path: webDirPath, to: screens, options: options, scheduleSceneCompanionBake: false)
-                    VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                    return succeeded()
+                    try await applyRenderer(path: webDirPath, to: screens, options: options, scheduleSceneCompanionBake: false, onStageChange: onStageChange, requestToken: transitionToken)
+                    return try succeeded()
                 }
-                try await applyVideo(bakedURL, to: screens, options: options)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyVideo(bakedURL, to: screens, options: options, requestToken: transitionToken)
+                return try succeeded()
             }
             // 无烘焙：不在此阻塞长烘焙。
             // 调度器：退回实时渲染（能设上桌面）；详情页应先 bake UI 再调本方法。
             guard allowNonVideoInOnEnd else { return false }
-            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: true)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: true, onStageChange: onStageChange, requestToken: transitionToken)
+            return try succeeded()
 
         case .web:
             // Align with scene: realtime mode always prefers live WKWebView daemon.
@@ -203,21 +217,18 @@ enum LocalWallpaperApplyService {
             // applied the live web wallpaper once a bake product existed.
             if !isRealtime,
                let bakedURL = usableBakedVideoURL(options: options, contentRoot: contentRoot) {
-                try await applyVideo(bakedURL, to: screens, options: options)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyVideo(bakedURL, to: screens, options: options, requestToken: transitionToken)
+                return try succeeded()
             }
             guard allowNonVideoInOnEnd else { return false }
-            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false, onStageChange: onStageChange, requestToken: transitionToken)
+            return try succeeded()
 
         case .image:
             guard !options.requirePlaybackEndSupport else { return false }
             if let imageURL = findImageFile(in: contentRoot) {
-                try await applyStaticImage(imageURL, to: screens)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyStaticImage(imageURL, to: screens, requestToken: transitionToken)
+                return try succeeded()
             }
             throw ApplyError.unsupported("image-directory")
 
@@ -226,24 +237,29 @@ enum LocalWallpaperApplyService {
 
         case .unknown:
             if let videoURL = findVideoFile(in: contentRoot) {
-                try await applyVideo(videoURL, to: screens, options: options)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyVideo(videoURL, to: screens, options: options, requestToken: transitionToken)
+                return try succeeded()
             }
             if let bakedURL = usableBakedVideoURL(options: options, contentRoot: contentRoot) {
-                try await applyVideo(bakedURL, to: screens, options: options)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyVideo(bakedURL, to: screens, options: options, requestToken: transitionToken)
+                return try succeeded()
             }
             guard allowNonVideoInOnEnd else { return false }
             if let imageURL = findImageFile(in: contentRoot) {
-                try await applyStaticImage(imageURL, to: screens)
-                VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-                return succeeded()
+                try await applyStaticImage(imageURL, to: screens, requestToken: transitionToken)
+                return try succeeded()
             }
-            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false)
-            VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: screens)
-            return succeeded()
+            try await applyRenderer(path: contentRoot.path, to: screens, options: options, scheduleSceneCompanionBake: false, onStageChange: onStageChange, requestToken: transitionToken)
+            return try succeeded()
+        }
+        } catch {
+            if !Task.isCancelled,
+               !WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(transitionToken) {
+                throw GlobalWallpaperSyncCoordinator.WallpaperApplySupersededError(
+                    screenIDs: targetScreenIDs, requestToken: transitionToken
+                )
+            }
+            throw error
         }
     }
 
@@ -252,17 +268,35 @@ enum LocalWallpaperApplyService {
     static func apply(
         localURL: URL,
         to screen: NSScreen,
-        options: Options = Options()
+        options: Options = Options(),
+        onStageChange: WallpaperApplyStageHandler? = nil
     ) async throws -> Bool {
-        try await apply(localURL: localURL, targetScreens: [screen], options: options)
+        try await apply(localURL: localURL, targetScreens: [screen], options: options, onStageChange: onStageChange)
     }
 
     // MARK: - Primitives
 
-    private static func applyVideo(_ videoURL: URL, to screens: [NSScreen], options: Options) async throws {
+    private static func checkRequestCurrent(
+        _ token: WallpaperCrossTypeTransitionCoordinator.RequestToken, on screens: [NSScreen]
+    ) throws {
+        try Task.checkCancellation()
+        guard WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(token) else {
+            throw GlobalWallpaperSyncCoordinator.WallpaperApplySupersededError(
+                screenIDs: Set(screens.map(\.wallpaperScreenIdentifier)), requestToken: token
+            )
+        }
+    }
+
+    private static func applyVideo(
+        _ originalVideoURL: URL, to screens: [NSScreen], options: Options,
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
+    ) async throws {
         // 桌面/锁屏静态底图只认高清 poster（scene_bake_* / poster_wallpaper_*）。
         // 有缓存直接用；没有就同步抽一帧——切换需要静态帧先写桌面、拆旧窗、
         // 菜单栏采样，不能跳过。
+        // 可播性兜底：AVFoundation 打不开（如 elst 计数损坏的 Workshop 视频）时
+        // 先用内置 ffmpeg 转封装修复，避免「静默失败、桌面不动」。
+        let videoURL = try await VideoRepairService.playableVideoURL(for: originalVideoURL)
         var hdPosterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
             forLocalVideo: videoURL,
             sceneBakeItemID: options.sceneBakeItemID
@@ -288,10 +322,11 @@ enum LocalWallpaperApplyService {
         // 多屏播同一文件时默认共享一路 AVQueuePlayer，避免每屏各起 VTDecoderXPCService。
         // 仅「覆盖全部当前屏幕」或全局同步时走共享标志路径；子集多选仍按屏循环，
         // 由 VideoWallpaperManager 按 URL 机会式复用已有 player。
-        let useShared = options.usesSharedVideoDecoder
+        let useShared = coversAllScreens && (options.usesSharedVideoDecoder
             || ((options.isGlobalTransaction || WallpaperSchedulerService.shared.isGlobalDisplaySyncEnabled)
                 && screens.count > 1)
-            || (coversAllScreens && screens.count > 1)
+            || screens.count > 1)
+        if let requestToken { try checkRequestCurrent(requestToken, on: screens) }
         if useShared {
             try await VideoWallpaperManager.shared.applyVideoWallpaper(
                 from: videoURL,
@@ -299,7 +334,8 @@ enum LocalWallpaperApplyService {
                 muted: options.muted,
                 targetScreens: screens,
                 animatedTransition: options.animatedTransition,
-                usesSharedVideoDecoder: true
+                usesSharedVideoDecoder: true,
+                requestTransitionToken: requestToken
             )
         } else if coversAllScreens {
             try await VideoWallpaperManager.shared.applyVideoWallpaper(
@@ -308,7 +344,8 @@ enum LocalWallpaperApplyService {
                 muted: options.muted,
                 targetScreen: nil,
                 animatedTransition: options.animatedTransition,
-                usesSharedVideoDecoder: false
+                usesSharedVideoDecoder: false,
+                requestTransitionToken: requestToken
             )
         } else {
             try await VideoWallpaperManager.shared.applyVideoWallpaper(
@@ -317,10 +354,12 @@ enum LocalWallpaperApplyService {
                 muted: options.muted,
                 targetScreens: screens,
                 animatedTransition: options.animatedTransition,
-                usesSharedVideoDecoder: false
+                usesSharedVideoDecoder: false,
+                requestTransitionToken: requestToken
             )
         }
 
+        if let requestToken { try checkRequestCurrent(requestToken, on: screens) }
         // 仅系统壁纸同步开启时注册桌面 poster；动态层（视频窗）不受影响
         if let immediatePosterURL, VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled {
             for screen in screens {
@@ -359,6 +398,8 @@ enum LocalWallpaperApplyService {
                     let id = screen.wallpaperScreenIdentifier
                     let fp = screen.wallpaperScreenFingerprint
                     guard targetScreenIDs.contains(id) || targetFingerprints.contains(fp) else { continue }
+                    if let requestToken,
+                       !WallpaperCrossTypeTransitionCoordinator.shared.isCurrent(requestToken, on: screen) { continue }
                     // 用户已切到别的视频时不要回写旧 poster
                     vm.updatePosterURL(posterURL, for: screen, expectedVideoURL: expectedVideoURL)
                 }
@@ -366,25 +407,22 @@ enum LocalWallpaperApplyService {
         }
     }
 
-    private static func applyStaticImage(_ imageURL: URL, to screens: [NSScreen]) async throws {
+    private static func applyStaticImage(
+        _ imageURL: URL, to screens: [NSScreen],
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
+    ) async throws {
         if screens.count == 1, let only = screens.first {
-            try await StaticWallpaperApplyService.apply(from: imageURL, option: .desktop, for: only)
+            try await StaticWallpaperApplyService.apply(
+                from: imageURL, option: .desktop, for: only, requestToken: requestToken
+            )
             return
         }
 
-        // Multi-display: apply sequentially but fail the whole transaction if
-        // any screen fails so GlobalWallpaperSyncCoordinator can roll back.
-        var appliedScreens: [NSScreen] = []
-        do {
-            for screen in screens {
-                try await StaticWallpaperApplyService.apply(from: imageURL, option: .desktop, for: screen)
-                appliedScreens.append(screen)
-            }
-        } catch {
-            throw ApplyError.failed(
-                "静态壁纸多屏应用在 \(appliedScreens.count)/\(screens.count) 屏后失败：\(error.localizedDescription)"
-            )
-        }
+        // One transaction publishes every target before it retires any old
+        // presentation. Sequential per-screen commits could leave a half apply.
+        try await StaticWallpaperApplyService.apply(
+            from: imageURL, option: .desktop, targetScreens: screens, requestToken: requestToken
+        )
     }
 
     /// - Parameter scheduleSceneCompanionBake: 仅 scene 实时路径为 true。
@@ -393,7 +431,9 @@ enum LocalWallpaperApplyService {
         path: String,
         to screens: [NSScreen],
         options: Options,
-        scheduleSceneCompanionBake: Bool
+        scheduleSceneCompanionBake: Bool,
+        onStageChange: WallpaperApplyStageHandler? = nil,
+        requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken? = nil
     ) async throws {
         guard FileManager.default.fileExists(atPath: path) else {
             throw ApplyError.missingFile(path)
@@ -410,9 +450,12 @@ enum LocalWallpaperApplyService {
             path: path,
             targetScreens: screens,
             userProperties: userProps,
-            requireAllTargetScreens: options.isGlobalTransaction
+            requireAllTargetScreens: options.isGlobalTransaction,
+            requestTransitionToken: requestToken,
+            onStageChange: onStageChange
         )
         try Task.checkCancellation()
+        if let requestToken { try checkRequestCurrent(requestToken, on: screens) }
         // 实时 scene / web 不经过 applyVideo，系统桌面与锁屏的静态底图不会被刷新：
         // 有可用高清 poster 时在这里补一次系统写入；无 poster 时保持旧图（与 applyVideo 的
         // 「没有 HD poster 就不写 fallback」策略一致）。
@@ -422,7 +465,7 @@ enum LocalWallpaperApplyService {
             WallpaperEngineXBridge.shared.currentWallpaperPath(for: $0) == path
                 && !WallpaperEngineXBridge.shared.isWebRendering(on: $0)
         }
-        syncSystemWallpaperPosterIfAvailable(for: currentScreens, options: options)
+        syncSystemWallpaperPosterIfAvailable(for: currentScreens, path: path, options: options)
         // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，
         // 覆盖启动恢复、显示器重连等绕过本服务的 Scene 设置入口。
     }
@@ -434,18 +477,24 @@ enum LocalWallpaperApplyService {
     /// 只 `setWallpaper`（动态层），没有任何系统壁纸写入，而 `.video` 工程走的
     /// `applyVideo` 早就有 immediate poster 注册。
     /// 登记只保存路径，不会执行系统写入；这里必须先实际设置再登记。
-    private static func syncSystemWallpaperPosterIfAvailable(for screens: [NSScreen], options: Options) {
+    private static func syncSystemWallpaperPosterIfAvailable(for screens: [NSScreen], path: String, options: Options) {
         guard !BackgroundRuntimeRole.isIsolatedTest,
               VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
               !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else { return }
         var posterURL: URL?
-        if let itemID = options.sceneBakeItemID {
-            posterURL = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID)
-        }
-        if posterURL == nil, let bakedPath = options.bakedVideoPath {
+        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
+        if let itemID = options.sceneBakeItemID,
+           let bakedPath = options.bakedVideoPath,
+           SceneOfflineBakeService.isCurrentBakedSceneVideo(
+                at: URL(fileURLWithPath: bakedPath), contentRoot: contentRoot
+           ) {
             posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
-                forLocalVideo: URL(fileURLWithPath: bakedPath),
-                sceneBakeItemID: options.sceneBakeItemID
+                forLocalVideo: URL(fileURLWithPath: bakedPath), sceneBakeItemID: itemID
+            )
+        }
+        if posterURL == nil, let itemID = options.sceneBakeItemID {
+            posterURL = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
+                itemID: itemID, contentRoot: contentRoot
             )
         }
         guard let posterURL else { return }
@@ -480,10 +529,12 @@ enum LocalWallpaperApplyService {
     private static func usableBakedVideoURL(options: Options, contentRoot: URL) -> URL? {
         if let bakedPath = options.bakedVideoPath {
             let url = URL(fileURLWithPath: bakedPath)
-            if SceneOfflineBakeService.isUsableBakedVideo(at: url) { return url }
+            if case .scene = determineWorkshopContentType(at: contentRoot) {
+                if SceneOfflineBakeService.isCurrentBakedSceneVideo(at: url, contentRoot: contentRoot) { return url }
+            } else if SceneOfflineBakeService.isUsableBakedVideo(at: url) { return url }
         }
         if let record = mediaRecord(for: contentRoot),
-           let art = SceneOfflineBakeService.usableArtifact(from: record) {
+           let art = SceneOfflineBakeService.usableCurrentArtifact(from: record) {
             let url = URL(fileURLWithPath: art.videoPath)
             if SceneOfflineBakeService.isUsableBakedVideo(at: url) { return url }
         }

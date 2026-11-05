@@ -17,6 +17,13 @@ private let appLog = OSLog(subsystem: "com.waifux.app", category: "ExtensionIPC"
 private let appWillTerminateNotificationName = "com.waifux.app.wallpaper.appWillTerminate"
 private let commandsChangedNotificationName = "com.waifux.app.wallpaper.commandsChanged"
 
+/// Publication/consumption evidence, not WindowServer presentation confirmation.
+enum WallpaperSourceReadiness: Equatable, Sendable {
+    case ready
+    case pending
+    case failed
+}
+
 // MARK: - IPC 协议类型（与服务端兼容）
 
 /// 注意：这些类型必须与 WaifuXWallpaperExtension/UnixSocketClient.swift 中的
@@ -50,6 +57,14 @@ struct IPCCommand: Codable {
     let action: String
     let videoID: String?
     let displayID: UInt32?
+    let requestID: String?
+
+    init(action: String, videoID: String?, displayID: UInt32?, requestID: String? = nil) {
+        self.action = action
+        self.videoID = videoID
+        self.displayID = displayID
+        self.requestID = requestID
+    }
 }
 
 /// Socket 文件路径
@@ -91,6 +106,204 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     private let videoMapLock = OSAllocatedUnfairLock(initialState: [UInt32: (videoID: String, videoURL: URL)]())
     private let localDecodeVideoLock = OSAllocatedUnfairLock(initialState: [String: URL]())
 
+    /// One latest request per display. Early replies and waiter registration share one lock.
+    private final class SourceReadyStore: @unchecked Sendable {
+        private struct Entry {
+            let requestID: String
+            var result: WallpaperSourceReadiness?
+            var continuation: CheckedContinuation<WallpaperSourceReadiness, Never>?
+            var missingContext: MissingContext?
+        }
+        struct MissingContext: Sendable {
+            let displayID: UInt32
+            let requestID: String
+            let pid: Int32
+            let firstObserved: TimeInterval
+        }
+        private let lock = NSLock()
+        private var entries: [UInt32: Entry] = [:]
+
+        func begin(displayID: UInt32, requestID: String) {
+            var replaced: CheckedContinuation<WallpaperSourceReadiness, Never>?
+            lock.lock()
+            if entries[displayID]?.requestID != requestID {
+                replaced = entries[displayID]?.continuation
+                entries[displayID] = Entry(requestID: requestID)
+            }
+            lock.unlock()
+            replaced?.resume(returning: .failed)
+        }
+
+        func wait(displayID: UInt32, requestID: String, timeout: TimeInterval) async -> WallpaperSourceReadiness {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    var immediate: WallpaperSourceReadiness?
+                    var replaced: CheckedContinuation<WallpaperSourceReadiness, Never>?
+                    lock.lock()
+                    if Task.isCancelled {
+                        immediate = .failed
+                    } else if var entry = entries[displayID], entry.requestID == requestID {
+                        if let result = entry.result {
+                            immediate = result
+                        } else {
+                            replaced = entry.continuation
+                            entry.continuation = continuation
+                            entries[displayID] = entry
+                        }
+                    } else {
+                        immediate = .failed
+                    }
+                    lock.unlock()
+                    replaced?.resume(returning: .failed)
+                    if let immediate { continuation.resume(returning: immediate); return }
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: UInt64(max(0.1, timeout) * 1_000_000_000))
+                        self?.report(displayID: displayID, requestID: requestID, result: .pending)
+                    }
+                }
+            } onCancel: {
+                self.report(displayID: displayID, requestID: requestID, result: .failed)
+            }
+        }
+
+        func report(displayID: UInt32, requestID: String, result: WallpaperSourceReadiness) {
+            var continuation: CheckedContinuation<WallpaperSourceReadiness, Never>?
+            lock.lock()
+            if var entry = entries[displayID], entry.requestID == requestID,
+               entry.result != .ready, entry.result != .failed {
+                entry.result = result
+                if result == .ready || result == .failed { entry.missingContext = nil }
+                continuation = entry.continuation
+                entry.continuation = nil
+                entries[displayID] = entry
+            }
+            lock.unlock()
+            continuation?.resume(returning: result)
+        }
+
+        /// Only an explicit missing_context receipt from the real socket peer creates
+        /// recovery evidence. A waiter timeout or a decoder still priming never does.
+        func noteMissingContext(displayID: UInt32, requestID: String, pid: Int32?, missing: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard var entry = entries[displayID], entry.requestID == requestID,
+                  entry.result != .ready, entry.result != .failed,
+                  let pid, pid > 0 else { return }
+            if missing {
+                if entry.missingContext?.pid != pid {
+                    entry.missingContext = MissingContext(displayID: displayID, requestID: requestID,
+                        pid: pid, firstObserved: ProcessInfo.processInfo.systemUptime)
+                }
+            } else if entry.missingContext?.pid == pid {
+                // An unknown/unrelated sender cannot erase another peer's receipt.
+                entry.missingContext = nil
+            }
+            entries[displayID] = entry
+        }
+
+        func missingContexts() -> [MissingContext] {
+            lock.lock(); defer { lock.unlock() }
+            return entries.values.compactMap(\.missingContext)
+        }
+
+        func status(displayID: UInt32, requestID: String) -> (current: Bool, ready: Bool, failed: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            guard let entry = entries[displayID], entry.requestID == requestID else { return (false, false, false) }
+            return (true, entry.result == .ready, entry.result == .failed)
+        }
+
+        func cancel(displayID: UInt32, requestID: String) {
+            lock.lock()
+            let entry = entries[displayID]?.requestID == requestID ? entries.removeValue(forKey: displayID) : nil
+            lock.unlock()
+            entry?.continuation?.resume(returning: .failed)
+        }
+
+        func failAll() {
+            lock.lock()
+            let pending = entries.values.compactMap(\.continuation)
+            entries.removeAll()
+            lock.unlock()
+            pending.forEach { $0.resume(returning: .failed) }
+        }
+    }
+
+    private let sourceReady = SourceReadyStore()
+    private let latestSourceCommands = OSAllocatedUnfairLock(initialState: [UInt32: IPCCommand]())
+
+    func contextRecoveryEvidence() -> [WallpaperExtensionContextRecoveryPolicy.Evidence] {
+        guard isRunning else { return [] }
+        return sourceReady.missingContexts().map {
+            .init(displayID: $0.displayID, requestID: $0.requestID, pid: $0.pid, firstObserved: $0.firstObserved)
+        }
+    }
+
+    func contextRecoveryStatus(displayID: UInt32, requestID: String) -> (current: Bool, ready: Bool, failed: Bool) {
+        guard isRunning else { return (false, false, false) }
+        return sourceReady.status(displayID: displayID, requestID: requestID)
+    }
+
+    func contextRecoveryProbeDisplays() -> Set<UInt32> {
+        guard isRunning else { return [] }
+        return latestSourceCommands.withLock { Set($0.keys) }
+    }
+
+    /// After a PID replacement, ask the new process to consume the unchanged,
+    /// previously-ready source. This creates no fault evidence by itself: only its
+    /// genuine missing_context response can authorize recovery. Never steals a waiter.
+    func probeCompletedSourceForContextRecovery(displayID: UInt32) -> Bool {
+        guard isRunning else { return false }
+        let queued = cmdLock.withLock { commands -> Bool in
+            let probe = latestSourceCommands.withLock { current -> IPCCommand? in
+                guard let previous = current[displayID], let oldRequest = previous.requestID,
+                      sourceReady.status(displayID: displayID, requestID: oldRequest).ready else { return nil }
+                let request = UUID().uuidString
+                let probe = IPCCommand(action: previous.action, videoID: previous.videoID, displayID: displayID, requestID: request)
+                sourceReady.begin(displayID: displayID, requestID: request)
+                current[displayID] = probe
+                return probe
+            }
+            guard let probe else { return false }
+            commands.removeAll { $0.displayID == displayID && ($0.action == "switch_video" || $0.action == "switch_image") }
+            commands.append(probe)
+            return true
+        }
+        if queued {
+            WallpaperExtensionAgentHealer.shared.sourceRequestChanged(displayID: displayID)
+            notifyCommandsChanged()
+        }
+        return queued
+    }
+
+    /// Re-send exactly the still-current source after the new context has appeared.
+    /// Cold acquire consumes the cached source but does not own the original requestID.
+    func replaySourceAfterContextRecovery(displayID: UInt32, requestID: String) -> Bool {
+        guard isRunning else { return false }
+        let replayed = cmdLock.withLock { commands -> Bool in
+            let status = sourceReady.status(displayID: displayID, requestID: requestID)
+            guard status.current, !status.ready, !status.failed,
+                  let command = latestSourceCommands.withLock({ $0[displayID] }),
+                  command.requestID == requestID else { return false }
+            commands.removeAll { $0.displayID == displayID && ($0.action == "switch_video" || $0.action == "switch_image") }
+            commands.append(command)
+            return true
+        }
+        if replayed { notifyCommandsChanged() }
+        return replayed
+    }
+
+    func waitForSourceResult(displayID: UInt32, requestID: String, timeout: TimeInterval = 12) async -> WallpaperSourceReadiness {
+        await sourceReady.wait(displayID: displayID, requestID: requestID, timeout: timeout)
+    }
+
+    func waitForSourceReady(displayID: UInt32, requestID: String, timeout: TimeInterval = 12) async -> Bool {
+        await waitForSourceResult(displayID: displayID, requestID: requestID, timeout: timeout) == .ready
+    }
+
+    func reportSourceReady(displayID: UInt32, requestID: String, success: Bool = true) {
+        sourceReady.report(displayID: displayID, requestID: requestID, result: success ? .ready : .failed)
+    }
+
     private init() {}
 
     /// 同步视频部署世代号。每调用一次 syncAllDisplayVideosToExtension 递增，
@@ -121,8 +334,29 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             os_log(.debug, log: appLog, "丢弃过期命令 generation=%llu", generation)
             return
         }
-        cmdLock.withLock { $0.append(command) }
-        os_log(.info, log: appLog, "入队命令: %@ display=%d gen=%llu", command.action, command.displayID ?? 0, generation)
+        // Legacy fire-and-forget publications also need a real receipt identity, so
+        // a later settings-only relaunch can probe the unchanged source safely.
+        let isSource = command.action == "switch_video" || command.action == "switch_image"
+        let effective = isSource && command.displayID != nil && command.requestID == nil
+            ? IPCCommand(action: command.action, videoID: command.videoID, displayID: command.displayID, requestID: UUID().uuidString)
+            : command
+        let changedDisplay = cmdLock.withLock { commands -> UInt32? in
+            var changed: UInt32?
+            if isSource, let displayID = effective.displayID {
+                if let requestID = effective.requestID {
+                    if latestSourceCommands.withLock({ $0[displayID]?.requestID }) != requestID { changed = displayID }
+                    sourceReady.begin(displayID: displayID, requestID: requestID)
+                    latestSourceCommands.withLock { $0[displayID] = effective }
+                }
+                commands.removeAll {
+                    $0.displayID == displayID && ($0.action == "switch_video" || $0.action == "switch_image")
+                }
+            }
+            commands.append(effective)
+            return changed
+        }
+        if let changedDisplay { WallpaperExtensionAgentHealer.shared.sourceRequestChanged(displayID: changedDisplay) }
+        os_log(.info, log: appLog, "入队命令: %{public}@ display=%d gen=%llu", effective.action, effective.displayID ?? 0, generation)
         notifyCommandsChanged()
     }
 
@@ -140,14 +374,34 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     /// 清空所有挂起命令。
     func clearCommands() {
-        cmdLock.withLock { $0.removeAll() }
+        let removed = cmdLock.withLock { commands -> [UInt32] in
+            commands.removeAll()
+            let displays = latestSourceCommands.withLock { current -> [UInt32] in
+                let displays = Array(current.keys); current.removeAll(); return displays
+            }
+            sourceReady.failAll()
+            return displays
+        }
+        for display in removed { WallpaperExtensionAgentHealer.shared.sourceRequestChanged(displayID: display) }
         os_log(.info, log: appLog, "已清空所有挂起命令")
     }
 
     /// 视频全量重同步时只淘汰旧视频切换。另一块屏刚入队的静态图
     /// 切换仍需交给扩展处理，不能被全局清空。
     func clearVideoCommands() {
-        cmdLock.withLock { $0.removeAll { $0.action == "switch_video" } }
+        let removed = cmdLock.withLock { commands -> [UInt32] in
+            commands.removeAll { $0.action == "switch_video" }
+            let previous = latestSourceCommands.withLock { current -> [UInt32: IPCCommand] in
+                let previous = current.filter { $0.value.action == "switch_video" }
+                for display in previous.keys { current.removeValue(forKey: display) }
+                return previous
+            }
+            for (display, command) in previous {
+                if let request = command.requestID { sourceReady.cancel(displayID: display, requestID: request) }
+            }
+            return Array(previous.keys)
+        }
+        for display in removed { WallpaperExtensionAgentHealer.shared.sourceRequestChanged(displayID: display) }
         os_log(.info, log: appLog, "已清空挂起的视频切换命令")
     }
 
@@ -155,6 +409,14 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     func registerLocalDecodeVideo(videoID: String, videoURL: URL) {
         localDecodeVideoLock.withLock { $0[videoID] = videoURL }
         os_log(.info, log: appLog, "注册本地解码视频: %{public}@ path=%{public}@", videoID, videoURL.path)
+    }
+
+    /// Remove only this display's superseded image registration; rollback must
+    /// not expose its failed new source through a later get_video_path fallback.
+    func unregisterLocalDecodeVideo(videoID: String, matching url: URL) {
+        localDecodeVideoLock.withLock { videos in
+            if videos[videoID]?.standardizedFileURL == url.standardizedFileURL { videos.removeValue(forKey: videoID) }
+        }
     }
 
     /// 清空所有本地解码视频注册。清理锁屏实例时调用，防止扩展通过 get_video_path 获取已删除的视频路径。
@@ -213,8 +475,8 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         pendingRetries.removeAll()
         retryCounts.removeAll()
         retryLock.unlock()
-        // 清空挂起命令，防止旧 Task 入队的过期命令在扩展 poll 时被处理
-        clearCommands()
+        // 视频源重同步不能吞掉其它屏的静图或采样屏障/释放命令。
+        clearVideoCommands()
         DispatchQueue.main.async {
             LockScreenFramePusher.shared.stopAll()
         }
@@ -488,6 +750,8 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             return wasRunning
         }
         clearDisplayVideos()
+        clearCommands()
+        sourceReady.failAll()
         fcLock.withLock { clients in
             for fd in clients {
                 shutdown(fd, SHUT_RDWR)
@@ -503,11 +767,10 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     // MARK: - 请求处理
 
-    private func handleRequest(_ data: Data) -> Data? {
+    private func handleRequest(_ data: Data, peerPID: Int32?) -> Data? {
         guard let request = try? JSONDecoder().decode(IPCRequest.self, from: data) else {
             return nil
         }
-
         let response: IPCResponse
 
         switch request.method {
@@ -567,6 +830,30 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
                 response = .init(id: request.id, videos: nil, videoPath: nil, error: "invalid_params")
             }
 
+
+        case "source_pending":
+            guard let displayID = request.params?["displayID"].flatMap(UInt32.init),
+                  let requestID = request.params?["requestID"], !requestID.isEmpty else {
+                response = .init(id: request.id, videos: nil, videoPath: nil, error: "invalid_source_pending")
+                break
+            }
+            sourceReady.noteMissingContext(displayID: displayID, requestID: requestID, pid: peerPID,
+                                           missing: request.params?["reason"] == "missing_context")
+            sourceReady.report(displayID: displayID, requestID: requestID, result: .pending)
+            if sourceReady.missingContexts().contains(where: { $0.displayID == displayID && $0.requestID == requestID && $0.pid == peerPID }) {
+                WallpaperExtensionAgentHealer.shared.sourceMissingContextReported()
+            }
+            response = .init(id: request.id, videos: nil, videoPath: nil, error: nil)
+
+        case "source_ready":
+            guard let displayID = request.params?["displayID"].flatMap(UInt32.init),
+                  let requestID = request.params?["requestID"], !requestID.isEmpty else {
+                response = .init(id: request.id, videos: nil, videoPath: nil, error: "invalid_source_ready")
+                break
+            }
+            let success = request.params?["success"].map { $0 != "0" } ?? true
+            reportSourceReady(displayID: displayID, requestID: requestID, success: success)
+            response = .init(id: request.id, videos: nil, videoPath: nil, error: nil)
 
         case "poll_commands":
             // 扩展轮询挂起命令
@@ -779,7 +1066,11 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             }
 
             let payload = Data(bytes: buf.baseAddress!, count: payloadLen)
-            if let responseData = handleRequest(payload) {
+            var peerPID: pid_t = 0
+            var peerPIDSize = socklen_t(MemoryLayout<pid_t>.size)
+            let peerKnown = getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, &peerPID, &peerPIDSize) == 0
+                && peerPIDSize == MemoryLayout<pid_t>.size && peerPID > 0
+            if let responseData = handleRequest(payload, peerPID: peerKnown ? peerPID : nil) {
                 var respLen = UInt32(responseData.count).bigEndian
                 write(client, &respLen, 4)
                 _ = responseData.withUnsafeBytes { ptr in

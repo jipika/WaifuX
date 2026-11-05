@@ -457,6 +457,46 @@ internal sealed class SteamSession : IAsyncDisposable
             ids);
     }
 
+    /// <summary>
+    /// Lists one creator's public Workshop items for this app, newest first.
+    /// The community "myworkshopfiles" page hides items carrying adult content
+    /// descriptors from anonymous visitors (both its list and its "of N" count
+    /// drop them); this protocol query returns the complete list and total.
+    /// </summary>
+    public async Task<UserFilesPage> GetUserFilesAsync(ulong creatorSteamId, int startIndex, int pageSize, CancellationToken cancellationToken)
+    {
+        var size = Math.Clamp(pageSize, 1, 100);
+        var pageIndex = Math.Max(0, startIndex) / size;
+        var pageStart = pageIndex * size;
+        var request = new CPublishedFile_GetUserFiles_Request
+        {
+            steamid = creatorSteamId,
+            appid = AppId,
+            page = checked((uint)(pageIndex + 1)),
+            numperpage = checked((uint)size),
+            type = "myfiles",
+            // Same order as the community page's "mostrecent" sort.
+            sortmethod = "creationorder",
+            ids_only = true
+        };
+        var response = await publishedFiles.GetUserFiles(request)
+            .ToTask()
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        EnsureSuccess(response.Result, "USER_FILES_UNAVAILABLE");
+        var files = response.Body.publishedfiledetails;
+        var ids = files
+            .Where(file => file.consumer_appid == 0 || file.consumer_appid == AppId)
+            .Select(file => file.publishedfileid)
+            .Where(id => id != 0)
+            .ToArray();
+        return new UserFilesPage(
+            checked((int)response.Body.total),
+            pageStart,
+            pageStart + files.Count,
+            ids);
+    }
+
     public async Task SetFavoriteAsync(ulong workshopId, bool favorite, CancellationToken cancellationToken)
     {
         await favoriteGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -978,6 +1018,12 @@ internal sealed record SubscriptionPage(
     IReadOnlyList<SubscribedFile> Files);
 
 internal sealed record FavoritePage(
+    int TotalResults,
+    int StartIndex,
+    int NextStartIndex,
+    IReadOnlyList<ulong> PublishedFileIds);
+
+internal sealed record UserFilesPage(
     int TotalResults,
     int StartIndex,
     int NextStartIndex,

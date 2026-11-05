@@ -93,6 +93,7 @@ enum CloudSyncSettingsRegistry {
             .init(key: "scene_bake_fps", category: .wallpaperEngine, valueType: .double),
             .init(key: "scene_bake_duration", category: .wallpaperEngine, valueType: .double),
             .init(key: "auto_bake_scene", category: .wallpaperEngine, valueType: .bool),
+            .init(key: WorkshopSubscriptionAutomation.defaultsKey, category: .wallpaperEngine, valueType: .bool),
         ]
     }
 

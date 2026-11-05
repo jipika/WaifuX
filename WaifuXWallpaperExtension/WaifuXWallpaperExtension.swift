@@ -72,6 +72,7 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
             (#selector(WallpaperXPCHandler.invokeContextMenuAction(withMenuItemID:groupItemID:reply:)), 0, false),
             (#selector(WallpaperXPCHandler.invokeContextMenuAction(withMenuItemID:groupItemID:reply:)), 1, false),
             (#selector(WallpaperXPCHandler.isChoiceDownloaded(with:reply:)), 0, false),
+            (#selector(WallpaperXPCHandler.isChoiceDownloaded(with:reply:)), 0, true),
             (#selector(WallpaperXPCHandler.download(withChoiceID:reply:)), 0, false),
             (#selector(WallpaperXPCHandler.pauseDownload(for:reply:)), 0, false),
             (#selector(WallpaperXPCHandler.cancelDownload(for:reply:)), 0, false),
@@ -172,6 +173,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     typealias Configuration = WallpaperExtensionConfiguration
     private static let wakeRecoveryGeneration = OSAllocatedUnfairLock(initialState: 0)
     private static let hostAppBundleIdentifier = "com.waifux.app"
+    private var commandPollTimer: DispatchSourceTimer?
 
     var configuration: WallpaperExtensionConfiguration {
         WallpaperExtensionConfiguration()
@@ -189,7 +191,8 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         if let handle = dlopen(frameworkPath, RTLD_LAZY) {
             _ = handle
             extLog("INIT (PID: \(ProcessInfo.processInfo.processIdentifier)) — WallpaperExtensionKit loaded")
-            swizzleSnapshotEncodeIfNeeded()
+            // Keep the concrete NSXPCEncoder: its NSXPCCoder superclass has a
+            // no-op encodeXPCObject implementation and produces empty snapshots.
             Self.recordLaunchBundleFingerprint()
             VideoLibrary.shared.scan()
             WallpaperPrefs.shared.observeChanges()
@@ -247,9 +250,11 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     }
 
     private static func reconcileHostApplicationPresence() {
-        let isRunning = !NSRunningApplication.runningApplications(
-            withBundleIdentifier: hostAppBundleIdentifier
-        ).isEmpty
+        // The UI is allowed to exit while the Helper still owns IPC/playback.
+        // Do not switch into self-hosted playback merely because its window/app closed.
+        let isRunning = [hostAppBundleIdentifier, "com.waifux.app.helper"].contains { identifier in
+            !NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty
+        }
         let prefs = WallpaperPrefs.shared
         guard prefs.setAppHostRunning(isRunning) else { return }
 
@@ -330,28 +335,6 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             return true
         }
         return false
-    }
-
-    // MARK: - SnapshotXPC Swizzle
-
-    private func swizzleSnapshotEncodeIfNeeded() {
-        guard let snapshotClass = NSClassFromString("WallpaperSnapshotXPC") else { return }
-        let sel = NSSelectorFromString("encodeWithCoder:")
-        guard let origMethod = class_getInstanceMethod(snapshotClass, sel) else { return }
-        let origIMP = method_getImplementation(origMethod)
-        typealias EncodeFunc = @convention(c) (AnyObject, Selector, NSCoder) -> Void
-        let origFunc = unsafeBitCast(origIMP, to: EncodeFunc.self)
-        guard let nsxpcCoderClass = NSClassFromString("NSXPCCoder") else { return }
-
-        let block: @convention(block) (AnyObject, NSCoder) -> Void = { obj, coder in
-            let origClass: AnyClass = object_getClass(coder)!
-            object_setClass(coder, nsxpcCoderClass)
-            origFunc(obj, sel, coder)
-            object_setClass(coder, origClass)
-        }
-        let newIMP = imp_implementationWithBlock(block)
-        method_setImplementation(origMethod, newIMP)
-        extLog("  [Swizzle] Patched WallpaperSnapshotXPC encodeWithCoder:")
     }
 
     // MARK: - Display Sleep/Wake
@@ -492,12 +475,18 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     /// ⚠️ 必须 dispatch 到后台队列执行，因为 drainPendingSocketCommands 内部使用同步 socket I/O，
     /// 在主线程执行会阻塞 run loop，影响 XPC 回调响应和 CACommit 等关键事件的处理。
     private func observeSocketCommands() {
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            WaifuXWallpaperExtension.reconcileHostApplicationPresence()
-            wallpaperCommandQueue.async {
-                Self.drainPendingSocketCommands(reason: "timer")
-            }
+        // AppExtension initialization is not guaranteed to have a running
+        // default-mode RunLoop. A retained dispatch source keeps cold-start
+        // command polling alive even before WallpaperAgent acquires a context.
+        guard commandPollTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: wallpaperCommandQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler {
+            Task { @MainActor in WaifuXWallpaperExtension.reconcileHostApplicationPresence() }
+            Self.drainPendingSocketCommands(reason: "timer")
         }
+        commandPollTimer = timer
+        timer.resume()
         extLog("[Extension] Socket command polling started (background dispatch)")
     }
 
@@ -589,12 +578,41 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         return true
     }
 
+    private enum CommandSourceResult: Sendable {
+        case ready, pending, failed
+    }
+
+    /// Bounded observation of existing frame evidence; never retries renderer creation.
+    @MainActor
+    private static func sourceFrameResult(
+        renderer: VideoRenderer, url: URL, displayID: UInt32, contextId: UInt32, generation: UInt64
+    ) async -> CommandSourceResult {
+        let deadline = Date().addingTimeInterval(10)
+        repeat {
+            guard !Task.isCancelled,
+                  WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation) else { return .pending }
+            if await renderer.isSourceFrameReady(for: url) {
+                let published = WallpaperXPCHandler.publishedSource(for: displayID)
+                return published.videoURL?.standardizedFileURL == url.standardizedFileURL ? .ready : .failed
+            }
+            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return .pending }
+        } while Date() < deadline
+        return .pending
+    }
+
     private static func handleSocketCommand(_ cmd: IPCCommand) {
         if cmd.action == "switch_video", let videoID = cmd.videoID, let displayID = cmd.displayID {
             extLog("[Commands] Socket switch_video: display=\(displayID) video=\(videoID)")
             if let path = UnixSocketClient.shared.fetchVideoPathSync(for: videoID) {
                 let url = URL(fileURLWithPath: path)
                 if FileManager.default.fileExists(atPath: path) {
+                    let published = WallpaperXPCHandler.publishedSource(for: displayID)
+                    guard published.videoURL?.standardizedFileURL == url.standardizedFileURL else {
+                        if let requestID = cmd.requestID {
+                            Task { await UnixSocketClient.shared.notifySourceReady(displayID: displayID, requestID: requestID, success: false) }
+                        }
+                        return
+                    }
                     // 多显示器：按 displayID 写各自一格缓存，避免覆盖其它屏的缓存。
                     WallpaperState.shared.setCachedVideoURL(url, for: displayID)
                     WallpaperState.shared.removeIOSurfaceRenderer(for: displayID)
@@ -608,6 +626,12 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         // 无活跃上下文（扩展刚重启），缓存视频等待 acquire 后自动应用
                         WallpaperState.shared.setPendingVideo(url, for: displayID)
                         extLog("[Commands] ⏳ 无活跃上下文 display=\(displayID)，已缓存待处理视频: \(videoID)")
+                        if let requestID = cmd.requestID {
+                            Task {
+                                await UnixSocketClient.shared.notifySourcePending(
+                                    displayID: displayID, requestID: requestID, missingContext: true)
+                            }
+                        }
                         return
                     }
 
@@ -618,6 +642,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         WallpaperState.shared.beginRendererReplacement(contextId: $0.contextId, expectedRootLayer: $0.rootLayer)
                     }
                     // Path A: 有 renderer 的 context → 热切换视频
+                    var videoTasks: [Task<CommandSourceResult, Never>] = []
                     let contextsWithRenderer = replacements.filter { $0.context.renderer != nil }
                     if !contextsWithRenderer.isEmpty {
                         for replacement in contextsWithRenderer {
@@ -627,6 +652,10 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                             guard WallpaperState.shared.commitRenderer(contextId: active.contextId,
                                 generation: replacement.generation, renderer: renderer, videoID: videoID).committed else { continue }
                             renderer.replaceVideo(with: url)
+                            videoTasks.append(Task { @MainActor in
+                                await sourceFrameResult(renderer: renderer, url: url, displayID: displayID,
+                                    contextId: active.contextId, generation: replacement.generation)
+                            })
                             WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, displayID: displayID, rootLayer: active.rootLayer)
                         }
                         // 所有 context 更新完后统一写一次状态文件 + Darwin 通知，避免循环内重复 IO
@@ -650,19 +679,24 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         let rootLayer = replacement.context.rootLayer
                         // ⚠️ 必须 @MainActor：AVSampleBufferDisplayLayer 的创建和添加到 rootLayer
                         // 需要在主线程执行，否则视频不会动画（displayLayer 无帧输出）。
-                        let task = Task { @MainActor in
+                        let task = Task<CommandSourceResult, Never> { @MainActor in
                             defer { WallpaperState.shared.finishSetupTask(contextId: active.contextId, generation: replacement.generation) }
-                            guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return }
+                            guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return .pending }
                             do {
-                                let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: url, displayID: displayID)
-                                guard !Task.isCancelled else { renderer.stop(); return }
+                                let renderer = try await VideoRenderer.create(
+                                    rootLayer: rootLayer, videoURL: url, displayID: displayID,
+                                    isCurrent: { [contextId = active.contextId, generation = replacement.generation] in
+                                        WallpaperState.shared.isContextSetupCurrent(contextId: contextId, generation: generation)
+                                            && WallpaperXPCHandler.publishedSource(for: displayID).videoURL?.standardizedFileURL == url.standardizedFileURL
+                                    })
+                                guard !Task.isCancelled else { renderer.stop(); return .pending }
                                 let committed = WallpaperState.shared.commitRenderer(
                                     contextId: active.contextId,
                                     generation: replacement.generation,
                                     renderer: renderer,
                                     videoID: videoID
                                 )
-                                guard committed.committed else { renderer.stop(); return }
+                                guard committed.committed else { renderer.stop(); return .pending }
                                 committed.previous?.stop()
                                 rootLayer.contents = nil
                                 renderer.start()
@@ -672,11 +706,14 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                                 WallpaperPrefs.shared.updateCurrentVideo()
                                 WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, displayID: displayID, rootLayer: rootLayer)
                                 extLog("[Commands] ✅ 已从静态图切回视频: display=\(displayID) video=\(videoID)")
+                                return await sourceFrameResult(renderer: renderer, url: url, displayID: displayID,
+                                    contextId: active.contextId, generation: replacement.generation)
                             } catch {
-                                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return }
+                                guard !Task.isCancelled, WallpaperState.shared.isContextSetupCurrent(contextId: active.contextId, generation: replacement.generation) else { return .pending }
                                 extLog("[Commands] ❌ 从静态图切回视频失败: \(error.localizedDescription)")
                                 WallpaperPrefs.shared.reportError("switch_video 失败: \(error.localizedDescription)")
                                 // 恢复：尝试加载缓存快照作为兜底内容，避免永久黑屏
+                                WallpaperState.shared.invalidateImageFrame(contextId: active.contextId, generation: replacement.generation)
                                 if rootLayer.sublayers?.isEmpty ?? true {
                                     if let cachedImage = loadCachedSnapshotImage() {
                                         CATransaction.begin()
@@ -696,20 +733,93 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                                         extLog("[Commands] ⚠️ 无缓存快照可用，rootLayer 将保持空载 display=\(displayID)")
                                     }
                                 }
+                                return .failed
                             }
                         }
-                        WallpaperState.shared.retainSetupTask(task, contextId: active.contextId, generation: replacement.generation)
+                        let retained = Task<Void, Never> {
+                            await withTaskCancellationHandler {
+                                _ = await task.value
+                            } onCancel: {
+                                task.cancel()
+                            }
+                        }
+                        WallpaperState.shared.retainSetupTask(retained, contextId: active.contextId, generation: replacement.generation)
+                        videoTasks.append(task)
                     }
+                    if let requestID = cmd.requestID {
+                        let tasks = videoTasks
+                        Task {
+                            var result: CommandSourceResult = tasks.isEmpty ? .pending : .ready
+                            for task in tasks {
+                                switch await task.value {
+                                case .failed: result = .failed
+                                case .pending: if case .ready = result { result = .pending }
+                                case .ready: break
+                                }
+                            }
+                            switch result {
+                            case .ready:
+                                await UnixSocketClient.shared.notifySourceReady(displayID: displayID, requestID: requestID, success: true)
+                            case .pending:
+                                await UnixSocketClient.shared.notifySourcePending(displayID: displayID, requestID: requestID)
+                            case .failed:
+                                await UnixSocketClient.shared.notifySourceReady(displayID: displayID, requestID: requestID, success: false)
+                            }
+                        }
+                    }
+                } else if let requestID = cmd.requestID {
+                    Task {
+                        await UnixSocketClient.shared.notifySourceReady(
+                            displayID: displayID, requestID: requestID, success: false)
+                    }
+                }
+            } else if let requestID = cmd.requestID {
+                Task {
+                    await UnixSocketClient.shared.notifySourceReady(
+                        displayID: displayID, requestID: requestID, success: false)
                 }
             }
         } else if cmd.action == "switch_image", let sourceID = cmd.videoID, let displayID = cmd.displayID {
             extLog("[Commands] Socket switch_image: display=\(displayID) source=\(sourceID)")
-            if let path = UnixSocketClient.shared.fetchVideoPathSync(for: sourceID) {
-                let url = URL(fileURLWithPath: path)
-                if FileManager.default.fileExists(atPath: path) {
-                    // 多显示器：按 displayID 写各自一格缓存，避免覆盖其它屏的缓存。
-                    WallpaperState.shared.setCachedImageURL(url, for: displayID)
-                    WallpaperXPCHandler.switchActiveContextToStaticImage(displayID: displayID, sourceID: sourceID, imageURL: url)
+            let requestID = cmd.requestID
+            func fail() {
+                guard let requestID else { return }
+                Task {
+                    await UnixSocketClient.shared.notifySourceReady(
+                        displayID: displayID, requestID: requestID, success: false)
+                }
+            }
+            guard let path = UnixSocketClient.shared.fetchVideoPathSync(for: sourceID) else {
+                fail(); return
+            }
+            let url = URL(fileURLWithPath: path)
+            guard FileManager.default.fileExists(atPath: path) else {
+                fail(); return
+            }
+            let published = WallpaperXPCHandler.publishedSource(for: displayID)
+            guard published.imageURL?.standardizedFileURL == url.standardizedFileURL else { fail(); return }
+            // 多显示器：按 displayID 写各自一格缓存，避免覆盖其它屏的缓存。
+            WallpaperState.shared.setCachedImageURL(url, for: displayID)
+            if WallpaperState.shared.allActiveContexts(for: displayID).isEmpty {
+                WallpaperState.shared.setPendingImage(url, for: displayID)
+                if let requestID {
+                    Task { await UnixSocketClient.shared.notifySourcePending(displayID: displayID, requestID: requestID, missingContext: true) }
+                }
+                return
+            }
+            WallpaperXPCHandler.switchActiveContextToStaticImage(
+                displayID: displayID, sourceID: sourceID, imageURL: url,
+                isCurrent: { WallpaperXPCHandler.publishedSource(for: displayID).imageURL?.standardizedFileURL == url.standardizedFileURL }
+            ) { applied in
+                guard let requestID else { return }
+                Task {
+                    if !applied, WallpaperState.shared.allActiveContexts(for: displayID).isEmpty,
+                       WallpaperXPCHandler.publishedSource(for: displayID).imageURL?.standardizedFileURL == url.standardizedFileURL {
+                        await UnixSocketClient.shared.notifySourcePending(displayID: displayID, requestID: requestID, missingContext: true)
+                    } else {
+                        await UnixSocketClient.shared.notifySourceReady(
+                            displayID: displayID, requestID: requestID, success: applied)
+                    }
                 }
             }
         }

@@ -113,9 +113,27 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             requestedURL = url
             didSignalReady = false
 
-            // 本地文件：直接播
+            // 本地文件：可播性兜底——AVFoundation 打不开（如 elst 计数损坏的
+            // Workshop 视频）先用内置 ffmpeg 转封装修复（与桌面应用链路共享缓存），
+            // 否则背景层直接黑屏、连封面都不垫。
             if url.isFileURL {
-                startPlayback(with: url, in: view)
+                resolveTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        let playable = try await VideoRepairService.playableVideoURL(for: url)
+                        guard !Task.isCancelled, self.requestedURL == url else { return }
+                        guard let container = self.containerView else { return }
+                        self.startPlayback(with: playable, in: container)
+                    } catch is CancellationError {
+                        // teardown 已清场
+                    } catch {
+                        print("[LoopingVideoBackground] repair failed: \(url.lastPathComponent) \(error)")
+                        self.signalReadyOnce()
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                    self?.signalReadyOnce()
+                }
                 return
             }
 

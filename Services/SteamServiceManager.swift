@@ -28,12 +28,23 @@ struct SteamSubscriptionPage: Codable, Sendable {
     let items: [SteamSubscriptionItem]
 }
 
+/// listUserFiles 的一页结果（CPublishedFile_GetUserFiles，type=myfiles）：
+/// 某作者在本应用下的公开创意工坊作品 ID，按创建时间从新到旧。
+/// `nextStartIndex` 按服务端实际返回条数推进；`total` 是精确总数。
+struct SteamUserFilesPage: Codable, Sendable {
+    let total: Int
+    let startIndex: Int
+    let nextStartIndex: Int
+    let workshopIDs: [String]
+}
+
 enum SteamServiceError: LocalizedError {
     case unavailable(String)
     case busy
     case notAuthenticated
     case authenticationFailed(String, String?)
     case downloadFailed(String, String?)
+    case requestFailed(String, String?)
     case cancelled
 
     var errorDescription: String? {
@@ -43,13 +54,14 @@ enum SteamServiceError: LocalizedError {
         case .notAuthenticated: return "Steam 服务尚未登录，请到「设置 → Steam 服务」中登录。"
         case .authenticationFailed(let message, _): return message
         case .downloadFailed(let message, _): return message
+        case .requestFailed(let message, _): return message
         case .cancelled: return "Steam 下载已取消。"
         }
     }
 
     var errorCode: String? {
         switch self {
-        case .authenticationFailed(_, let code), .downloadFailed(_, let code):
+        case .authenticationFailed(_, let code), .downloadFailed(_, let code), .requestFailed(_, let code):
             return code
         default:
             return nil
@@ -513,6 +525,161 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                         startIndex: returnedStart,
                         items: items
                     ))
+                }
+            }
+        }
+    }
+
+    /// 走协议层分页拉取某作者的公开创意工坊作品 ID（新到旧）。
+    /// 社区作者页会对匿名访客隐藏带成人内容描述符的作品（列表和 `of N` 都不含），
+    /// 这里拿到的是完整列表与精确总数。
+    func fetchUserFiles(creatorSteamID: String, startIndex: Int, count: Int) async throws -> SteamUserFilesPage {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return try await BackgroundRuntimeBridge.requestCodable(
+                "steam.userFiles.wait",
+                arguments: BackgroundPropertyList.encode([
+                    "creator": creatorSteamID,
+                    "start": startIndex,
+                    "count": count
+                ]),
+                resultKey: "page",
+                as: SteamUserFilesPage.self
+            )
+        }
+        guard await waitForRestoredSessionIfNeeded() else {
+            throw SteamServiceError.notAuthenticated
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SteamUserFilesPage, Error>) in
+            ioQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    return
+                }
+                guard self.sessionIsLoggedIn else {
+                    continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                    return
+                }
+                self.sendCommandOnQueue("listUserFiles", fields: [
+                    "creatorSteamId": creatorSteamID,
+                    "startIndex": max(0, startIndex),
+                    "count": max(1, count)
+                ]) { _, message, errorCode, data in
+                    if errorCode == "NOT_AUTHENTICATED" {
+                        continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                        return
+                    }
+                    guard let data else {
+                        continuation.resume(throwing: SteamServiceError.requestFailed(
+                            message ?? "获取作者作品列表失败。",
+                            errorCode
+                        ))
+                        return
+                    }
+                    guard let total = data["total"] as? Int,
+                          let returnedStart = data["startIndex"] as? Int,
+                          let nextStart = data["nextStartIndex"] as? Int,
+                          let ids = data["workshopIds"] as? [String] else {
+                        continuation.resume(throwing: SteamServiceError.requestFailed(
+                            "Steam 服务返回的作者作品数据格式异常。",
+                            "MALFORMED_USER_FILES"
+                        ))
+                        return
+                    }
+                    continuation.resume(returning: SteamUserFilesPage(
+                        total: total,
+                        startIndex: returnedStart,
+                        nextStartIndex: nextStart,
+                        workshopIDs: ids.filter { !$0.isEmpty }
+                    ))
+                }
+            }
+        }
+    }
+
+    /// 修改当前账号对单个 Workshop 项目的订阅状态。
+    func setSubscribed(_ subscribed: Bool, workshopID: String) async throws {
+        guard !workshopID.isEmpty else {
+            throw SteamServiceError.downloadFailed("Workshop ID 不能为空。", "INVALID_WORKSHOP_ID")
+        }
+        if BackgroundRuntimeRole.isRemoteUI {
+            try await BackgroundRuntimeBridge.requestVoid(
+                "steam.subscription.wait",
+                arguments: BackgroundPropertyList.encode(["id": workshopID, "subscribed": subscribed])
+            )
+            return
+        }
+        guard await waitForRestoredSessionIfNeeded() else {
+            throw SteamServiceError.notAuthenticated
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            ioQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    return
+                }
+                guard self.sessionIsLoggedIn else {
+                    continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                    return
+                }
+                self.sendCommandOnQueue(
+                    subscribed ? "subscribe" : "unsubscribe",
+                    fields: ["workshopId": workshopID]
+                ) { success, message, errorCode, _ in
+                    if success {
+                        continuation.resume()
+                    } else if errorCode == "NOT_AUTHENTICATED" {
+                        continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                    } else {
+                        continuation.resume(throwing: SteamServiceError.requestFailed(
+                            message ?? (subscribed ? "订阅 Workshop 项目失败。" : "取消订阅 Workshop 项目失败。"),
+                            errorCode
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// 批量查询订阅状态，供本地库去重；服务每次最多处理 100 个 ID。
+    func fetchSubscriptionStates(workshopIDs: [String]) async throws -> [String: Bool] {
+        if BackgroundRuntimeRole.isRemoteUI {
+            return try await BackgroundRuntimeBridge.requestCodable(
+                "steam.subscriptionStates.wait",
+                arguments: BackgroundPropertyList.encode(["ids": workshopIDs]),
+                resultKey: "states",
+                as: [String: Bool].self
+            )
+        }
+        guard await waitForRestoredSessionIfNeeded() else {
+            throw SteamServiceError.notAuthenticated
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            ioQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    return
+                }
+                guard self.sessionIsLoggedIn else {
+                    continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                    return
+                }
+                self.sendCommandOnQueue("checkSubscriptionStates", fields: ["workshopIds": workshopIDs]) { success, message, errorCode, data in
+                    guard success, let items = data?["items"] as? [[String: Any]] else {
+                        if errorCode == "NOT_AUTHENTICATED" {
+                            continuation.resume(throwing: SteamServiceError.notAuthenticated)
+                        } else {
+                            continuation.resume(throwing: SteamServiceError.requestFailed(
+                                message ?? "获取 Workshop 订阅状态失败。", errorCode
+                            ))
+                        }
+                        return
+                    }
+                    let states = items.reduce(into: [String: Bool]()) { result, item in
+                        if let id = item["workshopId"] as? String, let subscribed = item["subscribed"] as? Bool {
+                            result[id] = subscribed
+                        }
+                    }
+                    continuation.resume(returning: states)
                 }
             }
         }

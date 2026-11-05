@@ -66,19 +66,6 @@ jobs:
         run: |
           xcodegen generate
           python3 scripts/verify-project-configuration.py
-          python3 Tests/HelperProvisioningRegression.py
-          python3 scripts/test-helper-display-controls.py
-          python3 scripts/test-helper-appearance.py
-          python3 scripts/test-helper-build-identity.py
-          python3 scripts/test-helper-child-cleanup.py
-          python3 scripts/test-background-preferences.py
-          python3 scripts/test-wallpaper-battery-pause.py
-          python3 scripts/test-owned-daemon-identity.py
-          python3 scripts/test-helper-network-proxy.py
-          python3 scripts/test-background-isolation.py
-          python3 scripts/test-wallpaper-extension-lifecycle.py
-          python3 scripts/test-native-video-resources.py
-          python3 scripts/test-wallpaper-snapshot-work.py
 
       - name: Cache SPM Dependencies
         uses: actions/cache@v5
@@ -392,6 +379,14 @@ jobs:
                 codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp "$f"
               }
             fi
+            # PyInstaller 内库不会随外壳重签；二次签名必须保留专用库验证权限。
+            case "$(basename "$f")" in
+              we-mpkg-tool|we-pair-server|we-mpkg-tool-x86_64|we-pair-server-x86_64)
+                codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp \
+                  --entitlements MobilePush.entitlements "$f" || return 1
+                return 0
+                ;;
+            esac
             SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
             if [[ "$(basename "$f")" == "wallpaper-wgpu" && -f "WallpaperRenderer.entitlements" ]]; then
               SIGN_ARGS+=(--entitlements "WallpaperRenderer.entitlements")

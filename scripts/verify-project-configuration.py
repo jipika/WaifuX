@@ -57,6 +57,9 @@ for target in objects.values():
         for source in ('OwnedProcessIdentity.swift', 'WallpaperBatteryPauseOwnership.swift', 'WallpaperAutoPauseApplicationIdentity.swift',
                        'VideoFreezeFrameBudget.swift', 'VideoPosterCacheBudget.swift', 'DeferredResourceCleanup.swift'):
             assert any(path.endswith(source) for path in source_paths), (name, 'shared lifecycle/policy source', source)
+        # The host validates staged lock-screen images with the extension's exact decoder and budget.
+        for source in ('WallpaperBoundedImageDecoder.swift', 'LockScreenImagePublication.swift', 'WallpaperSnapshotPixelBudget.swift'):
+            assert any(path.endswith(source) for path in source_paths), (name, 'shared static-image source', source)
         resource_paths = {
             objects[objects[file]['fileRef']].get('path')
             for phase in target['buildPhases'] if objects[phase]['isa'] == 'PBXResourcesBuildPhase'
@@ -67,13 +70,18 @@ for target in objects.values():
         permissions = plistlib.loads((ROOT / entitlements).read_bytes())
         assert 'group.com.waifux.app' in permissions['com.apple.security.application-groups'], name
     if name == 'WaifuXWallpaperExtension':
+        # pkd ignores unsandboxed plug-ins, so every configuration must sign with the sandbox.
+        assert permissions.get('com.apple.security.app-sandbox') is True, (name, 'extension must be sandboxed')
+        assert re.search(r'^\s+com\.apple\.security\.app-sandbox: true$', spec, re.M), \
+            (name, 'project.yml must keep the extension sandbox entitlement')
         source_paths = {
             objects[objects[file]['fileRef']].get('path', '')
             for phase in target['buildPhases'] if objects[phase]['isa'] == 'PBXSourcesBuildPhase'
             for file in objects[phase]['files']
         }
         for source in ('WallpaperContextGeneration.swift', 'VideoPlaybackRecoveryPolicy.swift',
-                       'LatestWallpaperSnapshotWork.swift', 'WallpaperSnapshotPixelBudget.swift'):
+                       'LatestWallpaperSnapshotWork.swift', 'WallpaperSnapshotPixelBudget.swift',
+                       'WallpaperBoundedImageDecoder.swift'):
             assert any(path.endswith(source) for path in source_paths), (name, 'memory lifecycle source', source)
 helper_info = plistlib.loads((ROOT / 'BackgroundAgent/Info.plist').read_bytes())
 for key in ['NSAudioCaptureUsageDescription', 'NSScreenCaptureDescription', 'NSAppleMusicUsageDescription', 'NSAppleEventsUsageDescription']:

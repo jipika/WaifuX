@@ -29,6 +29,7 @@
 import Darwin
 import Foundation
 import os
+import Security
 
 enum WallpaperExtensionKeeper {
     // MARK: - 常量
@@ -43,6 +44,8 @@ enum WallpaperExtensionKeeper {
     private static let extensionExecutableSuffix =
         "/WaifuXWallpaperExtension.appex/Contents/MacOS/WaifuXWallpaperExtension"
     private static let mainExecutableName = "WaifuX"
+    private static let lsregisterPath =
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     private static let log = OSLog(subsystem: "com.waifux.app", category: "WallpaperKeeper")
 
     /// 正常巡检间隔
@@ -108,7 +111,8 @@ enum WallpaperExtensionKeeper {
     /// 3) 主 App 未运行（App 在跑时由 App 侧 repair/健康检查负责，keeper 让位）
     static func shouldGuard() -> Bool {
         guard WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
-        guard processPids { $0.hasSuffix(extensionExecutableSuffix) }.isEmpty else { return false }
+        // 进程表读不到时不能当作扩展已死。
+        guard observedExtensionProcessPids()?.isEmpty == true else { return false }
         guard mainAppPids().isEmpty else { return false }
         return true
     }
@@ -122,20 +126,38 @@ enum WallpaperExtensionKeeper {
     }
 
     /// Registration wakes pkd and can remove a healthy extension instance.
+    /// 进程表读不到时按「在运行」处理，调用方因此不会在未知状态下注册。
     static func isExtensionProcessRunning() -> Bool {
-        !processPids(matching: { $0.hasSuffix(extensionExecutableSuffix) }).isEmpty
+        observedExtensionProcessPids()?.isEmpty != true
+    }
+
+    /// nil 表示进程表不可观测；空数组才表示确实没有扩展进程。
+    static func observedExtensionProcessPids() -> [pid_t]? {
+        observedProcessPids(
+            matching: { $0.hasSuffix(extensionExecutableSuffix) },
+            matchingProcessName: "WaifuXWallpaperExtension"
+        )
     }
 
     private static func processPids(
         matching predicate: (String) -> Bool,
         excludingPID excluded: pid_t? = nil
     ) -> [pid_t] {
+        observedProcessPids(matching: predicate, excludingPID: excluded) ?? []
+    }
+
+    private static func observedProcessPids(
+        matching predicate: (String) -> Bool,
+        matchingProcessName: String? = nil,
+        excludingPID excluded: pid_t? = nil
+    ) -> [pid_t]? {
         let needed = proc_listallpids(nil, 0)
-        guard needed > 0 else { return [] }
+        guard needed > 0 else { return nil }
         var pids = [pid_t](repeating: 0, count: Int(needed) + 8)
         // buffersize 单位是字节（libproc 语义），返回值是实际填充的 pid 个数
         let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-        guard count > 0 else { return [] }
+        // 列表已填满时可能截断，不能把漏掉的扩展误判为不存在。
+        guard count > 0, Int(count) < pids.count else { return nil }
 
         var result: [pid_t] = []
         result.reserveCapacity(Int(count))
@@ -144,9 +166,17 @@ enum WallpaperExtensionKeeper {
             // PROC_PIDPATHINFO_MAXSIZE
             var buf = [CChar](repeating: 0, count: 4096)
             let len = proc_pidpath(pid, &buf, UInt32(buf.count))
-            guard len > 0 else { continue }
-            if predicate(String(cString: buf)) {
-                result.append(pid)
+            if len > 0 {
+                let bytes = buf.prefix(Int(len)).prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                if predicate(String(decoding: bytes, as: UTF8.self)) { result.append(pid) }
+            } else if let matchingProcessName {
+                // 路径不可读时再按短进程名识别；宁可让同名进程挡住注册，也不能误杀健康扩展。
+                var name = [CChar](repeating: 0, count: 256)
+                let nameLength = proc_name(pid, &name, UInt32(name.count))
+                if nameLength > 0 {
+                    let bytes = name.prefix(Int(nameLength)).prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                    if String(decoding: bytes, as: UTF8.self) == matchingProcessName { result.append(pid) }
+                }
             }
         }
         return result
@@ -154,56 +184,63 @@ enum WallpaperExtensionKeeper {
 
     // MARK: - 自愈
 
-    /// 重新注册内嵌扩展，触发 WallpaperAgent 重新拉载。
-    /// 与 WaifuXApp 启动 repair 的注册序列一致（lsregister -f → pluginkit -a → -e use）。
+    /// 重新注册内嵌扩展，触发 WallpaperAgent 重新拉载（CLI keeper 模式：等待进程出现）。
     static func reviveExtension() -> Bool {
         let extensionURL = WaifuXHostBundle.bundleURL
             .appendingPathComponent("Contents/PlugIns/WaifuXWallpaperExtension.appex", isDirectory: true)
-        return reviveExtension(at: extensionURL)
+        return reviveExtension(at: extensionURL, waitForActivation: true)
     }
 
-    static func reviveExtension(at extensionURL: URL, shouldContinue: @Sendable () -> Bool = { true }) -> Bool {
+    /// 只注册签名与沙盒授权有效的宿主内 appex。每一步之前复查选择状态与扩展进程：
+    /// 注册会让 pkd remove 同 bundle ID 的全部实例，对存活扩展执行就是本案凶器。
+    /// - waitForActivation: false 时只报告注册命令是否被接受；激活由调用方
+    ///   （Helper healer）以「新实例上报活跃上下文并保持稳定」单独验证。
+    static func reviveExtension(
+        at extensionURL: URL,
+        waitForActivation: Bool = true,
+        shouldContinue: @Sendable () -> Bool = { true }
+    ) -> Bool {
         guard !BackgroundRuntimeRole.isIsolatedTest, shouldContinue() else { return false }
         guard FileManager.default.fileExists(atPath: extensionURL.path) else {
             keeperLog("embedded appex missing at \(extensionURL.path)")
             return false
         }
-
-        guard WallpaperStoreSelectionProbe.currentSelection() == .selected else {
-            keeperLog("extension no longer selected — skip registration")
-            return false
+        // 只放行实测的 lsregister Spotlight -10811；其它工具错误立即中止并退避。
+        let steps: [(label: String, tool: String, arguments: [String])] = [
+            ("lsregister", lsregisterPath, ["-f", extensionURL.path]),
+            ("pluginkit add", "/usr/bin/pluginkit", ["-a", extensionURL.path]),
+            ("pluginkit enable", "/usr/bin/pluginkit", ["-e", "use", "-i", extensionBundleID]),
+        ]
+        for step in steps {
+            guard shouldContinue() else { return false }
+            if let reason = registrationRejectionReason(for: extensionURL) {
+                keeperLog("refuse to register \(extensionURL.path): \(reason)")
+                return false
+            }
+            guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else {
+                keeperLog("extension no longer selected — stop before \(step.label)")
+                return false
+            }
+            guard !isExtensionProcessRunning() else {
+                keeperLog("extension present (or process table unavailable) before \(step.label) — stop registering")
+                return true
+            }
+            let result = runTool(step.tool, arguments: step.arguments, label: step.label)
+            guard WallpaperExtensionRecoveryPolicy.registrationToolAccepted(
+                label: step.label, status: result.status, output: result.output
+            ) else {
+                keeperLog("\(step.label) failed (exit=\(result.status)) — abort registration")
+                return false
+            }
         }
-
-        // revive 前最后一道闸：注册操作会触发 pkd remove all instances，
-        // 对存活扩展执行等于亲手触发本案凶器，因此此刻仍确认扩展不在才动手。
-        guard !isExtensionProcessRunning() else {
-            keeperLog("extension appeared just before revive — skip registration")
-            return true
-        }
-        guard shouldContinue() else { return false }
-
-        runTool(
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-            arguments: ["-f", extensionURL.path],
-            label: "lsregister"
-        )
-        guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
-        guard !isExtensionProcessRunning() else { return true }
-        runTool("/usr/bin/pluginkit", arguments: ["-a", extensionURL.path], label: "pluginkit add")
-        guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
-        guard !isExtensionProcessRunning() else { return true }
-        runTool(
-            "/usr/bin/pluginkit",
-            arguments: ["-e", "use", "-i", extensionBundleID],
-            label: "pluginkit enable"
-        )
+        guard waitForActivation else { return true }
 
         var waited: UInt32 = 0
         while waited < reviveVerifyWindowSeconds {
             guard shouldContinue(), WallpaperStoreSelectionProbe.currentSelection() == .selected else { return false }
             sleep(5)
             waited += 5
-            if !processPids(matching: { $0.hasSuffix(extensionExecutableSuffix) }).isEmpty {
+            if observedExtensionProcessPids()?.isEmpty == false {
                 return true
             }
         }
@@ -211,8 +248,35 @@ enum WallpaperExtensionKeeper {
         return false
     }
 
+    /// PlugInKit 拒绝未沙盒或签名无效的 appex（"plug-ins must be sandboxed"），
+    /// 注册这类副本只会触发 remove，拉不起任何实例。
+    static func registrationRejectionReason(for extensionURL: URL) -> String? {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(extensionURL as CFURL, [], &staticCode) == errSecSuccess,
+              let staticCode else {
+            return WallpaperExtensionRecoveryPolicy.registrationRejectionReason(
+                signatureValid: false, signingIdentifier: nil, entitlements: nil)
+        }
+        let signatureValid = SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess
+        var information: CFDictionary?
+        let copied = SecCodeCopySigningInformation(
+            staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess
+        let info = copied ? (information as NSDictionary?) as? [String: Any] : nil
+        return WallpaperExtensionRecoveryPolicy.registrationRejectionReason(
+            signatureValid: signatureValid,
+            signingIdentifier: info?[kSecCodeInfoIdentifier as String] as? String,
+            entitlements: info?[kSecCodeInfoEntitlementsDict as String] as? [String: Any]
+        )
+    }
+
+    private struct ToolResult {
+        let status: Int32
+        let output: String
+    }
+
+    /// 保留真实退出码与输出；无法启动时状态为 -1。
     @discardableResult
-    private static func runTool(_ launchPath: String, arguments: [String], label: String) -> String {
+    private static func runTool(_ launchPath: String, arguments: [String], label: String) -> ToolResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
@@ -223,14 +287,14 @@ enum WallpaperExtensionKeeper {
             try process.run()
         } catch {
             keeperLog("\(label) failed to launch: \(error.localizedDescription)")
-            return ""
+            return ToolResult(status: -1, output: error.localizedDescription)
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         let output = String(data: data, encoding: .utf8) ?? ""
         let tail = output.isEmpty ? "" : " output=\(output.prefix(400))"
         keeperLog("\(label) exit=\(process.terminationStatus)\(tail)")
-        return output
+        return ToolResult(status: process.terminationStatus, output: output)
     }
 
     // MARK: - LaunchAgent 管理（仅 App 进程调用）

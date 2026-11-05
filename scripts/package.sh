@@ -645,6 +645,14 @@ sign_exported_app() {
       fi
       local ent_check
       ent_check=$(codesign -d --entitlements - "$code_path" 2>/dev/null || true)
+      # Unlike a missing App Group, a missing sandbox makes the extension unusable:
+      # pkd ignores it ("plug-ins must be sandboxed"), so no override applies.
+      if ! echo "$ent_check" | grep -q "com.apple.security.app-sandbox"; then
+        echo "❌ App Extension 签名缺少 app-sandbox entitlement: $code_path" >&2
+        echo "pkd 会以 'plug-ins must be sandboxed' 拒绝加载该扩展，产物不可用。" >&2
+        echo "$ent_check" | head -20 >&2
+        return 1
+      fi
       if ! echo "$ent_check" | grep -q "com.apple.security.application-groups"; then
         if [[ -n "${WAIFUX_ALLOW_MISSING_APPGROUP:-}" ]]; then
           echo "  ⚠️ WAIFUX_ALLOW_MISSING_APPGROUP=1：跳过扩展 application-groups 校验（本地构建产物，不可对外分发）"
@@ -724,15 +732,15 @@ sign_exported_app() {
         done
   )
 
-  # 推送到手机工具（PyInstaller 单文件，Mach-O 可执行）：必须带 hardened runtime + 安全时间戳，
-  # 否则公证人/网关拦截。无 entitlements 需求，直接用外层身份签。
-  # 注：它们本来就会命中上面的 Mach-O 遍历被 ad-hoc 或身份签一遍，这里显式重签保证
-  # --options runtime + --timestamp 与主 App 一致，公证不因这两个新成员挂掉。
-  # universal 包会同时带 arm64 扁名与 -x86_64 后缀件，两份都要带安全时间戳重签。
+  # PyInstaller 单文件的内嵌 Python / 扩展库仍为 ad-hoc 签名；只重签外壳不会改变归档，
+  # hardened runtime 默认会以 different Team IDs 拒绝加载解压到 _MEI* 的库。
+  # 仅给推送工具放宽库验证，保留 hardened runtime + 安全时间戳；主 App 权限不继承给它们。
+  # universal 包同时携带 arm64 扁名和 -x86_64 后缀件，两套都要使用专用 entitlements。
   for push_tool in we-mpkg-tool we-pair-server we-mpkg-tool-x86_64 we-pair-server-x86_64; do
     local push_tool_path="$app_path/Contents/Resources/$push_tool"
     if [[ -f "$push_tool_path" ]]; then
-      codesign --force --timestamp --options runtime -s "$identity" "$push_tool_path" || {
+      codesign --force --timestamp --options runtime \
+        --entitlements "$PROJECT_DIR/MobilePush.entitlements" -s "$identity" "$push_tool_path" || {
         echo "  ❌ 推送工具签名失败: $push_tool_path" >&2
         return 1
       }

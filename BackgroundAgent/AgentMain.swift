@@ -115,8 +115,36 @@ private final class UIClientExitMonitor {
 }
 
 private final class AgentConnectionListener: NSObject, NSXPCListenerDelegate {
+    /// 启动时读一次自身签名的团队 ID。
+    ///
+    /// 不能每次连接现读：用户把旧包拖进废纸篓并清空、再装新包后，运行中的
+    /// 旧 Helper 的可执行文件已不在磁盘上，`SecCodeCopySelf` 直接失败
+    /// （实测 100002，`proc_pidpath` 也读不到）。旧实现于是对每个新 UI 都返回
+    /// false，客户端立刻收到 4097「无法与帮助程序通信。」，而 Helper 进程本身
+    /// 一直活着、launchd 也不会换掉它（2026-11-01 用户机：runs=1、never exited）。
+    /// 缓存后连接能被接受，UI 的 `ensureCurrentHelper` 再按构建身份走
+    /// `prepareForUpgrade` 让 launchd 从新包重新拉起。
+    private let ownTeamIdentifier: String? = AgentConnectionListener.readOwnTeamIdentifier()
+
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard connection.effectiveUserIdentifier == getuid(), trustedClient(connection) else { return false }
+        let rejection: String?
+        if connection.effectiveUserIdentifier != getuid() {
+            rejection = "uid mismatch (\(connection.effectiveUserIdentifier))"
+        } else {
+            rejection = untrustedReason(connection)
+        }
+        if let rejection {
+            if !BackgroundRuntimeRole.isIsolatedTest {
+                AppLogger.throttled(.error, .startup, key: "helper.connection.rejected", interval: 5,
+                                    "Helper rejected client connection",
+                                    metadata: ["reason": rejection,
+                                               "clientPID": connection.processIdentifier,
+                                               "clientPath": BackgroundChildProcessCleanup.executablePath(connection.processIdentifier),
+                                               "helperPID": getpid(),
+                                               "helperPath": BackgroundChildProcessCleanup.executablePath(getpid())])
+            }
+            return false
+        }
         connection.exportedInterface = NSXPCInterface(with: BackgroundAgentXPC.self)
         connection.remoteObjectInterface = NSXPCInterface(with: BackgroundAgentObserver.self)
         connection.exportedObject = AgentEndpoint(connection: connection)
@@ -132,32 +160,49 @@ private final class AgentConnectionListener: NSObject, NSXPCListenerDelegate {
         return true
     }
 
-    private func trustedClient(_ connection: NSXPCConnection) -> Bool {
+    /// nil = 可信；否则返回拒绝原因（写进日志，下次导出能直接定案）。
+    private func untrustedReason(_ connection: NSXPCConnection) -> String? {
         #if DEBUG
-        if BackgroundRuntimeRole.isIsolatedTest { return true }
+        if BackgroundRuntimeRole.isIsolatedTest { return nil }
         // Development builds can be unsigned. Still require the exact host executable.
         var path = [CChar](repeating: 0, count: 4096)
-        if proc_pidpath(connection.processIdentifier, &path, UInt32(path.count)) > 0,
-           let expected = Bundle(url: WaifuXHostBundle.bundleURL)?.executableURL {
-            return URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath() == expected.resolvingSymlinksInPath()
+        guard proc_pidpath(connection.processIdentifier, &path, UInt32(path.count)) > 0 else {
+            return "client path unavailable"
         }
-        return false
+        guard let expected = Bundle(url: WaifuXHostBundle.bundleURL)?.executableURL else {
+            return "host executable unavailable"
+        }
+        let actual = URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath()
+        return actual == expected.resolvingSymlinksInPath() ? nil : "client is not the host executable (\(expected.path))"
         #else
         var guest: SecCode?
         let attributes = [kSecGuestAttributePid as String: NSNumber(value: connection.processIdentifier)] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess, let guest else { return false }
-        var own: SecCode?
-        guard SecCodeCopySelf([], &own) == errSecSuccess, let own else { return false }
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(own, [], &staticCode) == errSecSuccess, let staticCode else { return false }
-        var info: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let team = (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String else { return false }
+        let guestStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest)
+        guard guestStatus == errSecSuccess, let guest else { return "client code lookup failed (\(guestStatus))" }
+        guard let team = ownTeamIdentifier ?? Self.readOwnTeamIdentifier() else {
+            return "helper team identifier unavailable"
+        }
         let text = "identifier \"com.waifux.app\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
         var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else { return false }
-        return SecCodeCheckValidity(guest, [], requirement) == errSecSuccess
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else {
+            return "requirement build failed"
+        }
+        let validity = SecCodeCheckValidity(guest, [], requirement)
+        return validity == errSecSuccess ? nil : "client signature check failed (\(validity), team \(team))"
         #endif
+    }
+
+    /// 当前进程签名里的团队 ID。可执行文件被删掉后会读不到，所以只在启动时调用并缓存。
+    private static func readOwnTeamIdentifier() -> String? {
+        var own: SecCode?
+        guard SecCodeCopySelf([], &own) == errSecSuccess, let own else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(own, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess else {
+            return nil
+        }
+        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
     }
 }
 
@@ -179,12 +224,37 @@ private final class AgentApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suffix = BackgroundRuntimeRole.isIsolatedTest ? ".test" : ""
-        instanceLock = open(directory.appendingPathComponent("background-helper\(suffix).lock").path, O_CREAT | O_RDWR, 0o600)
-        guard instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) == 0 else { exit(0) }
+        let lockPath = directory.appendingPathComponent("background-helper\(suffix).lock").path
+        instanceLock = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        let openErrno = instanceLock < 0 ? errno : 0
+        let locked = instanceLock >= 0 && flock(instanceLock, LOCK_EX | LOCK_NB) == 0
+        let lockErrno = instanceLock >= 0 && !locked ? errno : 0
+        guard locked else {
+            // 拿不到锁 = 另一个 Helper 在跑。以前静默 exit(0)，导出日志里什么都看不到。
+            if !BackgroundRuntimeRole.isIsolatedTest {
+                let holders = BackgroundChildProcessCleanup.helperProcesses(lockPath: lockPath).filter(\.holdsLock)
+                AppLogger.error(.startup, "Helper exiting: instance lock unavailable", metadata: [
+                    "pid": getpid(),
+                    "path": BackgroundChildProcessCleanup.executablePath(getpid()),
+                    "openErrno": openErrno,
+                    "lockErrno": lockErrno,
+                    "holders": holders.isEmpty ? "unknown" : holders.map { "\($0.child.pid)@\($0.path)" }.joined(separator: ";"),
+                ])
+                AppLogger.flushPendingWrites()
+            }
+            exit(0)
+        }
         let listener = NSXPCListener(machServiceName: ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_SERVICE"] ?? BackgroundAgentWire.machServiceName)
         listener.delegate = connectionListener
         listener.resume()
         xpcListener = listener
+        if !BackgroundRuntimeRole.isIsolatedTest {
+            AppLogger.info(.startup, "Helper process started", metadata: [
+                "pid": getpid(),
+                "path": BackgroundChildProcessCleanup.executablePath(getpid()),
+                "build": BackgroundAgentBuildIdentity.running() ?? "nil",
+            ])
+        }
         Task { await BackgroundAgentRuntime.shared.startAtLoginIfNeeded() }
     }
 

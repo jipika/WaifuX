@@ -141,9 +141,9 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     /// 为指定屏幕显示静态图：先完成黑边分析，再真正更新 overlay。
-    func showPrepared(imageURL: URL, for screen: NSScreen) async {
-        guard BackgroundRuntimeRole.isHelper else { return }
-        await showPrepared(imageURL: imageURL, for: screen, token: beginPresentation(for: screen))
+    func showPrepared(imageURL: URL, for screen: NSScreen, isCurrent: @escaping @MainActor () -> Bool = { true }) async {
+        guard BackgroundRuntimeRole.isHelper, isCurrent() else { return }
+        await showPrepared(imageURL: imageURL, for: screen, token: beginPresentation(for: screen), isCurrent: isCurrent)
     }
 
     private func beginPresentation(for screen: NSScreen) -> UUID {
@@ -160,9 +160,9 @@ final class StaticImageWallpaperOverlayManager {
         imageLetterboxAnalysisTasks.removeValue(forKey: screenID)?.cancel()
     }
 
-    private func showPrepared(imageURL: URL, for screen: NSScreen, token: UUID) async {
+    private func showPrepared(imageURL: URL, for screen: NSScreen, token: UUID, isCurrent: @escaping @MainActor () -> Bool = { true }) async {
         let screenID = screen.wallpaperScreenIdentifier
-        guard !isTerminating, !Task.isCancelled, presentationRequests[screenID] == token else { return }
+        guard !isTerminating, !Task.isCancelled, isCurrent(), presentationRequests[screenID] == token else { return }
 
         guard FileManager.default.fileExists(atPath: imageURL.path) else {
             print("[StaticImageOverlay] ⚠️ 图片不存在，跳过 overlay 显示: \(imageURL.path)")
@@ -179,26 +179,23 @@ final class StaticImageWallpaperOverlayManager {
             print("[StaticImageOverlay] ⚠️ 屏幕已断开，跳过 overlay 显示: \(screen.localizedName)")
             return
         }
-        imageByScreen[screenID] = imageURL
-        imageByScreenFingerprint[screenFingerprint] = imageURL
-        imageLetterboxContentCrops.removeValue(forKey: screenID)
         imageLetterboxAnalysisTasks[screenID]?.cancel()
         imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
 
-        // 加载图片并记录原始像素尺寸（供 CropLayoutEngine 使用）
-        if let img = NSImage(contentsOf: imageURL), img.size.width > 0, img.size.height > 0 {
-            // NSImage.size 是 point 尺寸，需乘以 rep 像素比
-            if let rep = img.representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
-                imageSizes[screenID] = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-            } else {
-                imageSizes[screenID] = img.size
-            }
+        // Stage metadata locally. A cancelled preparation must not replace the
+        // visible overlay's source map or its persisted state before commit.
+        guard let img = NSImage(contentsOf: imageURL), img.size.width > 0, img.size.height > 0 else { return }
+        let preparedSize: CGSize
+        if let rep = img.representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
+            preparedSize = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+        } else {
+            preparedSize = img.size
         }
 
         let contentCrop = await imageLetterboxCropIfNeeded(screenID: screenID, imageURL: imageURL)
         // hide/clear or even A -> B -> A supersedes this request. A URL check
         // alone cannot stop an older analysis from resurrecting an overlay.
-        guard !isTerminating, !Task.isCancelled, presentationRequests[screenID] == token else { return }
+        guard !isTerminating, !Task.isCancelled, isCurrent(), presentationRequests[screenID] == token else { return }
         guard Self.currentScreenExists(screenID: screenID, fingerprint: screenFingerprint) else {
             imageLetterboxContentCrops.removeValue(forKey: screenID)
             imageLetterboxAnalysisTasks.removeValue(forKey: screenID)
@@ -211,9 +208,9 @@ final class StaticImageWallpaperOverlayManager {
             print("[StaticImageOverlay] ⚠️ 黑边分析完成时屏幕已断开，跳过 overlay 更新: \(screen.localizedName)")
             return
         }
-        guard imageByScreen[screenID]?.standardizedFileURL == imageURL.standardizedFileURL else {
-            return
-        }
+        imageByScreen[screenID] = imageURL
+        imageByScreenFingerprint[screenFingerprint] = imageURL
+        imageSizes[screenID] = preparedSize
         if let contentCrop {
             imageLetterboxContentCrops[screenID] = contentCrop
         } else {

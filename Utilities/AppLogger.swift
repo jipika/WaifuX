@@ -196,6 +196,12 @@ final class AppLogger: @unchecked Sendable {
     /// Release 构建里除 `.error` 之外仍然落盘的模块（低频关键链路）。
     private static let releasePersistedModules: Set<AppLogModule> = [.startup]
 
+    /// 等已入队的文件写入全部落盘。只给「写完日志立刻 exit」的路径用
+    /// （例如 Helper 拿不到单实例锁）：文件写入走异步队列，不等就退出会丢最后几行。
+    static func flushPendingWrites() {
+        shared.queue.sync {}
+    }
+
     // MARK: - 格式化元数据
 
     private func formatMetadata(_ metadata: [String: Any]?) -> String {
@@ -398,6 +404,10 @@ final class AppLogger: @unchecked Sendable {
             to: destination
         )
 
+        // 「无法与帮助程序通信」光看日志定不了案（2026-11-01：只有 4097，看不出
+        // Helper 是起不来、被锁挡住还是旧进程在拒连），要现场的 launchd 与进程状态。
+        readableSegments += appendHelperState(to: destination)
+
         // Web 壁纸 daemon（主 App 未启用沙盒，/tmp 可直接读取）
         readableSegments += appendLogSegment(
             "WEB RENDERER DAEMON",
@@ -549,6 +559,60 @@ final class AppLogger: @unchecked Sendable {
         output.write(Data(segmentHeader.utf8))
         output.write(Data(String(decoding: data, as: UTF8.self).utf8))
         return 1
+    }
+
+    /// 追加 Helper 现场：全部 WaifuXHelper 进程（谁持锁）+ launchd job 状态。返回是否写入了内容。
+    private static func appendHelperState(to destination: URL) -> Int {
+        let title = "BACKGROUND HELPER STATE"
+        let lockPath = BackgroundAgentWire.productionLockFileURL.path
+        let formatter = ISO8601DateFormatter()
+        var text = "\n--- \(title) ---\n锁文件: \(lockPath)\n"
+        let helpers = BackgroundChildProcessCleanup.helperProcesses(lockPath: lockPath)
+        if helpers.isEmpty {
+            text += "WaifuXHelper 进程: 无\n"
+        } else {
+            for helper in helpers {
+                let started = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(helper.child.startedSeconds)))
+                text += "WaifuXHelper pid=\(helper.child.pid) started=\(started) holdsLock=\(helper.holdsLock) path=\(helper.path)\n"
+            }
+        }
+        let label = "gui/\(getuid())/\(BackgroundAgentWire.bundleIdentifier)"
+        text += "\n$ launchctl print \(label)\n"
+        text += captureCommand("/bin/launchctl", ["print", label], timeout: 3, maxBytes: 64 * 1024)
+        guard let output = try? FileHandle(forWritingTo: destination) else { return 0 }
+        defer { try? output.close() }
+        output.seekToEndOfFile()
+        output.write(Data(text.utf8))
+        return 1
+    }
+
+    /// 跑一条只读诊断命令，输出写临时文件再读回（不用管道，避免缓冲区写满卡死），带超时。
+    private static func captureCommand(_ executable: String, _ arguments: [String], timeout: TimeInterval, maxBytes: Int) -> String {
+        let fm = FileManager.default
+        let capture = fm.temporaryDirectory.appendingPathComponent("waifux-diag-\(UUID().uuidString).txt")
+        guard fm.createFile(atPath: capture.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: capture) else { return "[跳过] 无法创建临时文件\n" }
+        defer { try? fm.removeItem(at: capture) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = handle
+        process.standardError = handle
+        do { try process.run() } catch {
+            try? handle.close()
+            return "[跳过] 启动失败: \(error.localizedDescription)\n"
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline { usleep(50_000) }
+        let timedOut = process.isRunning
+        if timedOut { process.terminate() }
+        process.waitUntilExit()
+        try? handle.close()
+        let data = (try? Data(contentsOf: capture)) ?? Data()
+        var text = String(decoding: data.prefix(maxBytes), as: UTF8.self)
+        if !text.hasSuffix("\n") { text += "\n" }
+        text += "[exit \(process.terminationStatus)\(timedOut ? ", 超时已终止" : "")]\n"
+        return text
     }
 
     private static func appendSkipped(_ title: String, reason: String, to destination: URL) {

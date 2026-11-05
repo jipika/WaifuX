@@ -31,8 +31,12 @@ copy_prebuilt() {
     local architecture_destination="$DEST_ROOT/$architecture"
     local source="$PREBUILT_ROOT/$architecture"
     mkdir -p "$DEST_ROOT"
+    # cp -R onto an existing directory copies *into* it (arm64/arm64) and leaves
+    # the old app/ untouched, so incremental builds kept running a stale service.
+    rm -rf "${architecture_destination:?}"
     cp -R "$source" "$architecture_destination"
     if [ -d "$PREBUILT_ROOT/Licenses" ]; then
+        rm -rf "${DEST_ROOT:?}/Licenses"
         cp -R "$PREBUILT_ROOT/Licenses" "$DEST_ROOT/Licenses"
     fi
     echo "[steam-service] Copied prebuilt $architecture service from $source (set WAIFUX_STEAM_SERVICE_BUILD=1 to compile from source)."

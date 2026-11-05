@@ -32,6 +32,7 @@ struct IPCCommand: Codable {
     let action: String
     let videoID: String?
     let displayID: UInt32?
+    let requestID: String?
 }
 
 /// Unix Socket IPC 客户端
@@ -65,6 +66,21 @@ final class UnixSocketClient: Sendable {
     /// 通知 App 某个视频被选中（selectedChoicesDidChange 时调用）
     func notifyVideoSelected(_ videoID: String) async {
         _ = await send(method: "set_active_video", params: ["videoID": videoID])
+    }
+
+    /// Same request envelope; a distinct method fails closed against older hosts.
+    func notifySourcePending(displayID: UInt32, requestID: String, missingContext: Bool = false) async {
+        var params = ["displayID": String(displayID), "requestID": requestID]
+        // Decoder/prime delays are also pending, but must never request a context rebuild.
+        if missingContext { params["reason"] = "missing_context" }
+        _ = await send(method: "source_pending", params: params)
+    }
+
+    func notifySourceReady(displayID: UInt32, requestID: String, success: Bool) async {
+        _ = await send(method: "source_ready", params: [
+            "displayID": String(displayID), "requestID": requestID,
+            "success": success ? "1" : "0"
+        ])
     }
 
     /// 向 App 注册 IOSurface ID（每显示器双缓冲），同时通知管线就绪
