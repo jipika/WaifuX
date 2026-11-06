@@ -115,7 +115,8 @@ struct MenuBarQuickSwitcherView: View {
         .onAppear {
             refreshPlaybackControls()
         }
-        .task(id: viewModel.selectedItem?.id) {
+        .task(id: [viewModel.selectedItem?.id, viewModel.selectedItem?.videoPreviewURL?.absoluteString]) {
+            // 异步解析出视频 URL 后，候选 id 不变也要重新武装，延迟与动画保持原样。
             // hero 视频延迟武装：连点缩略图时不要每个都起一个播放器 —— 外置盘原片
             // 解码是弹窗里最贵的一步（CPU + IO + 一路 AVPlayer 内存）。停留超过
             // 这个时间才真正加载视频预览；快速划过时只显示静帧。

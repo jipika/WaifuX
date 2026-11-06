@@ -7,7 +7,9 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
     init(connection: NSXPCConnection) { self.connection = connection }
 
     func hello(_ reply: @escaping @Sendable (NSData) -> Void) {
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
         Task { @MainActor in
+            InteractionPerformanceLog.record(.helperCommandQueue, since: enqueuedAt, metadata: ["rpc": "hello"])
             var identity = BackgroundAgentBuildIdentity.running()
             #if DEBUG
             if BackgroundRuntimeRole.isIsolatedTest && BackgroundAgentRuntime.shared.regressionStaleIdentity { identity = "regression-stale-helper" }
@@ -29,6 +31,7 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
         }
     }
     func perform(_ command: NSData, reply: @escaping @Sendable (NSData) -> Void) {
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
         let bytes = command as Data
         // UI 的「告别」命令到达即记帐（与回复无关，mach 消息在发送者退出
         // 后仍会投递）：界面退出（cloud.syncOnUIExit）与完整退出
@@ -40,13 +43,18 @@ private final class AgentEndpoint: NSObject, BackgroundAgentXPC, @unchecked Send
             Task { @MainActor in UIClientExitMonitor.shared.markAnnouncedExit(identity) }
         }
         Task { @MainActor in
+            InteractionPerformanceLog.record(.helperCommandQueue, since: enqueuedAt, metadata: [
+                "rpc": "perform", "payloadBytes": String(bytes.count)
+            ])
             let result = await BackgroundAgentRuntime.shared.perform(bytes)
             reply(result as NSData)
             BackgroundAgentRuntime.shared.completeAcknowledgedCommand()
         }
     }
     func subscribe(_ reply: @escaping @Sendable (NSData) -> Void) {
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
         Task { @MainActor in
+            InteractionPerformanceLog.record(.helperCommandQueue, since: enqueuedAt, metadata: ["rpc": "subscribe"])
             BackgroundAgentRuntime.shared.subscribe(connection)
             reply(BackgroundAgentRuntime.shared.snapshot() as NSData)
         }

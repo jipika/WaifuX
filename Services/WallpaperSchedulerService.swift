@@ -93,15 +93,29 @@ class WallpaperSchedulerService: ObservableObject {
     private var pendingManualGlobalRotation: PendingManualGlobalRotation?
     /// Blocks a timer callback while a user-initiated apply is committing.
     private var manualWallpaperApplyInFlight = false
-    /// Cached per-root health result. Candidate construction stays memory-only;
-    /// each actual switch forces one root-level check before applying.
+    /// Cached per-root health result; UI reads only this cache.
+    /// Actual switches retain root and candidate/resource preflight checks.
     private var managedLibraryRootAvailability: (path: String, isAvailable: Bool)?
     private var unavailableLibraryRetryUntil: Date?
     /// 后台 stat 节流时间戳（防止休眠卷被高频轮询反复唤醒）。
     private var lastRootAvailabilityRefreshAt: Date?
-    /// Missing files are removed from this process's candidate pool after the
-    /// real apply path detects them, rather than being stat'ed every rotation.
-    private var unavailableSchedulableItemIDs = Set<String>()
+    /// Real applies quarantine missing sources briefly, not for the entire process:
+    /// an external volume/file can recover without a library notification.
+    private var unavailableSchedulableItemRetryAfter: [String: Date] = [:]
+    private var schedulableLibrarySubscriptions = Set<AnyCancellable>()
+    /// Only pure on-end Workshop entries need bake health to answer a UI query.
+    /// Key by record ID + the complete artifact identity, never a hash of the library.
+    private struct CachedBakedAvailability: Sendable {
+        let artifact: SceneBakeArtifact
+        let isUsable: Bool
+        let expiresAt: Date
+    }
+    private var bakedAvailabilityByRecordID: [String: CachedBakedAvailability] = [:]
+    private var pendingBakedAvailability: [String: SceneBakeArtifact] = [:]
+    private var bakedAvailabilityGeneration: UInt64 = 0
+    private var isBakedAvailabilityRefreshScheduled = false
+    private static let bakedAvailabilityQueue = DispatchQueue(label: "com.waifux.scheduler.bake-availability", qos: .utility)
+    private let bakedAvailabilityLifetime: TimeInterval = 60
 
     /// Persists screenID → fingerprint mapping so that display configs can be
     /// relinked after sleep/wake when CGDirectDisplayID may change on external monitors.
@@ -139,6 +153,13 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     private init() {
+        // Remote UI queries also own a transient availability cache. Invalidate it
+        // on root/content changes even though this process never runs the timer.
+        for name in [Notification.Name.managedLibraryContentsChanged, .downloadPathChanged] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(handleManagedLibraryChanged), name: name, object: nil
+            )
+        }
         if BackgroundRuntimeRole.isRemoteUI {
             BackgroundRuntimeBridge.observe { [weak self] snapshot in
                 guard let self, let values = snapshot["scheduler"] as? [String: Any] else { return }
@@ -164,18 +185,6 @@ class WallpaperSchedulerService: ObservableObject {
             self,
             selector: #selector(handleScreenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleManagedLibraryChanged),
-            name: .managedLibraryContentsChanged,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleManagedLibraryChanged),
-            name: .downloadPathChanged,
             object: nil
         )
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -476,17 +485,130 @@ class WallpaperSchedulerService: ObservableObject {
         applyNextWallpaper(for: screenID, requiredMode: nil, overrideOrder: .random, preferImmediatePresentation: true)
     }
 
+    /// Menu/button availability is a metadata query, not a playback preflight.
+    /// Actual next/previous/apply paths still build and validate real candidates.
     func hasSchedulableItems(for screenID: String) -> Bool {
-        guard isManagedLibraryAvailable() else { return false }
-        if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }),
-           hasUnresolvedSavedOwner(for: screen) { return false }
+        observeSchedulableLibraryChangesIfNeeded()
+        guard isCachedManagedLibraryAvailableForUI() else { return false }
+        let screen = NSScreen.screens.first { $0.wallpaperScreenIdentifier == screenID }
+        if let screen, hasUnresolvedSavedOwner(for: screen) { return false }
         let displayConfig = config.isGlobalDisplaySyncEnabled
             ? config.globalDisplayConfig
-            : NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID })
-                .map { resolvedDisplayConfig(for: $0) } ?? unresolvedDisplayConfig
-        return !getSchedulableItems(
-            for: displayConfig
-        ).isEmpty
+            : screen.map { resolvedDisplayConfig(for: $0) } ?? unresolvedDisplayConfig
+        return hasMetadataSchedulableItems(for: displayConfig)
+    }
+
+    private func hasMetadataSchedulableItems(for displayConfig: DisplaySchedulerConfig) -> Bool {
+        let requiresPlaybackEnd = displayConfig.isOnEndMode && displayConfig.webSceneSwitchSeconds == nil
+        let now = Date()
+        if displayConfig.includeWallpapers && !requiresPlaybackEnd,
+           WallpaperLibraryService.shared.downloadRecords.contains(where: { record in
+               record.isActive && matchesSchedulableFolder(record.folderID, for: displayConfig)
+                   && !isUnavailableSchedulableItem("wp_dl_\(record.id)", now: now)
+           }) { return true }
+
+        guard displayConfig.includeMedia else { return false }
+        return MediaLibraryService.shared.downloadRecords.contains { record in
+            guard record.isActive, matchesSchedulableFolder(record.folderID, for: displayConfig),
+                  !isUnavailableSchedulableItem("media_dl_\(record.id)", now: now) else { return false }
+            let ext = (record.localFilePath as NSString).pathExtension.lowercased()
+            let isDirectVideo = schedulableMediaExtensions.contains(ext)
+            let isWorkshop = record.item.id.hasPrefix("workshop_")
+            guard isDirectVideo || isWorkshop else { return false }
+            guard requiresPlaybackEnd else { return true }
+            // Match the real candidate path: an explicit .web entry is excluded
+            // even when it has a bake, while video-declared Workshop stays eligible.
+            guard ext != "web" else { return false }
+            if isDirectVideo || workshopRecordDeclaresVideo(record) { return true }
+            return hasCachedUsableBake(for: record)
+        }
+    }
+
+    private func matchesSchedulableFolder(_ itemFolderID: String?, for displayConfig: DisplaySchedulerConfig) -> Bool {
+        guard let folderIDs = displayConfig.folderIDs else { return true }
+        if folderIDs.isEmpty { return itemFolderID == nil }
+        guard let itemFolderID else { return false }
+        return folderIDs.contains(itemFolderID)
+    }
+
+    /// Subscribe lazily: no new singleton initialization dependencies or defaults
+    /// reads in init. Published record edits include tombstones, folders and bakes.
+    private func observeSchedulableLibraryChangesIfNeeded() {
+        guard schedulableLibrarySubscriptions.isEmpty else { return }
+        MediaLibraryService.shared.$downloadRecords.dropFirst().sink { [weak self] _ in
+            self?.invalidateSchedulableItemAvailability()
+        }.store(in: &schedulableLibrarySubscriptions)
+        WallpaperLibraryService.shared.$downloadRecords.dropFirst().sink { [weak self] _ in
+            self?.invalidateSchedulableItemAvailability()
+        }.store(in: &schedulableLibrarySubscriptions)
+    }
+
+    private func invalidateSchedulableItemAvailability() {
+        unavailableSchedulableItemRetryAfter.removeAll()
+        bakedAvailabilityGeneration &+= 1
+        bakedAvailabilityByRecordID.removeAll()
+        pendingBakedAvailability.removeAll()
+        isBakedAvailabilityRefreshScheduled = false
+        objectWillChange.send()
+    }
+
+    private func isUnavailableSchedulableItem(_ itemID: String, now: Date = Date()) -> Bool {
+        guard let retryAfter = unavailableSchedulableItemRetryAfter[itemID] else { return false }
+        if retryAfter > now { return true }
+        unavailableSchedulableItemRetryAfter.removeValue(forKey: itemID)
+        return false
+    }
+
+    private func hasCachedUsableBake(for record: MediaDownloadRecord) -> Bool {
+        guard let artifact = record.sceneBakeArtifact else { return false }
+        let now = Date()
+        if let cached = bakedAvailabilityByRecordID[record.id],
+           cached.artifact == artifact, cached.expiresAt > now { return cached.isUsable }
+        refreshBakedAvailabilityInBackground(recordID: record.id, artifact: artifact)
+        // A persisted artifact pointer is not proof of usable playback. Unknown
+        // and expired entries stay disabled until the background check completes.
+        return false
+    }
+
+    private func refreshBakedAvailabilityInBackground(recordID: String, artifact: SceneBakeArtifact) {
+        guard pendingBakedAvailability[recordID] != artifact else { return }
+        pendingBakedAvailability[recordID] = artifact
+        scheduleBakedAvailabilityRefreshIfNeeded()
+    }
+
+    private func scheduleBakedAvailabilityRefreshIfNeeded() {
+        guard !isBakedAvailabilityRefreshScheduled, !pendingBakedAvailability.isEmpty else { return }
+        isBakedAvailabilityRefreshScheduled = true
+        let generation = bakedAvailabilityGeneration
+        let lifetime = bakedAvailabilityLifetime
+        // Coalesce all unknown entries encountered by this runloop's UI queries.
+        // One serial batch avoids parallel reads and one publication avoids N
+        // completions causing N full metadata rechecks for a large Workshop folder.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.bakedAvailabilityGeneration == generation else { return }
+            let artifacts = self.pendingBakedAvailability
+            Self.bakedAvailabilityQueue.async { [weak self] in
+                var results: [String: (artifact: SceneBakeArtifact, isUsable: Bool)] = [:]
+                for (recordID, artifact) in artifacts {
+                    let isUsable = SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: artifact.videoPath))
+                    results[recordID] = (artifact: artifact, isUsable: isUsable)
+                }
+                let checkedResults = results
+                DispatchQueue.main.async {
+                    guard let self, self.bakedAvailabilityGeneration == generation else { return }
+                    self.isBakedAvailabilityRefreshScheduled = false
+                    let expiresAt = Date().addingTimeInterval(lifetime)
+                    for (recordID, result) in checkedResults where self.pendingBakedAvailability[recordID] == result.artifact {
+                        self.pendingBakedAvailability.removeValue(forKey: recordID)
+                        self.bakedAvailabilityByRecordID[recordID] = CachedBakedAvailability(
+                            artifact: result.artifact, isUsable: result.isUsable, expiresAt: expiresAt
+                        )
+                    }
+                    self.scheduleBakedAvailabilityRefreshIfNeeded()
+                    self.objectWillChange.send()
+                }
+            }
+        }
     }
 
     private var unresolvedDisplayConfig: DisplaySchedulerConfig {
@@ -1083,7 +1205,8 @@ class WallpaperSchedulerService: ObservableObject {
             guard let self else { return }
             self.managedLibraryRootAvailability = nil
             self.unavailableLibraryRetryUntil = nil
-            self.unavailableSchedulableItemIDs.removeAll()
+            self.lastRootAvailabilityRefreshAt = nil
+            self.invalidateSchedulableItemAvailability()
             if self.isRunning {
                 self.scheduleNextChange()
             }
@@ -2222,6 +2345,18 @@ class WallpaperSchedulerService: ObservableObject {
         return base
     }
 
+    /// UI must not resolve a security-scoped root just to enable a menu item.
+    /// Unknown health permits a metadata candidate, never a successful apply.
+    private func isCachedManagedLibraryAvailableForUI() -> Bool {
+        guard let cached = managedLibraryRootAvailability else { return true }
+        if !cached.isAvailable, (unavailableLibraryRetryUntil ?? .distantPast) <= Date() {
+            // Menus can be queried while stopped or in pure on-end mode (no timer).
+            // Expired negatives must still get a chance to notice a recovered volume.
+            refreshManagedLibraryAvailabilityInBackground(rootPath: cached.path)
+        }
+        return cached.isAvailable
+    }
+
     /// The scheduler's source of truth is the managed download library. Checking
     /// its root once per actual switch is much cheaper than stat'ing every item
     /// on a removable volume.
@@ -2235,6 +2370,11 @@ class WallpaperSchedulerService: ObservableObject {
         let rootURL = DownloadPathManager.shared.rootFolderURL.standardizedFileURL
         let rootPath = rootURL.path
         let now = Date()
+        if let cached = managedLibraryRootAvailability, cached.path != rootPath {
+            managedLibraryRootAvailability = nil
+            unavailableLibraryRetryUntil = nil
+            lastRootAvailabilityRefreshAt = nil
+        }
 
         let cacheUsable: Bool
         if let cached = managedLibraryRootAvailability, cached.path == rootPath {
@@ -2282,6 +2422,7 @@ class WallpaperSchedulerService: ObservableObject {
                 self.unavailableLibraryRetryUntil = isAvailable
                     ? nil
                     : Date().addingTimeInterval(self.unavailableLibraryRetryDelay)
+                self.objectWillChange.send()
             }
         }
     }
@@ -2667,7 +2808,7 @@ class WallpaperSchedulerService: ObservableObject {
             }
             return ok
         } catch LocalWallpaperApplyService.ApplyError.missingFile {
-            unavailableSchedulableItemIDs.insert(item.id)
+            unavailableSchedulableItemRetryAfter[item.id] = Date().addingTimeInterval(unavailableLibraryRetryDelay)
             AppLogger.error(.wallpaper, "onEnd 项文件缺失，移出本轮换池", metadata: ["item": item.fileURL.lastPathComponent])
             return false
         } catch {
@@ -2751,7 +2892,7 @@ class WallpaperSchedulerService: ObservableObject {
             )
             return ok
         } catch LocalWallpaperApplyService.ApplyError.missingFile {
-            unavailableSchedulableItemIDs.insert(item.id)
+            unavailableSchedulableItemRetryAfter[item.id] = Date().addingTimeInterval(unavailableLibraryRetryDelay)
             print("\(logTag) Removed missing global item '\(item.title)' from this session's rotation pool")
             return false
         } catch {
@@ -2760,6 +2901,7 @@ class WallpaperSchedulerService: ObservableObject {
         }
     }
 
+    private let schedulableMediaExtensions: Set<String> = ["mp4", "m4v", "mov", "mkv", "avi", "flv"]
     private let videoExtensions: Set<String> = ["mp4", "mov", "webm", "mkv", "avi", "m4v", "flv"]
     private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
 
@@ -2957,6 +3099,7 @@ class WallpaperSchedulerService: ObservableObject {
     /// Builds candidates from persisted library records only. Imported content is
     /// recorded synchronously, so polling the download folders is unnecessary.
     private func getSchedulableItems(for displayConfig: DisplaySchedulerConfig) -> [SchedulableItem] {
+        observeSchedulableLibraryChangesIfNeeded()
         guard isManagedLibraryAvailable() else { return [] }
         var items: [SchedulableItem] = []
 
@@ -2965,14 +3108,8 @@ class WallpaperSchedulerService: ObservableObject {
         let onEndMode = displayConfig.isOnEndMode
         let webSceneSwitchEnabled = onEndMode && displayConfig.webSceneSwitchSeconds != nil
 
-        // 文件夹过滤：nil = 全部，非空 = 仅这些文件夹（含根目录无 folderID 的项）
-        let folderIDs = displayConfig.folderIDs
-        let folderFilter: (String?) -> Bool = { itemFolderID in
-            guard let folderIDs else { return true } // nil = 全部
-            if folderIDs.isEmpty { return itemFolderID == nil } // 空数组 = 只匹配根目录
-            guard let itemFolderID else { return false } // 有文件夹过滤，nil 项不匹配
-            return folderIDs.contains(itemFolderID)
-        }
+        // Share the exact nil/all, []/root-only and explicit-folder policy with UI.
+        let folderFilter: (String?) -> Bool = { self.matchesSchedulableFolder($0, for: displayConfig) }
 
         if displayConfig.includeWallpapers && (!onEndMode || webSceneSwitchEnabled) {
             // Persisted wallpaper download records are the authoritative source.
@@ -2980,7 +3117,7 @@ class WallpaperSchedulerService: ObservableObject {
                 guard folderFilter(record.folderID) else { continue }
                 let url = URL(fileURLWithPath: record.localFilePath)
                 let itemID = "wp_dl_\(record.id)"
-                guard !unavailableSchedulableItemIDs.contains(itemID) else { continue }
+                guard !isUnavailableSchedulableItem(itemID) else { continue }
                 items.append(SchedulableItem(
                     id: itemID,
                     fileURL: url,
@@ -2994,7 +3131,7 @@ class WallpaperSchedulerService: ObservableObject {
         if displayConfig.includeMedia {
             // 自动切换仅支持能被 VideoWallpaperManager 播放的视频格式
             // 与 applyItem 中的 videoExtensions 保持一致（排除 webm——macOS 原生播放器不稳定）
-            let allowedMediaExts: Set<String> = ["mp4", "m4v", "mov", "mkv", "avi", "flv"]
+            let allowedMediaExts = schedulableMediaExtensions
 
             // 已在 wallpapers 分支添加过的 Workshop 项 ID（当双选时避免重复）
             let existingIDs = Set(items.map(\.id))
@@ -3009,7 +3146,7 @@ class WallpaperSchedulerService: ObservableObject {
                 // directories. Do not stat every record just to rediscover that.
                 guard isWorkshop || isAllowedExt else { continue }
                 let itemID = "media_dl_\(record.id)"
-                guard !unavailableSchedulableItemIDs.contains(itemID) else { continue }
+                guard !isUnavailableSchedulableItem(itemID) else { continue }
                 // 双选时 wallpapers 分支已添加过，跳过避免重复
                 if isWorkshop && displayConfig.includeWallpapers && existingIDs.contains(itemID) {
                     continue

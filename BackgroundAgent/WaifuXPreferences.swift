@@ -15,11 +15,15 @@ final class WaifuXPreferences: UserDefaults, @unchecked Sendable {
     private var mutationHandler: (@Sendable (Data) -> Void)?
     private var bufferedMutations: [Data] = []
     private let preferencesSuite: String
+    private let legacySuiteName: String
 
     private init() {
         let suite = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_SUITE"]
             ?? BackgroundAgentWire.preferencesSuite
         preferencesSuite = suite
+        // 隔离回归不可把测试值写进真实的 com.waifux.app。生产 Helper 即使
+        // 尚未收到主程序的偏好迁移，也必须能读到旧域中的 Steam 会话标识。
+        legacySuiteName = BackgroundRuntimeRole.isIsolatedTest ? suite + ".legacy" : "com.waifux.app"
         super.init(suiteName: suite)!
     }
 
@@ -44,8 +48,33 @@ final class WaifuXPreferences: UserDefaults, @unchecked Sendable {
     func loadLegacyPreferences() {
         guard BackgroundRuntimeRole.isRemoteUI else { return }
         stateLock.lock()
-        legacy = UserDefaults.standard.persistentDomain(forName: "com.waifux.app") ?? [:]
+        legacy = legacyDomainSnapshot()
         stateLock.unlock()
+    }
+
+    /// Helper 恢复 Steam 会话时按需读旧域。不能像 UI 那样用 legacy 字典兜底
+    /// 所有键：登出/清除操作已经落到新域后，旧域残值会绕过删除重新登录。
+    func legacyStringForSessionRestore(_ key: String) -> String? {
+        guard BackgroundRuntimeRole.isHelper,
+              !bool(forKey: BackgroundAgentWire.migrationKey),
+              super.object(forKey: key) == nil else { return nil }
+        return legacyDomainSnapshot()[key] as? String
+    }
+
+    func legacyIntegerForSessionRestore(_ key: String) -> Int? {
+        guard BackgroundRuntimeRole.isHelper,
+              !bool(forKey: BackgroundAgentWire.migrationKey),
+              super.object(forKey: key) == nil else { return nil }
+        return (legacyDomainSnapshot()[key] as? NSNumber)?.intValue
+    }
+
+    func removeLegacySessionValue(forKey key: String) {
+        guard BackgroundRuntimeRole.isHelper else { return }
+        UserDefaults(suiteName: legacySuiteName)?.removeObject(forKey: key)
+    }
+
+    private func legacyDomainSnapshot() -> [String: Any] {
+        UserDefaults(suiteName: legacySuiteName)?.persistentDomain(forName: legacySuiteName) ?? [:]
     }
 
     func takeBufferedMutations() -> [Data] {

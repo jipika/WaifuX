@@ -1,9 +1,36 @@
 import AppKit
+import Combine
 import Foundation
 
 /// The UI owns no wallpaper runtime. Commands enter one ordered XPC stream.
 @MainActor
 enum BackgroundRuntimeBridge {
+    /// 库快照到达位：菜单栏弹窗等轻量 UI 不想引 BackgroundAgentClient 的完整订阅面。
+    /// Helper 进程内库记录本地直读，不存在「快照未到达」态。
+    static var librarySnapshotIsArrived: Bool {
+        #if WAIFUX_HELPER
+        true
+        #else
+        BackgroundAgentClient.shared.librarySnapshotIsArrived
+        #endif
+    }
+
+    /// 库快照到达位的变化流（UI 侧订阅用）。
+    static var librarySnapshotArrivedPublisher: AnyPublisher<Bool, Never> {
+        #if WAIFUX_HELPER
+        Just(true).eraseToAnyPublisher()
+        #else
+        BackgroundAgentClient.shared.$librarySnapshotIsArrived.eraseToAnyPublisher()
+        #endif
+    }
+
+    /// 主动拉取一帧库快照（与库页同一 RPC）；Helper 本地库即是真值，无需拉取。
+    static func refreshLibrarySnapshot() async throws {
+        #if !WAIFUX_HELPER
+        try await BackgroundAgentClient.shared.refreshLibrarySnapshot()
+        #endif
+    }
+
     static func arguments(_ values: [String: Any?]) -> [String: Any] {
         values.compactMapValues { value in
             if let url = value as? URL { return url.absoluteString }

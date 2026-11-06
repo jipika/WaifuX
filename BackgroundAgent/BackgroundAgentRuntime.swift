@@ -149,6 +149,9 @@ final class BackgroundAgentRuntime {
             }
             WaifuXPreferences.shared.set(currentSession, forKey: sessionKey)
             WaifuXPreferences.shared.synchronize()
+            // Steam 会话在后台首次恢复时即建立，不依赖用户打开设置页。
+            // 无保存凭据时不会启动子进程，也不会产生登录网络请求。
+            SteamServiceManager.shared.restoreSavedSessionIfAvailable()
             LocalizationService.shared.restoreSavedSettings()
             WallpaperLibraryService.shared.restoreSavedData()
             MediaLibraryService.shared.restoreSavedData()
@@ -261,6 +264,15 @@ final class BackgroundAgentRuntime {
         }
     }
     func snapshot() -> Data {
+        let performanceStart = ProcessInfo.processInfo.systemUptime
+        var snapshotBytes = 0
+        defer {
+            InteractionPerformanceLog.record(.helperSnapshot, since: performanceStart, metadata: [
+                "ready": isReady ? "1" : "0",
+                "subscribers": String(observers.count),
+                "bytes": String(snapshotBytes)
+            ])
+        }
         var values: [String: Any] = ["ready": isReady, "pid": ProcessInfo.processInfo.processIdentifier]
         if isReady {
             values["appearance"] = ThemeManager.shared.backgroundSnapshot
@@ -280,7 +292,9 @@ final class BackgroundAgentRuntime {
             values["cloud"] = CloudSyncService.shared.backgroundSnapshot()
             values["current"] = CurrentWallpaperService.shared.activeURLByScreenID.mapValues(\.absoluteString)
         }
-        return (try? BackgroundPropertyList.encode(values)) ?? Data()
+        let data = (try? BackgroundPropertyList.encode(values)) ?? Data()
+        snapshotBytes = data.count
+        return data
     }
     private func schedulePublish() {
         guard !stopping, !upgrading, !observers.isEmpty, publishTask == nil else { return }
@@ -1256,7 +1270,7 @@ final class BackgroundAgentRuntime {
             return ["media": MediaLibraryService.shared.backgroundLibrarySnapshot(), "wallpaper": WallpaperLibraryService.shared.backgroundLibrarySnapshot(), "mediaFolders": try JSONEncoder().encode(LibraryFolderStore.shared.mediaFolders), "wallpaperFolders": try JSONEncoder().encode(LibraryFolderStore.shared.wallpaperFolders)]
         case "steam.start":
             try SteamServiceManager.shared.start()
-            return [:]
+            return ["steam": SteamServiceManager.shared.backgroundSnapshot()]
         case "steam.shutdown":
             try SteamServiceManager.shared.shutdown()
             return [:]

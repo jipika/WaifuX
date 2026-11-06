@@ -49,6 +49,145 @@ enum AppLogModule: String, CaseIterable {
     case network     = "Network"
     case storage     = "Storage"
     case startup     = "Startup"
+    case performance = "Performance" // 仅限下方合并限频诊断；Release 也保留
+}
+
+// MARK: - 低噪声交互性能诊断（App / Helper 共用）
+enum InteractionPerformancePoint: String, CaseIterable, Sendable {
+    case menuOpen, menuRefresh, libraryWallpaperBuild, libraryMediaBuild
+    case thumbnailIO, thumbnailGeneration, helperSnapshot, helperCommandQueue, mainThreadStall
+
+    var thresholdMS: Double {
+        switch self {
+        case .menuOpen: return 100
+        case .thumbnailIO, .thumbnailGeneration: return 500
+        case .helperCommandQueue: return 150
+        case .mainThreadStall: return 2500
+        default: return 50
+        }
+    }
+}
+
+/// 纯数据窗口，单调时钟；所有类别共享每进程一分钟一条的自动输出预算。
+/// observations 是慢操作/迟到观测次数，不把同一长卡顿误称为多个独立故障。
+struct InteractionPerformanceWindow: Sendable {
+    struct Observation: Sendable {
+        var count = 0
+        var peakMS: Double = 0
+        var metadata: [String: String] = [:]
+    }
+    struct Summary: Sendable {
+        let observations: [InteractionPerformancePoint: Observation]
+    }
+    private(set) var pending: [InteractionPerformancePoint: Observation] = [:]
+    private var nextEmission: TimeInterval?
+    static let interval: TimeInterval = 60
+
+    mutating func record(_ point: InteractionPerformancePoint, milliseconds: Double,
+                         metadata: [String: String], now: TimeInterval) -> Summary? {
+        guard milliseconds.isFinite, milliseconds >= point.thresholdMS else { return nil }
+        var observation = pending[point] ?? Observation()
+        observation.count = min(observation.count + 1, 1_000_000)
+        if milliseconds >= observation.peakMS {
+            observation.peakMS = milliseconds
+            // 固定类别、最多十二个短字段。不保留项目/路径数组，不拼动态节流 key。
+            observation.metadata = metadata.keys.sorted().prefix(12).reduce(into: [:]) { result, key in
+                result[String(key.prefix(40))] = String((metadata[key] ?? "").replacingOccurrences(of: "\n", with: " ").prefix(120))
+            }
+        }
+        pending[point] = observation
+        return flush(now: now)
+    }
+
+    mutating func flush(now: TimeInterval, force: Bool = false) -> Summary? {
+        guard !pending.isEmpty, force || now >= (nextEmission ?? now) else { return nil }
+        let summary = Summary(observations: pending)
+        pending.removeAll(keepingCapacity: true)
+        nextEmission = now + Self.interval
+        return summary
+    }
+
+    func flushDelay(now: TimeInterval) -> TimeInterval? {
+        pending.isEmpty ? nil : max(0, (nextEmission ?? now) - now)
+    }
+}
+
+/// 正常操作只读一次单调时钟；超阈值才聚合。无常驻轮询、无额外 sample 子进程。
+/// 被抑制的慢操作由一个按需单次回调补摘要，安静后不再唤醒/输出。
+final class InteractionPerformanceLog: @unchecked Sendable {
+    private static let shared = InteractionPerformanceLog()
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.waifux.performance-log", qos: .utility)
+    private var window = InteractionPerformanceWindow()
+    private var flushScheduled = false
+
+    static func record(_ point: InteractionPerformancePoint, since start: TimeInterval,
+                       metadata: @autoclosure () -> [String: String] = [:]) {
+        record(point, milliseconds: (ProcessInfo.processInfo.systemUptime - start) * 1000, metadata: metadata())
+    }
+
+    static func record(_ point: InteractionPerformancePoint, milliseconds: Double,
+                       metadata: @autoclosure () -> [String: String] = [:]) {
+        guard milliseconds.isFinite, milliseconds >= point.thresholdMS else { return }
+        shared.recordSlow(point, milliseconds: milliseconds, metadata: metadata())
+    }
+
+    private func recordSlow(_ point: InteractionPerformancePoint, milliseconds: Double,
+                            metadata: [String: String]) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        let summary = window.record(point, milliseconds: milliseconds, metadata: metadata, now: now)
+        scheduleFlushIfNeeded(now: now)
+        if let summary { queue.async { self.write(summary) } }
+        lock.unlock()
+    }
+
+    /// 调用方持 lock。无论多少慢事件，最多一个待执行的单次回调。
+    private func scheduleFlushIfNeeded(now: TimeInterval) {
+        guard !flushScheduled, let delay = window.flushDelay(now: now) else { return }
+        flushScheduled = true
+        queue.asyncAfter(deadline: .now() + delay) { self.flush() }
+    }
+
+    private func flush() {
+        lock.lock()
+        flushScheduled = false
+        let now = ProcessInfo.processInfo.systemUptime
+        let summary = window.flush(now: now)
+        scheduleFlushIfNeeded(now: now)
+        lock.unlock()
+        if let summary { write(summary) }
+    }
+
+    /// 仅手动导出例外：补齐本进程尚未写出的摘要，然后由导出入口等文件队列落盘。
+    static func flushForExport() {
+        shared.queue.sync {
+            shared.lock.lock()
+            let summary = shared.window.flush(now: ProcessInfo.processInfo.systemUptime, force: true)
+            shared.lock.unlock()
+            if let summary { shared.write(summary) }
+        }
+    }
+
+    private func write(_ summary: InteractionPerformanceWindow.Summary) {
+        let points = summary.observations.keys.sorted { $0.rawValue < $1.rawValue }.map { point in
+            let value = summary.observations[point]!
+            let context = value.metadata.keys.sorted().map { "\($0)=\(value.metadata[$0]!)" }.joined(separator: ",")
+            let peak = String(format: "%.0f", value.peakMS)
+            return "\(point.rawValue){observations=\(value.count),peakMS=\(peak),\(context)}"
+        }.joined(separator: "; ")
+        #if WAIFUX_HELPER
+        let role = "Helper"
+        #else
+        let role = "App"
+        #endif
+        AppLogger.info(.performance, "PERF_SLOW", metadata: [
+            "process": role,
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "autoIntervalSeconds": Int(InteractionPerformanceWindow.interval),
+            "points": points
+        ])
+    }
 }
 
 // MARK: - Logger 入口
@@ -187,6 +326,7 @@ final class AppLogger: @unchecked Sendable {
         //    调用（启动/注册/修复），它的 info 正是「后台服务起不来」的唯一线索。
         //    2026-10-19 的 4099 故障里，registration status 与 bootstrap 各步骤
         //    全被这条规则砍掉，只剩 5 条 4099，无法判断 repair 走到哪一步。
+        //    `.performance` 只供 InteractionPerformanceLog 使用，自动摘要每进程最多一分钟一条。
         #if !DEBUG
         guard level == .error || Self.releasePersistedModules.contains(module) else { return }
         #endif
@@ -194,7 +334,7 @@ final class AppLogger: @unchecked Sendable {
     }
 
     /// Release 构建里除 `.error` 之外仍然落盘的模块（低频关键链路）。
-    private static let releasePersistedModules: Set<AppLogModule> = [.startup]
+    private static let releasePersistedModules: Set<AppLogModule> = [.startup, .performance]
 
     /// 等已入队的文件写入全部落盘。只给「写完日志立刻 exit」的路径用
     /// （例如 Helper 拿不到单实例锁）：文件写入走异步队列，不等就退出会丢最后几行。
@@ -343,6 +483,8 @@ final class AppLogger: @unchecked Sendable {
     /// 绝不因为某一段缺失让整个导出失败。每段只保留尾部 N KiB。
     /// 无任何可读日志时返回 nil。
     static func exportLogToDesktop() throws -> URL? {
+        InteractionPerformanceLog.flushForExport()
+        flushPendingWrites()
         let fm = FileManager.default
         let desktop = fm.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)

@@ -484,16 +484,9 @@ final class StatusBarController: NSObject {
                 }
             )
         } else if event.type == .leftMouseUp || event.type == .rightMouseUp {
-            // 右键弹菜单前的准备耗时：`refreshMenuState()` 会逐屏查锁屏暂停态/静音/
-            // 当前壁纸，并解析当前壁纸工程的 project.json。`popUpMenu` 本身是阻塞的
-            // （要到菜单关闭才返回），所以打点必须放在它之前，否则量到的是「菜单
-            // 存活时长」而不是准备耗时。
-            let menuPrepareStart = Date()
             quickSwitcherController.dismiss()
-            refreshMenuState()
-            AppLogger.debug(.general, "状态栏右键菜单准备耗时", metadata: [
-                "refreshMS": Int(Date().timeIntervalSince(menuPrepareStart) * 1000),
-            ])
+            // menuWillOpen owns the one fresh refresh and its timing. popUpMenu
+            // returns after tracking ends, so its duration is not preparation.
             statusItem.popUpMenu(menu)
         }
     }
@@ -1606,6 +1599,12 @@ final class StatusBarController: NSObject {
 // MARK: - NSMenuDelegate
 extension StatusBarController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        let performanceStart = ProcessInfo.processInfo.systemUptime
+        let menuPrepareStart = Date()
         refreshMenuState()
+        InteractionPerformanceLog.record(.menuRefresh, since: performanceStart, metadata: [
+            "refreshMS": String(Int(Date().timeIntervalSince(menuPrepareStart) * 1000))
+        ])
     }
 }

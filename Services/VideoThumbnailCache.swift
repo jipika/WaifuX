@@ -59,50 +59,438 @@ private actor VideoPosterGenerationCoordinator {
 /// 列表小图抽帧限并发（外置卡上同时 N 路 AVAsset 会全卡死）。
 private actor VideoListThumbnailGenerationCoordinator {
     static let shared = VideoListThumbnailGenerationCoordinator()
-
     private let maxConcurrentGenerations = 2
     private var activeGenerations = 0
-    private var waitingGenerations: [CheckedContinuation<Void, Never>] = []
-    private var tasks: [String: Task<URL?, Never>] = [:]
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+    private struct Job {
+        let token: UUID
+        let task: Task<URL?, Never>
+        var consumers: Set<UUID>
+    }
+    private var waitingGenerations: [Waiter] = []
+    private var tasks: [String: Job] = [:]
 
-    func generate(
-        key: String,
-        operation: @escaping @Sendable () async -> URL?
-    ) async -> URL? {
-        if let task = tasks[key] {
-            return await task.value
+    func generate(key: String, operation: @escaping @Sendable () async -> URL?) async -> URL? {
+        guard !Task.isCancelled else { return nil }
+        let consumer = UUID()
+        let job: Job
+        if var current = tasks[key] {
+            current.consumers.insert(consumer)
+            tasks[key] = current
+            job = current
+        } else {
+            let token = UUID()
+            let task = Task.detached(priority: .utility) { [operation] () -> URL? in
+                guard await self.acquireSlot() else { return nil }
+                guard !Task.isCancelled else {
+                    await self.releaseSlot()
+                    return nil
+                }
+                let result = await operation()
+                await self.releaseSlot()
+                return Task.isCancelled ? nil : result
+            }
+            job = Job(token: token, task: task, consumers: [consumer])
+            tasks[key] = job
         }
-
-        let task = Task.detached(priority: .utility) { [operation] () -> URL? in
-            await self.acquireSlot()
-            let result = await operation()
-            await self.releaseSlot()
-            return result
+        let result = await withTaskCancellationHandler {
+            await job.task.value
+        } onCancel: {
+            Task { await self.removeConsumer(key: key, token: job.token, consumer: consumer) }
         }
-        tasks[key] = task
-
-        let result = await task.value
-        tasks.removeValue(forKey: key)
-        return result
+        removeConsumer(key: key, token: job.token, consumer: consumer)
+        return Task.isCancelled ? nil : result
     }
 
-    private func acquireSlot() async {
+    private func removeConsumer(key: String, token: UUID, consumer: UUID) {
+        guard var job = tasks[key], job.token == token, job.consumers.remove(consumer) != nil else { return }
+        if job.consumers.isEmpty {
+            tasks.removeValue(forKey: key)
+            job.task.cancel()
+        } else { tasks[key] = job }
+    }
+
+    private func acquireSlot() async -> Bool {
+        guard !Task.isCancelled else { return false }
         if activeGenerations < maxConcurrentGenerations {
             activeGenerations += 1
-            return
+            return true
         }
-        await withCheckedContinuation { continuation in
-            waitingGenerations.append(continuation)
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume(returning: false) }
+                else { waitingGenerations.append(Waiter(id: id, continuation: continuation)) }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: id) }
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waitingGenerations.firstIndex(where: { $0.id == id }) else { return }
+        waitingGenerations.remove(at: index).continuation.resume(returning: false)
     }
 
     private func releaseSlot() {
-        if let next = waitingGenerations.first {
-            waitingGenerations.removeFirst()
-            next.resume()
-        } else {
-            activeGenerations = max(0, activeGenerations - 1)
+        if !waitingGenerations.isEmpty {
+            waitingGenerations.removeFirst().continuation.resume(returning: true)
+        } else { activeGenerations = max(0, activeGenerations - 1) }
+    }
+}
+
+/// UI 只传不可变路径快照；这里不持有服务单例，也不解析 security-scoped bookmark。
+struct LibraryThumbnailLookupContext: Hashable, Sendable {
+    let root: URL
+    let videoCache: URL
+    let imageCache: URL
+
+    var covers: URL { root.appendingPathComponent("Covers", isDirectory: true) }
+}
+
+struct LibraryThumbnailLookupRequest: Hashable, Sendable {
+    let itemID: String
+    let localFileURL: URL?
+    let bakedVideoURL: URL?
+    let bakedArtifact: SceneBakeArtifact?
+    let posterURL: URL?
+    let thumbnailURL: URL
+    let context: LibraryThumbnailLookupContext
+    let isFolderPreview: Bool
+}
+
+struct LibraryThumbnailResolution: Sendable {
+    var thumbnailURL: URL? = nil
+    var videoURL: URL? = nil
+    var hasListThumbnail = false
+    var localGIFURL: URL? = nil
+    var lookupRequest: LibraryThumbnailLookupRequest? = nil
+    var lookupToken: UUID? = nil
+    var isDeferred = false
+}
+
+/// 只在自己的串行 utility 队列访问索引；慢卷最多一路读，不会随几千张列表一起抽帧。
+/// 索引只读文件名/日期，图片解码只针对被请求的那一项，而不是把整个 Covers 都打开一遍。
+final class LibraryThumbnailDiskReader: @unchecked Sendable {
+    static let shared = LibraryThumbnailDiskReader()
+    private let queue = DispatchQueue(label: "com.waifux.library-thumbnail-lookup", qos: .utility)
+    private struct Poster {
+        let url: URL
+        let date: Date
+    }
+    private struct Index {
+        let builtAt: Date
+        let posters: [String: [Poster]]
+    }
+    private var indexes: [LibraryThumbnailLookupContext: Index] = [:]
+
+    private final class Ticket: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
         }
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    private enum Work: Sendable {
+        case item(LibraryThumbnailLookupRequest)
+        case poster(String, LibraryThumbnailLookupContext)
+    }
+    private struct Job: Sendable {
+        let submittedAt = ProcessInfo.processInfo.systemUptime
+        let id: UUID
+        let ticket: Ticket
+        let work: Work
+        var prioritizeVisible: Bool
+        let complete: @Sendable (LibraryThumbnailResolution) -> Void
+    }
+    private let pendingLock = NSLock()
+    private var pending: [Job] = []
+    private var draining = false
+    private var indexInvalidationPending = false
+    private let maximumPendingJobs = 128
+
+    func resolve(_ request: LibraryThumbnailLookupRequest, prioritizeVisible: Bool = false) async -> LibraryThumbnailResolution {
+        await submit(.item(request), prioritizeVisible: prioritizeVisible)
+    }
+
+    func realtimePoster(itemID: String, context: LibraryThumbnailLookupContext) async -> URL? {
+        let result = await submit(.poster(itemID, context), prioritizeVisible: true)
+        return result.thumbnailURL
+    }
+
+    /// 主线程只改有界队列表；不会等待磁盘队列，也不会再为每代128项累积dispatch闭包。
+    func promote(_ request: LibraryThumbnailLookupRequest) {
+        pendingLock.lock()
+        if let index = pending.firstIndex(where: {
+            if case .item(let candidate) = $0.work { return candidate == request }
+            return false
+        }) {
+            var job = pending.remove(at: index)
+            job.prioritizeVisible = true
+            pending.insert(job, at: 0)
+        }
+        pendingLock.unlock()
+    }
+
+    private func submit(_ work: Work, prioritizeVisible: Bool) async -> LibraryThumbnailResolution {
+        let id = UUID()
+        let ticket = Ticket()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let job = Job(id: id, ticket: ticket, work: work, prioritizeVisible: prioritizeVisible,
+                    complete: { continuation.resume(returning: $0) })
+                var evicted: Job?
+                pendingLock.lock()
+                if ticket.isCancelled {
+                    pendingLock.unlock()
+                    continuation.resume(returning: LibraryThumbnailResolution())
+                    return
+                }
+                if pending.count >= maximumPendingJobs, prioritizeVisible,
+                   let index = pending.firstIndex(where: { !$0.prioritizeVisible }) {
+                    evicted = pending.remove(at: index)
+                }
+                guard pending.count < maximumPendingJobs else {
+                    pendingLock.unlock()
+                    continuation.resume(returning: LibraryThumbnailResolution(isDeferred: true))
+                    return
+                }
+                if prioritizeVisible { pending.insert(job, at: 0) } else { pending.append(job) }
+                let shouldStart = !draining
+                draining = true
+                pendingLock.unlock()
+                evicted?.ticket.cancel()
+                evicted?.complete(LibraryThumbnailResolution(isDeferred: true))
+                if shouldStart { queue.async { self.drain() } }
+            }
+        } onCancel: {
+            ticket.cancel()
+            self.cancelPendingJob(id: id)
+        }
+    }
+
+    private func cancelPendingJob(id: UUID) {
+        pendingLock.lock()
+        let job = pending.firstIndex(where: { $0.id == id }).map { pending.remove(at: $0) }
+        pendingLock.unlock()
+        job?.complete(LibraryThumbnailResolution())
+    }
+
+    private func drain() {
+        while true {
+            pendingLock.lock()
+            guard !pending.isEmpty else {
+                draining = false
+                pendingLock.unlock()
+                return
+            }
+            let job = pending.removeFirst()
+            let remaining = pending.count
+            let invalidateIndex = indexInvalidationPending
+            indexInvalidationPending = false
+            pendingLock.unlock()
+            if invalidateIndex { indexes.removeAll() }
+            guard !job.ticket.isCancelled else {
+                job.complete(LibraryThumbnailResolution())
+                continue
+            }
+            let readStart = ProcessInfo.processInfo.systemUptime
+            let kind: String
+            switch job.work {
+            case .item(let request):
+                kind = "item"
+                job.complete(read(request, ticket: job.ticket))
+            case .poster(let itemID, let context):
+                kind = "poster"
+                let poster = latestRealtimePoster(itemID: itemID, context: context, ticket: job.ticket)
+                job.complete(LibraryThumbnailResolution(thumbnailURL: poster))
+            }
+            InteractionPerformanceLog.record(.thumbnailIO, since: job.submittedAt, metadata: [
+                "kind": kind,
+                "queueMS": String(Int((readStart - job.submittedAt) * 1000)),
+                "readMS": String(Int((ProcessInfo.processInfo.systemUptime - readStart) * 1000)),
+                "pending": String(remaining),
+                "cancelled": job.ticket.isCancelled ? "1" : "0"
+            ])
+        }
+    }
+
+    func invalidateRealtimeIndex() {
+        pendingLock.lock()
+        indexInvalidationPending = true
+        pendingLock.unlock()
+    }
+
+    private func read(_ request: LibraryThumbnailLookupRequest, ticket: Ticket) -> LibraryThumbnailResolution {
+        let context = request.context
+        let fm = FileManager.default
+        let gifPreview: URL?
+        if let local = request.localFileURL, local.isFileURL {
+            let ext = local.pathExtension.lowercased()
+            if ext == "gif" {
+                gifPreview = fm.fileExists(atPath: local.path) ? local : nil
+            } else if !["mp4", "mov", "webm", "m4v", "mkv"].contains(ext),
+                      !LocalImageThumbnailCache.isRasterImageFile(local) {
+                gifPreview = MediaItem.resolveLocalWorkshopPreviewGIF(from: local)
+            } else { gifPreview = nil }
+        } else { gifPreview = nil }
+        func result(_ url: URL?, video: URL? = nil, list: Bool = false) -> LibraryThumbnailResolution {
+            LibraryThumbnailResolution(thumbnailURL: url, videoURL: request.bakedVideoURL ?? video,
+                hasListThumbnail: list && (request.bakedVideoURL == nil || video == request.bakedVideoURL), localGIFURL: gifPreview)
+        }
+        func staticMetadata() -> URL? {
+            [request.posterURL, Optional(request.thumbnailURL)].compactMap { $0 }.first {
+                !MediaItem.urlLooksLikeGIF($0) && (!$0.isFileURL || fm.fileExists(atPath: $0.path))
+            }
+        }
+        func videoThumbnail(_ video: URL) -> LibraryThumbnailResolution? {
+            let path = video.standardizedFileURL.path
+            let list = context.videoCache.appendingPathComponent("list_\(path.md5).jpg", isDirectory: false)
+            if Self.isUsableImage(at: list) { return result(list, video: video, list: true) }
+            let rootPath = context.root.standardizedFileURL.path
+            let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+            let relativeKey = path.hasPrefix(prefix) ? "lib:" + String(path.dropFirst(prefix.count)) : path
+            let posters = [
+                context.covers.appendingPathComponent("poster_wallpaper_\(relativeKey.md5).jpg", isDirectory: false),
+                context.videoCache.appendingPathComponent("poster_wallpaper_\(path.md5).jpg", isDirectory: false)
+            ]
+            if let poster = posters.first(where: { Self.isUsableImage(at: $0) }) {
+                return result(poster, video: video)
+            }
+            return nil
+        }
+        func bakePoster() -> URL? {
+            let name = "scene_bake_\(request.itemID.md5).jpg"
+            return [context.covers, context.videoCache]
+                .map { $0.appendingPathComponent(name, isDirectory: false) }
+                .first { Self.isUsableImage(at: $0) }
+        }
+
+        if let baked = request.bakedVideoURL {
+            let path = baked.standardizedFileURL.path
+            let list = context.videoCache.appendingPathComponent("list_\(path.md5).jpg", isDirectory: false)
+            if Self.isUsableImage(at: list) { return result(list, video: baked, list: true) }
+            if let poster = bakePoster() { return result(poster, video: baked) }
+        }
+        // Web截图也写scene_bake poster而没有MP4；grid与folder都必须保留该高清优先级。
+        if let poster = bakePoster() { return result(poster, video: request.bakedVideoURL) }
+        guard !ticket.isCancelled else { return result(nil) }
+        if let poster = latestRealtimePoster(itemID: request.itemID, context: context, ticket: ticket) {
+            return result(poster, video: request.bakedVideoURL)
+        }
+        guard !ticket.isCancelled else { return result(nil) }
+        let fallback = staticMetadata()
+        guard let local = request.localFileURL, local.isFileURL,
+              fm.fileExists(atPath: local.path) else {
+            return result(fallback, video: request.bakedVideoURL)
+        }
+        let ext = local.pathExtension.lowercased()
+        if ext == "gif" {
+            var resolved = result(fallback ?? local)
+            resolved.localGIFURL = local
+            return resolved
+        }
+        if LocalImageThumbnailCache.isRasterImageFile(local) {
+            return result(Self.localImageThumbnail(for: local, context: context) ?? fallback ?? local)
+        }
+        if ["mp4", "mov", "webm", "m4v", "mkv"].contains(ext) {
+            return videoThumbnail(local) ?? result(fallback, video: local)
+        }
+        guard !ticket.isCancelled else { return result(nil) }
+        // Workshop 解析只在后台按需进行，列表 map/滚动 configure 不再递归读整个工程。
+        let video = MediaItem.resolveLocalVideoFile(from: local)
+        if let video, let cached = videoThumbnail(video) { return cached }
+        guard !ticket.isCancelled else { return result(nil) }
+        if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
+            if MediaItem.urlLooksLikeGIF(preview) {
+                var resolved = result(fallback ?? preview, video: request.bakedVideoURL ?? video)
+                resolved.localGIFURL = preview
+                return resolved
+            }
+            if LocalImageThumbnailCache.isRasterImageFile(preview) {
+                return result(Self.localImageThumbnail(for: preview, context: context) ?? fallback ?? preview, video: request.bakedVideoURL ?? video)
+            }
+            return result(preview, video: request.bakedVideoURL ?? video)
+        }
+        return result(fallback, video: request.bakedVideoURL ?? video)
+    }
+
+    private func latestRealtimePoster(itemID: String, context: LibraryThumbnailLookupContext, ticket: Ticket) -> URL? {
+        let snapshot: Index
+        if let cached = indexes[context], Date().timeIntervalSince(cached.builtAt) < 10 {
+            snapshot = cached
+        } else {
+            var posters: [String: [Poster]] = [:]
+            let fm = FileManager.default
+            let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
+            for directory in [context.covers, context.videoCache] {
+                guard let files = fm.enumerator(at: directory, includingPropertiesForKeys: keys,
+                    options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { continue }
+                for case let file as URL in files {
+                    guard !ticket.isCancelled else { return nil }
+                    let name = file.lastPathComponent
+                    let prefix = "scene_realtime_"
+                    guard name.hasPrefix(prefix), file.pathExtension.lowercased() == "jpg" else { continue }
+                    let body = name.dropFirst(prefix.count)
+                    guard let separator = body.firstIndex(of: "_") else { continue }
+                    let itemKey = String(body[..<separator])
+                    let values = try? file.resourceValues(forKeys: Set(keys))
+                    guard !itemKey.isEmpty, values?.isRegularFile != false else { continue }
+                    posters[itemKey, default: []].append(Poster(url: file, date: values?.contentModificationDate ?? .distantPast))
+                }
+            }
+            // TTL 从完成时计时；慢卷扫描超过 TTL 不会导致下一条请求立即重新全扫。
+            snapshot = Index(builtAt: Date(), posters: posters)
+            if indexes.count >= 4 { indexes.removeAll() }
+            indexes[context] = snapshot
+        }
+        return snapshot.posters[itemID.md5, default: []].sorted { $0.date > $1.date }
+            .first { !ticket.isCancelled && Self.isUsableImage(at: $0.url) }?.url
+    }
+
+    static func isUsableImage(at url: URL, minimumBytes: Int = 500) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber, size.intValue > minimumBytes,
+              let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetStatus(source) == .statusComplete else { return false }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1,
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary) != nil
+    }
+
+    private static func localImageThumbnail(for source: URL, context: LibraryThumbnailLookupContext) -> URL? {
+        let path = source.standardizedFileURL.path
+        let output = context.imageCache.appendingPathComponent("img_\(path.md5)_768.jpg", isDirectory: false)
+        if isUsableImage(at: output, minimumBytes: 400) { return output }
+        guard let imageSource = CGImageSourceCreateWithURL(source as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 768,
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: context.imageCache, withIntermediateDirectories: true)
+            try (data as Data).write(to: output, options: .atomic)
+            return output
+        } catch { return nil }
     }
 }
 
@@ -111,7 +499,34 @@ private actor VideoListThumbnailGenerationCoordinator {
 @MainActor
 final class VideoThumbnailCache {
     static let shared = VideoThumbnailCache()
-    
+
+    /// 只读取已保存的展示路径，不触发 rootFolderURL 的书签解析、stat 或建目录。
+    /// 真正写入/应用壁纸仍使用 DownloadPathManager 的授权与可用性校验。
+    static func libraryLookupContext() -> LibraryThumbnailLookupContext {
+        let fm = FileManager.default
+        let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        if BackgroundRuntimeRole.isIsolatedTest,
+           let path = ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"] {
+            let root = URL(fileURLWithPath: path, isDirectory: true)
+            return LibraryThumbnailLookupContext(root: root.appendingPathComponent("WaifuX", isDirectory: true),
+                videoCache: root.appendingPathComponent("VideoThumbnails", isDirectory: true),
+                imageCache: root.appendingPathComponent("LocalImageThumbnails", isDirectory: true))
+        }
+        let root: URL
+        if let snapshot = DownloadPathManager.shared.libraryRootFolderURLSnapshot {
+            root = snapshot
+        } else if let path = WaifuXPreferences.shared.string(forKey: DownloadPathManager.customDownloadRootPathKey),
+           !path.isEmpty {
+            root = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent("WaifuX", isDirectory: true)
+        } else {
+            root = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("WaifuX", isDirectory: true)
+        }
+        return LibraryThumbnailLookupContext(root: root,
+            videoCache: caches.appendingPathComponent("WaifuX/VideoThumbnails", isDirectory: true),
+            imageCache: caches.appendingPathComponent("WaifuX/LocalImageThumbnails", isDirectory: true))
+    }
+
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
     private let memoryCache = NSCache<NSString, NSImage>()
@@ -186,67 +601,54 @@ final class VideoThumbnailCache {
         }
     }
 
-    /// `scene_realtime_*` 目录快照索引：itemID.md5 → 修改时间最新的一张。
-    ///
-    /// 「我的库」构建列表时会为**每个**媒体条目调用一次
-    /// `latestSceneRealtimePosterFileURLIfExists`；旧实现每次 `contentsOfDirectory`
-    /// 全量枚举缓存目录（条目数 × 目录项数）。索引之后每个条目只剩一次字典查找。
-    /// 失效由写入点显式触发，TTL 只作兜底（其他进程写入/清理）。
+    /// 详情/菜单同步入口也只读内存，目录扫描与图片解码复用后台读取器。
     private static var realtimePosterIndex: [String: URL] = [:]
-    private static var realtimePosterIndexBuiltAt: Date = .distantPast
-    private static let realtimePosterIndexTTL: TimeInterval = 10
+    private var realtimePosterCheckedAt: [String: Date] = [:]
+    private var realtimePosterTasks: [String: Task<Void, Never>] = [:]
+    private var realtimePosterGeneration: UInt64 = 0
+    private var realtimePosterContext: LibraryThumbnailLookupContext?
 
-    /// 自动烘焙关闭时实时渲染抽帧的 item 级最新静帧（`scene_realtime_<itemID>_*.jpg`）。
-    /// 供详情页等没有 variantKey 上下文的调用方回退：不区分目标尺寸，取修改时间最新的一张。
     func latestSceneRealtimePosterFileURLIfExists(itemID: String) -> URL? {
-        refreshRealtimePosterIndexIfNeeded()
-        return Self.realtimePosterIndex[itemID.md5]
-    }
-
-    /// 重建目录快照；10 秒内直接命中。
-    private func refreshRealtimePosterIndexIfNeeded() {
-        let now = Date()
-        guard now.timeIntervalSince(Self.realtimePosterIndexBuiltAt) > Self.realtimePosterIndexTTL else {
-            return
+        let context = Self.libraryLookupContext()
+        if realtimePosterContext != context {
+            invalidateRealtimePosterIndex()
+            Self.realtimePosterIndex.removeAll()
+            realtimePosterContext = context
         }
-        Self.realtimePosterIndexBuiltAt = now
-
-        // 库目录 Covers/ 与旧 Caches 目录都扫；同一条目取修改时间最新的一张。
-        var directories = [cacheDirectory]
-        if let covers = sceneCoversDirectory(), covers != cacheDirectory { directories.insert(covers, at: 0) }
-        let files = directories.flatMap { dir in
-            (try? fileManager.contentsOfDirectory(
-                at: dir,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-        }
-
-        let prefix = "scene_realtime_"
-        var latestByItem: [String: (url: URL, date: Date)] = [:]
-        for file in files {
-            let name = file.lastPathComponent
-            guard name.hasPrefix(prefix),
-                  file.pathExtension.lowercased() == "jpg" else { continue }
-            // 文件名形如 scene_realtime_<itemID.md5>_<variantKey.md5>.jpg
-            let body = name.dropFirst(prefix.count)
-            guard let separator = body.firstIndex(of: "_") else { continue }
-            let itemKey = String(body[body.startIndex..<separator])
-            guard !itemKey.isEmpty else { continue }
-
-            guard isUsableCachedImage(at: file),
-                  let date = (try? fileManager.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
-                continue
+        let key = itemID.md5
+        if realtimePosterTasks[key] == nil,
+           Date().timeIntervalSince(realtimePosterCheckedAt[key] ?? .distantPast) >= 10,
+           realtimePosterTasks.count < 128 {
+            let generation = realtimePosterGeneration
+            realtimePosterTasks[key] = Task { @MainActor [weak self] in
+                let poster = await LibraryThumbnailDiskReader.shared.realtimePoster(itemID: itemID, context: context)
+                guard let self, !Task.isCancelled, self.realtimePosterGeneration == generation,
+                      self.realtimePosterContext == context else { return }
+                self.realtimePosterTasks.removeValue(forKey: key)
+                let previous = Self.realtimePosterIndex[key]
+                Self.realtimePosterIndex[key] = poster
+                self.realtimePosterCheckedAt[key] = Date()
+                if self.realtimePosterCheckedAt.count > 4096,
+                   let victim = self.realtimePosterCheckedAt.keys.first {
+                    self.realtimePosterCheckedAt.removeValue(forKey: victim)
+                    Self.realtimePosterIndex.removeValue(forKey: victim)
+                }
+                if let poster, previous != poster {
+                    NotificationCenter.default.post(name: .sceneOfflineBakeThumbnailDidUpdate, object: itemID,
+                        userInfo: ["thumbnailURL": poster, "lookupOnly": true])
+                }
             }
-            if let existing = latestByItem[itemKey], existing.date >= date { continue }
-            latestByItem[itemKey] = (file, date)
         }
-        Self.realtimePosterIndex = latestByItem.mapValues(\.url)
+        return Self.realtimePosterIndex[key]
     }
 
-    /// 实时封面写入/删除后必须调用，否则同一进程内列表会继续命中旧目录快照。
+    /// 写入/删除后失效，但不丢弃旧画面；过期任务不可覆盖下一代结果。
     private func invalidateRealtimePosterIndex() {
-        Self.realtimePosterIndexBuiltAt = .distantPast
+        realtimePosterGeneration &+= 1
+        for task in realtimePosterTasks.values { task.cancel() }
+        realtimePosterTasks.removeAll(keepingCapacity: true)
+        realtimePosterCheckedAt.removeAll(keepingCapacity: true)
+        LibraryThumbnailDiskReader.shared.invalidateRealtimeIndex()
     }
 
     /// 仅返回已缓存的**高清**动态壁纸 poster，不触发 AVFoundation 抽帧。
@@ -1230,7 +1632,8 @@ final class VideoThumbnailCache {
         sourceURL: URL,
         outputURL: URL
     ) async -> URL? {
-        await Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) { () -> URL? in
+            guard !Task.isCancelled else { return nil }
             guard FileManager.default.fileExists(atPath: sourceURL.path) else {
                 print("[VideoThumbnailCache] List thumb source missing: \(sourceURL.lastPathComponent)")
                 return nil
@@ -1267,6 +1670,7 @@ final class VideoThumbnailCache {
             }
 
             for seconds in candidates {
+                guard !Task.isCancelled else { return nil }
                 let t = CMTime(seconds: seconds, preferredTimescale: 600)
                 do {
                     let cgImage = try imageGenerator.copyCGImage(at: t, actualTime: nil)
@@ -1281,12 +1685,21 @@ final class VideoThumbnailCache {
             }
             print("[VideoThumbnailCache] Failed to generate list thumbnail for \(sourceURL.lastPathComponent)")
             return nil
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: { task.cancel() }
     }
 
     /// 为列表 UI 生成/返回 列表小图 URL（完整画幅，无 letterbox 裁切）。
     /// 与 `posterJPEGFileURL`（高清+去黑边，桌面/锁屏用）隔离。
     func listThumbnailJPEGFileURL(forLocalVideo videoURL: URL) async -> URL? {
+        let performanceStart = ProcessInfo.processInfo.systemUptime
+        defer {
+            InteractionPerformanceLog.record(.thumbnailGeneration, since: performanceStart, metadata: [
+                "cancelled": Task.isCancelled ? "1" : "0"
+            ])
+        }
         guard videoURL.isFileURL else { return nil }
         let pathKey = Self.stablePathKey(for: videoURL)
         let thumb = cacheURL(forPathKey: pathKey)

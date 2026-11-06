@@ -1312,6 +1312,24 @@ actor PortraitBlurFillWallpaperService {
         return outputURL
     }
 
+    /// 将实际显示在桌面上的派生图反查为库记录使用的原图。
+    /// 映射读取与已有生成/迁移操作都在 actor 内串行，调用方无需阻塞主线程。
+    func originalSourceURL(
+        forDerivedWallpaperAt url: URL,
+        derivedWallpapersDirectory: URL
+    ) -> URL? {
+        guard url.isFileURL else { return nil }
+        let mappingURL = derivedWallpapersDirectory
+            .appendingPathComponent(Self.artifactDirectoryName, isDirectory: true)
+            .appendingPathComponent(Self.mappingFileName)
+        guard (try? loadArtifactsIfNeeded(from: mappingURL)) != nil else { return nil }
+        let path = url.standardizedFileURL.path
+        guard let artifact = artifacts.values.first(where: {
+            URL(fileURLWithPath: $0.outputPath).standardizedFileURL.path == path
+        }) else { return nil }
+        return URL(fileURLWithPath: artifact.sourcePath)
+    }
+
     /// 原图被用户删除时移除全部关联派生文件，不影响其他来源的生成结果。
     func removeArtifacts(
         for sourceURL: URL,

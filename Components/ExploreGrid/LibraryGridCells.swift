@@ -1020,6 +1020,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
     private var resolvedThumbnailURL: URL?
     private var thumbnailRefreshTask: Task<Void, Never>?
     private var thumbnailIdleToken: UUID?
+    private var isThumbnailWorkSuspended = false
 
     // hover GIF
     private var hoverGIFFetchTask: Task<Void, Never>?
@@ -1092,6 +1093,41 @@ final class LibraryMediaGridCell: ExploreGridItem {
             name: .sceneOfflineBakeThumbnailDidUpdate,
             object: nil
         )
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(libraryThumbnailsDidChange(_:)), name: .libraryMediaThumbnailsDidChange, object: nil)
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(suspendThumbnailWork(_:)), name: .libraryMediaThumbnailWorkDidSuspend, object: nil)
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(resumeThumbnailWork(_:)), name: .libraryMediaThumbnailWorkDidResume, object: nil)
+    }
+
+    @objc private func suspendThumbnailWork(_ notification: Notification) {
+        if notification.userInfo?["untilVisible"] as? Bool == true { isThumbnailWorkSuspended = true }
+        thumbnailRefreshTask?.cancel()
+        thumbnailRefreshTask = nil
+        if let token = thumbnailIdleToken {
+            LibraryScrollHoverGate.shared.cancelIdleWork(token: token)
+            thumbnailIdleToken = nil
+        }
+    }
+
+    @objc private func resumeThumbnailWork(_ notification: Notification) {
+        isThumbnailWorkSuspended = false
+        if currentModel != nil { scheduleThumbnailRefresh() }
+    }
+
+    /// 后台一批结果只更新对应的可见 cell，不推动 SwiftUI 重新 map/filter 全库。
+    @objc private func libraryThumbnailsDidChange(_ notification: Notification) {
+        guard !isThumbnailWorkSuspended, let model = currentModel,
+              let itemIDs = notification.userInfo?["itemIDs"] as? [String],
+              itemIDs.contains(model.itemID) else { return }
+        if let resolved = LibraryMediaThumbnailCache.shared.cachedResolution(
+            for: model.mediaItem, localFileURL: model.localFileURL), let url = resolved.thumbnailURL {
+            applyResolvedThumbnail(url)
+            if isHovered { startHoverGIFPlaybackIfNeeded() }
+        } else {
+            scheduleThumbnailRefresh()
+        }
     }
 
     @objc private func sceneBakeThumbnailDidUpdate(_ notification: Notification) {
@@ -1118,6 +1154,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
                 cache.removeImage(forKey: key, processorIdentifier: processorIdentifier)
             }
         }
+        guard !isThumbnailWorkSuspended else { return }
         if let newURL = notification.userInfo?["thumbnailURL"] as? URL {
             resolvedThumbnailURL = newURL
             loadCoverImages(preferredURL: newURL, model: model)
@@ -1298,7 +1335,6 @@ final class LibraryMediaGridCell: ExploreGridItem {
         // 存在性走 FileExistenceCache 正负缓存——列表构建时 libraryGridThumbnailURL
         // 已对同一文件 stat 过，此处命中缓存，滚动热路径不新增磁盘 IO。
         if let local = model.localFileURL, local.isFileURL,
-           FileExistenceCache.shared.fileExists(atPath: local.path),
            LocalImageThumbnailCache.isGIFFile(local),
            !rawCandidates.contains(local) {
             rawCandidates.append(local)
@@ -1465,13 +1501,8 @@ final class LibraryMediaGridCell: ExploreGridItem {
         if let local = model.localFileURL, LocalImageThumbnailCache.isGIFFile(local) {
             append(local)
         }
-        if let local = model.localFileURL,
-           local.isFileURL,
-           FileExistenceCache.shared.isDirectory(atPath: local.path),
-           let preview = MediaItem.resolveLocalWorkshopPreviewGIF(from: local),
-           LocalImageThumbnailCache.isGIFFile(preview) {
-            append(preview)
-        }
+        append(LibraryMediaThumbnailCache.shared.cachedResolution(
+            for: model.mediaItem, localFileURL: model.localFileURL)?.localGIFURL)
         // 与旧 MediaVideoCard.animatedProbeCandidates 对齐：不能只探测当前列表
         // 封面，否则本地静态抽帧存在时会漏掉 MediaItem.posterURL 里的真实 GIF。
         for candidate in [
@@ -1561,7 +1592,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
     // MARK: 列表缩略图异步解析（抽帧 / SSD 小图 / scene bake，对齐 MediaVideoCard.triggerThumbnailIfNeeded）
 
     private func scheduleThumbnailRefresh() {
-        guard let model = currentModel else { return }
+        guard !isThumbnailWorkSuspended, let model = currentModel else { return }
         if let token = thumbnailIdleToken {
             LibraryScrollHoverGate.shared.cancelIdleWork(token: token)
             thumbnailIdleToken = nil
@@ -1607,12 +1638,9 @@ final class LibraryMediaGridCell: ExploreGridItem {
         if LocalImageThumbnailCache.isGIFFile(local) {
             return true
         }
-        // Workshop 目录内的 preview.gif
-        if FileExistenceCache.shared.isDirectory(atPath: local.path),
-           let preview = MediaItem.resolveLocalWorkshopPreviewGIF(from: local) {
-            return LocalImageThumbnailCache.isGIFFile(preview)
-        }
-        return false
+        // Workshop GIF 已在后台解析；hover/configure 不再同步打开 project.json。
+        return LibraryMediaThumbnailCache.shared.cachedResolution(
+            for: model.mediaItem, localFileURL: local)?.localGIFURL != nil
     }
 
     private func refreshListThumbnailSource(model: LibraryMediaCellModel) {
@@ -1623,124 +1651,38 @@ final class LibraryMediaGridCell: ExploreGridItem {
     }
 
     private func refreshListThumbnailSourceStep(model: LibraryMediaCellModel) async {
-        guard currentModel?.itemID == model.itemID else { return }
-        let videoCache = VideoThumbnailCache.shared
-        let item = model.mediaItem
-
-        // Scene 烘焙：优先列表小图；有 poster 先占位再后台补完整画幅帧
-        if let bakedPath = MediaLibraryService.shared.downloadRecord(for: item.id)?.sceneBakeArtifact?.videoPath,
-           !bakedPath.isEmpty {
-            let bakedVideo = URL(fileURLWithPath: bakedPath)
-            if let listThumb = videoCache.cachedListThumbnailFileURLIfExists(forLocalVideo: bakedVideo) {
-                applyResolvedThumbnail(listThumb)
-                return
-            }
-            if let hd = videoCache.cachedSceneBakePosterFileURLIfExists(itemID: item.id) {
-                applyResolvedThumbnail(hd)
-            }
-            guard !LibraryScrollHoverGate.shared.isScrolling else { return }
-            if let listThumb = await videoCache.listThumbnailJPEGFileURL(forLocalVideo: bakedVideo) {
-                applyResolvedThumbnail(listThumb)
-            } else if let poster = await videoCache.sceneBakePosterJPEGFileURL(
-                forLocalVideo: bakedVideo,
-                itemID: item.id
-            ) {
-                applyResolvedThumbnail(poster)
-            }
-            return
-        }
-
-        if let poster = videoCache.cachedSceneBakePosterFileURLIfExists(itemID: item.id) {
-            applyResolvedThumbnail(poster)
-            return
-        }
-
-        guard let local = model.localFileURL, local.isFileURL else { return }
-        let ext = local.pathExtension.lowercased()
-
-        // GIF：直接用原文件
-        if ext == "gif" {
-            applyResolvedThumbnail(local)
-            return
-        }
-
-        // 静图：只读已有 SSD 缓存；缺失时滚停后生成
-        if LocalImageThumbnailCache.isRasterImageFile(local) {
-            if let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: local) {
-                applyResolvedThumbnail(cached)
-                return
-            }
-            guard !LibraryScrollHoverGate.shared.isScrolling else { return }
-            if let thumb = await LocalImageThumbnailCache.shared.ensureThumbnail(forLocalFile: local) {
-                applyResolvedThumbnail(thumb)
-            }
-            return
-        }
-
-        // 直出视频文件 / 父视图已解析的内部视频
-        if Self.videoExtensions.contains(ext) {
-            await applyVideoListThumbnail(for: local)
-            return
-        }
-        if let resolved = model.resolvedVideoFileURL,
-           Self.videoExtensions.contains(resolved.pathExtension.lowercased()) {
-            await applyVideoListThumbnail(for: resolved)
-            return
-        }
-
-        // Workshop 目录：有内部视频则抽帧；否则 preview / GIF
-        guard !LibraryScrollHoverGate.shared.isScrolling else { return }
-        let exists = await local.fileExistsAsync()
-        guard currentModel?.itemID == model.itemID else { return }
-        guard exists else { return }
-
-        if let resolved = MediaItem.resolveLocalVideoFile(from: local),
-           Self.videoExtensions.contains(resolved.pathExtension.lowercased()) {
-            await applyVideoListThumbnail(for: resolved)
-            return
-        }
-
-        if let localPreview = MediaItem.resolveLocalWorkshopPreviewImage(from: local) {
-            if LocalImageThumbnailCache.isGIFFile(localPreview) {
-                applyResolvedThumbnail(localPreview)
-                return
-            }
-            if LocalImageThumbnailCache.isRasterImageFile(localPreview) {
-                if let cached = LocalImageThumbnailCache.shared.cachedThumbnailURLIfExists(forLocalFile: localPreview) {
-                    applyResolvedThumbnail(cached)
-                    return
-                }
-                if let thumb = await LocalImageThumbnailCache.shared.ensureThumbnail(forLocalFile: localPreview) {
-                    applyResolvedThumbnail(thumb)
-                } else {
-                    applyResolvedThumbnail(localPreview)
-                }
-                return
-            }
-            applyResolvedThumbnail(localPreview)
-            return
-        }
+        let resolved = await LibraryMediaThumbnailCache.shared.resolve(
+            for: model.mediaItem, localFileURL: model.localFileURL
+        )
+        guard !Task.isCancelled, currentModel?.itemID == model.itemID,
+              currentModel?.localFileURL == model.localFileURL,
+              LibraryMediaThumbnailCache.shared.isCurrent(resolved, for: model.mediaItem, localFileURL: model.localFileURL) else { return }
+        if let thumbnail = resolved.thumbnailURL { applyResolvedThumbnail(thumbnail) }
+        guard !resolved.hasListThumbnail, !LibraryScrollHoverGate.shared.isScrolling,
+              let video = resolved.videoURL else { return }
+        await applyVideoListThumbnail(for: video, model: model, lookup: resolved)
     }
 
-    /// 列表视频封面：已有缓存直接用；否则后台生成列表帧，失败回退高清 poster。
-    private func applyVideoListThumbnail(for videoURL: URL) async {
+    /// 缺视频列表帧时才生成；复用/换目录后旧任务不得给新卡片套上旧封面。
+    private func applyVideoListThumbnail(for videoURL: URL, model: LibraryMediaCellModel, lookup: LibraryThumbnailResolution) async {
         let videoCache = VideoThumbnailCache.shared
-        if let cached = videoCache.cachedStaticThumbnailFileURLIfExists(forLocalFile: videoURL) {
-            applyResolvedThumbnail(cached)
+        let thumbnail = await videoCache.listThumbnailJPEGFileURL(forLocalVideo: videoURL)
+        guard !Task.isCancelled, currentModel?.itemID == model.itemID,
+              currentModel?.localFileURL == model.localFileURL,
+              LibraryMediaThumbnailCache.shared.isCurrent(lookup, for: model.mediaItem, localFileURL: model.localFileURL) else { return }
+        if let thumbnail {
+            applyResolvedThumbnail(thumbnail)
             FileExistenceCache.shared.markExisting(atPath: videoURL.path)
+            LibraryMediaThumbnailCache.shared.invalidate(itemID: model.itemID, realtimeIndexChanged: false)
             return
         }
-        guard !LibraryScrollHoverGate.shared.isScrolling else { return }
-        if let listThumb = await videoCache.listThumbnailJPEGFileURL(forLocalVideo: videoURL) {
-            applyResolvedThumbnail(listThumb)
-            FileExistenceCache.shared.markExisting(atPath: videoURL.path)
-            return
-        }
-        if let poster = await videoCache.posterJPEGFileURL(forLocalVideo: videoURL) {
-            applyResolvedThumbnail(poster)
-            FileExistenceCache.shared.markExisting(atPath: videoURL.path)
-        }
+        let poster = await videoCache.posterJPEGFileURL(forLocalVideo: videoURL)
+        guard !Task.isCancelled, currentModel?.itemID == model.itemID,
+              currentModel?.localFileURL == model.localFileURL,
+              LibraryMediaThumbnailCache.shared.isCurrent(lookup, for: model.mediaItem, localFileURL: model.localFileURL) else { return }
+        if let poster { applyResolvedThumbnail(poster) }
     }
+
 }
 
 // MARK: - 文件夹卡 Cell

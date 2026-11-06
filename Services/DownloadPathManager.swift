@@ -22,6 +22,58 @@ final class DownloadPathManager {
     /// 当前已 `startAccessingSecurityScopedResource` 的自定义父目录（进程内保持访问）
     private var activeSecurityScopedRootURL: URL?
     private var isAccessingSecurityScopedRoot = false
+    private var libraryRootSnapshot: URL?
+    private var libraryRootSnapshotBookmark: Data?
+    private var libraryRootSnapshotDisplayPath: String?
+
+    /// 热路径只读已授权解析过的值；书签/展示路径变化时不沿用旧根，不在这里重新解析。
+    var libraryRootFolderURLSnapshot: URL? {
+        if BackgroundRuntimeRole.isIsolatedTest {
+            return ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_ROOT"].map {
+                URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("WaifuX", isDirectory: true)
+            }
+        }
+        guard libraryRootSnapshotBookmark == defaults.data(forKey: Self.customDownloadRootBookmarkKey),
+              libraryRootSnapshotDisplayPath == defaults.string(forKey: Self.customDownloadRootPathKey) else { return nil }
+        return libraryRootSnapshot
+    }
+
+    /// 库页引导期只解析一次，书签解析在后台；搬家/卷改名后同步真实根与展示路径。
+    func prepareLibraryRootSnapshot() async {
+        if BackgroundRuntimeRole.isIsolatedTest {
+            libraryRootSnapshot = libraryRootFolderURLSnapshot
+            return
+        }
+        let bookmark = defaults.data(forKey: Self.customDownloadRootBookmarkKey)
+        if libraryRootFolderURLSnapshot != nil { return }
+        let savedPath = defaults.string(forKey: Self.customDownloadRootPathKey)
+        let parent = await Task.detached(priority: .utility) { () -> URL? in
+            guard let bookmark else { return nil }
+            var stale = false
+            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope,
+                                  relativeTo: nil, bookmarkDataIsStale: &stale) { return url }
+            if let savedPath, FileManager.default.fileExists(atPath: savedPath) {
+                return URL(fileURLWithPath: savedPath, isDirectory: true)
+            }
+            return nil
+        }.value
+        guard defaults.data(forKey: Self.customDownloadRootBookmarkKey) == bookmark else { return }
+        let fallback = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("WaifuX", isDirectory: true)
+        let previous = libraryRootSnapshot ?? savedPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("WaifuX", isDirectory: true)
+        } ?? fallback
+        if let parent {
+            ensureSecurityScopedAccess(to: parent)
+            libraryRootSnapshot = parent.appendingPathComponent("WaifuX", isDirectory: true)
+            if savedPath != parent.path { defaults.set(parent.path, forKey: Self.customDownloadRootPathKey) }
+        } else { libraryRootSnapshot = fallback }
+        libraryRootSnapshotBookmark = bookmark
+        libraryRootSnapshotDisplayPath = defaults.string(forKey: Self.customDownloadRootPathKey)
+        if previous != libraryRootSnapshot {
+            NotificationCenter.default.post(name: .downloadPathChanged, object: nil)
+        }
+    }
 
     // MARK: - 根目录
 
@@ -54,6 +106,9 @@ final class DownloadPathManager {
                 .first!
                 .appendingPathComponent("WaifuX", isDirectory: true)
         }
+        libraryRootSnapshot = url
+        libraryRootSnapshotBookmark = defaults.data(forKey: Self.customDownloadRootBookmarkKey)
+        libraryRootSnapshotDisplayPath = defaults.string(forKey: Self.customDownloadRootPathKey)
         return url
     }
 
@@ -95,6 +150,9 @@ final class DownloadPathManager {
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             )
+            if defaults.string(forKey: Self.customDownloadRootPathKey) != url.path {
+                defaults.set(url.path, forKey: Self.customDownloadRootPathKey)
+            }
             if isStale {
                 // 刷新 bookmark（需已持有访问权）
                 ensureSecurityScopedAccess(to: url)

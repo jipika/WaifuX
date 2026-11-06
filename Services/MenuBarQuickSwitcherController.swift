@@ -274,7 +274,10 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 封面更新通知触发的重解析任务；与 `previewTasks` 分开，免得打乱预热并发槽计数。
     private var coverRefreshTasks: [String: Task<Void, Never>] = [:]
     private var playbackObservers: Set<AnyCancellable> = []
+    private var libraryObservers: Set<AnyCancellable> = []
     private var playbackRefreshWorkItem: DispatchWorkItem?
+    private var currentWallpaperIdentityTask: Task<Void, Never>?
+    private var libraryFetchTask: Task<Void, Never>?
 
     var onOpenSettings: (() -> Void)?
     var onOpenDesignWallpaper: (() -> Void)?
@@ -284,9 +287,10 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     private var targetScreenID: String?
     private var targetScreenFingerprint: String?
-    /// 菜单栏所在屏幕当前正在使用的那张壁纸（prepare 传入）。
-    /// 它必须始终在候选项中，并且默认被选中。
+    /// 菜单栏所在屏幕实际显示的壁纸；竖屏时可能是 blur-fill 派生图。
     private var currentWallpaperURL: URL?
+    /// 用于反查库记录的 URL；派生图异步映射回原图，普通壁纸保持原值。
+    private var currentWallpaperLookupURL: URL?
     /// 打开耗时诊断（`状态栏左键弹窗打开耗时` 日志用）。
     private(set) var lastDataDurationMS = 0
     private(set) var lastCurrentLookupMS = 0
@@ -373,6 +377,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         // 记住该屏正在使用的壁纸：后面每次重建批次、换一批、切文件夹都要保证
         // 它仍作为候选项出现，并且默认被选中（hero 大图同步）。
         self.currentWallpaperURL = currentWallpaperURL
+        self.currentWallpaperLookupURL = currentWallpaperURL
         errorMessage = nil
 
         let schedulerConfig = activeSchedulerConfig()
@@ -401,6 +406,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
         startObservingPlaybackState()
         startObservingCoverUpdates()
+        startObservingLibraryState()
+        resolveCurrentWallpaperIdentity()
         refreshPlaybackSnapshot()
     }
 
@@ -642,6 +649,85 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 self.handleCoverUpdate(itemID: itemID, posterURL: posterURL)
             }
             .store(in: &coverObservers)
+    }
+
+    /// 库快照/当前屏路径晚于弹窗到达时，重新计算当前项，不把 provisional external 留到最后。
+    private func startObservingLibraryState() {
+        guard libraryObservers.isEmpty else { return }
+        // UI 冷启动而 Helper 尚未推送库快照时主动拉一次；已到达则等订阅变更即可。
+        if !BackgroundRuntimeBridge.librarySnapshotIsArrived {
+            libraryFetchTask?.cancel()
+            libraryFetchTask = Task { @MainActor in
+                try? await BackgroundRuntimeBridge.refreshLibrarySnapshot()
+            }
+        }
+        let libraryChanges = Publishers.Merge3(
+            BackgroundRuntimeBridge.librarySnapshotArrivedPublisher
+                .map { _ in () }.dropFirst(),
+            WallpaperLibraryService.shared.$downloadRecords
+                .map { _ in () }.dropFirst(),
+            MediaLibraryService.shared.$downloadRecords
+                .map { _ in () }.dropFirst()
+        )
+        libraryChanges
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                guard let self else { return }
+                MenuBarQuickWallpaperRepository.shared.invalidateItemsCache()
+                self.resolveCurrentWallpaperIdentity()
+            }
+            .store(in: &libraryObservers)
+
+        CurrentWallpaperService.shared.$activeURLByScreenID
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] values in
+                guard let self,
+                      let screen = self.resolvedTargetScreen(),
+                      let url = values[screen.wallpaperScreenIdentifier],
+                      self.currentWallpaperURL != url else { return }
+                self.currentWallpaperURL = url
+                self.resolveCurrentWallpaperIdentity()
+            }
+            .store(in: &libraryObservers)
+    }
+
+    private func resolveCurrentWallpaperIdentity() {
+        currentWallpaperIdentityTask?.cancel()
+        currentWallpaperIdentityTask = nil
+        guard let presentedURL = currentWallpaperURL else {
+            currentWallpaperLookupURL = nil
+            return
+        }
+        // 先沿原路径立即展示，避免读映射拖延弹窗；异步命中库记录后再替换 external。
+        currentWallpaperLookupURL = presentedURL
+        reconcileCurrentWallpaperSelection()
+        // 非派生图路径（视频 / scene / web / 原图直设）不读 blur-fill 映射。
+        let derivedDirectory = DownloadPathManager.shared.derivedWallpapersFolderURL
+        let derivedPrefix = derivedDirectory
+            .appendingPathComponent("PortraitBlurFill", isDirectory: true)
+            .standardizedFileURL.path + "/"
+        guard presentedURL.standardizedFileURL.path.hasPrefix(derivedPrefix) else { return }
+        currentWallpaperIdentityTask = Task { @MainActor [weak self] in
+            let sourceURL = await PortraitBlurFillWallpaperService.shared.originalSourceURL(
+                forDerivedWallpaperAt: presentedURL,
+                derivedWallpapersDirectory: derivedDirectory
+            )
+            guard let self, !Task.isCancelled,
+                  self.currentWallpaperURL == presentedURL else { return }
+            self.currentWallpaperIdentityTask = nil
+            self.currentWallpaperLookupURL = sourceURL ?? presentedURL
+            self.reconcileCurrentWallpaperSelection()
+        }
+    }
+
+    private func reconcileCurrentWallpaperSelection() {
+        // 用户已手动点选另一张库壁纸时，异步身份结果只更新候选，不抢走选中。
+        let userPickedOther = selectedItem.map { item in
+            item.isLibraryItem
+                && item.localURL != currentWallpaperLookupURL
+                && item.localURL != currentWallpaperURL
+        } ?? false
+        ensureCurrentWallpaperInBatch(selectCurrent: !userPickedOther)
     }
 
     private func handleCoverUpdate(itemID: String, posterURL: URL?) {
@@ -1111,6 +1197,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     }
 
     func suspendPreviewWork() {
+        libraryObservers.removeAll()
+        currentWallpaperIdentityTask?.cancel()
+        currentWallpaperIdentityTask = nil
+        libraryFetchTask?.cancel()
+        libraryFetchTask = nil
         for task in previewTasks.values {
             task.cancel()
         }
@@ -1132,7 +1223,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     private func replaceBatch(avoidPreviousBatch: Bool) {
         let pool = MenuBarQuickWallpaperRepository.shared.items(folderIDs: selectedFolderIDs)
         let currentItem = MenuBarQuickWallpaperRepository.shared.currentItem(
-            matching: currentWallpaperURL
+            matching: currentWallpaperLookupURL
         )
         let currentIsInPool: Bool = {
             guard let currentItem else { return false }
@@ -1188,9 +1279,10 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     }
 
     /// 批次还在时（同一文件夹下再次打开），把「当前壁纸」同步成候选项与选中项。
-    private func ensureCurrentWallpaperInBatch() {
+    /// - Parameter selectCurrent: false 时只更新候选与 external 替身，不抢用户已点选的项。
+    private func ensureCurrentWallpaperInBatch(selectCurrent: Bool = true) {
         guard let current = MenuBarQuickWallpaperRepository.shared.currentItem(
-            matching: currentWallpaperURL
+            matching: currentWallpaperLookupURL
         ) else { return }
 
         // 上一次打开合成了 external「当前壁纸」；这次换成了别的壁纸就把它清掉，
@@ -1210,6 +1302,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             batchItems = updated
             lastBatchIDs = Set(updated.map(\.id))
             previewWarmupToken = UUID()
+        }
+        guard selectCurrent else { return }
+        if let selected = selectedItem, !updated.contains(where: { $0.id == selected.id }) {
+            // 原选中项被移出批次（external 被库记录替换等），退回当前壁纸选中。
+            selectedItem = nil
         }
         selectedItem = batchItems.first { Self.isSameWallpaper($0, current) } ?? current
         errorMessage = nil

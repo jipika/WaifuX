@@ -99,6 +99,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     private var restartCount = 0
     private var loginID: UInt32
     private var sessionIsLoggedIn = false
+    private var lastRestoreFailureMessage: String?
     private var launchedProxySignature = ""
     private var restartingForProxyChange = false
     private var qrLoginActive = false
@@ -112,27 +113,59 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     }
 
     private override init() {
-        loginID = BackgroundRuntimeRole.isRemoteUI ? 0 : Self.loadLoginID(forKey: loginIDKey)
+        // 所有偏好读取都延迟到 ioQueue；singleton init 不读 UserDefaults。
+        loginID = 0
         super.init()
+        // 在 ioQueue 上延迟读偏好，避开 singleton init 期间直接读 UserDefaults。
+        if !BackgroundRuntimeRole.isRemoteUI {
+            ioQueue.async { [weak self] in self?.restoreLoginIDIfNeeded() }
+        }
         if BackgroundRuntimeRole.isRemoteUI {
             Task { @MainActor in
                 BackgroundRuntimeBridge.observe { [weak self] snapshot in
                     guard let self, let values = snapshot["steam"] as? [String: Any] else { return }
-                    self.isAvailable = values["available"] as? Bool ?? false
-                    self.isLoggedIn = values["loggedIn"] as? Bool ?? false
-                    self.accountName = values["account"] as? String ?? ""
-                    self.steamID = values["steamID"] as? String ?? ""
-                    if let data = values["login"] as? Data, let state = try? JSONDecoder().decode(SteamServiceLoginState.self, from: data) { self.loginState = state }
+                    self.applyBackgroundSnapshot(values)
                 }
             }
         }
     }
 
+    @MainActor private func applyBackgroundSnapshot(_ values: [String: Any]) {
+        isAvailable = values["available"] as? Bool ?? false
+        isLoggedIn = values["loggedIn"] as? Bool ?? false
+        accountName = values["account"] as? String ?? ""
+        steamID = values["steamID"] as? String ?? ""
+        if let data = values["login"] as? Data,
+           let state = try? JSONDecoder().decode(SteamServiceLoginState.self, from: data) {
+            loginState = state
+        }
+    }
+
     func start() {
-        if BackgroundRuntimeRole.isRemoteUI { Task { @MainActor in BackgroundRuntimeBridge.send("steam.start", [:]) }; return }
+        if BackgroundRuntimeRole.isRemoteUI {
+            Task { @MainActor in
+                do {
+                    let data = try await BackgroundRuntimeBridge.request("steam.start", [:])
+                    if let values = data["steam"] as? [String: Any] { applyBackgroundSnapshot(values) }
+                } catch {
+                    AppLogger.error(.download, "Steam 后台会话启动失败", metadata: ["error": error.localizedDescription])
+                }
+            }
+            return
+        }
 
         ioQueue.async { [weak self] in
             guard let self else { return }
+            self.explicitShutdown = false
+            self.startOnQueue()
+        }
+    }
+
+    /// 后台启动时只恢复已有会话；没有保存账号时不创建服务进程。
+    func restoreSavedSessionIfAvailable() {
+        guard !BackgroundRuntimeRole.isRemoteUI else { return }
+        ioQueue.async { [weak self] in
+            guard let self, self.savedUsernameOnQueue()?.isEmpty == false else { return }
             self.explicitShutdown = false
             self.startOnQueue()
         }
@@ -335,6 +368,9 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
             WaifuXPreferences.shared.removeObject(forKey: usernameKey)
+            WaifuXPreferences.shared.removeLegacySessionValue(forKey: usernameKey)
+            WaifuXPreferences.shared.removeLegacySessionValue(forKey: loginIDKey)
+            lastRestoreFailureMessage = nil
             sessionIsLoggedIn = false
             resolveRestoreWaitersOnQueue(isLoggedIn: false)
             updateOnMain {
@@ -361,9 +397,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             throw SteamServiceError.downloadFailed("Workshop ID 不能为空。", "INVALID_WORKSHOP_ID")
         }
         guard await waitForRestoredSessionIfNeeded() else {
-            throw SteamServiceError.notAuthenticated
+            throw sessionRestoreError()
         }
 
+        // 24 项一批的下载会在同一毫秒进入。启动前先尝试已有会话，避免第一批
+        // 在 Helper 尚未恢复时全被报成“未登录”。
+        start()
         let taskID = UUID().uuidString
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
@@ -477,7 +516,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             }
         }
         guard ready else {
-            throw SteamServiceError.notAuthenticated
+            throw sessionRestoreError()
         }
 
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SteamSubscriptionPage, Error>) in
@@ -778,24 +817,71 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         return process?.isRunning == true
     }
 
-    private func restoreSessionOnQueue() {
-        guard loginContinuation == nil,
-              !restoringSession,
-              let username = WaifuXPreferences.shared.string(forKey: usernameKey),
-              !username.isEmpty,
-              case .value(let token) = keychainRead(account: refreshTokenAccount(username)) else {
-            return
+    @discardableResult
+    private func restoreSessionOnQueue() -> Bool {
+        guard loginContinuation == nil, !restoringSession else { return restoringSession }
+        guard let username = savedUsernameOnQueue(), !username.isEmpty else {
+            return false
         }
-        restoringSession = true
-        loginUsername = username
-        updateOnMain {
-            self.loginState = .loggingIn
+        switch keychainRead(account: refreshTokenAccount(username)) {
+        case .value(let token):
+            restoringSession = true
+            loginUsername = username
+            updateOnMain {
+                self.loginState = .loggingIn
+            }
+            sendCommandOnQueue("restoreSession", fields: [
+                "username": username,
+                "refreshToken": token,
+                "loginId": loginID
+            ])
+            return true
+        case .notFound:
+            markRestorationFailureOnQueue(
+                "已保存 Steam 账号，但钥匙串中没有会话令牌。请到「设置 → Steam 服务」重新登录。",
+                reason: "refreshTokenMissing",
+                status: errSecItemNotFound
+            )
+        case .failure(let status):
+            markRestorationFailureOnQueue(
+                "无法读取钥匙串中的 Steam 会话（错误 \(status)）。请到「设置 → Steam 服务」重新登录。",
+                reason: "refreshTokenReadFailed",
+                status: status
+            )
         }
-        sendCommandOnQueue("restoreSession", fields: [
-            "username": username,
-            "refreshToken": token,
-            "loginId": loginID
+        return false
+    }
+
+    private func savedUsernameOnQueue() -> String? {
+        let preferences = WaifuXPreferences.shared
+        let username = preferences.string(forKey: usernameKey)
+            ?? preferences.legacyStringForSessionRestore(usernameKey)
+        return username?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func markRestorationFailureOnQueue(_ message: String, reason: String, status: OSStatus) {
+        lastRestoreFailureMessage = message
+        AppLogger.error(.download, "Steam 会话恢复不可用", metadata: [
+            "reason": reason,
+            "keychainStatus": String(status)
         ])
+        updateOnMain {
+            self.isLoggedIn = false
+            self.loginState = .failed(message)
+        }
+    }
+
+    private func restoreLoginIDIfNeeded() {
+        guard loginID == 0 else { return }
+        let preferences = WaifuXPreferences.shared
+        let saved: Int?
+        if let current = preferences.object(forKey: loginIDKey) as? NSNumber {
+            saved = current.intValue
+        } else {
+            saved = preferences.legacyIntegerForSessionRestore(loginIDKey)
+        }
+        guard let value = saved.flatMap({ UInt32(exactly: $0) }), value != 0 else { return }
+        loginID = value
     }
 
     private func waitForRestoredSessionIfNeeded() async -> Bool {
@@ -812,6 +898,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                     continuation.resume(returning: false)
                     return
                 }
+                self.restoreLoginIDIfNeeded()
                 if self.sessionIsLoggedIn {
                     continuation.resume(returning: true)
                     return
@@ -915,13 +1002,20 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         case "loggedIn":
             stopQRLoginOnQueue()
             let resolvedSteamID = event["steamId"] as? String ?? steamID
+            var persistedToken = true
             if let token = event["refreshToken"] as? String, !token.isEmpty {
-                _ = setKeychainValue(token, account: refreshTokenAccount(resolvedUsername))
+                let status = setKeychainValue(token, account: refreshTokenAccount(resolvedUsername))
+                persistedToken = status == errSecSuccess
+                if !persistedToken {
+                    AppLogger.error(.download, "Steam 会话令牌保存失败", metadata: ["keychainStatus": String(status)])
+                }
             }
             if let guardData = event["guardData"] as? String, !guardData.isEmpty {
                 _ = setKeychainValue(guardData, account: guardDataAccount(resolvedUsername))
             }
             WaifuXPreferences.shared.set(resolvedUsername, forKey: usernameKey)
+            lastRestoreFailureMessage = nil
+            AppLogger.info(.download, "Steam 会话已连接", metadata: ["steamID": resolvedSteamID, "tokenPersisted": persistedToken ? "1" : "0"])
             restoringSession = false
             restartCount = 0
             sessionIsLoggedIn = true
@@ -946,7 +1040,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 self.steamID = ""
                 self.loginState = wasRestoring ? .failed("保存的 Steam 会话已失效，请重新登录。") : .idle
             }
-            if wasRestoring, let username = WaifuXPreferences.shared.string(forKey: usernameKey) {
+            if wasRestoring, let username = savedUsernameOnQueue() {
                 _ = deleteKeychainValue(account: refreshTokenAccount(username))
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
@@ -954,12 +1048,19 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             let message = event["message"] as? String ?? "Steam 登录失败。"
             let errorCode = event["errorCode"] as? String
             let wasRestoring = restoringSession
+            lastRestoreFailureMessage = wasRestoring ? message : nil
+            if wasRestoring {
+                AppLogger.error(.download, "Steam 会话恢复失败", metadata: [
+                    "error": message,
+                    "code": errorCode ?? ""
+                ])
+            }
             stopQRLoginOnQueue()
             restoringSession = false
             sessionIsLoggedIn = false
             resolveRestoreWaitersOnQueue(isLoggedIn: false)
             if wasRestoring, errorCode == "AUTH_FAILED",
-               let username = WaifuXPreferences.shared.string(forKey: usernameKey) {
+               let username = savedUsernameOnQueue() {
                 _ = deleteKeychainValue(account: refreshTokenAccount(username))
                 _ = deleteKeychainValue(account: guardDataAccount(username))
             }
@@ -1193,14 +1294,14 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         return nil
     }
 
-    private static func loadLoginID(forKey key: String) -> UInt32 {
-        if let number = WaifuXPreferences.shared.object(forKey: key) as? NSNumber,
-           number.uint32Value != 0 {
-            return number.uint32Value
+    /// 会话恢复失败时给出真实原因：没有保存账号才是“尚未登录”；
+    /// 有账号但令牌读取失败、恢复被拒等场景保留具体信息，避免一律
+    /// 报“未登录”误导用户重新走登录流程。
+    private func sessionRestoreError() -> SteamServiceError {
+        if let message = lastRestoreFailureMessage {
+            return .authenticationFailed(message, "SESSION_RESTORE_FAILED")
         }
-        let value = UInt32.random(in: 1...UInt32.max)
-        WaifuXPreferences.shared.set(Int(value), forKey: key)
-        return value
+        return .notAuthenticated
     }
 
     private func refreshTokenAccount(_ username: String) -> String {

@@ -21,6 +21,7 @@ enum AppResponsivenessMonitor {
     nonisolated(unsafe) private static var lastSnapshotTime = Date.distantPast
     nonisolated(unsafe) private static var lastStallLogTime = Date.distantPast
     nonisolated(unsafe) private static var lastForegroundActivationTime = Date.distantPast
+    nonisolated(unsafe) private static var stallWasObserved = false
     private static let foregroundSettleInterval: TimeInterval = 1.2
 
     static func startIfNeeded() {
@@ -139,6 +140,12 @@ enum AppResponsivenessMonitor {
 
     private static func acknowledgeHeartbeat(_ token: UInt64) {
         queue.async {
+            if stallWasObserved {
+                InteractionPerformanceLog.record(.mainThreadStall,
+                    milliseconds: Date().timeIntervalSince(lastHeartbeatTime) * 1000,
+                    metadata: ["phase": "recovered", "tab": state.currentTab])
+                stallWasObserved = false
+            }
             state.lastAckedHeartbeat = token
             lastHeartbeatTime = Date()
         }
@@ -152,6 +159,7 @@ enum AppResponsivenessMonitor {
         }
         lastHeartbeatTime = Date()
         lastStallLogTime = Date()
+        stallWasObserved = false
     }
 
     private static func evaluateStall() {
@@ -171,14 +179,15 @@ enum AppResponsivenessMonitor {
         guard now.timeIntervalSince(lastStallLogTime) >= stallThreshold else { return }
         lastStallLogTime = now
 
-        AppLogger.error(.ui, "Main thread stall suspected", metadata: [
-            "stallMS": String(format: "%.0f", elapsed * 1000),
-            "heartbeat": snapshot.heartbeat,
-            "ackedHeartbeat": snapshot.lastAckedHeartbeat,
-            "currentTab": snapshot.currentTab,
-            "detailDepth": snapshot.detailDepth,
-            "windowVisible": snapshot.windowVisible,
-            "appActive": snapshot.appActive,
+        stallWasObserved = true
+        InteractionPerformanceLog.record(.mainThreadStall, milliseconds: elapsed * 1000, metadata: [
+            "phase": "detected",
+            "heartbeat": String(snapshot.heartbeat),
+            "ackedHeartbeat": String(snapshot.lastAckedHeartbeat),
+            "tab": snapshot.currentTab,
+            "detailDepth": String(snapshot.detailDepth),
+            "windowVisible": snapshot.windowVisible ? "1" : "0",
+            "appActive": snapshot.appActive ? "1" : "0",
             "scenePhase": snapshot.scenePhase
         ])
         captureMainThreadSample(stallMS: elapsed * 1000)
@@ -190,7 +199,7 @@ enum AppResponsivenessMonitor {
     /// 采样期间主线程若已恢复，栈顶会显示 idle 等待——同样是有价值的证据。
     ///
     /// 每次采样都会 spawn 一个 `/usr/bin/sample` 子进程并抓 1 秒栈，连续卡顿时
-    /// 会放大负载。这里 10 分钟最多采一次；其余卡顿仍由 `logSnapshot` 记录。
+    /// 会放大负载。这里 10 分钟最多采一次；其余观测并入限频性能摘要。
     private static func captureMainThreadSample(stallMS: Double) {
         guard AppLogger.shouldThrottle(key: "ui.stallSample", interval: 600) else { return }
         let samplePath = "/tmp/waifux-stall-sample-\(Int(Date().timeIntervalSince1970)).txt"
