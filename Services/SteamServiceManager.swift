@@ -645,7 +645,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         if BackgroundRuntimeRole.isRemoteUI {
             return try await BackgroundRuntimeBridge.requestCodable(
                 "steam.subscriptionStates.wait",
-                arguments: BackgroundPropertyList.encode(["ids": workshopIDs]),
+                // AgentArguments.decode expects JSON Data inside the property-list envelope.
+                arguments: BackgroundPropertyList.encode(["ids": try JSONEncoder().encode(workshopIDs)]),
                 resultKey: "states",
                 as: [String: Bool].self
             )
@@ -674,10 +675,28 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                         }
                         return
                     }
-                    let states = items.reduce(into: [String: Bool]()) { result, item in
-                        if let id = item["workshopId"] as? String, let subscribed = item["subscribed"] as? Bool {
-                            result[id] = subscribed
+                    var states: [String: Bool] = [:]
+                    let requestedIDs = Set(workshopIDs)
+                    for item in items {
+                        guard let id = item["workshopId"] as? String,
+                              requestedIDs.contains(id),
+                              let subscribed = item["subscribed"] as? Bool,
+                              states[id] == nil else {
+                            continuation.resume(throwing: SteamServiceError.requestFailed(
+                                "Steam 服务返回的订阅状态数据格式异常，请重试。",
+                                "MALFORMED_SUBSCRIPTION_STATES"
+                            ))
+                            return
                         }
+                        states[id] = subscribed
+                    }
+                    // Missing is unknown, not false: never subscribe based on a partial response.
+                    guard Set(states.keys) == requestedIDs else {
+                        continuation.resume(throwing: SteamServiceError.requestFailed(
+                            "Steam 服务返回的订阅状态不完整，请重试。",
+                            "MALFORMED_SUBSCRIPTION_STATES"
+                        ))
+                        return
                     }
                     continuation.resume(returning: states)
                 }

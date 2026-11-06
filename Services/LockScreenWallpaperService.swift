@@ -516,11 +516,14 @@ final class LockScreenWallpaperService: ObservableObject {
         return requestID
     }
 
+    // Swift 6.4 crashes splitting the throwing detached coroutine in Release.
+    // Keep all throwing work synchronous and out of the nonthrowing worker's body.
+    @inline(never)
     private nonisolated static func prepareStaticImagePublication(
         originalImageData: Data, sourceURL: URL, alreadyCropped: Bool,
         displayIDs: [UInt32], directory: URL, requestID: UUID
-    ) async throws -> (staged: LockScreenImagePublication.Staged, thumbnailData: Data?) {
-        try await Task.detached(priority: .userInitiated) {
+    ) -> Result<(staged: LockScreenImagePublication.Staged, thumbnailData: Data?), Error> {
+        Result {
             // Scene transition frames already include their viewport/letterbox.
             // Trimming black borders or applying crop again would change the frame.
             let image: (data: Data, fileExtension: String)
@@ -533,7 +536,7 @@ final class LockScreenWallpaperService: ObservableObject {
                 data: image.data, fileExtension: image.fileExtension, displayIDs: displayIDs,
                 directory: directory, requestID: requestID)
             return (staged: staged, thumbnailData: staticThumbnailJPEGData(imageData: image.data))
-        }.value
+        }
     }
 
     /// Existing video/Web/static callers still require actual source readiness when requested.
@@ -611,12 +614,14 @@ final class LockScreenWallpaperService: ObservableObject {
         let targetDisplayIDs = Set(displayIDs).sorted()
         // Crop, stage and decode the actual written bytes off main. The same
         // decoder is used by the extension; unsupported input cannot replace prefs.
-        // Keep this throwing detached coroutine as a plain function call: inlining
-        // its closure here crashes the Swift 6 Release coroutine splitter.
-        let prepared = try await Self.prepareStaticImagePublication(
-            originalImageData: originalImageData, sourceURL: imageURL,
-            alreadyCropped: alreadyCropped, displayIDs: targetDisplayIDs,
-            directory: imageDir, requestID: requestID)
+        // Pass errors across the suspension as values, not a throwing coroutine.
+        let preparation = await Task.detached(priority: .userInitiated) {
+            Self.prepareStaticImagePublication(
+                originalImageData: originalImageData, sourceURL: imageURL,
+                alreadyCropped: alreadyCropped, displayIDs: targetDisplayIDs,
+                directory: imageDir, requestID: requestID)
+        }.value
+        let prepared = try preparation.get()
         var committed = false
         defer { if !committed { LockScreenImagePublication.discard(prepared.staged) } }
         // No await from the final request check through prefs publication and

@@ -3297,7 +3297,10 @@ final class MediaExploreViewModel: ObservableObject {
                 do {
                     try await SteamServiceManager.shared.setSubscribed(true, workshopID: id)
                     newlySubscribed += 1
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
+                    try Task.checkCancellation()
                     failed += 1
                     AppLogger.error(.download, "批量订阅本地 Workshop 项目失败", metadata: [
                         "id": id,
@@ -3307,6 +3310,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
             onProgress(index + 1, ids.count)
         }
+        try Task.checkCancellation()
         return LocalWorkshopSubscriptionStats(
             total: ids.count,
             alreadySubscribed: alreadySubscribed,
