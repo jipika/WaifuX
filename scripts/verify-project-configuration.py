@@ -91,6 +91,21 @@ assert helper_info['CFBundleIconName'] == 'AppIcon'
 agent = plistlib.loads((ROOT / 'BackgroundAgent/com.waifux.app.helper.plist').read_bytes())
 assert agent['KeepAlive'] == {'SuccessfulExit': False}, 'Explicit quit must not restart a successfully stopped Helper'
 assert agent['RunAtLoad'] is True, 'Login launch must remain available'
+# 「修复后台服务」的备用注册：除 Label 外必须与默认注册一致，且两份都要拷进主 App 的 LaunchAgents。
+relinked = plistlib.loads((ROOT / 'BackgroundAgent/com.waifux.app.helper.relinked.plist').read_bytes())
+assert relinked['Label'] == 'com.waifux.app.helper.relinked' != agent['Label'], 'Relinked agent needs its own launchd label'
+assert {k: v for k, v in relinked.items() if k != 'Label'} == {k: v for k, v in agent.items() if k != 'Label'}, \
+    'Relinked agent must match the bundled agent except for Label'
+launch_agent_copies = set()
+for target in objects.values():
+    if target.get('isa') != 'PBXNativeTarget' or target['name'] != 'WaifuX':
+        continue
+    for phase in target['buildPhases']:
+        if objects[phase]['isa'] == 'PBXCopyFilesBuildPhase' and objects[phase].get('dstPath') == 'Contents/Library/LaunchAgents':
+            for file in objects[phase]['files']:
+                launch_agent_copies.add(Path(objects[objects[file]['fileRef']].get('path', '')).name)
+assert {'com.waifux.app.helper.plist', 'com.waifux.app.helper.relinked.plist'} <= launch_agent_copies, \
+    ('Both Helper agent plists must be copied into Contents/Library/LaunchAgents', launch_agent_copies)
 seen_expected = set(expected)
 assert seen == seen_expected, (seen, seen_expected)
 print(f'PROJECT_CONFIGURATION_PASSED team={expected_team} targets={len(seen)} Debug/Release')

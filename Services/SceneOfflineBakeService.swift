@@ -1430,7 +1430,11 @@ enum SceneOfflineBakeService {
     }
 
     @MainActor
-    static func scheduleRealtimeCompanionBake(path: String, targetScreens: [NSScreen]? = nil, reason: String, desktopSourceAlreadyCommitted: Bool = false) {
+    static func scheduleRealtimeCompanionBake(
+        path: String, targetScreens: [NSScreen]? = nil, reason: String,
+        desktopSourceAlreadyCommitted: Bool = false,
+        preservingDesktopDisplayIDs: Set<UInt32> = []
+    ) {
         guard BackgroundRuntimeRole.isHelper else { return }
         let autoBakeEnabled = WaifuXPreferences.shared.bool(forKey: "auto_bake_scene")
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
@@ -1474,7 +1478,8 @@ enum SceneOfflineBakeService {
                             itemID: record?.item.id,
                             displayIDs: displayIDs,
                             reason: reason,
-                            generation: generation
+                            generation: generation,
+                            preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                         )
                     }
                     print("[SceneOfflineBake] realtime companion bake cache hit (\(reason)): \(artifact.videoPath)")
@@ -1495,7 +1500,8 @@ enum SceneOfflineBakeService {
                         record: record,
                         targets: posterTargets,
                         reason: reason,
-                        generation: generation
+                        generation: generation,
+                        preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                     )
                     return
                 }
@@ -1543,7 +1549,8 @@ enum SceneOfflineBakeService {
                         targets: posterTargets,
                         reason: reason,
                         generation: generation,
-                        syncToDisplays: !desktopSourceAlreadyCommitted
+                        syncToDisplays: !desktopSourceAlreadyCommitted,
+                        preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                     )
                     return
                 }
@@ -1586,6 +1593,7 @@ enum SceneOfflineBakeService {
                             reason: reason,
                             generation: generation,
                             syncToDisplays: !desktopSourceAlreadyCommitted,
+                            preservingDesktopDisplayIDs: preservingDesktopDisplayIDs,
                             detection: detection
                         )
                         return
@@ -1617,7 +1625,8 @@ enum SceneOfflineBakeService {
                     itemID: itemID,
                     displayIDs: displayIDs,
                     reason: reason,
-                    generation: generation
+                    generation: generation,
+                    preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                 )
             } catch {
                 print("[SceneOfflineBake] realtime companion bake failed (\(reason)): \(error.localizedDescription)")
@@ -1635,7 +1644,8 @@ enum SceneOfflineBakeService {
         record: MediaDownloadRecord?,
         targets: [RealtimePosterTarget],
         reason: String,
-        generation: UInt
+        generation: UInt,
+        preservingDesktopDisplayIDs: Set<UInt32> = []
     ) async {
         guard generation == companionBakeGeneration else {
             print("[ScenePosterDiag] 中止(stale): 进入临时抽帧前已被新应用取代 reason=\(reason)")
@@ -1717,7 +1727,8 @@ enum SceneOfflineBakeService {
                     cachedPoster,
                     displayIDs: groupedTargets[size, default: []].map(\.displayID),
                     reason: "\(reason), cached \(size.width)x\(size.height) transient poster",
-                    generation: generation
+                    generation: generation,
+                    preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                 )
             } else {
                 missingSizes.append(size)
@@ -1759,7 +1770,8 @@ enum SceneOfflineBakeService {
                         cachedPoster,
                         displayIDs: displayIDs,
                         reason: "\(reason), shared \(size.width)x\(size.height) transient poster",
-                        generation: generation
+                        generation: generation,
+                        preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                     )
                     continue
                 }
@@ -1788,7 +1800,8 @@ enum SceneOfflineBakeService {
                     posterURL,
                     displayIDs: displayIDs,
                     reason: "\(reason), temporary 1s bake \(size.width)x\(size.height)",
-                    generation: generation
+                    generation: generation,
+                    preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                 )
                 print(
                     "[SceneOfflineBake] transient poster finished (\(reason)) "
@@ -2039,6 +2052,7 @@ enum SceneOfflineBakeService {
         reason: String,
         generation: UInt?,
         syncToDisplays: Bool,
+        preservingDesktopDisplayIDs: Set<UInt32> = [],
         detection precomputed: SceneStaticDetectionResult? = nil
     ) async {
         guard generation.map({ $0 == companionBakeGeneration }) ?? true else {
@@ -2085,7 +2099,8 @@ enum SceneOfflineBakeService {
                         cachedPoster,
                         displayIDs: groupedTargets[size, default: []].map(\.displayID),
                         reason: "\(reason), cached \(size.width)x\(size.height) static poster",
-                        generation: generation ?? 0
+                        generation: generation ?? 0,
+                        preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                     )
                 }
             } else {
@@ -2143,7 +2158,8 @@ enum SceneOfflineBakeService {
                         cachedPoster,
                         displayIDs: groupedTargets[size, default: []].map(\.displayID),
                         reason: "\(reason), shared \(size.width)x\(size.height) static poster",
-                        generation: generation ?? 0
+                        generation: generation ?? 0,
+                        preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                     )
                 }
                 continue
@@ -2165,7 +2181,8 @@ enum SceneOfflineBakeService {
                     posterURL,
                     displayIDs: groupedTargets[size, default: []].map(\.displayID),
                     reason: "\(reason), renderer static frame \(size.width)x\(size.height)",
-                    generation: generation ?? 0
+                    generation: generation ?? 0,
+                    preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
                 )
             }
             print("[SceneOfflineBake] static poster finished (\(reason)) size=\(size.width)x\(size.height): \(posterURL.path)")
@@ -2348,7 +2365,8 @@ enum SceneOfflineBakeService {
         itemID: String?,
         displayIDs: [UInt32],
         reason: String,
-        generation: UInt? = nil
+        generation: UInt? = nil,
+        preservingDesktopDisplayIDs: Set<UInt32> = []
     ) async {
         guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
@@ -2379,7 +2397,8 @@ enum SceneOfflineBakeService {
                 posterURL,
                 displayIDs: displayIDs,
                 reason: reason,
-                generation: generation
+                generation: generation,
+                preservingDesktopDisplayIDs: preservingDesktopDisplayIDs
             )
         }
     }
@@ -2392,7 +2411,8 @@ enum SceneOfflineBakeService {
         _ posterURL: URL,
         displayIDs: [UInt32],
         reason: String,
-        generation: UInt? = nil
+        generation: UInt? = nil,
+        preservingDesktopDisplayIDs: Set<UInt32> = []
     ) async {
         guard generation.map({ $0 == companionBakeGeneration }) ?? true else { return }
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
@@ -2420,18 +2440,29 @@ enum SceneOfflineBakeService {
             return
         }
 
-        let targetScreens: [NSScreen]
+        let candidateScreens: [NSScreen]
         if displayIDs.isEmpty {
             // 调用方未指定 → 退回历史行为（兼容无显示器信息的路径）
-            targetScreens = NSScreen.screens
+            candidateScreens = NSScreen.screens
         } else {
             let idSet = Set(displayIDs)
-            targetScreens = NSScreen.screens.filter { screen in
+            candidateScreens = NSScreen.screens.filter { screen in
                 guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
                     return false
                 }
                 return idSet.contains(n.uint32Value)
             }
+        }
+        // Only ordinary system-desktop writes are filtered. The lock-screen
+        // branch above must retain its complete source-push target list.
+        // Keep generation/cache work for every screen, but never replace a
+        // pre-show desktop frame under an already opaque Scene window.
+        let targetScreens = candidateScreens.filter { screen in
+            guard !preservingDesktopDisplayIDs.isEmpty else { return true }
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return !preservingDesktopDisplayIDs.contains(number.uint32Value)
         }
         guard !targetScreens.isEmpty else {
             print("[SceneOfflineBake] static poster has no matching display (\(reason)): display=\(displayIDs)")

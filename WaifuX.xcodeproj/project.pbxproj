@@ -299,6 +299,7 @@
 		7BE02314734DADA1C09E6947 /* DesktopWallpaperSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26E549172081FEBF234C3A56 /* DesktopWallpaperSyncManager.swift */; };
 		7C44B5D49FAF5CCD95D961DA /* WallpaperAgentRecoveryExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49EAB13B8BE6EFC337ABD779 /* WallpaperAgentRecoveryExecutor.swift */; };
 		7CABDFC2219873A3F5923405 /* VideoPreloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 346599B5EA4571FB1FEAA1F3 /* VideoPreloader.swift */; };
+		7CD96C38B1ED35C461971926 /* com.waifux.app.helper.relinked.plist in CopyFiles */ = {isa = PBXBuildFile; fileRef = 6B3346443311AF70F26E0812 /* com.waifux.app.helper.relinked.plist */; };
 		7CE9D7595407EF27D532FE30 /* DanmakuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB6DD5A499E7BFC1DB6DB1B /* DanmakuView.swift */; };
 		7D16B8DA5A272696D4601A81 /* WebWallpaperDesignService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B90FB7E5E929B342AD6FB7 /* WebWallpaperDesignService.swift */; };
 		7D439B9CC297E0893336CDFE /* LiquidGlassWallpaperCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7159115AD04C7CD5E4B85F /* LiquidGlassWallpaperCard.swift */; };
@@ -603,10 +604,10 @@
 		6367CD2B049670AE8262B27D /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = Contents/Helpers;
+			dstPath = "Contents/Resources/Screen Savers";
 			dstSubfolderSpec = 1;
 			files = (
-				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
+				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -618,6 +619,7 @@
 			dstSubfolderSpec = 1;
 			files = (
 				B4A45A5B51FFA8BB4D15BEE7 /* com.waifux.app.helper.plist in CopyFiles */,
+				7CD96C38B1ED35C461971926 /* com.waifux.app.helper.relinked.plist in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -635,10 +637,10 @@
 		F68564DF1E026B1AC3471511 /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "Contents/Resources/Screen Savers";
+			dstPath = Contents/Helpers;
 			dstSubfolderSpec = 1;
 			files = (
-				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
+				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -806,6 +808,7 @@
 		687522FC992369259385825C /* MobilePushSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePushSheet.swift; sourceTree = "<group>"; };
 		695C0C43F501FF67741CE517 /* WallpaperBoundedImageDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperBoundedImageDecoder.swift; sourceTree = "<group>"; };
 		69E901FF6D205414875FD5F4 /* SuperResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuperResolutionService.swift; sourceTree = "<group>"; };
+		6B3346443311AF70F26E0812 /* com.waifux.app.helper.relinked.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = com.waifux.app.helper.relinked.plist; sourceTree = "<group>"; };
 		6BD158374E9260871EF76B53 /* FullScreenWallpaperView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullScreenWallpaperView.swift; sourceTree = "<group>"; };
 		6CA001EDF005B2FC12DC4043 /* LibraryFolderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFolderStore.swift; sourceTree = "<group>"; };
 		6CF2A6B0DAA0C8F5FE072A3A /* VideoOptimizationRecordStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoOptimizationRecordStore.swift; sourceTree = "<group>"; };
@@ -1513,6 +1516,7 @@
 				17B88CC331A0509F08FC5B5F /* BackgroundRuntimeBridge.swift */,
 				0354F7DEC26E30CA9CD177BA /* BackgroundRuntimeRole.swift */,
 				B1DBF2B67F9E5DEF8BFFE2D8 /* com.waifux.app.helper.plist */,
+				6B3346443311AF70F26E0812 /* com.waifux.app.helper.relinked.plist */,
 				7D7A600C4E6E8061C61922EA /* RendererComponentStore.swift */,
 				DEC3BC189EF75B77C6114003 /* WaifuXHostBundle.swift */,
 				08B67008CBA0E630EDEC272D /* WaifuXPreferences.swift */,

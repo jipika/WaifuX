@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 备用注册：除 Label 外必须与 com.waifux.app.helper.plist 完全一致
+         （scripts/verify-project-configuration.py 校验）。只在默认注册的 BTM
+         记录损坏、用户点「修复后台服务」后由 UI 改注册到这一份。 -->
+    <key>Label</key><string>com.waifux.app.helper.relinked</string>
+    <key>BundleProgram</key><string>Contents/Helpers/WaifuXHelper.app/Contents/MacOS/WaifuXHelper</string>
+    <key>MachServices</key>
+    <dict><key>com.waifux.app.helper.control</key><true/></dict>
+    <key>RunAtLoad</key><true/>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>

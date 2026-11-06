@@ -516,9 +516,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         launchedAsLoginItem = Self.wasLaunchedAsLoginItem()
-        // 历史版本曾把主 App 注册为登录项；服务拆到 Helper 后登录恢复归 LaunchAgent，
-        // 主 App 不再担任登录项 —— 每次启动都顺手清理残留，之后重启只起 Helper。
-        if SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
+        // 历史版本曾把主 App 注册为登录项；服务拆到 Helper 后登录恢复归 LaunchAgent。
+        // 残留的清理挪进了 BackgroundAgentClient 的 bootstrap，等注销在 BTM 落地后才注册
+        // Helper：两者写同一条 WaifuX 父记录，这里同步 unregister 后立刻 start() 会抢跑，
+        // 154 在用户机上留下 launchd 找不到 App 路径的坏记录（exit 78）。
         installHelperQuitHandlers()
         WaifuXPreferences.shared.loadLegacyPreferences()
         BackgroundAgentClient.shared.start()

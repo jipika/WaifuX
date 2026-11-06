@@ -23,6 +23,28 @@ private final class BackgroundDiagnosticObserver: NSObject, BackgroundAgentObser
     func openUI(_ action: String) {}
 }
 
+/// 一次性闸门：任务结束或超时，谁先到谁放行（见 `BackgroundAgentClient.waitBounded`）。
+private final class BoundedWaitGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var result: Bool?
+    func install(_ continuation: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        if let result { lock.unlock(); continuation.resume(returning: result); return }
+        self.continuation = continuation
+        lock.unlock()
+    }
+    func finish(_ value: Bool) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let current = continuation
+        continuation = nil
+        lock.unlock()
+        current?.resume(returning: value)
+    }
+}
+
 private final class BackgroundReplyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Data, Error>?
@@ -60,6 +82,10 @@ final class BackgroundAgentClient: ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var lastError: String?
     @Published private(set) var requiresApproval = false
+    /// 默认注册的 BTM 记录坏了（launchd 一直 spawn failed + exit 78，常规修复无效）：
+    /// 横幅据此显示「修复后台服务」。只重建 WaifuX 自己的注册，不碰系统里其他记录。
+    @Published private(set) var canRelinkRegistration = false
+    @Published private(set) var isRelinkingRegistration = false
     /// 是否真的应用过一帧 Helper 库快照（`library.snapshot` 的返回）。
     ///
     /// 库记录全部由 Helper 异步推送，UI 侧「记录数组为空」有两种含义：库里确实
@@ -102,6 +128,10 @@ final class BackgroundAgentClient: ObservableObject {
     private var helperStopRequested = false
     private var observedHelperStop = false
     private var knownHelperPID: Int32?
+    /// 用户点了「修复后台服务」：下一轮 bootstrap 先换到备用注册。
+    private var relinkRequested = false
+    /// 本会话里常规修复后 launchd 仍拒绝 spawn 的证据摘要；非 nil 时重试只复查一次 launchd。
+    private var lastSpawnRejection: String?
     var onApplicationQuitRequested: (() -> Void)?
     var onHelperStopped: (() -> Void)?
     private var pendingCropCommands: [String: [String: Any]] = [:]
@@ -117,6 +147,24 @@ final class BackgroundAgentClient: ObservableObject {
 
     func retryConnection() {
         guard !isQuittingApplication else { return }
+        relinkRequested = false
+        isRelinkingRegistration = false
+        restartBootstrap()
+    }
+
+    /// 横幅「修复后台服务」：Helper 改用备用 launchd Label 重新注册，让 BTM 新建一条
+    /// 子记录。只动 WaifuX 自己的两条注册，不清理系统里其他 App 的登录项。
+    func repairRegistration() {
+        guard !isQuittingApplication, canRelinkRegistration, !isRelinkingRegistration else { return }
+        AppLogger.error(.startup, "User requested Helper registration repair",
+                        metadata: ["launchd": lastSpawnRejection ?? ""])
+        relinkRequested = true
+        isRelinkingRegistration = true
+        canRelinkRegistration = false
+        restartBootstrap()
+    }
+
+    private func restartBootstrap() {
         disconnect()
         bootstrapTask?.cancel()
         bootstrapTask = nil
@@ -154,7 +202,10 @@ final class BackgroundAgentClient: ObservableObject {
                 let staleHelper = Self.indicatesStaleHelper(error)
                 let unresponsive = Self.indicatesUnresponsiveHelper(error)
                 let rejected = Self.indicatesRejectedConnection(error)
-                guard staleHelper || unresponsive || rejected || Self.indicatesMissingLaunchdJob(error) else { throw error }
+                let spawnRejected = Self.indicatesSpawnRejection(error)
+                guard staleHelper || unresponsive || rejected || spawnRejected || Self.indicatesMissingLaunchdJob(error) else { throw error }
+                // 本会话已经确认过常规修复救不回来：不再重复注销/注册，直接交给横幅按钮。
+                if spawnRejected, lastSpawnRejection != nil { throw error }
                 // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
                 // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
                 // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
@@ -172,11 +223,14 @@ final class BackgroundAgentClient: ObservableObject {
                                         ? "Helper unresponsive during bootstrap (120s no reply), repairing registration"
                                         : rejected
                                             ? "Helper rejected the connection (4097), repairing registration"
-                                            : "Helper service missing from launchd, repairing registration",
+                                            : spawnRejected
+                                                ? "launchd keeps rejecting the Helper spawn (exit 78), repairing registration"
+                                                : "Helper service missing from launchd, repairing registration",
                                 metadata: ["code": (error as NSError).code,
                                            "detail": error.localizedDescription])
                 try Task.checkCancellation()
-                let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
+                let mode = currentRegistrationMode()
+                let service = SMAppService.agent(plistName: mode.plistName)
                 do {
                     // 注销之后丢弃 launchd 里缓存的 job：正式包（Developer ID）与
                     // Xcode 构建（Apple Development）交替运行时，签名类别变了，
@@ -185,7 +239,7 @@ final class BackgroundAgentClient: ObservableObject {
                     try await BackgroundAgentRegistration.repairLaunchdRegistration(
                         service,
                         bootout: {
-                            await BackgroundAgentRegistration.bootoutCachedJob()
+                            await BackgroundAgentRegistration.bootoutCachedJob(label: mode.launchdLabel)
                             await Self.terminateStaleHelperLockHolders()
                         }
                     ) { [weak self] in
@@ -198,6 +252,17 @@ final class BackgroundAgentClient: ObservableObject {
                     AppLogger.error(.startup, "Helper registration repair failed",
                                     metadata: ["status": service.status.rawValue,
                                                "error": error.localizedDescription])
+                    if error is CancellationError { throw error }
+                    // 注销/注册之后 launchd 仍 spawn failed + exit 78：这一份注册的 BTM 记录
+                    // 本身坏了（2026-11-05 用户机：子记录指向父记录、父记录不列它），
+                    // 再重试也一样。换成专门的错误，横幅给「修复后台服务」。
+                    if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
+                       let summary = BackgroundAgentRegistration.spawnRejectionSummary(description) {
+                        lastSpawnRejection = summary
+                        AppLogger.error(.startup, "launchd still rejects the Helper spawn after repair",
+                                        metadata: ["mode": mode.rawValue, "launchd": summary])
+                        throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+                    }
                     throw error
                 }
                 try Task.checkCancellation()
@@ -218,6 +283,17 @@ final class BackgroundAgentClient: ObservableObject {
                 }
                 lastError = error.localizedDescription
                 if case BackgroundAgentRegistrationError.approvalRequired = error { requiresApproval = true }
+                isRelinkingRegistration = false
+                if Self.indicatesSpawnRejection(error) {
+                    if currentRegistrationMode() == .bundled {
+                        canRelinkRegistration = true
+                    } else {
+                        // 已经在备用注册上还被拒：按钮帮不上忙，不再显示，给导出日志的指引。
+                        canRelinkRegistration = false
+                        lastError = BackgroundAgentRegistrationError
+                            .registrationRepairFailed(lastSpawnRejection ?? "").localizedDescription
+                    }
+                }
                 isConnected = false
                 let failure = error as NSError
                 AppLogger.error(.startup, "Helper startup failed", metadata: ["domain": failure.domain, "code": failure.code, "error": failure.localizedDescription])
@@ -288,15 +364,79 @@ final class BackgroundAgentClient: ObservableObject {
         return false
     }
 
+    /// launchd 一直 spawn failed + exit 78（见 `BackgroundAgentRegistration.spawnRejectionSummary`）。
+    private static func indicatesSpawnRejection(_ error: Error) -> Bool {
+        guard let registrationError = error as? BackgroundAgentRegistrationError else { return false }
+        if case .launchdSpawnRejected = registrationError { return true }
+        return false
+    }
+
+    private func currentRegistrationMode() -> BackgroundAgentRegistrationMode {
+        BackgroundAgentRegistration.currentMode(relinked: SMAppService.agent(plistName: BackgroundAgentWire.relinkedPlistName))
+    }
+
+    /// 38.0.153 及以前用 `SMAppService.mainApp` 做「开机自启」；之后登录恢复归 Helper 的
+    /// LaunchAgent。必须等这次注销在 BTM 落地，才轮到注册 Helper：两者写同一条 WaifuX
+    /// 父记录，154 里两边抢跑，留下了 launchd 找不到 App 路径的坏记录（exit 78）。
+    private func retirePre154MainAppLoginItem() async throws {
+        let service = SMAppService.mainApp
+        switch try await BackgroundAgentRegistration.retireMainAppLoginItem(service) {
+        case .notEnabled:
+            return
+        case .retired:
+            AppLogger.info(.startup, "Retired the pre-154 main app login item before registering the Helper", metadata: [:])
+        case .stillEnabled:
+            AppLogger.error(.startup, "Pre-154 main app login item is still enabled; registering the Helper anyway",
+                            metadata: ["status": service.status.rawValue])
+        }
+    }
+
+    /// 「修复后台服务」：从默认注册换到备用 Label。只动 WaifuX 自己的两条注册。
+    private func relinkRegistration() async throws {
+        relinkRequested = false
+        guard currentRegistrationMode() == .bundled else { return }
+        let host = WaifuXHostBundle.bundleURL
+        try BackgroundAgentRegistration.validateBundle(host, plistName: BackgroundAgentWire.relinkedPlistName)
+        let current = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
+        let replacement = SMAppService.agent(plistName: BackgroundAgentWire.relinkedPlistName)
+        AppLogger.error(.startup, "Relinking the Helper under a new launchd label", metadata: [
+            "from": BackgroundAgentRegistrationMode.bundled.launchdLabel,
+            "to": BackgroundAgentRegistrationMode.relinked.launchdLabel,
+            "launchd": lastSpawnRejection ?? "",
+        ])
+        try await BackgroundAgentRegistration.relinkAgent(from: current, to: replacement, bootout: {
+            await BackgroundAgentRegistration.bootoutCachedJob(label: BackgroundAgentRegistrationMode.bundled.launchdLabel)
+            await Self.terminateStaleHelperLockHolders()
+        })
+        // 注册换了，旧证据不再代表现状；新 Label 能不能起来由下面的 hello 和 launchd 观察判定。
+        lastSpawnRejection = nil
+        AppLogger.error(.startup, "Helper relinked", metadata: ["status": replacement.status.rawValue])
+    }
+
     private func runBootstrap() async throws {
         try Task.checkCancellation()
+        try await retirePre154MainAppLoginItem()
         try BackgroundAgentRegistration.validateBundle(WaifuXHostBundle.bundleURL)
-        let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
-        AppLogger.info(.startup, "Helper registration status", metadata: ["status": service.status.rawValue])
+        if relinkRequested { try await relinkRegistration() }
+        let mode = currentRegistrationMode()
+        if mode == .relinked {
+            try BackgroundAgentRegistration.validateBundle(WaifuXHostBundle.bundleURL, plistName: mode.plistName)
+        }
+        // 本会话已确认 launchd 拒绝 spawn：重试只复查一次，不再等 120s hello 和一整轮修复。
+        if lastSpawnRejection != nil {
+            if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
+               let summary = BackgroundAgentRegistration.spawnRejectionSummary(description) {
+                lastSpawnRejection = summary
+                throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+            }
+            lastSpawnRejection = nil
+        }
+        let service = SMAppService.agent(plistName: mode.plistName)
+        AppLogger.info(.startup, "Helper registration status", metadata: ["status": service.status.rawValue, "mode": mode.rawValue])
         try BackgroundAgentRegistration.ensureEnabled(service)
         requiresApproval = false
         connect()
-        try await ensureCurrentHelper()
+        try await ensureCurrentHelper(watchingLaunchdLabel: mode.launchdLabel)
         try Task.checkCancellation()
         let legacy = UserDefaults.standard.persistentDomain(forName: "com.waifux.app") ?? [:]
         _ = try await perform("preferences.migrate", ["preferences": legacy])
@@ -310,6 +450,8 @@ final class BackgroundAgentClient: ObservableObject {
         try Task.checkCancellation()
         isConnected = true
         lastError = nil
+        canRelinkRegistration = false
+        isRelinkingRegistration = false
         installPreferenceMutationHandler()
     }
 
@@ -342,7 +484,7 @@ final class BackgroundAgentClient: ObservableObject {
     /// Read-only production diagnostics from the signed host executable. Does not
     /// register, bootstrap or stop the service, and exposes no saved preferences.
     func inspectRunningService() async throws -> [String: Any] {
-        let service = SMAppService.agent(plistName: BackgroundAgentWire.plistName)
+        let service = SMAppService.agent(plistName: currentRegistrationMode().plistName)
         guard service.status == .enabled else { throw BackgroundAgentRegistrationError.unavailable(service.status.rawValue) }
         let diagnosticConnection = NSXPCConnection(machServiceName: BackgroundAgentWire.machServiceName)
         diagnosticConnection.remoteObjectInterface = NSXPCInterface(with: BackgroundAgentXPC.self)
@@ -563,11 +705,16 @@ final class BackgroundAgentClient: ObservableObject {
         }
     }
 
-    private func ensureCurrentHelper() async throws {
+    private func ensureCurrentHelper(watchingLaunchdLabel label: String? = nil) async throws {
         try Task.checkCancellation()
         let url = WaifuXHostBundle.bundleURL.appendingPathComponent("Contents/Helpers/WaifuXHelper.app/Contents/MacOS/WaifuXHelper")
         guard let expected = BackgroundAgentBuildIdentity.executable(url) else { throw CocoaError(.executableNotLoadable) }
-        var status = try await helloReply()
+        var status: BackgroundAgentHello
+        if let label {
+            status = try await helloWatchingLaunchd(label: label)
+        } else {
+            status = try await helloReply()
+        }
         try Task.checkCancellation()
         guard status.bundleIdentifier == BackgroundAgentWire.bundleIdentifier else { throw CocoaError(.executableLoad) }
         if status.buildIdentity != expected {
@@ -604,6 +751,36 @@ final class BackgroundAgentClient: ObservableObject {
             proxy.hello { gate.finish(.success($0 as Data)) }
         }
         return try JSONDecoder().decode(BackgroundAgentHello.self, from: data)
+    }
+
+    /// 启动时的首个 `hello`，同时盯 launchd。
+    ///
+    /// launchd 拉不起 Helper 时（spawn failed + exit 78），消息只会在端口里排队，
+    /// 光等 hello 要等满 120s 才超时。这里每 5s 看一次 `launchctl print`，连续两次
+    /// 命中拒绝证据就提前结束，进入 `start()` 的修复路径。Helper 正常时 hello
+    /// 先回来，观察任务随之取消，不改变健康路径。
+    private func helloWatchingLaunchd(label: String) async throws -> BackgroundAgentHello {
+        try await withThrowingTaskGroup(of: BackgroundAgentHello.self) { group in
+            group.addTask { try await self.helloReply() }
+            group.addTask {
+                var confirmations = 0
+                var summary = ""
+                while confirmations < 2 {
+                    try await Task.sleep(for: .seconds(5))
+                    if let description = await BackgroundAgentRegistration.launchdJobDescription(label: label),
+                       let rejection = BackgroundAgentRegistration.spawnRejectionSummary(description) {
+                        confirmations += 1
+                        summary = rejection
+                    } else {
+                        confirmations = 0
+                    }
+                }
+                throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CancellationError() }
+            return first
+        }
     }
 
     /// repair 后的真实可达性探针。
@@ -724,7 +901,24 @@ final class BackgroundAgentClient: ObservableObject {
         }
         // Startup owns direct migration/bootstrap RPCs outside commandTail.
         // Finish admitted startup before stopping its shared XPC connection.
-        _ = try? await bootstrapTask?.value
+        if let startup = bootstrapTask {
+            // 本会话 Helper 一次 hello 都没回过：startup 里不可能已有被接纳的 RPC，
+            // 无限等它只会撞 6s 看门狗、把完整退出卡成「UI retained」（2026-11-05
+            // 用户机：launchd 一直拉不起 Helper，Cmd+Q 两次失败只能强退）。最多等 2s，
+            // 之后放弃这轮启动，交给 stopForApplicationQuit 按进程表兜底。
+            let helperNeverAnswered = knownHelperPID == nil && !isIsolatedProbeEnvironment
+            var abandon = false
+            if helperNeverAnswered {
+                let finished = await waitBounded(startup, seconds: 2)
+                // 等待期间 hello 回来了（knownHelperPID 已有值）就照旧等它跑完。
+                abandon = !finished && knownHelperPID == nil
+            }
+            if abandon {
+                abandonStartupForQuit()
+            } else {
+                _ = try? await startup.value
+            }
+        }
         try Task.checkCancellation()
         // Give unrelated in-flight commands (Steam, cloud, …) only a short grace
         // period: a slow command must not stall window-close into the 6s quit
@@ -743,10 +937,12 @@ final class BackgroundAgentClient: ObservableObject {
         // An unrelated failed wallpaper command does not prevent closing once
         // all preferences are durable.
         guard try !WaifuXPreferences.shared.pendingMutationData().isEmpty else { return }
-        guard connection != nil else {
+        guard connection != nil, knownHelperPID != nil || isIsolatedProbeEnvironment else {
             // 完整退出 + 连接不可用：保留 UI 也无法让写入发生（退出期间重连
             // 已被冻结）。pending 队列本身是持久化的，下次连接自动回放，
             // 不能再用这一条把退出卡成「UI retained」横幅死锁。
+            // 连接对象在、但本会话 Helper 从没回过 hello，同样写不进去（每条
+            // 重放要等 120s 超时）。
             warnPendingMutationsForQuit()
             return
         }
@@ -756,6 +952,36 @@ final class BackgroundAgentClient: ObservableObject {
             throw NSError(domain: "WaifuXHelper", code: 4,
                 userInfo: [NSLocalizedDescriptionKey: "仍有设置等待后台保存，请稍后重试"])
         }
+    }
+
+    /// 最多等 `seconds` 看 `task` 是否结束，不取消它。返回 true = 已结束。
+    ///
+    /// 不能用 task group 里 `await task.value` 跟 sleep 赛跑：`value` 不响应取消，
+    /// group 退出时仍会等它跑完，上限形同虚设。
+    private func waitBounded(_ task: Task<Void, Error>, seconds: Double) async -> Bool {
+        let gate = BoundedWaitGate()
+        let waiter = Task { _ = try? await task.value; gate.finish(true) }
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            gate.finish(false)
+        }
+        let finished = await withCheckedContinuation { gate.install($0) }
+        waiter.cancel()
+        timer.cancel()
+        return finished
+    }
+
+    /// 完整退出时放弃一轮从没连上 Helper 的启动。推进代际，让它被取消的失败按
+    /// superseded 记日志，不覆盖退出流程自己的错误展示。
+    private func abandonStartupForQuit() {
+        AppLogger.error(.general, "Helper never answered this session; abandoning startup for full quit", metadata: [
+            "relinking": isRelinkingRegistration,
+        ])
+        bootstrapGeneration &+= 1
+        bootstrapTask?.cancel()
+        bootstrapTask = nil
+        isBootstrapping = false
+        isRelinkingRegistration = false
     }
 
     /// 界面退出只要求「把已持久化的设置尽力发出去」。这里只重放 pending
@@ -959,7 +1185,7 @@ final class BackgroundAgentClient: ObservableObject {
         let isolated = false
         #endif
         guard !isolated else { return .failure(fallback) }
-        let status = SMAppService.agent(plistName: BackgroundAgentWire.plistName).status
+        let status = SMAppService.agent(plistName: currentRegistrationMode().plistName).status
         if let pid = knownHelperPID {
             if helperProcessGone(pid) { return .alreadyStopped }
             if status != .enabled {

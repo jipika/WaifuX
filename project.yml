@@ -106,6 +106,12 @@ targets:
           copyFiles:
             destination: wrapper
             subpath: Contents/Library/LaunchAgents
+      # 备用注册（只换 Label）：BTM 默认记录损坏时「修复后台服务」改注册到它。
+      - path: BackgroundAgent/com.waifux.app.helper.relinked.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     settings:
       base:
         PRODUCT_NAME: WaifuX
@@ -370,6 +376,7 @@ targets:
           - Info.plist
           - BackgroundAgent.entitlements
           - com.waifux.app.helper.plist
+          - com.waifux.app.helper.relinked.plist
       - path: Components/DisplaySelectorSheet.swift
       - path: Components/ExploreChips.swift
       - path: Components/PerformanceModifiers.swift

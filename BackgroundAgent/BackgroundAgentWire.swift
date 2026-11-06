@@ -6,6 +6,14 @@ enum BackgroundAgentWire {
     static let machServiceName = "com.waifux.app.helper.control"
     static let protocolVersion = 2
     static let plistName = "com.waifux.app.helper.plist"
+    /// 备用注册：与 `plistName` 内容相同、只换 launchd Label。
+    ///
+    /// 用户机实测（2026-11-05，153→154）：BTM 里 Helper 子记录指向 WaifuX 父记录，
+    /// 父记录却没列出它，launchd 每次 `copy_bundle_path` 失败、exit 78。对同一 Label
+    /// 注销/注册只会更新那条坏记录（UUID 不变），换一个 Label 才会让 BTM 新建子记录
+    /// 并挂到父记录下。只在用户点「修复后台服务」后启用，见 `BackgroundAgentRegistrationMode`。
+    static let relinkedPlistName = "com.waifux.app.helper.relinked.plist"
+    static let relinkedLabel = "com.waifux.app.helper.relinked"
     static let preferencesSuite = "group.com.waifux.app"
     static let migrationKey = "background_preferences_migrated_v1"
     static let maximumCommandBytes = 16 * 1024 * 1024

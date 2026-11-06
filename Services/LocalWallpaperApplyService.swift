@@ -456,67 +456,10 @@ enum LocalWallpaperApplyService {
         )
         try Task.checkCancellation()
         if let requestToken { try checkRequestCurrent(requestToken, on: screens) }
-        // 实时 scene / web 不经过 applyVideo，系统桌面与锁屏的静态底图不会被刷新：
-        // 有可用高清 poster 时在这里补一次系统写入；无 poster 时保持旧图（与 applyVideo 的
-        // 「没有 HD poster 就不写 fallback」策略一致）。
-        // Web 屏的系统桌面由 WallpaperEngineXBridge 的 Web 海报收尾链统一写（带读回确认 +
-        // 延迟转不透明）。这里再写一次会在一秒内连写同一屏，系统合并丢弃后哪张生效不确定。
-        let currentScreens = screens.filter {
-            WallpaperEngineXBridge.shared.currentWallpaperPath(for: $0) == path
-                && !WallpaperEngineXBridge.shared.isWebRendering(on: $0)
-        }
-        syncSystemWallpaperPosterIfAvailable(for: currentScreens, path: path, options: options)
-        // 伴生烘焙由 WallpaperEngineXBridge 的最终成功路径统一调度，
-        // 覆盖启动恢复、显示器重连等绕过本服务的 Scene 设置入口。
-    }
-
-    /// 给「不走 applyVideo」的渲染路径补系统壁纸底图。
-    ///
-    /// 2026-10-08 实锤：弹窗设置 Workshop 工程壁纸后 macOS 桌面静态图不跟随——
-    /// `.scene` 实时/兜底渲染与 `.web` 实时渲染都走 `applyRenderer`，这条路径原本
-    /// 只 `setWallpaper`（动态层），没有任何系统壁纸写入，而 `.video` 工程走的
-    /// `applyVideo` 早就有 immediate poster 注册。
-    /// 登记只保存路径，不会执行系统写入；这里必须先实际设置再登记。
-    private static func syncSystemWallpaperPosterIfAvailable(for screens: [NSScreen], path: String, options: Options) {
-        guard !BackgroundRuntimeRole.isIsolatedTest,
-              VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
-              !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else { return }
-        var posterURL: URL?
-        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: URL(fileURLWithPath: path))
-        if let itemID = options.sceneBakeItemID,
-           let bakedPath = options.bakedVideoPath,
-           SceneOfflineBakeService.isCurrentBakedSceneVideo(
-                at: URL(fileURLWithPath: bakedPath), contentRoot: contentRoot
-           ) {
-            posterURL = VideoThumbnailCache.shared.existingWallpaperPosterURL(
-                forLocalVideo: URL(fileURLWithPath: bakedPath), sceneBakeItemID: itemID
-            )
-        }
-        if posterURL == nil, let itemID = options.sceneBakeItemID {
-            posterURL = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
-                itemID: itemID, contentRoot: contentRoot
-            )
-        }
-        guard let posterURL else { return }
-
-        AppLogger.debug(.wallpaper, "applyRenderer 补写系统壁纸底图", metadata: [
-            "poster": posterURL.lastPathComponent,
-            "screens": screens.map(\.wallpaperScreenIdentifier).joined(separator: ","),
-        ])
-        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-            .allowClipping: true
-        ]
-        for screen in screens {
-            do {
-                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen, options: fillOptions)
-            } catch {
-                AppLogger.error(.wallpaper, "同步渲染壁纸的系统底图失败", metadata: [
-                    "screen": screen.wallpaperScreenIdentifier, "error": error.localizedDescription
-                ])
-            }
-        }
+        // 系统底图由 WallpaperEngineXBridge 统一提交：Scene 在不透明窗口显示前写入，
+        // 未提交成功的屏由桥内封面同步兜底；Web 沿用自己的海报与有限采样保持链。
+        // 此处不得在 renderer 就绪后再写一次，否则会重置已完成前置提交的采样源。
+        // 伴生烘焙也由桥的最终成功路径调度，覆盖启动恢复、显示器重连等入口。
     }
 
     private static func hasWebSceneTimer(for screen: NSScreen) -> Bool {

@@ -1937,19 +1937,30 @@ final class WallpaperEngineXBridge: ObservableObject {
                 + "statePaths=[\(screenRenderStates.values.map { ($0.path as NSString).lastPathComponent }.joined(separator: ", "))] "
                 + "resolved=\((resolvedPath as NSString).lastPathComponent)"
         )
+        // Scene 已在 show 前提交的逐屏过渡图必须保持为系统底图。此时不透明窗口
+        // 已显示，改写成通用烘焙封面会重置采样源，却挡住系统重新采样的机会。
+        // 只给前置桌面提交未成功的屏保留旧封面同步兜底，不能按整组一刀切。
+        let pendingDesktopPosterScreens = bakedStaticScreens.filter { screen in
+            !(sceneHandoff?.desktopScreenIDs.contains(screen.wallpaperScreenIdentifier) ?? false)
+        }
         scheduleBakedCoverSync(
             path: resolvedPath,
-            targetScreens: bakedStaticScreens
+            targetScreens: pendingDesktopPosterScreens
         )
         // 伴生抽帧必须挂在 renderer 的最终成功路径：启动恢复、显示器重连和直接调用
         // `WallpaperEngineXBridge.setWallpaper` 都会绕开 LocalWallpaperApplyService。
         if renderKind == .scene, !bakedStaticScreens.isEmpty {
+            let committedDesktopDisplayIDs = Set(bakedStaticScreens.compactMap { screen -> UInt32? in
+                guard sceneHandoff?.desktopScreenIDs.contains(screen.wallpaperScreenIdentifier) == true else { return nil }
+                return (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            })
             SceneOfflineBakeService.scheduleRealtimeCompanionBake(
                 path: resolvedPath,
                 targetScreens: bakedStaticScreens,
                 reason: "renderer-set",
                 desktopSourceAlreadyCommitted: Set(bakedStaticScreens.map(\.wallpaperScreenIdentifier))
-                    .isSubset(of: sceneHandoff.map { $0.desktopScreenIDs.union($0.publishedSourceScreenIDs) } ?? [])
+                    .isSubset(of: sceneHandoff.map { $0.desktopScreenIDs.union($0.publishedSourceScreenIDs) } ?? []),
+                preservingDesktopDisplayIDs: committedDesktopDisplayIDs
             )
         } else {
             print(

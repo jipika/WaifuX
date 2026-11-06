@@ -1065,8 +1065,9 @@ class SettingsViewModel: ObservableObject {
     }
 
     func toggleLaunchAtLogin() {
-        // LaunchAgent owns login restoration; stop launching the full UI at login.
-        if SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
+        // LaunchAgent owns login restoration; the full UI no longer launches at login.
+        // The leftover pre-154 main-app login item is retired by the Helper bootstrap
+        // before it registers the agent, never concurrently with it.
         BackgroundAgentClient.shared.start()
         launchAtLogin.toggle()
     }

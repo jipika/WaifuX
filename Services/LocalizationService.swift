@@ -315,6 +315,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Errors
         "loadFailed": "LOAD FAILED",
         "retry": "RETRY",
+        "helper.repair": "REPAIR BACKGROUND SERVICE",
+        "helper.repairing": "Rebuilding WaifuX's background service record. This only touches WaifuX's own entries…",
         // Filters
         "contentLevel": "CONTENT LEVEL",
         "colorFilter": "COLOR FILTER",
@@ -1991,6 +1993,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Errors
         "loadFailed": "加载失败",
         "retry": "重试",
+        "helper.repair": "修复后台服务",
+        "helper.repairing": "正在重建 WaifuX 的后台服务记录，只改 WaifuX 自己的记录…",
         // Filters
         "contentLevel": "内容级别",
         "colorFilter": "颜色筛选",
@@ -3670,6 +3674,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         // Errors
         "loadFailed": "読み込み失敗",
         "retry": "再試行",
+        "helper.repair": "バックグラウンドサービスを修復",
+        "helper.repairing": "WaifuX のバックグラウンドサービス記録を再作成しています（WaifuX 自身の記録のみ変更）…",
         // Filters
         "contentLevel": "コンテンツレベル",
         "colorFilter": "色フィルター",

@@ -576,9 +576,12 @@ final class AppLogger: @unchecked Sendable {
                 text += "WaifuXHelper pid=\(helper.child.pid) started=\(started) holdsLock=\(helper.holdsLock) path=\(helper.path)\n"
             }
         }
-        let label = "gui/\(getuid())/\(BackgroundAgentWire.bundleIdentifier)"
-        text += "\n$ launchctl print \(label)\n"
-        text += captureCommand("/bin/launchctl", ["print", label], timeout: 3, maxBytes: 64 * 1024)
+        // 默认注册与「修复后台服务」换上的备用注册都打出来：哪一份在用、哪一份 spawn failed 一眼可见。
+        for jobLabel in [BackgroundAgentWire.bundleIdentifier, BackgroundAgentWire.relinkedLabel] {
+            let label = "gui/\(getuid())/\(jobLabel)"
+            text += "\n$ launchctl print \(label)\n"
+            text += captureCommand("/bin/launchctl", ["print", label], timeout: 3, maxBytes: 64 * 1024)
+        }
         guard let output = try? FileHandle(forWritingTo: destination) else { return 0 }
         defer { try? output.close() }
         output.seekToEndOfFile()
