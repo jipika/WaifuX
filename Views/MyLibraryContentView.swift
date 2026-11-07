@@ -254,6 +254,7 @@ struct MyLibraryContentView: View {
     @State private var currentMediaFolderID: String? = nil
     @State private var wallpaperFolderStack: [String] = []  // 面包屑栈
     @State private var mediaFolderStack: [String] = []  // 面包屑栈
+    @State private var folderNavigation = LibraryFolderNavigation()
 
     // 触摸板双指右滑返回（文件夹内）
     @State private var folderBackSwipeRegistration: UUID?
@@ -1268,29 +1269,36 @@ struct MyLibraryContentView: View {
 
     // MARK: - Wallpaper Section
     private func wallpaperSection(config: LibraryGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // 文件夹导航面包屑
-            folderBreadcrumb(
-                folderStack: wallpaperFolderStack,
-                isInFolder: currentWallpaperFolderID != nil,
-                onBack: popWallpaperFolder,
-                onRoot: { navigateToWallpaperFolder(nil) },
-                onAdd: { showAddToFolderSheet = true }
-            )
-
-            if libraryGridPlaceholderVisible {
-                libraryGridLoadingPlaceholder(config: config)
-            } else if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
-                libraryEmptySurface(
-                    title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads")),
-                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint")),
-                    icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
-                    accent: LiquidGlassColors.primaryPink
+        LibraryFolderTransition(
+            pageID: "wallpaper/\(selectedSubTab.rawValue)/\(currentWallpaperFolderID ?? "root")",
+            navigation: folderNavigation,
+            isVisible: isVisible
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                // 文件夹导航面包屑与内容同层进退；固定工具栏不参与过渡。
+                folderBreadcrumb(
+                    folderStack: wallpaperFolderStack,
+                    isInFolder: currentWallpaperFolderID != nil,
+                    onBack: popWallpaperFolder,
+                    onRoot: { navigateToWallpaperFolder(nil) },
+                    onAdd: { showAddToFolderSheet = true }
                 )
-            } else {
-                wallpaperGridContainer(config: config)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                if libraryGridPlaceholderVisible {
+                    libraryGridLoadingPlaceholder(config: config)
+                } else if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
+                    libraryEmptySurface(
+                        title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads")),
+                        subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint")),
+                        icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
+                        accent: LiquidGlassColors.primaryPink
+                    )
+                } else {
+                    wallpaperGridContainer(config: config)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -1541,7 +1549,11 @@ struct MyLibraryContentView: View {
     }
 
     private func navigateToWallpaperFolder(_ folderID: String?) {
-        if let current = currentWallpaperFolderID, folderID != nil {
+        guard currentWallpaperFolderID != folderID else { return }
+        folderNavigation.move(folderID == nil ? .backward : .forward)
+        if folderID == nil {
+            wallpaperFolderStack.removeAll()
+        } else if let current = currentWallpaperFolderID {
             wallpaperFolderStack.append(current)
         }
         currentWallpaperFolderID = folderID
@@ -1550,12 +1562,8 @@ struct MyLibraryContentView: View {
     }
 
     private func popWallpaperFolder() {
-        guard !wallpaperFolderStack.isEmpty else {
-            currentWallpaperFolderID = nil
-            gridScrollToTopToken &+= 1
-            updateWallpaperItems()
-            return
-        }
+        guard currentWallpaperFolderID != nil else { return }
+        folderNavigation.move(.backward)
         currentWallpaperFolderID = wallpaperFolderStack.popLast()
         gridScrollToTopToken &+= 1
         updateWallpaperItems()
@@ -2138,29 +2146,35 @@ struct MyLibraryContentView: View {
 
     // MARK: - Media Section
     private func mediaSection(config: LibraryGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // 文件夹导航面包屑
-            folderBreadcrumb(
-                folderStack: mediaFolderStack,
-                isInFolder: currentMediaFolderID != nil,
-                onBack: popMediaFolder,
-                onRoot: { navigateToMediaFolder(nil) },
-                onAdd: { showAddToFolderSheet = true }
-            )
-
-            if libraryGridPlaceholderVisible {
-                libraryGridLoadingPlaceholder(config: config)
-            } else if mediaItems.isEmpty && currentMediaFolders.isEmpty {
-                libraryEmptySurface(
-                    title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads")),
-                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint")),
-                    icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
-                    accent: LiquidGlassColors.secondaryViolet
+        LibraryFolderTransition(
+            pageID: "media/\(selectedSubTab.rawValue)/\(currentMediaFolderID ?? "root")",
+            navigation: folderNavigation,
+            isVisible: isVisible
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                folderBreadcrumb(
+                    folderStack: mediaFolderStack,
+                    isInFolder: currentMediaFolderID != nil,
+                    onBack: popMediaFolder,
+                    onRoot: { navigateToMediaFolder(nil) },
+                    onAdd: { showAddToFolderSheet = true }
                 )
-            } else {
-                mediaGridContainer(config: config)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                if libraryGridPlaceholderVisible {
+                    libraryGridLoadingPlaceholder(config: config)
+                } else if mediaItems.isEmpty && currentMediaFolders.isEmpty {
+                    libraryEmptySurface(
+                        title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads")),
+                        subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint")),
+                        icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
+                        accent: LiquidGlassColors.secondaryViolet
+                    )
+                } else {
+                    mediaGridContainer(config: config)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -2438,7 +2452,11 @@ struct MyLibraryContentView: View {
     }
 
     private func navigateToMediaFolder(_ folderID: String?) {
-        if let current = currentMediaFolderID, folderID != nil {
+        guard currentMediaFolderID != folderID else { return }
+        folderNavigation.move(folderID == nil ? .backward : .forward)
+        if folderID == nil {
+            mediaFolderStack.removeAll()
+        } else if let current = currentMediaFolderID {
             mediaFolderStack.append(current)
         }
         currentMediaFolderID = folderID
@@ -2447,12 +2465,8 @@ struct MyLibraryContentView: View {
     }
 
     private func popMediaFolder() {
-        guard !mediaFolderStack.isEmpty else {
-            currentMediaFolderID = nil
-            gridScrollToTopToken &+= 1
-            updateMediaItems()
-            return
-        }
+        guard currentMediaFolderID != nil else { return }
+        folderNavigation.move(.backward)
         currentMediaFolderID = mediaFolderStack.popLast()
         gridScrollToTopToken &+= 1
         updateMediaItems()

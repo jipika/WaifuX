@@ -1980,7 +1980,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 window.__waifuxAudioVolume = 1.0;
             }
             if (typeof window.__waifuxAudioMuted !== 'boolean') {
-                window.__waifuxAudioMuted = false;
+                // 新文档先关闭音频总闸门，直到宿主显式同步；与 ScreenState 默认值一致。
+                window.__waifuxAudioMuted = true;
             }
             var wrappedRefs = [];
             var hostMutedElements = new WeakMap();
@@ -2100,12 +2101,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                             { childList: true, subtree: true });
                     } catch (_) {}
                 }
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', observeAudio, { once: true });
-                } else {
-                    observeAudio();
-                }
+                // documentStart 时即可观察 Document，不能等 DOMContentLoaded 才拦截 autoplay。
+                observeAudio();
             }
+            enforceAudio();
             window.__waifuxEnforceAudio = enforceAudio;
             window.setInterval(enforceAudio, 1000);
         })();
@@ -2867,11 +2866,12 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             dlog("[WebRendererBridge] file read access expanded to workshop root: \(readAccessURL.path)")
         }
         autoFixSpineConfigIfNeeded(projectContentDir: baseURL)
+        // 先落原生页级静音，再开始导航；新文档的 JS 总闸门也默认关闭。
+        if !offscreen { applyAudioControl(for: screenIdx) }
         web.loadFileURL(fileURL, allowingReadAccessTo: readAccessURL)
         if offscreen {
             w.orderFrontRegardless()
         } else {
-            applyAudioControl(for: screenIdx)
             // `desktopWindow` 层本身低于普通 App 窗口；在该层内前置不会盖住应用，
             // 却能避免 WindowServer 将完整遮挡的 WKWebView/WebGL canvas 停止合成。
             // 始终沿用同一个内容层；采样结束仅收口窗口透明度。

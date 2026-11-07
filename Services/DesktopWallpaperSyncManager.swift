@@ -33,6 +33,8 @@ final class DesktopWallpaperSyncManager {
     private let minimumSyncInterval: TimeInterval = 0.5
     /// 用于 Space 切换的 debounce，快速连续切换时只保留最后一次
     private var pendingSyncWorkItem: DispatchWorkItem?
+    /// 节流期间合并一次尾沿同步，不能丢掉最后切入的 Space。
+    private var pendingThrottledSyncWorkItem: DispatchWorkItem?
     private var pendingScreenChangeWorkItem: DispatchWorkItem?
     private var pendingActivationSyncWorkItem: DispatchWorkItem?
     /// 标记“应用重新激活时确实需要做一次恢复性同步”。
@@ -277,6 +279,9 @@ final class DesktopWallpaperSyncManager {
     }
 
     @objc private func handleActiveSpaceChanged() {
+        // 上一个 Space 的节流补跑不能抢在本次切换稳定前写入桌面。
+        pendingThrottledSyncWorkItem?.cancel()
+        pendingThrottledSyncWorkItem = nil
         // Debounce：快速连续切换 Space 时，取消之前的延迟任务，只保留最后一次
         pendingSyncWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -308,7 +313,7 @@ final class DesktopWallpaperSyncManager {
         // 系统唤醒后延迟同步，给 macOS 时间重新枚举所有显示器
         // 注意：不 cancel pendingScreenChangeWorkItem（那是 screenParametersChanged 的专用 work item），
         // 避免 screenParametersChanged 在唤醒期间触发时把唤醒重建任务连带后续二次重试一起 cancel 掉。
-        // performSync 内部有 0.5s 防抖，重复同步会被自动跳过。
+        // performSync 内部有 0.5s 节流，重复请求会合并为一次尾沿同步。
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.requiresActivationRecoverySync = true
@@ -504,12 +509,23 @@ final class DesktopWallpaperSyncManager {
     /// 执行实际同步逻辑
     private func performSync(source: String) {
         let start = Date()
-        // 防抖动：避免短时间内多次同步（Space 切换通常不会连续触发）
-        if let last = lastSyncTime, Date().timeIntervalSince(last) < minimumSyncInterval {
-            print("[DesktopWallpaperSyncManager] Skipping sync from '\(source)' (too soon)")
-            return
+        pendingThrottledSyncWorkItem?.cancel()
+        pendingThrottledSyncWorkItem = nil
+        // 保留写入频率限制，但不能直接丢弃最后一次 Space/唤醒/显示器同步。
+        // 补跑只捕获触发来源；执行时重新读取每屏最新静图或 video/scene/web poster。
+        if let last = lastSyncTime {
+            let remainingInterval = minimumSyncInterval - start.timeIntervalSince(last)
+            if remainingInterval > 0 {
+                let workItem = DispatchWorkItem { [weak self] in
+                    self?.performSync(source: source)
+                }
+                pendingThrottledSyncWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + remainingInterval, execute: workItem)
+                print("[DesktopWallpaperSyncManager] Deferring sync from '\(source)' (throttled)")
+                return
+            }
         }
-        lastSyncTime = Date()
+        lastSyncTime = start
 
         let videoManager = VideoWallpaperManager.shared
         let hasStaticRegistrations = !lastSetImageURLByScreen.isEmpty || !lastSetImageURLByFingerprint.isEmpty
