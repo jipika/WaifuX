@@ -322,6 +322,9 @@ struct ContentView: View {
     // 数据源切换提示由独立子视图（WallpaperSourceSwitchToast）各自观察，并复用同一个 SourceSwitchToast 外观。
     // 数据源已无任何自动切换逻辑（启动 ping/VPN 决策已删除），启动后可直接加载数据。
     @State private var detailPath: [MainDetailRoute] = []
+    @State private var detailNavigation = PageNavigationMotion()
+    /// 非动画重置也变更页面标识，以取消尚未结束的过渡，而不是再播放一次返回。
+    @State private var detailPageRevision: UInt = 0
     /// 状态栏可在已有详情页上请求另一个详情；重建栈以避免 SwiftUI 复用旧 destination。
     @State private var detailNavigationStackID = UUID()
     @State private var pendingCurrentWallpaperRoute: MainDetailRoute?
@@ -343,14 +346,9 @@ struct ContentView: View {
         let _ = Self._printChanges()
         #endif
         ZStack {
-            NavigationStack(path: $detailPath) {
-                mainContent
-                    .navigationDestination(for: MainDetailRoute.self) { route in
-                        detailDestination(for: route)
-                    }
-            }
-            .id(detailNavigationStackID)
+            detailNavigationContent
 
+            // 全局提示与弹窗不跟随页面位移。
             globalOverlayLayer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -452,6 +450,28 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .applyTheme()
+    }
+
+    /// 从长 body 修饰符链中拆出，避免新增导航泛型增加 SwiftUI 类型检查负担。
+    private var detailNavigationContent: some View {
+        PageNavigationTransition(
+            pageID: String(detailPageRevision),
+            navigation: detailNavigation,
+            isVisible: true,
+            allowsSnapshot: detailPath.isEmpty
+        ) {
+            NavigationStack(path: detailPathBinding) {
+                mainContent
+                    .navigationDestination(for: MainDetailRoute.self) { route in
+                        detailDestination(for: route)
+                    }
+            }
+            .id(detailNavigationStackID)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 独立 NSHostingView 会重新计算标题栏安全区；外层忽略设置不会跨根视图传入。
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        .background(Color(hex: "0D0D0D"))
     }
 
     private var globalOverlayLayer: some View {
@@ -607,14 +627,14 @@ struct ContentView: View {
     /// 先完整关闭当前详情页，再在下一轮主线程事件重建并打开目标详情。
     private func replaceDetailWithCurrentWallpaper(_ route: MainDetailRoute) {
         pendingCurrentWallpaperRoute = route
-        detailPath.removeAll()
+        updateDetailPath([], animated: false)
         clearSelectedDetailBindings()
         detailNavigationStackID = UUID()
         Task { @MainActor in
             await Task.yield()
             guard pendingCurrentWallpaperRoute == route else { return }
             pendingCurrentWallpaperRoute = nil
-            openDetail(route)
+            openDetail(route, animated: false)
         }
     }
 
@@ -628,7 +648,7 @@ struct ContentView: View {
                 contextWallpapers: context,
                 onClose: popDetail,
                 onNavigateToWallpaper: { selected in
-                    detailPath.append(.wallpaper(selected, context: context))
+                    updateDetailPath(detailPath + [.wallpaper(selected, context: context)])
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -642,7 +662,7 @@ struct ContentView: View {
                 contextItems: context,
                 onClose: popDetail,
                 onNavigateToItem: { selected in
-                    detailPath.append(.media(selected, context: context))
+                    updateDetailPath(detailPath + [.media(selected, context: context)])
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -666,7 +686,7 @@ struct ContentView: View {
             MangaDetailSheet(
                 route: route,
                 onNavigateToManga: { selectedRoute in
-                    detailPath.append(.manga(selectedRoute))
+                    updateDetailPath(detailPath + [.manga(selectedRoute)])
                 }
             )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -676,8 +696,42 @@ struct ContentView: View {
         }
     }
 
-    private func openDetail(_ route: MainDetailRoute) {
-        detailPath = [route]
+    /// Native dismiss() (漫画返回/系统返回) 也走同一入口，不能只给自绘返回按钮加动画。
+    private var detailPathBinding: Binding<[MainDetailRoute]> {
+        Binding(
+            get: { detailPath },
+            set: { newPath in
+                updateDetailPath(newPath)
+                if newPath.isEmpty { clearSelectedDetailBindings() }
+            }
+        )
+    }
+
+    private func updateDetailPath(_ newPath: [MainDetailRoute], animated: Bool = true) {
+        guard detailPath != newPath else {
+            if !animated {
+                detailNavigation.suppressAnimation()
+                detailPageRevision &+= 1
+            }
+            return
+        }
+        let direction: PageNavigationMotion.Direction = newPath.count < detailPath.count ? .backward : .forward
+        // The native stack retains destinations/history; only the outer container animates.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            if animated {
+                detailNavigation.move(direction)
+            } else {
+                detailNavigation.suppressAnimation()
+            }
+            detailPageRevision &+= 1
+            detailPath = newPath
+        }
+    }
+
+    private func openDetail(_ route: MainDetailRoute, animated: Bool = true) {
+        updateDetailPath([route], animated: animated)
         // 仅清除触发当前导航的那个 binding，避免 5 个无关的 onChange 空跑
         switch route {
         case .wallpaper:
@@ -693,7 +747,7 @@ struct ContentView: View {
 
     private func popDetail() {
         if !detailPath.isEmpty {
-            detailPath.removeLast()
+            updateDetailPath(Array(detailPath.dropLast()))
         }
         if detailPath.isEmpty {
             clearSelectedDetailBindings()
@@ -875,7 +929,7 @@ struct ContentView: View {
         viewModel.releaseForegroundMemory()
         mediaViewModel.releaseForegroundMemory()
         animeViewModel.releaseForegroundMemory()
-        detailPath.removeAll()
+        updateDetailPath([], animated: false)
         navigationState.resetForMemoryRelease()
     }
 

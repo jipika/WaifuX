@@ -2,7 +2,7 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
-/// Only explicit folder navigation advances this value; search/reload/tab changes do not animate.
+/// Only explicit page navigation advances this value; search/reload/tab changes do not animate.
 struct LibraryFolderNavigation: Equatable {
     enum Direction: Equatable {
         case forward
@@ -13,10 +13,18 @@ struct LibraryFolderNavigation: Equatable {
 
     private(set) var revision: UInt = 0
     private(set) var direction: Direction = .forward
+    private(set) var isAnimated = false
 
     mutating func move(_ direction: Direction) {
         self.direction = direction
+        isAnimated = true
         revision &+= 1
+    }
+
+    mutating func suppressAnimation() {
+        // A reset can be coalesced with an earlier push before the bridge sees either update.
+        // Keep the final intent explicit instead of treating every unseen revision as a move.
+        isAnimated = false
     }
 }
 
@@ -26,6 +34,8 @@ struct LibraryFolderTransition<Content: View>: NSViewRepresentable {
     let pageID: String
     let navigation: LibraryFolderNavigation
     let isVisible: Bool
+    /// Describes this page, not its destination. Live video/web details opt out; lists may be captured.
+    var allowsSnapshot: Bool = true
     @ViewBuilder var content: Content
     @Environment(\.self) private var environment
 
@@ -33,7 +43,8 @@ struct LibraryFolderTransition<Content: View>: NSViewRepresentable {
         LibraryFolderTransitionView(
             rootView: hostedContent,
             pageID: pageID,
-            navigation: navigation
+            navigation: navigation,
+            allowsSnapshot: allowsSnapshot
         )
     }
 
@@ -43,7 +54,8 @@ struct LibraryFolderTransition<Content: View>: NSViewRepresentable {
             pageID: pageID,
             navigation: navigation,
             isVisible: isVisible,
-            reduceMotion: environment.accessibilityReduceMotion
+            reduceMotion: environment.accessibilityReduceMotion,
+            allowsSnapshot: allowsSnapshot
         )
     }
 
@@ -57,6 +69,11 @@ struct LibraryFolderTransition<Content: View>: NSViewRepresentable {
     }
 }
 
+/// The same lightweight transition hosts the main list/detail NavigationStack.
+/// Keep the library names intact so folder navigation needs no identity or API migration.
+typealias PageNavigationMotion = LibraryFolderNavigation
+typealias PageNavigationTransition<Content: View> = LibraryFolderTransition<Content>
+
 @MainActor
 final class LibraryFolderTransitionView: NSView {
     private let hostingView: NSHostingView<AnyView>
@@ -68,11 +85,13 @@ final class LibraryFolderTransitionView: NSView {
     private var viewportSize: CGSize = .zero
     private var wasReducingMotion = false
     private var isTransitioning = false
+    private var allowsSnapshot: Bool
 
-    init(rootView: AnyView, pageID: String, navigation: LibraryFolderNavigation) {
+    init(rootView: AnyView, pageID: String, navigation: LibraryFolderNavigation, allowsSnapshot: Bool = true) {
         self.hostingView = NSHostingView(rootView: rootView)
         self.pageID = pageID
         self.navigation = navigation
+        self.allowsSnapshot = allowsSnapshot
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -127,26 +146,29 @@ final class LibraryFolderTransitionView: NSView {
         pageID: String,
         navigation: LibraryFolderNavigation,
         isVisible: Bool,
-        reduceMotion: Bool
+        reduceMotion: Bool,
+        allowsSnapshot: Bool = true
     ) {
         let pageChanged = self.pageID != pageID
-        let isFolderNavigation = pageChanged && self.navigation.revision != navigation.revision
-        let shouldAnimate = isFolderNavigation && isVisible && window?.isVisible == true
+        let isNavigation = pageChanged && self.navigation.revision != navigation.revision && navigation.isAnimated
+        let shouldAnimate = isNavigation && isVisible && window?.isVisible == true
             && bounds.width > 1 && bounds.height > 1
-        let image = shouldAnimate ? viewportSnapshot() : nil
+        // Capture eligibility belongs to the outgoing page. The incoming page may have a player.
+        let image = shouldAnimate && self.allowsSnapshot ? viewportSnapshot() : nil
         if pageChanged || !isVisible || reduceMotion != wasReducingMotion {
             finishTransition()
         }
         self.pageID = pageID
         self.navigation = navigation
+        self.allowsSnapshot = allowsSnapshot
         wasReducingMotion = reduceMotion
 
         if shouldAnimate { isTransitioning = true }
         if let image {
             installOutgoingImage(image)
         } else if shouldAnimate {
-            // A filtered/locked preview must never be flattened without its privacy blur.
-            // Fall back to incoming-only motion instead of displaying an unsafe outgoing image.
+            // Never flatten a privacy blur, video, or web detail into an unsafe/incomplete image.
+            // Incoming-only motion also lets the original detail tear down its player immediately.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             liveContainer.layer?.opacity = 0
